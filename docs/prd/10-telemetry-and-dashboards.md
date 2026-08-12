@@ -576,6 +576,16 @@ one rather than rediscovering the choice:
 Either way the volume argument stands on its own and does not go away with the
 vocabulary one, because of the next paragraph.
 
+**What the row costs, measured once rather than assumed:** `record()` plus the
+commit is p50 **3.957 ms** / p95 4.738 ms over 2,000 iterations against a real
+`pgvector/pgvector:pg17`, of which the INSERT is 0.9 ms and the WAL flush is
+3.0 ms. Against the shipped full-text path's p50 33.3 ms
+([05](05-search-and-similarity.md)) that is **11.9% of a median search** — one
+order of magnitude smaller, not the two an earlier estimate assumed, which is
+worth knowing before anything prices a *keystroke* against it. No bar is minted
+and none is needed; the full table and its caveats are in
+`.claude/rules/search-and-embeddings.md`.
+
 ⚠️ **Nothing owns this table's size, and that is stated rather than left
 implied.** There is no retention job and no scheduler anywhere in `src/` —
 every periodic thing in this project is an operator's cron line ([M8's boundary

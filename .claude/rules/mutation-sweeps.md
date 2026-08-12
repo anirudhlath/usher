@@ -4004,3 +4004,89 @@ rather than assuming, and neither control is an `__all__` reorder, which
 files scan source, **none of them reads `api/dto/search.py`**, and the one that
 reads `api/routers/search.py` (`test_api_search.py`'s result-ceiling case)
 walks `ast.Attribute` nodes, which a docstring is not.
+
+## M9 Task F2 — `search_queries`' retrieval half, and a plant the plan named that the row cannot see (2026-08-12)
+
+**12 plants over `services/search.py` and `composition.py` — 11 behavioural
+targets, all KILLED; 1 equivalent-mutant control, SURVIVED all five gate steps.
+0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.**
+Harness at `/var/tmp/m9-F2/plants.py`, **outside the working tree** for V1's
+reason and under `/var/tmp` rather than `/tmp`, which is tmpfs here. Plant list
+and expected verdicts written to `/var/tmp/m9-F2/PLANTS.md`
+(`sha256 82b0252164…`) before the first run. Tree committed at `ecd70c7` first,
+so `git status` is the verification — clean afterwards, every restore
+`md5sum`-verified. `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under
+**both** `src/` and `tests/` before every run, `compile()` as the dry run, an
+exact anchor count asserted before each plant, the landing spelled
+`old not in landed and new in landed` **inside** the `try`, no second `-q`.
+
+**Selection:** `test_services_search.py`, `test_telemetry_search.py`,
+`test_composition.py` (unit, 124 cases, ~1.5 s a run), widened for the two
+plants whose damage is in the wiring to
+`tests/integration/test_services_search.py`,
+`test_pipeline_deps.py` and `test_search_route.py` (~10 s a run). Scoped rather
+than whole-suite for B2's and D4's reason: `test_sse_end_to_end.py` is
+intermittent on this tree and predates M9, and a sweep scored on "did the run
+fail" cannot include a flaky case.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the `commit()` deleted from `_record_search` | KILLED | 3 — the integration durability case, the refused-row case's control arm, and the headline |
+| P2 the row records `requested` rather than the mode that ran | KILLED | **1 — the fused case alone** |
+| P3 the blank guard spelled `if not query:` | KILLED | 4 (the new one plus the three that already guard it) |
+| P4 `or user_id is None` dropped from the write guard | KILLED | **1**, *and* `mypy` — see below |
+| P5 `latency_ms` an absolute clock reading | KILLED | 3 |
+| P6 `_ms`'s `max(0, …)` clamp deleted | KILLED | **1 — the backwards-clock case alone** |
+| P7 `except UsherPortError` widened to `except Exception` | KILLED | **1** |
+| P8 the refusal log line renders the query | KILLED | **1** |
+| P9 the write moved in front of the `elapsed` read | KILLED | **1, and it is in the telemetry file** |
+| P10 `suggest` writes and commits a row | KILLED | 3 — both tiers plus the structural scan |
+| P11 `build_search_service` passes no analytics | KILLED | 4, across composition, deps, route |
+| C1 `SearchQueryRecord`'s `result_count=`/`latency_ms=` in the other written order | SURVIVED | all five gate steps |
+
+**Three results worth carrying.**
+
+🔴 **The plan's own headline about the measured window is not spellable against
+the row, and the case that first tried to pin it could not have failed.** F2's
+acceptance says *"the analytics write sits outside [the measured interval]: a
+write inside the measured window inflates the number it is recording"*, and the
+obvious case — a deliberately slow repository, then assert `latency_ms` is the
+search's 250 ms rather than 60,250 ms — **is satisfied by every ordering**,
+because the row needs its latency as an *argument* and therefore cannot be
+written before the number exists. Working that out before the run is what moved
+the case: the artefact a reordering really moves is `usher.search.duration`, so
+`test_the_analytics_write_is_not_counted_as_search_latency` lives in
+`tests/unit/test_telemetry_search.py` with a meter reader, and P9 fails it
+alone. **The general form: when an acceptance criterion says a write must sit
+outside a measured window, ask which of the two artefacts the reordering can
+actually move — if the write's own row carries the number, it is not that
+one.** Nearest relative is B6's *"a port that takes a typed position cannot
+express an `OFFSET` defect"*, arriving at a data dependency instead of a
+signature.
+
+**P4 is caught by the gate *and* by the suite, which is the pairing this file
+usually finds broken in one direction.** The careless spelling
+(`if self._analytics is None:` alone) leaves `user_id: uuid.UUID | None` flowing
+into `SearchQueryRecord.user_id: uuid.UUID`, so `mypy` reports **one**
+`arg-type` error at `services/search.py:838` — measured, not argued — and the
+fake, which models no foreign key, happily stores the row so
+`test_a_search_nobody_is_speaking_for_records_nothing` fails too. Both claims
+are true here and they are still different claims: the *suite* is what would
+hold a spelling carrying a `cast`.
+
+**P3's blast radius says the blank guard is shared rather than duplicated.**
+Losing `.strip()` fails the new analytics case beside the three that were
+already there (the embed guard, the completion guard, the histogram guard) —
+which is the check that F2 sat its write *below* the existing guard instead of
+adding a second one of its own.
+
+**The control is a fact about the code rather than about what the tools look
+at:** keyword arguments bind by name regardless of written order, and both
+right-hand sides are side-effect-free (a local read and a pure `_ms` call on
+another local) — `_ledger_row`'s precedent. It is deliberately **not** a
+reorder of a positional call, which A5's entry is the reason for checking
+rather than assuming, and not an `__all__` reorder, which `RUF022` rejects.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| C1 | PASS | PASS | PASS | PASS (9/0) | PASS |
