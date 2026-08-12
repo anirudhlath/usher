@@ -60,6 +60,7 @@ from usher.composition import (
     build_curation_service,
     build_enrich_service,
     build_pipeline,
+    build_search_service,
     build_worker,
     embedder,
     llm_client,
@@ -67,6 +68,7 @@ from usher.composition import (
     run_bootstrap,
 )
 from usher.config import Settings
+from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.domain.bootstrap import BootstrapPhase, ImportRun
 from usher.domain.curation import LLMPurpose
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
@@ -1288,6 +1290,48 @@ async def test_a_switch_on_with_no_client_to_hand_still_builds_no_expander() -> 
         pipeline = build_pipeline(AsyncSession(engine), settings)
 
         assert pipeline.search._expander is None
+    finally:
+        await engine.dispose()
+
+
+async def test_both_search_roots_write_search_queries_over_this_sessions_commit() -> None:
+    """PRD 10's `search_queries`, wired on the two roots that build a
+    `SearchService`, and the *commit* is the half that has to be this
+    session's.
+
+    Three wirings, three ways for the analytics to go missing, and each is
+    silent:
+
+    - **No analytics at all.** Every search answers correctly, both histograms
+      record, and the table PRD 10 turns ADR-0002's Meilisearch gate into a
+      live measurement with stays empty forever. There is no error and no log
+      line, which is why this is a wiring assertion rather than a behavioural
+      one.
+    - **A repository over another session**, so the row never reaches the
+      transaction the search commits.
+    - **A commit that is not this session's**, which leaves the row to be
+      rolled back when the read closes -- and a search writes nothing else, so
+      there is no second write to carry it. `cli._session_for` disposes its
+      engine without committing, so on that root the loss is total.
+
+    **Both roots, because `build_pipeline` delegating to `build_search_service`
+    is a fact about today's code rather than a guarantee.** `usher search`
+    reaches this through `build_pipeline` and `api/deps.get_search_service`
+    reaches it directly; a `build_pipeline` that re-assembled a `SearchService`
+    of its own would return a working one and record nothing.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        session = AsyncSession(engine)
+        direct = build_search_service(session, _settings())
+        through_the_pipeline = build_pipeline(session, _settings()).search
+
+        for service in (direct, through_the_pipeline):
+            analytics = service._analytics
+            assert analytics is not None
+            assert isinstance(analytics.queries, PostgresSearchQueryRepository)
+            assert analytics.queries._session is session
+            assert analytics.commit == session.commit
     finally:
         await engine.dispose()
 

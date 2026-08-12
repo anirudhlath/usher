@@ -710,6 +710,13 @@ async def _search(
     error, no empty result, no log line. This milestone's headline failure
     mode, arriving at the CLI.
 
+    **This command writes a `search_queries` row and it is the root that
+    proves the commit is the service's.** `_session_for` yields a session and
+    disposes the engine **without ever committing**, so a row left for the
+    caller would be rolled back here and nowhere else -- `api/deps.get_session`
+    commits when a handler returns and would have hidden it. Nothing below
+    commits; `SearchService` does (F2).
+
     **Two different problems present identically and get different sentences**,
     which is what `SearchAnswer` carrying `requested_mode` beside `mode` is
     for. `degraded` means the deployment has no model at all and the fix is an
@@ -790,11 +797,19 @@ async def _search(
                     # `ensure_default_user`, not `default_user`: this command
                     # needs an id and nothing else, exactly as `usher curate`
                     # does, and PRD 01's authentication seam is a singleton row
-                    # until a request has one to carry. Not committed, for the
-                    # same reason `usher curate` does not commit it -- a search
-                    # is a read, and on the one run where the row does not
-                    # exist yet the household it would create has no watch
-                    # history for the term to find anyway.
+                    # until a request has one to carry.
+                    #
+                    # **Not committed *here*, and since F2 that is no longer
+                    # the same as "not committed".** This command commits
+                    # nothing of its own -- `_session_for` yields a session and
+                    # disposes the engine -- but `SearchService` now writes a
+                    # `search_queries` row and commits it, and the household
+                    # row is in that same transaction. So on a first run the
+                    # user this line created lands durably, which is what makes
+                    # the row's `NOT NULL` foreign key satisfiable at all: the
+                    # analytics write is the only writer on this path, and a
+                    # commit that carried the row without its household would
+                    # be refused rather than silently partial.
                     user_id=await ensure_default_user(session),
                 )
             except SemanticSearchUnavailable as exc:

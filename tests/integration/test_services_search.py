@@ -14,7 +14,7 @@ scans this file.
 
 import math
 import uuid
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
@@ -26,20 +26,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.fakes.embedding import planted_pair
 from tests.fakes.search_index import FakePrefixSuggestIndex, FakeSuggestIndex
 from usher.adapters.search.postgres import PostgresSearchIndex, _predicates
+from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.search import PostgresTitleEmbeddingRepository
+from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.taste import PostgresTasteRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
+from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.ports.repository import StoredTaste, TitleEmbeddingUpsert
 from usher.ports.search import SearchFilters, SearchMode
-from usher.services.search import SearchService
+from usher.services.search import SearchAnalytics, SearchService
 
 SEEN_AT = datetime(2026, 8, 2, 3, 0, tzinfo=UTC)
 
@@ -592,3 +595,119 @@ async def test_a_search_that_matches_nothing_costs_no_hydration(session: AsyncSe
 
     assert answer.results == ()
     assert len(seen) == 1, f"{len(seen)} statements for a search that matched nothing: {seen}"
+
+
+@pytest.mark.integration
+async def test_the_analytics_row_is_committed_and_a_second_session_can_read_it(
+    postgres_url: str,
+) -> None:
+    """**The commit, observed from outside the transaction that made it.**
+
+    Every repository in this project flushes and never commits, so a
+    `search_queries` row written inside a search is this session's own
+    uncommitted work until somebody commits it -- and a search writes nothing
+    else, so there is no later write to carry it. `api/deps.get_session`
+    happens to commit when a handler returns; `cli._session_for` disposes its
+    engine without ever committing, which is the root that would lose the row
+    silently. So `SearchService` commits, and this is what says the commit is
+    real rather than "visible within the same still-open transaction" --
+    reading back through the *same* session would pass against a service that
+    only flushed.
+
+    **The second arm is the control that makes the first one a claim about the
+    commit.** The identical search over the identical fixture with a no-op
+    commit leaves the row invisible to a third session and then rolled back, so
+    the difference between the two arms is exactly one `await commit()`. The
+    sweep that makes this worth a case rather than a convention is
+    `QueryExpansionService`'s: **a deleted `commit()` survived 42 cases.**
+
+    Its own engine rather than the per-test `session` fixture, for
+    `test_a_write_is_invisible_to_a_second_session_until_the_caller_commits`'
+    reason: that fixture's isolation is a transaction the harness rolls back,
+    so committing on it would leave rows behind for every later case in this
+    session-scoped container.
+    """
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    household = new_id()
+    name = f"search-analytics-{household}"
+    try:
+        async with factory() as setup:
+            await setup.execute(
+                text("INSERT INTO users (id, name) VALUES (:id, :name)"),
+                {"id": household, "name": name},
+            )
+            await _seed_title(setup, "The Kestrelbound Vacuum")
+            await setup.commit()
+
+        async with factory() as first:
+            answer = await _analytics_service(first).search(
+                "kestrelbound", limit=10, user_id=household
+            )
+            assert len(answer.results) == 1, "the premise: the search answered"
+
+        async with factory() as second:
+            assert await _recorded_queries(second, household) == [("kestrelbound", "full_text", 1)]
+
+        async with factory() as uncommitted:
+            service = _analytics_service(uncommitted, commit=_nothing)
+            assert (
+                len((await service.search("kestrelbound", limit=10, user_id=household)).results)
+                == 1
+            )
+
+        async with factory() as third:
+            # Still one -- the second search flushed a row and nothing made it
+            # durable, so the session above rolled it back on close.
+            assert len(await _recorded_queries(third, household)) == 1
+    finally:
+        async with factory() as cleanup:
+            await cleanup.execute(
+                text("DELETE FROM search_queries WHERE user_id = :id"), {"id": household}
+            )
+            await cleanup.execute(text("DELETE FROM users WHERE id = :id"), {"id": household})
+            await cleanup.execute(
+                text("DELETE FROM titles WHERE name = :name"),
+                {"name": "The Kestrelbound Vacuum"},
+            )
+            await cleanup.commit()
+        await engine.dispose()
+
+
+async def _nothing() -> None:
+    """A commit that does not, so the arm above differs by exactly one call."""
+    return None
+
+
+def _analytics_service(
+    session: AsyncSession, *, commit: Callable[[], Awaitable[None]] | None = None
+) -> SearchService:
+    """`_service`, plus PRD 10's `search_queries` writer over the same session."""
+    return SearchService(
+        PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K),
+        FakePrefixSuggestIndex(),
+        FakeSuggestIndex(),
+        PostgresTitleRepository(session),
+        PostgresMediaItemRepository(session),
+        PostgresWatchStateRepository(session),
+        PostgresTasteRepository(session),
+        PostgresTitleEmbeddingRepository(session),
+        result_limit=100,
+        analytics=SearchAnalytics(
+            queries=PostgresSearchQueryRepository(session),
+            commit=session.commit if commit is None else commit,
+        ),
+    )
+
+
+async def _recorded_queries(
+    session: AsyncSession, household: uuid.UUID
+) -> list[tuple[str, str, int]]:
+    """Every `search_queries` row for one household, oldest first."""
+    rows = await session.execute(
+        text(
+            "SELECT query, mode, result_count FROM search_queries WHERE user_id = :id ORDER BY id"
+        ),
+        {"id": household},
+    )
+    return [(one.query, one.mode, one.result_count) for one in rows]

@@ -509,20 +509,84 @@ llm_calls(
 )                                   --    no rows. See below
 
 search_queries(                       -- 🔶 M9 (`m09a`): the table, whole.
-  id, at, user_id, query, mode,       --    No writer yet; see below
+  id, at, user_id, query, mode,       -- ✅ M9 (F2): written per answered search
   result_count, latency_ms,
-  clicked_title_id, played          -- outcome attribution
+  clicked_title_id, played          -- outcome attribution. 🔶 M9 (F3)
 )
 ```
 
-🔶 **`search_queries` exists as of `m09a`, with these nine columns and no
-tenth, and nothing writes it.** *Whole* is what the table got and it is only
-half of what the paragraph above asks for — the argument for shipping all nine
-at once is that a dashboard reading a half-populated analytics table cannot
-tell a real zero from a column nobody filled, and an empty table is at least
-honestly empty. The writer, and the attribution update that fills
-`clicked_title_id` and `played` after the fact, belong to the M9 task that owns
-the search routes.
+✅ **`search_queries` exists as of `m09a` with these nine columns and no tenth,
+and as of F2 seven of them have a writer.** *Whole* is what the table got and it
+was only half of what the paragraph above asks for — the argument for shipping
+all nine at once is that a dashboard reading a half-populated analytics table
+cannot tell a real zero from a column nobody filled, and an empty table is at
+least honestly empty. `SearchQueryRepository.record` now writes `id`, `at`,
+`user_id`, `query`, `mode`, `result_count` and `latency_ms` at the moment a
+search answers; the attribution update that fills `clicked_title_id` and
+`played` after the fact is `record_outcome` and is still 🔶 (F3).
+
+**One row per *answered* search, and four things that are deliberately not
+rows.** Each is a decision rather than an omission, and each is stated here
+because the absence is invisible in the data:
+
+- **A blank or whitespace-only query.** A search box sends one between every
+  character, and `SearchService` refuses one before it reaches an index. Counted
+  they would dominate this table exactly as they would dominate the two
+  histograms, and the zero-result rate below would become a measure of how fast
+  somebody types.
+- **A search with no household.** `user_id` is `NOT NULL` behind a real foreign
+  key, so a search nobody is speaking for has no row rather than a row with a
+  hole in it. Unreachable from either shipped caller — `GET /search` and
+  `usher search` both resolve the singleton default user first.
+- **A page of a search.** Neither `GET /search` nor `SearchService.search` takes
+  a cursor, so a search is one row and cannot become one per scroll. The day
+  either grows pagination this is a decision to make again, not a default.
+- **A keystroke.** See the next paragraph.
+
+🔴 **`GET /search/suggest` writes no row, on either tier, and what that costs
+is stated rather than hidden.** `mode` is a `SearchMode` — three reachable
+values — and a suggest request is parameterised by a disjoint `SuggestTier`
+(`prefix` | `fuzzy`), so storing both under one column is the
+two-vocabularies-under-one-name hazard this document already names for
+`provider`. It would also make every mode-split panel in dashboards 1 and 4 a
+measure of the type-ahead box: tier 1 is p50 **0.6 ms** against full text's p50
+**33.3 ms** over the same 2,993 cases
+([05](05-search-and-similarity.md)), so a client driving the box per keystroke
+would out-number *and* out-weight the searches by an order of magnitude each.
+
+**The cost is that this table cannot answer the question below that it is most
+wanted for** — *whether real users type 2–4-character queries at all*, which is
+a question about the suggest box. Two ways to fix it, both **PRD 10
+amendments** and both deliberately out of M9's scope, named here so M10 plans
+one rather than rediscovering the choice:
+
+1. **A fourth `SearchMode` member** (a `suggest` value, or one per tier). It is
+   the smaller schema change — no column, no migration for the enum's Postgres
+   side beyond widening a CHECK — and the larger *wire* change: `SearchMode` is
+   `GET /search`'s `?mode=` and `SearchAnswer`'s two fields, so a member no
+   search lane can serve becomes reachable on a route that would have to refuse
+   it.
+2. **A tenth column** (`surface`, `search | suggest`, or a nullable `tier`). It
+   keeps the two vocabularies apart, which is the objection above answered
+   rather than absorbed, and it costs a migration plus a decision about every
+   existing row. It is also the only one of the two that can record *which tier*
+   answered, which is the half [ADR-0031](decisions/0031-the-two-tier-suggest.md)
+   would actually want measured.
+
+Either way the volume argument stands on its own and does not go away with the
+vocabulary one, because of the next paragraph.
+
+⚠️ **Nothing owns this table's size, and that is stated rather than left
+implied.** There is no retention job and no scheduler anywhere in `src/` —
+every periodic thing in this project is an operator's cron line ([M8's boundary
+call 8](09-roadmap.md)) — so `search_queries` grows monotonically at one row per
+answered search, forever. On the shipped surface that is bounded by how often a
+household presses enter, which is why it is tolerable in M9; it is *not* what a
+keystroke-recording amendment above would produce, and pricing the retention is
+part of that amendment rather than a follow-up to it. Pruning is
+`DELETE FROM search_queries WHERE at < now() - interval '90 days'`, an
+operator's SQL, and the table has **no index on `at`**, so that statement is a
+sequential scan until somebody adds one.
 
 The same "whole" cuts the other way: `requested_mode` is wire-only and is
 deliberately **not** a tenth column. `played` is `NOT NULL` rather than
@@ -710,7 +774,12 @@ image proxy hit rate and cache size.
 the drill-down. **API latency by endpoint and cache hit rates are backed as of
 M9**: the former by `http.server.duration` (no `usher.` prefix — see the
 correction above the metric table), the latter by `usher.cache.hits`/
-`.misses`. One panel on this dashboard is still **not** backed: search→play
+`.misses`. **The zero-result rate is backed as of M9's F2** — it is
+`search_queries.result_count = 0` over the rows a real household produced,
+which is the live measurement this whole table exists to turn ADR-0002's gate
+into, and it counts only *answered* searches: a blank query and a keystroke are
+not rows, so the denominator is searches rather than characters typed. One
+panel on this dashboard is still **not** backed: search→play
 conversion needs `search_queries`' outcome columns (M9, owned elsewhere). And
 one caveat travels with the home panels — the build histogram's population is
 cache *misses* only, so a p50 that rises after a deploy may be a colder cache

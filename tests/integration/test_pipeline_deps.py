@@ -23,6 +23,7 @@ from asgi_lifespan import LifespanManager
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.api.app import create_app
 from usher.api.deps import (
@@ -44,6 +45,7 @@ from usher.api.deps import (
     get_row_cache,
     get_row_context,
     get_search_service,
+    get_session,
     get_similarity_service,
     get_source_repository,
     get_sync_run_repository,
@@ -400,3 +402,59 @@ async def test_the_search_service_the_graph_resolves_holds_both_suggest_tiers(
         SuggestTier.PREFIX.value: "PostgresPrefixSuggestIndex",
         SuggestTier.FUZZY.value: "PostgresSuggestIndex",
     }
+
+
+async def test_the_search_service_the_graph_resolves_writes_search_queries_over_this_session(
+    postgres_url: str,
+) -> None:
+    """**PRD 10's analytics row, on the root that would lose it silently.**
+
+    A `Depends` graph that resolves is not a graph that wired the write. A
+    `get_search_service` handing over a `SearchService` with `analytics=None`
+    answers every search correctly, records both histograms, passes every unit
+    case in `tests/unit/test_api_search.py` (whose fakes are handed in) and
+    leaves `search_queries` empty forever -- with no error, no log line and no
+    field on the wire to say so. The table is what turns ADR-0002's
+    Meilisearch gate into a live measurement, so an empty one is the whole
+    feature missing.
+
+    Three things, and the third is the one only a request can see: the pair is
+    present, the repository is over **this request's** session, and the commit
+    is that session's own bound method rather than some other callable. A row
+    written through a repository on another session never reaches the
+    transaction the request commits, and a commit that is not this session's
+    leaves the row to be rolled back when the request closes.
+
+    Reaching private attributes is deliberate and is the narrower of the two
+    options, exactly as in the tiers case above: the alternative is a public
+    accessor on `SearchService` that exists only for a test.
+    """
+    app = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
+    seen: dict[str, bool] = {}
+
+    def route(
+        service: Annotated[SearchService, Depends(get_search_service)],
+        session: Annotated[AsyncSession, Depends(get_session)],
+    ) -> dict[str, bool]:
+        analytics = service._analytics
+        seen["wired"] = analytics is not None
+        if analytics is not None:
+            seen["this session"] = analytics.queries._session is session  # type: ignore[attr-defined]
+            seen["this session's commit"] = analytics.commit == session.commit
+        return seen
+
+    app.get("/_probe/search_queries")(route)
+    async with LifespanManager(app) as manager:
+        transport = ASGITransport(app=manager.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/_probe/search_queries")
+
+    assert response.status_code == 200, response.text
+    assert seen == {"wired": True, "this session": True, "this session's commit": True}
