@@ -61,7 +61,11 @@ screen"* is a property of a request boundary no CLI can exhibit); **the
 `curated_rows`/`LLMRow`/`CuratedProvider` family is M8's whole** and
 `RowFamily` ships with two members rather than a `CURATED` nobody can emit;
 **`RowCard` carries no artwork field**, absent rather than null, the same call
-`GET /titles/{id}` made for `images`; **`Person`/`Credit`/`Collection` ARE
+`GET /titles/{id}` made for `images` — ✅ **discharged by M9 Task C6 on
+2026-08-11**, which is the outcome the call named and not a reversal: the field
+is one image id chosen against the row's `display_hint`, added once C2 built the
+table, C3 filled it and C4/C5 served it, so do not re-litigate the absence;
+**`Person`/`Credit`/`Collection` ARE
 built**, re-derived from `raw_payloads` with no second network call, minus
 `Person`'s four `/person/{id}` fields; **weight class B is filled** and needs a
 denormalised `titles.credit_names` because a generated column cannot reach

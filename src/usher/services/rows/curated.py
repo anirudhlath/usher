@@ -81,16 +81,18 @@ reclaims.
 """
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import timedelta
 
 from opentelemetry import trace
 
 from usher.domain.curation import SLUG_PREFIX, CuratedRow
+from usher.domain.enums import ImageKind
+from usher.domain.image import Image
 from usher.domain.rows import DisplayHint, RowFamily
 from usher.domain.title import Title
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
-from usher.services.rows.base import BaseRow
+from usher.services.rows.base import ARTWORK_FOR_HINT, BaseRow
 
 # **Five minutes, and PRD 06's "until regenerated" is the artefact's lifetime
 # rather than this number.** Read as a TTL that phrase inverts: the stored row
@@ -120,7 +122,9 @@ class _Family:
     builds; the composer then builds `HomeService._MAX_PER_FAMILY` of them, and
     each `BaseRow.build` was issuing its own catalog read and its own ownership
     read -- **eight statements for the ~22 distinct ids one generation names**,
-    inside one request, on a screen whose whole budget is 400 ms.
+    inside one request, on a screen whose whole budget is 400 ms. M9's C6 adds
+    a third read of the same shape (`primary_for_titles`), so the unshared
+    spelling would now be **twelve**; it is three.
 
     **Nothing is read here until a shelf asks.** Constructed in `propose` and
     populated by the first `build`, which is what keeps a shelf the per-family
@@ -142,7 +146,7 @@ class _Family:
     cache's lifetime.
     """
 
-    __slots__ = ("_known", "_owned", "_title_ids")
+    __slots__ = ("_artwork", "_known", "_owned", "_title_ids")
 
     def __init__(self, title_ids: Sequence[uuid.UUID]) -> None:
         # `dict.fromkeys` rather than `set`: two shelves naming one film is
@@ -155,6 +159,15 @@ class _Family:
         self._title_ids = list(dict.fromkeys(title_ids))
         self._known: dict[uuid.UUID, Title] | None = None
         self._owned: set[uuid.UUID] | None = None
+        # **Keyed by `ImageKind`, not a bare slot**, and that is not
+        # speculative generality: `_known` and `_owned` answer questions with
+        # one answer per family, and this one has an answer per *hint*. Every
+        # `LLMRow` is `PORTRAIT` today, so the dict holds one entry and the
+        # read is `4 -> 1` exactly as the other two are -- but a shelf whose
+        # hint moved would otherwise be served the poster memo under a
+        # backdrop's name, which is the one artwork defect that renders
+        # perfectly.
+        self._artwork: dict[ImageKind, dict[uuid.UUID, Image]] = {}
 
     async def known(self, ctx: RowContext) -> dict[uuid.UUID, Title]:
         if self._known is None:
@@ -171,6 +184,15 @@ class _Family:
         if self._owned is None:
             self._owned = await ctx.media_items.owned_title_ids(self._title_ids)
         return self._owned
+
+    async def artwork(self, ctx: RowContext, kind: ImageKind) -> dict[uuid.UUID, Image]:
+        # `not in` rather than falsiness, for `owned`'s reason one table over:
+        # a generation none of whose titles has a poster reads back `{}`, which
+        # is an answer rather than a miss, and falsiness would re-read once per
+        # shelf for exactly the households the read is least useful to.
+        if kind not in self._artwork:
+            self._artwork[kind] = await ctx.images.primary_for_titles(self._title_ids, kind)
+        return self._artwork[kind]
 
 
 class LLMRow(BaseRow):
@@ -260,6 +282,17 @@ class LLMRow(BaseRow):
         # method of that name is shadowed by it; `base.py` records the
         # measurement.
         return await self._family.owned(ctx)
+
+    async def _artwork(
+        self, ctx: RowContext, title_ids: Sequence[uuid.UUID]
+    ) -> Mapping[uuid.UUID, Image]:
+        # The third read of the same shape, and the third `4 -> 1`: four
+        # shelves out of one `list_for_user` were about to issue four
+        # `primary_for_titles` for one set of ~22 ids. The kind is still this
+        # shelf's own -- `ARTWORK_FOR_HINT[self.display_hint]`, not a constant
+        # -- so the memo is asked the question this row would have asked, and
+        # the family answers it once.
+        return await self._family.artwork(ctx, ARTWORK_FOR_HINT[self.display_hint])
 
 
 # **0.85, flat, and the two things it has to be are different kinds of fact.**

@@ -297,14 +297,18 @@ carries a measurement they do not.
    table is annotated rather than silently shipped short.
 
 3. **`RowCard` carries no artwork field, exactly as `GET /titles/{id}` carries
-   no `images` key.** There is no `Image` table, no `images` column and not
-   even a `poster_path` on `titles`; M9 owns the proxy and the table. The
-   choice was between an always-null field and no field, and M5 settled the
-   identical question one route over in a sentence this call reuses verbatim:
-   *"an empty list would be indistinguishable from a film with no cast."* A
-   card with `"artwork": null` on every row is a client-side branch that never
-   takes its other arm, and the day M9 fills it every client that shipped
-   against the null already renders without it. `rating` is refused on the
+   no `images` key.** ✅ **Discharged in M9, which is the outcome this call
+   named rather than a reversal of it.** There is no `Image` table, no `images`
+   column and not even a `poster_path` on `titles`; M9 owns the proxy and the
+   table. The choice was between an always-null field and no field, and M5
+   settled the identical question one route over in a sentence this call reuses
+   verbatim: *"an empty list would be indistinguishable from a film with no
+   cast."* A card with `"artwork": null` on every row is a client-side branch
+   that never takes its other arm, and the day M9 fills it every client that
+   shipped against the null already renders without it. M9 built the table, the
+   derivation and the proxy, and `RowCard.artwork` is now **one image id chosen
+   against the row's `display_hint`** — additive, with both arms of the branch
+   reachable. `rating` is refused on the
    same page for a different reason — see
    [06](06-rows-and-recommendations.md): `watch_states` has no `rating` and no
    `favorite`, and neither does `SourceWatchState`, so a *household's* rating

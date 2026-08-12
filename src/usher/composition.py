@@ -1119,7 +1119,7 @@ def _load_embedder(settings: Settings) -> Embedder:
 
 
 def build_row_context(pipeline: Pipeline, user: User) -> RowContext:
-    """The fourteen values a row may reach, over one unit of work.
+    """The thirteen values a row may reach, over one unit of work.
 
     `api/deps.py` assembles the same context from request-scoped dependencies
     and `usher home` from a command's one session; this is the third caller --
@@ -1148,6 +1148,7 @@ def build_row_context(pipeline: Pipeline, user: User) -> RowContext:
         collections=pipeline.collections,
         affinities=lambda: pipeline.taste.genre_affinity(user.id),
         curated=pipeline.curated_rows,
+        images=pipeline.images,
     )
 
 

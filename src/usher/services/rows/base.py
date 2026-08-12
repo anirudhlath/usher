@@ -30,17 +30,53 @@ read returned -- `ContinueWatchingProvider` has `WatchState`s,
 be one round trip per card to re-read what the caller is holding. A provider
 with nothing to say about progress passes nothing and the cards carry the
 honest zero-and-`None`.
+
+**Artwork is the one thing `hydrate` reads *for* the provider rather than from
+it**, and the asymmetry is the point. Progress and chapters are things the
+caller already has in hand; artwork is a thing nobody has, and the only input
+the decision needs is `self.display_hint`, which every row already declares.
+Pushing it out to ten providers would be ten copies of one mapping and ten
+chances for a shelf to paint a backdrop into a 2:3 slot; leaving it here makes
+it `+1` statement per shelf, once, with `LLMRow`'s override collapsing the
+curated family's four to one exactly as it already does for the other two
+reads. `ARTWORK_FOR_HINT` is the mapping and `_artwork` is the hook -- the
+latter named after grepping this directory, for the reason `_ownership`'s own
+docstring records.
 """
 
 import uuid
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
+from usher.domain.enums import ImageKind
 from usher.domain.episode import Episode
-from usher.domain.rows import BuiltRow, RowCard
+from usher.domain.image import Image
+from usher.domain.rows import BuiltRow, DisplayHint, RowCard
 from usher.domain.title import Title
 from usher.ports.rows import Row, RowContext
+
+#: Which kind of artwork a shelf's cards are painted with, keyed on the shelf's
+#: own `display_hint`. **Total over `DisplayHint` rather than over the hints the
+#: registry happens to emit** -- `wide` and `square` have no emitter in
+#: `services/rows/` today, so a mapping written from the ten providers would be
+#: complete-looking and would `KeyError` inside `hydrate` on the first row that
+#: used one, which is a 500 on a home screen.
+#:
+#: The two-way split is the whole of the vocabulary a card needs: a poster is
+#: 2:3 and a backdrop is 16:9, and ADR-0006's four hints are two aspect ratios
+#: wearing four names. `ImageKind.LOGO`, `STILL` and `PROFILE` are deliberately
+#: unreachable from here -- a card paints a poster or a backdrop, an episode
+#: still belongs to a chapter view and a profile to `GET /people/{id}`.
+ARTWORK_FOR_HINT: Mapping[DisplayHint, ImageKind] = MappingProxyType(
+    {
+        DisplayHint.PORTRAIT: ImageKind.POSTER,
+        DisplayHint.SQUARE: ImageKind.POSTER,
+        DisplayHint.LANDSCAPE: ImageKind.BACKDROP,
+        DisplayHint.WIDE: ImageKind.BACKDROP,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,13 +186,23 @@ class BaseRow(Row):
     ) -> tuple[RowCard, ...]:
         """Turn ids into cards, **in the order given**, dropping what is gone.
 
-        Three port calls whatever the row's length, never one per card: the
-        catalog read, the ownership read, and whatever the caller already did.
+        Four port calls whatever the row's length, never one per card: the
+        catalog read, the ownership read, the artwork read, and whatever the
+        caller already did. It was three until M9's C6 filled `RowCard.artwork`
+        -- `+1 per shelf`, and one for the whole curated family through
+        `LLMRow`'s override, which is the same `4 -> 1` the shared catalog and
+        ownership reads already buy.
+
+        The early return is load-bearing for the same reason it always was and
+        for one more: the composer drops rows that build empty (ADR-0023), so a
+        read taken before this guard is one statement per *dropped* shelf on
+        every screen.
         """
         if not title_ids:
             return ()
         known = await self._known(ctx, title_ids)
         owned = await self._ownership(ctx, title_ids)
+        artwork = await self._artwork(ctx, title_ids)
         seen: set[uuid.UUID] = set()
         cards: list[RowCard] = []
         for title_id in title_ids:
@@ -169,6 +215,7 @@ class BaseRow(Row):
             seen.add(title_id)
             place = (progress or {}).get(title_id, _NOTHING_KNOWN)
             chapter = (chapters or {}).get(title_id)
+            image = artwork.get(title_id)
             cards.append(
                 RowCard(
                     title_id=title.id,
@@ -182,6 +229,13 @@ class BaseRow(Row):
                     played=place.played,
                     episode_id=None if chapter is None else chapter.episode_id,
                     episode_label=None if chapter is None else chapter.label,
+                    # A title with no image of this row's kind carries `None`
+                    # rather than being dropped: absent artwork is an ordinary
+                    # state and a card without a poster is still a card a
+                    # client can open. The **id** and not the row -- see
+                    # `RowCard.artwork` for why a card carries neither the path
+                    # nor a URL.
+                    artwork=None if image is None else image.id,
                 )
             )
         return tuple(cards)
@@ -230,6 +284,51 @@ class BaseRow(Row):
         """
         return await ctx.media_items.owned_title_ids(list(title_ids))
 
+    async def _artwork(
+        self, ctx: RowContext, title_ids: Sequence[uuid.UUID]
+    ) -> Mapping[uuid.UUID, Image]:
+        """One image per title, of the kind **this shelf's hint** asks for.
+
+        `primary_for_titles` rather than `list_for_title` per card: a shelf is
+        up to thirty cards and `GET /home` composes ten of them, so the
+        per-card shape is three hundred round trips a screen -- which is why
+        that port takes a sequence and a caller cannot express the other one.
+
+        **The kind is read off `self.display_hint` and not off the card**, and
+        that is ADR-0006's *"the server composes"* applied to a second field. A
+        hint is a property of the shelf, so one row cannot disagree with itself
+        about its own shape; the poster/backdrop decision is therefore answered
+        once per shelf, by the shelf, and a client is never asked to re-decide
+        a question the composer already answered. `ARTWORK_FOR_HINT` is the
+        mapping, total over `DisplayHint` rather than over the hints the
+        registry happens to emit.
+
+        **Overridable on `_known`'s exact terms, and by the same one row.**
+        `LLMRow` shares one read across the whole curated family, which is
+        `4 -> 1` on the home path; the answer may be a *superset* of
+        `title_ids` because `hydrate` looks each id up rather than iterating
+        what came back.
+
+        **`_artwork` and not `_images`, `_art` or `_poster`**, and the name was
+        chosen by grepping `services/rows/` before it was written rather than
+        after. `FranchiseRow` carries `self._owned`, a tuple of its
+        collection's members, and naming the ownership hook `_owned` shadowed
+        it -- a subclass *attribute* shadows a base-class *method*, so
+        `hydrate` raised `TypeError: 'tuple' object is not callable` on one
+        provider in ten, at render time, and the failure is invisible in the
+        class that declares the method. Measured: 12 failures across three
+        files, all from one name. `grep` over this directory is the check, and
+        it is cheaper than the twelve cases.
+
+        A title absent from the answer is a title with no image of that kind,
+        which is what the port promises -- absent means "no artwork", never
+        "not asked", and `hydrate` turns it into `artwork=None` rather than
+        into a dropped card.
+        """
+        return await ctx.images.primary_for_titles(
+            list(title_ids), ARTWORK_FOR_HINT[self.display_hint]
+        )
+
     def empty(self) -> BuiltRow:
         """This row with no cards.
 
@@ -251,4 +350,4 @@ class BaseRow(Row):
         )
 
 
-__all__ = ["BaseRow", "Chapter", "Progress", "label"]
+__all__ = ["ARTWORK_FOR_HINT", "BaseRow", "Chapter", "Progress", "label"]
