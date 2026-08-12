@@ -92,11 +92,26 @@ def _after(entry: MediaItem, boundary: UnmatchedCursorPosition) -> bool:
     order: `added_at DESC NULLS LAST, id DESC`.
 
     ADR-0034's three arms, written out rather than folded into one tuple
-    comparison -- and the reason is that the tuple spelling does not *work*
-    here rather than that it is unclear. `(entry.added_at, entry.id) <
-    (boundary.added_at, boundary.id)` raises `TypeError` the moment either
-    side is undated, which is the sixth divergence in this module's docstring:
-    the same defect that is silent against Postgres is loud here.
+    comparison -- and both of the tuple spellings were measured before this one
+    was kept, because "the arms are clearer" would not have been a reason.
+
+    - `(entry.added_at, entry.id) < (boundary.added_at, boundary.id)` raises
+      `TypeError` the moment either side is undated. That is the last
+      divergence in this module's docstring: the mistake that is *silent*
+      against Postgres is loud here, and it fails three cases at once.
+    - `(entry.added_at or _UNDATED, entry.id) < (boundary.added_at or
+      _UNDATED, boundary.id)` -- which is how this fake's own `list_unmatched`
+      already spells NULLS LAST, so it is the spelling an author would reach
+      for -- **survives every case in the contract, measured.** It is
+      order-preserving on the whole reachable domain, so it is not a coverage
+      gap: the sentinel and the three arms are the same relation for every
+      value a source can report, and they differ only for an item genuinely
+      dated `datetime.min`, which is the sentinel's own value.
+
+    The arms are kept anyway, and the reason is what a *contract* fake is for:
+    they are the shape of the Postgres predicate, so the NULL leg exists here
+    as something a plant can delete. Under the sentinel there is no NULL leg to
+    drop and the fake arm of the contract loses that mutation entirely.
 
     Strict on every arm. Relaxed anywhere, the walk re-serves its boundary row
     at each page break.
