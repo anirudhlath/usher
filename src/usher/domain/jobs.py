@@ -154,6 +154,15 @@ class JobKind(StrEnum):
     1,126,789 items are episodes -- so the unbounded read would put 20,000
     jobs on the queue for one press of a 20,000-episode series.
 
+    **Its registration is unconditional**, which puts it with `match` and
+    `watch_history` rather than with `curate` two paragraphs up: nothing about
+    a write-back is optional. `composition.build_worker` withholds `enrich`,
+    `derive`, `index` and `curate` from a deployment that lacks the
+    collaborator each needs -- a TMDb key, an embedding model, an LLM
+    endpoint -- and this one needs only the session's own repositories, so
+    every build claims it and no household's own write is left to a process
+    that never arrives.
+
     **Adding a member here needs no migration**, verified rather than
     assumed: `db/models/jobs.py` declares `kind` through `enum_column`, whose
     `native_enum=False` compiles to a plain `VARCHAR(32)` and whose

@@ -12,6 +12,7 @@ claim disjoint halves of one batch. The fake's own module docstring lists
 the code that depends on it most.
 """
 
+import inspect
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
 
@@ -457,6 +458,28 @@ def test_the_service_never_imports_a_storage_or_transport_library() -> None:
     for forbidden in ("httpx", "sqlalchemy", "asyncpg", "usher.db"):
         assert f"import {forbidden}" not in text
         assert f"from {forbidden}" not in text
+
+
+def test_no_temporary_marker_survives_in_this_module() -> None:
+    """A 🔴 that says "for exactly one commit" and survives that commit is
+    worse than one that was never written.
+
+    `registered_kinds`' docstring carried one between M9's D7 and D8: the
+    member `WATCH_WRITEBACK` existed, four routes enqueued it, and no build
+    registered a handler for it -- which is precisely the queue that grows
+    forever M4 refused to ship. The marker was the branch advertising that
+    state, and striking it is how the advertisement ends. This assertion is
+    what stops a revert re-introducing the sentence while the registration
+    stays, which is the contradiction nobody re-reads a docstring to notice.
+
+    The same shape as `test_ports_metadata.py`'s surviving-🔶 scan, over the
+    whole module rather than one docstring: a marker moved to a neighbouring
+    method is the same defect and a scan pointed at one surface reads as
+    coverage.
+    """
+    import usher.services.jobs as module
+
+    assert "🔴" not in inspect.getsource(module)
 
 
 def test_the_worker_holds_no_reference_to_a_job_id_it_did_not_claim() -> None:
