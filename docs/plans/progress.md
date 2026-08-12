@@ -2384,3 +2384,71 @@ tier row and PRD 02's `vote_count` line move in this commit. Four further
 refutations, the two-instrument timing table, the flat-cost-across-eras
 measurement that makes the extrapolation linear, and the invalid first cache
 test are in `.claude/rules/tmdb-and-enrichment.md`.
+
+## M9 Task S3 — the priority tier enriched, and three things only a 130,806-row run could find (2026-08-12)
+
+**The run S2 priced, executed whole.** 22:08:53Z → 00:07:46Z, **130,334
+requests**, **130,141 × 200, 107 × 404, 86 × 502**, no 429, no transport
+error, no `Retry-After` on anything. Bar written to `/tmp/m9-exec/S3/BAR.md`
+before the first request; enqueue driver and per-pid HTTP probe outside the
+tree at `/tmp/m9-exec/S3/`, recording path only and never the query string.
+`alembic current` reported **m09a** and was upgraded to **m09c (head)** first.
+
+**Over the frozen tier of 130,806 ids** (`s3_tier_snapshot`, taken 22:02:21Z
+before the first request, because enrichment moves the predicate it selects
+on): **130,647 enriched (99.88%)**, 159 still skeleton, and every one of the
+159 accounted for — 109 TMDb 404s, 30 `imdb_id` conflicts, 20 orphaned by a
+worker crash. Weight class C landed at 99.33% `overview` / 41.72% `tagline`
+and class D at 99.98% `genres` / 63.00% `keywords`. `raw_payloads` **995 MB**,
+mean stored payload **7,001 B** against S2's predicted 6,914 — 1.3% out.
+
+**Refuted, and it was this repository's own arithmetic in PRD 04: "three
+workers at `30/N` each reach 30 rps".** Per-worker throughput does not survive
+concurrency. Three workers achieved **19.76 rps**, 6.59 each against the
+10.38 S2 measured on one — a **37% per-worker loss** and a scaling factor of
+**1.90×, not 3×**. The bucket was never binding on any worker. S2's 0.38%
+sample got the median request right (0.0588 s against 0.0580 s) and the tail
+completely wrong: **p95 0.4267 s against 0.1049 s, 4.1×**. Concurrency moves
+the tail, and a sequential sample cannot see it. Whole run **1.98 h** against
+the 3.50 h [3.41, 3.59] one-worker bar. PRD 04's Phase-3 paragraph moves in
+this commit.
+
+**A worker crashed 78 minutes in** — unhandled `MissingGreenlet` out of
+`usher work`, a path no test has executed — and **its 20 claimed jobs are
+orphaned in `status='running'` permanently**, because `JobWorker.startup()`
+runs once at process start and restarting to recover them would steal the
+other two workers' live claims. That is a dead end at N > 1, stated rather
+than worked around.
+
+**A failure class no taxonomy in the repository covers: 30 parked jobs are
+`ix_titles_imdb_id` write conflicts**, not upstream failures. TMDb's
+`external_ids.imdb_id` disagrees with the bulk export's and the id it returns
+is already held by another catalog row — confirmed by re-fetching five
+through the shipped provider. It is not `PortDataMalformed`, so each burns all
+five attempts and re-fetches every time.
+
+**And the first 5xx this repository has ever seen from TMDb: 86 × 502 in two
+exact bursts of 43**, inside 526 s, none carrying `Retry-After`, all
+classified `PortUnavailable` and all recovered — the retry taxonomy firing on
+a branch that had never run in production.
+
+**`title_embeddings` stayed at 542 for the whole run and jumped the moment the
+enrich queue emptied, and `USHER_EMBEDDING_ENABLED` was not the reason.** The
+claim orders `priority DESC, created_at`, every job is `BACKFILL`, and the
+enqueue wrote all 130,804 enrich rows in a 1.3-second window — so every
+follow-up job sorts behind every enrich job and `LIMIT 20` never reaches one.
+The embedder being on was verified three ways, including the absence of
+`composition.embedder`'s no-op warning from all three logs while its LLM
+sibling is present in all three. **So the ruling was right and its reason was
+one step off**: enabling the embedder makes index jobs claimable, but a bulk
+enqueue at one priority defers them wholesale. 261,294 follow-up jobs — two
+per success, exactly as S2 measured — remain, priced at **~1.9 h** on the two
+surviving workers. They are durable; the index pass is S4's.
+
+**One measurement for whoever touches the worker loop:** `SearchGauges.refresh`
+runs after every 20 jobs and its `count_stale` went **16.4 ms → 29.4 ms →
+327.9 ms** as the enriched tier grew 7,718 → 18,267 → 88,001. The repository's
+own docstring prices that query at "2k-10k rows" and "a few times a day".
+
+Full evidence, both post-states, and the five confirmed crosswalk conflicts in
+`.claude/rules/tmdb-and-enrichment.md`.
