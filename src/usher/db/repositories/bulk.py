@@ -82,18 +82,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.repositories._errors import refusals_as_conflict
 from usher.db.staging import stage_records
+from usher.domain.enums import SearchNameKind
 from usher.domain.ids import new_id
 from usher.ports.bulk import (
     GENOME_TAG_COUNT,
     GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
+    ImdbAka,
     ImdbCreditNames,
     ImdbRating,
     ImdbTitle,
     TmdbId,
 )
 from usher.ports.repository import (
+    AliasWriteResult,
     BulkCatalogRepository,
     BulkWriteResult,
     CreditNamesFillResult,
@@ -101,6 +104,15 @@ from usher.ports.repository import (
     GenomeCoverage,
     GenomeWriteResult,
 )
+
+# The `kind` this module writes, and it is bound to the enum rather than
+# spelled `'alias'` twice: the DELETE's scope and the INSERT's value have to
+# agree, and a literal in each is two places to change. Same reason and same
+# spelling as `db/repositories/people.py`'s `_PERSON_NAME_KIND`, which is the
+# other writer of this table. `.value` because `enum_column`'s storage
+# identifier is the member's value; binding the member sends "CAST" and
+# matches nothing.
+_ALIAS_NAME_KIND = SearchNameKind.ALIAS.value
 
 # Dropped for the duration of a bulk-load window and rebuilt after, but only
 # into an empty `titles` -- see `bulk_load_window`. The two btrees are plain,
@@ -710,6 +722,145 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         filled, unmatched, deferred = result.one()
         return CreditNamesFillResult(
             filled=int(filled), unmatched=int(unmatched), deferred=int(deferred)
+        )
+
+    async def replace_aliases(
+        self, rows: Sequence[ImdbAka], *, imdb_ids: Sequence[str]
+    ) -> AliasWriteResult:
+        # `dict.fromkeys`, not `set`: the scope is bound as a `text[]` and a
+        # stable order keeps two runs' query plans and error messages
+        # comparable. Duplicates are removed because `unmatched` counts scoped
+        # ids, and a caller naming one title twice must not count it twice.
+        scope = list(dict.fromkeys(imdb_ids))
+        # Before the DELETE, and naming the offender. A row whose title the
+        # scope does not hold would be inserted under a title no later scope
+        # deletes -- it survives every re-import and every upstream withdrawal,
+        # which is the one row shape a re-derivation cannot repair.
+        #
+        # **Postgres cannot demonstrate the "before" here and the fake can**,
+        # because the SAVEPOINT below would roll the delete back with the
+        # raise either way. It is spelled first because that is where the
+        # check belongs, and `tests/unit` is the arm that can see it.
+        stray = sorted({row.imdb_id for row in rows} - set(scope))
+        if stray:
+            raise ValueError(f"title.akas rows name titles outside the replacement scope: {stray}")
+        if not scope:
+            return AliasWriteResult(written=0, unmatched=0, canonical=0, duplicate=0)
+        await self._stage(
+            """
+            CREATE TEMP TABLE stg_akas (
+                id uuid, imdb_id text, ordering integer,
+                name text, region text, language text
+            ) ON COMMIT DROP
+            """,
+            "stg_akas",
+            ("id", "imdb_id", "ordering", "name", "region", "language"),
+            # A UUIDv7 per staged row, exactly as `upsert_titles` mints one --
+            # this table's `id` has no server default and `gen_random_uuid()`
+            # is a v4, which would put a bulk-loaded alias outside the identity
+            # convention every other row in this schema follows. Most of them
+            # are discarded: 75.5% of retained akas rows never become a row.
+            [
+                (new_id(), row.imdb_id, row.ordering, row.name, row.region, row.language)
+                for row in rows
+            ],
+        )
+        # `refusals_as_conflict` rather than this module's older bare
+        # `except IntegrityError`, and the reason is a measurement rather than
+        # a preference: `ck_title_search_names_name_within_btree_bound` is a
+        # column bound narrower than the field feeding it, which is exactly the
+        # shape `db/repositories/_errors.py` records as reaching SQLAlchemy as
+        # a bare `DBAPIError`. **33 rows of the pinned dump exceed it**, and
+        # the refusal is per *call*, so one of them takes a ten-thousand-row
+        # batch with it -- which is why `parse_akas_row` filters on
+        # `AKAS_NAME_MAX_CHARS` upstream and why that constant is bound to
+        # `SEARCH_NAME_MAX_CHARS` rather than spelled again.
+        async with refusals_as_conflict(
+            self._session, "an alias violates title_search_names' own bounds"
+        ):
+            # **Scoped by `kind` as well as by title, and both halves are
+            # load-bearing.** The title scope is what lets a title whose akas
+            # all disappeared upstream lose its stale rows; the `kind` scope is
+            # about the *second writer* -- `CreditRepository.replace_for_titles`
+            # lands `person` rows in this same table, and a delete on title
+            # alone makes the two mutually destructive, whichever runs second
+            # erasing the other's rows with nothing raised and nothing logged.
+            #
+            # Served by `ix_title_search_names_title_id`, which `m09a` created
+            # for the `ON DELETE CASCADE` lookup.
+            await self._session.execute(
+                text("""
+                    DELETE FROM title_search_names
+                    WHERE kind = CAST(:kind AS text)
+                      AND title_id IN (
+                          SELECT t.id FROM titles t
+                          WHERE t.imdb_id = ANY(CAST(:imdb_ids AS text[]))
+                      )
+                """),
+                {"kind": _ALIAS_NAME_KIND, "imdb_ids": scope},
+            )
+            # `lower()` on both sides of the canonical comparison, because
+            # that is the function `ix_titles_name_lower_prefix` is built over:
+            # an alias differing from the title's own name only in case is the
+            # same entry to every reader of this table, so keeping it is the
+            # one-row-per-title duplication M6's boundary call 3 refused.
+            # `IS NOT DISTINCT FROM`, not `=`, because `original_name` is
+            # nullable and `NULL = x` is NULL -- an `OR` over it would make
+            # `canonical` three-valued and `NOT canonical` would drop the row
+            # rather than keep it, silently, for every title with no original
+            # title.
+            #
+            # `DISTINCT ON (title_id, folded) ... ORDER BY ..., ordering, id`:
+            # one name legitimately appears for several regions (9.7% of what
+            # survives the filter above), and the loser's `region` *and*
+            # `language` go with it, so the winner has to be deterministic.
+            # `ordering` is the only per-title sequence `title.akas` supplies;
+            # `id` is the tie-break and ascends with arrival order, since the
+            # ids were minted in a comprehension over `rows`.
+            result = await self._session.execute(
+                text("""
+                    WITH scope AS (
+                        SELECT DISTINCT u.imdb_id
+                        FROM unnest(CAST(:imdb_ids AS text[])) AS u(imdb_id)
+                    ), scoped AS (
+                        SELECT s.imdb_id, t.id AS title_id, t.name, t.original_name
+                        FROM scope s JOIN titles t ON t.imdb_id = s.imdb_id
+                    ), candidate AS (
+                        SELECT sc.title_id, a.id, a.name, a.region, a.language,
+                               a.ordering, lower(a.name) AS folded,
+                               (lower(a.name) IS NOT DISTINCT FROM lower(sc.name)
+                                OR lower(a.name)
+                                   IS NOT DISTINCT FROM lower(sc.original_name)) AS canonical
+                        FROM stg_akas a JOIN scoped sc ON sc.imdb_id = a.imdb_id
+                    ), retained AS (
+                        SELECT * FROM candidate WHERE NOT canonical
+                    ), deduped AS (
+                        SELECT DISTINCT ON (title_id, folded)
+                               id, title_id, name, region, language
+                        FROM retained ORDER BY title_id, folded, ordering, id
+                    ), inserted AS (
+                        INSERT INTO title_search_names
+                               (id, title_id, name, kind, region, language)
+                        SELECT d.id, d.title_id, d.name, CAST(:kind AS text),
+                               d.region, d.language
+                        FROM deduped d
+                        RETURNING 1
+                    )
+                    SELECT (SELECT count(*) FROM inserted) AS written,
+                           (SELECT count(*) FROM scope)
+                               - (SELECT count(*) FROM scoped) AS unmatched,
+                           (SELECT count(*) FROM candidate WHERE canonical) AS canonical,
+                           (SELECT count(*) FROM retained)
+                               - (SELECT count(*) FROM deduped) AS duplicate
+                """),
+                {"kind": _ALIAS_NAME_KIND, "imdb_ids": scope},
+            )
+            written, unmatched, canonical, duplicate = result.one()
+        return AliasWriteResult(
+            written=int(written),
+            unmatched=int(unmatched),
+            canonical=int(canonical),
+            duplicate=int(duplicate),
         )
 
     async def upsert_tmdb_ids(self, rows: Sequence[TmdbId]) -> int:

@@ -42,6 +42,23 @@ cannot pin from the unit arm alone:
   column**, so the whole cost argument behind every `IS DISTINCT FROM`
   guard is unobservable here: a fake that rewrote every row on every replay
   would fail only the cases that assert the *count*.
+- **Python's `str.lower()` is not Postgres's `lower()`, and `replace_aliases`
+  compares names with it.** Python applies Unicode's *contextual* final-sigma
+  rule and the database does not, so `"ΟΔΟΣ".lower() == "Οδος".lower()` is
+  `True` here and `lower('ΟΔΟΣ') = lower('Οδος')` is **false** in Postgres --
+  this fake would drop that alias as a restatement of the title's own name and
+  the real one stores it. Measured over the whole pinned
+  `title.akas.tsv.gz`: **32,223 of 46,202,631 retained rows (0.070%)** are in
+  the two families where the three foldings disagree (German `ß`, Greek final
+  sigma). Recorded rather than fixed, because reimplementing a collation in
+  Python is a second implementation and not a stand-in, and because Postgres
+  is *authoritative* by construction here -- the rule is "does this alias
+  reach anything `ix_titles_name_lower_prefix` does not", and that index is a
+  btree over the database's own `lower(name)`.
+  `tests/integration/test_bulk_repository.py::
+  test_the_canonical_comparison_is_the_databases_own_lower_and_not_pythons`
+  is the only case in the suite that can see it, and it is deliberately not in
+  the shared contract.
 """
 
 import contextlib
@@ -51,18 +68,20 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
 
-from usher.domain.enums import TitleKind
+from usher.domain.enums import SearchNameKind, TitleKind
 from usher.domain.ids import new_id
 from usher.ports.bulk import (
     GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
+    ImdbAka,
     ImdbCreditNames,
     ImdbRating,
     ImdbTitle,
     TmdbId,
 )
 from usher.ports.repository import (
+    AliasWriteResult,
     BulkCatalogRepository,
     BulkWriteResult,
     CreditNamesFillResult,
@@ -137,6 +156,12 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
         # because the two tables are: nothing joins them, and the only
         # relationship they have is the equality a reader compares.
         self._genome_tags: dict[int, tuple[str, str]] = {}
+        # `title_search_names`, flat: (title_id, kind, name, region, language).
+        # A list rather than a dict keyed on anything, because the real table
+        # carries **no unique constraint** -- `m09a` ships none deliberately --
+        # so a dict would model an idempotence the database does not provide
+        # and the doubling case would pass against a writer that never deletes.
+        self._search_names: list[tuple[uuid.UUID, str, str, str | None, str | None]] = []
         self.window_depth = 0
 
     def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
@@ -214,6 +239,82 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
                 stored.credit_names = row.names
                 filled += 1
         return CreditNamesFillResult(filled=filled, unmatched=unmatched, deferred=deferred)
+
+    async def replace_aliases(
+        self, rows: Sequence[ImdbAka], *, imdb_ids: Sequence[str]
+    ) -> AliasWriteResult:
+        scope = dict.fromkeys(imdb_ids)
+        # Before anything is deleted, and naming the offender: the row would
+        # be inserted under a title no later scope deletes, which is the one
+        # shape a re-import cannot repair. `sorted` so the message is the same
+        # sentence whichever order the batch arrived in.
+        stray = sorted({row.imdb_id for row in rows} - set(scope))
+        if stray:
+            raise ValueError(f"title.akas rows name titles outside the replacement scope: {stray}")
+        resolved = {imdb_id: self._titles.get(imdb_id) for imdb_id in scope}
+        unmatched = sum(1 for stored in resolved.values() if stored is None)
+        kept = [
+            entry
+            for entry in self._search_names
+            if not (
+                entry[1] == SearchNameKind.ALIAS.value
+                and entry[0] in {stored.id for stored in resolved.values() if stored is not None}
+            )
+        ]
+        self._search_names = kept
+
+        canonical = duplicate = 0
+        # Lowest `ordering` wins, and the sort is stable, so two rows sharing
+        # an `ordering` keep arrival order -- the real statement's final
+        # `ORDER BY ... id` tie-break, whose ids ascend with arrival.
+        seen: set[tuple[uuid.UUID, str]] = set()
+        for row in sorted(rows, key=lambda one: one.ordering):
+            stored = resolved.get(row.imdb_id)
+            if stored is None:
+                # Attributed to the scoped id that resolved to nothing, which
+                # `unmatched` already counted. Counting it again here would
+                # make the same absence two numbers.
+                continue
+            # `str.lower()`, not `casefold()`: the comparison has to be the
+            # one `ix_titles_name_lower_prefix` is built over, and that index
+            # is `lower(name)`.
+            folded = row.name.lower()
+            if folded == stored.facts.name.lower() or (
+                stored.facts.original_name is not None
+                and folded == stored.facts.original_name.lower()
+            ):
+                canonical += 1
+                continue
+            if (stored.id, folded) in seen:
+                duplicate += 1
+                continue
+            seen.add((stored.id, folded))
+            self._search_names.append(
+                (stored.id, SearchNameKind.ALIAS.value, row.name, row.region, row.language)
+            )
+        return AliasWriteResult(
+            written=len(seen), unmatched=unmatched, canonical=canonical, duplicate=duplicate
+        )
+
+    def search_names(self, imdb_id: str) -> tuple[tuple[str, str, str | None, str | None], ...]:
+        """Every stored `title_search_names` row for a title, as
+        `(kind, name, region, language)` ascending."""
+        stored = self._titles.get(imdb_id)
+        if stored is None:
+            return ()
+        return tuple(
+            sorted(
+                (entry[1], entry[2], entry[3], entry[4])
+                for entry in self._search_names
+                if entry[0] == stored.id
+            )
+        )
+
+    def seed_person_search_name(self, imdb_id: str, name: str) -> None:
+        """What `CreditRepository.replace_for_titles` leaves behind for one
+        credited person: `kind = 'person'`, no region and no language."""
+        stored = self._titles[imdb_id]
+        self._search_names.append((stored.id, SearchNameKind.PERSON.value, name, None, None))
 
     async def upsert_tmdb_ids(self, rows: Sequence[TmdbId]) -> int:
         # Highest popularity wins within a batch, matching `ORDER BY

@@ -24,6 +24,7 @@ from usher.ports.repository._results import (
     BulkWriteResult,
 )
 from usher.ports.repository.bulk import (
+    AliasWriteResult,
     BulkCatalogRepository,
     CreditNamesFillResult,
     CrosswalkLinkResult,
@@ -110,6 +111,7 @@ from usher.ports.repository.watch_state import (
 
 __all__ = [
     "AddedTitle",
+    "AliasWriteResult",
     "BrowseCursorPosition",
     "BrowseFacets",
     "BrowseSort",
