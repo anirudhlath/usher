@@ -873,12 +873,21 @@ def test_reordering_the_weights_without_changing_one_leaves_the_fingerprint(
     At 130,647 embedded titles that rebuild is **85 minutes** (S5's measured
     walk), which is what makes "cries wolf" an operational cost rather than a
     tidiness argument.
+
+    **The reordering is derived from `_WEIGHTS` rather than transcribed from
+    it, and that is a repair.** Until 2026-08-12 the monkeypatched value was a
+    hand-written copy of the shipped table, so this case failed on *any* change
+    to a weight -- it was a change-detector wearing an ordering case's name, and
+    S7's sweep watched it report a kill for three separate plants that had
+    nothing to do with insertion order. Reversed from the real mapping it can
+    only ever fail on the property it is named for.
     """
+    reordered = dict(reversed(list(_WEIGHTS.items())))
+    assert list(reordered) != list(_WEIGHTS), "the premise: the order really moved"
+    assert reordered == _WEIGHTS, "the premise: only the order moved"
+
     before = blend_fingerprint()
-    monkeypatch.setattr(
-        "usher.services.similar._WEIGHTS",
-        {"genres": 0.10, "cosine": 0.45, "keywords": 0.20},
-    )
+    monkeypatch.setattr("usher.services.similar._WEIGHTS", reordered)
     assert blend_fingerprint() == before
 
 
