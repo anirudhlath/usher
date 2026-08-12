@@ -683,11 +683,63 @@ rendering: the branch is on whether `:after_key` is NULL, which the caller knows
 before it builds the statement. `db/repositories/title.py`'s `_browse_after` is
 the worked example.
 
-**And `nulls_last(...)` is written out as `key.is_not(None).desc()` on this
-read**, deliberately, even though the two compile to the same order: the keyset
-predicate has to agree with the `ORDER BY` term for term, and two spellings of
-one rule is how they stop agreeing. Planting `.desc()` → `.asc()` fails **12**
-cases; deleting the `key.is_(None)` disjunct from the predicate fails 7.
+**The `ORDER BY` was written out as `key.is_not(None).desc(), key <dir>` for
+exactly one day, and B7 measured that it costs 317×.** The argument for writing
+it out was legibility with teeth — the keyset predicate has to agree with the
+`ORDER BY` term for term, and two spellings of one rule is how they stop
+agreeing. It is a good argument about correctness and it is wrong about cost:
+`sort=name` is **299.21 ms p50 written out against 0.92 ms as
+`key <dir> NULLS LAST`** over 1,272,367 titles, byte-identical on 25 of 25
+positions, because `titles.sort_name` is `NOT NULL`, `ix_titles_sort_name`
+already exists, and **an index is matched by the sort-key *expression***.
+Postgres 17 does not simplify `sort_name IS NOT NULL` to `true` even on a
+`NOT NULL` column, so the written-out form has a leading key nothing carries
+and the page becomes a 95,000-buffer Parallel Seq Scan. **The general form: two
+spellings of one order are two different sort keys, and a legibility decision
+about SQL text can be a plan decision.** Reproduced on a **seven-row** fixture
+with `SET LOCAL enable_seqscan = off`, which is this file's own
+`text_pattern_ops` idiom and is what separates "not chosen" from "not
+choosable":
+
+| clause | plan | total cost |
+|---|---|---|
+| `sort_name ASC NULLS LAST, id ASC` | `Limit → Incremental Sort (Presorted Key: sort_name) → Index Scan using ix_titles_sort_name` | **2.72** |
+| `(sort_name IS NOT NULL) DESC, sort_name, id` | `Limit → Sort (Sort Key: ((sort_name IS NOT NULL)) DESC, …) → Seq Scan` | **1e10** — the disabled-node penalty |
+
+**Only the `ORDER BY` moved; `_browse_after`'s three arms are untouched.** So
+the clause and the predicate no longer read as one rule, and the agreement is
+now a **test** rather than a reading:
+`test_the_shipped_order_is_byte_identical_to_the_written_out_one` runs both
+spellings position for position, for every `BrowseSort` member, over a
+population carrying NULLs *and* ties in every key, unpaged and as a keyset
+walk. That is strictly stronger than the legibility was — and it is worth
+noticing that restoring the written-out spelling fails **only** the plan case
+and none of the 172 others, which is what "the same order" means when it is
+measured instead of argued.
+
+**The premise guard on that case caught the fixture, not the code, on its first
+run** — `popularity` and `vote_count` had no tie, so their `id` tail was
+unobservable and the equivalence would have been about four rows instead of
+seven. One row carrying a tie for every key at once fixed it. This is the
+`assert far_id < near_id` rule paying out in the direction nobody plans for.
+
+Plant verdicts on the shipped clause, all against the browse selection:
+`nulls_last` dropped (Postgres's `DESC` default is NULLS FIRST) fails **15**;
+the `id` tail dropped fails **5**; deleting the `key.is_(None)` disjunct from
+the predicate fails 7.
+
+**The nullable sorts are not fixed by this and the reason matters.** `year`,
+`popularity` and `vote_count` have no index at all, so all three remain a
+sequential scan (235.55 / 229.50 / 231.21 ms). A `(col DESC NULLS LAST, id)`
+btree on each would serve them — and **under the written-out spelling could not
+have been matched even if it existed**, so this change is what makes such an
+index possible rather than what makes it unnecessary. Recommended and
+deliberately not minted here: `ix_titles_popularity` is this schema's own
+precedent for an index declared on a guess, unusable, and dropped two
+milestones later in `ffc`, and Track 1 is not taking a third revision for an
+optimisation. A GIN index on `genres` is a separate and genuinely open
+question — B7 found none exists, so the lossy-bitmap recheck B3 measured one
+subsystem over would be *created* by adding it, not avoided.
 
 **Offset paging duplicates under a concurrent insert, measured rather than
 asserted.** PRD 07 has claimed this since M1 and nothing tested it, because

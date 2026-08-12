@@ -3,11 +3,11 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import Table, event, insert, text
+from sqlalchemy import ColumnElement, Select, Table, event, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from tests.contract.title_repository_contract import (
@@ -19,7 +19,7 @@ from tests.contract.title_repository_contract import (
 from usher.db.models.source import MediaItemRow
 from usher.db.models.title import DERIVED_COLUMNS, TitleRow
 from usher.db.repositories.source import PostgresSourceRepository
-from usher.db.repositories.title import PostgresTitleRepository
+from usher.db.repositories.title import PostgresTitleRepository, _browse_order
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
@@ -977,4 +977,194 @@ async def test_offset_duplicates_a_row_a_concurrent_insert_pushed_down_and_the_k
         "and the keyset over the identical two requests and the identical "
         "concurrent write has none, which is the comparison and not a second "
         "reading of the assertion four lines up"
+    )
+
+
+#: A browse population carrying, for **every** member of `BrowseSort`, at least
+#: one tie and — where the column is nullable — at least two NULLs. Both are
+#: needed for the equivalence below to be about anything: a fixture with no
+#: ties cannot see the `id` tail move and one with no NULLs cannot see the
+#: NULLS-LAST leg move, which are the only two ways the two spellings could
+#: disagree. Seeded in this order, which is id order and is no sort's answer.
+_EQUIVALENCE_POPULATION: tuple[tuple[str, str, int | None, float | None, int | None], ...] = (
+    # name, sort_name, year, popularity, vote_count
+    ("Delta", "delta", 1999, 3.0, 40),
+    ("Alpha", "alpha", None, None, None),
+    ("Foxtrot", "foxtrot", 2010, None, 5),
+    ("Bravo", "bravo", None, 9.0, None),
+    ("Echo", "echo", 1999, 1.0, 900),
+    ("Charlie", "charlie", 2010, None, None),
+    # One row carrying a tie for **every** key at once -- `sort_name` with
+    # Delta, `popularity` and `vote_count` with Delta, `year` alone (1999 and
+    # 2010 already repeat). Without it three of the four sorts had no tie and
+    # their `id` tail was unobservable, which is what the premise guard below
+    # caught on this fixture's first run rather than on some later one.
+    ("Delta II", "delta", 1985, 3.0, 40),
+)
+
+
+async def _seed_equivalence_population(repo: PostgresTitleRepository) -> list[Title]:
+    seeded = []
+    for name, sort_name, year, popularity, vote_count in _EQUIVALENCE_POPULATION:
+        one = Title(
+            kind=TitleKind.MOVIE,
+            name=name,
+            sort_name=sort_name,
+            year=year,
+            popularity=popularity,
+            vote_count=vote_count,
+        )
+        await repo.add(one)
+        seeded.append(one)
+    return seeded
+
+
+@pytest.mark.parametrize("sort", list(BrowseSort))
+async def test_the_shipped_order_is_byte_identical_to_the_written_out_one(
+    repo: PostgresTitleRepository, session: AsyncSession, sort: BrowseSort
+) -> None:
+    """**The guarantee that replaced a legibility argument, and it is stronger
+    than what it replaced.**
+
+    `browse` used to spell its `ORDER BY` as `(key IS NOT NULL) DESC, key
+    <dir>, id` — written out, so that a reader could see it and
+    `_browse_after`'s three arms were term for term the same rule. B7 measured
+    what that costs: **299.21 ms p50 against 0.92 ms, 317x**, on `sort=name`
+    over a real 1,272,367-title catalog, because an index is matched by the
+    *sort-key expression* and no index carries `sort_name IS NOT NULL`. The
+    clause is now `key <dir> NULLS LAST, id`.
+
+    The two are the same order **by an argument**, and an argument is what this
+    case replaces. It runs both spellings over one population and compares them
+    position for position — unpaged, and again as a keyset walk, because the
+    `WHERE` predicate was not touched and has to keep agreeing with a clause
+    that no longer looks like it.
+
+    The reference is built from `BrowseSort.order_for`, so it cannot drift on
+    *which* column or direction a sort means; only the spelling under test is
+    the shipped object's. Every premise is asserted, because an equivalence
+    over a fixture with no NULLs and no ties is an equivalence about nothing.
+    """
+    seeded = await _seed_equivalence_population(repo)
+    column, descending = BrowseSort.order_for(sort)
+    values = [getattr(one, column) for one in seeded]
+    keyed = [value for value in values if value is not None]
+    assert len(keyed) - len(set(keyed)) >= 1, (
+        f"the premise: {sort} needs a tie, or the `id` tail cannot be observed"
+    )
+    if len(keyed) < len(values):
+        assert len(values) - len(keyed) >= 2, (
+            f"the premise: {sort} needs two NULLs, or the unkeyed group has no "
+            "internal order to get wrong"
+        )
+
+    key = getattr(TitleRow, column)
+    reference = await session.execute(
+        select(TitleRow.id).order_by(
+            # The spelling this replaced, kept here on purpose: it is the
+            # order the fast one has to reproduce, and freezing it as a
+            # literal is what makes "identical" checkable rather than assumed.
+            key.is_not(None).desc(),
+            key.desc() if descending else key.asc(),
+            TitleRow.id.asc(),
+        )
+    )
+    expected = list(reference.scalars().all())
+    assert len(expected) == len(_EQUIVALENCE_POPULATION), "the premise: the fixture is all there"
+    assert expected != sorted(expected), (
+        "the premise: this sort's answer is not id order, or the comparison is "
+        "satisfied by two implementations that both ignore the sort key"
+    )
+
+    unpaged = await repo.browse(sort=sort, limit=len(expected) + 5)
+    walked = await TitleRepositoryBrowseContract._walk(repo, sort=sort, limit=2)
+
+    mismatched = [
+        index
+        for index, (shipped, written) in enumerate(
+            zip([one.id for one in unpaged], expected, strict=True)
+        )
+        if shipped != written
+    ]
+    assert not mismatched, f"{len(mismatched)} mismatched positions of {len(expected)}"
+    assert [one.id for one in unpaged] == expected
+    assert [one.id for one in walked] == expected, (
+        "and the keyset walk too: `_browse_after` was deliberately not touched, "
+        "so this is what says it still agrees with a clause that no longer "
+        "reads like it"
+    )
+
+
+async def _plan_of(session: AsyncSession, statement: Select[tuple[uuid.UUID]]) -> dict[str, object]:
+    """`EXPLAIN (FORMAT JSON)`'s plan tree for a statement, as a dict."""
+    compiled = statement.compile(compile_kwargs={"literal_binds": True})
+    rows = await session.execute(text(f"EXPLAIN (FORMAT JSON) {compiled}"))
+    plan = rows.scalar_one()[0]["Plan"]
+    return cast(dict[str, object], plan)
+
+
+def _plan_nodes(plan: dict[str, object]) -> list[dict[str, object]]:
+    children = cast(list[dict[str, object]], plan.get("Plans", []))
+    return [plan, *(node for child in children for node in _plan_nodes(child))]
+
+
+async def test_the_written_out_order_cannot_use_the_index_that_nulls_last_can(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    """**Why the clause changed: not "the index is missing", but "the spelling
+    cannot be matched to the index that is there".**
+
+    `titles.sort_name` is `NOT NULL` and `ix_titles_sort_name` is a plain btree
+    on it. Postgres 17 nevertheless does **not** simplify
+    `sort_name IS NOT NULL` to `true`, and it matches an index by the *sort-key
+    expression* — so `(sort_name IS NOT NULL) DESC, sort_name, id` has a
+    leading key no index carries and `sort_name ASC NULLS LAST, id` has one
+    that `ix_titles_sort_name` does. Same rows, same order, different plan.
+
+    `SET LOCAL enable_seqscan = off` is what makes that observable on a
+    fixture of seven rows, and it is this file's own idiom rather than a new
+    one: `m09a`'s prefix indexes are pinned the same way, because forcing the
+    choice separates *"the planner did not pick it"* from *"the planner could
+    not pick it"*. The refused plan comes back at cost **1e10**, which is the
+    disabled-node penalty and is the signature of the second.
+
+    B7's numbers on a real catalog: 299.21 ms p50 -> 0.92 ms, **317x**, 51x
+    under its own 50 ms bar, and byte-identical on 25 of 25 positions.
+    """
+    await _seed_equivalence_population(repo)
+    await session.execute(text("SET LOCAL enable_seqscan = off"))
+    # `ColumnElement`, because that is what `_browse_order` takes and what
+    # `browse` reaches it with -- there through `getattr`, which mypy sees as
+    # `Any`, so the cast is where that erasure is made explicit rather than a
+    # widening of anything.
+    key = cast("ColumnElement[Any]", TitleRow.sort_name)
+
+    shipped = await _plan_of(
+        session, select(TitleRow.id).order_by(*_browse_order(key, descending=False)).limit(3)
+    )
+    written_out = await _plan_of(
+        session,
+        select(TitleRow.id)
+        .order_by(key.is_not(None).desc(), key.asc(), TitleRow.id.asc())
+        .limit(3),
+    )
+
+    assert "ix_titles_sort_name" in {node.get("Index Name") for node in _plan_nodes(shipped)}, (
+        f"the shipped clause did not reach the index: {shipped}"
+    )
+    assert {node["Node Type"] for node in _plan_nodes(written_out)} >= {"Seq Scan", "Sort"}, (
+        "the written-out clause is expected to sort a sequential scan, because "
+        f"no index carries its leading key: {written_out}"
+    )
+    assert "ix_titles_sort_name" not in {
+        node.get("Index Name") for node in _plan_nodes(written_out)
+    }
+    assert cast(float, written_out["Total Cost"]) > 1e9, (
+        "and it is *unchoosable* rather than merely not chosen: with sequential "
+        "scans disabled the planner still took one, at the disabled-node "
+        f"penalty. Cost {written_out['Total Cost']}"
+    )
+    assert cast(float, shipped["Total Cost"]) < 1e9, (
+        "the premise for the line above: the same penalty is not on the shipped "
+        "plan, so the comparison is about the sort key and not about the GUC"
     )

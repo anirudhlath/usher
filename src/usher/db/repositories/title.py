@@ -65,6 +65,7 @@ autoflush fails.
 
 import uuid
 from collections.abc import Sequence
+from typing import Any
 
 from sqlalchemy import ColumnElement, Text, and_, exists, func, literal, nulls_last, or_, select
 from sqlalchemy import cast as sql_cast
@@ -209,11 +210,68 @@ def _browse_filters(
     return clauses
 
 
+def _browse_order(key: ColumnElement[Any], *, descending: bool) -> tuple[ColumnElement[Any], ...]:
+    """`key <dir> NULLS LAST, id ASC` -- browse's total order.
+
+    **Spelled as `nulls_last(...)` rather than written out as
+    `(key IS NOT NULL) DESC, key <dir>`, and that is a measurement rather than
+    a preference.** The two produce the identical row order; only one of them
+    an index can serve. B7 measured `sort=name` at **299.21 ms p50 written out
+    against 0.92 ms as `NULLS LAST`, 317x**, on a page proved byte-identical
+    (0 mismatched positions over 25) across a real 1,272,367-title catalog --
+    because `titles.sort_name` is `NOT NULL`, `ix_titles_sort_name` already
+    exists, and **Postgres matches an index by the sort-key *expression***. It
+    does not simplify `sort_name IS NOT NULL` to `true` even on a `NOT NULL`
+    column, so the written-out form has a leading sort key no index carries and
+    the page becomes a 95,000-buffer Parallel Seq Scan. The general form: two
+    spellings of one order are two different sort keys, and **a legibility
+    decision about SQL text can be a plan decision.**
+
+    **What the written-out form bought, and what pays for it now.** It made
+    `_browse_after`'s three arms and this clause visibly the same rule --
+    *"the keyset predicate has to agree with this term for term, and two
+    spellings of one rule is how they stop agreeing"* -- and that argument is
+    about correctness and is right. The cost of taking the fast spelling is
+    that the agreement is no longer legible from the two functions side by
+    side: `NULLS LAST` is where `key IS NULL` sorts, and you have to know that
+    to see that `_browse_after`'s first disjunct is its other half. So the
+    agreement is a **test** instead of a reading --
+    `tests/integration/test_title_repository.py::
+    test_the_shipped_order_is_byte_identical_to_the_written_out_one` compares
+    the two orders position for position, for every member of `BrowseSort`,
+    over a population carrying NULLs and ties in every key, unpaged and paged.
+    That is a strictly stronger guarantee than the legibility was; it is just
+    not free, and it is the thing to keep if this clause is ever touched again.
+
+    **What this does not change: the `WHERE`.** `_browse_after` keeps its three
+    arms exactly as measured. The row-comparison spelling silently drops the
+    unkeyed tail, and none of that is affected by how the `ORDER BY` is
+    written.
+
+    **The nullable sorts do not benefit yet and the reason is worth carrying.**
+    `year`, `popularity` and `vote_count` have no index at all, so all three
+    stay a sequential scan (B7: 235.55 / 229.50 / 231.21 ms) -- but under the
+    written-out spelling a `(col DESC NULLS LAST, id)` btree could not have
+    been matched even if it existed, so this change is what makes such an index
+    *possible* rather than what makes it unnecessary. Recommended, deliberately
+    not minted: `ix_titles_popularity` is this schema's precedent for an index
+    declared on a guess, unusable, and dropped two milestones later in `ffc`.
+    A GIN index on `genres` is a third question and a genuinely open one --
+    B7 found none exists, so the lossy-bitmap recheck B3 measured one subsystem
+    over would be *created* by adding it.
+    """
+    ordered = nulls_last(key.desc()) if descending else nulls_last(key.asc())
+    # The total order, and the only reason two reads of one unchanged catalog
+    # agree about which page a row is on. ADR-0034 refuses to mint a cursor for
+    # a keyset that does not end in the primary key.
+    return (ordered, TitleRow.id.asc())
+
+
 def _browse_after(
     key: ColumnElement[object], *, descending: bool, after: BrowseCursorPosition
 ) -> ColumnElement[bool]:
-    """ADR-0034's keyset predicate, for an order of `(key IS NOT NULL) DESC,
-    key <dir>, id`.
+    """ADR-0034's keyset predicate, for the order `_browse_order` builds:
+    NULLs last, then the key, then `id`.
 
     **Not the row comparison the ADR first carried, and that is a
     measurement.** `((k IS NOT NULL), k, id) > ((:ak IS NOT NULL), :ak, :aid)`
@@ -664,20 +722,11 @@ class PostgresTitleRepository(TitleRepository):
         )
         if after is not None:
             statement = statement.where(_browse_after(key, descending=descending, after=after))
-        statement = statement.order_by(
-            # `nulls_last(...)` written out, because the keyset predicate has
-            # to agree with this term for term and two spellings of one rule
-            # is how they stop agreeing. Postgres defaults a `DESC` sort to
-            # NULLS FIRST, and `titles.popularity` was measured NULL on all
-            # 1,271,138 rows of a bootstrap-only catalog -- so the default
-            # puts the entire unknown population on page one.
-            key.is_not(None).desc(),
-            key.desc() if descending else key.asc(),
-            # The total order, and the only reason two reads of one unchanged
-            # catalog agree about which page a row is on. ADR-0034 refuses to
-            # mint a cursor for a keyset that does not end in the primary key.
-            TitleRow.id.asc(),
-        ).limit(limit)
+        # `NULLS LAST` rather than the `(key IS NOT NULL) DESC` this shipped as
+        # -- identical order, 317x on `sort=name`, because only one of the two
+        # is a sort key an index can serve. `_browse_order` carries the
+        # measurement and what the legibility it replaced was worth.
+        statement = statement.order_by(*_browse_order(key, descending=descending)).limit(limit)
         with self._session.no_autoflush:  # see get()'s comment
             result = await self._session.execute(statement)
         return [_to_domain(row) for row in result.scalars().all()]
