@@ -915,6 +915,32 @@ clamp does can bound one, and the proxy will not store active content under a
 year-long `max-age`. A minority of titles therefore have a logo this route
 returns nothing for; ADR-0032 records the measurement and the degradation.
 
+✅ **Built in M9, and the header ships.** `GET /images/{image_id}?w=` answers
+`Cache-Control: public, max-age=31536000, immutable` plus a strong `sha256`
+`ETag` over the exact bytes served, and a conditional request gets a `304`
+carrying both. `public`, unlike every other cached route here: an image takes no
+user, `images` has no user column, and the bytes are identical for every
+household, so a shared proxy caching them is the feature rather than the leak
+`usher.api.caching`'s `private` rule exists to prevent. The mechanics are that
+module's, not a second implementation.
+
+**The response names the rung it served** in `Content-Location`
+(`/images/{id}?w=780`), which is RFC 9110 §8.7's own mechanism for "you asked
+for 400 and this is the representation I selected" — so a client caches under a
+URL it can re-ask for rather than guessing the ladder. It is built from the
+route table and the *clamped* rung, never from the request's own path, so no
+byte a client sent reaches a response header.
+
+**Four failures and each is a problem document.** A missing row is
+`404 not_found`; **artwork this deployment declines to carry — the SVG logos
+above — is the same `404`**, because the provider answered correctly and a
+client owes it the same fallback it renders for a title with no logo. A CDN
+that did not answer is `503 source_unavailable` with `Retry-After`; a CDN that
+answered something else unusable is the same code without it. [08](08-operations.md)'s
+degradation table carries all four with the reason the fourth is not a 502:
+[ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s
+closed vocabulary has no member for one, and C5 asked rather than minting.
+
 Clients never see provider image URLs and never need a provider key. `w` is
 clamped **up** to a closed ladder of four widths — `154 342 780 1280`, a code
 constant — with `342` when it is omitted and a 422 for anything that is not a

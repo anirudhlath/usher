@@ -19,6 +19,7 @@ from usher.api.routers import (
     events,
     health,
     home,
+    images,
     meta,
     people,
     playback,
@@ -32,6 +33,7 @@ from usher.api.routers import (
 from usher.composition import (
     DefaultUserId,
     embedder,
+    image_proxy,
     llm_client,
     metadata_provider,
     nothing,
@@ -76,6 +78,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         client, close_client = (
             await llm_client(settings) if settings.worker_enabled else (None, nothing)
         )
+        # `GET /images/{id}`'s two process-scoped halves. **Unconditional,
+        # unlike the three above**: those are worker capabilities and answer
+        # `(None, no-op)` where no worker runs here, but this one is on a
+        # request path that every deployment serves. There is no switch and
+        # nothing to be missing -- the CDN needs no credential (ADR-0032) and
+        # both inputs have defaults -- so a nullable here would be a
+        # degradation nothing can cause. One `httpx.AsyncClient` per process
+        # for `metadata_provider`'s reason: a client per request is a
+        # connection pool per request.
+        image_fetcher, image_store, close_images = image_proxy(settings)
+        app.state.image_fetcher = image_fetcher
+        app.state.image_store = image_store
         lanes = LaneSupervisor(
             settings,
             unit_of_work(session_factory, settings, events=bus, provider=provider),
@@ -128,6 +142,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await close_provider()
             await close_model()
             await close_client()
+            await close_images()
             await engine.dispose()
 
     app = FastAPI(
@@ -200,6 +215,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(events.router)
     app.include_router(health.router)
     app.include_router(home.router)
+    app.include_router(images.router)
     app.include_router(meta.router)
     app.include_router(people.router)
     app.include_router(playback.router)

@@ -35,15 +35,33 @@ only the second.**
    has no TTL to quote, and a per-query ETag would only save a body the client
    asked for once.
 
-**`private`, never `public`.** Every screen this helper is built for is
-composed for one household from a key that carries `user_id`
-(`services/rows/cache.py` argues the identical point for its own key), so a
-shared proxy caching a response under this helper would silently serve one
-household's screen to another -- with no error, no log line and no metric.
-`Vary` is deliberately absent: it would earn its keep the day a second user
-identity exists and `current_user` stops returning the singleton default
-user, and it moves with that dependency rather than separately -- adding it
-today would describe a distinction the API cannot yet draw.
+**`private`, never `public` -- for the screens, and `GET /images/{id}` is not
+an exception to that rule but a case outside it.** Every screen
+`conditional_response` is built for is composed for one household from a key
+that carries `user_id` (`services/rows/cache.py` argues the identical point
+for its own key), so a shared proxy caching a *screen* under this helper would
+silently serve one household's screen to another -- with no error, no log line
+and no metric. An image is the opposite shape: `GET /images/{id}` takes no
+user, reads a row with no user column, and answers a provider's artwork that
+is byte-identical for every household, so `public` there is a statement about
+the resource rather than a loosening here. That is why the `Cache-Control`
+value is `conditional_bytes_response`'s **argument** and not a literal it
+builds -- one caller's freshness policy cannot become another's by accident.
+`Vary` is deliberately absent from both: for the screens it would earn its
+keep the day a second user identity exists and `current_user` stops returning
+the singleton default user, and it moves with that dependency rather than
+separately; for the proxy it is what the `Accept` successor (ADR-0032) buys,
+and there is nothing to vary on until it exists.
+
+**Two functions, one implementation, and the split is where the *value*
+stops being shared.** `conditional_bytes_response` owns the mechanics -- the
+strong tag over the exact bytes, the `If-None-Match` comparison, the 304 with
+the same validators the 200 would have carried -- and knows nothing about what
+is in the body. `conditional_response` is the JSON caller and is the only
+place a `BaseModel` is serialised. A second implementation of the mechanics
+is the thing this shape exists to prevent: the day the two disagree about
+whether a tag is quoted, a warm client re-downloads every screen it holds and
+nothing anywhere reports it.
 
 **The ETag is a strong tag, `sha256` over the exact bytes served, computed
 once.** `hashlib.md5` is not an option -- bandit's `S` rules are selected for
@@ -85,6 +103,7 @@ this file with the freshness question and not with the cache's:
 """
 
 import hashlib
+from collections.abc import Mapping
 from datetime import timedelta
 from typing import Final
 
@@ -93,6 +112,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 _NOT_MODIFIED: Final = 304
+_JSON: Final = "application/json"
 
 
 def conditional_response(request: Request, body: BaseModel, *, ttl: timedelta) -> Response:
@@ -101,15 +121,43 @@ def conditional_response(request: Request, body: BaseModel, *, ttl: timedelta) -
     `ttl` sets `max-age` directly -- never restated as a second literal, so
     the header and whatever cache the caller is fronting cannot drift apart.
     """
-    payload = body.model_dump_json().encode("utf-8")
+    return conditional_bytes_response(
+        request,
+        body.model_dump_json().encode("utf-8"),
+        media_type=_JSON,
+        cache_control=f"private, max-age={int(ttl.total_seconds())}",
+    )
+
+
+def conditional_bytes_response(
+    request: Request,
+    payload: bytes,
+    *,
+    media_type: str,
+    cache_control: str,
+    headers: Mapping[str, str] | None = None,
+) -> Response:
+    """Either a 304 or `payload`, under a strong `sha256` tag over exactly
+    these bytes.
+
+    **The bytes hashed are the bytes returned**, computed once and never
+    re-derived to check -- which is the whole reason a tag over bytes exists
+    rather than one over a `repr()` or a pre-serialisation DTO. A tag derived
+    from anything upstream of the wire agrees with the previous response the
+    day the thing between them stops being deterministic.
+
+    `headers` rides on **both** answers. RFC 9110 section 15.4.5 requires a 304
+    to carry the validators it would have sent with a 200, and a caller whose
+    extra header is part of *which representation this is* -- the proxy's
+    `Content-Location`, naming the rung it clamped to -- has the same
+    obligation for the same reason: a client that learned the rung only on a
+    200 would forget it on every revalidation.
+    """
     etag = f'"{hashlib.sha256(payload).hexdigest()}"'
-    headers = {
-        "ETag": etag,
-        "Cache-Control": f"private, max-age={int(ttl.total_seconds())}",
-    }
+    merged = {**(headers or {}), "ETag": etag, "Cache-Control": cache_control}
     if _if_none_match_hits(request.headers.get("if-none-match"), etag):
-        return Response(status_code=_NOT_MODIFIED, headers=headers)
-    return Response(content=payload, media_type="application/json", headers=headers)
+        return Response(status_code=_NOT_MODIFIED, headers=merged)
+    return Response(content=payload, media_type=media_type, headers=merged)
 
 
 def _if_none_match_hits(if_none_match: str | None, etag: str) -> bool:
@@ -126,4 +174,4 @@ def _if_none_match_hits(if_none_match: str | None, etag: str) -> bool:
     return etag in (candidate.strip() for candidate in if_none_match.split(","))
 
 
-__all__ = ["conditional_response"]
+__all__ = ["conditional_bytes_response", "conditional_response"]

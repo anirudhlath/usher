@@ -249,7 +249,7 @@ def test_the_two_series_are_counters(meter_reader: InMemoryMetricReader) -> None
 
 
 def test_the_instruments_exist_at_import(meter_reader: InMemoryMetricReader) -> None:
-    """A rename in `src/` that leaves `_cache_hits`/`_cache_misses` pointing
+    """A rename in `src/` that leaves `CACHE_HITS`/`CACHE_MISSES` pointing
     at a near-miss name is a dashboard panel that is permanently empty and
     indistinguishable from a healthy zero -- caught here structurally rather
     than only through a case that happens to record to it."""
