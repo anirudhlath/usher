@@ -33,10 +33,7 @@ wrote, measured, and deliberately left uncalled.
 """
 
 import uuid
-from collections.abc import Sequence
 from dataclasses import dataclass
-
-from opentelemetry import metrics
 
 from usher.domain.enums import ENRICHMENT_RANK, EnrichmentState, HdrFormat
 from usher.domain.image import Image
@@ -44,7 +41,6 @@ from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.people import CreditKind
 from usher.domain.title import Title
 from usher.domain.watch import WatchState
-from usher.ports.images import is_servable_path
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import (
     CreditedPerson,
@@ -55,29 +51,8 @@ from usher.ports.repository import (
     TitleRepository,
     WatchStateRepository,
 )
+from usher.services.images import servable_images
 from usher.telemetry import current_traceparent
-
-_meter = metrics.get_meter("usher.images")
-
-# **A filter with no counter is invisible**, which is the requirement
-# `is_servable_path`'s own docstring hands to this task: once the unservable
-# rows are dropped, *"this catalog has no logos"* and *"this proxy dropped all
-# of them"* produce the identical body and the identical empty space on a
-# screen, and nothing anywhere reports which happened.
-#
-# **One counter with an `outcome` label rather than two counters**, on
-# `usher.ingest.items`' precedent, because the answer an operator needs is a
-# *ratio* and a bare drop count has no denominator: 4,000 unservable
-# references is a broken deployment on a small catalog and one title in
-# seventeen on a large one. **Both outcomes are recorded on every read,
-# zeros included** -- `usher.curation.dropped`'s rule, and it matters more
-# here than there, because a label absent from the export is exactly the
-# silence this instrument exists to break.
-_image_references = _meter.create_counter(
-    "usher.images.references",
-    unit="1",
-    description="Artwork references on a title read, by whether the proxy can serve them",
-)
 
 # What a copy on a source that has since been deleted renders as. A
 # `KeyError` here is a 500 on the screen an operator opens to find out what
@@ -222,7 +197,7 @@ class TitleReadService:
         watch_state = await self._watch_states.get_for_title(user_id, title_id)
         cast = await self._credits.list_for_title(title_id, kind=CreditKind.CAST, limit=CAST_LIMIT)
         crew = await self._credits.list_for_title(title_id, kind=CreditKind.CREW, limit=CREW_LIMIT)
-        images = self._servable(await self._images.list_for_title(title_id))
+        images = servable_images(await self._images.list_for_title(title_id))
         promoted = await self._promote(title)
         return TitleDetail(
             title=title,
@@ -254,44 +229,6 @@ class TitleReadService:
             images=images,
             promoted=promoted,
         )
-
-    @staticmethod
-    def _servable(images: Sequence[Image]) -> tuple[Image, ...]:
-        """Drop the artwork `GET /images/{id}` can never answer for, and say
-        how much was dropped.
-
-        **Filter rather than annotate**, decided in `usher.ports.images` and
-        restated here because this is where it takes effect: a reference whose
-        fetch will always fail is not a reference, it is a broken link this API
-        would be minting deliberately, and the client renders a broken image
-        with nothing reporting the cause. There is no wire field for it -- a
-        `servable: false` entry is a discriminator whose only honest client
-        behaviour is to skip the entry, i.e. this filter relocated into every
-        client.
-
-        **The predicate is imported, never re-spelled.** `endswith(".svg")`
-        written out here would be a second definition of a fact the proxy owns,
-        and the two obvious wrong spellings of it -- a substring `in`, and a
-        test that does not lower-case -- each die on exactly one adversarial
-        path in `is_servable_path`'s own parameter table (`/svg-poster.jpg`,
-        `/.svg.jpg`, `/A-LOGO.SVG`). The cases below seed those paths anyway,
-        so a future inlining is caught here as well as there.
-
-        It is a *prediction from a filename* and `extension_for` stays the
-        authority, so a divergence is possible in both directions and quiet in
-        both: an unservable row that slips through is a broken image, and a
-        servable row filtered out is indistinguishable from a title that never
-        had one. The counter is what makes the second visible in aggregate.
-        """
-        kept = tuple(one for one in images if is_servable_path(one.provider_path))
-        # Recorded even when both are zero. A title with no artwork at all
-        # publishes `served=0, unservable=0`, which is what lets an operator
-        # tell an empty catalog from a filtered one; a counter that only spoke
-        # when it fired would leave the two series indistinguishable until the
-        # first drop, which is the state this whole instrument is about.
-        _image_references.add(len(kept), {"outcome": "served"})
-        _image_references.add(len(images) - len(kept), {"outcome": "unservable"})
-        return kept
 
     async def _promote(self, title: Title) -> bool:
         """Move this title's enrichment to the front of the queue.

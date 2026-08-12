@@ -270,8 +270,12 @@ written down here for the reason the paragraph above gives — `continue-watchin
   stale" a group-by rather than an inference.
 
 **`usher.images.references` exists because a filter with no counter is
-invisible.** `GET /titles/{id}`'s `images` key drops references the image
-proxy can never serve — the provider publishes some logos as `.svg` and
+invisible.** Both read surfaces — `GET /titles/{id}`'s `images` key and
+`GET /home`'s card artwork — drop references the image proxy can never
+serve, on one definition (`usher.ports.images.is_servable_path`), because two
+reads of one table disagreeing about what is servable is exactly the drift
+that predicate exists to prevent. The provider publishes some logos as `.svg`,
+and
 [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)'s width
 ladder cannot bound that type — so without a counter *"this catalog has no
 logos"* and *"this proxy dropped all of them"* are the same body, the same
@@ -286,10 +290,17 @@ API. Three things a dashboard query has to know:
   indistinguishable from a series nobody counts — `usher.curation.dropped`'s
   rule below, and it matters more here, because silence is the exact condition
   this instrument exists to break.
-- **It counts *references on a read*, not images in the catalog.** The
-  population is per request, so a popular title's artwork is counted once per
-  open; the ratio is the readable number and the absolute is proportional to
-  traffic.
+- **It counts *references a read considered*, not images in the catalog, and
+  the two surfaces consider different populations.** A title detail weighs
+  every image the title has; a shelf card weighs the **one** the composer
+  already chose. So the absolute is proportional to traffic and the two
+  surfaces are not summable into a catalog-wide rate — the ratio is what is
+  readable, and it is readable per surface only if a dashboard splits by the
+  route, which this counter does not carry a label for. Deliberate: a `route`
+  dimension on a per-request counter is the cardinality footgun
+  `usher.curation.dropped`'s closed vocabulary exists to avoid, and
+  `http.server.duration` already carries the route template for anyone
+  correlating.
 - **A rising `unservable` share is not by itself an incident.** It is the
   provider publishing more SVG logos, and the reopening trigger for ADR-0032 is
   a household needing those logos *rendered*, whose answer is a rasteriser

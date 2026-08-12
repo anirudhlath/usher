@@ -49,6 +49,7 @@ from pydantic import SecretStr
 import usher.api.dto.playback as playback_dto
 from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.title_repository import FakeTitleRepository
@@ -58,6 +59,7 @@ from usher.api.deps import (
     get_credential_store,
     get_media_item_repository,
     get_row_context,
+    get_row_provider_settings_repository,
     get_source_adapter_factory,
     get_source_repository,
     get_title_repository,
@@ -211,6 +213,13 @@ def app(household: _Household, settings: Settings) -> FastAPI:
     built.dependency_overrides[get_credential_store] = lambda: household.credentials
     built.dependency_overrides[get_source_adapter_factory] = lambda: household.factory
     built.dependency_overrides[get_row_context] = lambda: Library().context()
+    # M9 E2: the one other request-scoped read `GET /home` makes. Faked for
+    # the reason the context is -- this file has no database -- and
+    # `get_row_cache` is still deliberately *not* overridden, because the
+    # cache is the thing being swept.
+    built.dependency_overrides[get_row_provider_settings_repository] = (
+        FakeRowProviderSettingsRepository
+    )
     return built
 
 

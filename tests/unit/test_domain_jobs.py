@@ -87,15 +87,13 @@ def test_the_seven_kinds_this_tree_ships() -> None:
     with no `LLMClient`, exactly as it withholds `index` from one with no
     embedder. What M4 forbade was a member with no handler anywhere.
 
-    🔴 **`watch_writeback` is the first member to break that rule, and it is
-    broken for exactly one commit.** M9's D7 owns the enqueue -- the four
-    watch-write routes cannot enqueue a kind that does not exist -- and D8,
-    which depends on D7, owns the handler and the unconditional registration.
-    Until D8 lands, a client's watch write puts a job on the queue that no
-    worker claims: precisely the queue that grows forever, so this is a state
-    to pass through rather than a state to release from. Whoever lands D8
-    deletes this paragraph, and if D8 is dropped the member must be dropped
-    with it.
+    **`watch_writeback` arrived across two commits and the rule held anyway.**
+    M9's D7 owns the enqueue -- the four watch-write routes cannot enqueue a
+    kind that does not exist -- and D8 owns the handler and the unconditional
+    registration. Between them there really was a member no worker claimed,
+    which is exactly the queue M4 forbade; the marker that said so is struck
+    because D8 has landed, and what is left is the ordinary rule. Had D8 been
+    dropped, the member would have gone with it.
 
     An exact set rather than a membership check, so an eighth kind cannot be
     added without this list moving and someone reading that rule.

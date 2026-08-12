@@ -2506,6 +2506,335 @@ skipped**, **1,063 integration / 22 skipped**, `ruff check`,
 `ruff format --check`, `mypy` over 532 files, `lint-imports` 9 kept / 0 broken,
 PRD link check `OK`.
 
+## M9 Task E2 — `GET`/`PUT /admin/rows/providers`, and the toggle reaching the screen (2026-08-11)
+
+**14 plants over the four files E2 touches in `src/` — 12 targets all KILLED,
+2 equivalent-mutant controls surviving all five gate steps, 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 1 DID-NOT-LAND corrected and re-run.** Run in place with the
+plant list and its **expected verdict** written down first
+(`/var/tmp/e2-sweep/plan.md`, `/var/tmp` because `/tmp` is tmpfs on this host),
+`PYTHONDONTWRITEBYTECODE=1` with a `__pycache__` sweep under `src/` **and**
+`tests/` before every run, `compile()` as the dry run, the landing check
+spelled `old not in landed and new in landed`, and every restore verified by
+`md5sum` against a pre-plant digest.
+
+**Selection**, scoped rather than whole-suite: `test_services_home.py`,
+`test_api_rows.py`, `test_api_home.py`, `test_api_lanes.py`,
+`test_api_caching.py` (unit, ~4 s), `test_rows_route.py` (integration, ~9 s),
+and `test_cli_pipeline.py -k home` (integration, ~8 s). The last is what covers
+`usher home`; the first five are what cover both composition roots and the
+refresh lane.
+
+| # | mutation | verdict | the case that names it |
+|---|---|---|---|
+| T1 | `overrides.get(slug, True)` → `False` — **the defect E1's reviewer named for the first caller** | KILLED | `test_a_provider_no_one_has_ever_touched_renders_as_enabled` (+5 more) |
+| T2 | `enabled_row_providers`' `if one.enabled` → `if not one.enabled` | KILLED | `test_a_stored_false_removes_exactly_that_provider_and_leaves_the_other_nine` |
+| T3 | the join reads `ROW_PROVIDERS` instead of the registry it was handed | KILLED | `test_the_join_is_applied_to_whatever_registry_it_is_handed` |
+| T4 | `get_home_service`'s filter deleted (unfiltered `HomeService`) | KILLED | `test_the_composition_root_composes_the_registry_minus_what_is_disabled` |
+| T5 | `RowCache.clear()` deleted from the toggle | KILLED | `test_a_successful_toggle_clears_every_households_cached_screen` |
+| T6 | the 404 arm deleted → a silent upsert for an unregistered slug | KILLED | `test_a_slug_the_registry_does_not_hold_is_refused_and_writes_no_row` |
+| T7 | `set_enabled(slug, enabled=not update.enabled)` — the sense inverted at the write | KILLED | `test_disabling_a_provider_answers_the_entry_and_the_next_read_agrees` |
+| T8 | `cache.clear()` hoisted **above** the registry check, so a 404 empties the cache | KILLED | `test_a_refused_toggle_leaves_the_cached_screens_alone` |
+| T9 | the `rows.refresh` lane composes the unfiltered `pipeline.row_providers` | KILLED | `test_a_refresh_composes_the_registry_minus_what_an_operator_disabled` |
+| T10 | `usher home` composes the unfiltered `pipeline.row_providers` | KILLED | `test_home_omits_a_disabled_provider_and_names_the_ones_switched_off` |
+| T11 | the CLI's disabled list inverted (`if one.enabled`) | KILLED | the same case, plus the empty-database control |
+| T12 | `GET /admin/rows/providers` renders the **table** rather than the registry | KILLED | `test_every_registered_provider_is_listed_and_a_virgin_table_disables_none` |
+| C1 | `cache.clear()` moved *above* `set_enabled` on the success path | SURVIVED | — |
+| C2 | `', '.join(d) if d else 'none'` → `', '.join(d) or 'none'` | SURVIVED | — |
+
+**Both controls measured per gate step rather than against `pytest` alone**,
+which is the form this file records as the only honest one — the careless
+spelling of a defect dies on `ruff check` and the careful one passes all five:
+
+| control | ruff check | ruff format --check | mypy (529) | lint-imports | pytest (full) |
+|---|---|---|---|---|---|
+| C1 | PASS | PASS | PASS | PASS (9/0) | PASS |
+| C2 | PASS | PASS | PASS | PASS (9/0) | PASS |
+
+C1 is equivalent because `set_enabled` **flushes and does not commit** and both
+statements sit inside one request with no `await` on anything a second request
+could reach between them, so no observer exists that could see the two orders
+differ. C2 is `str.join` over an empty sequence being `""`, which is falsy.
+
+**The DID-NOT-LAND is the finding, and it is the landing check earning its
+spelling.** T8's first draft was `old = "    if slug not in {…}:"` and
+`new = "    cache.clear()\n" + old` — i.e. the anchor is a **prefix of its own
+replacement** — so `old not in landed` is false *after a mutation that landed
+perfectly*, and the harness refused it rather than scoring it. Spelled instead
+as a swap over the whole guard-plus-write block (the trailing `cache.clear()`
+moves from the end to the front, so `old` genuinely leaves the file), it lands
+and dies on one case. **A `DID-NOT-LAND` on an additive mutation is usually the
+plant's shape, not the code's** — and the alternative, weakening the check to
+`new in landed` alone, is exactly the "a plant that did not land looks like a
+check that passed" failure this file exists over.
+
+**One target is worth reading as a coverage statement rather than as a kill.**
+T1 — the wrong absence default — fails **six** cases across two files, and five
+of them are in `test_services_home.py` where the join lives. That is by
+construction: the default is spelled in exactly one place because
+`test_the_overrides_mapping_is_never_bound_outside_the_join_that_defaults_it`
+AST-scans `src/usher/` and requires every `overrides()` call to be handed
+straight into `row_provider_settings(...)` as an argument, never bound to a
+name. So the mutation has one site to be planted at, and a second caller
+inventing its own `.get(slug, False)` is a red *before* it can be a defect.
+That case carries a premise guard (`sum(fetched.values()) >= 3`) for the reason
+every scan in this repository does — it found `{}` and reported it while the
+route did not exist yet, which is the shape a passing scan over nothing has.
+
+Gate green on the fully restored tree, `md5sum`-verified per file: `ruff check`,
+`ruff format --check` (556 files), `mypy` over 529 files, `lint-imports`
+**9 kept / 0 broken**, **3,466 unit / 4 skipped** and **1,062 integration /
+22 skipped**.
+
+## M9 Task D8 — the watch write-back handler and its registration (2026-08-11)
+
+**12 plants over `services/handlers.py`, `composition.py`, `services/jobs.py`
+and `services/watch_write.py` — 9 behavioural targets, all KILLED; 3
+equivalent-mutant controls, all SURVIVED and all passing every gate step
+separately; 1 BAD-ANCHOR re-spelled and then killed; 0 BROKEN-MUTATION, 0
+DID-NOT-RUN, 0 HUNG.** Run in place with the plant list and its **expected
+verdict** written to `/var/tmp/m9-D8-plants.md` before the first run (`/var/tmp`,
+because `/tmp` is tmpfs on this host), the harness at `/tmp/m9-D8-sweep/`
+**outside the tree** for V1's reason, `PYTHONDONTWRITEBYTECODE=1` and a
+`__pycache__` sweep under **both** `src/` and `tests/` before every run,
+`compile()` as the dry run, an exact anchor count asserted before every plant,
+a read-back that the replacement landed, and every restore verified by `md5sum`
+against a pre-plant digest of all four files.
+
+**Selection:** `test_services_handlers.py`, `test_composition.py`,
+`test_services_jobs.py`, `test_domain_jobs.py`, `test_services_watch_write.py`
+and `test_api_watch.py` — 132 cases, ~2.0 s a run, green before and after.
+Scoped rather than whole-suite for B2's reason: `tests/integration/
+test_sse_end_to_end.py` is intermittent on this tree and predates M9, and a
+sweep scored on "did the run fail" cannot include a flaky case.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the state carried on the job (encoded into `Job.key`) rather than re-read | KILLED | 16 |
+| P9 the push sends what the **source** already holds rather than the household's row | KILLED | 3 |
+| P2 `except UsherPortError: return` around the push | KILLED | 2 — both propagation arms |
+| P3 the registration moved behind `if provider is not None:` | KILLED | 3 |
+| P4 enqueue priority `VISIBLE` → `BACKFILL` | KILLED | 1 |
+| P5 the `get_item` guard deleted | KILLED | 1 |
+| P6 an absent local row pushes zeroes instead of nothing | KILLED | 2 |
+| P7 `_local_watch_state` reads the title's row before the episode's | KILLED | 1 |
+| P8 the struck 🔴 restored to `JobWorker.registered_kinds` | KILLED | 1 — the marker scan |
+
+**P1 is the plan's own headline mutation and it dies on the *premise*, which is
+the finding.** The plan asks for *"the handler reading a carried payload rather
+than the current row"*, and `Job` has no payload column at all — one `key`
+string, three kinds of identifier — so the only way to spell a carried payload
+is to put it **in the key**. Doing that destroys the coalescing before it
+reaches the push: two presses become two rows, and the headline case fails on
+`assert [job.key for job in claimed] == ["emby-1"]` with
+`['emby-1|60|0', 'emby-1|900|1']`. That is a *stronger* result than the one
+predicted — the payload and the dedup are the same decision, and `(kind, key)`
+being the dedup target is what makes "no payload" structural rather than
+frugal — but it is **not** the assertion the plan was asking about, and a
+summary reading "KILLED, 16 cases" would have hidden that. Its blast radius is
+16 for the same reason: every D7 case that reads `job.key` back sees the new
+spelling.
+
+**So the assertion was measured with a second plant.** P9 keeps the key intact
+and changes only where the state comes from — `adapter.get_watch_state` instead
+of the household's row, which is a plausible copy-paste from
+`watch_history_handler` one function up. The headline case then fails on its
+own push assertion, `WatchStateUpdate(position_seconds=0, played=False)`
+against `(900, True)`. **The general form, which this file already holds in the
+other direction: when a plan names a mutation, check that the type it has to be
+spelled against can express it — a defect the data model makes unreachable is a
+design result, and the plant that reaches the named assertion may have to be a
+different plant.** Nearest relative is B6's *"a port that takes
+`after: BrowseCursorPosition` cannot express the defect PRD 07 refuses"*,
+arriving at a domain model instead of a port signature.
+
+**The BAD-ANCHOR is the anchor rule doing its job.** P1's first handler anchor
+was `async def handle(job: Job) -> None:\n        binding = await resolve(job.key)`
+— which is the **first two lines of all three source-scoped handlers**
+(`match`, `watch_history`, `watch_writeback` all resolve the key first). Three
+occurrences, so the harness refused rather than mutating whichever one
+`str.replace` reached; re-spelled through the debug line that names the
+write-back, it plants once and kills.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `WatchStateUpdate(position_seconds=…, played=…)`'s two keyword arguments in the other order | PASS | PASS | PASS | PASS | PASS (132) |
+| C2 one sentence of `watch_writeback_handler`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (132) |
+| C3 `build_worker`'s `WATCH_HISTORY` and `WATCH_WRITEBACK` `register` calls swapped | PASS | PASS | PASS | PASS | PASS (132) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at:
+keyword arguments bind by name and both expressions are side-effect-free
+attribute reads on one local; and `register` writes a dict while
+`registered_kinds` answers a `frozenset` and `run_once` hands
+`list(self._handlers)` to a `claim` spelled `kind = ANY(:kinds)` in Postgres and
+`set(kinds)` in the fake, so no layer below the registration can observe the
+order — the M8 entry's own control, re-measured against a fifth registration.
+C2 was checked first against the docstring-scan grep this file records: the
+twenty-three files it finds scan `ports/`, `services/curation*`,
+`services/home_sequential.py`, `services/jobs.py`, `services/watch_write.py`,
+`adapters/` and several `api/` modules, and **none of them reads
+`services/handlers.py`** — which is why the docstring control went in the
+handler rather than in `services/jobs.py`, whose source *is* scanned by the
+marker case this task adds.
+
+Gate green before and after on the fully restored tree (`git status` clean,
+`md5sum` byte-identical to the pre-sweep digests): **3,613 unit passed / 4
+skipped**, **1,101 integration passed / 22 skipped**, `ruff check`,
+`ruff format --check`, `mypy` over 551 files, `lint-imports` 9 kept / 0 broken,
+PRD link check `OK`.
+
+## M9 Task C6 — `RowCard.artwork`, and a memo whose key was unreachable
+
+**16 plants over `services/rows/base.py`, `services/rows/curated.py`,
+`api/dto/home.py` and `api/deps.py` — 13 behavioural targets of which 11 were
+killed on the first pass and **2 were real survivors since closed**, plus 3
+equivalent-mutant controls surviving all five gate steps. 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Run 2026-08-11 in place with the
+plant list and its **expected verdict** written down first, the harness at
+`/tmp/m9-exec/C6/` (V1's finding — a harness at the repo root is inside what
+`ruff check .` and `mypy src tests` walk, and every gate-step control then
+reads FAIL), `PYTHONDONTWRITEBYTECODE=1` with `__pycache__` swept under **both**
+`src/` and `tests/` before every run, `compile()` as the dry run, the anchor
+asserted exactly once before each plant, the landing check spelled
+`old not in landed and new in landed`, no second `-q`, and every restore
+verified by `md5sum` against a pre-plant digest of all four files. The
+three-way split is the one that says something: "13 killed" would hide the
+round's whole yield.
+
+**Selection:** the whole `tests/unit` plus
+`tests/integration/test_home_artwork.py` and
+`tests/integration/test_pipeline_deps.py` — 3,497 cases, ~44 s a run, green
+before and after. `tests/unit` is taken **whole** rather than scoped because
+`domain/rows.py` and `services/rows/base.py` are imported by all ten providers
+and by the route; the rest of `tests/integration` is excluded for B2's and D4's
+reason, `test_sse_end_to_end.py` being intermittent on this tree and predating
+M9, and a sweep scored on "did the run fail" cannot run against a suite holding
+a flaky case.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 poster/backdrop swapped in `ARTWORK_FOR_HINT` (the headline) | KILLED | 11 |
+| T2 the batched read passed only the shelf's first id | KILLED | 4 |
+| T3 `LLMRow._artwork` deleted | KILLED | **1** |
+| T4 every card's `artwork` forced to `None` | KILLED | 12 |
+| T5 the DTO drops the value (`artwork=None` in `RowCardResponse.of`) | KILLED | 3 |
+| T6 the artwork read moved in front of `hydrate`'s early return | KILLED | 1 |
+| T7 `_artwork` uses a constant kind rather than the row's hint | KILLED | 4 |
+| T8 `_Family`'s artwork memo is one slot, not keyed by kind | **SURVIVED, then closed** | 0, then 1 |
+| T9 `_artwork` spelled as `list_for_title` per card (the N+1) | KILLED | 5 |
+| T10 `artwork.get(title_id)` → `artwork[title_id]` | KILLED | 83 |
+| T11 `SQUARE` alone mapped to `BACKDROP` (the careful spelling of T1) | KILLED | **1** |
+| T12 the memo tests its answer for truth rather than for membership | **SURVIVED, then closed** | 0, then 1 |
+| T13 `images=None` wired into `get_row_context` | KILLED | 3 |
+
+**T3 is the plan's own prediction and it held exactly.** The acceptance
+criterion says *"`LLMRow`'s override deleted — it should survive
+**behaviourally** and be caught by the statement count, which is the difference
+between 'the suite holds it' and 'the gate holds it' and must be written up as
+such."* Measured: it is killed by **one case out of 3,497**, and that case is
+`test_a_family_of_shelves_reads_artwork_once_rather_than_once_per_shelf`, which
+is a count. Every card in every shelf still carries the right id in the right
+order under the mutant, because `_Family` holds the *union* and `hydrate` looks
+each id up — so *"the suite holds it"* is true only because a case was written
+to make it true, and the wording the plan asked for is the wording this entry
+uses. Note the plan's phrasing is one word loose and the measurement corrects
+it: the **gate** does not hold it at all (ruff, format, mypy and lint-imports
+all pass on the mutant), so the real contrast is *"the suite holds it, and only
+through a count"* against *"no behavioural assertion anywhere can"*.
+
+**T1 and T11 are the same defect at two blast radii, and the pair is the
+argument for parametrising over the enum rather than over the providers.**
+Swapping both mappings fails 11 cases; moving `SQUARE` alone fails **exactly
+one**, `test_every_hint_in_the_vocabulary_takes_the_kind_it_was_given[square-poster]`
+— because `square` has **no emitter in `services/rows/`**, so no provider case,
+no route case and no integration case can reach it. `wide` is the same. A
+mapping written from the ten registered providers would be complete-looking and
+would `KeyError` inside `hydrate` on the first row that used either, which is a
+500 on a home screen; the parametrisation is over `DisplayHint` and there is a
+separate structural case asserting `set(ARTWORK_FOR_HINT) == set(DisplayHint)`.
+
+**Both survivors are in `_Family`'s memo, and they fail this file's own test for
+equivalence in opposite ways.**
+
+- **T12 is an ordinary coverage gap and the fixture's fault.** Memoising on
+  `if not self._artwork.get(kind)` rather than on membership survived all 3,497
+  cases, because **every artwork case in the round seeded a poster for every
+  card**, so the empty answer was a state the suite had never been in. It is
+  not equivalent: `{}` is the *default* state of the whole `images` table
+  before `usher derive` has ever run, so the households the memo saves most for
+  are exactly the ones a falsy check charges four times.
+  `_Family.owned` already states the rule (`is None`, never falsiness) for the
+  same reason one read over. Closed by
+  `test_a_generation_whose_titles_have_no_artwork_is_still_read_only_once`;
+  re-planted, it fails **that case alone**. *"Has any fixture, anywhere, ever
+  set this to the other value?"* arriving at an empty mapping.
+- **T8 is the more interesting one: a defect the shipped code cannot reach,
+  closed anyway, and the reason is that the collaborator is a parameter.**
+  Collapsing the memo to a single slot survived, correctly —
+  `LLMRow.display_hint` is a hard-coded `PORTRAIT`, so every shelf in a
+  generation asks the same question and the two spellings are one program. By
+  the "which collaborator could falsify the promise this guard defends, and is
+  one already injected" test, the answer is `kind` **itself**: it is an
+  argument to `_Family.artwork`, so the case costs four lines and is a test of
+  the method's stated contract rather than of a reachable screen. Closed by
+  `test_the_family_memo_is_keyed_by_kind_and_not_by_whether_it_has_read`, which
+  asserts **which ids** come back and not merely a count — a single-slot memo
+  answers a full, correctly-shaped mapping either way. Re-planted, it fails
+  that case alone. **The general form, which this file has the mirror of but
+  not this side: a survivor whose defect is unreachable through the shipped
+  callers is an equivalent mutant only if nothing can construct the reaching
+  state; when the reaching state is a *parameter value*, the port's own
+  signature has already made it constructible and the survivor is coverage.**
+  Contrast B6's OFFSET plant, where the type signature made the defect
+  *inexpressible* and the survivor really was a design result.
+
+**T10's blast radius is the one worth knowing about for a different reason.**
+`artwork.get(title_id)` → `artwork[title_id]` fails **83** cases, because a
+`KeyError` inside `hydrate` takes every screen with any underived title on it —
+which is nearly every fixture in the suite. It is the loudest plant in the
+round and the least informative: a defect that breaks a third of the suite is
+one no reviewer needs a case for. The `None`-arm cases earn their keep against
+T4 and T5, which are quiet.
+
+**T13 was measured twice, because the claim written into a docstring was about
+*which assertion*.** `images=None` in `get_row_context` fails 3 cases: both
+integration cases in `test_home_artwork.py` and, in the unit suite,
+`test_the_route_hands_every_provider_a_context_it_can_actually_read` — on its
+**`None` scan**, reporting `assert ['images'] == []`, with the behavioural loop
+below it never reached. Re-run with the scan removed so the behavioural half
+was measured alone: **SURVIVED**. So `images` behaves like `titles` and
+`episodes` rather than like the eight — `propose()` against an empty household
+never hydrates, and hydration is where this field is read. That is the
+2026-08-07 finding holding for an eleventh field, confirmed rather than assumed.
+
+**The three controls, each against every gate step separately, all five PASS:**
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `ARTWORK_FOR_HINT`'s `PORTRAIT` and `SQUARE` entries swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,499) |
+| C2 one sentence of `BaseRow._artwork`'s docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (3,499) |
+| C3 `_Family.__init__`'s `_known` and `_owned` writes swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,499) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at:
+`ARTWORK_FOR_HINT` is a dict literal whose two swapped keys are distinct and
+independent, read only by `ARTWORK_FOR_HINT[hint]` and compared as a **set**,
+so insertion order is unobservable — the `_CODE_FOR_STATUS`/`_PLAY_FAILURES`
+precedent, and deliberately **not** an `__all__` reorder, which `RUF022` would
+have rejected; and `_known`/`_owned` are two disjoint attribute writes on a
+freshly constructed object from two `None` literals, neither able to observe
+the other. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/` — the nineteen
+files it finds scan `ports/`, `services/home.py`, `services/rows/curated.py`
+(via `ast.unparse` of a **docstring-stripped** tree), `adapters/`, `api/` and,
+new in this task, `usher.domain.rows`' module docstring; **none of them reads
+`services/rows/base.py`'s prose**. The `domain/rows.py` scan is this task's own
+and is why the docstring control was placed in `base.py` rather than there.
+
+Gate green before and after on the fully restored tree, `md5sum`-verified
+byte-identical to the pre-sweep digest of all four mutated files, with
+`git status` clean.
+
+
 ## M9 Task C7 — the `images` key on `GET /titles/{id}` (2026-08-11)
 
 **16 plants over `services/titles.py`, `api/dto/title.py`,
@@ -2622,3 +2951,47 @@ Gate green before and after on the fully restored tree: **3,643 unit / 4
 skipped**, **1,123 integration / 22 skipped**, `ruff check`,
 `ruff format --check`, `mypy` over 555 files, `lint-imports` 9 kept / 0 broken,
 PRD link check `OK`.
+
+### C7 follow-up — the second unfiltered read, after C6 landed (2026-08-11)
+
+**1 plant over `services/rows/base.py::BaseRow._artwork`, KILLED, naming
+exactly the one case written for it.** C6 shipped `RowCard.artwork` through
+`ImageRepository.primary_for_titles` and left it **unfiltered**, on
+`is_servable_path`'s own argument that the measured gap is logo-only and a card
+is never handed a logo. That argument is true and one measurement short: the
+`kind` filter excludes logos, and what excludes a *poster or backdrop published
+as `.svg`* is only the provider's present habit — `images_from_payload` records
+whatever `provider_path` a payload carried, for every kind, and servability is
+otherwise decided at serve time from a fetched `Content-Type`.
+
+So both read surfaces now call one `servable_images` in
+`usher.services.images`, and the plant is the state before that: `_artwork`
+returning `primary_for_titles`' answer whole. Against
+`test_rows_artwork.py`, `test_api_home.py` and `test_rows_curated.py` (60
+cases) it fails **exactly**
+`test_a_poster_the_proxy_cannot_serve_leaves_the_card_with_none`, which is the
+case added with the filter. `cp` backup, `md5sum`-verified restore.
+
+**Two things worth carrying.**
+
+- **"Unreachable by construction" and "unreached by this provider's current
+  habits" read identically in a docstring, and only one of them is a
+  guarantee.** C6's case
+  `test_a_title_whose_only_artwork_is_a_logo_carries_none` pins the half that
+  *is* structural (a card asks for `POSTER` or `BACKDROP`); nothing pinned the
+  half that is empirical, because nothing could — no fixture had ever seeded a
+  `.svg` poster, and the state is invisible until a provider publishes one.
+  **The tell is a claim about what a third party does, stated in the same
+  sentence as a claim about what the code does.**
+- **The shelf's filter degrades and the detail's does not, and that is stated
+  rather than discovered.** `primary_for_titles` has already chosen one image,
+  so filtering afterwards yields `artwork: null` rather than the title's second
+  poster of that kind. Falling through would mean the predicate in SQL — a
+  second spelling of the fact `is_servable_path` owns — which is the trade this
+  filter exists to refuse. The degradation is the same render as "this title
+  has no poster", which is C6's own argument for why a card carries no
+  discriminator, so the two agree.
+
+Gate green after, on the merged tree: **3,690 unit / 4 skipped**, **1,130
+integration / 22 skipped**, `ruff check`, `ruff format --check`, `mypy` over
+557 files, `lint-imports` 9 kept / 0 broken, PRD link check `OK`.

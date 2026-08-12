@@ -202,3 +202,39 @@ milestone's obvious spelling, "pass a no-op refresher from the CLI", opens the
 window with nothing behind it: a 31-second-old screen is served and never
 replaced, silently, which is strictly worse than the miss it avoided. The plan
 asked for the no-op; the gate is what makes it wrong to give one.
+
+**A fifth read on the home path, added rather than removed — `+1` per shelf,
+and the curated family's `4 -> 1` for a third time.** Measured 2026-08-11
+(M9 C6) against fakes, because a count is the only assertion a fake can carry
+honestly. `RowCard.artwork` makes `BaseRow.hydrate` four port calls rather than
+three (`ImageRepository.primary_for_titles`, one statement per shelf whatever
+the shelf's length), and `LLMRow._artwork` shares one read across a
+generation exactly as `_known` and `_ownership` already do: without the
+override the four curated shelves the composer builds out of one
+`list_for_user` would issue four, which would take one generation from three
+statements to **twelve**. Both numbers are asserted as counts derived from the
+screen (`images.calls == len(screen)`) rather than as literals, so a shelf the
+composer proposed and did not build, or one that built empty, costs nothing and
+the assertion says so.
+
+⚠️ **Any claim about what this costs in milliseconds has to name its
+household**, which is why this entry has none: the two p95s above differ by
+30x on the same composer, and a fourth read per shelf is a different fraction
+of 35.9 ms than of 783.4 ms.
+
+**And the hook-name trap fired in reverse, which is the cheap outcome the
+entry above exists to buy.** `grep -rn "_artwork\|artwork" src/usher/services/rows/`
+before writing the hook found nothing — the name was free in all ten providers
+— so `BaseRow._artwork` shipped without repeating `_owned`'s twelve failures.
+The check cost one command. `_images` was checked at the same time and is also
+free, but `_artwork` was chosen because it matches the field it fills.
+
+**The kind a card is painted with is keyed on the *row's* `display_hint`, and
+the mapping is total over `DisplayHint` rather than over the hints the registry
+emits.** `wide` and `square` have **no emitter in `services/rows/`** — all ten
+providers return `PORTRAIT` or `LANDSCAPE` — so a mapping written from the
+registry is complete-looking and is a `KeyError` inside `hydrate`, i.e. a 500
+on a home screen, the first time a provider uses one. Measured by planting
+`SQUARE -> BACKDROP` alone: it fails **exactly one case in 3,497**, the one
+parametrised over the enum. Parametrise over the vocabulary, not over the
+implementations that happen to use it.

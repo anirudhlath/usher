@@ -219,12 +219,33 @@ them. **The rate is not the rate limit**: `JobWorker` runs jobs sequentially
 and the token bucket lives on one client per process, so one worker runs at
 `1/latency` — measured **10.38 rps against a bucket set to 30**, a per-title
 cycle whose mean is 0.0963 s and of which HTTP is 65%. **So tier 1 is ~3.5 h
-at one worker** (95% CI [3.41, 3.59]), not 1.5–2.5 h, and reaching 30 rps
-needs three worker processes each configured to `30/N`. It also writes **~1.0
+at one worker** (95% CI [3.41, 3.59]), not 1.5–2.5 h. It also writes **~1.0
 GiB into `raw_payloads`** and **two follow-up jobs per enriched title**
 (`INDEX` and `DERIVE`), the `INDEX` half of which nothing claims unless
 `USHER_EMBEDDING_ENABLED` is on. Full evidence in
 `.claude/rules/tmdb-and-enrichment.md`.
+
+⚠️ **The whole tier has now been run, and the one sentence deleted above —
+"reaching 30 rps needs three worker processes each configured to `30/N`" —
+was wrong.** Measured 2026-08-12 (M9 S3) over the real **130,806** titles:
+130,334 requests in **1.98 h**, 130,141 × 200, 107 × 404, **86 × 502**, no
+429. Three workers achieved **19.76 rps, not 30** — **6.59 rps each against
+the 10.38 one worker managed**, a 37% per-worker loss, so concurrency scales
+**1.90× and not 3×** and the token bucket never bound on any worker. The
+0.38% sample priced the median request to within 1.4% (0.0588 s against
+0.0580 s) and the **tail not at all**: p95 **0.4267 s against 0.1049 s**.
+Budget the tier at **~2 h on three workers**, and expect the third to earn
+less than the second. Three things a sample could not have found: one worker
+died mid-run on an unhandled `MissingGreenlet` and **orphaned its 20 claims
+in `running` permanently** (only `startup()` requeues those, and restarting
+steals the survivors' claims); **30 jobs parked on `ix_titles_imdb_id`**, a
+write conflict where TMDb's `external_ids.imdb_id` disagrees with the bulk
+export's and is already held by another row; and the follow-up `INDEX` jobs
+**do not drain beside the crawl even with the embedder on**, because the
+claim orders `priority DESC, created_at`, everything is `BACKFILL`, and the
+enqueue wrote all 130,804 enrich rows inside 1.3 s. Outcome: **130,647 of
+130,806 enriched (99.88%)**, `overview` on 99.33% and `genres` on 99.98%,
+995 MB of `raw_payloads`, and 261,294 follow-up jobs left to drain at ~1.9 h.
 
 ⚠️ **And the tier is not a fixed population, because enriching a title can
 remove it from the tier.** `vote_count` is enrichable, the bulk loader writes

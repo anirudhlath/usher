@@ -77,6 +77,7 @@ from usher.services.bootstrap import BootstrapService
 from usher.services.curation import CurationReport
 from usher.services.curation_validate import DropReason
 from usher.services.home import ComposeReport, HomeService
+from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
 from usher.services.search import SearchAnswer, SemanticSearchUnavailable
 from usher.telemetry import (
@@ -1259,8 +1260,19 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
             collections=pipeline.collections,
             affinities=lambda: pipeline.taste.genre_affinity(user.id),
             curated=pipeline.curated_rows,
+            images=pipeline.images,
         )
         cache = RowCache(clock=lambda: datetime.now(UTC))
+        # **The same table `GET /home` filters against, read by the same join.**
+        # A setting honoured by one composition root and not the other is two
+        # different products, and this is the root an operator reaches for when
+        # a shelf is missing -- so it must not be the one that still shows it.
+        # Both halves come out of one read: the providers to compose, and the
+        # slugs to report as switched off.
+        provider_settings = row_provider_settings(
+            await pipeline.row_provider_settings.overrides(), pipeline.row_providers
+        )
+        disabled = [one.slug for one in provider_settings if not one.enabled]
         # **No refresher, and the `None` is the decision rather than an
         # omission.** `HomeService` gates its stale-serve grace window on
         # having one, so this composer is M7's fresh-or-miss cache exactly as
@@ -1274,7 +1286,9 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
         # the grace window with nothing behind it, so a screen 31 s old would
         # be served stale and never replaced, which is the one state PRD 06's
         # sentence must not produce.
-        service = HomeService(pipeline.row_providers, cache=cache, refresh=None, max_rows=limit)
+        service = HomeService(
+            enabled_row_providers(provider_settings), cache=cache, refresh=None, max_rows=limit
+        )
 
         # Collected rather than overwritten so the last one is reachable
         # without an `Optional` no input can reach -- `parse_args` refuses
@@ -1293,14 +1307,26 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
         await service.compose(ctx)
         warm = time.perf_counter() - warm_at
 
-        _print_home_report(report, cold=cold, warm=warm)
+        _print_home_report(report, cold=cold, warm=warm, disabled=disabled)
 
 
-def _print_home_report(report: ComposeReport, *, cold: Sequence[float], warm: float) -> None:
+def _print_home_report(
+    report: ComposeReport, *, cold: Sequence[float], warm: float, disabled: Sequence[str]
+) -> None:
     """The operator's table. `print`, never `logger` -- the split every command
     in this module makes: loguru output is operational and goes to a sink an
     operator may not be reading, and a command's answer is stdout, which is
-    what gets piped."""
+    what gets piped.
+
+    **`disabled` is printed unconditionally**, on exactly the argument the
+    revisit rule below is printed unconditionally for. A disabled provider has
+    **no line in the table at all** -- it never proposed, so `ComposeReport`
+    has no entry to print -- which is indistinguishable from a provider that
+    was deleted, and it is the state an operator is looking at when they run
+    this command to find out where a shelf went. Printing "none" is what lets
+    them rule the cause out; printing nothing when nothing is disabled would
+    make the absence of the line the answer, which is a thing nobody reads.
+    """
     print(f"{'provider':<22}{'proposed':>9}{'built':>7}{'cards':>7}{'propose':>11}{'build':>11}")
     for one in sorted(report.providers, key=lambda entry: entry.provider):
         built = "-" if one.selected == 0 else str(one.built)
@@ -1314,6 +1340,15 @@ def _print_home_report(report: ComposeReport, *, cold: Sequence[float], warm: fl
     print(
         f"{len(report.providers)} providers, {report.silent} proposed nothing, "
         f"{report.dropped} built empty and was dropped"
+    )
+    # The registry's own size rather than a literal ten, and the arithmetic is
+    # stated so the two numbers above and below cannot disagree silently: the
+    # table has one line per *composed* provider, and the difference between
+    # that and the registry is exactly this list.
+    print(
+        f"disabled by an operator: {', '.join(disabled) if disabled else 'none'} "
+        f"({len(disabled)} of {len(ROW_PROVIDERS)} registered; "
+        f"PUT /admin/rows/providers/{{slug}} to change)"
     )
     print(f"screen: {len(report.rows)} rows, {report.cards} cards")
     ordered = sorted(cold)

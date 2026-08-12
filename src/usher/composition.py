@@ -73,6 +73,7 @@ from usher.db.repositories.llm_call import PostgresLLMCallRepository
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
+from usher.db.repositories.row_provider_settings import PostgresRowProviderSettingsRepository
 from usher.db.repositories.search import (
     PostgresTitleEmbeddingRepository,
     PostgresTitleNeighborRepository,
@@ -103,6 +104,7 @@ from usher.ports.repository import (
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
+    RowProviderSettingsRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -126,6 +128,7 @@ from usher.services.handlers import (
     index_handler,
     match_handler,
     watch_history_handler,
+    watch_writeback_handler,
 )
 from usher.services.images import ImageProxyService
 from usher.services.index import IndexService
@@ -246,6 +249,16 @@ class Pipeline:
     # which is dead code that looks exactly like a provider with nothing to
     # say. `services/rows/__init__.py` owns it; this field is the wiring.
     row_providers: tuple[RowProvider, ...]
+    # M9's overrides table, and the field is here because the registry above is
+    # only half of "which providers compose". `usher home` and the API's
+    # `rows.refresh` lane both build a `HomeService` from this pipeline, and a
+    # provider an operator disabled through `PUT /admin/rows/providers/{slug}`
+    # must be absent from both -- a setting honoured by one composer and not
+    # the other is two different products, and the lane's half is the sharper
+    # one: a background refresh composing the unfiltered registry writes the
+    # disabled shelf straight back into the screen cache the route just
+    # cleared.
+    row_provider_settings: RowProviderSettingsRepository
     events: EventPublisher
     commit: Callable[[], Awaitable[None]]
 
@@ -469,6 +482,7 @@ def build_pipeline(
         # term rather than zeroing it), so "Because you watched Dune" is a
         # causal claim nothing computed and the sentence softens.
         row_providers=row_providers(semantic=embedder is not None),
+        row_provider_settings=PostgresRowProviderSettingsRepository(session),
         taste=taste,
         # The pool is the whole of M8's retrieval half, and its size is the
         # prompt's token budget -- **~20.4 prompt tokens a candidate**,
@@ -680,6 +694,21 @@ def build_worker(
     worker.register(JobKind.MATCH, match_handler(pipeline.matcher, pipeline.media_items, resolve))
     worker.register(
         JobKind.WATCH_HISTORY, watch_history_handler(pipeline.watch, resolve, user_id=user_id)
+    )
+    # Unconditional, joining `MATCH` and `WATCH_HISTORY`: nothing about a
+    # write-back is optional. The four guarded registrations below each rest
+    # on a collaborator a deployment may not have -- a TMDb key, an embedding
+    # model, an LLM endpoint -- and this one needs only the session's own
+    # repositories and the resolver every source-scoped kind already takes.
+    # A guard here would leave a client's own watch write pending forever on
+    # the shipped default deployment -- M4's "a job kind whose handler is a
+    # stub is a queue that grows forever", arriving as a registration rather
+    # than as a missing function.
+    worker.register(
+        JobKind.WATCH_WRITEBACK,
+        watch_writeback_handler(
+            pipeline.watch_states, pipeline.media_items, resolve, user_id=user_id
+        ),
     )
     if provider is not None:
         worker.register(
@@ -1090,7 +1119,7 @@ def _load_embedder(settings: Settings) -> Embedder:
 
 
 def build_row_context(pipeline: Pipeline, user: User) -> RowContext:
-    """The fourteen values a row may reach, over one unit of work.
+    """The thirteen values a row may reach, over one unit of work.
 
     `api/deps.py` assembles the same context from request-scoped dependencies
     and `usher home` from a command's one session; this is the third caller --
@@ -1119,6 +1148,7 @@ def build_row_context(pipeline: Pipeline, user: User) -> RowContext:
         collections=pipeline.collections,
         affinities=lambda: pipeline.taste.genre_affinity(user.id),
         curated=pipeline.curated_rows,
+        images=pipeline.images,
     )
 
 
