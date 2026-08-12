@@ -28,6 +28,7 @@ from usher.api.routers import (
     series,
     sources,
     titles,
+    unmatched,
     watch,
 )
 from usher.composition import (
@@ -224,5 +225,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(series.router)
     app.include_router(sources.router)
     app.include_router(titles.router)
+    app.include_router(unmatched.router)
     app.include_router(watch.router)
     return app

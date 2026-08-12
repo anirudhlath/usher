@@ -61,6 +61,7 @@ from usher.ports.repository.matching import (
 from usher.ports.repository.media_item import (
     AddedTitle,
     MediaItemRepository,
+    UnmatchedCursorPosition,
 )
 from usher.ports.repository.people import (
     CreditedPerson,
@@ -157,5 +158,6 @@ __all__ = [
     "TitleMatchRepository",
     "TitleNeighborRepository",
     "TitleRepository",
+    "UnmatchedCursorPosition",
     "WatchStateRepository",
 ]
