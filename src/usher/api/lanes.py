@@ -105,6 +105,7 @@ from usher.ports.metadata import MetadataProvider
 from usher.ports.source import SourceAdapter, SourceEvent
 from usher.services.home import HomeService
 from usher.services.push import PushOutcome, PushSupervisor
+from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache, StaleScreen
 from usher.telemetry import PushSnapshot, register_queue_gauges, register_search_gauges
 
@@ -478,6 +479,15 @@ class LaneSupervisor:
         10's "the number of `row.build` children of a `home.compose` is the
         number of misses" -- these `row.build` spans have no `home.compose`
         parent at all, because `HomeService.rebuild` opens none.
+
+        **It composes the same filtered registry `GET /home` does, and that is
+        not symmetry for its own sake.** A refresh runs *because* a screen
+        expired, and it writes what it builds back into the same `RowCache` --
+        so a lane composing the unfiltered `pipeline.row_providers` would put a
+        disabled provider's shelf back on the screen the toggle route had just
+        cleared, roughly `_SCREEN_TTL` after the operator switched it off. The
+        route would look like it worked and the shelf would return, which is
+        the failure mode M7's boundary call 9 refused this table over.
         """
         links = [Link(stale.link)] if stale.link.is_valid else []
         # `context=Context()` -- an empty context -- so "root" is structural
@@ -493,7 +503,15 @@ class LaneSupervisor:
                 # never the request's, which `get_session` committed and closed
                 # when the handler returned. That is the whole reason M7
                 # deferred this rather than half-implementing it.
-                service = HomeService(pipeline.row_providers, cache=self._rows)
+                service = HomeService(
+                    enabled_row_providers(
+                        row_provider_settings(
+                            await pipeline.row_provider_settings.overrides(),
+                            pipeline.row_providers,
+                        )
+                    ),
+                    cache=self._rows,
+                )
                 screen = await service.rebuild(build_row_context(pipeline, stale.user))
             span.set_attribute("usher.home.rows", len(screen))
 

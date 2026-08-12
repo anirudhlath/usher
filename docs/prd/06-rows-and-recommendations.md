@@ -266,6 +266,21 @@ all proposals, sorts by score, applies diversity constraints (no three
 consecutive similarity rows; cap per family), builds the top N
 **sequentially**, drops any that build empty, and returns them.
 
+**Which providers compose is the registry minus what an operator switched off
+(M9).** `services/rows/__init__.py`'s `ROW_PROVIDERS` is still the composition
+point — registration in code is what makes a provider exist — and
+`row_provider_settings` is a table of **overrides** left-joined onto it, written
+only by `PUT /admin/rows/providers/{slug}` ([07](07-client-api.md)). It ships
+empty and is never seeded, so **absence means enabled** and a deployment nobody
+has configured composes exactly the registry. The join is one function, used by
+every composer that exists — `GET /home`, `usher home`, and the background
+screen refresh — because a setting honoured by one root and not another is two
+different products, and a refresh composing the unfiltered registry would write
+the disabled shelf back into the screen cache the toggle just cleared. This is
+*filtering*, never *enumeration*: no composition root names a provider, so the
+eleventh one composes with no wiring change. [09](09-roadmap.md)'s M7 boundary
+call 9 is where the refusal and its expiry condition are recorded.
+
 > **"Concurrently" was wrong and is corrected here rather than implemented**
 > ([09](09-roadmap.md)'s M7 boundary call 8). `AsyncSession` is explicitly not
 > safe for concurrent use — two coroutines awaiting on one session interleave
