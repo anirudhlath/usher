@@ -37,18 +37,27 @@ from fastapi import FastAPI
 from pydantic import SecretStr
 
 from tests.fakes.credential_store import FakeCredentialStore
+from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.image_repository import FakeImageRepository
+from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.person_repository import FakePersonRepository
+from tests.fakes.search_query_repository import FakeSearchQueryRepository
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.title_repository import FakeTitleRepository
+from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
 from usher.api.deps import (
     get_credential_store,
+    get_default_user_id,
     get_episode_repository,
     get_media_item_repository,
+    get_search_query_repository,
     get_source_adapter_factory,
     get_source_repository,
+    get_title_read_service,
     get_title_repository,
 )
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemCode, problem_type
@@ -63,6 +72,8 @@ from usher.domain.title import Title
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortUnavailable
 from usher.ports.ingest import MediaItemUpsert
+from usher.ports.repository import SearchQueryRecord
+from usher.ports.search import SearchMode
 from usher.ports.source import (
     INFUSE_SCHEME,
     SourceAdapter,
@@ -73,6 +84,7 @@ from usher.ports.source import (
 )
 from usher.services.playback_ticket import build_ticket_cipher
 from usher.services.playback_ticket import mint as mint_ticket
+from usher.services.titles import TitleReadService
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
@@ -81,6 +93,12 @@ CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-ho
 TOKEN = "tok-Zq7"
 DIRECT_URL = f"https://e/a.mkv?api_key={TOKEN}"
 SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
+# The singleton default household, standing in for the provider that would
+# otherwise write a `users` row through a real session.
+USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
+# When the search a play is attributed to was answered -- `search_queries.at`
+# carries no server default.
+SEARCHED_AT = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 
 
 # -- fakes -------------------------------------------------------------
@@ -206,13 +224,24 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def app(household: _Household, settings: Settings) -> FastAPI:
+def queries() -> FakeSearchQueryRepository:
+    return FakeSearchQueryRepository()
+
+
+@pytest.fixture
+def app(household: _Household, settings: Settings, queries: FakeSearchQueryRepository) -> FastAPI:
     """The shipped app with the five ports replaced and nothing else.
 
     `get_playback_service` and `get_ticket_cipher` are deliberately **not**
     overridden: the mint closure, the cipher, `request.url_for` and the
     percent-encoding are what several cases below are about, and a stubbed
     service would replace all four with a lambda.
+
+    Two more since M9's F3, both for `?search_id=`: `get_default_user_id`,
+    whose real provider writes a `users` row through `get_session` and would
+    open a socket here, and the `search_queries` repository. `get_search_id`
+    is deliberately not overridden -- the parse of the parameter is the
+    shipped one.
     """
     built = create_app(settings)
     built.dependency_overrides[get_title_repository] = lambda: household.titles
@@ -221,7 +250,27 @@ def app(household: _Household, settings: Settings) -> FastAPI:
     built.dependency_overrides[get_source_repository] = lambda: household.sources
     built.dependency_overrides[get_credential_store] = lambda: household.credentials
     built.dependency_overrides[get_source_adapter_factory] = lambda: household.factory
+    built.dependency_overrides[get_default_user_id] = lambda: USER_ID
+    built.dependency_overrides[get_search_query_repository] = lambda: queries
     return built
+
+
+async def _seed_search(
+    queries: FakeSearchQueryRepository, *, user_id: uuid.UUID = USER_ID
+) -> uuid.UUID:
+    """One answered search, through the port, and its id back -- the value
+    `GET /search` echoes as `search_id`."""
+    record = SearchQueryRecord(
+        id=new_id(),
+        at=SEARCHED_AT,
+        user_id=user_id,
+        query="the quiet vacuum",
+        mode=SearchMode.FULL_TEXT,
+        result_count=3,
+        latency_ms=12,
+    )
+    await queries.record(record)
+    return record.id
 
 
 @pytest.fixture
@@ -474,6 +523,269 @@ async def test_the_episode_route_answers_the_copy_of_the_episode(
 
     assert response.status_code == 200
     assert [one["kind"] for one in response.json()["targets"]] == ["direct", "deep_link"]
+
+
+# -- PRD 10's `played`, the other half of F3's outcome attribution -----
+
+
+async def test_playing_a_result_of_a_search_records_the_play_against_that_row(
+    client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
+) -> None:
+    """**The `played` half of PRD 10's outcome attribution, end to end.**
+    `search_queries` exists to answer *"did they play anything"*, and this is
+    the only route that can say yes.
+
+    The wrong implementation this kills: a `/play` route that declares
+    `?search_id=` and never reads it, leaving `played` `false` forever --
+    which is exactly what "the household searched, clicked, and played
+    nothing" looks like.
+
+    **`clicked_title_id` stays `NULL`, and that is asserted rather than
+    assumed.** This writer names no title on purpose: a play writer that
+    filled the click column would make it mean *"the last thing this
+    household did with this search"*, and the two columns would stop being
+    two facts.
+    """
+    title_id = await household.add_title()
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, title_id=title_id)
+    household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
+    search_id = await _seed_search(queries)
+
+    response = await client.post(f"/titles/{title_id}/play", params={"search_id": str(search_id)})
+
+    assert response.status_code == 200
+    assert queries.outcomes[search_id] == (None, True)
+
+
+async def test_the_click_and_then_the_play_fill_the_two_columns_independently(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    household: _Household,
+    queries: FakeSearchQueryRepository,
+) -> None:
+    """**The funnel whole, through the two routes a client really drives**,
+    and the case that F1's corrected statement exists for.
+
+    `GET /titles/{id}?search_id=…` attributes the click and
+    `POST /titles/{id}/play` reports the play, at two different times against
+    the same row. The wrong implementation this kills: `record_outcome`
+    keyed off `clicked_title_id IS NULL`, which reads the second call as a
+    redelivery of the first and silently drops the one fact the table exists
+    to answer.
+
+    Both columns are asserted, and the click's assertion is what says the
+    play did not overwrite it -- the play passes `None`, so a `SET` without
+    `COALESCE` would blank an attribution that had already been earned.
+
+    **It lives here rather than in `test_api_titles.py` because this is the
+    file that wires the play routes**, and the click route is reachable from
+    it with one more override -- `TitleReadService` over the household's own
+    stores, so the two requests read and write the same titles.
+    """
+    title_id = await household.add_title()
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, title_id=title_id)
+    household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
+    app.dependency_overrides[get_title_read_service] = lambda: TitleReadService(
+        household.titles,
+        household.media_items,
+        household.sources,
+        FakeWatchStateRepository(),
+        FakeJobQueue(),
+        FakeCreditRepository(FakePersonRepository(), household.titles),
+        FakeImageRepository(),
+    )
+    search_id = await _seed_search(queries)
+
+    clicked = await client.get(f"/titles/{title_id}", params={"search_id": str(search_id)})
+    assert clicked.status_code == 200
+    assert queries.outcomes[search_id] == (title_id, False)
+
+    played = await client.post(f"/titles/{title_id}/play", params={"search_id": str(search_id)})
+
+    assert played.status_code == 200
+    assert queries.outcomes[search_id] == (title_id, True)
+
+
+async def test_the_episode_route_records_the_play_against_the_same_kind_of_row(
+    client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
+) -> None:
+    """The second play writer, which is a route of its own and would
+    otherwise be the one that quietly did not attribute.
+
+    `clicked_title_id` is still `NULL` and there is nothing awkward about
+    that: an episode is not a title, the column names a search *result*, and
+    a play writer that reached for the episode's series to have something to
+    put there would be inventing a click nobody made.
+    """
+    title_id = await household.add_title()
+    episode_id = await household.add_episode(title_id)
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, title_id=title_id, episode_id=episode_id)
+    household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
+    search_id = await _seed_search(queries)
+
+    response = await client.post(
+        f"/episodes/{episode_id}/play", params={"search_id": str(search_id)}
+    )
+
+    assert response.status_code == 200
+    assert queries.outcomes[search_id] == (None, True)
+
+
+async def test_played_does_not_revert_when_a_later_play_fails(
+    client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
+) -> None:
+    """Monotonic, at the boundary. There is no route that means *"undo the
+    play"*, so a second attempt that could not resolve a target must leave
+    the fact the row already holds.
+
+    Its first half is also the positive control the second needs: a case
+    asserting only that a failed play changes nothing passes against a route
+    that never attributed anything.
+    """
+    title_id = await household.add_title()
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, title_id=title_id)
+    household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
+    search_id = await _seed_search(queries)
+
+    assert (
+        await client.post(f"/titles/{title_id}/play", params={"search_id": str(search_id)})
+    ).status_code == 200
+    assert queries.outcomes[search_id] == (None, True)
+
+    household.factory.script(source, error=PortUnavailable("connection refused"))
+    failed = await client.post(f"/titles/{title_id}/play", params={"search_id": str(search_id)})
+
+    assert failed.status_code == 503
+    assert queries.outcomes[search_id] == (None, True)
+
+
+async def test_a_play_that_resolved_nothing_records_no_play(
+    client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
+) -> None:
+    """**A 409 and a 503 are not plays**, and the write sits after the branch
+    that raises them rather than before it.
+
+    `played` is the closest thing this API can observe to a play -- a target
+    was handed out -- and a request that got no target got no closer to
+    playing anything than a request that was never made. The wrong
+    implementation this kills: the attribution written on the way in, which
+    would count every unreachable source and every unplayable copy as a
+    play and make the no-play rate PRD 10 exists to compute unreadable.
+
+    Two arms, because the two failures leave the route at two different
+    `raise`s.
+    """
+    unplayable = await household.add_title()
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, title_id=unplayable)
+    household.factory.script(source, targets=[])
+    conflicted = await _seed_search(queries)
+
+    assert (
+        await client.post(f"/titles/{unplayable}/play", params={"search_id": str(conflicted)})
+    ).status_code == 409
+    assert queries.outcomes[conflicted] == (None, False)
+
+    household.factory.script(source, error=PortUnavailable("connection refused"))
+    unavailable = await _seed_search(queries)
+
+    assert (
+        await client.post(f"/titles/{unplayable}/play", params={"search_id": str(unavailable)})
+    ).status_code == 503
+    assert queries.outcomes[unavailable] == (None, False)
+
+
+async def test_a_play_of_a_title_that_does_not_exist_records_nothing(
+    client: httpx.AsyncClient, queries: FakeSearchQueryRepository
+) -> None:
+    """The 404 is resolved first and the attribution sits behind it, exactly
+    as it does on `GET /titles/{id}`."""
+    search_id = await _seed_search(queries)
+
+    response = await client.post(f"/titles/{new_id()}/play", params={"search_id": str(search_id)})
+
+    assert response.status_code == 404
+    assert queries.outcomes[search_id] == (None, False)
+
+
+async def test_another_households_search_id_is_not_marked_played(
+    client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
+) -> None:
+    """The same security boundary the click writer has, on the writer whose
+    column is the one PRD 10 is actually about.
+
+    **The positive control is the byte-identical call from the owning
+    household**, against the same route with the same title: without it a
+    route that stopped attributing altogether passes the first half.
+    """
+    title_id = await household.add_title()
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, title_id=title_id)
+    household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
+    stranger = new_id()
+    assert stranger != USER_ID, "the two households must differ or there is no boundary to cross"
+    theirs = await _seed_search(queries, user_id=stranger)
+
+    refused = await client.post(f"/titles/{title_id}/play", params={"search_id": str(theirs)})
+
+    assert refused.status_code == 200
+    assert queries.outcomes[theirs] == (None, False), (
+        "one household reported a play against another household's search"
+    )
+
+    mine = await _seed_search(queries)
+    served = await client.post(f"/titles/{title_id}/play", params={"search_id": str(mine)})
+
+    assert served.status_code == 200
+    assert queries.outcomes[mine] == (None, True), (
+        "the control: the owning household's identical call must land"
+    )
+
+
+async def test_a_malformed_or_absent_search_id_leaves_a_play_untouched(
+    client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
+) -> None:
+    """Neither is a 422. A client that truncated its `search_id`, or never
+    had one, is still entitled to play what it owns -- analytics may not
+    decide whether an action is performed.
+
+    The third arm is the control that the parameter does anything at all,
+    against the same route and the same title.
+    """
+    title_id = await household.add_title()
+    source = await household.add_source("Living Room Emby")
+    await household.add_copy(source, title_id=title_id)
+    household.factory.script(source, targets=_emby_shaped_targets(DIRECT_URL))
+    search_id = await _seed_search(queries)
+
+    assert (await client.post(f"/titles/{title_id}/play")).status_code == 200
+    assert queries.outcomes[search_id] == (None, False)
+
+    malformed = await client.post(
+        f"/titles/{title_id}/play", params={"search_id": "not-a-uuid-at-all"}
+    )
+    assert malformed.status_code == 200
+    assert queries.outcomes[search_id] == (None, False)
+
+    assert (
+        await client.post(f"/titles/{title_id}/play", params={"search_id": str(search_id)})
+    ).status_code == 200
+    assert queries.outcomes[search_id] == (None, True)
+
+
+async def test_both_play_routes_describe_the_search_id_parameter(app: FastAPI) -> None:
+    """A parameter a client is asked to send back and that `/openapi.json`
+    does not describe is a parameter no generated client will send -- and
+    the episode route is the one that would be missed, since it is a second
+    signature carrying the same three dependencies."""
+    paths = app.openapi()["paths"]
+    for path in ("/titles/{title_id}/play", "/episodes/{episode_id}/play"):
+        declared = {one["name"] for one in paths[path]["post"]["parameters"]}
+        assert "search_id" in declared, f"{path} does not accept the search it came from"
 
 
 # -- the redeem route --------------------------------------------------

@@ -225,7 +225,7 @@ be added if a client turns out to need flexible field selection.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /titles/{id}` | Detail: metadata, credits, images, availability, watch state |
+| `GET /titles/{id}?search_id=` ✅ | Detail: metadata, credits, images, availability, watch state. The optional, opaque `search_id` from a `GET /search` response records **which result the household opened** ([10](10-telemetry-and-dashboards.md)'s `clicked_title_id`). Unknown, malformed or absent, it changes nothing and the resource is served identically — analytics never decides whether a resource is served |
 | `GET /titles/{id}/similar` | Precomputed neighbours with similarity reasons |
 | `GET /series/{id}/seasons` · `GET /seasons/{id}/episodes` | Series hierarchy |
 | `GET /episodes/{id}` | Episode detail |
@@ -495,7 +495,7 @@ be added if a client turns out to need flexible field selection.
 
 | Endpoint | Effect |
 |---|---|
-| `POST /titles/{id}/play` · `POST /episodes/{id}/play` | Resolve ranked `StreamTarget`s |
+| `POST /titles/{id}/play?search_id=` · `POST /episodes/{id}/play?search_id=` ✅ | Resolve ranked `StreamTarget`s. The same optional, opaque `search_id` records **that a result was played** ([10](10-telemetry-and-dashboards.md)'s `played`) — only when a target was actually handed out, so a `409` and a `503` record nothing. It never writes `clicked_title_id`: that column names the result the household *opened*, and one writer setting both would collapse two facts into one |
 | `PUT /watch/titles/{id}` · `PUT /watch/episodes/{id}` | Set position / played |
 | `POST /watch/titles/{id}/played` · `DELETE …` | Mark played / unplayed |
 

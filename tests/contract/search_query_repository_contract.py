@@ -24,16 +24,33 @@ the play, at two different times) means the ordinary path is **a second call
 on the same row that only means to flip `played`** -- not a duplicate
 delivery of the first call, and not a second, different click. A guard keyed
 on `clicked_title_id IS NULL` cannot tell that call apart from either of
-those and silently drops it, which is the shape this suite now has three
+those and silently drops it, which is the shape this suite now has four
 cases for rather than one: a later click does not steal an earlier one's
-attribution; a later play reaches a row a click already attributed; and
-`played` never reverts once it is true. Everything else here is storage --
-did the row land, did it land once, did it land with every column distinct
-from every other.
+attribution; a later play reaches a row a click already attributed; a play
+that had no click before it is a legal row with `played` true and the click
+still `NULL`; and `played` never reverts once it is true.
+
+**The play writer passes no title, and every case below spells it that
+way.** `clicked_title_id=None` is what stops the second call from being one
+writer that sets both columns -- see the port. The one case that passes a
+title *and* `played=True` in a single call is the storage control, and says
+so.
+
+**The household scope is the one predicate here that is a security
+boundary**, so it is in the shared contract rather than only in the
+Postgres arm: a `query_id` arrives from a client and must not let one
+household write attribution onto another's row.
+`test_a_search_belonging_to_another_household_is_not_attributed` carries its
+own positive control, because a repository that stopped writing at all
+passes the negative half.
+
+Everything else here is storage -- did the row land, did it land once, did
+it land with every column distinct from every other.
 
 Subclass and provide `repository`, `ledger`, `user_id` (naming a household
-that actually exists, for an implementation with a foreign key) and
-`add_title` (for `record_outcome`'s attribution target, same reason).
+that actually exists, for an implementation with a foreign key), `add_user`
+(a *second* household, for the scope case) and `add_title` (for
+`record_outcome`'s attribution target, same reason).
 
 Its `ABC` shape is ADR-0001's argument applied to a test double -- a
 `Protocol` would let one arm drift out of the suite silently.
@@ -152,6 +169,16 @@ class SearchQueryRepositoryContract:
         """A title `record_outcome` can legitimately attribute a click to."""
         raise NotImplementedError
 
+    async def add_user(self) -> uuid.UUID:
+        """A *second* household, distinct from the `user_id` fixture.
+
+        Only the scope case needs it, and it needs a real one: on an
+        implementation with a foreign key, an invented id would make
+        "another household's call does not land" true for the wrong
+        reason -- the write would be refused rather than scoped out.
+        """
+        raise NotImplementedError
+
     # -- record() -----------------------------------------------------------
 
     async def test_a_recorded_query_reads_back_with_the_mode_that_ran_and_its_latency(
@@ -225,14 +252,22 @@ class SearchQueryRepositoryContract:
     async def test_an_attributed_query_reads_back_with_its_click_and_played(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """The wrong implementation this kills: `record_outcome` that writes
+        """The storage control, and the one case here that writes both
+        columns in a single call -- **no shipped caller does**, deliberately
+        (the click writer names a title, the play writer names none), so this
+        exists to prove both columns are reachable at all rather than to
+        model the funnel.
+
+        The wrong implementation this kills: `record_outcome` that writes
         `played` but not `clicked_title_id`, or updates the wrong row (no
         `WHERE id = ...`, or a dropped `id` parameter)."""
         record = search_query_record(user_id=user_id)
         await repository.record(record)
         title_id = await self.add_title()
 
-        await repository.record_outcome(record.id, clicked_title_id=title_id, played=True)
+        await repository.record_outcome(
+            record.id, user_id=user_id, clicked_title_id=title_id, played=True
+        )
 
         stored = await ledger.get(record.id)
         assert stored is not None
@@ -262,8 +297,12 @@ class SearchQueryRepositoryContract:
             "look identical"
         )
 
-        await repository.record_outcome(record.id, clicked_title_id=first_title, played=False)
-        await repository.record_outcome(record.id, clicked_title_id=second_title, played=False)
+        await repository.record_outcome(
+            record.id, user_id=user_id, clicked_title_id=first_title, played=False
+        )
+        await repository.record_outcome(
+            record.id, user_id=user_id, clicked_title_id=second_title, played=False
+        )
 
         stored = await ledger.get(record.id)
         assert stored is not None
@@ -277,22 +316,111 @@ class SearchQueryRepositoryContract:
         writers fire at two different times on the *same* row: viewing a
         result from a search (`GET /titles/{id}?search_id=…`) attributes the
         click, and playing it (`POST /titles/{id}/play`) is a later, separate
-        call naming the same title. The wrong implementation this kills: a
+        call that names **no** title and only reports `played`. The wrong
+        implementation this kills: a
         guard that keys the whole `UPDATE` off `clicked_title_id IS NULL`,
         which treats this second call as if it were a duplicate delivery of
-        the first and silently drops the one fact PRD 10:572-573 says this
-        table exists to answer -- *did they play anything*.
+        the first and silently drops the one fact PRD 10's
+        `## Analytics tables` says this table exists to answer -- *did they
+        play anything*.
+
+        It also kills a `SET clicked_title_id = :clicked_title_id` with no
+        `COALESCE`: the play writer's `None` would blank the attribution the
+        click had already earned.
         """
         record = search_query_record(user_id=user_id)
         await repository.record(record)
         title_id = await self.add_title()
 
-        await repository.record_outcome(record.id, clicked_title_id=title_id, played=False)
-        await repository.record_outcome(record.id, clicked_title_id=title_id, played=True)
+        await repository.record_outcome(
+            record.id, user_id=user_id, clicked_title_id=title_id, played=False
+        )
+        await repository.record_outcome(
+            record.id, user_id=user_id, clicked_title_id=None, played=True
+        )
 
         stored = await ledger.get(record.id)
         assert stored is not None
         assert stored.clicked_title_id == title_id
+        assert stored.played is True
+
+    async def test_a_play_with_no_click_before_it_is_played_with_the_click_still_null(
+        self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
+    ) -> None:
+        """**A legal state, not a hole**, and the reason
+        `clicked_title_id` is nullable on the argument as well as on the
+        column. A client can hold a `search_id` and go straight to
+        `POST /titles/{id}/play` -- it never asked Usher for the detail page,
+        so nothing told Usher which result it opened. The row then says
+        *"this search led to a play, and which result is unknown"*, which is
+        a different fact from *"this search led to nothing"* and from
+        *"this search led to a click that went nowhere"*.
+
+        The wrong implementation this kills: a `record_outcome` that treats
+        an absent click as nothing to do and returns early, so the whole
+        no-click half of PRD 10's funnel is silently unrecorded; and, one
+        step quieter, a play writer forced to name a title because the
+        parameter is not nullable -- which would make `clicked_title_id`
+        answer *"the last thing this household did"* rather than *"which
+        result it opened"*.
+        """
+        record = search_query_record(user_id=user_id)
+        await repository.record(record)
+
+        await repository.record_outcome(
+            record.id, user_id=user_id, clicked_title_id=None, played=True
+        )
+
+        stored = await ledger.get(record.id)
+        assert stored is not None
+        assert stored.clicked_title_id is None
+        assert stored.played is True
+
+    async def test_a_search_belonging_to_another_household_is_not_attributed(
+        self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
+    ) -> None:
+        """**The scope is a security boundary and this is where it is
+        pinned.** A `query_id` reaches this port from a query parameter and
+        UUIDv7 is partially time-ordered, so an unscoped `WHERE id = :id`
+        lets one household write attribution onto another's row -- silently,
+        with no error, no log line and no metric.
+
+        **The positive control is in the same case and is what makes the
+        negative half mean anything**: the byte-identical call from the
+        owning household must land. Without it a repository whose
+        `record_outcome` did nothing at all would pass.
+
+        The wrong implementation this kills: `WHERE id = :id` with the
+        `user_id` conjunct dropped -- and, because the two calls differ only
+        in that argument, nothing else.
+        """
+        record = search_query_record(user_id=user_id)
+        await repository.record(record)
+        title_id = await self.add_title()
+        stranger = await self.add_user()
+        assert stranger != user_id, (
+            "the fixture must supply two different households, or the refusal and the "
+            "control are the same call"
+        )
+
+        await repository.record_outcome(
+            record.id, user_id=stranger, clicked_title_id=title_id, played=True
+        )
+
+        refused = await ledger.get(record.id)
+        assert refused is not None
+        assert refused.clicked_title_id is None, "another household attributed this search"
+        assert refused.played is False, "another household reported a play against this search"
+
+        await repository.record_outcome(
+            record.id, user_id=user_id, clicked_title_id=title_id, played=True
+        )
+
+        stored = await ledger.get(record.id)
+        assert stored is not None
+        assert stored.clicked_title_id == title_id, (
+            "the control: the owning household's identical call must land"
+        )
         assert stored.played is True
 
     async def test_played_does_not_revert_to_false_once_true(
@@ -310,27 +438,37 @@ class SearchQueryRepositoryContract:
         """
         record = search_query_record(user_id=user_id)
         await repository.record(record)
-        title_id = await self.add_title()
 
-        await repository.record_outcome(record.id, clicked_title_id=title_id, played=True)
-        await repository.record_outcome(record.id, clicked_title_id=title_id, played=False)
+        await repository.record_outcome(
+            record.id, user_id=user_id, clicked_title_id=None, played=True
+        )
+        await repository.record_outcome(
+            record.id, user_id=user_id, clicked_title_id=None, played=False
+        )
 
         stored = await ledger.get(record.id)
         assert stored is not None
         assert stored.played is True
 
     async def test_attributing_a_query_that_was_never_recorded_is_a_silent_no_op(
-        self, repository: SearchQueryRepository, ledger: SearchQueryLedger
+        self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
         """The wrong implementation this kills: a `record_outcome` that
         raises on an unknown id rather than leaving a table it did not
         change alone, which would make a stale or duplicate client callback
         a request failure rather than a fact about a table with nothing to
         update.
+
+        This is also the shape a client holding a `search_id` from a
+        database that has since been pruned produces -- PRD 10's retention
+        is an operator's `DELETE`, so a stale id outliving its row is
+        ordinary rather than hostile.
         """
         unknown = new_id()
 
-        await repository.record_outcome(unknown, clicked_title_id=new_id(), played=True)
+        await repository.record_outcome(
+            unknown, user_id=user_id, clicked_title_id=None, played=True
+        )
 
         assert await ledger.get(unknown) is None
         assert await ledger.count() == 0

@@ -1,5 +1,5 @@
 """`search_queries` -- one row per answered search, then attributed by up to
-two later calls: a click and, separately, a play of the same title.
+two later calls: a click, and separately a play.
 
 Implements `SearchQueryRepository` (`usher.ports.repository`). Two
 statements, both wrapped in the same SAVEPOINT-backed refusal translation
@@ -65,18 +65,21 @@ _INSERT_QUERY = text(
 # this statement and it was wrong: F3's own funnel calls `record_outcome`
 # *twice* on the same row at two different times --
 # `GET /titles/{id}?search_id=…` attributes the click, and
-# `POST /titles/{id}/play` reports the play, naming the same title -- and a
+# `POST /titles/{id}/play` reports the play -- and a
 # guard keyed on `clicked_title_id` alone silently drops the second call,
 # which is the only call in the whole funnel that could ever set `played`.
 # Reviewed and corrected before this shipped; see the port docstring for the
 # full argument and `tests/contract/search_query_repository_contract.py`'s
-# module docstring for the three cases that pin it.
+# module docstring for the cases that pin it.
 #
 # `clicked_title_id = COALESCE(clicked_title_id, :clicked_title_id)` is first
 # write wins **on that column specifically**: once a click is attributed, a
 # later, genuinely different click (someone else's redelivered event, or a
 # stale retry naming the wrong result) must not steal credit from the result
-# the household actually opened.
+# the household actually opened. It is also what lets the *play* writer pass
+# `NULL` -- `COALESCE(clicked_title_id, NULL)` is the column unchanged, so a
+# play reports `played` and touches nothing else, which is what keeps the two
+# writers from collapsing into one that sets both.
 #
 # `played = played OR :played` is monotonic and moves only toward `True`: a
 # call that has not itself observed a play carries `played=False`, and there
@@ -84,16 +87,31 @@ _INSERT_QUERY = text(
 # later `False` is stale information about a fact the row already has,
 # never a correction to write over it.
 #
+# **`AND user_id = :user_id` is a security boundary, not tidiness.** The
+# `id` half comes from a client, on `?search_id=`, and UUIDv7 is partially
+# time-ordered and therefore partially guessable; without this predicate one
+# household writes attribution onto another's row silently, with no error,
+# no log line and no metric. It is a predicate rather than a column written:
+# `record()` set `user_id` and nothing may move it.
+#
 # Zero rows affected is still a silent no-op either way -- no row named that
-# `id`, or a row whose columns already hold at least as much as this call
-# would write -- because nothing distinguishes those two to a caller.
+# `id`, a row belonging to somebody else, or a row whose columns already hold
+# at least as much as this call would write -- because nothing distinguishes
+# those to a caller, and a caller that *could* tell "not yours" from "not
+# there" would have a household oracle.
 _RECORD_OUTCOME = text(
     "UPDATE search_queries "
     "SET clicked_title_id = COALESCE(clicked_title_id, :clicked_title_id), "
     "    played = played OR :played "
-    "WHERE id = :id"
+    "WHERE id = :id AND user_id = :user_id"
 ).bindparams(
     bindparam("id", type_=PGUUID(as_uuid=True)),
+    bindparam("user_id", type_=PGUUID(as_uuid=True)),
+    # Typed rather than left to the driver: the play writer binds `None`
+    # here on every call, and an untyped `NULL` is the shape asyncpg refuses
+    # with "could not determine data type of parameter"
+    # (`.claude/rules/db-and-sql.md`). Declared, it is a `uuid` NULL and
+    # `COALESCE` resolves against the column beside it.
     bindparam("clicked_title_id", type_=PGUUID(as_uuid=True)),
 )
 
@@ -109,14 +127,24 @@ class PostgresSearchQueryRepository(SearchQueryRepository):
             await self._session.execute(_INSERT_QUERY, _parameters(record))
 
     async def record_outcome(
-        self, query_id: uuid.UUID, *, clicked_title_id: uuid.UUID, played: bool
+        self,
+        query_id: uuid.UUID,
+        *,
+        user_id: uuid.UUID,
+        clicked_title_id: uuid.UUID | None,
+        played: bool,
     ) -> None:
         async with refusals_as_conflict(
             self._session, "a search outcome violates search_queries' own bounds"
         ):
             await self._session.execute(
                 _RECORD_OUTCOME,
-                {"id": query_id, "clicked_title_id": clicked_title_id, "played": played},
+                {
+                    "id": query_id,
+                    "user_id": user_id,
+                    "clicked_title_id": clicked_title_id,
+                    "played": played,
+                },
             )
 
 

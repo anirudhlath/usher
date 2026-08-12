@@ -81,8 +81,9 @@ class SearchQueryRepository(ABC):
     - `id`, `at`, `user_id`, `query`, `mode`, `result_count`, `latency_ms` --
       **F2**, written together by `record()` at the moment a search answers.
     - `clicked_title_id`, `played` -- **F3**, written later by
-      `record_outcome()`, from whatever client action PRD 07's search routes
-      grow to report it.
+      `record_outcome()`, one column per client action and never both by one
+      caller: `GET /titles/{id}?search_id=…` reports the click and
+      `POST /titles/{id}/play` (or `/episodes/{id}/play`) reports the play.
 
     **One divergence from PRD 10's own grouping, recorded rather than
     smoothed over.** PRD 10 groups `user_id` with the outcome half, because on
@@ -165,23 +166,29 @@ class SearchQueryRepository(ABC):
 
     @abstractmethod
     async def record_outcome(
-        self, query_id: uuid.UUID, *, clicked_title_id: uuid.UUID, played: bool
+        self,
+        query_id: uuid.UUID,
+        *,
+        user_id: uuid.UUID,
+        clicked_title_id: uuid.UUID | None,
+        played: bool,
     ) -> None:
         """Attribute a search to what happened next -- **F3's write**,
         covering `clicked_title_id` and `played`.
 
-        Updates the row `record()` wrote, keyed by its `id`. **Two columns,
-        two different conditions, deliberately not one shared guard** -- an
+        Updates the row `record()` wrote, keyed by its `id` **and scoped to
+        the household that owns it**. **Two columns, two different
+        conditions, deliberately not one shared guard** -- an
         earlier version of this method keyed the whole write off
         `clicked_title_id IS NULL`, which is wrong and was corrected in
         review before it shipped: F3's own funnel calls this method *twice*
         on the same row, at two different times --
         `GET /titles/{id}?search_id=…` attributes the click, and
-        `POST /titles/{id}/play` reports the play, naming the same title --
-        and a guard shared between the columns cannot tell that legitimate
+        `POST /titles/{id}/play` reports the play -- and a guard shared
+        between the columns cannot tell that legitimate
         second call apart from a redelivered duplicate of the first, so it
-        silently dropped the one fact PRD 10:572-573 says this table exists
-        to answer: *did they play anything*.
+        silently dropped the one fact PRD 10's `## Analytics tables` says
+        this table exists to answer: *did they play anything*.
 
         - **`clicked_title_id` is first write wins.** A row that already
           carries a non-`NULL` value is left exactly as it was on that
@@ -200,6 +207,31 @@ class SearchQueryRepository(ABC):
         `clicked_title_id` once (on the first call) and `played` once (on
         the second), which is exactly the shape that needs two independent
         conditions rather than one.
+
+        **`clicked_title_id` is nullable *on the argument*, and that is what
+        keeps the two writers from becoming one.** The click writer passes a
+        title and `played=False`; the play writer passes `played=True` and
+        **no title at all**. A play writer that named the title being played
+        would be one writer setting both columns, which is exactly the shape
+        PRD 10 refuses -- `clicked_title_id` would then answer *"the last
+        thing this household did with this search"* rather than *"which
+        result it opened"*, and a play that never had a click would be
+        indistinguishable from one that did. `COALESCE(clicked_title_id,
+        NULL)` is the column unchanged, so passing `None` is a write that
+        touches `played` alone. **A row carrying `played = true` and
+        `clicked_title_id IS NULL` is therefore a legal, meaningful state**:
+        the household played a result of this search without Usher ever
+        being told which one it opened first.
+
+        **`user_id` is a predicate, not a value written, and it is a security
+        boundary rather than tidiness.** A `query_id` is client-supplied --
+        it arrives on `?search_id=` -- and UUIDv7 is partially time-ordered
+        and therefore partially guessable, so without the scope one household
+        writes attribution onto another's row silently, with no error, no log
+        line and no metric (`services/rows/cache.py`'s own words for the same
+        failure one key over). A row whose `user_id` does not match is a
+        no-op, indistinguishable to a caller from a row that does not exist,
+        because a caller must not be able to tell those apart either.
 
         **This is still why the table needs no `updated_at` column and no
         trigger.** A row receives at most one insert and at most *two*
@@ -221,7 +253,8 @@ class SearchQueryRepository(ABC):
         not a storage failure a caller could usefully retry. Reachable only
         when the value is actually written: `COALESCE` means a row already
         carrying a click never re-evaluates the parameter this call passed,
-        so a played-only second call naming the same, already-valid title
-        cannot trip this -- which is the ordinary case, since F3's play
-        route always names the title being played.
+        and the play writer passes no title at all, so **neither of F3's two
+        shipped callers can reach it** -- the click writer names the title
+        whose row it has just read out of `titles`. It is the contract for
+        the caller that has not been written yet.
         """

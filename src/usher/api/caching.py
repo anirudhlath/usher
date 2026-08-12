@@ -24,16 +24,24 @@ only the second.**
    Opening an unenriched title promotes its `enrich` job to
    `JobPriority.DEMAND`
    (`tests/unit/test_api_titles.py::test_opening_a_stub_promotes_its_enrichment`),
+   and **since M9's F3 it also attributes PRD 10's click** when the request
+   carries a `?search_id=`
+   (`…::test_opening_a_result_from_a_search_records_the_click_against_that_row`),
    so a conditional check run *ahead* of the handler -- the natural place to
-   put it, for speed -- would silently stop that promotion for exactly the
+   put it, for speed -- would silently stop **both** for exactly the
    clients that already hold the title and would send `If-None-Match` on every
    request. `GET /titles/{id}` fails this condition and is therefore not
    adopted here; a future contributor moving this helper's call ahead of a
    handler for speed is the mistake this paragraph exists to stop them making.
-2. **The response must be `private`.** `GET /search` fails neither condition
-   -- it has no side effect -- but is deliberately not adopted here anyway: it
-   has no TTL to quote, and a per-query ETag would only save a body the client
-   asked for once.
+   The second write makes the loss quieter than the first: a promotion that
+   did not happen eventually happens anyway, and a click that was not recorded
+   reads back as a household that clicked nothing.
+2. **The response must be `private`.** `GET /search` is deliberately not
+   adopted here either: it has no TTL to quote, and a per-query ETag would
+   only save a body the client asked for once. ⚠️ **It used to fail neither
+   condition and now fails the first**, since M9's F2 gave it a
+   `search_queries` row per answered search -- so the argument above is the
+   one that applies to it now, not the one below.
 
 **`private`, never `public` -- for the screens, and `GET /images/{id}` is not
 an exception to that rule but a case outside it.** Every screen

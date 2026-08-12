@@ -30,6 +30,7 @@ from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.search_query_repository import FakeSearchQueryRepository
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
@@ -49,7 +50,7 @@ from usher.ports.search import (
     SuggestIndex,
 )
 from usher.services.query_expansion import QUERY_KEY, QueryExpansionService
-from usher.services.search import SearchService
+from usher.services.search import SearchAnalytics, SearchService
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 UNREACHABLE_DSN = "postgresql+asyncpg://usher:usher@127.0.0.1:1/usher"
@@ -161,6 +162,7 @@ async def _service(
     expander: _Expander | None = None,
     result_limit: int = 50,
     watch_states: _RecordingWatchStates | None = None,
+    analytics: SearchAnalytics | None = None,
 ) -> SearchService:
     titles = FakeTitleRepository()
     media_items = FakeMediaItemRepository()
@@ -193,6 +195,7 @@ async def _service(
         result_limit=result_limit,
         embedder=embedder,
         expander=None if expander is None else expander.service,
+        analytics=analytics,
     )
 
 
@@ -539,6 +542,45 @@ async def test_the_limit_ceiling_is_the_services_and_this_route_spells_none() ->
     )
 
 
+async def test_the_body_echoes_the_id_of_the_row_this_search_was_recorded_as(
+    hits: _ScriptedIndex,
+) -> None:
+    """**How a client gets a `search_id` at all**, which is the first link of
+    F3's funnel and the only one that lives on this route.
+
+    Asserted against the stored row's own id rather than as "a UUID is
+    present": an echo of a freshly minted id, or of the request's own trace
+    id, would satisfy the weaker assertion and send every subsequent
+    `?search_id=` to a `WHERE id = …` that matches nothing -- which is
+    byte-identical, on the wire and in the table, to a household that clicked
+    nothing.
+
+    The second arm is the shipped default of every case in the rest of this
+    file: a `SearchService` with no `SearchAnalytics` answers the same
+    results with `search_id: null`. A route that invented one when no row was
+    written would be publishing a handle to nothing.
+    """
+    queries = FakeSearchQueryRepository()
+
+    async def _commit() -> None:
+        return None
+
+    recorded = await _service(hits, analytics=SearchAnalytics(queries=queries, commit=_commit))
+    async for connected in _client(_app(recorded)):
+        body = (await connected.get("/search", params={"q": "vacuum"})).json()
+
+    (row,) = queries.rows.values()
+    assert body["search_id"] == str(row.id)
+
+    async for connected in _client(_app(await _service(hits))):
+        unrecorded = (await connected.get("/search", params={"q": "vacuum"})).json()
+
+    assert unrecorded["search_id"] is None
+    assert unrecorded["results"] == body["results"], (
+        "the control: the results are the same either way -- analytics is additive"
+    )
+
+
 async def test_no_source_concept_and_no_credential_reaches_the_body(
     client: httpx.AsyncClient,
 ) -> None:
@@ -557,6 +599,11 @@ async def test_no_source_concept_and_no_credential_reaches_the_body(
         "mode",
         "semantic_coverage",
         "expanded_query",
+        # M9 F3. Opaque, and the one thing on this response a client hands
+        # back -- to `GET /titles/{id}` and to `POST /titles/{id}/play`. It
+        # names a `search_queries` row and nothing else: not the household,
+        # not the query, not a handle any other route accepts.
+        "search_id",
         "results",
     }
     assert body["query"] == "vacuum"

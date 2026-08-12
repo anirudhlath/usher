@@ -18,14 +18,27 @@ promotion). Idempotent, and a second open writes zero rows -- the enqueue
 statement's `WHERE jobs.priority < excluded.priority` sees nothing left to
 promote. `get_session` commits it as it commits any other request, which is
 what makes the write durable rather than a flush that the response outlives.
+
+**Twice, since M9's F3**, on the same argument and the same commit: a request
+carrying `?search_id=` also attributes PRD 10's *click* to the
+`search_queries` row that search wrote. It is idempotent for a second
+reason -- `clicked_title_id` is first-write-wins, so re-opening a result
+cannot rewrite what the search led to. `api/caching.py`'s first adoption
+condition names both writes now: a conditional GET short-circuited ahead of
+this handler would silently stop the promotion *and* lose the click, for
+exactly the clients that already hold the title and would send
+`If-None-Match` on every request.
 """
 
 import uuid
 
 from fastapi import APIRouter, status
 
+from usher.api.analytics import record_search_outcome
 from usher.api.deps import (
     DefaultUserIdDep,
+    SearchIdDep,
+    SearchQueryRepositoryDep,
     SimilarityServiceDep,
     TitleReadServiceDep,
     TitleRepositoryDep,
@@ -40,9 +53,14 @@ router = APIRouter(tags=["titles"])
 
 @router.get("/titles/{title_id}", response_model=TitleResponse, response_model_exclude_unset=True)
 async def get_title(
-    title_id: uuid.UUID, titles: TitleReadServiceDep, user_id: DefaultUserIdDep
+    title_id: uuid.UUID,
+    titles: TitleReadServiceDep,
+    user_id: DefaultUserIdDep,
+    queries: SearchQueryRepositoryDep,
+    search_id: SearchIdDep,
 ) -> TitleResponse:
-    """One title, everything local about it, and a promotion if it needs one.
+    """One title, everything local about it, a promotion if it needs one, and
+    the click attributed to the search it came from if the client says so.
 
     **`response_model_exclude_unset=True` is what makes an empty `cast` or
     `crew` an absent key rather than `[]`** -- `TitleResponse.of` declines to
@@ -50,6 +68,16 @@ async def get_title(
     unconditionally, so nothing else moves. The reasoning, the two spellings
     rejected and the guard that keeps `of` honest are all in
     `api/dto/title.py`; this flag is the half that cannot live there.
+
+    **`?search_id=` is PRD 10's click, and it is the reason this route now
+    writes twice.** `GET /search` hands the id of the `search_queries` row it
+    wrote; opening a result with that id attached is the only moment anything
+    knows *which* result the household opened, so it fills
+    `clicked_title_id`. It rides the same commit the demand promotion does
+    and changes nothing else: no status code, no field, no header. Omitting
+    it is always legal, and a value that is unknown or not a UUID at all is
+    ignored rather than refused -- analytics may not decide whether a
+    resource is served.
     """
     detail = await titles.detail(title_id, user_id=user_id)
     if detail is None:
@@ -62,6 +90,19 @@ async def get_title(
             code=ProblemCode.NOT_FOUND,
             detail="title not found",
         )
+    # **After the 404 and not before it.** A click on a title this deployment
+    # does not have is a click on nothing, and writing one would put an id in
+    # `clicked_title_id` that `fk_search_queries_clicked_title_id_titles`
+    # refuses -- turning a plain 404 into a 500. The order is what makes that
+    # unreachable rather than caught.
+    #
+    # `played=False`: this writer reports a click and nothing else. One
+    # writer setting both columns is what would make `clicked_title_id` mean
+    # "the last thing this household did" rather than "which result it
+    # opened", and `POST /titles/{id}/play` is the other writer.
+    await record_search_outcome(
+        queries, search_id, user_id=user_id, clicked_title_id=title_id, played=False
+    )
     return TitleResponse.of(detail)
 
 

@@ -76,3 +76,9 @@ class TestFakeSearchQueryRepository(SearchQueryRepositoryContract):
         # No foreign key on this arm, so any id names a legitimate title as
         # far as the fake is concerned -- see the fake's own divergence list.
         return new_id()
+
+    async def add_user(self) -> uuid.UUID:
+        # Same reason as `add_title`: no `users` table to insert into, and
+        # the scope case needs the id to be *different*, not to exist. The
+        # Postgres arm is where "different and real" is the same thing.
+        return new_id()

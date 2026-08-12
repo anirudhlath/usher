@@ -14,7 +14,7 @@ from typing import Annotated, cast
 from urllib.parse import quote
 
 from cryptography.fernet import Fernet
-from fastapi import Depends, Request
+from fastapi import Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.lanes import LaneSupervisor
@@ -34,6 +34,7 @@ from usher.db.repositories.search import (
     PostgresTitleEmbeddingRepository,
     PostgresTitleNeighborRepository,
 )
+from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
 from usher.db.repositories.taste import PostgresTasteRepository
@@ -56,6 +57,7 @@ from usher.ports.repository import (
     PersonRepository,
     RawPayloadStore,
     RowProviderSettingsRepository,
+    SearchQueryRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -1119,6 +1121,66 @@ def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchServ
 
 
 SearchServiceDep = Annotated[SearchService, Depends(get_search_service)]
+
+
+def get_search_query_repository(session: SessionDep) -> SearchQueryRepository:
+    """`search_queries`' outcome half, for the routes a client reports one to.
+
+    Separate from `get_search_service` above, which owns the *retrieval* half
+    and reaches the same table through a `SearchAnalytics` pair carrying its
+    own `commit`. The three routes here need neither: they write inside a
+    request `get_session` already commits, and they hold no `SearchService`
+    at all -- `GET /titles/{id}` and the two `/play` routes have no query to
+    run. A dependency of their own is what keeps them from acquiring a search
+    service in order to reach one `UPDATE`.
+    """
+    return PostgresSearchQueryRepository(session)
+
+
+SearchQueryRepositoryDep = Annotated[SearchQueryRepository, Depends(get_search_query_repository)]
+
+
+def get_search_id(
+    search_id: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Opaque `search_id` from a `GET /search` response, attributing this request "
+                "to the search it came from. Optional; a value that is not one is ignored."
+            )
+        ),
+    ] = None,
+) -> uuid.UUID | None:
+    """The `?search_id=` a client attached, parsed, or `None`.
+
+    **Typed `str` and parsed here rather than annotated `uuid.UUID | None` on
+    the route, and the difference is a status code.** FastAPI would answer
+    `422 validation_failed` for a malformed value -- so a client that
+    truncated, re-encoded or invented a `search_id` would be refused *the
+    title*, over a piece of optional telemetry attached to a resource that
+    exists and that the request is otherwise entitled to. Analytics may not
+    decide whether a resource is served.
+
+    So a malformed value is collapsed into the same `None` an absent one
+    produces, and the route cannot tell them apart. That is deliberate: there
+    is no behaviour to differentiate, and one layer further down an id that
+    *is* a UUID but names no row is already indistinguishable from both. The
+    three cases -- absent, unparseable, unknown -- are one case, and it is
+    "nothing to attribute".
+
+    One dependency shared by all three attributing routes, so `?search_id=` is
+    described once in `/openapi.json` instead of three times in three
+    wordings.
+    """
+    if search_id is None:
+        return None
+    try:
+        return uuid.UUID(search_id)
+    except ValueError:
+        return None
+
+
+SearchIdDep = Annotated[uuid.UUID | None, Depends(get_search_id)]
 # The watch-write actions (M9). `PUT /watch/titles/{id}`,
 # `PUT /watch/episodes/{id}` and the two `/played` routes -- the first routes
 # in this API that write a `watch_states` row, and therefore the first writer

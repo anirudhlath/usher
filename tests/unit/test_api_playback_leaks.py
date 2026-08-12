@@ -50,6 +50,7 @@ import usher.api.dto.playback as playback_dto
 from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
+from tests.fakes.search_query_repository import FakeSearchQueryRepository
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.title_repository import FakeTitleRepository
@@ -57,9 +58,11 @@ from tests.unit.rows import USER, Library
 from usher.api.app import create_app
 from usher.api.deps import (
     get_credential_store,
+    get_default_user_id,
     get_media_item_repository,
     get_row_context,
     get_row_provider_settings_repository,
+    get_search_query_repository,
     get_source_adapter_factory,
     get_source_repository,
     get_title_repository,
@@ -220,6 +223,14 @@ def app(household: _Household, settings: Settings) -> FastAPI:
     built.dependency_overrides[get_row_provider_settings_repository] = (
         FakeRowProviderSettingsRepository
     )
+    # M9 F3: the two `/play` routes attribute PRD 10's `played` to the search
+    # a client came from, so both routes now resolve a household and a
+    # `search_queries` repository. Faked here for this file's reason -- there
+    # is no database -- and neither is a subject of the leak sweep: nothing
+    # this file drives sends a `?search_id=` at all, so the writes never fire
+    # and the overrides exist only to keep the dependency graph resolvable.
+    built.dependency_overrides[get_default_user_id] = lambda: USER.id
+    built.dependency_overrides[get_search_query_repository] = FakeSearchQueryRepository
     return built
 
 
