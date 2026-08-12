@@ -68,7 +68,12 @@ from usher.ports.ingest import (
     MediaItemUpsert,
     SweepResult,
 )
-from usher.ports.repository import AddedTitle, BulkWriteResult, MediaItemRepository
+from usher.ports.repository import (
+    AddedTitle,
+    BulkWriteResult,
+    MediaItemRepository,
+    UnmatchedCursorPosition,
+)
 
 # `ordinal` is the row's index within the batch, and it is what makes
 # deduplication deterministic: `ORDER BY ..., ordinal DESC` is literally
@@ -297,6 +302,87 @@ WHERE episode_id = ANY(:episode_ids)
 #
 # No source and no user: availability is household-wide. An item with no
 # `added_at` is excluded by three-valued logic rather than by a predicate.
+# The review queue, keyset-paged for `GET /admin/unmatched`. The order is
+# `list_unmatched`'s, character for character, because the port promises the
+# two forms agree on page one -- `added_at DESC NULLS LAST, id DESC` -- and
+# only the resume clause differs.
+#
+# **ADR-0034's three arms, and every one of them is reachable on this read.**
+# `media_items.added_at` is nullable (`db/models/source.py:95`), so a page
+# boundary can land inside the undated group, and the undated group is
+# precisely the population an operator opens this queue to review. Postgres
+# evaluates a row comparison element-wise and answers **NULL, not false**, when
+# the first differing pair involves one, so the spelling a reader reaches for
+# first --
+#
+#   ((added_at IS NOT NULL), added_at, id) > ((:a IS NOT NULL), :a, :id)
+#
+# -- drops the whole undated tail from an undated boundary while every page it
+# served looks full. Measured on `pgvector/pgvector:pg17` and recorded in
+# ADR-0034 with the before/after table. So the boundary's own NULL-ness picks
+# the branch, which is what `IS NOT DISTINCT FROM` would spell in one
+# expression; the caller knows it before it builds the statement.
+#
+# `<` rather than `>` because this order's tiebreak is `id DESC`. What is
+# load-bearing is that the predicate agrees with the `ORDER BY` term for term,
+# not which direction either runs -- two spellings of one rule is how they stop
+# agreeing.
+#
+# **Measured, and what it says is that the keyset fixes the depth and not the
+# page.** `EXPLAIN (ANALYZE, BUFFERS)` on `pgvector/pgvector:pg17` over 200,000
+# items of which 70,000 are unmatched, `limit = over_fetch(50)`:
+#
+#   keyset page 1                     70,000 scanned, 966 buffers, top-N
+#                                     heapsort, 16.4 ms
+#   keyset from a dated boundary      34,999 scanned, 966 buffers, 23.0 ms
+#   keyset from an undated boundary   99 scanned, 328 buffers, 1.9 ms
+#   OFFSET 0                          70,000 scanned, 966 buffers, 17.4 ms
+#   OFFSET 69,900                     69,951 scanned, external merge sort
+#                                     **on disk** (3.2 MB + a worker's 2.2 MB),
+#                                     57.3 ms
+#
+# So the offset's cost grows with depth and the keyset's does not -- but the
+# *sort* dominates either way, because `ix_media_items_unmatched` is
+# `(source_id) WHERE title_id IS NULL` and carries neither `added_at` nor `id`.
+# Every page is a top-N heapsort over the whole unmatched population, bounded by
+# the queue rather than by the table, which is survivable until a library that
+# bootstrapped and never matched makes the queue the library. The covering index
+# that would remove it is a migration this task does not own and did not mint;
+# `.claude/rules/db-and-sql.md` carries the full plans and the revision-id note.
+_AFTER_DATED = """
+  AND (added_at IS NULL
+       OR added_at < CAST(:after_added_at AS timestamptz)
+       OR (added_at = CAST(:after_added_at AS timestamptz) AND id < :after_id))
+"""
+# The boundary is inside the undated group, which sorts last, so only the rest
+# of that group can follow it.
+_AFTER_UNDATED = """
+  AND added_at IS NULL AND id < :after_id
+"""
+
+
+def _unmatched_page(resume: str) -> str:
+    """One page of the queue, with the resume clause the boundary calls for.
+
+    Three statements built from one template at import time rather than one
+    template formatted per call: the three are a closed set, nothing a client
+    submits reaches this, and a statement assembled inside a request reads like
+    dynamic SQL even when it is not.
+    """
+    return f"""
+SELECT * FROM media_items
+WHERE title_id IS NULL
+  AND (CAST(:source_id AS uuid) IS NULL OR source_id = :source_id){resume}
+ORDER BY added_at DESC NULLS LAST, id DESC
+LIMIT :limit
+"""  # noqa: S608 -- `resume` is one of three module literals, never input
+
+
+_UNMATCHED_FIRST_PAGE = _unmatched_page("")
+_UNMATCHED_AFTER_DATED = _unmatched_page(_AFTER_DATED)
+_UNMATCHED_AFTER_UNDATED = _unmatched_page(_AFTER_UNDATED)
+
+
 _RECENTLY_ADDED = """
 SELECT title_id, added_at FROM (
     SELECT DISTINCT ON (title_id) title_id, added_at
@@ -550,6 +636,26 @@ class PostgresMediaItemRepository(MediaItemRepository):
                 .mappings()
                 .all()
             )
+        return [MediaItem.model_validate(dict(row)) for row in rows]
+
+    async def list_unmatched_page(
+        self,
+        source_id: uuid.UUID | None = None,
+        *,
+        limit: int,
+        after: UnmatchedCursorPosition | None = None,
+    ) -> list[MediaItem]:
+        parameters: dict[str, object] = {"source_id": source_id, "limit": limit}
+        if after is None:
+            statement = _UNMATCHED_FIRST_PAGE
+        elif after.added_at is None:
+            statement = _UNMATCHED_AFTER_UNDATED
+            parameters["after_id"] = after.id
+        else:
+            statement = _UNMATCHED_AFTER_DATED
+            parameters |= {"after_added_at": after.added_at, "after_id": after.id}
+        with self._session.no_autoflush:
+            rows = (await self._session.execute(text(statement), parameters)).mappings().all()
         return [MediaItem.model_validate(dict(row)) for row in rows]
 
     async def attach_title(

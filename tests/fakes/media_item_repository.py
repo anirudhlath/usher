@@ -1,8 +1,10 @@
 """In-memory `MediaItemRepository`.
 
-**Where this is more forgiving than Postgres, on purpose.** Five places,
-each of which the paired `tests/integration/test_media_item_repository.py`
-run is what actually closes:
+**Where this diverges from Postgres, on purpose.** Seven places, each of which
+the paired `tests/integration/test_media_item_repository.py` run is what
+actually closes. *("More forgiving" and "five" until 2026-08-11: the list had
+six bullets under a count of five, and the seventh below is the first entry
+where this fake is **louder** than Postgres rather than more permissive.)*
 
 - It is a `dict` keyed on `(source_id, external_id)`, so a duplicate inside
   one batch is silently last-wins. The real one raises
@@ -47,6 +49,16 @@ run is what actually closes:
   `test_a_caught_conflict_leaves_the_session_usable` is a Postgres-only
   case. A fake cannot express `PendingRollbackError` and pretending
   otherwise would ratify a repository with no SAVEPOINT.
+- **`list_unmatched_page`'s keyset is louder here than there, which is the
+  one divergence on this list that runs that way.** A NULL cannot poison a
+  comparison in Python: the row-comparison spelling ADR-0034 refutes --
+  `(added_at, id) < (boundary.added_at, boundary.id)` -- raises `TypeError`
+  in the first case that reaches an undated boundary, while against Postgres
+  the identical mistake answers NULL, drops the whole undated tail, and
+  serves full-looking pages the entire way. So the contract case that walks
+  a boundary inside the undated group is a *loud* regression here and a
+  *silent* one there, and only the integration run reproduces what a client
+  would actually see.
 """
 
 import uuid
@@ -63,11 +75,43 @@ from usher.ports.ingest import (
     MediaItemUpsert,
     SweepResult,
 )
-from usher.ports.repository import AddedTitle, BulkWriteResult, MediaItemRepository
+from usher.ports.repository import (
+    AddedTitle,
+    BulkWriteResult,
+    MediaItemRepository,
+    UnmatchedCursorPosition,
+)
 
 # Sorts before every real timestamp, so an undated item lands at the end of
 # a descending review queue -- Postgres's `NULLS LAST`, spelled for Python.
 _UNDATED = datetime.min.replace(tzinfo=UTC)
+
+
+def _after(entry: MediaItem, boundary: UnmatchedCursorPosition) -> bool:
+    """Whether `entry` sorts strictly after `boundary` in the review queue's
+    order: `added_at DESC NULLS LAST, id DESC`.
+
+    ADR-0034's three arms, written out rather than folded into one tuple
+    comparison -- and the reason is that the tuple spelling does not *work*
+    here rather than that it is unclear. `(entry.added_at, entry.id) <
+    (boundary.added_at, boundary.id)` raises `TypeError` the moment either
+    side is undated, which is the sixth divergence in this module's docstring:
+    the same defect that is silent against Postgres is loud here.
+
+    Strict on every arm. Relaxed anywhere, the walk re-serves its boundary row
+    at each page break.
+    """
+    if boundary.added_at is None:
+        # The boundary is inside the undated group, which sorts last, so only
+        # the rest of that group can follow it.
+        return entry.added_at is None and entry.id < boundary.id
+    if entry.added_at is None:
+        # Every undated row follows every dated one. This is the arm a row
+        # comparison loses.
+        return True
+    if entry.added_at != boundary.added_at:
+        return entry.added_at < boundary.added_at
+    return entry.id < boundary.id
 
 
 def _answers(entry: MediaItem, target: MediaItemTarget) -> bool:
@@ -289,6 +333,22 @@ class FakeMediaItemRepository(MediaItemRepository):
         # decides the order.
         matching.sort(key=lambda entry: (entry.added_at or _UNDATED, entry.id), reverse=True)
         return matching[offset : offset + limit]
+
+    async def list_unmatched_page(
+        self,
+        source_id: uuid.UUID | None = None,
+        *,
+        limit: int,
+        after: UnmatchedCursorPosition | None = None,
+    ) -> list[MediaItem]:
+        # The whole queue in `list_unmatched`'s order, then everything strictly
+        # after the boundary. One order, read from the one method that spells
+        # it, which is what the contract's "the two forms agree on page one"
+        # case asserts from the outside.
+        ordered = await self.list_unmatched(source_id, limit=len(self._items), offset=0)
+        if after is not None:
+            ordered = [entry for entry in ordered if _after(entry, after)]
+        return ordered[:limit]
 
     async def attach_title(
         self, media_item_id: uuid.UUID, *, title_id: uuid.UUID, episode_id: uuid.UUID | None

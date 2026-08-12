@@ -18,7 +18,49 @@ from usher.ports.repository._results import BulkWriteResult
 __all__ = [
     "AddedTitle",
     "MediaItemRepository",
+    "UnmatchedCursorPosition",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class UnmatchedCursorPosition:
+    """One item's place in the review queue's order: when it arrived, and its
+    id.
+
+    **Typed values, never a cursor.**
+    [ADR-0034](../../../docs/prd/decisions/0034-the-cursor-carries-a-position.md)
+    holds that no port takes an opaque cursor -- the base64 lives in
+    `usher.api.cursor`, and a port that accepted one would have to decode it,
+    which means knowing the sort vocabulary of the layer above.
+    `GET /admin/unmatched` decodes, builds one of these, and hands it down.
+    `BrowseCursorPosition` and `EpisodeCursorPosition` are the same shape for
+    their own reads, and all three are deliberately separate types rather than
+    one generic: they carry different keys and no route can serve another's
+    cursor.
+
+    **`added_at` is `AwareDatetime | None`, and the `None` is the whole reason
+    this keyset needs all three of ADR-0034's arms.** `EpisodeCursorPosition`
+    types its key `int` rather than `int | None` because
+    `episodes.episode_number` is `nullable=False`, which makes the unkeyed
+    group provably empty there -- B12 measured that the refuted row-comparison
+    spelling is equivalent on that schema and recorded it as a fact about the
+    columns. `media_items.added_at` is nullable (`db/models/source.py:95`,
+    and `MediaItem.added_at` is `AwareDatetime | None`), and an item a source
+    could not date is exactly what an operator is reviewing, so here the
+    unkeyed group is a population rather than a corner. This annotation is
+    that fact spelled where a type checker can hold it: a caller *can*
+    construct the position the third arm is for, and `list_unmatched_page`
+    must answer it.
+
+    `id` is the UUIDv7 primary key, which is what makes the keyset a total
+    order (ADR-0003, and `CursorSpec` refuses a keyset that does not end in
+    one). It is not decoration: a source that imported a thousand files in one
+    second gives them all the same `added_at`, so without the tiebreak a page
+    boundary inside that group is a position no second read agrees about.
+    """
+
+    added_at: AwareDatetime | None
+    id: uuid.UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +307,65 @@ class MediaItemRepository(ABC):
         operator the same item twice and hides another. `added_at` is
         nullable and sorts last, because an item a source cannot date is
         less interesting than one it dated yesterday, not more.
+
+        **The `OFFSET` is measured and it is why `list_unmatched_page`
+        exists beside this**: 43.7 ms at offset 0 against 388.9 ms at offset
+        1,126,574, linear per page and quadratic to drain. This form is kept
+        for `usher unmatched`, whose `--offset` is an operator typing a
+        number at a terminal rather than a client following a cursor; two
+        callers with two access patterns is not duplication. Both orders are
+        one definition, asserted by a contract case that walks the first page
+        of each and requires them to agree.
+        """
+
+    @abstractmethod
+    async def list_unmatched_page(
+        self,
+        source_id: uuid.UUID | None = None,
+        *,
+        limit: int,
+        after: UnmatchedCursorPosition | None = None,
+    ) -> list[MediaItem]:
+        """One keyset page of the review queue, resumed from `after`.
+
+        `list_unmatched`'s order, exactly -- `added_at` descending with
+        undated items last and `id` descending as the tiebreak -- reached
+        without an `OFFSET`. A contract case asserts the two forms agree on
+        page one, so the order stays one definition rather than two that
+        drift.
+
+        **The keyset is ADR-0034's three-arm predicate and every arm is
+        reachable here.** `added_at` is nullable, so a page boundary can land
+        *inside* the undated group and the walk has to resume from it:
+
+            -- resuming from a dated boundary
+            WHERE added_at IS NULL                       -- NULLs sort last
+               OR added_at < :after_added_at
+               OR (added_at = :after_added_at AND id < :after_id)
+
+            -- resuming from an undated one: only the rest of that group can
+            -- follow
+            WHERE added_at IS NULL AND id < :after_id
+
+        The row comparison a reader reaches for first --
+        `((added_at IS NOT NULL), added_at, id) > (...)` -- is **wrong here
+        and quietly**: Postgres evaluates a row comparison element-wise and
+        answers NULL rather than false when the first differing pair involves
+        one, so resuming from an undated boundary drops the whole undated tail
+        while every page served looks full. ADR-0034 carries the measurement.
+        The comparisons run `<` rather than `>` because this order's tiebreak
+        is `id DESC`, which is `list_unmatched`'s and therefore this one's;
+        what is load-bearing is that the predicate agrees with the `ORDER BY`
+        term for term, not which direction either runs.
+
+        Strict on the tail: relaxed to `<=` the walk re-serves its boundary
+        row at every page break, and a test whose pages do not abut cannot
+        see it.
+
+        **`limit` has no default, on this method and deliberately.** A caller
+        asks for `over_fetch(limit)` rows -- one more than it serves -- and a
+        default here would be a third copy of a page size the route already
+        owns.
         """
 
     @abstractmethod

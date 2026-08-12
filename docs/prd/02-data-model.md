@@ -421,6 +421,29 @@ section opens with, and that `CLAUDE.md` states project-wide.
 
 **Unmatched items are never dropped.** A `MediaItem` with `title_id IS NULL`
 sits in a review queue exposed over the admin API for manual resolution.
+**Built in M9:** `GET /admin/unmatched` reads it and
+`POST /admin/unmatched/{id}/resolve` writes it ([07](07-client-api.md)'s Admin
+table); `usher unmatched` has delivered the same capability since M4.
+
+**The queue pages by cursor, and the reason is this column's nullability.**
+`added_at` is optional above and is the sort key the queue is ordered by, so a
+page boundary can land inside the group of items no source could date — which
+is precisely the population an operator is reviewing, since a source that could
+not date a file is a source that told us least about it. The keyset therefore
+carries all three arms of
+[ADR-0034](decisions/0034-the-cursor-carries-a-position.md)'s predicate; the
+row-comparison spelling that record originally shipped evaluates to NULL rather
+than false at such a boundary and drops the whole undated tail while every page
+served still looks full.
+
+**Nothing in this schema ties `title_id` to `episode_id`, so the resolve route
+checks it.** They are two independent foreign keys with no CHECK between them —
+deliberately, because an episode's `MediaItem` is *supposed* to carry its
+series' `title_id` beside its own `episode_id`. The cost is that a hand
+resolution naming an episode of a **different** series is a valid row that every
+read on this port answers with, and measured against real PostgreSQL the write
+succeeds. `POST /admin/unmatched/{id}/resolve` refuses that pairing before it
+writes; there is no second line of defence below it.
 
 **`added_at` is COALESCEd forward, which is not the same as immutable — and
 the difference is what M7's Recently Added row is exposed to.** The shipped

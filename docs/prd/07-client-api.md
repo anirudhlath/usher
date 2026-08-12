@@ -600,6 +600,43 @@ be added if a client turns out to need flexible field selection.
 > it. There is no `user_id` — the toggle is deployment-wide — and nothing
 > schedules a re-enable.
 
+> **Built in M9: `GET /admin/unmatched` · `POST /admin/unmatched/{id}/resolve`.**
+> [02](02-data-model.md)'s *"unmatched items are never dropped"* has had a CLI
+> review queue since M4 (`usher unmatched`) and no wire until now. `GET` answers
+> the `Page` envelope above — items newest-arrival first, undated ones last,
+> `?source_id=` narrowing it and `?limit=` bounded at 200 — and pages by
+> **cursor**, never by offset. That is not a house-style preference: the same
+> read's `OFFSET` is measured at **43.7 ms at offset 0 and 388.9 ms at offset
+> 1,126,574**, and it is the measurement the Pagination section below cites.
+> `usher unmatched --offset` keeps the offset form, because an operator typing a
+> number at a terminal and a client following a token are two access patterns
+> rather than one duplicated.
+>
+> **A queue entry carries the source's own `external_id`, which every *client*
+> response refuses.** An operator resolves an unmatched file by finding it on
+> their own server, and that id is the only handle that gets them there;
+> `usher unmatched` has printed it since M4 for the same reason. This is the one
+> place in the surface where it is the subject rather than a leak.
+>
+> **`POST /admin/unmatched/{id}/resolve` takes `{title_id, episode_id?}`** and
+> answers the resolved row. The `episode_id` is the argument `usher unmatched
+> --resolve` could not offer — an operator has no way to read an `Episode.id`
+> off that listing — and the route **refuses an `episode_id` whose episode
+> belongs to a different title**, because nothing below it would:
+> [02](02-data-model.md) records that `media_items` has no CHECK tying the two
+> columns together and that a mismatched pair is a write real PostgreSQL
+> accepts. A `title_id` or `episode_id` this catalog does not hold, and the
+> mismatched pair, are each a **422 `validation_failed`** — the request parsed
+> and its instruction cannot be carried out, the shape `GET /search` already
+> uses for an unservable `?mode=semantic`. A media item id no row carries is a
+> **404 `not_found`**, generic, because RFC 9457's `instance` already names it.
+> No problem code is minted (ADR-0030 stands at seven).
+>
+> **It enqueues nothing and invalidates nothing**, matching
+> `usher unmatched --resolve` exactly: resolving writes `media_items.title_id`,
+> and no job, neighbour list or cached screen reads that column. Stated so a
+> later reader does not add a re-derive on the assumption it was forgotten.
+
 ### Meta
 
 | Endpoint | Purpose |
