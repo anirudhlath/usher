@@ -3119,3 +3119,145 @@ case added with the filter. `cp` backup, `md5sum`-verified restore.
 Gate green after, on the merged tree: **3,690 unit / 4 skipped**, **1,130
 integration / 22 skipped**, `ruff check`, `ruff format --check`, `mypy` over
 557 files, `lint-imports` 9 kept / 0 broken, PRD link check `OK`.
+## M9 Task C5 — `GET /images/{id}`, the caching proxy on the wire (2026-08-11)
+
+**39 plants over `api/routers/images.py`, `api/caching.py`, `services/images.py`,
+`api/app.py`, `api/deps.py` and (through the route) `ports/images.py` — 36
+behavioural targets and 3 equivalent-mutant controls. Three-way split: **33
+KILLED, 3 SURVIVED, 3 controls surviving all five gate steps.** 0 BAD-ANCHOR,
+0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.** Every verdict
+was written down before the run and every one matched. Run in place with
+`PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under **both** `src/` and
+`tests/` before every run, `compile()` rather than `ast.parse` as the dry run,
+every plant asserted present by an exact anchor count (`count(old) == 1`), and
+every restore verified by `md5sum` against a pre-plant digest.
+
+**Selection:** `tests/unit` whole (3,660 cases, ~31 s a run) rather than a
+scoped subset — the run is cheap enough that scoping would have been the only
+source of a false survivor — plus `tests/integration/test_images_route.py` for
+the two plants named below. **Re-run in full after merging
+`milestone/m9-api-surface`**, because that merge brought C1's ADR-0032
+amendment (`immutable` earned) and C4's `MediaTypeNotServable`, and a ledger
+measured against code that is not what shipped is not a ledger. The first
+run's numbers are superseded and its two repaired survivors are kept below,
+because the *repairs* are the finding.
+
+🔴 **The two survivors from the first run, both the identity-element family,
+and one of them is a security property.** Both are killed by the code that
+shipped; they are recorded because the plant is what found them.
+
+- **`Content-Location` built from `request.url.path` instead of from the route
+  table survived all 3,474 unit cases.** The two spellings agree on every
+  request whose path is already the canonical one, which is every request any
+  fixture was making. This box is internet-facing and that spelling echoes a
+  client-supplied byte sequence into a response header. The smallest request
+  that separates them is an **upper-cased UUID** — `uuid.UUID` parses it,
+  FastAPI routes it, and `str(uuid)` is lower-case — and the property it pins
+  is a *canonicalisation* as well as a leak: two clients spelling one id
+  differently must be told the same representation URI or they cache the same
+  bytes twice and never revalidate against each other. Re-planted, it fails
+  `test_the_representation_uri_is_canonical_and_not_the_path_the_client_typed`
+  alone. **The general form: a header derived from a request is untested until
+  a case sends a spelling the server would not have generated** — and for any
+  identifier with a canonical form, the non-canonical spelling is free to
+  construct and is the only fixture that can see the difference.
+- **Swapping the hit and miss counters survived, because the fixture made one
+  cold request and one warm one and both counters therefore read `1`.** A pair
+  of counters over a symmetric fixture is its own inverse, exactly as a
+  transposition is for a permutation and a zero origin is for a subtraction.
+  One cold and **two** warm requests — 1 miss against 2 hits — is the smallest
+  fixture that is not, and re-planted the swap fails that case alone.
+
+**The two plants only the integration file can see, which is a *scope* result
+and not a gap.** `app.state.image_store = None` and `deps.py` handing the
+fetcher in as the store both survive the whole unit suite, for the reason this
+file already records under *"a dependency every test overrides is a dependency
+no test covers"*: every unit case overrides `get_image_proxy_service`, which is
+correct — it is what makes the route testable with no database and no disk.
+Against `tests/integration/test_images_route.py`, which drives the
+un-overridden graph, each fails **6 of 6**. Recorded because the honest
+statement of the residual risk is *"the wiring is covered by one file"*, and a
+sweep scoped to `tests/unit` alone would have reported two live mutants in the
+composition root.
+
+**The three real survivors, each with why it is one:**
+
+| survivor | why |
+|---|---|
+| `merged = {"ETag": …, "Cache-Control": …, **(headers or {})}` — a caller's headers shadowing the validators | Predicted. No caller passes `ETag` or `Cache-Control` and the only caller passing anything is this route, with `Content-Location`. A case would assert a defence against a call nobody makes; the shipped order (caller first, validators last) is the cheap half and is what a reviewer should keep. |
+| `await close_images()` deleted from the lifespan's `finally` | Predicted, and re-confirmed against the integration file. An `httpx.AsyncClient` leaked at shutdown, in a process that is exiting. `app.py`'s own comment makes the same argument about the three resources beside it. Nothing in this repository asserts a closed transport. |
+| a bare `HTTPException(404)` in place of the missing-row `ProblemException` | **Genuinely equivalent, and only at 404.** `_CODE_FOR_STATUS` maps 404, 405 and 422, so `http_error_as_a_problem_document` translates a bare 404 into the identical document — same `code`, same `type`, same media type. ADR-0030 ruling 4 is what makes this true and it is *not* true one status over: both upstream arms are 503s with no entry in that map, and deleting either `ProblemException` there fails its own case at once. So this survivor measures ruling 4 rather than the route. |
+
+**The five plants the plan named as headlines, with what each costs** (whole
+unit suite, no `-x`): the **clamp call** replaced by the raw width fails 3; the
+**`immutable` directive** removed fails 2; the **ETag comparison** loosened to
+"any `If-None-Match` matches" fails 4 — three of them A4's, which is the shared
+implementation earning its keep; the **404/upstream split** inverted fails 1;
+the **`code` string** changed to another member fails 1. Beside them,
+`app.include_router(images.router)` deleted fails **24**.
+
+**The arm ordering C4's subclass bought, pinned two ways.**
+`MediaTypeNotServable` subclasses `PortDataMalformed`, so an `except` arm
+written *after* its parent's is unreachable and the whole distinction vanishes
+with nothing failing. Two plants: the arm deleted, and the arm respelled as a
+second `except PortDataMalformed` (which is what "moved below its parent"
+compiles to). Both are killed — the first by the declined-media-type case, the
+second by the *503* case, which is the pair working as intended: one arm
+proves the 404 is reached, the other proves the 503 still is. A structural case
+(`test_the_declined_media_type_arm_precedes_its_parents`) reads the handler's
+own `except` clauses, for the reason `testing-discipline.md` records about
+`pytest.raises(Child)` — behavioural coverage of a subclass says nothing about
+ancestry, and a third arm added later is exactly when this stops being obvious.
+
+The other twenty-odd, grouped: clamping down instead of up fails 3 and clamping
+to the default only fails 1 (both through the *fetcher's* recorded rung and the
+store's key, so an unclamped width is loud rather than a CDN 400); `max-age`
+zeroed fails 1 and `private` for `public` fails 1; a weak `W/` validator fails
+2 and a tag over the media type rather than the bytes fails 2; a 304 without
+its validators fails 2; the transient `except` arm deleted fails 1 and the
+residual-malformed one fails 1; `Retry-After` added to the malformed arm fails
+1 and removed from the transient arm fails 1; the declined arm's code changed
+fails 1; `Content-Location` carrying the width the client asked for fails 3 and
+dropped entirely fails 3; `Query(gt=0)` unbounded fails 1; the OpenAPI content
+map replaced by `application/json` fails 1; the `cache` label changed to `row`
+fails 1, the miss not recorded fails 1, and a parallel instrument pair declared
+beside A5's fails 1; a missing row falling through to the 200 path fails 1.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `timedelta(days=365)` → `timedelta(seconds=31_536_000)` | PASS | PASS | PASS | PASS (9/0) | PASS (3,660 / 4 skipped) |
+| `deps.py`'s two `getattr(app.state, …)` reads swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,660 / 4 skipped) |
+| one sentence of `_representation_of`'s docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (3,660 / 4 skipped) |
+
+The first two are facts about the *code* rather than about what the tools look
+at: one `timedelta` literal with a single reader that immediately calls
+`.total_seconds()`, and two disjoint reads of `app.state` neither of which
+reads the other with nothing between them. The docstring reword was checked
+first against `grep -rn "getdoc\|__doc__\|ast.unparse\|getsource" tests/` — the
+scans it finds read `api/errors.py`, `api/caching.py`'s module docstring,
+`api/dto/playback.py`, `services/rows/`, `api/routers/rows.py` and
+`api/routers/home.py`, and **none reads `api/routers/images.py`**. Note that
+`test_api_problem_vocabulary.py` *does* AST-walk every module under
+`src/usher/api/`, but harvests `ProblemCode.<MEMBER>` attribute accesses and
+string literals passed as `code=`, so a docstring naming a code in prose — and
+this one's failure table names four — is invisible to it by construction.
+
+**The eighth import contract was verified in both directions, in the careful
+spelling.** `from usher.composition import build_image_proxy_service` planted
+in `api/routers/images.py` **in its isort position and with a use** — the
+careless spelling is caught by ruff as `F401`, which is the wrong way round for
+a guard — passes `ruff check`, `ruff format --check`, `mypy` and the whole unit
+suite, and reports **8 kept, 1 broken**, naming
+`usher.api.routers.images -> usher.composition`. Restored, `md5sum`-verified,
+9 kept / 0 broken.
+
+🔴 **One harness note worth carrying, learned the expensive way.** The first
+attempt at this sweep was run under a 10-minute foreground timeout and was
+**killed mid-plant**, leaving `services/images.py` carrying a mutation and the
+run reporting nothing at all. The recovery is what the discipline is for: the
+harness had already `cp`-ed the pristine file, so the restore was a `cp` back
+verified by *reading the import line back* and by `git status` — never
+`git checkout`. **A sweep runs detached with its own timeout, not inside a
+caller's**, because a harness killed between plant and restore is
+indistinguishable from one that never ran, and the tree it leaves behind looks
+exactly like working code.

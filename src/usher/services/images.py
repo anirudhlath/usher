@@ -19,6 +19,27 @@ identical and the second atomic rename wins. A lock is one process's claim and
 this deployment can run several, so an in-process single-flight would buy a
 guarantee only a single-container deployment has. Anyone reversing that needs
 observed overlap with recorded wall-clock intervals, not a count of fetches.
+
+**`usher.cache.hits`/`.misses` are recorded here, at the store read, and
+through the instruments `services/rows/cache.py` already declares.** Both
+halves are decisions rather than convenience. *Here*, because that is where
+the read happens and it is the rule A5 wrote the pair under -- *"every future
+reader is counted rather than every future caller remembering to"* -- and
+because `serve` answers bytes rather than an outcome, so a route counting for
+itself could not tell a hit from a miss without a second return value nobody
+else wants. *Those* instruments, because two `create_counter` calls for one
+name under one meter do not add up: PRD 10 gives the metric a `cache` label
+and this is its third value (`row`, `screen`, **`image`**), which is exactly
+the growth `services/rows/cache.py`'s own comment says a new cache performs by
+appending rather than by declaring a parallel pair.
+
+**No `freshness` label, and its absence is the honest reading of PRD 10's
+vocabulary rather than an omission.** `freshness` is `fresh`/`stale` on the
+hits counter and exists because a screen has a TTL it can outlive. This cache
+has none: a stored rung is the bytes the provider held when they were fetched,
+this proxy never re-encodes them, and there is nothing for a serve to be stale
+*against*. A constant `freshness="fresh"` here would put a distinction on a
+dashboard that this cache cannot draw.
 """
 
 import uuid
@@ -36,6 +57,7 @@ from usher.ports.images import (
     is_servable_path,
 )
 from usher.ports.repository import ImageRepository
+from usher.services.rows.cache import CACHE_HITS, CACHE_MISSES
 
 __all__ = ["ImageProxyService", "servable_images"]
 
@@ -114,6 +136,11 @@ def servable_images(images: Iterable[Image]) -> tuple[Image, ...]:
     _image_references.add(len(every) - len(kept), {"outcome": "unservable"})
     return kept
 
+#: PRD 10's `cache` label, third value. A module constant rather than a
+#: literal at two call sites, because a hit counted under `image` and a miss
+#: counted under `images` is a hit rate that reads as 100%.
+_CACHE_LABEL = {"cache": "image"}
+
 
 class ImageProxyService:
     """`GET /images/{id}`'s whole behaviour, minus its headers.
@@ -159,6 +186,8 @@ class ImageProxyService:
         )
         stored = await self._store.get(key)
         if stored is not None:
+            CACHE_HITS.add(1, _CACHE_LABEL)
             return stored
+        CACHE_MISSES.add(1, _CACHE_LABEL)
         async with self._fetcher.fetch(image.provider_path, key.width) as fetched:
             return await self._store.put(key, fetched)

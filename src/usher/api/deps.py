@@ -18,7 +18,7 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.lanes import LaneSupervisor
-from usher.composition import adapter_factory, build_search_service
+from usher.composition import adapter_factory, build_image_proxy_service, build_search_service
 from usher.config import Settings
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
@@ -44,6 +44,7 @@ from usher.domain.taste import GenreAffinity
 from usher.domain.watch import User
 from usher.ports.credentials import CredentialStore
 from usher.ports.events import EventPublisher
+from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import (
     CollectionRepository,
@@ -68,6 +69,7 @@ from usher.ports.rows import RowContext
 from usher.ports.source import SourceAdapterFactory
 from usher.services.events import InMemoryEventBus
 from usher.services.home import HomeService
+from usher.services.images import ImageProxyService
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.playback import PlaybackService
@@ -1089,3 +1091,49 @@ def get_watch_write_service(
 
 
 WatchWriteServiceDep = Annotated[WatchWriteService, Depends(get_watch_write_service)]
+
+
+# The image proxy (M9). One dependency function, deliberately: `app.py` and
+# this module are the milestone's worst collision pair, and every other
+# consumer of `images` -- `RowCard.artwork`, `GET /titles/{id}`'s `images` key
+# -- reads the repository rather than this service, so a shared
+# `get_image_repository` would be a second claimant on one line for no caller.
+# ---------------------------------------------------------------------------
+
+
+def get_image_proxy_service(request: Request, session: SessionDep) -> ImageProxyService:
+    """`GET /images/{id}`'s service: this request's repository over the
+    process's fetcher and store.
+
+    **The asymmetry is the design, not an inconsistency.** The repository is
+    session-scoped because a row read belongs to the request's unit of work;
+    the fetcher and the store are process-scoped because the fetcher owns an
+    `httpx.AsyncClient` and a client per request is a connection pool per
+    request. `composition.image_proxy` builds both halves together in
+    `create_app`'s lifespan, so a deployment cannot end up with a cache
+    directory the fetcher's byte ceiling was never told about.
+
+    **The repository, not the `Pipeline`.** `composition.build_image_proxy_
+    service` says why: this route reads one row and needs none of the other
+    twenty-odd fields, and a route handed the whole pipeline could reach the
+    job queue from a request path.
+
+    Same defensive `getattr`/`cast` shape as `get_session_factory`, and for
+    the same reason -- `app.state` is typed `Any`.
+    """
+    fetcher = getattr(request.app.state, "image_fetcher", None)
+    store = getattr(request.app.state, "image_store", None)
+    if fetcher is None or store is None:
+        raise RuntimeError(
+            "app.state.image_fetcher/image_store is not set -- create_app's lifespan "
+            "has not run. If this is a test using a bare ASGI transport, wrap the app "
+            "in asgi_lifespan.LifespanManager first."
+        )
+    return build_image_proxy_service(
+        PostgresImageRepository(session),
+        cast(ImageFetcher, fetcher),
+        cast(ImageBlobStore, store),
+    )
+
+
+ImageProxyServiceDep = Annotated[ImageProxyService, Depends(get_image_proxy_service)]
