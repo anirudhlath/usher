@@ -25,17 +25,19 @@ a two-tier suggest — **shipped in M9**
 ([ADR-0002](docs/prd/decisions/0002-postgres-first-search.md),
 [ADR-0031](docs/prd/decisions/0031-the-two-tier-suggest.md)).
 
-🔴 **M9's own live verification of playback and watch write-back did not run,
-and the roadmap says so rather than implying it did.** Everything on the wire is
-covered by unit and integration tests, and M9's Track 2 ran live against the
-TMDb API (130,334 requests, 130,647 titles enriched) — but the two runs that
-would have driven `POST /titles/{id}/play` → ticket → `302` → a real partial
-response, and a watch write-back read back *from* Emby, needed Emby credentials
-this development host does not have.
-[`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) carries it as a named gap
-under *M9's boundary calls*. It matters because M3, M4 and M5's live runs each
-found something their fakes agreed with and reality did not — including Emby's
-watch-state write-back route being simply wrong.
+**M9's own live verification of playback and watch write-back ran on
+2026-08-12, and both halves passed.** `POST /titles/{id}/play` → a minted ticket
+→ `GET /stream/{ticket}` → `302` → a **real `206` with real bytes** from the
+source, with the play body's leak check proven by a positive control before its
+absence was believed; and the watch write-back driven through the shipped routes
+and a real worker pass, read back **from Emby**, then restored **byte-for-byte**.
+Twenty-three bounded requests, no walk. ⚠️ It ran *after* the milestone closed:
+M9 had recorded it as an unrunnable gap on the strength of checking one `.env`
+file, and the credentials were in a secrets file one directory over.
+[`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) carries the result. It
+matters because M3, M4 and M5's live runs each found something their fakes
+agreed with and reality did not — including Emby's watch-state write-back route
+being simply wrong.
 
 **M7 composes a home screen**: nine row providers, scored and diversified
 server-side, plus the taste centroid, the MovieLens tag genome as a third

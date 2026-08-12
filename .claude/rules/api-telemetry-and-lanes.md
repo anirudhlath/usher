@@ -506,3 +506,51 @@ only models in the package the scan could not see — and `PlayTargetResponse` i
 the one model in the API that renders a value derived from a credential-bearing
 URL. Shipped as `PlayTargetResponse`/`PlaySourceResponse`, for the reason
 `ProblemResponse`'s own docstring gives for its name.
+
+## M9's live run (H4) — three route findings, measured 2026-08-12
+
+The Emby half of that run is in `.claude/rules/emby-push-and-ingest.md`; these
+three are about the *route* and belong here.
+
+🔴 **Starting the shipped app against a real source is itself an unbounded
+walk, and nothing warns you.** `LaneSupervisor` starts a push lane per **enabled**
+source, and the lane's reconnect gap-closer calls
+`reconcile(source, SyncRunKind.DELTA, adapter)`. Against a real household —
+1,126,789 items on the one this project measures — that is exactly the walk
+`emby-push-and-ingest.md` forbids, issued by a bare
+`uvicorn usher.api.app:create_app --factory` with default settings and no
+command of its own. H4/H5's run set `USHER_PUSH_ENABLED=false` and
+`USHER_WORKER_ENABLED=false` for that reason (and the second is required anyway,
+because H5's worker pass has to be a real `usher work --once`). **Any live HTTP
+run against a real source must set both, or budget for a delta walk it did not
+ask for.** The two settings are also what make such a run's request budget
+*statable*: with the lanes on, the count is whatever a websocket and a gap
+closer decide.
+
+**`quote(ticket, safe="=")` is a no-op at the length the shipped path actually
+produces, confirmed live.** D1 measured the encoding question over synthetic
+plaintext lengths; H4 measured the artefact: a ticket minted for a real Emby
+direct URL is **292 characters**, url-safe base64 plus `=` padding, and the
+segment that comes back out of Starlette is byte-identical to the one minted.
+No `%` appears in the path at any point.
+
+**The `deep_link` wrapper does not double-encode, and this is the specific
+defect H4 was dispatched to look for.** `PlaybackService._with_tickets` rebuilds
+a deep link as `wrap_deep_link(<the ticket URL>)`, so the whole Usher URL —
+itself already percent-encoded once by `quote(ticket, safe="=")` — is
+percent-encoded again by `quote(inner_url, safe="")`. Measured against the real
+route: the `url=` parameter decoded **exactly once** is byte-identical to the
+`direct` target's ticket URL, and a `GET` of that decoded string answers the
+same `302` to the same `Location`. One encode, one decode; the two are inverses
+at this length and alphabet.
+
+**Ticket expiry, driven against the wall clock rather than a frozen one.**
+`TICKET_TTL_SECONDS: Final = 300` is a module constant and deliberately not a
+setting, so a live run cannot lower it — the honest alternative is to wait. One
+ticket minted by the running server was honoured at **127 s** (`302`) and
+refused at **312 s** (`404 ticket_invalid`), and a four-character tamper of a
+live ticket answered `404 ticket_invalid` as well, which is D1's one-answer-for-
+expired-and-forged decision observed rather than asserted. Both the mint and the
+redeem happened in the **same** process: a ticket minted under one
+`USHER_SECRET_KEY` and redeemed against a server started with another is
+undecryptable and looks exactly like a ticket bug.

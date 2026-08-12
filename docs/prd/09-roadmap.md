@@ -26,7 +26,7 @@ direct Emby access, for both movies and television.
 | **M6 — Search** ✅ | **The `index` stage of [03](03-sources-and-sync.md)'s pipeline**; a weighted full-text document as a generated column, a typo-tolerant autocomplete path on its own port, optional embeddings with a fingerprint that makes staleness a query, RRF fusion reporting its own coverage, similarity, and a precomputed neighbour table. **Adds no HTTP route and no new client event, both deliberately** — see the boundary calls below. **[ADR-0002](decisions/0002-postgres-first-search.md)'s Meilisearch gate ran against a real 1,271,138-title catalog on 2026-08-03 and failed for short names and for latency**; the follow-up is the two-tier suggest, owned by M9 |
 | **M7 — Rows** ✅ | `Row`/`RowProvider` as ports and **nine registered providers**, `HomeService`'s propose→score→diversify→build, in-process row and screen caches, the taste centroid and genre affinity, `GET /home` and `usher home`, `row.invalidated`. **Plus the MovieLens tag-genome importer** — five documents specified it and nothing built it, and it is now the similarity blend's third live signal. Plus `Person`/`Credit`/`Collection` re-derived from `raw_payloads` with no second network call (`usher derive`), search weight class B filled, and two measurements the milestone owed: the sequential build's cost, and `titles.popularity`/genome coverage with their denominators |
 | **M8 — Curation** ✅ | LLM row generation, validation, persistence, regeneration job — `OpenAICompatibleClient` over httpx ([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md), litellm declined), `curated_rows` + `llm_calls` (migration `m08a`), `CandidatePoolService`, `CurationService`'s assemble→call→validate→persist with the validator as its own module, `RowFamily.CURATED` + `LLMRow` + `CuratedProvider` as **the tenth row provider**, `JobKind.CURATE` + handler, `POST /admin/rows/regenerate` (202), and `usher curate`. **Its eight boundary calls are below**, and 🔴 **the product finding is below them**: 88% of one live run's headings were the genre labels the prompt forbids. **Inherits from M7:** `curated_rows`, `LLMRow`, `CuratedProvider`, `RowFamily.CURATED` and `POST /admin/rows/regenerate` as one family (call 2); M6's query expansion (its call 6) — ✅ **shipped by Task 20 and then measured**: against a local `gemma-4-26b-a4b` it moved MRR **0.733 → 0.373**, so it ships behind `USHER_QUERY_EXPANSION_ENABLED`, off by default and independent of `USHER_LLM_ENABLED` ([05](05-search-and-similarity.md)); and the genome's **tag vocabulary**, which M7 deliberately did not store — a prompt that wants to say "atmospheric, thought-provoking" needs the words, and `genome_revision` is what made loading them later safe. ✅ **Shipped by Task 19**: `genome_tags(tag_id, tag, genome_revision)`, migration `m08b`, 1,128 rows loaded by the same `bootstrap --phase movielens`, with `GenomeRepository.vocabulary(revision)` refusing a release mismatch ([02](02-data-model.md), [04](04-catalog-bootstrap.md), [ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md)) |
-| **M9 — API surface** ✅ | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, **outbound watch state (`PUT /watch/titles/{id}` and the source write-back retry job)**, **[07](07-client-api.md)'s RFC 9457 error envelope**, `GET /titles/{id}/similar` over M6's precomputed table, **the `search_queries` analytics table whole** ([10](10-telemetry-and-dashboards.md)), **the two-tier suggest [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges** (see below), attribution. **Inherits from M7:** artwork on `RowCard` with the `Image` table and `GET /images/{id}` (call 3); `title_search_names`' *people* half, with M6's condition **restated rather than renewed** (call 6); row provider enable/disable via the admin API (call 9); the RFC 9457 envelope `GET /home` deliberately ships without (call 1), plus `usher.http.server.duration`, `usher.cache.hits`/`.misses` and serve-stale-while-refreshing; `credits` as a key on `GET /titles/{id}`; the three ranking terms M7 built data for and did not wire — taste-centroid proximity, watch state and recency ([05](05-search-and-similarity.md)); and **the tag-genome weight M7 left at 0.25 on coverage that does not support it** — ✅ **settled 2026-08-12 by S7 and the answer is the revert**: the priority tier was enriched and embedded so the pair rate could be measured over a population whose documents carry weight classes C and D, S5's one pool walk put it at **2.4746%** (323,297 of 13,064,700 pairs over 130,647 seeds) against the **10%** floor, and the term is removed from `SimilarityService._WEIGHTS` while the vectors, the pair read and the rebuild's coverage counters stay ([ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md)). It is a **second measurement, not a rise from 1.81%** — S1 established M7's figure came from 5,020 name-selected seeds in a database that no longer exists. **The blend change obliged one `usher similar --rebuild`, which S7 did not run and H7 did** — 2026-08-12, 88.3 minutes over 130,647 seeds, `stale_neighbors()` **0** against **3,266,175 rows** all stamped `78f3ecd2…`, the row count recorded beside the verdict because an empty table reports no stale rows too and empty is what it was. **Complete 2026-08-12 on `milestone/m9-api-surface`: 74 tasks planned across two tracks, migrations `m09a` and `m09c`, six ADRs (0029–0032, 0034, 0035).** T4 was withdrawn when the IMDb entity design failed its own pre-registered size bar. 🔴 **H4 and H5 — the live Emby verification of `/play` → ticket → `302` → a real 206, and of the watch write-back round trip read back from Emby — did not run**, because no Emby credentials exist on this host; see *M9's boundary calls* below, which records it as a gap rather than as a pass. **M9's eight boundary calls are below** |
+| **M9 — API surface** ✅ | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, **outbound watch state (`PUT /watch/titles/{id}` and the source write-back retry job)**, **[07](07-client-api.md)'s RFC 9457 error envelope**, `GET /titles/{id}/similar` over M6's precomputed table, **the `search_queries` analytics table whole** ([10](10-telemetry-and-dashboards.md)), **the two-tier suggest [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges** (see below), attribution. **Inherits from M7:** artwork on `RowCard` with the `Image` table and `GET /images/{id}` (call 3); `title_search_names`' *people* half, with M6's condition **restated rather than renewed** (call 6); row provider enable/disable via the admin API (call 9); the RFC 9457 envelope `GET /home` deliberately ships without (call 1), plus `usher.http.server.duration`, `usher.cache.hits`/`.misses` and serve-stale-while-refreshing; `credits` as a key on `GET /titles/{id}`; the three ranking terms M7 built data for and did not wire — taste-centroid proximity, watch state and recency ([05](05-search-and-similarity.md)); and **the tag-genome weight M7 left at 0.25 on coverage that does not support it** — ✅ **settled 2026-08-12 by S7 and the answer is the revert**: the priority tier was enriched and embedded so the pair rate could be measured over a population whose documents carry weight classes C and D, S5's one pool walk put it at **2.4746%** (323,297 of 13,064,700 pairs over 130,647 seeds) against the **10%** floor, and the term is removed from `SimilarityService._WEIGHTS` while the vectors, the pair read and the rebuild's coverage counters stay ([ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md)). It is a **second measurement, not a rise from 1.81%** — S1 established M7's figure came from 5,020 name-selected seeds in a database that no longer exists. **The blend change obliged one `usher similar --rebuild`, which S7 did not run and H7 did** — 2026-08-12, 88.3 minutes over 130,647 seeds, `stale_neighbors()` **0** against **3,266,175 rows** all stamped `78f3ecd2…`, the row count recorded beside the verdict because an empty table reports no stale rows too and empty is what it was. **Complete 2026-08-12 on `milestone/m9-api-surface`: 74 tasks planned across two tracks, migrations `m09a` and `m09c`, six ADRs (0029–0032, 0034, 0035).** T4 was withdrawn when the IMDb entity design failed its own pre-registered size bar. ✅ **H4 and H5 — the live Emby verification of `/play` → ticket → `302` → a real 206, and of the watch write-back round trip read back from Emby — ran on 2026-08-12 and both passed**, in 23 bounded requests with no walk, the write restored byte-for-byte; ⚠️ they ran **after** the gate, because the milestone shipped them as an unrunnable gap having checked one `.env` file and nowhere else. See *M9's boundary calls* below. **M9's eight boundary calls are below** |
 | **M10 — Hardening** | Observability, failure modes, backup/restore, docs, public release |
 
 TV is in scope throughout, not deferred — series/season/episode modelling,
@@ -737,41 +737,49 @@ back here rather than restating it.
    itself, and no widening of `except IntegrityError` reaches them. Left in the
    carried-debt list below with that reason attached.
 
-🔴 **And one thing M9 intended to do and did not: the live Emby verification.**
-M9's H4 (`POST /titles/{id}/play` → a minted ticket → `302` → a real `206` from
-the source) and H5 (the watch write-back round trip, read back **from Emby**)
-are both live runs against a real Emby 4.9.5.0, and **neither ran**. The reason
-is not a scheduling one: **no Emby credentials exist on this host** — verified
-rather than assumed, `.env` holds `USHER_SECRET_KEY` and `USHER_TMDB_API_KEY`
-only, `sources` is empty in every catalog on the box, and nothing outside the
-tree names an Emby host. `CLAUDE.md`'s live-verification rule requires driving
-such a run from *"the operator's own secrets file"*, and there is no such file
-here.
+✅ **The one thing M9 shipped as a gap — the live Emby verification — ran on
+2026-08-12, after the gate, and both halves passed.** H4
+(`POST /titles/{id}/play` → a minted ticket → `302` → a real `206` from the
+source) and H5 (the watch write-back round trip, read back **from Emby**) drove
+the shipped surface over real sockets against the operator's real Emby 4.9.5.0
+in **23 bounded requests with no walk of any kind**. The evidence is in
+`.claude/rules/emby-push-and-ingest.md`, per the convention that live-run
+evidence lives with the subsystem it measures.
 
-**This is recorded as a gap and not as a pass, and the distinction is the whole
-reason the entry exists.** The entire product of H4 and H5 *is* the live
-evidence; there is no fake substitute, because the argument for running them at
-all is that M3's, M4's and M5's live runs each found something the fakes could
-not — including Emby's watch-state write-back route simply being **wrong** in
-code that every fake agreed with. Recording an unrunnable live verification as
-done would be *"a run that did not run is not a pass"* in its most expensive
-spelling.
+🔴 **What this section said until then was wrong, and the way it was wrong is
+worth more than the runs.** It read *"no Emby credentials exist on this host —
+verified rather than assumed"*, and what had been verified was `~/code/usher/.env`
+and nothing else. The operator's Emby base URL, token, user id and device id
+were in a Home Assistant secrets file one directory over — which is exactly the
+*"operator's own secrets file"* that `CLAUDE.md`'s live-verification rule tells
+such a run to read. **A negative established by checking the one place the
+answer was expected is not a negative**, and this one cost a milestone the two
+runs whose entire product is live evidence. The claim was repeated in **eight
+places across seven files**; the reconciliation that was supposed to keep them
+in step counted five.
 
-What is affected and what is not, stated so nobody re-derives it:
+What the runs settled, briefly — the full ledger is in the rules file:
 
-- **One thing H5 was specifically meant to observe is already carried as a
-  standing 🔴 risk rather than measured** — the `POST /PlayedItems`
-  position-clearing divergence, recorded on D8's write-back handler.
+- **The read half is bytes, not a redirect.** The `302`'s `Location` is
+  byte-for-byte the URL `build_stream_targets` builds, and a `Range` request
+  against it answers `206` with `video/x-matroska` content. The **ticket path
+  mangles nothing**, and the specific candidate — double percent-encoding of the
+  `deep_link` wrapper — does not fire.
+- **The leak claim has a control.** The token is found in the `302`'s
+  `Location`, where it must be, *before* its absence from the `/play` body is
+  believed.
+- **Ticket expiry was driven live rather than named as unverified**: honoured
+  at 127 s, refused at 312 s. Group D shipped the TTL as a constant and
+  deliberately not as a setting, so it was held against the wall clock instead.
+- **One thing H5 was specifically meant to observe is no longer a standing 🔴
+  risk** — the `POST /PlayedItems` position-clearing divergence on D8's
+  write-back handler is now measured, in the direction M3 predicted, through the
+  shipped route and the shipped job.
+- **The write to a real account was restored byte-for-byte**, the before/after
+  diff empty, on an item chosen precisely because its `UserData` was all-zero.
 - **H2's conformance pin, H6's reconciliation and H7's gate are unaffected.**
-  None of the three depends on H4 or H5 landing, only on their disposition
-  being honest.
-- **The playback path is not unverified in every sense.** D5 pins all four
-  `StreamTarget` leak surfaces — one of them against a **real loopback socket**,
-  because `HTTPXClientInstrumentor` cannot see an `httpx.MockTransport` — and C5
-  proved image id stability across a real re-derivation.
-- **It is dispatchable unchanged.** With an Emby base URL and API key in a
-  secrets file outside the tree, both tasks run exactly as written. **It needs
-  the operator, not a plan.**
+  None of the three ever depended on H4 or H5 landing, only on their disposition
+  being honest — and that disposition is what changed.
 
 ### The follow-up the gate obliges: a two-tier suggest, owned by M9
 

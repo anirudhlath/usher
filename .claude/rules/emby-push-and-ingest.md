@@ -14,31 +14,166 @@ Verified facts, loaded when working in this subsystem. Measured or observed,
 never assumed — each entry carries its date, its sample and what it refuted.
 The always-on conventions live in `CLAUDE.md`; this file is the evidence.
 
-🔴 **M9 put playback and outbound watch state on the wire and did NOT verify
-either against a live server.** Recorded here because this file is where the
-Emby live-run evidence lives, and an absence has to be as findable as a
-measurement. M9's H4 (`POST /titles/{id}/play` → a minted ticket →
-`GET /stream/{ticket}` → `302` → a real `206` from the source) and H5 (the watch
-write-back round trip, read back **from Emby**) were both planned as live runs
-against a real Emby 4.9.5.0 and neither ran: `.env` on the development host
-holds `USHER_SECRET_KEY` and `USHER_TMDB_API_KEY` only, `sources` is empty in
-every catalog on the box, and nothing outside the tree names an Emby host —
-verified, not assumed. There is no fake substitute, because the *reason* those
-runs exist is that every previous one on this list found something the fakes
-agreed with and the server did not, the write-back route below being the
-loudest.
+## M9's live verification — it ran on 2026-08-12, and the reason it had not is the first finding
 
-**What that leaves open, specifically.** The `POST /PlayedItems`
-position-clearing divergence recorded further down is carried as a standing 🔴
-risk on M9's write-back handler rather than as an observation — H5 was the run
-that would have settled it. And the redirect chain has never been walked against
-a server that answers ranges: `StreamTarget`'s four leak surfaces are pinned
-(M9's D5, one of them against a real loopback socket, because
-`HTTPXClientInstrumentor` cannot see an `httpx.MockTransport`), and the ticket's
-mint/redeem/expiry is pinned by unit and integration cases — what is unpinned is
-whether the URL those produce is one this Emby will serve. Both tasks are
-dispatchable unchanged the moment an operator supplies a base URL and an API key
-in a secrets file outside the tree.
+**Both halves passed against the same real Emby 4.9.5.0, and H5 is the first
+time this project has written to the operator's account *through the HTTP
+surface* and restored it byte-for-byte.** H4 is `POST /titles/{id}/play` → a
+minted ticket → `GET /stream/{ticket}` → `302` → a real `206`; H5 is the watch
+write-back round trip read back **from Emby**.
+
+🔴 **The premise that stopped them was false, and it was false in eight places
+across seven files.** M9 recorded H4/H5 as *did not run* on the ground that *"no
+Emby credentials exist on this host — verified rather than assumed"*. What was
+verified was `~/code/usher/.env`, and nothing else. The operator's Emby base
+URL, access token, user id and device id are in a Home Assistant secrets file
+one directory over — which is precisely where `CLAUDE.md`'s live-verification
+rule says such a run reads them from. **A negative established by checking the
+one place the answer was expected is not a negative**, and it cost a milestone
+its two most valuable runs. The eight sites (this file, `CLAUDE.md`,
+`README.md`, PRD 09 twice, `docs/prd/README.md`, `docs/plans/progress.md`, and
+the M9 plan's final-gate section) are corrected in the same commit as this
+entry; the milestone's own reconciliation task counted **five** of them.
+
+**Bounded deliberately: 23 requests to the operator's server in total**, and
+**no walk of any kind** — three reachability probes, one filtered listing, one
+single-item confirmation, one `get_item` for the ingest, two for H4 (the play
+resolution's `stream_targets` read and the `Range` fetch), fourteen for H5's
+writes, read-backs and the restore, and one post-teardown read confirming the
+account is still restored. The item was chosen by a **filtered**
+listing (`IncludeItemTypes=Movie&Filters=IsUnplayed&Limit=25`); the ingest's
+bound is in the **iterator**, a `list_items` replaced by a closed one-element
+list feeding the shipped `get_item` → `to_source_item` → `IngestService` path.
+
+### H4 — the read half
+
+- **The whole chain works and the claim is bytes.** `POST /titles/{id}/play`
+  answered `200` with **two** ranked targets for a single-`MediaSource` movie —
+  `direct` then `deep_link` — every `url` an Usher ticket URL.
+  `GET /stream/{ticket}` answered `302` with `Cache-Control: no-store`, and the
+  `Location` was byte-for-byte the URL `build_stream_targets` builds. A
+  `Range: bytes=0-65535` against it answered **`206`,
+  `Content-Range: bytes 0-65535/729664590`, `Content-Type: video/x-matroska`,
+  65,536 bytes whose first four are the Matroska magic `1A 45 DF A3`.** M3
+  measured the URL *as built* answering 206 (ADR-0012); what this adds is that
+  the **ticket path does not mangle it**.
+- **The absence claim, and its control fired first.** `token_appears_in` was
+  pointed at the `302`'s `Location`, where the token **must** be —
+  `True` — and only then at the `/play` response body, where it found nothing:
+  no `api_key`, no token, no source host. A run whose control found nothing was
+  pre-registered as `DID-NOT-RUN` yielding no absence claim; it did not come to
+  that.
+- **The double percent-encoding candidate does not fire.** This is the specific
+  refutation H4 existed to look for. The `deep_link`'s `url=` parameter,
+  percent-decoded **once**, is exactly the direct target's ticket URL, and a
+  `GET` of that decoded string answers the same `302` to the same `Location`.
+  `wrap_deep_link` encodes the ticket URL once and nothing encodes it again.
+- **The ticket round-trips.** 292 characters, url-safe base64 plus `=` padding,
+  no `%` in the path segment — D1's `quote(ticket, safe="=")` is a no-op at this
+  length, live. A four-character tamper answers `404 ticket_invalid`.
+- **Ticket expiry was driven live rather than named as unverified**, and the
+  decision rule's flattering half was unavailable: group D shipped
+  `TICKET_TTL_SECONDS: Final = 300` deliberately **not** as a setting, so there
+  was nothing to lower. One ticket was held against the wall clock instead —
+  honoured at **127 s** (`302`), refused at **312 s** (`404 ticket_invalid`).
+- **ADR-0029 observed, not asserted.** After the redirect, the third party
+  holds the real source URL with the token in it, exactly as before the ticket
+  existed. *What changes is the artifact, not the grant*, measured.
+- **`MediaSourceId` on this build is `mediasource_<item id>`, a namespace of its
+  own rather than the item id.** `build_stream_targets` spells it
+  `media_source.get("Id") or external_id`; the `or` arm is therefore not what
+  runs here, and a URL built from the item id alone would be a different URL.
+
+### H5 — the write half, and it wrote to a real account
+
+M4's method exactly, because it is the only one that makes restoration exact.
+The item was chosen by filtered request and its **complete** `UserData` read
+from the **item** route — never a listing, which M3 measured as dishonest about
+`PlayCount` — and the run refused to write unless it was already
+`{PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false}`
+with no `LastPlayedDate`. It was, on the first confirmed candidate.
+
+- **The control was run before the write and seen to be red.** *"Emby's item
+  differs from the recorded prior object"* answered **`False`** against a write
+  that had not run — which is exactly the state M3 shipped forty passing
+  contract assertions against. Only then was the same comparison believed after
+  each write.
+- **The position is exact and Emby does not round it.** `PUT /watch/titles/{id}`
+  with `position_seconds=613`, one real `usher work --once`, and Emby's own item
+  read reports **`PlaybackPositionTicks: 6130000000`** — 613 × 10,000,000 — with
+  `Played: false` and `PlayCount: 0` untouched.
+- **`POST /watch/titles/{id}/played` → `PlayCount: 1`, `Played: true`, a real
+  `LastPlayedDate`, and the resume position cleared to `0`.** PRD 03's "position
+  first, played last" as a consequence rather than a preference, through the
+  shipped route and the shipped job.
+- **The second press is a complete no-op, not merely a non-increment.** M3
+  recorded `POST /PlayedItems` advancing `PlayCount` to 1 idempotently; this run
+  adds that a second press leaves the **whole** `UserData` object byte-identical
+  — `LastPlayedDate` is not re-stamped either. So a retried write-back cannot
+  move a household's play history forward in time.
+- **The unplayed path goes through `UserData` and not through
+  `DELETE /PlayedItems`, and the observation is what proves it.** After
+  `DELETE /watch/titles/{id}/played` and one worker pass, Emby reports
+  `Played: false` while **`PlayCount` is still 1 and `LastPlayedDate` survives**
+  — all three of which `DELETE /PlayedItems` would have reset. The local 613 s
+  position rode along in the same body, which is the other half of M3's finding:
+  the body names `Played` even when `Played` is not the field being changed.
+- **Restored byte-for-byte.** `DELETE /Users/{u}/PlayedItems/{item}`, then a
+  read-back: the before/after diff is `{}`. Choosing the all-zero item is what
+  made that exact; on any other item `PlayCount` is not restorable by any route
+  this project knows.
+- 🔴 **Emby's read-back does not lag, which refutes the risk H5's own spec
+  names.** That spec warns that "Emby's own indexing is asynchronous; a
+  read-back immediately after a 204 may lag", and asks for bounded polling with
+  the observed latency recorded. Measured: the change was visible on the
+  **first** read every time, at **0.141 s / 0.142 s / 0.143 s** after the worker
+  pass returned. Zero polls were consumed. `UserData` is not the asynchronous
+  half of this server.
+- **`PlayedPercentage` is on the item route when a position is set** (19.73% at
+  613 s of a 3,107 s runtime) and gone when it is cleared — M5's observation
+  confirmed a second time, on a second item. Nothing reads it.
+- **Usher's own state, reported as the second and weaker observation it is:**
+  `{position_seconds: 613, played: false, play_count: 1, last_played_at: …}`,
+  agreeing with Emby at every step. ⚠️ One divergence worth knowing:
+  **Usher's `last_played_at` after a local `/played` press is Usher's own write
+  instant, not the one Emby stamped** (`…19:55:40.845654Z` locally against
+  Emby's `…19:55:40.0000000Z`). Nothing reconciles the two until a
+  `watch_history` backfill reads the item back.
+- **One `usher work --once` per press was enough**, each pass claiming exactly
+  `1 jobs`: the write-back is enqueued at `VISIBLE` and coalesced on
+  `(kind, key)`. A real CLI subprocess against the same database, never a
+  hand-called handler.
+
+### `PortRateLimited.retry_after` — not provoked, and the premise it was dispatched under is stale
+
+**Not provoked, named rather than implied.** Emby answered no `429` in any of
+the 23 requests, no job ever recorded an attempt, and `run_after` is `NULL` on
+the only row left in the queue. And the dispatch's own premise — *"constructed
+at six sites and read nowhere outside its own `__init__`"* — was measured before
+D9 landed. At the milestone head it is constructed at **six** `raise`/`return`
+sites and **read exactly once in `src/`**, at `services/jobs.py:200`
+(`JobWorker._fail`), which is D9's whole product. What remains true is that no
+real upstream this project talks to has ever produced the header that feeds it.
+
+### How the run was driven, because two parts of it are traps
+
+- **The operator's secrets file holds an access token and a user id, not a
+  password**, so `POST /Users/AuthenticateByName` cannot be exercised and
+  `EmbySession._authenticate_locked` was swapped for one that installs the
+  known token — M3, M4 and M5 all did exactly this. **The swap lives in a
+  `sitecustomize.py` on `PYTHONPATH`, not in an in-process monkeypatch**,
+  because H5's worker pass has to be a real `usher work --once` **subprocess**
+  and a patched parent cannot reach it. It writes a marker file that the caller
+  asserts on: a plant that did not land looks exactly like a check that passed.
+- 🔴 **Starting the shipped app against a real source is itself an unbounded
+  walk, and nothing warns you.** `LaneSupervisor` starts a push lane per enabled
+  source, and its reconnect gap-closer calls
+  `reconcile(source, SyncRunKind.DELTA, adapter)` — against this server that is
+  the walk every rule in this file forbids, issued by `uvicorn` with default
+  settings and no command of its own. This run set
+  `USHER_PUSH_ENABLED=false` and `USHER_WORKER_ENABLED=false` on the app. Anyone
+  driving a live HTTP run against a real household must do the same, or budget
+  for a delta walk they did not ask for.
 
 **Emby push works.** Verified 2026-07-29 against the live server with a normal
 non-admin token: `/embywebsocket` upgrades (101), delivers periodic `Sessions`,

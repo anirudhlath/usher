@@ -59,12 +59,18 @@ section below this one.
    Mapping them means wrapping the COPY path, which is a bulk-loader change.
    Left in PRD 09's carried debt with the candidate fix named.
 
-⚠️ **One thing M9 intended to do and did not, and it is not a boundary call:**
-the live Emby verification of playback and watch write-back (H4/H5) **did not
-run**, because no Emby credentials exist on the development host. That is a
-*gap*, deliberately not written into this list, because this file holds calls
-that were decided and PRD 09 holds the one that was not. The evidence half is
-in `emby-push-and-ingest.md`, per this file's own convention.
+✅ **The one thing M9 shipped as a gap has since been closed: the live Emby
+verification of playback and watch write-back (H4/H5) ran on 2026-08-12 and
+both halves passed.** It was never a boundary call — this file holds calls that
+were decided, and that was a gap — and it is recorded here only because the
+sentence that stood in its place said the opposite. 🔴 **The reason it had been
+a gap was a false negative:** M9 concluded "no Emby credentials exist on the
+development host" after checking `~/code/usher/.env` and nowhere else, and the
+operator's credentials were in a secrets file one directory over. The evidence
+half, per this file's own convention, is in `emby-push-and-ingest.md`; the short
+version is that the whole chain works, the play body leaks nothing with its
+positive control fired first, the `302` leads to a real `206` with real bytes,
+and the write to the operator's account was restored byte-for-byte.
 
 ## M9 Track 2 — the IMDb bulk expansion, and the bar that failed
 
