@@ -184,6 +184,36 @@ class JobKind(StrEnum):
     are: there is no optional process resource behind it, only the adapter
     factory every composition root already builds.
 
+    `bootstrap` is `POST /admin/bootstrap/{phase}`, on `sync`'s terms one
+    row up: M2 delivered the capability as `usher bootstrap` and M9 puts the
+    *same* dispatch on the queue so a route can start one. **Its key is a
+    `BootstrapPhase`'s wire value** -- `imdb`, `credit-names`, `aliases`,
+    `tmdb-ids`, `crosswalk`, `movielens` or `all` -- which makes it the
+    second kind whose key names neither a title, a source item nor a
+    household. `(kind, key)` unique is doing real work here: pressing *imdb*
+    twice while one runs coalesces into the run in flight, and a second
+    process bootstrapping the same dataset is separately guarded by
+    `ImportRunRepository.start()`'s `RepositoryConflict`, which
+    `BootstrapService._concede_to_other_owner` answers by touching nothing
+    and returning the winner's row.
+
+    **`all` and `imdb` are two keys and therefore two jobs**, deliberately,
+    and that is the opposite call from `sync`'s composite key one paragraph
+    up. A `sync` key had to name its lane because a `full` walk coalescing
+    into a pending `delta` one answers 202 for a walk that never happens;
+    here every phase's work is *resumable and idempotent*, so `all` running
+    after `imdb` re-reads `imdb`'s completed checkpoint, yields no batch and
+    costs a re-parse rather than a wrong answer. Collapsing the two into one
+    key would instead make an operator's `--phase movielens` silently
+    coalesce into somebody's `--phase all`.
+
+    **Registered unconditionally**, with `match`, `watch_history`, `sync` and
+    `watch_writeback`: there is no optional process resource behind a bulk
+    import, only `USHER_BULK_DATA_DIR` and an outbound HTTPS client that
+    every deployment can build. What a deployment may not have is a
+    *writable* data directory, and that is a run-time failure recorded on the
+    `import_runs` row rather than a build-time absence -- see PRD 08.
+
     **Adding a member here needs no migration**, verified rather than
     assumed: `db/models/jobs.py` declares `kind` through `enum_column`, whose
     `native_enum=False` compiles to a plain `VARCHAR(32)` and whose
@@ -200,6 +230,7 @@ class JobKind(StrEnum):
     CURATE = "curate"
     WATCH_WRITEBACK = "watch_writeback"
     SYNC = "sync"
+    BOOTSTRAP = "bootstrap"
 
 
 class JobStatus(StrEnum):
@@ -241,12 +272,14 @@ class Job(DomainModel):
     """One outstanding unit of work.
 
     `key` is the kind's own identifier for the work, and it is **one column,
-    four kinds of identifier**: a `Title.id` for `enrich`, `index` and
+    five kinds of identifier**: a `Title.id` for `enrich`, `index` and
     `derive`; a source's own `external_id` for `match`, `watch_history` and
-    `watch_writeback`; a `User.id` for `curate`; and a composite
+    `watch_writeback`; a `User.id` for `curate`; a composite
     `"{source_id}:{lane}"` for `sync`, the one kind whose key names two
-    things rather than one -- see `JobKind.SYNC`. All four render as a
-    string, so one column serves every kind without a polymorphic payload.
+    things rather than one -- see `JobKind.SYNC`; and a `BootstrapPhase`'s
+    wire value for `bootstrap`, which names a *dataset group* and no row at
+    all. All five render as a string, so one column serves every kind
+    without a polymorphic payload.
     `(kind, key)` is
     unique; enqueueing
     the same work twice promotes rather than duplicates.

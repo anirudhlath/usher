@@ -15,28 +15,33 @@ that the information is still surfaced rather than merely quieted.
 """
 
 import ast
+import dataclasses
 import inspect
 import io
 import os
 import pathlib
 import uuid
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 
+import httpx
 import pytest
 from loguru import logger
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 import usher
+from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.image_repository import FakeImageRepository
+from tests.fakes.import_run_repository import FakeImportRunRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient, usage
@@ -59,8 +64,10 @@ from usher.composition import (
     embedder,
     llm_client,
     metadata_provider,
+    run_bootstrap,
 )
 from usher.config import Settings
+from usher.domain.bootstrap import BootstrapPhase, ImportRun
 from usher.domain.curation import LLMPurpose
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
@@ -73,6 +80,7 @@ from usher.ports.events import ClientEvent, EventPublisher, NullEventPublisher
 from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import (
+    CrosswalkLinkResult,
     CuratedRowRepository,
     LLMCallRepository,
     MediaItemRepository,
@@ -155,6 +163,8 @@ def _pipeline_over_fakes(
         episodes=FakeEpisodeRepository(),
         watch_states=history,
         payloads=FakeRawPayloadStore(),
+        bulk=FakeBulkCatalogRepository(),
+        import_runs=FakeImportRunRepository(),
         runs=unused,
         queue=queue,
         embeddings=embeddings,
@@ -459,9 +469,12 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
     The `ENRICH` and `CURATE` halves are asserted alongside it, so the three
     guards cannot drift into "two guarded, one not", and `MATCH` is asserted
     so an implementation registering *nothing* cannot pass. This is the
-    default deployment -- no key, no extra, no model -- and its four
-    claimable kinds (`match`, `watch_history`, `watch_writeback`, `sync`) are
-    the whole of what it can do.
+    default deployment -- no key, no extra, no model -- and its five
+    claimable kinds (`match`, `watch_history`, `watch_writeback`, `sync`,
+    `bootstrap`) are the whole of what it can do. `bootstrap` joined them in
+    M9's E5 for `sync`'s reason: a bulk import needs a writable data
+    directory and an outbound client, neither of which is a process resource
+    a deployment can lack at build time.
     """
     worker = build_worker(
         _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
@@ -474,7 +487,13 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
     )
 
     assert worker.registered_kinds == frozenset(
-        {JobKind.MATCH, JobKind.WATCH_HISTORY, JobKind.WATCH_WRITEBACK, JobKind.SYNC}
+        {
+            JobKind.MATCH,
+            JobKind.WATCH_HISTORY,
+            JobKind.WATCH_WRITEBACK,
+            JobKind.SYNC,
+            JobKind.BOOTSTRAP,
+        }
     )
 
 
@@ -1286,3 +1305,313 @@ def _expanding(**rest: object) -> Settings:
         query_expansion_enabled=True,
         **rest,  # type: ignore[arg-type]
     )
+
+
+# ---------------------------------------------------------------------------
+# `run_bootstrap` -- one dispatch, two roots (M9's E5).
+# ---------------------------------------------------------------------------
+
+
+class _JournallingCatalog(FakeBulkCatalogRepository):
+    """`FakeBulkCatalogRepository` that writes down when the load window opens
+    and closes and when the crosswalk is linked.
+
+    The window's two edges are recorded separately rather than as one entry,
+    because *"the window wraps both IMDb passes"* and *"the window wraps each
+    pass"* differ only in where the closes fall.
+    """
+
+    def __init__(self, journal: list[str]) -> None:
+        super().__init__()
+        self._journal = journal
+
+    def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
+        return self._journalled_window()
+
+    @asynccontextmanager
+    async def _journalled_window(self) -> AsyncIterator[None]:
+        self._journal.append("window-open")
+        async with super().bulk_load_window():
+            yield
+        self._journal.append("window-close")
+
+    async def link_crosswalk(self) -> CrosswalkLinkResult:
+        self._journal.append("link-crosswalk")
+        return await super().link_crosswalk()
+
+
+class _JournallingRuns(FakeImportRunRepository):
+    """Every dataset this run touched, in the order it touched them.
+
+    The transport in these cases refuses every request, so `BulkDataset.
+    revision()` raises `PortUnavailable` and `BootstrapService.
+    import_dataset` records a `FAILED` run rather than downloading 335 MiB.
+    A dataset that gets as far as `start()` therefore writes **twice** -- the
+    started row and the failed one -- and consecutive repeats are collapsed,
+    because this case is about the order of the phases and not about how many
+    writes each one makes.
+    """
+
+    def __init__(self, journal: list[str]) -> None:
+        super().__init__()
+        self._journal = journal
+
+    def _note(self, entry: str) -> None:
+        if not self._journal or self._journal[-1] != entry:
+            self._journal.append(entry)
+
+    async def start(self, dataset: str, revision: str) -> ImportRun:
+        self._note(dataset)
+        return await super().start(dataset, revision)
+
+    async def save(self, run: ImportRun) -> None:
+        self._note(run.dataset)
+        await super().save(run)
+
+
+def _offline_client(*_: object, **__: object) -> httpx.AsyncClient:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("the bootstrap dispatch reached the network")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+
+
+async def _journal_of_a_full_bootstrap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *, through_the_worker: bool
+) -> list[str]:
+    """`--phase all` driven either the way `usher bootstrap` drives it or the
+    way the `bootstrap` job handler does, over the same fakes."""
+    journal: list[str] = []
+    catalog = _JournallingCatalog(journal)
+    runs = _JournallingRuns(journal)
+    settings = _settings(bulk_data_dir=tmp_path)
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+
+    if not through_the_worker:
+        # Byte for byte what `cli._bootstrap` calls, minus the engine it owns
+        # and with the report sink pointed at the same journal -- which is
+        # what makes the three catalog-dependent phases visible at all, since
+        # each of them refuses an empty catalog with a sentence rather than
+        # touching a dataset.
+        await run_bootstrap(
+            catalog, runs, _nothing, settings, BootstrapPhase.ALL, report=journal.append
+        )
+        return journal
+
+    queue = FakeJobQueue()
+    pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue)
+    monkeypatch.setattr(usher.composition, "_log_bootstrap_line", journal.append)
+    worker = build_worker(
+        dataclasses.replace(pipeline, bulk=catalog, import_runs=runs),
+        settings,
+        provider=None,
+        embedder=None,
+        client=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+    await queue.enqueue(
+        [
+            JobRequest(
+                kind=JobKind.BOOTSTRAP, key=BootstrapPhase.ALL.value, priority=JobPriority.DEMAND
+            )
+        ]
+    )
+    assert await worker.run_once() == 1, "the premise: the worker claimed the bootstrap job"
+    return journal
+
+
+async def _nothing() -> None:
+    return None
+
+
+#: Which phase each journal entry belongs to. The three catalog-dependent
+#: phases contribute a refusal *sentence* rather than a dataset name against
+#: an empty catalog, which is what makes all six visible in one run.
+_PHASE_OF = (
+    (BootstrapPhase.IMDB, ("window-", "imdb.title.")),
+    (BootstrapPhase.CREDIT_NAMES, ("credit-names", "imdb.credit_names")),
+    (BootstrapPhase.ALIASES, ("aliases", "imdb.title.akas")),
+    (BootstrapPhase.TMDB_IDS, ("tmdb.ids.",)),
+    (BootstrapPhase.CROSSWALK, ("wikidata.crosswalk", "link-crosswalk")),
+    (BootstrapPhase.MOVIELENS, ("movielens",)),
+)
+
+
+def _phases_in(journal: list[str]) -> list[BootstrapPhase]:
+    """The journal's entries collapsed to the phase each belongs to, in first
+    -sighting order, with an entry nothing claims raising rather than being
+    silently dropped -- a mapping that fell through would turn a reordered
+    phase into a missing one, which reads as a shorter list rather than as a
+    wrong one."""
+    seen: list[BootstrapPhase] = []
+    for entry in journal:
+        phase = next(
+            (one for one, prefixes in _PHASE_OF if entry.startswith(prefixes)),
+            None,
+        )
+        assert phase is not None, f"no phase claims the journal entry {entry!r}"
+        if phase not in seen:
+            seen.append(phase)
+    return seen
+
+
+async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The proof that the extraction landed is **behavioural, not
+    structural**: the same phases, in the same order, whichever root drove
+    them.
+
+    A structural assertion -- "the handler imports `run_bootstrap`" -- is
+    satisfied by a handler that imports it and then does something else, and
+    it is satisfied forever by a `run_bootstrap` whose arms have drifted from
+    the ones `usher bootstrap` reaches. What cannot be satisfied that way is
+    an identical journal of window edges, dataset names and the crosswalk
+    link, produced twice over the same fakes.
+
+    Three facts about that journal are asserted by name, because each is a
+    measured decision the order alone would not pin:
+
+    - **One window, both IMDb passes inside it.** Wrapping each pass
+      separately rebuilds `ix_titles_sort_name` and
+      `ix_titles_name_lower_year` between them and pays for the rebuild
+      twice -- 35.8 s suspended against 40.2 s kept (11.0% faster) with a
+      rebuilt pair ~24% smaller, 97 MB against 127 MB
+      (`.claude/rules/bootstrap-and-datasets.md`).
+    - **`link-crosswalk` immediately after the crosswalk import.** The import
+      stores pairs; the link is what attaches them to `titles`.
+    - **Every phase in `BootstrapPhase`'s declared order**, asserted against
+      the enum rather than against the other driver. **A parity assertion
+      cannot see a permutation** -- both roots call one function, so a
+      reordered dispatch reorders both journals identically and they still
+      match. Measured: moving the `credit-names` arm in front of the `imdb`
+      one survived this case until the order was pinned against the enum, and
+      the damage is the one Track 2 named -- `credit-names` joins to `titles`
+      on `imdb_id`, so ahead of `imdb` it refuses an empty catalog and the
+      phase silently does nothing, while behind a TMDb crawl it stales
+      203,969 of the 204,335 >=100-vote titles' embeddings.
+    """
+    through_cli = await _journal_of_a_full_bootstrap(
+        monkeypatch, tmp_path, through_the_worker=False
+    )
+    through_worker = await _journal_of_a_full_bootstrap(
+        monkeypatch, tmp_path, through_the_worker=True
+    )
+
+    assert through_cli, "the premise: driving the dispatch records something"
+    assert through_worker == through_cli
+
+    window = through_cli.index("window-open"), through_cli.index("window-close")
+    inside = through_cli[window[0] + 1 : window[1]]
+    assert inside == ["imdb.title.basics", "imdb.title.ratings"]
+    assert through_cli.count("window-open") == 1
+    assert through_cli.count("window-close") == 1
+
+    assert through_cli[through_cli.index("wikidata.crosswalk") + 1] == "link-crosswalk"
+    assert _phases_in(through_cli) == [
+        one for one in BootstrapPhase if one is not BootstrapPhase.ALL
+    ]
+
+
+async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """One `httpx.AsyncClient` for seven datasets, closed in a `finally`.
+
+    A client per *phase* would defeat connection reuse across the whole run;
+    a client per worker *pass* would be built ~17,280 times a day at the
+    lane's 5 s floor, which is the arithmetic `build_worker`'s own docstring
+    records for a log line. The `finally` is the other half: the phase that
+    raises here is `bulk_load_window` itself, which is the one thing in the
+    dispatch outside `import_dataset`'s `except UsherPortError` and therefore
+    the only way a bootstrap run ends by raising.
+    """
+    built: list[httpx.AsyncClient] = []
+
+    def recording(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        client = _offline_client()
+        built.append(client)
+        return client
+
+    monkeypatch.setattr(usher.composition, "bulk_client", recording)
+    journal: list[str] = []
+    settings = _settings(bulk_data_dir=tmp_path)
+
+    await run_bootstrap(
+        _JournallingCatalog(journal),
+        _JournallingRuns(journal),
+        _nothing,
+        settings,
+        BootstrapPhase.ALL,
+        report=lambda _: None,
+    )
+    assert len(built) == 1
+    assert built[0].is_closed
+
+    class _WindowRaises(_JournallingCatalog):
+        def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
+            raise RuntimeError("the window could not be opened")
+
+    with pytest.raises(RuntimeError, match="the window could not be opened"):
+        await run_bootstrap(
+            _WindowRaises(journal),
+            _JournallingRuns(journal),
+            _nothing,
+            settings,
+            BootstrapPhase.IMDB,
+            report=lambda _: None,
+        )
+    assert len(built) == 2
+    assert built[1].is_closed
+
+
+async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`run_bootstrap` takes a report sink because the two roots want the
+    same sentences in different places, and this is the half a default
+    argument would have got wrong.
+
+    `usher bootstrap` prints; a worker inside the server process must not,
+    because its stdout is a log stream and a bare line in it has no level, no
+    timestamp and no trace id. The refusal sentence is the one that always
+    renders against an empty catalog, so it is what this case reads back.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    sink: list[str] = []
+    handle = logger.add(lambda message: sink.append(message.record["message"]), level="INFO")
+    try:
+        queue = FakeJobQueue()
+        pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue)
+        worker = build_worker(
+            dataclasses.replace(
+                pipeline,
+                bulk=FakeBulkCatalogRepository(),
+                import_runs=FakeImportRunRepository(),
+            ),
+            _settings(bulk_data_dir=tmp_path),
+            provider=None,
+            embedder=None,
+            client=None,
+            resolve=_never_resolves,
+            user_id=uuid.uuid4(),
+        )
+        capsys.readouterr()
+        await queue.enqueue(
+            [
+                JobRequest(
+                    kind=JobKind.BOOTSTRAP,
+                    key=BootstrapPhase.MOVIELENS.value,
+                    priority=JobPriority.DEMAND,
+                )
+            ]
+        )
+        assert await worker.run_once() == 1
+    finally:
+        logger.remove(handle)
+
+    assert capsys.readouterr().out == ""
+    assert any("titles is empty" in line for line in sink)

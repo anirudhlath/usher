@@ -675,6 +675,50 @@ be added if a client turns out to need flexible field selection.
 > process, and that a `PortUnavailable` from the queue really does become an
 > ordinary 500 rather than being caught somewhere on the way.
 
+> **Built in M9's E5: `POST /admin/bootstrap/{phase}`.** M2 shipped the bulk
+> importers as `usher bootstrap` and only as a separate process, which is the
+> fact [09](09-roadmap.md) and `ports/events.py` both cite for why
+> `bootstrap.progress` has never had a producer. **The route enqueues
+> `JobKind.BOOTSTRAP` and answers 202. It imports nothing** — a `--phase all`
+> run is 74.8 s against warm on-disk dumps and materially longer cold, since
+> the dataset cache keys on the upstream token and IMDb regenerates daily, so
+> the request can trigger a 224 MB download ([04](04-catalog-bootstrap.md)).
+> The body is `{"kind": "bootstrap", "key": "<phase>"}`, the same two-field
+> shape the sync and regenerate routes answer with and for the same reason.
+>
+> **`{phase}` is a typed path parameter, not a string this route checks
+> itself.** `BootstrapPhase` is one vocabulary read by the route, by
+> `/openapi.json` and by `usher bootstrap --phase`'s own `choices`, so the CLI
+> cannot accept a phase the route rejects, and an unknown phase is a **422
+> `validation_failed`** rather than a 404 — the route exists and was asked for
+> something outside its vocabulary. It enqueues nothing on that arm.
+>
+> **`all` and `<one phase>` are two keys and therefore two jobs**, which is the
+> opposite call from the sync route's composite key above and rests on a
+> property a sync does not have: every phase is resumable and idempotent, so a
+> job for `all` running after one for `imdb` re-reads a completed checkpoint,
+> yields no batch and costs a re-parse. Collapsing them would instead make an
+> operator's `--phase movielens` coalesce silently into somebody's `--phase
+> all`. A repeat of the same phase writes zero rows and is coalesced, exactly
+> as for `curate` above.
+>
+> **There is no refusal here beyond the phase's own type, and that is a
+> statement about what a request can know.** Every precondition a bootstrap has
+> — an empty catalog for `credit-names`, `aliases` and `movielens`, a writable
+> `USHER_BULK_DATA_DIR`, another process already owning the dataset's
+> `import_runs` row — is a fact about the instant the *worker* claims the job,
+> which the queue may hold for the length of whatever is ahead of it. Each is
+> therefore checked where it is true rather than restated here.
+>
+> **Two costs, both named rather than solved.** A bootstrap is the longest unit
+> of work in this system and holds the single worker lane for its duration —
+> [08](08-operations.md)'s job-reliability section prices that, and this route
+> adds no second lane. And the *server* process now writes to
+> `USHER_BULK_DATA_DIR`: in the shipped container that is a bind mount, and a
+> deployment that gave the API no writable data directory now learns so from a
+> route rather than from a command. **Unauthenticated, like every route in this
+> table.**
+>
 > **Built in M9: `GET`/`PUT /admin/rows/providers`** — the control
 > [08](08-operations.md)'s Database layer has promised since M6 and the
 > discharge of [09](09-roadmap.md)'s M7 boundary call 9, which refused the

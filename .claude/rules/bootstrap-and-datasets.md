@@ -696,3 +696,56 @@ before the first batch of **every** run, resumed or not — a fixed 19.5 s and
 `title.principals` scan is skipped. `position` is a line offset into
 `title.principals` alone and says nothing about `name.basics`, which is
 correct precisely because the index is never partial.
+
+## `bulk_load_window()` is entered before the ownership race is known, and a route makes that reachable (2026-08-12, M9 E5)
+
+**Found by asking E3's question of a bootstrap phase — *what has changed
+between the enqueue and the claim, and does the handler still have the right
+to do the work?* — and it is a defect in a shipped M2 path rather than in the
+new route. Recorded, not fixed.**
+
+`cli._bootstrap` (now `composition.run_bootstrap`) opens
+`catalog.bulk_load_window()` **around** the two IMDb `import_dataset` calls,
+and `BootstrapService.import_dataset` is where a `RepositoryConflict` from
+`ImportRunRepository.start()` is discovered. So the window is entered before
+anybody knows who owns the dataset, and the window's own guard —
+`count_titles() == 0` — is a point-in-time read taken at that same moment.
+
+Two processes bootstrapping an **empty** catalog therefore both see zero, both
+`DROP INDEX IF EXISTS ix_titles_sort_name, ix_titles_name_lower_year`, and both
+commit. The loser then concedes inside `import_dataset`
+(`_concede_to_other_owner` touches nothing and **does not raise**), returns,
+exits its `async with`, and runs `CREATE INDEX IF NOT EXISTS` for both — **while
+the winner is still streaming 1.27M rows**. The winner's own rebuild afterwards
+is a no-op, because the indexes are already there.
+
+**The cost is exactly the saving the window exists for, so the suspension
+silently buys nothing:** 40.2 s instead of 35.8 s (11.0% slower) and a rebuilt
+pair of 127 MB instead of 97 MB (~24% larger) — the measured numbers recorded
+further up this file. Second-order, the loser's `CREATE INDEX` takes a `SHARE`
+lock on `titles`, which blocks the winner's batch writes for the length of the
+rebuild.
+
+**The window of exposure is the *download*, not the whole run.** Once the
+winner commits its first batch (50,000 rows at `USHER_BULK_BATCH_SIZE`'s
+default) `count_titles()` is non-zero and a later loser suspends nothing. But
+the winner's first commit is behind a `HEAD`, an `ensure_local` and 224 MB, so
+the window is minutes wide on a cold cache.
+
+**What changed in M9 is reachability, not the code.** Before E5 this needed two
+`usher bootstrap` processes started by hand, which is an operator's own
+mistake. `POST /admin/bootstrap/{phase}` makes the ordinary shape *worker
+claims the job while an operator has the CLI running in a terminal* — and note
+what does **not** reach it: `(kind, key)` unique means two presses of one phase
+are one job, and the single `JobWorker` lane serialises the jobs that do exist,
+so no pair of *jobs* can race. It takes a second process.
+
+**Not repaired here, deliberately.** Both candidate fixes — a Postgres advisory
+lock around the window, or entering the window only after `start()` has been
+won — are behaviour changes to a path M2 shipped and M9's E5 was scoped to
+*extract verbatim*; "any behaviour change found necessary is a separate commit
+with its own red". What E5 does add is the assertion that the window's guard
+holds at all on a live catalog
+(`tests/integration/test_admin_bootstrap.py::test_the_load_window_declines_on_a_
+live_catalog_and_keeps_both_indexes`), which is the half that stops an
+unauthenticated route taking browse ordering away from every reader.
