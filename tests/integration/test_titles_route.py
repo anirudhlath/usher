@@ -38,9 +38,11 @@ from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.image import PostgresImageRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
+from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
+from usher.db.users import ensure_default_user
 from usher.domain.enums import EnrichmentState, HdrFormat, ImageKind, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.image import Image
@@ -48,10 +50,15 @@ from usher.domain.jobs import JobPriority
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
+from usher.ports.repository import SearchQueryRecord
+from usher.ports.search import SearchMode
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
 SWEPT_AFTER = datetime(2026, 8, 2, tzinfo=UTC)
+# When the search a click is attributed to was answered -- `search_queries.at`
+# carries no server default.
+SEARCHED_AT = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 # Every title this file writes carries it, so teardown can delete exactly
 # what this file created rather than emptying a table another committing
 # file is also using.
@@ -90,7 +97,15 @@ async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncS
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
         for statement in (
-            # `users` first: `watch_states.user_id` is `ON DELETE CASCADE`
+            # **Before `users`, and it is an ordering rather than a tidy-up.**
+            # `search_queries.user_id` is `ON DELETE RESTRICT` -- a
+            # household's search history is user state and outlives nothing
+            # but the household -- so a committed row from the attribution
+            # cases below turns the next statement into a foreign-key
+            # violation. F2 owed the same three fixtures the same line; this
+            # file joined them the moment it started seeding rows of its own.
+            "DELETE FROM search_queries",
+            # `users` next: `watch_states.user_id` is `ON DELETE CASCADE`
             # while `watch_states.title_id` is `ON DELETE RESTRICT`, so
             # removing the default user is what makes the titles deletable.
             "DELETE FROM users WHERE name = 'default'",
@@ -116,11 +131,14 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
             # rather than cleaning up after it.
         ):
             await session.execute(text(statement))
-        # Last, and bound rather than interpolated: only this file's own
-        # titles go, so a blanket `DELETE FROM titles` cannot reach another
-        # committing file's rows.
+        # Last two, and bound rather than interpolated: only this file's own
+        # titles and its own second household go, so neither blanket delete
+        # can reach another committing file's rows.
         await session.execute(
             text("DELETE FROM titles WHERE sort_name LIKE :pattern"), {"pattern": f"{MARK} %"}
+        )
+        await session.execute(
+            text("DELETE FROM users WHERE name LIKE :pattern"), {"pattern": f"{MARK} %"}
         )
         await session.commit()
 
@@ -576,6 +594,159 @@ async def test_the_route_answers_with_the_source_down(
         ("Unreachable Emby", True)
     ]
     assert body["watch_state"] is None
+
+
+async def _given_default_household(sessions: async_sessionmaker[AsyncSession]) -> uuid.UUID:
+    """The household the route itself will resolve, created here first.
+
+    `ensure_default_user` is what `DefaultUserIdDep` calls, so seeding through
+    it -- rather than inventing a `users` row and hoping -- is what makes the
+    id this returns the *same* id the request will scope its `UPDATE` by. An
+    invented one would make the attribution cases fail as cross-household
+    refusals, which is the answer they are checking for.
+    """
+    async with sessions() as session:
+        user_id = await ensure_default_user(session)
+        await session.commit()
+    return user_id
+
+
+async def _given_search(
+    sessions: async_sessionmaker[AsyncSession], *, user_id: uuid.UUID
+) -> uuid.UUID:
+    """One committed `search_queries` row, written through the shipped
+    repository rather than by hand.
+
+    Through `PostgresSearchQueryRepository.record` because the two outcome
+    columns start as **literals it writes** (`NULL`, `false`) rather than as
+    defaults the table declares -- `played` is `NOT NULL` with no default at
+    all -- so an `INSERT` composed here could seed a starting state the real
+    writer cannot produce.
+    """
+    record = SearchQueryRecord(
+        id=new_id(),
+        at=SEARCHED_AT,
+        user_id=user_id,
+        query="the quiet vacuum",
+        mode=SearchMode.FULL_TEXT,
+        result_count=3,
+        latency_ms=12,
+    )
+    async with sessions() as session:
+        await PostgresSearchQueryRepository(session).record(record)
+        await session.commit()
+    return record.id
+
+
+async def _outcome(
+    sessions: async_sessionmaker[AsyncSession], query_id: uuid.UUID
+) -> tuple[uuid.UUID | None, bool]:
+    """`(clicked_title_id, played)` as the table holds it, on a connection of
+    its own -- the route's write is only real if a second session can see it."""
+    async with sessions() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT clicked_title_id, played FROM search_queries "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": query_id},
+            )
+        ).one()
+    clicked, played = row
+    return clicked, bool(played)
+
+
+async def _given_household(sessions: async_sessionmaker[AsyncSession], name: str) -> uuid.UUID:
+    """A second, real `users` row -- `search_queries.user_id` has a foreign
+    key, so the household the scope refuses has to be one this schema
+    accepts."""
+    user_id = new_id()
+    async with sessions() as session:
+        await session.execute(
+            text("INSERT INTO users (id, name) VALUES (CAST(:id AS uuid), :name)"),
+            {"id": user_id, "name": name},
+        )
+        await session.commit()
+    return user_id
+
+
+async def test_opening_a_result_records_the_click_durably_against_the_real_row(
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """**The click, through a real request against a real `search_queries`
+    row, read back on a different connection.**
+
+    That last clause is the whole reason this case exists beside the unit
+    one: `get_session` is the request's commit boundary, and a handler that
+    issued the `UPDATE` and never committed passes every case driven over a
+    fake (a dict does not roll back). PRD 10's table is only useful if the
+    attribution survives the response.
+
+    It is also the first exercise of the real statement's `COALESCE` and its
+    `AND user_id = :user_id` against Postgres from a route.
+    """
+    household = await _given_default_household(sessions)
+    title = await _given_title(sessions, "A Searched Film", state=EnrichmentState.ENRICHED)
+    search_id = await _given_search(sessions, user_id=household)
+
+    response = await client.get(f"/titles/{title.id}", params={"search_id": str(search_id)})
+
+    assert response.status_code == 200
+    assert await _outcome(sessions, search_id) == (title.id, False)
+
+
+async def test_another_households_row_survives_a_real_request_and_the_owners_lands(
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """The scope predicate against a real `WHERE`, with its positive control.
+
+    The fake models this predicate deliberately (it is a security boundary
+    rather than a storage detail), so both arms run on both sides -- what
+    only this one can say is that the *statement* carries the conjunct, since
+    a repository whose Python filtered correctly and whose SQL did not would
+    pass the unit case and fail here.
+    """
+    household = await _given_default_household(sessions)
+    stranger = await _given_household(sessions, f"{MARK} stranger")
+    assert stranger != household, "the premise: two households, or there is no boundary"
+    title = await _given_title(sessions, "A Contested Film", state=EnrichmentState.ENRICHED)
+    theirs = await _given_search(sessions, user_id=stranger)
+    mine = await _given_search(sessions, user_id=household)
+
+    assert (
+        await client.get(f"/titles/{title.id}", params={"search_id": str(theirs)})
+    ).status_code == 200
+    assert await _outcome(sessions, theirs) == (None, False)
+
+    assert (
+        await client.get(f"/titles/{title.id}", params={"search_id": str(mine)})
+    ).status_code == 200
+    assert await _outcome(sessions, mine) == (title.id, False), (
+        "the control: the owning household's identical call must land"
+    )
+
+
+async def test_an_unknown_search_id_is_served_normally_against_a_real_schema(
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """A stale id -- an operator's retention `DELETE` is PRD 10's pruning
+    story -- reaches a real `UPDATE` that matches nothing, and the response
+    is byte-identical to the one without the parameter.
+
+    Only this level can say the no-op is the statement's rather than a guard
+    in front of it, and that the transaction the route committed was still a
+    clean one.
+    """
+    title = await _given_title(
+        sessions, "A Film With A Stale Referrer", state=EnrichmentState.ENRICHED
+    )
+    plain = await client.get(f"/titles/{title.id}")
+
+    response = await client.get(f"/titles/{title.id}", params={"search_id": str(new_id())})
+
+    assert response.status_code == 200
+    assert response.json() == plain.json()
 
 
 async def test_an_unknown_id_is_a_404_against_a_real_schema(client: AsyncClient) -> None:

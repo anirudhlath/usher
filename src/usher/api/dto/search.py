@@ -121,6 +121,28 @@ class SearchResponse(BaseModel):
     (`query`, `expanded_query`) is what makes an expansion legible; one field
     carrying whichever of the two happened to be embedded would make it
     invisible.
+
+    **`search_id` is opaque and is the only thing on this response a client is
+    asked to hand back.** It names the `search_queries` row this answer was
+    recorded as, and its two uses are `GET /titles/{id}?search_id=…` — which
+    records *which result was opened* — and `POST /titles/{id}/play` (or
+    `/episodes/{id}/play`) — which records *that one was played*. Together
+    those fill the two columns PRD 10 says the table cannot ship without.
+
+    ⚠️ **Opaque means opaque, and the shape invites the opposite.** It is a
+    UUIDv7 and therefore carries a timestamp and sorts, so a client could read
+    a search's time out of it or order two of them — and neither is a promise.
+    Nothing else may be inferred: it is not the household, not the query, and
+    not a handle any other route accepts.
+
+    **`null` is a fact about this deployment rather than about the search**,
+    and it is not an error: no row was written, so there is nothing to attach
+    an outcome to. Three ways to get one, all of them PRD 10's own list — a
+    blank query, a search with no household, and a deployment that composed
+    `SearchService` with no analytics — plus a write the store refused, which
+    answers `null` for the same reason. A client sees the same complete,
+    correct results either way and simply has nothing to report back, so
+    **omitting the parameter is always legal** and never changes a response.
     """
 
     query: str
@@ -128,6 +150,7 @@ class SearchResponse(BaseModel):
     mode: SearchMode
     semantic_coverage: float
     expanded_query: str | None
+    search_id: uuid.UUID | None
     results: tuple[SearchResultResponse, ...]
 
     @classmethod
@@ -138,6 +161,7 @@ class SearchResponse(BaseModel):
             mode=answer.mode,
             semantic_coverage=answer.semantic_coverage,
             expanded_query=answer.expanded_query,
+            search_id=answer.search_id,
             results=tuple(SearchResultResponse.of(result) for result in answer.results),
         )
 

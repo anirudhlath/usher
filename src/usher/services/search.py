@@ -61,7 +61,7 @@ import math
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 
@@ -433,6 +433,20 @@ class SearchAnswer:
     row with `ok = false` -- and still leaves this field `None`. So the
     implication runs one way only: a populated `expanded_query` means a
     completion was bought, and an absent one means nothing about spend.
+
+    **`search_id` is the `search_queries` row this answer was recorded as,
+    and it is what makes the outcome half of that table fillable at all**
+    (F3). A client hands it back on `GET /titles/{id}?search_id=…` to say
+    which result it opened and on `POST /titles/{id}/play` to say it played
+    one; nothing else may be read from it, which is why it is described on
+    the wire as opaque.
+
+    It is `None` on every search that wrote no row, and the three ways that
+    happens are the three PRD 10 enumerates: a blank query (refused before
+    the measurement), a search with no household, and a deployment whose
+    `SearchService` was built with no `SearchAnalytics`. **`None` is also
+    what a refused write leaves**, because a row that was not stored has no
+    id worth handing out -- see `_record_search`.
     """
 
     results: tuple[SearchResult, ...] = ()
@@ -440,6 +454,7 @@ class SearchAnswer:
     mode: SearchMode = SearchMode.FULL_TEXT
     semantic_coverage: float = 0.0
     expanded_query: str | None = None
+    search_id: uuid.UUID | None = None
 
     @property
     def degraded(self) -> bool:
@@ -769,10 +784,19 @@ class SearchService:
         _search_results.record(len(answer.results), labels)
         # **Outside the window, deliberately.** An INSERT inside it would be
         # counted as search latency by both the histogram and the row itself.
-        await self._record_search(
-            query, mode=mode, user_id=user_id, results=len(answer.results), elapsed=elapsed
+        #
+        # The id comes back rather than being minted here so that the one
+        # place that decides whether a row exists is also the one place that
+        # decides whether there is an id to hand a client: an id echoed for
+        # a row that was refused would send every outcome call to a
+        # `WHERE id = …` that matches nothing, which is indistinguishable
+        # from a client that never clicked (F3).
+        return replace(
+            answer,
+            search_id=await self._record_search(
+                query, mode=mode, user_id=user_id, results=len(answer.results), elapsed=elapsed
+            ),
         )
-        return answer
 
     async def _record_search(
         self,
@@ -782,9 +806,20 @@ class SearchService:
         user_id: uuid.UUID | None,
         results: int,
         elapsed: float,
-    ) -> None:
+    ) -> uuid.UUID | None:
         """One `search_queries` row for one answered search, and the commit
-        that makes it durable.
+        that makes it durable. **Answers the row's own id, or `None` when no
+        row was written** -- which is the value `SearchAnswer.search_id`
+        carries and therefore what `GET /search` echoes.
+
+        **A refused write answers `None` rather than the id it minted**, and
+        that is the whole reason the id is returned from here rather than
+        minted by the caller. `record()` raising means there is no row, so
+        an id handed out anyway would send F3's outcome calls to a
+        `WHERE id = …` matching nothing -- and a no-op update is exactly
+        what a search the household never clicked also produces, so the
+        no-click rate PRD 10 exists to compute would silently absorb every
+        refused row.
 
         **`mode` is the mode that ran**, the same value the histogram label
         carries, for the same reason: a degraded FUSED search stored as `fused`
@@ -829,25 +864,26 @@ class SearchService:
         one row.
         """
         if self._analytics is None or user_id is None:
-            return
+            return None
+        record = SearchQueryRecord(
+            id=new_id(),
+            at=self._now(),
+            user_id=user_id,
+            query=query,
+            mode=mode,
+            result_count=results,
+            latency_ms=_ms(elapsed),
+        )
         try:
-            await self._analytics.queries.record(
-                SearchQueryRecord(
-                    id=new_id(),
-                    at=self._now(),
-                    user_id=user_id,
-                    query=query,
-                    mode=mode,
-                    result_count=results,
-                    latency_ms=_ms(elapsed),
-                )
-            )
+            await self._analytics.queries.record(record)
             await self._analytics.commit()
         except UsherPortError as exc:
             logger.error(
                 "the search analytics row was refused; this search is unrecorded: {error}",
                 error=str(exc) or type(exc).__name__,
             )
+            return None
+        return record.id
 
     async def suggest(
         self, prefix: str, limit: int = 10, *, tier: SuggestTier

@@ -28,24 +28,36 @@ from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import FakePersonRepository
+from tests.fakes.search_query_repository import FakeSearchQueryRepository
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
-from usher.api.deps import get_default_user_id, get_title_read_service
+from usher.api.deps import (
+    get_default_user_id,
+    get_search_query_repository,
+    get_title_read_service,
+)
 from usher.api.dto.title import TitleResponse
 from usher.config import Settings
 from usher.domain.enums import EnrichmentState, HdrFormat, ImageKind, SourceKind, TitleKind
+from usher.domain.ids import new_id
 from usher.domain.image import Image
 from usher.domain.jobs import JobKind
 from usher.domain.people import Credit, CreditKind, Person, person_sort_name
 from usher.domain.source import Source
 from usher.domain.title import Title
+from usher.ports.errors import RepositoryConflict
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
+from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
+from usher.ports.search import SearchMode
 from usher.services.titles import TitleReadService
 
 USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
 SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
+# When the search this file attributes clicks to was answered. `at` carries no
+# server default, so a seeded analytics row has to name one.
+SEARCHED_AT = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 # Distinctive on purpose: an absence assertion against a string that appears
 # elsewhere in the response proves nothing. This is what an Emby item id
 # looks like on the wire, and no client has any use for one.
@@ -102,6 +114,11 @@ def images() -> FakeImageRepository:
 
 
 @pytest.fixture
+def queries() -> FakeSearchQueryRepository:
+    return FakeSearchQueryRepository()
+
+
+@pytest.fixture
 def credits(people: FakePersonRepository, titles: FakeTitleRepository) -> FakeCreditRepository:
     """Wired to the *same* `people` and `titles` stores the assertions read
     through. `CreditedPerson` carries a name that the port joins in, so a fake
@@ -130,7 +147,7 @@ def service(
 
 
 @pytest.fixture
-def app(service: TitleReadService) -> FastAPI:
+def app(service: TitleReadService, queries: FakeSearchQueryRepository) -> FastAPI:
     built = create_app(
         Settings(
             database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
@@ -144,6 +161,10 @@ def app(service: TitleReadService) -> FastAPI:
     # rather than mocked away at the router, so the route keeps taking a user
     # id from a dependency and a route that stopped doing so would fail.
     built.dependency_overrides[get_default_user_id] = lambda: USER_ID
+    # The `search_queries` half. `get_search_id` is deliberately *not*
+    # overridden: the parse of `?search_id=` is the shipped one, so a case
+    # about a malformed value is about the real parser.
+    built.dependency_overrides[get_search_query_repository] = lambda: queries
     return built
 
 
@@ -213,6 +234,58 @@ async def _seed_copy(
             )
         ]
     )
+
+
+async def _seed_search(
+    queries: FakeSearchQueryRepository, *, user_id: uuid.UUID = USER_ID
+) -> uuid.UUID:
+    """One answered search, exactly as `SearchService._record_search` writes
+    it, and its id back -- which is what `GET /search` echoes as `search_id`.
+
+    Written through the port rather than into the fake's dicts, so a row this
+    file seeds is a row `record()` would produce: `clicked_title_id` `NULL`
+    and `played` `False` are literals `record()` writes, not defaults, and a
+    hand-built dict entry would let a case pass against an implementation
+    that never wrote them.
+    """
+    record = SearchQueryRecord(
+        id=new_id(),
+        at=SEARCHED_AT,
+        user_id=user_id,
+        query="the quiet vacuum",
+        mode=SearchMode.FULL_TEXT,
+        result_count=3,
+        latency_ms=12,
+    )
+    await queries.record(record)
+    return record.id
+
+
+class _RefusingSearchQueries(SearchQueryRepository):
+    """A `SearchQueryRepository` whose every method raises what it was given.
+
+    The port's own refusal is unreachable from either shipped writer (see
+    `usher.api.analytics`), so the absorption at the route can only be
+    exercised by a collaborator that breaks the promise -- and both arms of
+    it, the port failure that is absorbed and the bug that is not, differ
+    only in the exception this is constructed with.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def record(self, record: SearchQueryRecord) -> None:
+        raise self._error
+
+    async def record_outcome(
+        self,
+        query_id: uuid.UUID,
+        *,
+        user_id: uuid.UUID,
+        clicked_title_id: uuid.UUID | None,
+        played: bool,
+    ) -> None:
+        raise self._error
 
 
 async def _seed_person(people: FakePersonRepository, name: str) -> Person:
@@ -937,6 +1010,247 @@ async def test_opening_an_enriched_title_enqueues_nothing(
     is permanently the size of the library."""
     await client.get(f"/titles/{seeded.title_id}")
     assert await queue.claim([JobKind.ENRICH], limit=10) == []
+
+
+async def test_opening_a_result_from_a_search_records_the_click_against_that_row(
+    client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
+) -> None:
+    """**The click half of PRD 10's outcome attribution, end to end through
+    the route.** `GET /search` hands back a `search_id`; opening one of its
+    results with that id attached is the only thing that can say *which*
+    result the household opened, and `clicked_title_id` is the column that
+    holds the answer.
+
+    The wrong implementation this kills: a route that declares `?search_id=`
+    and never reads it -- which serves a byte-identical response and leaves
+    the column `NULL` forever, i.e. exactly what "the household clicked
+    nothing" looks like.
+
+    `played` stays `False`: this writer reports a click and nothing else.
+    Asserted rather than left implicit, because one writer setting both
+    columns is the defect that makes `clicked_title_id` mean *"the last thing
+    this household did"*.
+    """
+    search_id = await _seed_search(queries)
+
+    response = await client.get(f"/titles/{seeded.title_id}", params={"search_id": str(search_id)})
+
+    assert response.status_code == 200
+    assert queries.outcomes[search_id] == (seeded.title_id, False)
+
+
+async def test_a_search_id_belonging_to_another_household_is_not_updated(
+    client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
+) -> None:
+    """**A security boundary, not tidiness.** A `search_id` arrives in a query
+    string and UUIDv7 is partially time-ordered, so an `UPDATE` scoped only by
+    `id` lets one household write attribution onto another's row -- silently,
+    with no error, no log line and no metric.
+
+    **The positive control is the byte-identical call from the owning
+    household**, in this same case and against the same seeded row. Without
+    it the assertion above is satisfied by a route that stopped writing
+    anything at all, which is the exact failure the two halves are here to
+    tell apart -- and the only difference between the two requests is which
+    household the *dependency* resolved, so nothing else can explain a
+    divergence.
+    """
+    stranger = new_id()
+    assert stranger != USER_ID, "the two households must differ or there is no boundary to cross"
+    theirs = await _seed_search(queries, user_id=stranger)
+
+    refused = await client.get(f"/titles/{seeded.title_id}", params={"search_id": str(theirs)})
+
+    assert refused.status_code == 200
+    assert queries.outcomes[theirs] == (None, False), (
+        "one household attributed a click onto another household's search"
+    )
+
+    mine = await _seed_search(queries)
+    served = await client.get(f"/titles/{seeded.title_id}", params={"search_id": str(mine)})
+
+    assert served.status_code == 200
+    assert queries.outcomes[mine] == (seeded.title_id, False), (
+        "the control: the owning household's identical call must land"
+    )
+
+
+async def test_a_second_click_leaves_the_first_result_attributed(
+    client: httpx.AsyncClient,
+    seeded: Seeded,
+    titles: FakeTitleRepository,
+    queries: FakeSearchQueryRepository,
+) -> None:
+    """First write wins, at the boundary rather than only in the repository.
+
+    The column answers *"what did this search lead to"*, not *"what did this
+    client last do"* -- so a household that opens one result, goes back and
+    opens another must not overwrite the first attribution. The wrong
+    implementation this kills: a `SET clicked_title_id = :clicked_title_id`
+    with no `COALESCE`, which is also what makes the row immutable after its
+    outcome and therefore what lets `search_queries` ship with no
+    `updated_at`.
+    """
+    second = await _seed_title(titles, EnrichmentState.ENRICHED)
+    assert second.id != seeded.title_id, "two clicks on one title cannot show a steal"
+    search_id = await _seed_search(queries)
+
+    await client.get(f"/titles/{seeded.title_id}", params={"search_id": str(search_id)})
+    await client.get(f"/titles/{second.id}", params={"search_id": str(search_id)})
+
+    assert queries.outcomes[search_id] == (seeded.title_id, False)
+
+
+async def test_an_unknown_search_id_changes_nothing_and_still_serves_the_title(
+    client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
+) -> None:
+    """Analytics, not a resource. A client holding an id whose row an operator
+    has since pruned -- PRD 10's retention is an operator's `DELETE` -- must
+    not be handed an error page for a title that exists.
+
+    The wrong implementation this kills: a route that 404s (or 422s) on an id
+    it cannot find, which would make the retention policy of an analytics
+    table a client-visible failure of the catalog.
+    """
+    known = await _seed_search(queries)
+    stale = new_id()
+    assert stale != known, "the fixture must name a row that really is absent"
+
+    response = await client.get(f"/titles/{seeded.title_id}", params={"search_id": str(stale)})
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(seeded.title_id)
+    assert stale not in queries.outcomes
+    assert queries.outcomes[known] == (None, False), "an unknown id must not attribute elsewhere"
+
+
+async def test_a_malformed_search_id_is_ignored_rather_than_refused(
+    client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
+) -> None:
+    """**The 422 this route must not answer**, and the reason `?search_id=` is
+    typed `str` rather than `uuid.UUID` at the boundary.
+
+    Annotated as a UUID, FastAPI refuses the whole request for a value that
+    is not one -- so a client that truncated or re-encoded the id would be
+    denied *the title*, over optional telemetry attached to a resource it is
+    otherwise entitled to. Analytics may not decide whether a resource is
+    served.
+
+    The body is asserted whole against the same request without the
+    parameter, so this says the response is *unchanged* rather than merely
+    successful.
+    """
+    known = await _seed_search(queries)
+    plain = await client.get(f"/titles/{seeded.title_id}")
+
+    response = await client.get(
+        f"/titles/{seeded.title_id}", params={"search_id": "not-a-uuid-at-all"}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == plain.json()
+    assert queries.outcomes[known] == (None, False)
+
+
+async def test_a_title_opened_with_no_search_id_attributes_nothing(
+    client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
+) -> None:
+    """The ordinary case, and the one that makes the column mean something.
+
+    Most title views do not come from a search -- a home row, a deep link, a
+    bookmark -- and a route that attributed the household's most recent
+    search to every one of them would make `clicked_title_id` a measure of
+    browsing rather than of retrieval.
+    """
+    search_id = await _seed_search(queries)
+
+    assert (await client.get(f"/titles/{seeded.title_id}")).status_code == 200
+
+    assert queries.outcomes[search_id] == (None, False)
+
+
+async def test_a_search_id_on_a_title_that_does_not_exist_attributes_nothing(
+    client: httpx.AsyncClient, queries: FakeSearchQueryRepository
+) -> None:
+    """The 404 comes first, and the click write sits behind it.
+
+    A click on a title this deployment does not have is not a click on
+    anything, and writing one would put an id in `clicked_title_id` that
+    `fk_search_queries_clicked_title_id_titles` refuses -- turning a plain
+    404 into a 500 on the arm with a real foreign key. The order is what
+    makes that unreachable rather than caught.
+    """
+    search_id = await _seed_search(queries)
+
+    response = await client.get(f"/titles/{new_id()}", params={"search_id": str(search_id)})
+
+    assert response.status_code == 404
+    assert queries.outcomes[search_id] == (None, False)
+
+
+async def test_a_refused_outcome_write_still_serves_the_title(
+    app: FastAPI, client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
+) -> None:
+    """PRD 08's *"a degraded subsystem narrows functionality; it never fails a
+    request local state can answer"*, at the narrowest subsystem there is.
+
+    Whether Usher managed to note down where the household came from cannot
+    decide whether it gets the title. **Neither shipped writer can reach the
+    port's one refusal** -- the click writer names the title it just read and
+    the play writer names none -- so this guard is against a promise nobody
+    breaks, and the only way to test one of those is to inject the
+    collaborator that breaks it. The port is already injected, so the case
+    costs four lines.
+    """
+    search_id = await _seed_search(queries)
+    app.dependency_overrides[get_search_query_repository] = lambda: _RefusingSearchQueries(
+        RepositoryConflict("a search outcome violates search_queries' own bounds")
+    )
+
+    response = await client.get(f"/titles/{seeded.title_id}", params={"search_id": str(search_id)})
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(seeded.title_id)
+    assert queries.outcomes[search_id] == (None, False), "the refused write must not have landed"
+
+
+async def test_a_bug_in_the_outcome_write_is_not_absorbed_into_a_log_line(
+    app: FastAPI, client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
+) -> None:
+    """The other arm, and the reason the catch is `UsherPortError` rather than
+    `Exception`.
+
+    A `RepositoryConflict` means the store refused a row and the household
+    still gets its title; a `TypeError` out of the attribution path is a bug
+    in Usher, and a bug absorbed into a log line is billed as an outage.
+    `SearchService._record_search` draws the identical line one layer down
+    and has two cases of its own for it.
+    """
+    search_id = await _seed_search(queries)
+    app.dependency_overrides[get_search_query_repository] = lambda: _RefusingSearchQueries(
+        RuntimeError("not a port failure")
+    )
+
+    with pytest.raises(RuntimeError, match="not a port failure"):
+        await client.get(f"/titles/{seeded.title_id}", params={"search_id": str(search_id)})
+
+
+async def test_the_search_id_parameter_is_described_in_the_schema(app: FastAPI) -> None:
+    """A parameter a client is asked to send back and that `/openapi.json`
+    does not describe is a parameter no generated client will send.
+
+    It is `string` rather than `format: uuid` on purpose and the case says
+    so: the route accepts a value that is not a UUID and ignores it, and a
+    schema promising `uuid` would have generated clients validating locally
+    against a rule the server deliberately does not enforce.
+    """
+    parameters = app.openapi()["paths"]["/titles/{title_id}"]["get"]["parameters"]
+    declared = {one["name"]: one for one in parameters}
+
+    assert "search_id" in declared
+    assert declared["search_id"]["in"] == "query"
+    assert declared["search_id"]["required"] is False
+    assert "format" not in declared["search_id"]["schema"].get("anyOf", [{}])[0]
 
 
 async def test_the_response_carries_no_source_specific_concept(

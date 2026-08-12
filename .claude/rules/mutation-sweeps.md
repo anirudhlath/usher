@@ -4090,3 +4090,117 @@ rather than assuming, and not an `__all__` reorder, which `RUF022` rejects.
 | control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
 |---|---|---|---|---|---|
 | C1 | PASS | PASS | PASS | PASS (9/0) | PASS |
+
+## M9 Task F3 — `search_queries`' outcome half, and a landing check that is wrong for a *move* (2026-08-12)
+
+**19 plants over the two writers PRD 10's table cannot ship without — 16
+behavioural targets, all KILLED; 3 equivalent-mutant controls, all SURVIVED and
+all passing every gate step separately. 1 PLANT-DID-NOT-LAND, re-spelled and
+then killed; 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Run in
+place over `db/repositories/search_query.py`, `tests/fakes/
+search_query_repository.py`, `api/routers/titles.py`, `api/routers/playback.py`,
+`api/deps.py`, `api/analytics.py`, `services/search.py` and `api/dto/search.py`.
+
+Harness at `/var/tmp/m9-F3/plants.py`, **outside the working tree** for V1's
+reason, under `/var/tmp` rather than `/tmp`, which is tmpfs on this host. Plant
+list and **expected verdicts** written to `/var/tmp/m9-F3/PLANTS.md`
+(`sha256 95d369be24…`) before the first run. Tree committed at `b166698`
+first, so `git status` is the verification — clean after every plant and after
+the round. `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under **both**
+`src/` and `tests/` before every run, `compile()` as the dry run, an exact
+anchor count asserted before each plant, the landing assertion **inside** the
+`try`, `md5sum`-verified restore, no second `-q`.
+
+**Selection:** `test_api_titles.py`, `test_api_playback.py`,
+`test_api_playback_leaks.py`, `test_api_search.py`, `test_api_dto.py`,
+`test_services_search.py`, `test_search_query_repository_contract.py` (unit)
+and `test_search_query_repository.py`, `test_titles_route.py`,
+`test_playback_route.py` (integration) — **199 cases, ~13 s a run**, green
+before and after. Scoped rather than whole-suite for B2's and D4's reason:
+`tests/integration/test_sse_end_to_end.py` is intermittent on this tree and
+predates M9, and a sweep scored on "did the run fail" cannot include a flaky
+case. The three Postgres-statement plants need an integration arm, so the
+selection carries one that the flake is not in.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 pg `AND user_id = :user_id` neutralised to `AND :user_id IS NOT NULL` | KILLED | 2 — the contract scope case and the route's |
+| T2 the fake's household guard dropped | KILLED | 3 |
+| T3 pg `COALESCE(clicked_title_id, :clicked_title_id)` → `:clicked_title_id` | KILLED | 2 |
+| T4 the fake's first-write-wins dropped | KILLED | 4 |
+| T5 pg `played = played OR :played` → `= :played` | KILLED | **1 — the monotonic case alone** |
+| T6 the fake's monotonic dropped | KILLED | **1** |
+| T7 the click write deleted from `GET /titles/{id}` | KILLED | 7 |
+| T8 the click write **moved** in front of the 404 | KILLED | **1 — the case written for it** |
+| T9 the click writer passes `played=True` | KILLED | 6 |
+| T10 the play write moved in front of `_answer` | KILLED | **1 — the 409/503 case** |
+| T11 the play write deleted from `/episodes/{id}/play` | KILLED | **1** |
+| T12 `_record_play` passes `played=False` | KILLED | 7 |
+| T13 `get_search_id` parses strictly (no `try`/`except`) | KILLED | 2 — one per route family |
+| T14 `except UsherPortError` → `except Exception` | KILLED | **1** |
+| T15 `_record_search` answers the id it minted after a refused write | KILLED | **1** |
+| T16 `SearchResponse.of` drops `search_id` | KILLED | **1** |
+
+**Three results worth carrying.**
+
+🔴 **The landing check this file records is wrong for a *move*, and T8 is the
+case that shows it.** B6's substring-immune form — `old not in landed and new
+in landed` — is right for a substitution and is refused by a plant that
+relocates a call *past* a block it leaves in place: hoisting the click write
+above the 404 guard leaves `detail = await titles.detail(...)` exactly where it
+was, so the first anchor legitimately survives and the harness reports
+PLANT-DID-NOT-LAND on a plant that landed perfectly. This is the **third**
+spelling of that trap in this milestone (E2's additive plant, B5's additive
+plant, and now a move), and the two repairs those entries reached for — respell
+as a substitution, or weaken the check — do not both apply here: a move is not
+spellable as one substitution, and weakening is the failure this file exists
+over. **The general form: spell the landing check as byte equality with the
+intended mutant** (`path.read_text() == planted`, plus `planted != source`),
+which is strictly stronger than the substring form, immune to B6's prefix case
+*and* to this one, and independent of how many hunks the plant has.
+
+**T5 and T6 fail exactly one case each, and it is the same property on the two
+arms — which is what says F1's split guard is pinned rather than described.**
+`played = played OR :played` collapsed to `= :played` is invisible to every
+case in the round except the monotonic one, on both implementations
+independently. The defect it reproduces is the one F1 fixed by reading rather
+than by running: with a shared `clicked_title_id IS NULL` guard the play call
+never lands at all, and with an unconditional `SET` a later stale call erases
+the play. Two different wrong statements, one case each, one per arm.
+
+**T8 and T10 are the same decision on two routes and they die on two different
+cases**, which is the pairing worth having: the click write must sit *after*
+the 404 (a click on a title this deployment does not have would put an id in
+`clicked_title_id` that the foreign key refuses, turning a 404 into a 500), and
+the play write must sit *after* `_answer` (a 409 or a 503 handed out no target,
+so nothing was played). Both are orderings rather than presences, so a case
+asserting only "the write happened" cannot see either — T8 dies on
+`test_a_search_id_on_a_title_that_does_not_exist_attributes_nothing` and T10 on
+`test_a_play_that_resolved_nothing_records_no_play`, and neither kills the
+other's.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 the click call's `clicked_title_id=`/`played=` keyword arguments in the other written order | PASS | PASS | PASS | PASS | PASS (199) |
+| C2 one sentence of `api/analytics.py`'s module docstring reworded | PASS | PASS | PASS | PASS | PASS (199) |
+| C3 `_RECORD_OUTCOME`'s `bindparam("id", …)` and `bindparam("user_id", …)` in the other order | PASS | PASS | PASS | PASS | PASS (199) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at:
+keyword arguments bind by name regardless of written order and both
+expressions are side-effect-free (a parameter read and a literal), which is
+`_ledger_row`'s precedent; and `TextClause.bindparams()` matches its arguments
+to the statement's `:name` placeholders **by name**, so the order two pure
+`bindparam(...)` constructor calls are written in cannot reach the statement.
+Neither is an argument reorder of a *positional* call, which A5's entry is the
+reason for checking rather than assuming, and neither is an `__all__` reorder,
+which `RUF022` rejects. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: twenty-seven
+files scan source, and **none of them reads `src/usher/api/analytics.py`** —
+note that `test_api_problem_vocabulary.py` *does* AST-walk every module under
+`src/usher/api/`, but harvests `ProblemCode.<MEMBER>` attribute accesses and
+string literals passed as `code=`, so prose is invisible to it by construction.
+
+Gate green before and after on the fully restored tree (`git status` clean):
+`ruff check`, `ruff format --check` (585 files), `mypy` over 571 files,
+`lint-imports` 9 kept / 0 broken, **3,934 unit / 4 skipped** and **1,207
+integration / 22 skipped**, PRD link check `OK`.

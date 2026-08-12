@@ -101,6 +101,15 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
     async def add_title(self) -> uuid.UUID:
         return await _seed_title(self._session)
 
+    async def add_user(self) -> uuid.UUID:
+        # A real second `users` row, not an invented id: `search_queries`
+        # scopes by `user_id` in a `WHERE`, which no foreign key defends, so
+        # a made-up id would make the scope case pass for the wrong reason
+        # only if the *predicate* were also what refused it. It is not --
+        # `record_outcome` never writes `user_id` -- but the control half of
+        # that case does have to be a household this schema accepts.
+        return await _seed_user(self._session)
+
     async def test_a_query_naming_no_household_is_a_port_error(
         self,
         repository: PostgresSearchQueryRepository,
@@ -186,7 +195,9 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         await repository.record(record)
 
         with pytest.raises(RepositoryConflict) as raised:
-            await repository.record_outcome(record.id, clicked_title_id=new_id(), played=True)
+            await repository.record_outcome(
+                record.id, user_id=user_id, clicked_title_id=new_id(), played=True
+            )
 
         assert raised.value.constraint == "fk_search_queries_clicked_title_id_titles"
         stored = await ledger.get(record.id)

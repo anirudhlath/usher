@@ -1840,6 +1840,80 @@ async def test_a_refused_row_still_answers_the_whole_search_and_never_logs_the_q
     assert (len(working.rows), working.commits) == (1, 1), "the control: this fixture can write"
 
 
+async def test_the_answer_carries_the_id_of_the_row_the_search_was_recorded_as() -> None:
+    """**The handle F3's whole funnel hangs off.** A client can only report a
+    click or a play against a row it can name, and `SearchAnswer.search_id`
+    is the only place that name is published.
+
+    Asserted against the id of the row that was actually stored, not merely
+    as "not `None`": a service that minted a fresh id for the answer and a
+    different one for the row would satisfy the weaker assertion and send
+    every outcome call to a `WHERE id = …` matching nothing -- which renders
+    identically to a household that clicked nothing, in the very column PRD
+    10 builds this table for.
+
+    The negative arm is the same service with no household: no row, so no id,
+    which is what makes the field's `None` a fact about the write rather than
+    a default nobody set.
+    """
+    recorder = _Recorder()
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),)))
+    service = await _service(index, analytics=recorder.bind())
+
+    answer = await service.search("the quiet vacuum", user_id=_HOUSEHOLD)
+
+    (row,) = recorder.rows
+    assert answer.search_id == row.id
+
+    unattributed = await service.search("the quiet vacuum")
+    assert unattributed.search_id is None
+    assert len(recorder.rows) == 1, "the premise: the second search wrote no row to name"
+
+
+async def test_a_refused_row_hands_back_no_id_to_attribute_against() -> None:
+    """A row that was refused has no id worth publishing.
+
+    The id is minted before the write and could be returned regardless; doing
+    so would put a `search_id` on the wire for a row that does not exist, and
+    every outcome call against it would be a silent no-op -- indistinguishable
+    from a household that clicked nothing. So the no-click rate PRD 10 exists
+    to compute would quietly absorb every refused row, which is worse than the
+    refusal itself and invisible.
+
+    Fails against `return record.id` moved above the `except`, which is the
+    natural way to write it. The control is the working recorder below: a
+    `None` here is also what a service that stopped answering ids produces.
+    """
+    recorder = _Recorder(_RefusingQueries(RepositoryConflict("latency_ms out of range")))
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),)))
+    service = await _service(index, analytics=recorder.bind())
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    assert len(answer.results) == 1, "the premise: the search itself answered"
+    assert answer.search_id is None
+
+    working = _Recorder()
+    control = await _service(index, analytics=working.bind())
+    assert (await control.search("vacuum", user_id=_HOUSEHOLD)).search_id is not None, (
+        "the control: this fixture can publish an id at all"
+    )
+
+
+async def test_a_deployment_with_no_analytics_answers_searches_and_names_none_of_them() -> None:
+    """`SearchAnalytics` is optional on the constructor, so `search_id` is
+    `None` on every answer a deployment without one gives -- and the results
+    are unchanged, which is the half worth pinning: analytics is additive.
+    """
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),)))
+    service = await _service(index)
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    assert len(answer.results) == 1
+    assert answer.search_id is None
+
+
 async def test_a_bug_in_the_repository_is_not_absorbed_as_an_upstream_failure() -> None:
     """`except UsherPortError`, deliberately not `except Exception`.
 

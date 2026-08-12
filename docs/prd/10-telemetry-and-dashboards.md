@@ -508,22 +508,71 @@ llm_calls(
   generation_id                     -- ✅ M8. NULL for a purpose that produces
 )                                   --    no rows. See below
 
-search_queries(                       -- 🔶 M9 (`m09a`): the table, whole.
+search_queries(                       -- ✅ M9 (`m09a`): the table, whole.
   id, at, user_id, query, mode,       -- ✅ M9 (F2): written per answered search
   result_count, latency_ms,
-  clicked_title_id, played          -- outcome attribution. 🔶 M9 (F3)
+  clicked_title_id, played          -- outcome attribution. ✅ M9 (F3)
 )
 ```
 
 ✅ **`search_queries` exists as of `m09a` with these nine columns and no tenth,
-and as of F2 seven of them have a writer.** *Whole* is what the table got and it
+and as of F3 every one of them has a named writer.** *Whole* is what the table
+got and it
 was only half of what the paragraph above asks for — the argument for shipping
 all nine at once is that a dashboard reading a half-populated analytics table
 cannot tell a real zero from a column nobody filled, and an empty table is at
-least honestly empty. `SearchQueryRepository.record` now writes `id`, `at`,
+least honestly empty. `SearchQueryRepository.record` writes `id`, `at`,
 `user_id`, `query`, `mode`, `result_count` and `latency_ms` at the moment a
-search answers; the attribution update that fills `clicked_title_id` and
-`played` after the fact is `record_outcome` and is still 🔶 (F3).
+search answers (F2); `record_outcome` fills `clicked_title_id` and `played`
+afterwards (F3), from the two actions a client actually performs.
+
+✅ **The outcome half is two writers, two columns, and no route that sets
+both.** `GET /search` returns the row's own id as an opaque `search_id`;
+`GET /titles/{id}?search_id=…` records the **click**, because opening a result
+is the only moment anything knows *which* one the household opened; and
+`POST /titles/{id}/play` (or `/episodes/{id}/play`) carrying the same id
+records the **play**, naming no title. No new endpoint was needed for either.
+The split is what stops the ambiguity this document spends a paragraph
+refusing from arriving anyway through the back door: a single writer setting
+both would make `clicked_title_id` mean *"the last thing this household did
+with this search"* rather than *"which result it opened"*.
+
+Four properties of that update, each a decision rather than an implementation
+detail:
+
+- **The update is scoped `WHERE id = :search_id AND user_id = :user_id`**, and
+  that is a security boundary rather than tidiness. A `search_id` is
+  client-supplied and UUIDv7 is partially time-ordered and therefore partially
+  guessable, so without the scope one household writes attribution onto
+  another's row — silently, with no error, no log line and no metric.
+- **First write wins on `clicked_title_id`**, so a repeated or later, different
+  click cannot rewrite history. That is what makes the column answer *"what did
+  this search lead to"* rather than *"what did this client last do"* — and it
+  is also what makes the row immutable after its outcome, which is why this
+  table needs no `updated_at` and no trigger.
+- **`played` is monotonic and moves only toward `true`.** Nothing in this
+  design means *"undo the play"*, so a later call that has not itself observed
+  one is stale information rather than a correction.
+- **An unknown, stale or malformed `search_id` is ignored, never a 4xx.** This
+  is analytics, not a resource: pruning is an operator's `DELETE` (below), so a
+  client outliving its row is ordinary, and a client that truncated its id must
+  not be denied a title that exists.
+
+**Which absence means what, because a reader computing a no-click rate needs
+all three and only one of them is a real zero.**
+
+| what you see | what it means |
+|---|---|
+| a row with `clicked_title_id IS NULL` and `played = false` | **the signal.** The search answered and the household opened nothing — the no-click rate this table exists to compute |
+| a row with `clicked_title_id` set and `played = false` | **also the signal.** A click that never became a play, which is the row `usher search`'s own gate cannot produce and a synthetic typo set cannot imitate |
+| a row with `played = true` and `clicked_title_id IS NULL` | legal and meaningful: the household played a result without ever asking for its detail page, so no click was ever reported. Not a hole |
+| a play with **no row at all** | simply **unattributed**. A client that carried no `search_id` — a home row, a deep link, a bookmark — is not a search that led nowhere, and counting it as one would make the denominator the whole library |
+| **no rows from `GET /search/suggest`** | by design, on either tier (F2, and the two amendments below). The type-ahead box contributes nothing to any rate on this table |
+
+⚠️ **So the denominator is answered searches, never plays.** *"Plays with no
+search"* and *"searches with no play"* are counted in different tables — the
+first is not in this one at all — and a panel dividing one by the other is
+measuring how often people search rather than how well search works.
 
 **One row per *answered* search, and four things that are deliberately not
 rows.** Each is a decision rather than an omission, and each is stated here
@@ -695,6 +744,13 @@ it early rather than wait for the attribution call that fills the other two.
 five retrieval-side columns, and `record_outcome` (F3) writes only
 `clicked_title_id` and `played`.
 
+✅ **And `user_id` earned a second job in F3 that this row did not anticipate:
+it is the *scope* of the outcome update, not only a column.** On an
+unauthenticated deployment that reads like a formality; it is not one, and it
+is a predicate rather than a comment because the day the seam above is filled
+is the day a `search_id` guessed from a timestamp stops being harmless. The
+column is written once, by `record`, and never moved.
+
 **M6's contribution is the two histograms** — `usher.search.duration` and
 `usher.search.results`, both labelled by mode — which answer latency and
 result count without needing a durable row per query. Said explicitly so a
@@ -718,6 +774,17 @@ better than.
 Row attribution (`played` joined back to the row a title was launched from) does
 the same for [06](06-rows-and-recommendations.md) — it shows which
 `RowProvider`s earn their slot.
+
+⚠️ **That sentence is an aspiration and M9 does not deliver it — stated here
+because F3 lands `played` and a reader would otherwise assume it did.** This
+column is joined to a **search**, not to a row: `search_queries` has no row
+slug, no `generation_id` and no provider, and a play launched from a home
+shelf carries no `search_id` at all, so it is one of the *unattributed* plays
+in the table above. Attributing a play to the shelf it came from needs a
+handle `GET /home` does not hand out and a column this table does not have —
+the same shape [06](06-rows-and-recommendations.md)'s "cost per play
+attributed to an LLM row" panel needs, and a PRD amendment rather than a
+follow-up to this one.
 
 ## Dashboards
 
@@ -788,9 +855,14 @@ correction above the metric table), the latter by `usher.cache.hits`/
 `search_queries.result_count = 0` over the rows a real household produced,
 which is the live measurement this whole table exists to turn ADR-0002's gate
 into, and it counts only *answered* searches: a blank query and a keystroke are
-not rows, so the denominator is searches rather than characters typed. One
-panel on this dashboard is still **not** backed: search→play
-conversion needs `search_queries`' outcome columns (M9, owned elsewhere). And
+not rows, so the denominator is searches rather than characters typed.
+**Search→play conversion is backed as of M9's F3** — `played` over the same
+denominator, with the no-click rate (`clicked_title_id IS NULL`) beside it — so
+every panel on this dashboard now has a writer behind it. ⚠️ Read both against
+the absence table above before quoting either: a play carrying no `search_id`
+is not in this table at all, so the conversion rate is *"of searches, how many
+led to a play Usher was told about"* and never *"of plays, how many came from
+a search"*. And
 one caveat travels with the home panels — the build histogram's population is
 cache *misses* only, so a p50 that rises after a deploy may be a colder cache
 rather than a slower provider. **Two M9 additions change how these panels

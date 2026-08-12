@@ -7,7 +7,9 @@ is what actually closes:
 - **No foreign keys**, so `record()` stores a row for a `user_id` no `users`
   row names and `record_outcome()` attributes to a `clicked_title_id` no
   `titles` row names. Both refusals are Postgres-only, `llm_calls`' and
-  `curated_rows`' precedent for the identical shape.
+  `curated_rows`' precedent for the identical shape. **This is about the
+  keys, not about `record_outcome`'s `user_id` scope**, which is a predicate
+  rather than a key and is modelled here exactly -- see the comment on it.
 - **No CHECK constraints.** `ck_search_queries_query_not_empty`,
   `ck_search_queries_result_count_non_negative` and
   `ck_search_queries_latency_ms_non_negative` are enforced here not at all --
@@ -65,11 +67,23 @@ class FakeSearchQueryRepository(SearchQueryRepository):
         self.outcomes[record.id] = (None, False)
 
     async def record_outcome(
-        self, query_id: uuid.UUID, *, clicked_title_id: uuid.UUID, played: bool
+        self,
+        query_id: uuid.UUID,
+        *,
+        user_id: uuid.UUID,
+        clicked_title_id: uuid.UUID | None,
+        played: bool,
     ) -> None:
-        if query_id not in self.rows:
-            # No row named this id -- a silent no-op, matching the real
-            # statement's zero-rows-affected `UPDATE`.
+        stored = self.rows.get(query_id)
+        # No row named this id, or one belonging to another household -- a
+        # silent no-op either way, matching the real statement's
+        # zero-rows-affected `UPDATE`. **The household scope is modelled here
+        # rather than left to the arm with a real `WHERE`**, unlike the four
+        # divergences above: it is the one predicate in this port that is a
+        # security boundary, so a fake that ignored it would let every unit
+        # case in the milestone pass against an unscoped statement and leave
+        # the cross-household write caught only by a test with Docker.
+        if stored is None or stored.user_id != user_id:
             return
         already_clicked, already_played = self.outcomes[query_id]
         # First write wins on `clicked_title_id` alone: a later, genuinely
@@ -79,8 +93,8 @@ class FakeSearchQueryRepository(SearchQueryRepository):
         winning_click = already_clicked if already_clicked is not None else clicked_title_id
         # Monotonic on `played` alone, and independent of the guard above --
         # this is the whole fix. A call that only means to report a play
-        # (the same title, `played=True`, arriving after the click that
-        # already attributed this row) must still land, and once `played`
-        # is `True` a later `False` is stale information rather than a
-        # correction to write over it.
+        # (`clicked_title_id=None`, `played=True`, arriving after the click
+        # that already attributed this row) must still land, and once
+        # `played` is `True` a later `False` is stale information rather
+        # than a correction to write over it.
         self.outcomes[query_id] = (winning_click, already_played or played)

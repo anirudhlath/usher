@@ -57,9 +57,13 @@ from typing import Any, Final
 from fastapi import APIRouter, status
 from fastapi.responses import RedirectResponse
 
+from usher.api.analytics import record_search_outcome
 from usher.api.deps import (
+    DefaultUserIdDep,
     EpisodeRepositoryDep,
     PlaybackServiceDep,
+    SearchIdDep,
+    SearchQueryRepositoryDep,
     TicketCipherDep,
     TitleRepositoryDep,
 )
@@ -156,6 +160,9 @@ async def play_title(
     title_id: uuid.UUID,
     titles: TitleRepositoryDep,
     playback: PlaybackServiceDep,
+    user_id: DefaultUserIdDep,
+    queries: SearchQueryRepositoryDep,
+    search_id: SearchIdDep,
 ) -> PlayResponse:
     """Every playable target for a title, across every source that holds it.
 
@@ -163,6 +170,10 @@ async def play_title(
     authenticates against each source that holds a copy and mints a
     credential-bearing artifact per target. PRD 07 files it under Actions for
     that reason.
+
+    **`?search_id=` reports PRD 10's `played`**, which is the one fact
+    `search_queries` exists to answer and the one no other route can. See
+    `_record_play` for what the column does and does not claim.
     """
     if await titles.get(title_id) is None:
         # Generic `not_found`, and ADR-0030 ruling 1 is why: RFC 9457's
@@ -174,7 +185,9 @@ async def play_title(
             code=ProblemCode.NOT_FOUND,
             detail="title not found",
         )
-    return _answer(await playback.for_title(title_id))
+    answer = _answer(await playback.for_title(title_id))
+    await _record_play(queries, search_id, user_id=user_id)
+    return answer
 
 
 @router.post(
@@ -187,14 +200,21 @@ async def play_episode(
     episode_id: uuid.UUID,
     episodes: EpisodeRepositoryDep,
     playback: PlaybackServiceDep,
+    user_id: DefaultUserIdDep,
+    queries: SearchQueryRepositoryDep,
+    search_id: SearchIdDep,
 ) -> PlayResponse:
-    """The same answer for one episode.
+    """The same answer for one episode, and the same attribution.
 
     A route of its own rather than a query parameter on the one above:
     999,927 of the one measured library's 1,126,789 items are episodes
     (`docs/prd/03-sources-and-sync.md`), and the two reads underneath are
     different statements -- `list_for_title` carries `AND episode_id IS NULL`,
     which excludes precisely the rows this route is about.
+
+    A search whose result was a series and whose play was an episode of it
+    still records `played` here: PRD 10 asks whether the search led to
+    anything, and it did.
     """
     if not await episodes.list_by_ids([episode_id]):
         raise ProblemException(
@@ -202,7 +222,9 @@ async def play_episode(
             code=ProblemCode.NOT_FOUND,
             detail="episode not found",
         )
-    return _answer(await playback.for_episode(episode_id))
+    answer = _answer(await playback.for_episode(episode_id))
+    await _record_play(queries, search_id, user_id=user_id)
+    return answer
 
 
 @router.get(
@@ -252,6 +274,39 @@ async def redeem_playback_ticket(ticket: str, cipher: TicketCipherDep) -> Redire
         url=url,
         status_code=status.HTTP_302_FOUND,
         headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _record_play(
+    queries: SearchQueryRepositoryDep, search_id: SearchIdDep, *, user_id: uuid.UUID
+) -> None:
+    """PRD 10's `played`, in one place because both `/play` routes report it.
+
+    **Called after `_answer`, never before it.** `_answer` raises for the 503
+    and the 409, so a request that resolved no target never reaches this --
+    and it should not: a source that could not be reached and a copy that
+    cannot be played got no closer to playing anything than a request nobody
+    made. Written on the way in, this column would count both and the
+    no-play rate PRD 10 exists to compute would be unreadable.
+
+    **What `played` claims, exactly: a target was handed out.** Usher never
+    proxies the bytes, so nothing here can observe a client following the
+    redirect, let alone watching anything -- `GET /stream/{ticket}` is closer
+    to the truth and carries neither a `search_id` nor a household, by
+    design, because a ticket is a disposable artifact rather than a session.
+    This is the last moment in the funnel that Usher is part of, and PRD 10's
+    question is whether the search led anywhere.
+
+    **No `clicked_title_id`.** A play writer that named the title being
+    played would be one writer setting both columns, which is what would make
+    that column mean *"the last thing this household did with this search"*
+    rather than *"which result it opened"* -- and a play with no click before
+    it would stop being distinguishable from one with a click. `played = true`
+    beside `clicked_title_id IS NULL` is a legal, meaningful row: the
+    household played a result without ever asking Usher for its detail page.
+    """
+    await record_search_outcome(
+        queries, search_id, user_id=user_id, clicked_title_id=None, played=True
     )
 
 

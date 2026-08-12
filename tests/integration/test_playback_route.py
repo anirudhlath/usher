@@ -54,14 +54,19 @@ from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
+from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.title import PostgresTitleRepository
+from usher.db.users import ensure_default_user
 from usher.domain.enums import SourceKind, TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.credentials import SourceCredentials
 from usher.ports.ingest import MediaItemUpsert
+from usher.ports.repository import SearchQueryRecord
+from usher.ports.search import SearchMode
 from usher.ports.source import (
     SourceAdapter,
     SourceAdapterFactory,
@@ -74,6 +79,9 @@ USERNAME = "usher"
 PASSWORD = "correct-horse-battery"
 SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
 CHANGED_AT = datetime(2026, 7, 30, tzinfo=UTC)
+# When the search a play is attributed to was answered -- `search_queries.at`
+# carries no server default.
+SEARCHED_AT = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 # Every title this file writes carries it, so teardown deletes exactly what
 # this file created rather than emptying a table another committing file uses.
 MARK = "Playback Route Case"
@@ -144,6 +152,16 @@ class _Seeded:
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
+        # **First, and it is an obligation this file inherited rather than a
+        # tidy-up.** `search_queries.user_id` is `ON DELETE RESTRICT`, so a
+        # committed row from the attribution case below turns another
+        # committing file's `DELETE FROM users WHERE name = 'default'` into a
+        # foreign-key violation -- in that file, not in this one, which is
+        # the shape CLAUDE.md records for `titles` and `jobs`. The rows this
+        # file writes belong to the singleton default household, which it
+        # does not own and must not delete, so the rows go and the household
+        # stays.
+        await session.execute(text("DELETE FROM search_queries"))
         # Takes `media_items` and `source_credentials` with it
         # (`ON DELETE CASCADE`), which is what leaves `titles` unreferenced.
         await session.execute(text("TRUNCATE sources CASCADE"))
@@ -324,6 +342,64 @@ async def test_a_play_over_the_real_graph_answers_tickets_and_not_the_emby_url(
     assert token not in response.text
     assert "api_key" not in response.text
     assert "emby.invalid" not in response.text
+
+
+async def test_a_play_carrying_a_search_id_records_played_durably(
+    client: AsyncClient, seeded: _Seeded, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """**PRD 10's `played`, through the un-overridden graph, read back on a
+    different connection.**
+
+    That last clause is what only this level can say: `get_session` is the
+    request's commit boundary, and a route that issued the `UPDATE` and never
+    committed passes every case driven over a fake, because a dict does not
+    roll back. The table exists to answer *did they play anything*, and an
+    answer that does not survive the response answers nothing.
+
+    It is also the only place the real statement binds `clicked_title_id`
+    as a **typed `NULL`** against Postgres from a route -- an untyped one is
+    the shape asyncpg refuses outright.
+
+    `ensure_default_user` seeds the household the request will itself
+    resolve, so the row is one the route's own `AND user_id = :user_id` can
+    match; an invented id would make this pass as a cross-household refusal,
+    which is the answer it is checking against.
+    """
+    async with sessions() as session:
+        household = await ensure_default_user(session)
+        await session.commit()
+    search_id = new_id()
+    async with sessions() as session:
+        await PostgresSearchQueryRepository(session).record(
+            SearchQueryRecord(
+                id=search_id,
+                at=SEARCHED_AT,
+                user_id=household,
+                query="the quiet vacuum",
+                mode=SearchMode.FULL_TEXT,
+                result_count=3,
+                latency_ms=12,
+            )
+        )
+        await session.commit()
+
+    response = await client.post(
+        f"/titles/{seeded.movie_id}/play", params={"search_id": str(search_id)}
+    )
+
+    assert response.status_code == 200, response.text
+    async with sessions() as session:
+        clicked, played = (
+            await session.execute(
+                text(
+                    "SELECT clicked_title_id, played FROM search_queries "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": search_id},
+            )
+        ).one()
+    assert bool(played) is True
+    assert clicked is None, "the play writer names no title -- that is the click's column"
 
 
 async def test_following_the_ticket_redirects_to_the_url_the_adapter_really_built(
