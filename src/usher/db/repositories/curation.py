@@ -231,8 +231,8 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
             # halves matter and for different reasons: the *order* is what makes
             # a redelivered generation answer instead of meeting
             # `pk_curated_rows` on the very rows it is about to remove (PRD 08's
-            # redelivery rule -- `JobWorker.startup()` requeues everything left
-            # `running`), and the *SAVEPOINT* is what makes a generation that
+            # redelivery rule -- `JobWorker.recover()` requeues a claim its worker
+            # stopped heartbeating), and the *SAVEPOINT* is what makes a generation that
             # fails part-way leave the previous screen whole rather than an
             # empty one. Without it the delete has already landed in the
             # caller's transaction, and a service that catches the conflict and

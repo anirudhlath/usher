@@ -493,7 +493,7 @@ class CreditRepositoryContract:
         self, repository: CreditRepository, title_id: uuid.UUID, lead_person: uuid.UUID
     ) -> None:
         """PRD 08's redelivery rule: the job queue *will* redeliver, and
-        `JobWorker.startup()` requeues everything left `running`. Same
+        `JobWorker.recover()` requeues an abandoned claim. Same
         arguments twice, same rows, same count.
 
         The wrong implementation this kills is insert-then-delete rather than

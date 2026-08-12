@@ -94,6 +94,21 @@ class Settings(BaseSettings):
     database_url: SecretStr
     secret_key: SecretStr = Field(min_length=32)
 
+    # The connection pool, settings-driven since M9's W1 and hardcoded before
+    # it. `usher.db.base.build_engine`'s own comment predicted this task:
+    # *"Revisit if/when a milestone adds a second long-running process (e.g. a
+    # worker pool) sharing this pool."* It is not a second process -- it is
+    # `job_concurrency` jobs, each holding a session, **plus the claim and the
+    # heartbeat, plus the API's own requests**, because `usher serve` runs the
+    # worker lane inside the same process against the same engine.
+    #
+    # The default budget at the shipped `job_concurrency = 12`: 12 jobs + 1
+    # claim + 1 heartbeat = 14 for the worker, leaving 6 of `db_pool_size` and
+    # all 10 of the overflow for the API, the push lanes and the rows.refresh
+    # lane. The old 10/5 could not hold the worker alone.
+    db_pool_size: int = Field(default=20, ge=1, le=200)
+    db_max_overflow: int = Field(default=10, ge=0, le=200)
+
     host: str = "0.0.0.0"  # noqa: S104  intentional: default bind-all for a containerized service
     port: int = Field(default=8000, ge=1, le=65535)
 
@@ -144,6 +159,35 @@ class Settings(BaseSettings):
     # passes on the command line.
     sync_max_retract_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
     job_batch_size: int = Field(default=20, ge=1, le=500)
+    # How many jobs one worker process may have in flight at once, and the
+    # per-kind ceiling for the network-bound kinds. `usher.services.jobs.
+    # KIND_CONCURRENCY` holds the per-kind table and the measurement behind
+    # every entry in it; this is the global bound and the value the entries
+    # spelled `None` resolve to.
+    #
+    # **12 is Little's law over what M9's S3 measured, not a round number.**
+    # p95 HTTP against TMDb was 0.4267 s over 130,334 requests, and ~0.033 s
+    # of Postgres bookkeeping per job (S2's one-worker 10.38 rps against its
+    # own 0.0637 s mean HTTP) makes a p95 job ~0.46 s -- so holding ADR-0005's
+    # ~25 rps through the tail takes ~11.5 in flight. Below that the
+    # *architecture* is the ceiling again, which is the defect W1 exists to
+    # remove: S3's three workers reached 19.76 rps with a 10 rps-per-process
+    # bucket that never once bound.
+    #
+    # `le=64` rather than unbounded, and the bound is the connection pool
+    # rather than taste: every job in flight holds a session, so a value above
+    # `db_pool_size + db_max_overflow` cannot run and would wait 30 s per job
+    # on `pool_timeout` before failing. The validator below refuses that
+    # combination outright instead of letting it be discovered in production.
+    job_concurrency: int = Field(default=12, ge=1, le=64)
+    # How long a claim may go un-heartbeated before another worker may take it
+    # back. Paired with `JobQueue.touch`, which `JobWorker` calls every
+    # `job_lease_seconds / 3` for everything in flight -- so this is a bound on
+    # *"the process stopped"*, not on how long a job may take, and a `bootstrap`
+    # phase running for hours is not at risk. `ge=10` because a lease shorter
+    # than a couple of heartbeat intervals plus a slow database is a worker
+    # that recovers its own live claims.
+    job_lease_seconds: float = Field(default=300.0, ge=10.0)
     # PRD 08's "after N attempts a job is parked with its error". `ge=1`
     # rather than `ge=0`: a ceiling of zero would park every job on its first
     # failure, which is `retryable=False` applied indiscriminately and takes
@@ -693,6 +737,37 @@ class Settings(BaseSettings):
                 "USHER_QUERY_EXPANSION_ENABLED=true needs USHER_LLM_ENABLED=true "
                 "-- query expansion is one completion in front of the embed, and "
                 "with no LLM there is no completion to put there"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _the_pool_can_hold_the_worker(self) -> "Settings":
+        """A concurrency the pool cannot serve is refused at startup.
+
+        Every job in flight holds a session, and the worker needs two more of
+        its own: the claim and the heartbeat. Over the pool's capacity, jobs do
+        not fail fast -- SQLAlchemy's `QueuePool` **waits** `pool_timeout`
+        (30 s, the default this project does not change) and then raises, so
+        the symptom is a lane that gets slower and slower and finally starts
+        parking jobs with a message about a pool. That is a configuration
+        mistake wearing an upstream's clothes.
+
+        The bound is deliberately *not* "and leave room for the API": a
+        split-container deployment (`USHER_WORKER_ENABLED=false` on the server,
+        `usher work` beside it) has no API requests on the worker's pool at
+        all, and a validator that assumed otherwise would refuse a correct
+        deployment. What it refuses is the arithmetic that cannot work in any
+        shape. `db/base.py`'s docstring carries the in-process budget.
+        """
+        needed = self.job_concurrency + 2
+        capacity = self.db_pool_size + self.db_max_overflow
+        if needed > capacity:
+            raise ValueError(
+                f"USHER_JOB_CONCURRENCY={self.job_concurrency} needs {needed} connections "
+                f"(one per job in flight, plus the claim and the heartbeat) and "
+                f"USHER_DB_POOL_SIZE={self.db_pool_size} + "
+                f"USHER_DB_MAX_OVERFLOW={self.db_max_overflow} is {capacity} "
+                "-- raise the pool or lower the concurrency"
             )
         return self
 

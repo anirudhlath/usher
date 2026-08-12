@@ -173,8 +173,9 @@ async def test_a_series_never_receives_a_collection_id(harness: _Harness) -> Non
 
 
 async def test_deriving_twice_leaves_one_row_per_credit(harness: _Harness) -> None:
-    """PRD 08's redelivery rule, and `JobWorker.startup()` requeues everything
-    left `running`, so this is ordinary rather than hypothetical.
+    """PRD 08's redelivery rule, and `JobWorker.recover()` requeues a claim
+    its worker stopped heartbeating, so this is ordinary rather than
+    hypothetical.
 
     Idempotence comes from two mechanisms and this case sees both: people
     dedupe on `tmdb_id` (never on `Person.id`, which the derivation mints

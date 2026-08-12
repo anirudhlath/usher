@@ -1242,10 +1242,35 @@ suspicion.
   which is a migration, a port change and a change to every composition root.
   The cheap mitigation, which is documentation rather than code: run one worker,
   or accept that a crash costs a manual `UPDATE`.
+
+  ✅ **Discharged by M9's W1 (2026-08-12), and the estimate was wrong in one
+  place worth naming: no migration was needed.** The lease this entry asks for
+  is `requeue_running(older_than_seconds=…)`, which the port has carried since
+  M4, measured against `jobs.updated_at`, which the schema has carried since
+  M4 — so the missing half was never a column, it was a **heartbeat to move
+  it**. `JobQueue.touch()` is that, `JobWorker.recover()` passes
+  `USHER_JOB_LEASE_SECONDS` instead of the `0.0` default, and it is called on
+  a timer rather than once, which is what lets a live worker recover a *dead
+  peer's* claims — the thing this entry says there is no way to do. A
+  `claimed_by` column would have named whose claims are stale; a beat makes
+  that question unnecessary, because a claim nobody is renewing is stale
+  whoever holds it. The port change and the composition-root change were both
+  real. [ADR-0037](decisions/0037-the-worker-is-a-bounded-pool-of-scopes.md).
+
+  ⚠️ **The `MissingGreenlet` itself is not fixed and is not claimed to be.**
+  This entry's opening clause — *"a worker that dies on an unhandled
+  `MissingGreenlet`"* — describes a crash whose cause is still unknown; what W1
+  removed is the **consequence**, which is that its claims were unrecoverable.
+  The hypothesis that it was a shared `AsyncSession` is refuted by the
+  deployment shape: `usher work` held one session and ran one job at a time, so
+  there was no second coroutine to touch it. `.claude/rules/tmdb-and-enrichment.md`
+  carries the refutation and what a next run has to capture.
   🔴 **And the worse half, which the `usher work` description above understates:
   the same fault inside the API server's own in-process worker lane orphans
-  claims with no process death at all.** `api/lanes.py:554-561` calls
-  `worker.startup()` **once per lane lifetime** and sets `requeued = True` —
+  claims with no process death at all.** ✅ *Discharged with the entry above:
+  the lane now calls `recover()` on a timer, so a pass that raised does not
+  strand its claims until the process restarts.* `api/lanes.py` called
+  `worker.startup()` **once per lane lifetime** and set `requeued = True` —
   correct on its own terms, and the comment says why (*"a second call would
   steal this lane's own claims"*) — while `:573-578` catches `except Exception`,
   logs a warning and continues, which is also correct on its own terms

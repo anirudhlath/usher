@@ -75,14 +75,25 @@ committed state inside a window where the code has not yet produced it.
 3. The rule is made **structural** rather than conventional — G2's subject,
    shipped. It was conventional: five sites, five hand-written comments arguing
    for the same ordering, and nothing that failed when a sixth author omitted
-   it. It is now a property of `JobWorker`. A worker holds a
-   `DeferredEventPublisher` wrapping whatever publisher it was built with;
-   `composition.build_worker` hands **that** to every service it constructs
-   (`build_enrich_service` takes `events` as a required keyword rather than
-   reading `pipeline.events`, which is why the change is visible in a
-   signature); `_run` flushes it after `complete()` and `_commit()`, and
-   discards it in a `finally`. **A handler that publishes writes no line to
+   it. It is now a property of the worker's *scope*. Each scope holds a
+   `DeferredEventPublisher` wrapping the process bus;
+   `composition.build_worker` hands **that** to every service it constructs in
+   that scope (`build_enrich_service` takes `events` as a required keyword
+   rather than reading `pipeline.events`, which is why the change is visible in
+   a signature); `_run` flushes it after `complete()` and the scope's commit,
+   and discards it in a `finally`. **A handler that publishes writes no line to
    get the ordering, and a handler that fails cannot keep it.**
+
+   ⚠️ **Amended by [0037](0037-the-worker-is-a-bounded-pool-of-scopes.md),
+   2026-08-12: the buffer is the scope's rather than the worker's, and that is
+   a correctness change, not a refactor.** This paragraph read *"It is now a
+   property of `JobWorker`. A worker holds a `DeferredEventPublisher`"* — one
+   buffer for the life of the worker — which was exactly right while jobs ran
+   one at a time and is a defect the moment they do not: `discard()` on a
+   failing job empties a **concurrent** job's held frames, so an enriched title
+   that really did commit is never announced and nothing anywhere says so. The
+   ordering rule this ADR is about is unchanged; what moved is the object that
+   owns it.
    The rule stops at the worker: the push and reconcile lanes are not jobs,
    already satisfy the stronger form, and a `sync.progress` frame held behind
    a 1,127-batch walk would turn a progress bar into a single jump.

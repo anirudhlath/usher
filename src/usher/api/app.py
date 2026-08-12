@@ -55,7 +55,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = build_engine(settings.database_url.get_secret_value())
+        engine = build_engine(
+            settings.database_url.get_secret_value(),
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+        )
         session_factory = build_session_factory(engine)
         app.state.session_factory = session_factory
         # The TMDb provider, and the one place its token bucket can live:

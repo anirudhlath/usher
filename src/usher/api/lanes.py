@@ -59,12 +59,17 @@ source's lane must cost that source and nothing else; a task group cancels
 its siblings on the first escape, and if the group were awaited in the
 lifespan it would take the HTTP server with it.
 
-**One worker per deployment, not per process.** `JobWorker.startup()`
-requeues everything left `running`, which is correct at exactly one worker
-and at two steals the other's live claims. So a deployment that runs
-`usher work` in its own container must set `USHER_WORKER_ENABLED=false` on
-the server; that is what the switch is for, and the README says so where an
-operator will read it.
+**Two workers are now safe, and the switch is still what an operator
+wants.** This used to read *"one worker per deployment, not per process"*,
+because `JobWorker.startup()` requeued everything left `running` and at two
+workers each stole the other's live claims. M9's W1 replaced that with a
+lease and a heartbeat (`JobWorker.recover`), so a second `usher work` beside
+the server no longer corrupts anything -- what it still does is share the
+same `job_concurrency` budget against the same upstreams from two processes,
+which is the thing ADR-0005's rate limit is per-*client* and cannot see. So
+`USHER_WORKER_ENABLED=false` on the server remains the documented shape for a
+split deployment; it is now a capacity decision rather than a correctness
+one.
 
 **Tests that build an app but do not want lanes must say so.** Both switches
 default on, so `create_app(Settings(...))` under `LifespanManager` starts a
@@ -75,6 +80,7 @@ a way an autouse default would not be.
 """
 
 import asyncio
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -104,6 +110,7 @@ from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
 from usher.ports.source import SourceAdapter, SourceEvent
 from usher.services.home import HomeService
+from usher.services.jobs import JobWorker
 from usher.services.push import PushOutcome, PushSupervisor
 from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache, StaleScreen
@@ -526,40 +533,49 @@ class LaneSupervisor:
         a lane that already has push as its real answer for *inbound* work.
         What it drains is Usher's own queue, which has no push.
 
-        One unit of work per pass, and the registry outlives them: its
-        repositories change every few seconds, its connection pools must
-        not.
+        **The worker is built once per process, not once per pass.** It used
+        to be rebuilt on every turn of this loop because it was bound to that
+        pass's session; since M9's W1 it holds a *factory* and opens a scope
+        per job, so the only thing that has to happen per pass is the gauge
+        refresh, which needs a pipeline of its own and gets one. The lazy build
+        is what keeps `start()`'s promise that a lane connects to nothing: the
+        first `await self._user_id()` is a database call, and doing it here
+        means a database that is down at boot delays the first job instead of
+        crashing the lane.
+
+        **Recovery runs on a timer, not once.** `startup()` ran exactly once,
+        at process start, with `older_than_seconds=0.0` -- which could only
+        recover *this* process's orphans and only by stealing every other
+        worker's live claims. `recover()` takes an age instead, so it is safe
+        to call repeatedly and safe to call while other workers are running,
+        which is the only shape under which a crashed peer's claims ever come
+        back. Throttled to half the lease because it is an `UPDATE` scanning
+        `status = 'running'` and there is nothing to find between leases.
         """
         register_queue_gauges(self._gauges.read)
         register_search_gauges(self._backlog.read)
-        registry: SourceRegistry | None = None
-        requeued = False
+        registry = SourceRegistry()
+        worker: JobWorker | None = None
+        recovered_at = 0.0
         while True:
             ran = 0
             try:
-                async with self._work() as pipeline:
-                    if registry is None:
-                        registry = SourceRegistry(pipeline)
-                    else:
-                        registry.rebind(pipeline)
+                if worker is None:
                     worker = build_worker(
-                        pipeline,
+                        self._work,
                         self._settings,
                         provider=self._provider,
                         embedder=self._embedder,
                         client=self._client,
-                        resolve=registry.resolve,
+                        registry=registry,
                         user_id=await self._user_id(),
                     )
-                    if not requeued:
-                        # PRD 08: "startup requeues anything left
-                        # in_progress". Here rather than in `start()`, for
-                        # the reason nothing else touches the database
-                        # there -- and once rather than per pass, since a
-                        # second call would steal this lane's own claims.
-                        await worker.startup()
-                        requeued = True
-                    ran = await worker.run_once()
+                now = time.monotonic()
+                if now - recovered_at >= self._settings.job_lease_seconds / 2:
+                    await worker.recover()
+                    recovered_at = now
+                ran = await worker.run_once()
+                async with self._work() as pipeline:
                     await self._gauges.refresh(pipeline.queue)
                     await self._backlog.refresh(
                         pipeline.embeddings,
@@ -567,8 +583,7 @@ class LaneSupervisor:
                         self._settings.embedding_model,
                     )
             except asyncio.CancelledError:
-                if registry is not None:
-                    await registry.aclose()
+                await registry.aclose()
                 raise
             except Exception as exc:
                 # Including a `UsherPortError`: a database outage must slow

@@ -198,7 +198,8 @@ class TitleEmbeddingRepository(ABC):
 
         The index stage reads this *before* asking a model for anything, and
         that read is what makes redelivery free rather than merely safe:
-        `JobWorker.startup()` requeues everything left `running`, so a
+        `JobWorker.recover()` requeues a claim whose worker stopped
+        heartbeating, so a
         process killed between a handler returning and `complete` committing
         produces a second delivery of work already done. At ~83 texts/s a
         requeued backfill that re-embedded would re-run the whole enriched

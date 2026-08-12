@@ -72,10 +72,16 @@ above in M7, which is the milestone that made leaving them there concretely
 wrong** — a table listing a knob after its own prose retracted it is the same
 failure as a table listing a control nothing implements.
 
-- ⏳ **"Concurrency per lane" has no knob because it has no lane** — there is
-  no semaphore anywhere in `src/`, and [01](01-architecture.md)'s concurrency
-  table now says so. A setting cannot be added ahead of the mechanism it
-  would bound.
+- ✅ **"Concurrency per lane" now has a knob, because M9's W1 built the
+  mechanism it would bound.** It was struck on the principle that *a setting
+  cannot be added ahead of the mechanism it would bound* — there was no
+  semaphore anywhere in `src/` — and the principle is unchanged: the setting
+  arrives **with** the pool rather than before it. `USHER_JOB_CONCURRENCY` is
+  the worker's global ceiling; the per-kind ceilings under it are code
+  (`usher.services.jobs.KIND_CONCURRENCY`) for the reason the row weights below
+  are, one entry per `JobKind` with its measurement beside it. The *row build*
+  still has no such setting, and the bullet at the end of this section says
+  why: its mechanism is still a `for`.
 - **"Row weights" are deliberately module constants, not configuration.**
   M6's similarity blend and its ranking blend are both weighted sums, and
   both are hardcoded. Changing a weight changes what "similar" and "relevant"
@@ -161,8 +167,11 @@ delivered directly, and were silently ignored when set where the docs point.
 **A setting that is documented but unreachable is dead config that looks like
 a control**, and this one had teeth: an operator who sets
 `USHER_WORKER_ENABLED=false` and then runs `usher work` in a second container
-gets two workers, and `JobWorker.startup()` requeues everything `running`, so
-each steals the other's live claims.
+gets two workers, and `JobWorker.startup()` requeued everything `running`, so
+each stole the other's live claims. *(That consequence is closed by M9's W1 —
+recovery is a lease now — but the finding about `env_file:` is unchanged, and
+two workers still spend `USHER_JOB_CONCURRENCY` and
+`USHER_TMDB_REQUESTS_PER_SECOND` twice against limits that are per process.)*
 
 `environment:` still wins over `env_file:`, so what is left in it is exactly
 the four the compose *topology* owns rather than the operator:
@@ -365,7 +374,25 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
 - Parked jobs are listed in the admin API and counted in metrics. Silent failure
   is the thing worth engineering against; visible failure is fine.
 - Jobs are idempotent by construction, so redelivery is always safe.
-- Startup requeues anything left `in_progress` by an unclean shutdown.
+- **Abandoned claims are recovered on a lease, and the lease is what makes
+  recovery possible at more than one worker.** This read *"startup requeues
+  anything left `in_progress` by an unclean shutdown"* until M9's W1, and that
+  is what shipped: `requeue_running()` with the port's `older_than_seconds=0.0`
+  default, called once at process start. M9's S3 measured the dead end. One of
+  three workers died holding 20 claims; the only lever that could recover them
+  would have requeued the other two workers' **live** claims with it, so the 20
+  were written off and reported as part of the shortfall. Two changes, and
+  neither works without the other:
+  - `JobWorker.recover()` passes an explicit `USHER_JOB_LEASE_SECONDS`
+    (default 300), so it takes back only claims nobody has touched for a
+    lease — and is therefore safe to run **repeatedly**, which is what lets a
+    live worker recover a *dead peer's* orphans rather than only its own.
+  - `JobQueue.touch()` is the heartbeat. Without it the lease would have to
+    exceed the longest job a deployment can run — a `bootstrap` phase is
+    measured in hours — and the orphan window would be hours with it. The
+    worker beats every third of a lease for everything in flight, so the lease
+    is a bound on *"the process stopped"* rather than on how long a job may
+    take.
 - **Head-of-line blocking is accepted, priced, and recorded — M9's E3, and the
   one lane this queue has.** `POST /admin/sources/{id}/sync` (`JobKind.SYNC`)
   and `POST /admin/bootstrap/{phase}` put the two longest units of work in
@@ -382,6 +409,21 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
   lane. No second lane is added to change this trade; a deployment large
   enough to need one is a deployment large enough to need `usher work` run
   from a second host instead.
+
+  ✅ **M9's W1 narrows this without removing it, and the correction is worth
+  reading precisely.** *"`services/jobs.py`'s claim loop is strictly
+  sequential"* is no longer true — jobs run in a bounded pool — so `enrich`,
+  `index`, `derive`, `curate` and `match` are **not** unavailable for the
+  duration of a sync any more; they run beside it, up to
+  `USHER_JOB_CONCURRENCY`. What survives is the *claim* ordering, which is
+  where the real head-of-line blocking always was: the claim is `priority DESC,
+  created_at`, so a bulk enqueue at one priority still defers everything
+  enqueued after it — S3 measured `title_embeddings` frozen at 542 for a whole
+  130,806-title crawl and then jumping to 4,929 within minutes of the enrich
+  queue emptying, with the embedder on the entire time. A pool does not fix an
+  ordering. *(The parenthetical above also read "`JobWorker.startup()` requeues
+  everything `running`"; that is now `recover()` on a lease — see the recovery
+  bullet.)*
 
 ## Observability
 

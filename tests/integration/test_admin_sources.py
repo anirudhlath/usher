@@ -55,7 +55,7 @@ from usher.adapters.emby.adapter import EmbyAdapter
 from usher.api.app import create_app
 from usher.api.deps import get_lane_supervisor, get_source_adapter_factory
 from usher.api.lanes import LaneSupervisor
-from usher.composition import Pipeline, build_pipeline, build_worker
+from usher.composition import Pipeline, SourceRegistry, build_pipeline, build_worker
 from usher.config import Settings
 from usher.db.base import build_engine
 from usher.db.models.source import SourceCredentialRow, SourceRow
@@ -651,16 +651,26 @@ async def _drained_pipeline(
     session_factory: async_sessionmaker[AsyncSession] = app.state.session_factory
     async with session_factory() as session:
         pipeline = dataclasses.replace(build_pipeline(session, settings), adapters=worker_factory)
+
+        @asynccontextmanager
+        async def _work() -> AsyncIterator[Pipeline]:
+            # One pipeline for every scope, so the case can read back what the
+            # run wrote on the same session it wrote it on. `build_worker`
+            # opens a scope per claim and per job since M9's W1; the property
+            # that those are *different sessions* is asserted in
+            # `test_services_jobs.py`, which is where a second engine exists to
+            # tell them apart.
+            yield pipeline
+
         worker = build_worker(
-            pipeline,
+            _work,
             settings,
             provider=None,
             embedder=None,
             client=None,
-            resolve=_never_resolves,
+            registry=SourceRegistry(),
             user_id=user_id,
         )
-        await worker.startup()
         ran = await worker.run_once()
         assert ran == 1, "the claim found more or fewer than the one enqueued sync job"
         yield pipeline

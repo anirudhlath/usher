@@ -204,7 +204,11 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
     degradation PRD 07 and PRD 08 record for a split deployment. A client
     that wants these frames watches the server that ran the phase.
     """
-    engine = build_engine(settings.database_url.get_secret_value())
+    engine = build_engine(
+        settings.database_url.get_secret_value(),
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
     factory = build_session_factory(engine)
     try:
         async with factory() as session:
@@ -308,7 +312,11 @@ async def _session_for(settings: Settings) -> AsyncIterator[AsyncSession]:
     is the whole unit of work -- unlike `api/deps.py`, where the session is
     request-scoped and the engine outlives it on `app.state`.
     """
-    engine = build_engine(settings.database_url.get_secret_value())
+    engine = build_engine(
+        settings.database_url.get_secret_value(),
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
     factory = build_session_factory(engine)
     try:
         async with factory() as session:
@@ -451,60 +459,89 @@ async def _work(settings: Settings, *, once: bool) -> None:
     closes there, and `EventPublisher` is a port precisely so the fix for
     the split deployment is a second implementation rather than a branch.
     """
-    async with _session_for(settings) as session:
-        provider, aclose = await metadata_provider(settings)
-        # Both built once, here, and closed in the same `finally`. A model is
-        # a process-lifetime resource for the same reason the TMDb client is:
-        # `build_worker` runs once per pass below, and a load there is 4.84 s
-        # cold / 0.13 s warm over 65 MB of ONNX.
-        model, aclose_model = await embedder(settings)
-        # And the completion client, on the same terms: one per process, not
-        # one per pass. `USHER_LLM_ENABLED=false` is the shipped default and
-        # answers `(None, no-op)`, which is what leaves `curate` unclaimed
-        # here rather than parked.
-        client, aclose_client = await llm_client(settings)
-        pipeline = build_pipeline(session, settings, provider=provider)
-        registry = SourceRegistry(pipeline)
-        gauges = QueueGauges()
-        register_queue_gauges(gauges.read)
-        # PRD 10's embedding backlog, refreshed on the same beat and for the
-        # same reason: an OTel observable callback runs on the metric reader's
-        # background thread and cannot await an asyncpg query. Refreshed even
-        # when this process has no model -- a worker without one leaves index
-        # jobs for one that has, and the backlog is the number that says so.
-        backlog = SearchGauges()
-        register_search_gauges(backlog.read)
-        try:
-            worker = build_worker(
-                pipeline,
-                settings,
-                provider=provider,
-                embedder=model,
-                client=client,
-                resolve=registry.resolve,
-                user_id=await ensure_default_user(session),
-            )
-            # PRD 08: "startup requeues anything left in_progress". Before
-            # the first claim, so a previous process's abandoned claims are
-            # this one's work rather than nobody's.
-            await worker.startup()
-            ran = await worker.run_once()
-            await gauges.refresh(pipeline.queue)
-            await backlog.refresh(pipeline.embeddings, pipeline.neighbors, settings.embedding_model)
-            print(f"{ran} jobs")
-            while not once:
-                if ran == 0:
-                    await asyncio.sleep(_IDLE_SLEEP_SECONDS)
-                ran = await worker.run_once()
+    engine = build_engine(
+        settings.database_url.get_secret_value(),
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
+    sessions = build_session_factory(engine)
+    provider, aclose = await metadata_provider(settings)
+    # Both built once, here, and closed in the same `finally`. A model is
+    # a process-lifetime resource for the same reason the TMDb client is:
+    # a load is 4.84 s cold / 0.13 s warm over 65 MB of ONNX, and the worker
+    # below opens a scope per *job*.
+    model, aclose_model = await embedder(settings)
+    # And the completion client, on the same terms: one per process, not
+    # one per job. `USHER_LLM_ENABLED=false` is the shipped default and
+    # answers `(None, no-op)`, which is what leaves `curate` unclaimed
+    # here rather than parked.
+    client, aclose_client = await llm_client(settings)
+    registry = SourceRegistry()
+    gauges = QueueGauges()
+    register_queue_gauges(gauges.read)
+    # PRD 10's embedding backlog, refreshed on the same beat and for the
+    # same reason: an OTel observable callback runs on the metric reader's
+    # background thread and cannot await an asyncpg query. Refreshed even
+    # when this process has no model -- a worker without one leaves index
+    # jobs for one that has, and the backlog is the number that says so.
+    backlog = SearchGauges()
+    register_search_gauges(backlog.read)
+    # **A session factory, not a session.** This command held exactly one
+    # `AsyncSession` for the life of the process until M9's W1, which is what
+    # bound the whole lane to one job at a time: `AsyncSession` is not
+    # concurrency-safe, so the worker now opens one per claim and one per job
+    # through the same `unit_of_work` the server's lanes use.
+    work = unit_of_work(sessions, settings, events=NullEventPublisher(), provider=provider)
+    try:
+        async with sessions() as bootstrap_session:
+            user_id = await ensure_default_user(bootstrap_session)
+            await bootstrap_session.commit()
+        worker = build_worker(
+            work,
+            settings,
+            provider=provider,
+            embedder=model,
+            client=client,
+            registry=registry,
+            user_id=user_id,
+        )
+
+        recovered_at = 0.0
+
+        async def _measure() -> int:
+            # PRD 08's recovery, on the lease rather than on "everything
+            # running". Before the first claim, so a dead process's abandoned
+            # claims are this one's work rather than nobody's -- and it is now
+            # safe to run beside another live worker, which is the whole
+            # difference from the `startup()` it replaces. Throttled to half
+            # the lease for `api/lanes.py`'s reason: it is an `UPDATE` scanning
+            # `status = 'running'`, and between leases there is nothing to
+            # find.
+            nonlocal recovered_at
+            now = time.monotonic()
+            if now - recovered_at >= settings.job_lease_seconds / 2:
+                await worker.recover()
+                recovered_at = now
+            done = await worker.run_once()
+            async with work() as pipeline:
                 await gauges.refresh(pipeline.queue)
                 await backlog.refresh(
                     pipeline.embeddings, pipeline.neighbors, settings.embedding_model
                 )
-        finally:
-            await registry.aclose()
-            await aclose()
-            await aclose_model()
-            await aclose_client()
+            return done
+
+        ran = await _measure()
+        print(f"{ran} jobs")
+        while not once:
+            if ran == 0:
+                await asyncio.sleep(_IDLE_SLEEP_SECONDS)
+            ran = await _measure()
+    finally:
+        await registry.aclose()
+        await aclose()
+        await aclose_model()
+        await aclose_client()
+        await engine.dispose()
 
 
 async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
@@ -1498,7 +1535,11 @@ async def _run_lanes(settings: Settings) -> None:
     Ctrl-C -- `KeyboardInterrupt` reaches `asyncio.run`, which cancels the
     task, and `stop()` runs in the `finally`.
     """
-    engine = build_engine(settings.database_url.get_secret_value())
+    engine = build_engine(
+        settings.database_url.get_secret_value(),
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
     sessions = build_session_factory(engine)
     provider, close_provider = (
         await metadata_provider(settings) if settings.worker_enabled else (None, nothing)

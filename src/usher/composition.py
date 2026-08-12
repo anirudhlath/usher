@@ -46,6 +46,7 @@ usher.adapters.search.postgres` KEPT while a *direct* import in
 than argued -- without the flag that real chain reports BROKEN.
 """
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -140,6 +141,7 @@ from usher.services.curation import CurationService
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
+from usher.services.events import DeferredEventPublisher
 from usher.services.handlers import (
     SourceBinding,
     bootstrap_handler,
@@ -155,7 +157,12 @@ from usher.services.handlers import (
 from usher.services.images import ImageProxyService
 from usher.services.index import IndexService
 from usher.services.ingest import IngestService
-from usher.services.jobs import JobWorker
+from usher.services.jobs import (
+    KIND_CONCURRENCY,
+    Handler,
+    JobScope,
+    JobWorker,
+)
 from usher.services.matching import MatchService
 from usher.services.push import PushApplyService
 from usher.services.query_expansion import QueryExpansionService
@@ -774,14 +781,65 @@ def build_enrich_service(
     )
 
 
+def worker_kinds(
+    *,
+    provider: MetadataProvider | None,
+    embedder: Embedder | None,
+    client: LLMClient | None,
+) -> frozenset[JobKind]:
+    """Which kinds this deployment can run, from build-time facts alone.
+
+    **The one list in `src/` that has to agree with another**, and it is
+    deliberately small and deliberately here: `JobWorker` claims
+    `list(self._concurrency)` and its concurrency table is keyed by this set,
+    while `_worker_handlers` below builds the callables. The two cannot be one
+    expression because the handler map needs a `Pipeline` -- i.e. a session --
+    and the claimable kinds have to be known before any session is opened.
+
+    Both failure directions are quiet, which is why they get a case rather than
+    a comment (`test_composition.py::
+    test_every_configuration_registers_exactly_the_kinds_it_claims`, over all
+    eight provider/embedder/client configurations): a kind here with no handler
+    is a `KeyError` inside a claimed job, and a handler with no entry here is
+    work nothing ever claims -- M4's "a queue that grows forever".
+    """
+    kinds = {
+        JobKind.MATCH,
+        JobKind.WATCH_HISTORY,
+        JobKind.WATCH_WRITEBACK,
+        JobKind.SYNC,
+        JobKind.BOOTSTRAP,
+    }
+    if provider is not None:
+        kinds |= {JobKind.ENRICH, JobKind.DERIVE}
+    if embedder is not None:
+        kinds.add(JobKind.INDEX)
+    if client is not None:
+        kinds.add(JobKind.CURATE)
+    return frozenset(kinds)
+
+
+def worker_concurrency(settings: Settings, kinds: frozenset[JobKind]) -> dict[JobKind, int]:
+    """`KIND_CONCURRENCY` resolved against this deployment's global ceiling.
+
+    A `None` there means "whatever the operator configured", and every entry is
+    additionally clamped to the global: `USHER_JOB_CONCURRENCY=2` must not be
+    quietly overridden to 4 by a per-kind constant chosen for a bigger box.
+    """
+    return {
+        kind: min(settings.job_concurrency, KIND_CONCURRENCY[kind] or settings.job_concurrency)
+        for kind in kinds
+    }
+
+
 def build_worker(
-    pipeline: Pipeline,
+    work: UnitOfWork,
     settings: Settings,
     *,
     provider: MetadataProvider | None,
     embedder: Embedder | None,
     client: LLMClient | None,
-    resolve: Callable[[str], Awaitable[SourceBinding | None]],
+    registry: "SourceRegistry",
     user_id: uuid.UUID,
 ) -> JobWorker:
     """The queue consumer, with a handler per `JobKind` this process can run.
@@ -791,42 +849,92 @@ def build_worker(
     demand-promoted job at the head of the queue forever, and the client
     that promoted it watching an SSE stream that never fires.
 
-    **`provider is None` is not reported here**, and the reason is that this
-    function is called once per worker *pass*: `usher.api.lanes._run_worker`
-    rebuilds the worker on each turn of a loop whose floor is
-    `IDLE_SLEEP_SECONDS`, so a `logger.warning` here was ~17,280 identical
-    lines a day in the default no-key deployment -- measured at exact 5 s
-    intervals. The degradation is still surfaced, once, by
-    `metadata_provider`, which is where the decision is made and which every
-    composition root calls exactly once per process.
+    **It takes a `UnitOfWork`, not a `Pipeline`, and that is the whole of M9's
+    W1.** `AsyncSession` is not concurrency-safe and every repository a handler
+    holds is bound to one, so a worker running jobs concurrently needs a
+    session, a commit, a handler set and an event buffer *per job* -- which
+    means this is a factory rather than a bound assembly. `_worker_handlers`
+    below is called once per scope, and the process-lifetime resources
+    (`provider`, `embedder`, `client`, and `registry`'s adapter cache) are the
+    ones that must **not** be rebuilt there.
+
+    **`provider is None` is not reported here**, and the reason survives the
+    change: `metadata_provider` is where the decision is made and every
+    composition root calls it exactly once per process, while this factory's
+    scopes are opened once per *job*. A `logger.warning` here would have been
+    ~17,280 lines a day when it ran once a pass and is worse now.
     """
-    worker = JobWorker(
-        pipeline.queue,
-        pipeline.commit,
-        # The bus itself, which the worker wraps in its own buffer. A service
-        # registered below whose frames belong to the *job's* unit of work is
-        # handed `worker.events` -- the buffer -- so a frame raised inside a
-        # job is offered after `complete()` and its commit (ADR-0033).
-        #
-        # **That is the default and not a law, and there are three exceptions
-        # with one reason between them.** The push and reconcile lanes are not
-        # wrapped because they are not jobs; the `bootstrap` registration is
-        # not wrapped although it *is* one, and its own comment below carries
-        # the argument. All three commit their own subject before they publish
-        # and all three publish per batch, so deferring them buys nothing and
-        # costs the whole point of the frame: a `sync.progress` held behind a
-        # 1,127-batch walk, or a `bootstrap.progress` behind a 26-batch load,
-        # is a progress bar delivered as a single jump after the work it was
-        # describing finished. *(This comment read "every service registered
-        # below that publishes is handed `worker.events` ... and never
-        # `pipeline.events`" until M9's E7, which added the counter-example
-        # rather than the exception the sentence already had.)*
-        events=pipeline.events,
+    kinds = worker_kinds(provider=provider, embedder=embedder, client=client)
+
+    @asynccontextmanager
+    async def scope() -> AsyncIterator[JobScope]:
+        async with work() as pipeline:
+            # The bus wrapped in a buffer belonging to *this* scope. A service
+            # built below whose frames belong to the job's unit of work is
+            # handed this, so a frame raised inside a job is offered after
+            # `complete()` and its commit (ADR-0033) -- and a concurrent job's
+            # `discard()` cannot empty it, which one shared buffer would.
+            #
+            # **That is the default and not a law, and there are three
+            # exceptions with one reason between them.** The push and reconcile
+            # lanes are not wrapped because they are not jobs; the `bootstrap`
+            # registration is not wrapped although it *is* one, and its own
+            # comment below carries the argument. All three commit their own
+            # subject before they publish and all three publish per batch, so
+            # deferring them buys nothing and costs the whole point of the
+            # frame.
+            events = DeferredEventPublisher(pipeline.events)
+            yield JobScope(
+                queue=pipeline.queue,
+                commit=pipeline.commit,
+                handlers=_worker_handlers(
+                    pipeline,
+                    settings,
+                    provider=provider,
+                    embedder=embedder,
+                    client=client,
+                    registry=registry,
+                    user_id=user_id,
+                    events=events,
+                ),
+                events=events,
+            )
+
+    return JobWorker(
+        scope,
+        worker_concurrency(settings, kinds),
+        max_in_flight=settings.job_concurrency,
         batch_size=settings.job_batch_size,
+        lease_seconds=settings.job_lease_seconds,
     )
-    worker.register(JobKind.MATCH, match_handler(pipeline.matcher, pipeline.media_items, resolve))
-    worker.register(
-        JobKind.WATCH_HISTORY, watch_history_handler(pipeline.watch, resolve, user_id=user_id)
+
+
+def _worker_handlers(
+    pipeline: Pipeline,
+    settings: Settings,
+    *,
+    provider: MetadataProvider | None,
+    embedder: Embedder | None,
+    client: LLMClient | None,
+    registry: "SourceRegistry",
+    user_id: uuid.UUID,
+    events: DeferredEventPublisher,
+) -> dict[JobKind, Handler]:
+    """One scope's handlers, bound to that scope's repositories.
+
+    Must register exactly `worker_kinds(...)`; see its docstring for why the
+    pair needs a case rather than a comment.
+    """
+    handlers: dict[JobKind, Handler] = {}
+    # The resolver is bound to *this* scope's repositories and to the
+    # process-lifetime adapter cache. `SourceRegistry` used to hold the
+    # pipeline and be `rebind`-ed once a pass; holding one under concurrent
+    # jobs would have put two of them on the same session through the door
+    # nobody was looking at, since `resolve` issues two reads of its own.
+    resolve = registry.bound(pipeline)
+    handlers[JobKind.MATCH] = match_handler(pipeline.matcher, pipeline.media_items, resolve)
+    handlers[JobKind.WATCH_HISTORY] = watch_history_handler(
+        pipeline.watch, resolve, user_id=user_id
     )
     # Unconditional, exactly as MATCH and WATCH_HISTORY are: unlike ENRICH,
     # INDEX, DERIVE and CURATE there is no optional process resource behind a
@@ -834,15 +942,12 @@ def build_worker(
     # `open_adapter` is a module-level function rather than a method so it
     # can be shared with `usher.cli._open_adapter`'s reporting wrapper; bound
     # here to this pipeline the way `resolve` already is above.
-    worker.register(
-        JobKind.SYNC,
-        sync_handler(
-            pipeline.sources,
-            pipeline.reconcile,
-            pipeline.watch,
-            lambda source: open_adapter(pipeline, source),
-            user_id=user_id,
-        ),
+    handlers[JobKind.SYNC] = sync_handler(
+        pipeline.sources,
+        pipeline.reconcile,
+        pipeline.watch,
+        lambda source: open_adapter(pipeline, source),
+        user_id=user_id,
     )
     # Unconditional, joining `MATCH`, `WATCH_HISTORY` and `SYNC`, and in the
     # *same commit* as `JobKind.BOOTSTRAP` itself -- a member with no claimant
@@ -857,7 +962,7 @@ def build_worker(
     # renders them to the log, which is the only difference between the two
     # roots and the reason `run_bootstrap` takes a sink at all.
     #
-    # ⚠️ **`pipeline.events` and deliberately NOT `worker.events`, which is
+    # ⚠️ **`pipeline.events` and deliberately NOT the scope's buffer, which is
     # the opposite of every registration below and the same call the push and
     # reconcile lanes already make.** `DeferredEventPublisher` holds a job's
     # frames until `complete()` and its commit, and its own docstring sizes
@@ -873,19 +978,16 @@ def build_worker(
     # naming rows that really did land. `test_composition.py` pins the choice
     # from both sides, because no unit case of `JobWorker` can see which
     # publisher a handler was handed.
-    worker.register(
-        JobKind.BOOTSTRAP,
-        bootstrap_handler(
-            lambda phase: run_bootstrap(
-                pipeline.bulk,
-                pipeline.import_runs,
-                pipeline.commit,
-                settings,
-                phase,
-                report=_log_bootstrap_line,
-                events=pipeline.events,
-            )
-        ),
+    handlers[JobKind.BOOTSTRAP] = bootstrap_handler(
+        lambda phase: run_bootstrap(
+            pipeline.bulk,
+            pipeline.import_runs,
+            pipeline.commit,
+            settings,
+            phase,
+            report=_log_bootstrap_line,
+            events=pipeline.events,
+        )
     )
     # Unconditional, joining `MATCH`, `WATCH_HISTORY` and `SYNC`: nothing
     # about a write-back is optional. The four guarded registrations below
@@ -896,18 +998,12 @@ def build_worker(
     # pending forever on the shipped default deployment -- M4's "a job kind
     # whose handler is a stub is a queue that grows forever", arriving as a
     # registration rather than as a missing function.
-    worker.register(
-        JobKind.WATCH_WRITEBACK,
-        watch_writeback_handler(
-            pipeline.watch_states, pipeline.media_items, resolve, user_id=user_id
-        ),
+    handlers[JobKind.WATCH_WRITEBACK] = watch_writeback_handler(
+        pipeline.watch_states, pipeline.media_items, resolve, user_id=user_id
     )
     if provider is not None:
-        worker.register(
-            JobKind.ENRICH,
-            enrich_handler(
-                build_enrich_service(pipeline, settings, provider, events=worker.events)
-            ),
+        handlers[JobKind.ENRICH] = enrich_handler(
+            build_enrich_service(pipeline, settings, provider, events=events)
         )
         # Guarded on the provider rather than on the embedder, and that is the
         # honest dependency rather than the convenient one: `DeriveService`
@@ -916,16 +1012,16 @@ def build_worker(
         # TMDb payloads to derive from at all -- they exist only because a key
         # once did -- so leaving derive jobs pending for a worker that has one
         # is exactly INDEX's bargain, one lane over.
-        worker.register(JobKind.DERIVE, derive_handler(build_derive_service(pipeline, provider)))
+        handlers[JobKind.DERIVE] = derive_handler(build_derive_service(pipeline, provider))
     # Guarded exactly as ENRICH is, and the symmetry is the point: `run_once`
-    # claims `list(self._handlers)`, so a worker with no model leaves index
+    # claims only the kinds `worker_kinds` named, so a worker with no model leaves index
     # jobs pending for a worker that has one rather than parking them. A job
     # parked that way needs a human to release it, and its only problem was
     # being offered to the wrong process. A deployment without the extra
     # still has full-text and trigram over all 1.27M titles -- narrowed, not
     # broken.
     if embedder is not None:
-        worker.register(JobKind.INDEX, index_handler(build_index_service(pipeline, embedder)))
+        handlers[JobKind.INDEX] = index_handler(build_index_service(pipeline, embedder))
     # Guarded exactly as INDEX is, on the client this deployment either has or
     # does not, and the guard is a `mypy` fact rather than a convention:
     # `CurationService` spells its client `LLMClient`, never `LLMClient | None`,
@@ -936,10 +1032,10 @@ def build_worker(
     # curate work pending for a process that can run it rather than parking
     # work whose only problem was the process it was offered to.
     if client is not None:
-        worker.register(
-            JobKind.CURATE, curate_handler(build_curation_service(pipeline, settings, client))
+        handlers[JobKind.CURATE] = curate_handler(
+            build_curation_service(pipeline, settings, client)
         )
-    return worker
+    return handlers
 
 
 def build_derive_service(pipeline: Pipeline, provider: MetadataProvider) -> DeriveService:
@@ -1419,36 +1515,65 @@ class SourceRegistry:
     adapter is one connection pool, and building one per job would
     re-authenticate against the upstream every time.
 
-    **The pipeline is rebindable and the adapter cache is not.** A worker
-    lane inside the server opens a fresh session per pass, so its
-    repositories change every few seconds while its connection pools must
-    not -- `rebind` is that split made explicit rather than a registry
-    holding a session that has been closed under it. `usher work`, which
-    holds one session for the whole command, never calls it.
+    **This registry holds the adapter cache and deliberately holds no
+    pipeline.** It used to hold one and be `rebind`-ed once a worker pass, on
+    the argument that repositories change every few seconds while connection
+    pools must not. That argument is still right and the *shape* was wrong the
+    moment jobs became concurrent: `resolve` issues two reads of its own
+    (`sources.list_all` and `media_items.get_by_external_id`), so two jobs
+    resolving at once would have put two coroutines on one `AsyncSession`
+    through a door nobody was looking at -- not the handler's repositories,
+    which the per-job scope already separates, but the resolver's. `bound()`
+    takes the scope's pipeline as an argument instead, which makes the split a
+    signature rather than a convention.
+
+    **Adapter construction is behind a lock**, because it is the one `await`
+    in `resolve` that mutates the cache: without it two jobs for the same
+    source both miss, both authenticate, and one of the two adapters is
+    overwritten in the dict and never closed -- a leaked socket per race,
+    which is exactly the kind of thing that only appears under load.
     """
 
-    def __init__(self, pipeline: Pipeline) -> None:
-        self._pipeline = pipeline
+    def __init__(self) -> None:
         self._adapters: dict[uuid.UUID, SourceAdapter] = {}
+        self._building = asyncio.Lock()
 
-    def rebind(self, pipeline: Pipeline) -> None:
-        self._pipeline = pipeline
+    def bound(self, pipeline: Pipeline) -> Callable[[str], Awaitable[SourceBinding | None]]:
+        """This registry's resolver, reading through one scope's repositories."""
 
-    async def resolve(self, external_id: str) -> SourceBinding | None:
-        for source in await self._pipeline.sources.list_all():
+        async def resolve(external_id: str) -> SourceBinding | None:
+            return await self._resolve(pipeline, external_id)
+
+        return resolve
+
+    async def _resolve(self, pipeline: Pipeline, external_id: str) -> SourceBinding | None:
+        for source in await pipeline.sources.list_all():
             if not source.enabled:
                 continue
-            stored = await self._pipeline.media_items.get_by_external_id(source.id, external_id)
+            stored = await pipeline.media_items.get_by_external_id(source.id, external_id)
             if stored is None:
                 continue
-            adapter = self._adapters.get(source.id)
+            adapter = await self._adapter_for(pipeline, source)
             if adapter is None:
-                adapter = await open_adapter(self._pipeline, source)
-                if adapter is None:
-                    return None
-                self._adapters[source.id] = adapter
+                return None
             return SourceBinding(source=source, adapter=adapter)
         return None
+
+    async def _adapter_for(self, pipeline: Pipeline, source: Source) -> SourceAdapter | None:
+        cached = self._adapters.get(source.id)
+        if cached is not None:
+            return cached
+        async with self._building:
+            # Re-read inside the lock: the loser of the race must take the
+            # winner's adapter rather than build a second one.
+            cached = self._adapters.get(source.id)
+            if cached is not None:
+                return cached
+            adapter = await open_adapter(pipeline, source)
+            if adapter is None:
+                return None
+            self._adapters[source.id] = adapter
+            return adapter
 
     async def aclose(self) -> None:
         for adapter in self._adapters.values():

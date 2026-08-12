@@ -554,7 +554,7 @@ class PostgresCreditRepository(CreditRepository):
                     # ix_credits_tmdb_credit_id on the very rows it is about
                     # to remove, so a redelivered batch would raise instead of
                     # answering. PRD 08's redelivery rule is not optional --
-                    # JobWorker.startup() requeues everything left `running`.
+                    # JobWorker.recover() requeues an abandoned claim.
                     await self._session.execute(
                         text(_DELETE_CREDITS), {"title_ids": list(title_ids)}
                     )

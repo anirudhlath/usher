@@ -187,6 +187,22 @@ class FakeJobQueue(JobQueue):
         self._jobs[found] = updated
         return updated
 
+    async def touch(self, job_ids: Sequence[uuid.UUID]) -> int:
+        """`updated_at` forward, for running rows only.
+
+        The same column `requeue_running` below compares against, which is what
+        makes the pair a lease here as well as in SQL. A `running` filter for
+        the same reason the statement has one: a beat that arrives after
+        another worker recovered the job must not resurrect it.
+        """
+        wanted = set(job_ids)
+        moved = 0
+        for key, job in list(self._jobs.items()):
+            if job.id in wanted and job.status is JobStatus.RUNNING:
+                self._jobs[key] = job.evolve(updated_at=_now())
+                moved += 1
+        return moved
+
     async def requeue_running(self, *, older_than_seconds: float = 0.0) -> int:
         cutoff = _now() - timedelta(seconds=older_than_seconds)
         requeued = 0
@@ -209,6 +225,20 @@ class FakeJobQueue(JobQueue):
         found = [job for job in self._jobs.values() if job.status is JobStatus.PARKED]
         found.sort(key=lambda job: (job.updated_at, job.id), reverse=True)
         return found[: max(limit, 0)]
+
+    def backdate(self, *, seconds: float) -> None:
+        """Move every stored `updated_at` back, so a lease can be observed.
+
+        Test-only, deliberately absent from the port, and for `clear_backoff`'s
+        reason below: the alternative is a case that sleeps for the length of a
+        lease, and a suite that waits five minutes to watch a threshold fire is
+        a suite nobody runs. Backdating the *row* rather than advancing a clock
+        keeps `_now()` a real reading, which is what the Postgres arm does too
+        (`clock_timestamp()` is not injectable).
+        """
+        moved = timedelta(seconds=seconds)
+        for key, job in list(self._jobs.items()):
+            self._jobs[key] = job.evolve(updated_at=job.updated_at - moved)
 
     async def clear_backoff(self) -> None:
         """Test-only hook, deliberately absent from the port.

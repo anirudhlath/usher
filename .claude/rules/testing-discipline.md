@@ -1029,3 +1029,59 @@ nothing about the suite. Re-spelled with the import widened **and** the
 `ruff check` and reaches the suite. Second instance in that one task of
 `CLAUDE.md`'s careless/careful rule, and the first outside the import graph:
 **the careless spelling of "change a base class" is one that will not import.**
+
+## A concurrency case has to fail on its own assertion, not on a clock — and the deadline is what buys that (2026-08-12, M9 W1)
+
+`JobWorker` awaited its claimed jobs one at a time, and the case that had to be
+red against it is CLAUDE.md's fourth rule applied to the worker itself:
+**"twenty jobs completed" is what the sequential loop produces too**, so the
+assertion is on the wall-clock interval each job occupied.
+
+**The obvious rendezvous is an `asyncio.Barrier`, and against the code under
+test it *deadlocks*.** The first handler waits for a second that cannot start
+until the first returns. This file already records that shape from M5's event
+bus — *"a timing case can only ever report a timeout against it"* — and the
+repair is the same family and a different mechanism: `_Rendezvous.arrive()`
+waits behind an `asyncio.wait_for` with a deadline and **gives up**. The
+sequential run then produces two disjoint, *recorded* windows and the case
+fails on `overlapping(...)` with both of them in the message. Seen red exactly
+that way before the implementation existed:
+
+```
+AssertionError: the two jobs did not overlap, so the worker ran them one at a
+time: windows=[ClaimWindow(keys=('t1',), started_at=…622, finished_at=…123),
+               ClaimWindow(keys=('t2',), started_at=…123, finished_at=…123)]
+```
+
+**A second case in the same file is deliberately *not* red at HEAD, and says
+so in its own docstring.**
+`test_one_jobs_events_are_not_discarded_by_another_jobs_failure` pins that the
+deferred event buffer is per job: with one shared buffer, a failing job's
+`discard()` empties a *surviving* job's frames. With one job in flight that
+state is **unreachable**, so the case cannot be red against the sequential
+worker — it is red against the *intermediate* implementation, concurrency over
+one shared buffer, which is the mistake the task was most likely to make. It
+was planted and watched to fail there (one buffer built in `__init__` instead
+of per scope) before the fix landed: `the surviving job's frame was lost: []`,
+failing that case alone. **A case whose defect is unreachable at HEAD is still
+TDD if you plant the reachable version and watch it fail** — what it must never
+be is written after the fix and asserted to have been red.
+
+**And the premise, because an overlap assertion is as vacuous as any other
+absence claim:** every one of these asserts `len(windows) == 2` first. Two
+windows that intersect is a statement about two jobs; one window that never
+recorded is a statement about nothing.
+
+## A count and an argument are two assertions, and the count is the one everybody writes
+
+Same task. `test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass`
+asserted `requeues == 1` over three lane passes. Recovery then changed from
+*"once at startup, requeueing everything"* to *"on a timer, on a lease"* — and
+**the old assertion passes against both**, because the count is identical and
+only the `older_than_seconds` argument differs. At `0.0` a recovery pass takes
+the worker's *own* live claims; at the lease it takes only abandoned ones.
+
+The fake now records the argument as well as counting the call. Same shape as
+*"a rejection is not an assertion"* one file over: when a call's correctness
+lives in **what it was passed** rather than in how often it happened, a
+call-count spy is a spy on the wrong thing.
