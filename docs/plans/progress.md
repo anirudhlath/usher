@@ -2530,6 +2530,162 @@ both restored against an `md5sum` — deleting the `credit_names` segment kills
 the **premise** (six SQL segments against the composer's seven), and replacing
 it with `''` kills the **named assertion** while leaving the premise green.
 Ledger and every measurement above in `.claude/rules/search-and-embeddings.md`.
+## ✅ M9 Task S5 — THE GATE: 6.08%, and three of the bar's four guesses refuted (2026-08-12)
+
+**The verdict, read off [`/tmp/m9-gate/BAR.md`](/tmp/m9-gate/BAR.md)'s single
+threshold without adjustment: `< 10%`, so the tags term is NOT built in M9.**
+Within that arm it is the upper band — *"the signal is real but does not clear
+the floor a weight would assume"* — so ADR-0035 records a scoped follow-up with
+the number attached rather than a refusal. **No line of `src/` is touched on
+this arm**: `services/similar.py` and `tests/unit/test_services_similar.py` do
+not appear in the diff, as BAR.md requires.
+
+**Refutations first, as the bar's own preamble asks. Three of its four guesses
+fall, and the one that survives is the one that decides the gate.**
+
+1. 🔴 **Guess 1 — "3–5%" — refuted upward. The measurement is 6.0821%.** Its
+   arithmetic fails on both inputs. It scaled M7's single-side-to-pair ratio of
+   0.238 by a **tier-wide** 14.46%, and the population that is actually embedded
+   carries **21.094%** — and the ratio is not a constant even inside one walk:
+   the genome's is **0.208** (2.4746/11.883) against tags' **0.288**
+   (6.0821/21.094), a 38% spread over the identical pool. Carried onto the right
+   coverage, 0.238 predicts 5.02%, which the plan named as the figure to refute;
+   the measurement is 21% above it. Guess 1's own caveat — *"pools are
+   correlated, not independent draws"* — is the half that held, and is now
+   quantified rather than warned about (below).
+2. ✅ **Guess 2 — "it does not clear 10%" — confirmed.** 6.0821% is the only
+   guess that survives, and it is the one the bar turns on.
+3. 🔴 **Guess 3 — "`>= 10` scores a HIGHER pair rate on fewer titles" —
+   refuted, and backwards.** It scores **3.0999%** against 6.0821%, on 18,470
+   seeds against 27,558. It **cannot** score higher: pairs at `>= 10` are a
+   strict subset of pairs at `>= 5` over an identical denominator, so the rate
+   is monotone by construction. What is worth having is why the gap is the size
+   it is, and the decomposition is exact — coverage falls 21.094% → 14.137%
+   (×0.670), a pair needs **both** sides so that enters squared (×0.449), and
+   the heavily-tagged population genuinely is more clustered in each other's
+   pools (×1.135, below). 6.0821% × 0.449 × 1.135 = **3.099%**. **"More tags per
+   title" is a real effect and it is swamped by its own coverage loss, because
+   both-sides squares everything.** The guess's second clause — *"covers so few
+   titles the product is worse"* — is right, and is the whole mechanism rather
+   than a counterweight to a first clause that is false.
+4. 🔴 **Guess 4 — "tag-set Jaccard on the marginal population is near-chance" —
+   refuted on its mechanism, confirmed on its conclusion, for a sharper
+   reason.** Measured against `ml-latest/tags.csv` itself (21.3M rows, read
+   outside the tree, no row committed) over a uniform random 2,000-seed sample:
+   pool pairs on the marginal population (tagged, no genome) mean **0.0261**
+   against a chance baseline of **0.0034** — **7.7× chance**, and 5.8× over the
+   whole qualifying population. Not near-chance. But the bar's illustrative
+   *"two 4-tag sets sharing one tag gives 0.14"* sits between p90 (0.0833) and
+   p99 (0.2222), not at the centre: **the median marginal pool pair shares no
+   tag at all, and 62.3% of them share none.** That is not a missing signal, it
+   is a **present** one — `_jaccard` answers `None` only when a *set* is empty,
+   so two titles with five tags each and nothing in common yield a hard `0.0`,
+   which `_blend` renormalises as a confident negative and which would therefore
+   **demote** 62.3% of the very pairs the term was added to promote, relative to
+   pairs carrying no tag data at all. ADR-0014's argument arriving from the
+   set-valued side, and the single sharpest reason not to build.
+
+**The walk, and both rates over one pool.** `scripts/measure_pair_rates.py`
+drove `rebuild`'s own page shape read-only over the whole embedded population —
+**130,647 seeds, 262 pages of 500, 13,064,700 candidate pairs, 5,125 s
+(85.4 min)** against S4's ~80-minute prediction, on a box with nothing else
+dispatched. Counted over the **pool** `nearest_for` returns, never over stored
+rows, and writing nothing.
+
+| both sides carry | pairs | **rate** | seeds | single-side | coverage² | measured ÷ coverage² |
+|---|---|---|---|---|---|---|
+| a `genome_scores` row | 323,297 | **2.4746%** | 15,525 | 11.883% | 1.412% | **1.75×** |
+| ≥ 5 MovieLens tags | 794,606 | **6.0821%** | 27,558 | 21.094% | 4.449% | **1.37×** |
+| ≥ 10 MovieLens tags | 404,993 | **3.0999%** | 18,470 | 14.137% | 1.999% | **1.55×** |
+
+⚠️ **The genome's 2.4746% is a second measurement and is NOT a before/after
+against M7's 1.81%.** S1 settled that M7's number came from 5,020 owned,
+name-selected, pre-TMDb seeds in a database that no longer exists, and saying so
+is the deliverable. What is new — and is what S3's enrichment existed to
+produce — is the genome's pair rate over a population whose documents carry real
+`overview`/`tagline`/`genres`/`keywords`. It is **still four times below the
+10% floor the 0.25 weight assumes**, so PRD 09's open question about that weight
+is answered with a number rather than a hunch.
+
+**`coverage²` is wrong in a measurable direction, and the size of the error is
+the finding.** All three signals beat their independent-draw prediction, by
+1.37–1.75×, so pool membership and signal membership are positively correlated —
+most strongly for the genome, whose coverage concentrates in popular, older,
+heavily-embedded films. This project has carried the warning since M7 (*"measured,
+never squared"*); it now has the correction factor.
+
+**A random sample agrees with the exhaustive walk, which is the walk's own
+control.** The 2,000-seed uniform sample above measures the `>= 5` both-sides
+rate at **6.4125%** against the walk's 6.0821% — 5.4% apart, on S4's licence that
+a random seed sample is unbiased for pool composition where a `list_embedded`
+prefix is not.
+
+**`nearest_for` was asserted deterministic rather than assumed, over a full
+500-seed page**: two reads returned identical pools, id for id and in order.
+That is what licenses comparing this walk with S7's rebuild — and the walk's
+genome counter is byte-for-byte `rebuild`'s `pairs_with_tags / candidate_pairs`,
+pinned to it by `tests/unit/test_scripts_measure_pair_rates.py` driving both over
+one shared fake.
+
+**The one fatal spelling was written first on purpose and the case was red
+against it.** An accumulator counting the *stored* rows rather than the *pool*
+answers **147/1,000 = 14.70%** where the pool answers **182/1,560 = 11.67%** on
+the same 40-title fixture — plausible, four points high, and high **by
+construction**, because the stored rows are the pool already sorted by a blend
+that weights the very signal being counted at 0.25. The failure named it:
+`assert 1000 == 1560`.
+
+⚠️ **The tag plant no longer reproduces BAR.md's table exactly, and this is
+reported rather than absorbed.** Joined over titles of **any kind** it is now
+49,055 / 15,385 / 33,670 / 14,448 / 6,266 against the bar's 49,05**6** / 15,385 /
+33,67**1** / 14,448 / 6,266 — three cells exact, two one lower, so exactly one
+title stopped matching and it carries **no genome and one-to-four tags**.
+Corroborated independently by the tier's "any tags" read, 45,090 where the plan
+recorded 45,091 while genome, `>= 5` and `genome-or-5` agree exactly. The
+mechanism was demonstrated rather than assumed: **`imdb_id` is in
+`EnrichService._ENRICHABLE`**, so TMDb's `external_ids.imdb_id` overwrites
+IMDb's, and streaming all 12,707,540 rows of `title.basics.tsv.gz` finds **28
+enriched titles whose current `imdb_id` is not a tconst IMDb holds at all** —
+a lower bound, since a rewrite onto another valid tconst is invisible to that
+check. None of the 28 could be tied to a tagged id through `links.csv`, so the
+individual title is characterised and not named. **A tag plant is not stationary
+across an enrichment run.**
+
+**The definition to join on is "titles of any kind", and the 381 are a
+classification finding.** Filtered to `kind = 'movie'` the same queries give
+48,674 / 15,385 / 33,289 / 14,222 / 6,135; the difference is exactly **381 titles
+this catalog classifies as `series` whose IMDb ids appear in a movies-only
+dataset**. They cost the walk nothing — the embedded population is
+`kind = 'movie'` and holds **zero** series — so BAR.md's row label *"tagged
+movies joined"* is wrong about them while its number is right.
+
+**And `ml_tags_tmp.n_tags` counts tag *applications*, not distinct tags.** Of the
+27,558 embedded titles it puts at `>= 5`, **61.7% disagree with a case-folded
+distinct count** and **485 (1.8%) hold fewer than five distinct tags**. At 1.8%
+it moves no verdict; a threshold named "≥ 5 tags" is nonetheless counting
+something slightly more generous than its name.
+
+**The genome's 15,565 rows reconcile to the walk's 15,525 seeds with no
+residue**: **33** are outside the frozen `s3_tier_snapshot` (22 movies with no
+`tmdb_id` but ≥ 100 votes, 8 with neither, 3 with a `tmdb_id` and fewer than 100
+IMDb votes) and **7** are in the tier but still `skeleton` — part of S4's 159-row
+gap, and `_POPULATION` excludes skeletons, so no `index` job was ever owed for
+them. 15,525 + 33 + 7 = 15,565.
+
+**What this measured, said plainly: membership, not relevance.** Nothing here
+establishes that a tags term makes a neighbour list *better*. The same caveat M7
+attached to the genome's 0.25 weight applies unchanged, and guess 4's Jaccard
+distribution is why the distinction is load-bearing rather than pedantic.
+
+Every measurement above, and the pool-versus-stored ledger, in
+`.claude/rules/rows-and-genome.md`.
+
+Gate: ruff clean, `ruff format --check` 587 files, `mypy` 572 files,
+`lint-imports` **9 kept / 0 broken**, **3,939 unit / 4 skipped**, **1,207
+integration / 22 skipped**, PRD link check `OK`. `test_no_third_party_data.py`'s
+repo-wide row scan passes and **no dataset row is committed** — the walk's
+output, the Jaccard probe and the IMDb drift check all live outside the tree
+under `/var/tmp/m9-S5/`.
 ### ✅ M9 Task G2 — the ordering rule made structural: a job's events are offered after the job's own commit (2026-08-11)
 
 **[ADR-0033](../prd/decisions/0033-an-event-is-a-statement-about-committed-state.md) is now a property

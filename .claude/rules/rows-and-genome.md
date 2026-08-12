@@ -278,3 +278,134 @@ the unscoped call for its own documented reason (the width mismatch is why
 `_cosine` answers "no opinion" rather than raising inside a nightly job). Both
 are pinned by cases asserting the recorded argument is `None`, because on a
 single-model fixture the two spellings answer identically.
+
+**The candidate-pair rate, re-measured over an enriched population — one walk,
+both signals, 2026-08-12 (M9 S5).** `scripts/measure_pair_rates.py` drove
+`rebuild`'s own page shape read-only over the whole embedded population:
+**130,647 seeds, 262 pages of 500, 13,064,700 candidate pairs, 5,125 s
+(85.4 min)** against S4's ~80-minute prediction, on a box with nothing else
+dispatched. Counted over the **pool** `nearest_for` returns, never over stored
+rows, and writing nothing.
+
+| both sides carry | pairs | **pair rate** | seeds | single-side | coverage² | measured ÷ coverage² |
+|---|---|---|---|---|---|---|
+| a `genome_scores` row | 323,297 | **2.4746%** | 15,525 | 11.883% | 1.412% | **1.75×** |
+| ≥ 5 MovieLens tags | 794,606 | **6.0821%** | 27,558 | 21.094% | 4.449% | **1.37×** |
+| ≥ 10 MovieLens tags | 404,993 | **3.0999%** | 18,470 | 14.137% | 1.999% | **1.55×** |
+
+⚠️ **2.4746% is a second measurement of the genome, never a delta against
+1.81%** — S1 settled that M7's number came from 5,020 owned, name-selected,
+pre-TMDb seeds in a database that no longer exists. What is new is that the
+genome rate is now known over a population whose documents carry real
+`overview`/`tagline`/`genres`/`keywords`, which is the thing S3's enrichment
+existed to produce, and it is **still four times below the 10% floor the 0.25
+weight assumes**.
+
+**`coverage²` is wrong in a measurable direction, and the size of the error is
+the finding.** All three signals beat their independent-draw prediction —
+1.37–1.75× — so pool membership and signal membership are positively
+correlated, most strongly for the genome (whose coverage concentrates in
+popular, older, heavily-embedded films). This is the first time this project
+has had the correction factor rather than the warning.
+
+**A stricter tag threshold scores a *lower* pair rate, not a higher one, and
+the decomposition is exact.** The M9 bar guessed `>= 10` would score higher on
+fewer titles. It cannot: pairs at `>= 10` are a strict subset of pairs at
+`>= 5` over an identical denominator, so the rate is monotone by construction.
+The interesting half is *why the gap is what it is*: coverage falls
+21.094% → 14.137% (×0.670), a pair needs **both** sides so that enters squared
+(×0.449), and the heavily-tagged population really is more clustered
+(1.55/1.37 = ×1.135). 6.0821% × 0.449 × 1.135 = **3.099%**, the measured value.
+"More tags per title" is a real effect and it is swamped by its own coverage
+loss, because both-sides squares everything.
+
+**And the membership rate is not the signal.** Measured the same day against
+`ml-latest/tags.csv` itself (21.3M rows, read outside the tree, no row
+committed) over a **uniform random** 2,000-seed sample — 6.4125% both-sides at
+`>= 5`, agreeing with the exhaustive walk's 6.0821% within 5.4%, which is the
+sample's own control:
+
+| tag-set Jaccard | n | mean | median | p90 | p99 | share sharing **no** tag |
+|---|---|---|---|---|---|---|
+| pool pairs, both `>= 5` | 12,825 | 0.0221 | 0.0055 | 0.0625 | 0.1765 | **47.3%** |
+| random pairs, same population | 20,000 | 0.0038 | 0.0000 | 0.0115 | 0.0625 | 83.3% |
+| pool pairs, **marginal** (tagged, no genome) | 2,595 | 0.0261 | **0.0000** | 0.0833 | 0.2222 | **62.3%** |
+| random pairs, marginal | 20,000 | 0.0034 | 0.0000 | 0.0000 | 0.0769 | 92.7% |
+
+**Near-chance is refuted — it is 5.8× chance overall and 7.7× on the marginal
+population — and the conclusion that guess drew is confirmed anyway, for a
+sharper reason.** The bar's illustrative "two 4-tag sets sharing one tag gives
+0.14" sits between p90 and p99 of the marginal distribution, not at its centre:
+the **median marginal pool pair shares no tag at all**. That is not a missing
+signal, it is a **present** one — `_jaccard` returns `None` only when a *set* is
+empty, so two titles with five tags each and nothing in common yield a hard
+`0.0`, which `_blend` renormalises as a confident negative and which would
+therefore **demote** 62.3% of the very pairs the term was added to promote,
+relative to pairs carrying no tag data at all. ADR-0014's argument, arriving
+from the set-valued side.
+
+**A pair rate is a statement about membership and this one says so.** Nothing
+here measures whether a tags term makes a neighbour list *better*; that would
+need relevance judgements this project has never had, and the same caveat M7
+attached to the genome's 0.25 weight applies unchanged.
+
+**The bar's own prediction of 3–5% was refuted upward, and the arithmetic
+behind it fails on both inputs.** It scaled M7's observed single-side-to-pair
+ratio of 0.238 by a tier-wide 14.46%. The population that is actually embedded
+carries 21.094%, not 14.46% — and **the ratio is not a constant even within one
+walk**: 2.4746/11.883 = **0.208** for the genome against 6.0821/21.094 =
+**0.288** for tags, a 38% spread over the identical pool. Carrying M7's 0.238
+onto the right coverage predicts 5.02%; the measurement is 21% above that.
+
+**`ml_tags_tmp.n_tags` is not a distinct-tag count, and the input is very
+slightly generous.** Of the 27,558 embedded titles it puts at `>= 5`, **61.7%
+disagree with a case-folded distinct count** and **485 (1.8%) hold fewer than
+five distinct tags**. At 1.8% it moves no verdict, but a threshold named "≥ 5
+tags" is counting tag *applications*.
+
+⚠️ **The tag plant no longer reproduces the bar's table exactly, and the two
+cells that moved are the two that localise the loss.** Re-measured 2026-08-12,
+the join over titles of **any kind** gives 49,055 / 15,385 / 33,670 / 14,448 /
+6,266 against the bar's 49,05**6** / 15,385 / 33,67**1** / 14,448 / 6,266 —
+three cells exact, two one lower, so exactly one title stopped matching and it
+carries **no genome and one-to-four tags**. Corroborated independently: the
+tier's "any tags" read is 45,090 where the plan recorded 45,091 while genome,
+`>= 5` and `genome-or-5` all agree. The mechanism is available and was
+demonstrated rather than assumed — **`imdb_id` is in
+`EnrichService._ENRICHABLE`**, so TMDb's `external_ids.imdb_id` overwrites
+IMDb's own, and streaming all 12,707,540 rows of `title.basics.tsv.gz` finds
+**28 enriched titles whose current `imdb_id` is not a tconst IMDb holds at
+all**. That 28 is a *lower bound* on rewrites — a rewrite onto another valid
+tconst is invisible to the check — and none of the 28 could be tied to a tagged
+id through `links.csv`, so the individual title is characterised but not named.
+**A tag plant is not stationary across an enrichment run.**
+
+**The definition to join on is "titles of any kind", and the 381 are a
+classification finding rather than a defect.** Filtered to `kind = 'movie'` the
+same queries give 48,674 / 15,385 / 33,289 / 14,222 / 6,135; the difference is
+exactly **381 titles this catalog classifies as `series` whose IMDb ids appear
+in a movies-only dataset**. They cost the walk nothing — the embedded
+population is `kind = 'movie'` and holds **zero** series — so the label on the
+bar's row is wrong while its number is right.
+
+**The genome's 15,565 rows reconcile to the walk's 15,525 seeds with no
+residue**: **33** sit outside the frozen `s3_tier_snapshot` entirely (22 movies
+with no `tmdb_id` but ≥ 100 votes, 8 with neither, 3 with a `tmdb_id` and fewer
+than 100 IMDb votes) and **7** are in the tier but are still `skeleton` — part
+of S4's 159-row gap — and `_POPULATION` excludes skeletons, so no `index` job
+was ever owed for them. 15,525 + 33 + 7 = 15,565.
+
+**`nearest_for` was asserted deterministic rather than assumed, on a full
+page**: two reads of the same 500 seeds returned identical pools, id for id and
+in the same order. That is what licenses comparing this walk against a later
+`SimilarityService.rebuild()`, and the walk's genome counter is byte-for-byte
+that rebuild's `pairs_with_tags / candidate_pairs` — pinned to it by
+`tests/unit/test_scripts_measure_pair_rates.py` over one shared fake.
+
+**The one fatal spelling, measured on the fixture that kills it.** Counting the
+*stored* rows rather than the *pool* answers **147/1,000 = 14.70%** where the
+pool answers **182/1,560 = 11.67%** on the same 40-title population: plausible,
+four points high, and high **by construction**, because the stored rows are the
+pool already sorted by a blend that weights the very signal being counted at
+0.25. The first draft of `scripts/measure_pair_rates.py` was written with that
+spelling on purpose and the case was red against it before it was fixed.
