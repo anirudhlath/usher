@@ -224,6 +224,7 @@ class RunLog:
 
     started_at: str = ""
     bar: dict[str, Any] = field(default_factory=dict)
+    diagnose: dict[str, Any] = field(default_factory=dict)
     catalog: dict[str, Any] = field(default_factory=dict)
     load: dict[str, Any] = field(default_factory=dict)
     facets: dict[str, Any] = field(default_factory=dict)
@@ -453,6 +454,83 @@ async def verify_harness(session: AsyncSession, recorder: RecordingSession) -> d
     }
 
 
+async def diagnose_order_by(
+    session: AsyncSession, recorder: RecordingSession, reps: int
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """**Added after both bars were scored, and it is a diagnostic, not a bar.**
+
+    Bar 2's named output is an index recommendation, and the first question a
+    recommendation has to answer is whether the index is missing or merely
+    unreachable. So this changes **one variable**: the shipped `ORDER BY`'s
+    leading `(key IS NOT NULL) DESC` term is dropped and nothing else moves --
+    same columns, same `LIMIT`, same session.
+
+    The term is written out rather than spelled `nulls_last(...)` on a stated
+    argument -- *"the keyset predicate has to agree with this term for term
+    and two spellings of one rule is how they stop agreeing"* -- and that
+    argument is about **correctness**, which it gets right. What it does not
+    say, because nobody had measured it, is that the two spellings produce the
+    same row order and **different sort keys**, and an index is matched by the
+    sort key. `titles.sort_name` is declared `NOT NULL`, so for
+    `BrowseSort.NAME` the dropped term is provably constant and the two
+    statements are the same question.
+    """
+    repository = PostgresTitleRepository(recorder)  # type: ignore[arg-type]
+    results: dict[str, Any] = {}
+    plans: dict[str, str] = {}
+    for sort in BrowseSort:
+        column, descending = BrowseSort.order_for(sort)
+        recorder.statements.clear()
+        await repository.browse(sort=sort, limit=FETCH_LIMIT)
+        shipped = recorder.statements[0]
+        direction = "DESC" if descending else "ASC"
+        compiled = _compiled(shipped)
+        # One variable: the leading boolean term goes, the `NULLS LAST` it was
+        # written out from stays, so the row order is unchanged.
+        #
+        # 🔴 **The first spelling of this surgery did not land and the check
+        # written to catch that could not fire.** The anchor was guessed as
+        # `ORDER BY (col IS NOT NULL) DESC, ...` and SQLAlchemy emits
+        # `ORDER BY titles.col IS NOT NULL DESC, ...` -- no parentheses, and
+        # table-qualified -- so `str.replace` matched nothing, the guard
+        # `"IS NOT NULL) DESC" in variant` was spelled against the same absent
+        # parenthesis and was vacuously false, and the run timed **two copies
+        # of one statement** and reported them as a refutation. The guard is
+        # now byte inequality against the text it was derived from, which is
+        # the F3 landing-check repair and is immune to how the compiler spells
+        # anything.
+        old = f"ORDER BY titles.{column} IS NOT NULL DESC, titles.{column} {direction}"
+        new = f"ORDER BY titles.{column} {direction} NULLS LAST"
+        variant = compiled.replace(old, new)
+        if variant == compiled or "IS NOT NULL DESC" in variant:
+            raise MeasurementRefused(
+                f"the leading sort term could not be dropped for {sort.value!r}; the surgery "
+                "found nothing and the comparison would be two copies of one statement"
+            )
+        _say(f"diagnose: {sort.value} without the leading IS NOT NULL term")
+
+        async def _shipped(statement: Any = shipped) -> None:
+            (await session.execute(statement)).all()
+            await session.rollback()
+
+        async def _variant(sql: str = variant) -> None:
+            (await session.execute(text(sql))).all()
+            await session.rollback()
+
+        shipped_timing, _ = await _time(f"{sort.value}:shipped", _shipped, reps)
+        variant_timing, _ = await _time(f"{sort.value}:nulls_last", _variant, reps)
+        results[sort.value] = {
+            "shipped": asdict(shipped_timing),
+            "nulls_last": asdict(variant_timing),
+            "column_is_not_null": column == "sort_name",
+        }
+        plans[f"diagnose:{sort.value}:shipped"] = await _explain(session, shipped)
+        rows = (await session.execute(text(f"EXPLAIN (ANALYZE, BUFFERS) {variant}"))).all()
+        await session.rollback()
+        plans[f"diagnose:{sort.value}:nulls_last"] = "\n".join(row[0] for row in rows)
+    return results, plans
+
+
 async def measure_facets(
     session: AsyncSession, recorder: RecordingSession, frame: dict[str, Any], reps: int
 ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -658,6 +736,11 @@ async def run(args: argparse.Namespace) -> None:
                 )
                 log.plans.update(plans)
                 _persist("browse")
+
+            if args.diagnose:
+                log.diagnose, plans = await diagnose_order_by(session, recorder, args.reps)
+                log.plans.update(plans)
+                _persist("diagnose")
     except BaseException as failure:
         log.verdicts["crashed"] = f"{type(failure).__name__}: {failure}"
         _persist("crashed")
@@ -701,12 +784,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Price /browse's two reads at catalog scale.")
     parser.add_argument("--facets", action="store_true", help="bar 1")
     parser.add_argument("--browse", action="store_true", help="bar 2")
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="after the bars: the same page without the leading IS NOT NULL sort term",
+    )
     parser.add_argument("--all", action="store_true", help="every phase")
     parser.add_argument("--reps", type=int, default=20, help="timed executions per probe")
     parser.add_argument("--out", default=None, help="write the whole run log here as JSON")
     args = parser.parse_args()
     if args.all:
-        args.facets = args.browse = True
+        args.facets = args.browse = args.diagnose = True
     asyncio.run(run(args))
 
 
