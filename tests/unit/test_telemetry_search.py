@@ -42,6 +42,7 @@ from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
+from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.title import Title
@@ -142,6 +143,7 @@ def _service(titles: FakeTitleRepository, index: FakeSearchIndex) -> SearchServi
         FakeSuggestIndex(),
         titles,
         FakeMediaItemRepository(),
+        FakeWatchStateRepository(),
         result_limit=50,
         embedder=FakeEmbedder(),
     )
@@ -199,6 +201,7 @@ async def test_the_mode_label_is_the_mode_that_ran(meter_reader: InMemoryMetricR
         FakeSuggestIndex(),
         titles,
         FakeMediaItemRepository(),
+        FakeWatchStateRepository(),
         result_limit=50,
         embedder=None,
     )

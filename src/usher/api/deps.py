@@ -1043,6 +1043,14 @@ def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchServ
     embed for one to sit in front of. `SearchService` buys a completion only
     inside the `else` of its `embedder is None` branch, so this is not a
     saving that has to be argued -- there is no reachable call site.
+
+    **The household is not wired here, and looking for it here is the mistake
+    this paragraph exists to prevent.** `SearchService.search` takes a
+    `user_id` per call, so the route reads `DefaultUserIdDep` beside this
+    dependency and passes it in; what `build_search_service` wires is the
+    `WatchStateRepository` the term reads *through*. A service built around one
+    household would be a per-request object cached per session, and the two
+    would disagree the first time a request carried an identity.
     """
     return build_search_service(session, settings)
 

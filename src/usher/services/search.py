@@ -58,15 +58,18 @@ not interchangeable without a re-embed.
 
 import hashlib
 import time
-from collections.abc import Sequence
+import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 
 from opentelemetry import metrics
+from pydantic import AwareDatetime
 
 from usher.domain.search import SearchResult
 from usher.domain.title import Title
 from usher.ports.embedding import Embedder
-from usher.ports.repository import MediaItemRepository, TitleRepository
+from usher.ports.repository import MediaItemRepository, TitleRepository, WatchStateRepository
 from usher.ports.search import (
     SearchFilters,
     SearchHit,
@@ -230,15 +233,76 @@ _RELEVANCE_K = 1.0
 # bounded, so a wrong midpoint moves a score by at most its weight.
 _POPULARITY_MIDPOINT = 10.0
 
-# PRD 05's ranking terms M6 has data for. Watch state, recency and taste
-# centroid are M7's and are *absent* rather than zeroed -- a term with no data
-# is a weight that reads like a signal. Relevance dominates because a search is
-# a request for a specific thing; the other two are tie-breakers among things
-# that already matched. The 0.15 owned boost is bounded on purpose: against
-# `1 / (1 + rank)` at 0.70 it cannot displace the rank-0 hit (0.70 against
-# 0.35 + 0.15) and moves a title roughly five positions mid-list -- PRD 05's
-# "boosted but not exclusive" as arithmetic rather than as a promise.
-_WEIGHTS: dict[str, float] = {"relevance": 0.70, "popularity": 0.15, "owned": 0.15}
+# Age squashed to (0, 1] by `1 / (1 + age / midpoint)` -- `_popularity_term`'s
+# shape exactly, and for its reasons: bounded, monotone, and independent of
+# which other rows came back, so a wrong constant moves a score by at most its
+# weight rather than reshuffling a list.
+#
+# **25 years is chosen with an argument, not measured**, in the same words
+# `_POPULARITY_MIDPOINT`'s comment uses one constant up. The argument is about
+# where the curve should be steepest: at 25 the term separates "this decade"
+# from "the films your parents saw", which is a distinction a viewer would
+# recognise, where a small constant separates last year from three years ago,
+# which is a distinction nothing in this project has evidence for.
+#
+# **And PRD 05's double-counting caveat is recorded here rather than
+# resolved**: TMDb's `popularity` is a rolling engagement figure that already
+# leans recent, so this term and `_popularity_term` are not independent. What
+# would settle both the constant and the overlap is `search_queries` (PRD 10),
+# and that table has no rows until after M9 ships -- so this ships as a term
+# M10 re-measures, which is a smaller cost than PRD 05's "three ranking terms"
+# being two.
+_RECENCY_MIDPOINT_YEARS = 25.0
+
+# Julian years, so a leap year is not a discontinuity in an age. The term is
+# monotone in days and nothing downstream reads the age itself, so the third
+# decimal place of this divisor cannot reach a result.
+_DAYS_IN_YEAR = 365.25
+
+# PRD 05's ranking terms, five of the six. Taste-centroid proximity is the one
+# still *absent* rather than zeroed -- a term with no data is a weight that
+# reads like a signal -- and it is F5's.
+#
+# Relevance dominates because a search is a request for a specific thing; the
+# other four are tie-breakers among things that already matched. **The
+# arithmetic bound, stated over all five rather than one at a time:** the
+# rank-0 hit scores `0.70` with every other signal against it, and a rank-1 hit
+# with every other signal maximally for it scores `0.35 + 0.15 + 0.15 + 0.02 +
+# 0.02 = 0.69` -- the denominators are equal because the present-signal set is
+# the same -- so no combination of ownership, popularity, watch state and
+# recency can displace an exact match. That is PRD 05's "boosted but not
+# exclusive" as arithmetic rather than as a promise, and it is the constraint
+# every number here is chosen under: the non-relevance weights must sum below
+# half the relevance weight.
+#
+# **The three M6 weights keep their exact values, and that is a requirement
+# rather than inertia.** `_blend` renormalises over the signals that are
+# present, so it is scale-invariant: changing the *ratio* of relevance to
+# popularity to owned would move every score this project has ever computed,
+# while re-scaling all three together would move none of them. Holding the
+# ratio is what makes "a hit with no popularity, no year and no household
+# scores exactly what M6 scored it" true, which is the one thing a client
+# upgrading across this commit can check.
+#
+# **Both new weights are 0.02 and they are equal on purpose.** Each rests on an
+# argument rather than on a measurement -- the direction of the watch-state
+# term, the value of the recency midpoint -- so the weight is the bound on how
+# wrong the argument can make a score. At 0.02 the played boost moves a title
+# from about rank 10 to about rank 7 mid-list, which is a nudge; the owned
+# boost at 0.15 moves the same title to about rank 2, which is the difference
+# the two are meant to have.
+#
+# ⚠️ **The budget is spent.** 0.34 against a ceiling of 0.35 leaves 0.01, so
+# F5's taste term cannot be added without either taking weight from popularity
+# and owned -- which ends the byte-for-byte claim above -- or raising
+# relevance's share. That trade is F5's to make and to write down.
+_WEIGHTS: dict[str, float] = {
+    "relevance": 0.70,
+    "popularity": 0.15,
+    "owned": 0.15,
+    "played": 0.02,
+    "recency": 0.02,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +355,26 @@ class SearchAnswer:
 class SearchService:
     """PRD 05's two stages, in order: retrieve, then rank.
 
+    **`search` takes a household, and that is a keyword rather than a
+    `SearchFilters` field.** PRD 05 keeps `SearchFilters` a closed vocabulary
+    with no user field, and the practical consequence is the one that matters:
+    every filter this service has is reachable from a query string, so a user
+    field there would let any caller name any household. It is also not a
+    filter -- it narrows nothing and changes no candidate set; it changes how
+    the same set is ordered.
+
+    **The same query can now answer differently for two people, and nothing on
+    the wire says so** -- deliberately, and it is not the omission
+    `requested_mode` beside `mode` exists to prevent. A degraded mode is a
+    *deployment* state a client cannot otherwise see: two clients of the same
+    server get the same narrowing and neither can tell. A household is not a
+    state at all here -- both shipped callers resolve one before they search
+    (`GET /search` through `DefaultUserIdDep`, `usher search` through
+    `ensure_default_user`), so there is no reachable request that is
+    unpersonalised and therefore no difference for a field to report. The day
+    authentication makes "search as nobody" reachable, that changes, and the
+    field to add then is one saying which household answered.
+
     **Holds the `Embedder`, and the port DTO makes that structural.**
     `SearchRequest.__post_init__` refuses a `SEMANTIC` or `FUSED` request with
     no `query_vector`, so the only object that can construct one is the object
@@ -340,16 +424,28 @@ class SearchService:
         suggestions: SuggestIndex,
         titles: TitleRepository,
         media_items: MediaItemRepository,
+        watch_states: WatchStateRepository,
         *,
         result_limit: int,
         embedder: Embedder | None = None,
         expander: QueryExpansionService | None = None,
+        now: Callable[[], AwareDatetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._index = index
         self._suggestions = suggestions
         self._titles = titles
         self._media_items = media_items
+        # Not optional, unlike the two collaborators below it: a deployment
+        # without a household is not a state this project has -- PRD 01's
+        # authentication seam is a singleton row, and both callers resolve one
+        # before they search. What is optional is the *argument* to `search`,
+        # because a caller may legitimately have no household to speak for.
+        self._watch_states = watch_states
         self._result_limit = result_limit
+        # Injected for the reason every clock in `services/` is: the recency
+        # term is a function of the instant it is scored at, and a term read
+        # off the wall clock is one no case can pin an age against.
+        self._now = now
         # Optional, and a deployment without it still has search: full-text and
         # trigram are PRD 05's catalog-lookup tier and serve all 1,271,138
         # titles with no model at all.
@@ -372,6 +468,14 @@ class SearchService:
         # default) even though the value is frozen. The sentinel is the
         # spelling, not the reason.
         filters: SearchFilters | None = None,
+        # **A keyword here and deliberately not a `SearchFilters` field.**
+        # PRD 05 says `SearchFilters` is a closed vocabulary with no user
+        # field, and the practical half of that is `usher search`'s
+        # `--filter`-shaped flags and `GET /search`'s query string: a household
+        # reachable from a query string is a household any caller can claim to
+        # be. It is also not a filter -- it narrows nothing and returns no
+        # different candidate set; it changes how the same set is ordered.
+        user_id: uuid.UUID | None = None,
     ) -> SearchAnswer:
         """Retrieve, then rank. Raises `SemanticSearchUnavailable`.
 
@@ -383,6 +487,13 @@ class SearchService:
         lane", arriving in the panel an operator would use to check for it.
         The degradation is carried by `SearchAnswer.requested_mode`, which is
         what `usher search` prints; PRD 10 documents one label and this is it.
+
+        **`user_id` is `None`-able and both shipped callers pass one.** With it
+        absent the watch-state term is absent too and every other line here is
+        M6's -- which is the state the numeric case pins, and the reason the
+        parameter is optional rather than required: `SearchService` is
+        constructed on every deployment there is and a caller with no household
+        to speak for must still be able to search.
         """
         requested = mode
         # Refused before the model, not after. Every whitespace-only input
@@ -451,7 +562,7 @@ class SearchService:
             )
         )
         answer = SearchAnswer(
-            results=await self._rank(outcome.hits),
+            results=await self._rank(outcome.hits, user_id=user_id),
             requested_mode=requested,
             mode=mode,
             # Passed through, never recomputed. It is the fraction of the
@@ -498,11 +609,23 @@ class SearchService:
             if hit.title_id in by_id
         )
 
-    async def _rank(self, hits: Sequence[SearchHit]) -> tuple[SearchResult, ...]:
+    async def _rank(
+        self, hits: Sequence[SearchHit], *, user_id: uuid.UUID | None
+    ) -> tuple[SearchResult, ...]:
         """PRD 05 stage 2, over one already-retrieved candidate set.
 
-        Two reads regardless of hit count, which is the whole reason
-        `list_by_ids` and `owned_title_ids` exist.
+        **Three reads with a household and two without, regardless of hit
+        count** -- which is the whole reason `list_by_ids`, `owned_title_ids`
+        and `played_title_ids` exist in the batch shape they do. This docstring
+        said "two reads" until the household arrived; the count is asserted
+        against fakes rather than described, because a per-hit spelling answers
+        identically and costs a statement a hit.
+
+        `played_title_ids` rolls a watched episode up to its series through
+        `COALESCE(ws.title_id, e.title_id)`, which is what keeps this from
+        being a films-only answer for a television household -- the roll-up is
+        the port's, and re-deriving it here would be a second definition of
+        "seen".
         """
         if not hits:
             return ()
@@ -511,6 +634,15 @@ class SearchService:
             for title in await self._titles.list_by_ids([hit.title_id for hit in hits])
         }
         owned = await self._media_items.owned_title_ids(list(titles))
+        # Not read at all without a household, rather than read with a
+        # placeholder: `played_title_ids` is scoped by `user_id`, so an invented
+        # one is a statement per search answering about a user nobody is.
+        played = (
+            frozenset[uuid.UUID]()
+            if user_id is None
+            else await self._watch_states.played_title_ids(user_id, list(titles))
+        )
+        today = self._now().date()
         ranks = _dense_ranks(hits)
         results = [
             _result(
@@ -520,6 +652,24 @@ class SearchService:
                     relevance=_RELEVANCE_K / (_RELEVANCE_K + rank),
                     popularity=_popularity_term(titles[hit.title_id].popularity),
                     owned=1.0 if hit.title_id in owned else 0.0,
+                    # **A small boost, never a demotion, and the direction is
+                    # the decision PRD 05 leaves open.** A search is
+                    # overwhelmingly a re-find intent -- somebody typing a
+                    # title's name usually wants that title -- so demoting what
+                    # the household has finished buries the exact film they
+                    # just named. `RediscoverProvider` already treats a
+                    # finished title as re-offerable, which is the same call
+                    # one surface over. The opposite reading is defensible for
+                    # *discovery* and renders identically, which is exactly why
+                    # it is written down here rather than left in the sign of a
+                    # constant.
+                    #
+                    # `None` rather than `0.0` without a household: nobody
+                    # measured this title's watch state, and scoring the
+                    # absence would rank an unknown identically to a known
+                    # never-watched. ADR-0014, one signal over from popularity.
+                    played=None if user_id is None else (1.0 if hit.title_id in played else 0.0),
+                    recency=_recency_term(titles[hit.title_id], today=today),
                 ),
             )
             for hit, rank in zip(hits, ranks, strict=True)
@@ -581,18 +731,56 @@ def _popularity_term(popularity: float | None) -> float | None:
     return popularity / (popularity + _POPULARITY_MIDPOINT)
 
 
+def _recency_term(title: Title, *, today: date) -> float | None:
+    """`1 / (1 + age / midpoint)`, or `None` when nobody has dated it.
+
+    **`None` is not 0.0** -- ADR-0014, in a fifth place, after
+    `_popularity_term`'s fourth. `titles.year` is null for every row the IMDb
+    dump gave no start year and for everything a source contributed without
+    one, and `year or 0` would put those at maximum age: the un-enriched
+    catalog buried beneath the enriched tier, looking like arithmetic and
+    raising nothing. `_blend` drops an absent signal from numerator *and*
+    denominator, so an undated title is scored on what is known about it. The
+    observable consequence, and the case that pins it: at equal relevance, an
+    undated title ranks above one with a measured old year.
+
+    **`release_date` where the enriched tier has one, `year` otherwise.** The
+    two are the same fact at two precisions and both are on `Title`; taking the
+    coarse one when the fine one is present would throw away eleven months of
+    the only signal this term has. A `year` alone is read as 1 January, which
+    is a bias of at most half a year against a midpoint of twenty-five.
+
+    A release in the future -- and TMDb dates unreleased films -- is clamped to
+    age zero rather than allowed a term above 1.0, which would put an
+    announcement above everything ever made.
+    """
+    released = title.release_date or (None if title.year is None else date(title.year, 1, 1))
+    if released is None:
+        return None
+    age_years = max((today - released).days, 0) / _DAYS_IN_YEAR
+    return 1.0 / (1.0 + age_years / _RECENCY_MIDPOINT_YEARS)
+
+
 def _blend(**signals: float | None) -> float:
     """A weighted mean over the signals that are actually present.
 
     An absent signal leaves **both** the numerator and the denominator, so a
     title with no popularity is scored on what is known about it rather than
     penalised for what is not. The observable consequence: at equal relevance,
-    unknown popularity ranks above a measured zero.
+    unknown popularity ranks above a measured zero, and an undated title ranks
+    above one with a measured old year.
 
     Written as a sum over an explicit signal list -- the same skeleton
-    `SimilarityService` uses -- so that landing watch state, recency or a taste
-    centroid in M7 is adding a term and a weight in both places rather than
-    rewriting two scorers.
+    `SimilarityService` uses -- so that landing a term is adding a term and a
+    weight in both places rather than rewriting two scorers. Watch state and
+    recency arrived that way; the taste centroid is the one still to come.
+
+    **It is scale-invariant, which is what lets new terms arrive without moving
+    old scores.** Multiplying every weight by the same factor changes nothing,
+    and adding a term changes only the rows where that term is *present* -- so
+    a hit with no popularity, no year and no household scores exactly what M6
+    scored it, and `_WEIGHTS`' comment says why the three M6 numbers therefore
+    cannot be re-balanced against each other.
     """
     total = 0.0
     applied = 0.0

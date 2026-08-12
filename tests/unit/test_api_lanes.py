@@ -312,6 +312,7 @@ def _pipeline(
             FakeSuggestIndex(),
             titles,
             fakes.media_items,
+            watch_states,
             result_limit=settings.search_result_limit,
         ),
         similar=SimilarityService(embeddings, neighbors, titles, commit),

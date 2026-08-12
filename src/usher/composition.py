@@ -545,6 +545,12 @@ def build_search_service(
     directly would get unranked hits with no `owned` flag and no
     `SearchAnswer` to say what ran.
 
+    **The household reaches `search` as an argument, never as a collaborator
+    bound here.** What this function wires is the *repository* the watch-state
+    term reads through; which household a given search speaks for is a property
+    of the request, and a `SearchService` built around one would be a
+    per-household object on a per-session factory.
+
     `embedder` is `None` for every caller but `usher search --mode
     semantic|fused`, and that is ADR-0022 at the wiring layer rather than an
     omission. It is a once-per-*process* resource -- a 65 MB ONNX session and
@@ -577,6 +583,12 @@ def build_search_service(
         ),
         PostgresTitleRepository(session),
         PostgresMediaItemRepository(session),
+        # The fifth object, and it is built here rather than handed in for the
+        # reason the two indexes are: it is a function of the session alone.
+        # **Built here rather than in `build_pipeline` and again in
+        # `api/deps.py`** -- this function is the one assembly, so a caller
+        # that reaches it gets the watch-state term or nobody does.
+        PostgresWatchStateRepository(session),
         result_limit=settings.search_result_limit,
         embedder=embedder,
         expander=expander,

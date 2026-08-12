@@ -3368,3 +3368,198 @@ talks to most — stated in `.claude/rules/tmdb-and-enrichment.md` already, and
 restated here because it is the reason `test_a_429_carrying_a_retry_after_
 backs_off_no_sooner_than_the_upstream_asked` is the only place its behaviour
 is pinned at all.
+
+## M9 Task E4 — the review queue's keyset and its resolve route (2026-08-11)
+
+**17 plants over `db/repositories/media_item.py`, `tests/fakes/media_item_
+repository.py`, `api/routers/unmatched.py` and `api/cursor.py` — 15 behavioural
+targets, all KILLED; 1 measured equivalent mutant reported rather than closed;
+2 equivalent-mutant controls surviving all five gate steps. 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.** Harness at
+`/var/tmp/m9-E4/plants.py`, **outside the working tree** for the reason V1's
+entry records, and `/var/tmp` rather than `/tmp` because `/tmp` is tmpfs on this
+host. Plant list and expected verdict written down first, exact anchor count
+asserted before each plant, the landing spelled `old not in landed and new in
+landed`, `compile()` as the dry run, `PYTHONDONTWRITEBYTECODE=1` with
+`__pycache__` swept under **both** `src/` and `tests/` before every run, a 600 s
+per-plant timeout reporting `HUNG` as its own verdict, no second `-q`, and every
+restore `md5sum`-verified against a pre-plant digest. Tree committed first, so
+`git status` is the verification; clean after.
+
+**Selection:** `test_api_unmatched.py`, `test_media_item_repository_contract.py`,
+`test_ports_repository_ingest.py` (unit) and `test_admin_unmatched.py`,
+`test_media_item_repository.py` (integration) — **166 cases**, 12–28 s a run,
+green before and after. Scoped rather than whole-suite because nothing outside
+this task's own files reads `list_unmatched_page` or the new router (grepped,
+not assumed), and because `tests/integration/test_sse_end_to_end.py` is
+intermittent on this tree: **a sweep scored on "did the run fail" cannot run
+against a suite holding a flaky case.**
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 pg: the NULL disjunct dropped from the **dated** arm | KILLED | 2 — the route walk, and `..._resuming_from_a_dated_boundary_still_reaches_the_undated_tail` |
+| **P2 pg: ADR-0034's refuted row comparison, one statement for both boundaries** | KILLED | **2 — the route walk, and `..._a_page_boundary_inside_the_undated_group_does_not_drop_the_rest_of_it`** |
+| P3 fake: the NULL disjunct dropped | KILLED | 2 |
+| P4 fake: the literal row-comparison transcription (`TypeError`) | KILLED | 3 |
+| P5 fake: the **sentinel** transcription | **SURVIVED — equivalent, measured** | 0 |
+| P6 pg: the tiebreak dropped from the dated arm | KILLED | 2 |
+| P7 pg: the tiebreak dropped from the undated arm | KILLED | 2 |
+| P8 pg: `id DESC` dropped from the `ORDER BY` | KILLED | 5 |
+| P9 pg: `>` for `<` on the dated key | KILLED | 2 |
+| P10 pg: both tails relaxed `<` → `<=` | KILLED | 5 |
+| P11 route: the episode-belongs-to-title check deleted | KILLED | 3 |
+| P12 route: `attach_title`'s boolean return ignored | KILLED | 1 |
+| P13 route: the title existence read deleted | KILLED | 3 |
+| P14 route: `over_fetch(limit)` → `limit` alone | KILLED | 6 |
+| **P15: the off-by-one in full** — `over_fetch` dropped **and** `paginate`'s `<= limit` relaxed to `< limit` | KILLED | **2, and they are the same case on both arms** |
+
+**Four results worth carrying.**
+
+- **P1 and P2 are two arms of one predicate and they die on two different
+  cases, which is the whole point of writing both.** The plan's requirement was
+  that the NULL mutation *"must fail the boundary case specifically, not merely
+  some case"*: P2 — the row comparison ADR-0034 was corrected to remove — fails
+  the undated-boundary case and **passes** the dated-boundary one, while P1
+  does the reverse. A single case covering "NULLs are handled" would have been
+  satisfied by either and would have made the pair indistinguishable.
+- **The off-by-one is invisible outside `count % limit == 0`, re-measured
+  here.** P15 is the naive spelling in full and it fails **exactly** the two
+  `test_a_page_that_exactly_exhausts_the_queue_carries_no_next_cursor` cases
+  (one unit, one integration) out of 166 — the seven-item partition walk at
+  `limit=3` in the same file stays green, because `7 % 3 != 0`. **P14 is the
+  half-spelling and is a different, louder defect**: `over_fetch(limit) - 1`
+  makes `len(fetched) <= limit` always true, so *no* cursor is ever minted and
+  six cases fall over. Both are kills; only P15 is the one ADR-0034's evidence
+  section names, and a summary reporting "the off-by-one dies, 6 cases" would
+  have been describing the wrong mutation.
+- **P5 is the interesting survivor and it is an equivalence rather than a
+  gap.** `FakeMediaItemRepository._after` spelled as
+  `(entry.added_at or _UNDATED, entry.id) < (boundary.added_at or _UNDATED,
+  boundary.id)` — which is how that fake's own `list_unmatched` already spells
+  NULLS LAST, so it is the spelling an author would reach for — survives all
+  166. The sentinel map is order-preserving over the whole reachable domain, so
+  the mutant and the original differ on **no state a source can produce**: only
+  on an item genuinely dated `datetime.min`, which is the sentinel's own value.
+  Applying this file's own test (*which collaborator could falsify the promise*)
+  answers "none", so it is reported rather than closed. **The three arms are
+  kept anyway, for a reason that is about the sweep rather than about
+  behaviour: under the sentinel there is no NULL leg to delete, so the fake arm
+  of the contract loses P3 entirely.** A contract fake's job is to carry the
+  *shape* of the predicate it stands in for, and that is worth more than one
+  line of tidiness. Written into `_after`'s own docstring, both spellings
+  named, so the next reader does not "simplify" it back.
+- **P4 confirms `fixtures-and-fakes.md`'s asymmetry in the direction that entry
+  predicts.** The literal row comparison is a `TypeError` in Python and a
+  silent full-looking short page in Postgres — same defect, loud here, quiet
+  there — which is why the headline case for it lives in the integration file
+  and only *echoes* in the contract's unit arm.
+
+**The two controls, measured against every gate step separately** — the check
+V1's entry exists to force, run with the harness outside the tree so the four
+whole-repository steps are not measuring the harness:
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 — `_UNMATCHED_AFTER_DATED` / `_UNMATCHED_AFTER_UNDATED` defined in the other order | PASS | PASS | PASS (559) | PASS (9/0) | PASS (166) |
+| C2 — one sentence of `MediaItemRepository.list_unmatched_page`'s docstring reworded | PASS | PASS | PASS (559) | PASS (9/0) | PASS (166) |
+
+C1 is a fact about the *code* rather than about what the tools look at: both
+are module-level `str` assignments built by one pure function from two
+module-level literals, referencing neither each other nor anything between
+them, in a module with no import-time side effect. It is deliberately **not**
+an `__all__` reorder, which `RUF022` rejects. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: the twenty-two
+files it finds include `test_ports_repository_package.py`, which **does** read
+this package — but it checks a docstring's **presence**, not its wording, which
+was verified by reading that case before the control was chosen rather than
+after it survived. The one scan this task itself adds
+(`test_the_router_enqueues_nothing_and_invalidates_nothing`) parses
+`api/routers/unmatched.py` with every docstring **stripped**, precisely so a
+module whose prose names `JobQueue` and `RowCache` on purpose can say why it
+holds neither.
+## M9 Task F4 — the watch-state and recency terms, and a `NameError` scored as a twelve-case kill (2026-08-11)
+
+**12 plants over `services/search.py`, `api/routers/search.py` and `cli.py` —
+10 behavioural targets, all KILLED; 2 equivalent-mutant controls, both
+SURVIVED and both passing every gate step separately; 1 BROKEN-MUTATION
+re-spelled and then killed. 0 BAD-ANCHOR, 0 DID-NOT-RUN, 0 HUNG.** Run in
+place from a harness at `/tmp/m9-exec/F4/plants.py`, **outside the tree** for
+V1's reason, with the plant list and its expected verdict written down first,
+`PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under **both** `src/` and
+`tests/` before every run, `compile()` as the dry run, an exact anchor count
+asserted before each plant, the landing spelled `old not in landed and new in
+landed`, and every restore verified by `md5sum` against a pre-plant digest.
+Committed before sweeping, so `git status` is the verification.
+
+**Selection:** `test_services_search.py`, `test_api_search.py`, `test_cli.py`,
+`test_telemetry_search.py` (unit) and `test_services_search.py` (integration) —
+133 cases, 15–19 s a run, green before and after. Scoped rather than
+whole-suite for B2's reason: `tests/integration/test_sse_end_to_end.py` is
+intermittent on this tree and predates M9, and a sweep scored on "did the run
+fail" cannot include a flaky case.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the watch-state term dropped from the blend, the household read intact | KILLED | 3 |
+| P2 the household read issued with a placeholder id when there is none | KILLED | 2 — both read-count cases, one per arm |
+| P3 the recency term deleted | KILLED | 1 |
+| P4 an absent year scored rather than excluded (`year or 1`) | KILLED | 2 |
+| P5 the watch-state term inverted into a demotion | KILLED | 3 |
+| P6 `owned` 0.15 → 0.10, breaking the M6 ratio and no ordering | KILLED | **1 — the numeric case alone** |
+| P7 the household read scoped to `list(_ALL)` | **BROKEN-MUTATION** | (12, on a `NameError`) |
+| P7b the household read scoped to `list(owned)` | KILLED | 5 |
+| P8 the route never resolves a household | KILLED | 1 |
+| P9 `usher search` never resolves one | KILLED | 1 |
+
+**P6 is the round's yield and it is a result about the *numeric* case.**
+Re-balancing `owned` against `relevance` reorders **nothing** — every ordering
+case in the file compares two rows whose owned-ness or popularity differs in
+the same direction under either weight — so all ten ordering cases stay green
+and exactly one assertion fails:
+`test_with_no_household_and_no_year_the_score_is_the_one_m6_computed`, whose
+expectation is two literals rather than a read of `_WEIGHTS`. **A weight table
+is not pinned by any number of ordering cases**; a re-weighting that reordered
+nothing would change every score on the wire and be invisible. Same family as
+D4's `TICKET_TTL_SECONDS` and B9's `CAST_LIMIT` — a constant whose value only a
+literal-valued case can hold — arriving at a *ratio* between two constants
+rather than at one constant's magnitude.
+
+🔴 **P7 is the recorded `NameError` trap, and the first spelling produced a
+plausible twelve-case kill across four files.** *"The household read unbounded
+by the hits"* was first spelled `played_title_ids(user_id, list(_ALL))` — and
+`_ALL` is defined nowhere, so the expression raised inside `_rank`, every
+ranked search in the selection errored, and the log named twelve cases
+including three that have nothing to do with the household. The existing rule
+covers an `except` clause; this is the same defect in an ordinary argument
+position, on the path *every* case reaches rather than only the failing ones,
+which is what makes the false kill so large and so plausible. **The wider form:
+check a plant's new identifiers are bound before believing any verdict, and
+treat a kill whose failing cases are far broader than the plant's subject as a
+tell.**
+
+**And the defect P7 named is only half spellable, which is the design result
+underneath it.** `played_title_ids` takes a `Sequence[uuid.UUID]`; the service
+holds the hydrated ids and nothing else, and the port has no "the household's
+whole history" call at all — so *unbounded* cannot be written here (B6's OFFSET
+finding, arriving at a port argument instead of a cursor). What *is* spellable
+is the read scoped to the **wrong** set the service happens to hold, and P7b —
+`list(owned)`, a plausible copy-paste from the line above — fails 5 cases
+including `test_the_household_read_is_bounded_by_the_hits`, which is the case
+written for it.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `_WEIGHTS`' `played` and `recency` entries in the other order | PASS | PASS | PASS | PASS | PASS (133) |
+| C2 one sentence of `_recency_term`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (133) |
+
+C1 is a fact about the *code* rather than about what the tools look at:
+`_WEIGHTS` is a dict literal with two distinct, independent keys read only by
+`_WEIGHTS[name]` inside `_blend`, and a mapping's insertion order cannot reach
+a weighted sum. It is deliberately **not** an `__all__` reorder, which `RUF022`
+rejects, and it is not spellable as an argument reorder, which is A5's entry's
+reason for checking rather than assuming. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/` — the
+twenty-four files it finds scan `ports/`, `services/curation*`,
+`services/home_sequential.py`, `services/jobs.py`, `adapters/` and several
+`api/` modules, and **none of them reads `services/search.py`**; the one scan
+this task itself adds parses `services/home.py` and `services/rows/*.py`.
