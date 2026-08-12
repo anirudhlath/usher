@@ -96,14 +96,17 @@ class JobWorker:
 
         A read-only view rather than a test reaching into `_handlers`, and
         the property that assertion needs is the one `run_once` relies on:
-        **four of the seven kinds are registered conditionally** by
+        **four of the eight kinds are registered conditionally** by
         `composition.build_worker` -- `ENRICH` and `DERIVE` on a TMDb key,
         `INDEX` on an embedder, `CURATE` on an `LLMClient` -- so "this
         deployment cannot run that kind" is wiring a test has to be able to
-        see, and `MATCH`, `WATCH_HISTORY` and `WATCH_WRITEBACK` are the three
-        in every build. A mutable dict handed out would let a caller register
-        a handler the worker never knew about, which is the same silent gap
-        the other way round.
+        see, and `MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK` and `SYNC` are the
+        four in every build. `SYNC` joined them in M9's E3: there is no
+        optional process resource behind a triggered sync, only the adapter
+        factory every root already builds, so it is registered exactly as
+        unconditionally as the other three. A mutable dict handed out would
+        let a caller register a handler the worker never knew about, which is
+        the same silent gap the other way round.
         """
         return frozenset(self._handlers)
 

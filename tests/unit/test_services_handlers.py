@@ -24,6 +24,7 @@ from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.source_adapter import FakeSourceAdapter
+from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
 from tests.fakes.title_repository import FakeTitleRepository
@@ -31,12 +32,14 @@ from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import EnrichmentState, MatchMethod, SourceKind, TitleKind
 from usher.domain.jobs import Job, JobKind
 from usher.domain.source import Source
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
 from usher.ports.llm import LLMUsage
 from usher.ports.metadata import MetadataCandidate
 from usher.ports.source import (
+    SourceAdapter,
     SourceItem,
     SourceItemKind,
     SourceWatchState,
@@ -49,10 +52,12 @@ from usher.services.handlers import (
     curate_handler,
     enrich_handler,
     match_handler,
+    sync_handler,
     watch_history_handler,
     watch_writeback_handler,
 )
 from usher.services.matching import MatchService
+from usher.services.reconcile import ReconcileService
 from usher.services.watch_sync import WatchStateSyncService
 from usher.services.watch_write import WatchWriteService
 
@@ -485,6 +490,265 @@ async def test_the_watch_history_handler_does_nothing_for_an_unowned_key() -> No
         Job(kind=JobKind.WATCH_HISTORY, key="emby-1")
     )
     assert seen == ["emby-1"]
+
+
+# -- sync -------------------------------------------------------------------
+
+
+class _RecordingReconcile(ReconcileService):
+    """A `ReconcileService` that records **which source and lane** it was
+    asked to walk, without touching any of its five real collaborators.
+
+    Same shape as `_RecordingCuration` above and for the same reason: there
+    is no port between `sync_handler` and the service it drives, so what a
+    case has to see is the argument, and `__init__` deliberately does not
+    call `super()`.
+    """
+
+    def __init__(self, log: list[str], *, raises: Exception | None = None) -> None:
+        self.calls: list[tuple[uuid.UUID, SyncRunKind]] = []
+        self._log = log
+        self._boom = raises
+
+    async def reconcile(self, source: Source, kind: SyncRunKind, adapter: SourceAdapter) -> SyncRun:
+        self.calls.append((source.id, kind))
+        self._log.append("reconcile")
+        if self._boom is not None:
+            raise self._boom
+        return SyncRun(source_id=source.id, kind=kind, status=SyncRunStatus.COMPLETED)
+
+
+class _RecordingWatch(WatchStateSyncService):
+    """`WatchStateSyncService`'s twin of `_RecordingReconcile` above."""
+
+    def __init__(self, log: list[str], *, raises: Exception | None = None) -> None:
+        self.calls: list[tuple[uuid.UUID, uuid.UUID]] = []
+        self._log = log
+        self._boom = raises
+
+    async def sync(self, source: Source, adapter: SourceAdapter, *, user_id: uuid.UUID) -> SyncRun:
+        self.calls.append((source.id, user_id))
+        self._log.append("watch")
+        if self._boom is not None:
+            raise self._boom
+        return SyncRun(
+            source_id=source.id, kind=SyncRunKind.WATCH_STATE, status=SyncRunStatus.COMPLETED
+        )
+
+
+class _Opener:
+    """`composition.open_adapter`, bound to one answer and recording who asked.
+
+    A class rather than a closure, so a case can read `.calls` back the way
+    `FakeSourceRepository.calls` already lets one read a lookup count back --
+    the shape `test_the_sync_handler_completes_for_a_source_that_no_longer_
+    exists` needs to prove the adapter factory was never reached at all.
+    """
+
+    def __init__(self, adapter: SourceAdapter | None) -> None:
+        self._adapter = adapter
+        self.calls: list[uuid.UUID] = []
+
+    async def __call__(self, source: Source) -> SourceAdapter | None:
+        self.calls.append(source.id)
+        return self._adapter
+
+
+async def test_the_sync_handler_walks_the_item_lane_then_the_watch_lane(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """PRD 03's ordering, restated at the handler: a watch lane that ran
+    before the items existed would resolve every state against a
+    `MediaItem` that does not exist yet and count it unmatched."""
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    reconcile = _RecordingReconcile(events)
+    watch = _RecordingWatch(events)
+    opener = _Opener(adapter)
+
+    await sync_handler(sources, reconcile, watch, opener, user_id=_USER)(
+        Job(kind=JobKind.SYNC, key=f"{source.id}:full")
+    )
+
+    assert events == ["reconcile", "watch"]
+    assert reconcile.calls == [(source.id, SyncRunKind.FULL)]
+    assert watch.calls == [(source.id, _USER)]
+    assert opener.calls == [source.id]
+
+
+async def test_the_lane_in_the_key_is_the_lane_reconcile_is_asked_for(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """The composite key is the only channel lane selection reaches the
+    handler through -- a `delta` request and a `full` request differ in
+    nothing else."""
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    reconcile = _RecordingReconcile(events)
+    watch = _RecordingWatch(events)
+
+    await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
+        Job(kind=JobKind.SYNC, key=f"{source.id}:delta")
+    )
+
+    assert reconcile.calls == [(source.id, SyncRunKind.DELTA)]
+
+
+async def test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises(
+    source: Source, adapter: FakeSourceAdapter
+) -> None:
+    """`aclose()` in a `finally`, the rule `usher.cli._sync` already
+    documents: one adapter is one connection pool, and a walk that raises
+    would otherwise leak it for the rest of the process.
+
+    `ReconcileService.reconcile` itself "never raises a `UsherPortError`" --
+    it records a `FAILED` run instead -- so the exception that reaches this
+    handler in production is a genuine bug, and `JobWorker` deliberately lets
+    it propagate rather than swallowing it as an upstream failure. That is
+    reproduced here with a bare `RuntimeError` rather than a `UsherPortError`,
+    which is also what proves the watch lane never runs after it.
+    """
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    reconcile = _RecordingReconcile(events, raises=RuntimeError("boom"))
+    watch = _RecordingWatch(events)
+
+    with pytest.raises(RuntimeError):
+        await sync_handler(sources, reconcile, watch, _Opener(adapter), user_id=_USER)(
+            Job(kind=JobKind.SYNC, key=f"{source.id}:delta")
+        )
+
+    assert events == ["reconcile"], "the watch lane ran after the item lane raised"
+    # The port's own `aclose` contract: afterwards every method raises
+    # `PortUnavailable` rather than whatever the underlying transport would.
+    with pytest.raises(PortUnavailable):
+        await adapter.get_item("anything")
+
+
+async def test_a_sync_key_with_no_lane_parks_rather_than_killing_the_worker() -> None:
+    """`"{source_id}"` alone, with no `:lane` -- a plausible corruption from
+    something that dropped the separator -- must not reach `str.partition`
+    and silently resolve to an empty lane."""
+    with pytest.raises(PortDataMalformed):
+        await sync_handler(
+            FakeSourceRepository(),
+            _RecordingReconcile([]),
+            _RecordingWatch([]),
+            _Opener(None),
+            user_id=_USER,
+        )(Job(kind=JobKind.SYNC, key=str(uuid.uuid4())))
+
+
+async def test_a_sync_key_whose_source_id_does_not_parse_parks_rather_than_killing_the_worker() -> (
+    None
+):
+    """`uuid.UUID("not-a-uuid")` raises a `ValueError`, and `JobWorker`
+    deliberately lets anything that is not a `UsherPortError` propagate."""
+    with pytest.raises(PortDataMalformed) as raised:
+        await sync_handler(
+            FakeSourceRepository(),
+            _RecordingReconcile([]),
+            _RecordingWatch([]),
+            _Opener(None),
+            user_id=_USER,
+        )(Job(kind=JobKind.SYNC, key="not-a-uuid:delta"))
+    assert "source id" in str(raised.value)
+
+
+async def test_a_sync_key_naming_watch_state_as_its_own_lane_is_malformed() -> None:
+    """`SyncRunKind.WATCH_STATE` parses as a `SyncRunKind` and is still not a
+    triggerable lane: the watch lane is never a thing an operator asks for on
+    its own, only the second half of every triggered sync."""
+    with pytest.raises(PortDataMalformed):
+        await sync_handler(
+            FakeSourceRepository(),
+            _RecordingReconcile([]),
+            _RecordingWatch([]),
+            _Opener(None),
+            user_id=_USER,
+        )(Job(kind=JobKind.SYNC, key=f"{uuid.uuid4()}:watch_state"))
+
+
+async def test_a_sync_key_naming_an_unknown_lane_is_malformed() -> None:
+    with pytest.raises(PortDataMalformed):
+        await sync_handler(
+            FakeSourceRepository(),
+            _RecordingReconcile([]),
+            _RecordingWatch([]),
+            _Opener(None),
+            user_id=_USER,
+        )(Job(kind=JobKind.SYNC, key=f"{uuid.uuid4()}:nightly"))
+
+
+async def test_the_sync_handler_completes_for_a_source_that_no_longer_exists() -> None:
+    """A job for work that has since become impossible completes rather than
+    parks -- PRD 08 reserves parking for work a human must look at, and a
+    source deleted between enqueue and claim is simply gone."""
+    events: list[str] = []
+    opener = _Opener(None)
+
+    await sync_handler(
+        FakeSourceRepository(),
+        _RecordingReconcile(events),
+        _RecordingWatch(events),
+        opener,
+        user_id=_USER,
+    )(Job(kind=JobKind.SYNC, key=f"{uuid.uuid4()}:delta"))
+
+    assert events == [], "no source to walk, so neither lane may run"
+    assert opener.calls == [], "no source to build an adapter for"
+
+
+async def test_the_sync_handler_completes_for_a_source_disabled_since_it_was_enqueued() -> None:
+    """The race the route's own 409 cannot close by itself: the queue can
+    hold this job behind a head-of-line-blocking walk for minutes, long
+    enough for an operator to disable the source after the healthy 202 and
+    before the worker ever claims the row. `SourceRegistry.resolve` already
+    makes this guard for `match` and `watch_history`
+    (`composition.py`); this is the same rule for the kind that reaches a
+    source by id instead of asking a resolver.
+    """
+    sources = FakeSourceRepository()
+    await sources.add(
+        Source(
+            kind=SourceKind.EMBY,
+            name="Parked Mid-Flight",
+            base_url="https://emby.example",
+            credentials_ref="ref",
+            device_id="device",
+            enabled=False,
+        )
+    )
+    disabled = (await sources.list_all())[0]
+    events: list[str] = []
+    opener = _Opener(None)
+
+    await sync_handler(
+        sources, _RecordingReconcile(events), _RecordingWatch(events), opener, user_id=_USER
+    )(Job(kind=JobKind.SYNC, key=f"{disabled.id}:delta"))
+
+    assert events == [], "a disabled source must not be walked, however it got that way"
+    assert opener.calls == [], "no adapter should be built for a source the worker declines"
+
+
+async def test_the_sync_handler_completes_when_the_credential_row_has_gone(source: Source) -> None:
+    """`composition.open_adapter` answers `None` for exactly this and already
+    logs why -- an operator with three sources needs the second and third to
+    run when the first's credential has gone."""
+    sources = FakeSourceRepository()
+    await sources.add(source)
+    events: list[str] = []
+    opener = _Opener(None)
+
+    await sync_handler(
+        sources, _RecordingReconcile(events), _RecordingWatch(events), opener, user_id=_USER
+    )(Job(kind=JobKind.SYNC, key=f"{source.id}:delta"))
+
+    assert events == [], "no adapter, so neither lane may run"
+    assert opener.calls == [source.id]
 
 
 # -- the outbound write-back -----------------------------------------------

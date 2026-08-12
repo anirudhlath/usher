@@ -113,6 +113,17 @@ class ProblemCode(StrEnum):
     separated by *status* (`409 NOT_PLAYABLE`) rather than by code. Encoded
     twice, against the careless spelling (`title_not_found`) and the careful
     one (`no_such_title`).
+
+    **`NOT_PLAYABLE` is also what `POST /admin/sources/{id}/sync` (M9's E3)
+    answers for a source an operator has disabled**, and that is a reuse
+    rather than a coincidence of status. Both say the identical thing at the
+    RFC 9110 §15.5.10 level -- *"the request could not be completed due to a
+    conflict with the current state of the target resource, stop asking until
+    that state changes"* -- and V1's vocabulary is closed at seven; a route
+    that wants a distinct member amends ADR-0030 rather than minting one
+    beside it, and this one does not clear that bar. `detail` carries the
+    source-specific sentence (`"this source is disabled..."`); `code` carries
+    only the disposition the two share.
     """
 
     NOT_FOUND = "not_found"

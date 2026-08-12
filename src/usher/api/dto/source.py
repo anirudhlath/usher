@@ -30,6 +30,7 @@ import uuid
 from pydantic import AwareDatetime, BaseModel, Field, SecretStr
 
 from usher.domain.enums import SourceKind
+from usher.domain.jobs import JobKind
 from usher.domain.source import Source
 from usher.ports.source import SourceStatus
 
@@ -107,3 +108,17 @@ class SourceStatusResponse(BaseModel):
             server_version=status.server_version,
             detail=status.detail,
         )
+
+
+class SyncTriggerResponse(BaseModel):
+    """`POST /admin/sources/{id}/sync`'s whole body: the enqueued job's
+    identity, on the same shape `usher.api.dto.rows.RegenerateResponse` uses
+    for `POST /admin/rows/regenerate` -- both routes promise exactly one
+    thing, that this row is on the queue at `JobPriority.DEMAND` or was
+    already there, and `(kind, key)` is the only fact about it a reader can
+    still act on. `key` is `"{source_id}:{lane}"`, never a bare source id --
+    `usher.domain.jobs.JobKind.SYNC` says why the composite is deliberate.
+    """
+
+    kind: JobKind
+    key: str

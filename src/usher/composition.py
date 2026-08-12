@@ -127,6 +127,7 @@ from usher.services.handlers import (
     enrich_handler,
     index_handler,
     match_handler,
+    sync_handler,
     watch_history_handler,
     watch_writeback_handler,
 )
@@ -733,15 +734,31 @@ def build_worker(
     worker.register(
         JobKind.WATCH_HISTORY, watch_history_handler(pipeline.watch, resolve, user_id=user_id)
     )
-    # Unconditional, joining `MATCH` and `WATCH_HISTORY`: nothing about a
-    # write-back is optional. The four guarded registrations below each rest
-    # on a collaborator a deployment may not have -- a TMDb key, an embedding
-    # model, an LLM endpoint -- and this one needs only the session's own
-    # repositories and the resolver every source-scoped kind already takes.
-    # A guard here would leave a client's own watch write pending forever on
-    # the shipped default deployment -- M4's "a job kind whose handler is a
-    # stub is a queue that grows forever", arriving as a registration rather
-    # than as a missing function.
+    # Unconditional, exactly as MATCH and WATCH_HISTORY are: unlike ENRICH,
+    # INDEX, DERIVE and CURATE there is no optional process resource behind a
+    # triggered sync, only the adapter factory every root already builds.
+    # `open_adapter` is a module-level function rather than a method so it
+    # can be shared with `usher.cli._open_adapter`'s reporting wrapper; bound
+    # here to this pipeline the way `resolve` already is above.
+    worker.register(
+        JobKind.SYNC,
+        sync_handler(
+            pipeline.sources,
+            pipeline.reconcile,
+            pipeline.watch,
+            lambda source: open_adapter(pipeline, source),
+            user_id=user_id,
+        ),
+    )
+    # Unconditional, joining `MATCH`, `WATCH_HISTORY` and `SYNC`: nothing
+    # about a write-back is optional. The four guarded registrations below
+    # each rest on a collaborator a deployment may not have -- a TMDb key, an
+    # embedding model, an LLM endpoint -- and this one needs only the
+    # session's own repositories and the resolver every source-scoped kind
+    # already takes. A guard here would leave a client's own watch write
+    # pending forever on the shipped default deployment -- M4's "a job kind
+    # whose handler is a stub is a queue that grows forever", arriving as a
+    # registration rather than as a missing function.
     worker.register(
         JobKind.WATCH_WRITEBACK,
         watch_writeback_handler(

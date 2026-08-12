@@ -3641,3 +3641,61 @@ every instance is truthy and `or` and `is None` cannot disagree. It is the
 implementation grows a `__len__`, an empty one silently becomes a
 `NullEventPublisher`. Deliberately not an `__all__` or `__slots__` reorder:
 ruff `RUF022` and `RUF023` reject both, which makes them careless spellings.
+## M9 Task E3 — `POST /admin/sources/{id}/sync` as an enqueue (2026-08-11)
+
+**6 plants over the two files E3's five named-mutation risks and one
+self-found race concentrate in — all 6 KILLED, 0 survivors, 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-LAND.** Run in place with the plant list and its
+expected verdict written down first (`/var/tmp/e3-sweep/plan.md`, `/var/tmp`
+because `/tmp` is tmpfs on this host), `cp` backups taken before the first
+plant, `md5sum` asserted equal to the backup after every restore, and each
+mutation dry-run through `ast.parse` before its test run.
+
+**Selection**, scoped rather than whole-suite: `tests/unit/test_services_handlers.py`,
+`tests/unit/test_api_sources.py`, `tests/unit/test_composition.py`,
+`tests/unit/test_domain_jobs.py` for T1/T2/T6 (handler-only mutations);
+`tests/unit/test_api_sources.py` alone for T3-T5 (route-only mutations), which
+also ran once against the integration pair
+(`tests/integration/test_admin_sources.py -k sync`,
+`tests/integration/test_job_queue.py -k sync`) for T3 specifically, since that
+mutation's blast radius reaches the end-to-end walk. Baseline green before
+each block (87 unit / 88 integration for the pre-T3 run), restored green
+after every plant, verified by `md5sum` against the pre-plant digest before
+the next plant was written.
+
+| # | mutation | verdict | the case that names it |
+|---|---|---|---|
+| T1 | the two lanes' order swapped (`watch.sync` before `reconcile.reconcile`) | KILLED (2) | `test_the_sync_handler_walks_the_item_lane_then_the_watch_lane`, `test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises` |
+| T2 | `aclose()` moved out of the `finally` (sequential calls, no `try`) | KILLED (1) | `test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises` |
+| T3 | the composite key collapsed to the bare source id (`key = str(source_id)`) | KILLED (6) | `test_a_sync_request_enqueues_one_job_at_demand_and_reconciles_nothing_in_the_request`, `test_a_full_request_is_asked_for_by_query_and_reaches_the_key`, `test_a_full_and_a_delta_request_are_two_distinct_jobs`, and 3 integration cases downstream of the same malformed key |
+| T4 | the disabled-source guard deleted from the route | KILLED (1) | `test_a_disabled_source_is_409_and_enqueues_nothing` |
+| T5 | `JobPriority.DEMAND` lowered to `JobPriority.NEW` | KILLED (1) | `test_a_sync_request_enqueues_one_job_at_demand_and_reconciles_nothing_in_the_request` (asserts the literal `100`) |
+| T6 | the handler's own `enabled` re-check deleted (self-found, not in the plan's list) | KILLED (1) | `test_the_sync_handler_completes_for_a_source_disabled_since_it_was_enqueued` |
+
+**T3's key-collapse mutation fails on the lane that ran, not merely on a row
+count**, which is the plan's own bar for this one. `test_a_full_request_is_
+asked_for_by_query_and_reaches_the_key` and the response-body assertion in the
+first case both read the exact key string back (`f"{source.id}:full"` /
+`f"{source.id}:delta"`), so a collapse to a bare id fails on *what* the key
+names rather than on *how many* rows exist — the row-count case in
+`tests/integration/test_job_queue.py` (`test_a_full_and_a_delta_sync_for_one_
+source_are_two_rows`) does not even reach the mutation, because it drives the
+queue directly rather than through the route, and stayed green throughout.
+
+**T6 is the mutation E3 was not asked to plant and planted anyway.** It is
+not on the group preamble's list of five; it targets the handler-level
+`source.enabled` re-check added after the review that found the gap the route's
+own 409 cannot close by itself — the queue can hold a `sync` job behind a
+head-of-line-blocking full walk for minutes (PRD 08's job-reliability
+section), long enough for an operator to disable a source that was healthy
+when they pressed the button. `SourceRegistry.resolve` already made this
+guard for `match` and `watch_history`; `sync_handler` was the one source-by-id
+kind missing it until this task. Recorded here because a guard added after a
+review and never swept is a guard nobody has verified has teeth.
+
+Gate green on the fully restored tree, confirmed by direct comparison rather
+than by the suite alone: `md5sum` of both mutated files equal to their
+pre-sweep digest, `git diff --stat` empty, `ruff check .`, `ruff format
+--check .` (578 files), `mypy src tests` (565 files), `lint-imports` **9
+kept / 0 broken**, and the full suite **3792 unit / 4 skipped**, **1175
+integration / 22 skipped** — identical to the pre-sweep baseline.

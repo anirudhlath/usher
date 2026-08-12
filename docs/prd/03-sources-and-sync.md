@@ -331,9 +331,44 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 |---|---|---|
 | **Push** | WebSocket event | **Apply it inline when it is small; defer to a delta when it is large.** A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk instead, because a request per item against a 1,126,789-item library is a design defect rather than a slow path |
 | **Reconnect delta** | Socket re-established | Items changed since the last cursor. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds |
-| **Full reconcile** | Nightly | Walk the source; upsert everything; mark unseen items `available = false` |
+| **Full reconcile** | Nightly, or an operator's `POST /admin/sources/{id}/sync` (M9) | Walk the source; upsert everything; mark unseen items `available = false` |
 
 Polling is the backstop, not the design.
+
+**A triggered sync is a queued job, never a walk run inside the request.**
+M9's E3 delivers the route as `JobKind.SYNC`: the handler is `usher sync`'s
+own body — the item lane, then the watch lane, in that order, over one
+adapter closed in a `finally` — run by the worker rather than by the request
+that asked for it, for the reason `api/deps.py`'s `get_reconcile_service`
+already states one layer down: *"a reconcile checkpoints and commits per
+batch, so a route that drove a six-hour walk inside one request would be
+committing the request's session repeatedly before the handler returned."*
+The route's own 202 promises the row is queued and nothing about how soon it
+runs — [08](08-operations.md)'s job-reliability section prices the
+consequence, a single worker lane shared with every other queued kind.
+
+**A third caller of `reconcile()` already existed before this route did, and
+the design is safe against it by construction rather than by coincidence.**
+The Reconnect-delta row above — `LaneSupervisor._close_gap` — runs the
+identical pair (`reconcile.reconcile(source, DELTA, adapter)`, then
+`watch.sync(...)`) on its own adapter whenever a source's push socket comes
+back, entirely independently of the job queue; and `usher sync` has always
+been a third way to trigger the same pair, from a second process. So a
+triggered `sync` job can genuinely run concurrently with the push lane's own
+gap-closer, or with an operator's cron — this route adds a caller, not a new
+kind of overlap. Three things already make that safe rather than merely
+survivable, all pre-dating this route: the availability sweep only ever runs
+on a **full** walk, so two concurrent **delta** walks (the reconnect lane's
+only kind, and this route's default) never race on retraction at all; every
+write is an upsert keyed on `(source_id, external_id)`, so two walks
+observing the same item at nearly the same instant converge rather than
+conflict; and the sweep's own predicate is purely time-based
+(`last_seen_at < run.started_at`), so a concurrent walk that observes an item
+*after* another run's `started_at` is read as "still there" by that run's own
+sweep regardless of which task wrote it. A `full` sync requested through this
+route while the push lane happens to be closing a gap on the same source is
+therefore not a new failure mode this route introduces; it is the existing
+concurrent-walk safety argument exercised by a fourth caller.
 
 **A push `ITEM_REMOVED` retracts nothing.**
 [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
