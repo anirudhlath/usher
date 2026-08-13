@@ -199,7 +199,7 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
         *,
         genres: Sequence[str] = (),
         keywords: Sequence[str] = (),
-        model_name: str = "fake:test-384",
+        model_name: str = "fake:test-embedding",
         genome: Sequence[float] | None = None,
     ) -> Title:
         """Seed one embedded title, its tag sets, and its vector.

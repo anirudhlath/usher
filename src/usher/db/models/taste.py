@@ -313,7 +313,10 @@ class UserTasteRow(Base):
     same `IS DISTINCT FROM` clause rather than through a migration somebody
     has to remember to write.
 
-    **`halfvec(384)`, matching `title_embeddings.embedding` exactly.** A
+    **`halfvec(1024)`, matching `title_embeddings.embedding` exactly** --
+    both are `EMBEDDING_DIMENSIONS`, and `m09e` moved them together for that
+    reason.
+    ** A
     centroid is a mean of vectors from that column and is compared against it,
     so a different type or width would make the one comparison this table
     exists for a cast. The measured `halfvec` round-trip cost is a max cosine

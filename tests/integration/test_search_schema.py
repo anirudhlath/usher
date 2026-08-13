@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.domain.ids import new_id
 
 _VECTOR = "[" + ",".join(["0.05"] * 384) + "]"
@@ -36,7 +37,7 @@ async def _embed(session: AsyncSession, title_id: uuid.UUID, *, vector: str | No
             "(title_id, embedding, model_name, source_fingerprint) "
             "VALUES (:id, CAST(:v AS halfvec), :m, :f)"
         ),
-        {"id": title_id, "v": vector, "m": "fake:test-384", "f": "0" * 32},
+        {"id": title_id, "v": vector, "m": "fake:test-embedding", "f": "0" * 32},
     )
 
 
@@ -66,20 +67,20 @@ async def test_a_refused_embedding_is_a_written_row_with_a_null_vector(
     )
     is_null, model_name = stored.one()
     assert is_null is True
-    assert model_name == "fake:test-384"
+    assert model_name == "fake:test-embedding"
 
 
 async def test_a_halfvec_column_refuses_the_wrong_width(session: AsyncSession) -> None:
-    """`halfvec(384)` is a declared width, not a hint.
+    """`halfvec(1024)` is a declared width, not a hint.
 
     The wrong implementation this fails: a bare `halfvec` with no dimension,
     or a `jsonb`/`double precision[]` column standing in for one -- both
-    accept a 383-wide vector from a model swap and then answer every
+    accept a 1023-wide vector from a model swap and then answer every
     similarity query with a type error at read time instead of a write error
     at write time.
 
     `DBAPIError`, not `IntegrityError`: pgvector reports a width mismatch as
-    `DataError` (`expected 384 dimensions, not 3`), which is a sibling of
+    `DataError` (`expected 1024 dimensions, not 3`), which is a sibling of
     `IntegrityError` rather than a subclass. The plan's draft named the
     narrower one and would not have caught the write it exists to forbid.
     """
@@ -89,11 +90,15 @@ async def test_a_halfvec_column_refuses_the_wrong_width(session: AsyncSession) -
             text(
                 "INSERT INTO title_embeddings "
                 "(title_id, embedding, model_name, source_fingerprint) "
-                "VALUES (:id, CAST(:v AS halfvec), 'fake:test-384', :f)"
+                "VALUES (:id, CAST(:v AS halfvec), 'fake:test-embedding', :f)"
             ),
             {"id": title_id, "v": "[0.1,0.2,0.3]", "f": "0" * 32},
         )
-    assert "384" in str(raised.value)
+    # Against the constant, never the literal: `m09e` moved this width once
+    # and the assertion that survived it unchanged is the one that would
+    # have gone on passing against a column of any width containing the
+    # digits it names.
+    assert f"expected {EMBEDDING_DIMENSIONS} dimensions" in str(raised.value)
 
 
 async def test_the_hnsw_index_is_partial_on_a_present_vector(

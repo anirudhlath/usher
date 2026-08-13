@@ -87,12 +87,34 @@ class Embedder(ABC):
         them, the stale gauge climbs and then drains, and nobody has to
         remember to write a migration. The fingerprint scheme doing its job
         instead of a human doing it.
+
+        **And that promise is scoped to a swap at one width, which nothing
+        said until `m09e`.** `EMBEDDING_DIMENSIONS` is a `halfvec` typmod and
+        a typmod is DDL, so a swap that changes the width needs a migration
+        after all -- `m09e` is the first one, 384 -> 1024 for `BAAI/bge-m3`.
+        Read this paragraph as narrowing the one above rather than
+        contradicting it: within a width the mechanism is exactly as described
+        and has been exercised; across widths there was never a claim, only
+        the absence of a counterexample.
+
+        **One thing the fingerprint still does not reach, recorded because
+        `m09e` had to work around it:** `title_neighbors` rows are derived
+        from these vectors and their `blend_fingerprint` hashes the blend's
+        constants only, so a model swap leaves every neighbour row reading as
+        current. See that revision's docstring.
         """
 
     @property
     @abstractmethod
     def dimension(self) -> int:
-        """Vector width, must match the database column (`halfvec(384)`)."""
+        """Vector width, must match the database column (`halfvec(1024)`).
+
+        **Report the model's own width, never this schema's.** The temptation
+        is to return `EMBEDDING_DIMENSIONS`, which makes every implementation
+        agree with the column by construction -- and turns
+        `composition.embedder`'s startup comparison into `x == x`. The whole
+        value of this property is that it can disagree.
+        """
 
     @abstractmethod
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:

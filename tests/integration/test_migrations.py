@@ -542,21 +542,49 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
         stepped_back = await _index_set(url)
-        # `m09d`'s artefacts, re-pointed here the moment it became head. It is
-        # a *creating* head, so the direction is `not in` -- you do not choose
-        # that, `m09d.downgrade()` does. Three artefact kinds, one assertion
-        # each, because none is observable through another's reader: two
-        # indexes (`_index_set`), two columns (`_column_set`) and a CHECK
-        # (`_constraint_set`).
-        assert "ix_credits_source_natural_key" not in stepped_back
-        assert "ix_people_imdb_id" not in stepped_back
+        # `m09e`'s artefacts, re-pointed here the moment it became head — the
+        # ninth landing in a row to do this, and the first where neither
+        # `_index_set` nor `_column_set` can carry the assertion.
+        #
+        # **`m09e` is an *altering* head, so the direction is neither of the
+        # two this block has used before.** A creating head gives you `not in`
+        # (`m09a`, `m09d`) and a dropping head gives you `in` (`ffc`); this one
+        # changes two columns' width, so what `-1` observes is the **old
+        # value** — 384, the width before the revision, not the absence of
+        # anything. `embedding` and `centroid` are in `_column_set` on both
+        # sides of it, and `ix_title_embeddings_hnsw` is in `_index_set` on
+        # both sides, so every reader this file had before today is blind to
+        # the whole revision: a `downgrade()` body replaced by `pass` passes
+        # all of them. `_column_type` exists for that.
+        assert await _column_type(url, "title_embeddings", "embedding") == "halfvec(384)"
+        assert await _column_type(url, "user_taste", "centroid") == "halfvec(384)"
+        # The index in the same breath, and it is not redundant with the two
+        # above: `_resize` drops and recreates it around the `ALTER`, so a
+        # `downgrade()` that restored both widths and forgot to rebuild the
+        # graph would satisfy them and leave the semantic lane with no index
+        # at all — which nothing else in this suite would notice, because
+        # pgvector answers the same query by sequential scan.
+        assert "ix_title_embeddings_hnsw" in stepped_back
+
+        # **A named stop at `m09c`, holding `m09d`'s five.** Displaced from the
+        # `-1` half the moment `m09e` became head, and displaced *because they
+        # had teeth*: `-1`-from-`m09e` lands on `m09d`'s applied state, where
+        # every one of these artefacts is present and every `not in` above was
+        # false. Nine landings, nine loud breaks.
+        #
+        # `m09d` is a creating head, so the direction is `not in` -- three
+        # artefact kinds, one assertion each, because none is observable
+        # through another's reader.
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m09c", direction="down"))
+        at_m09c = await _index_set(url)
+        assert "ix_credits_source_natural_key" not in at_m09c
+        assert "ix_people_imdb_id" not in at_m09c
         assert "source" not in await _column_set(url, "credits")
         people_columns = await _column_set(url, "people")
         assert "imdb_id" not in people_columns
         # The pre-existing column, asserted present in the same breath: a
         # `downgrade()` that dropped `tmdb_id` instead would satisfy the line
-        # above and leave `people` unable to identify anybody. Same shape as
-        # the `remote_url` pairing this block used to carry for `m09c`.
+        # above and leave `people` unable to identify anybody.
         assert "tmdb_id" in people_columns
         assert "ck_people_imdb_id_not_empty" not in await _constraint_set(url, "people")
 
@@ -703,6 +731,41 @@ async def _column_set(url: str, table: str) -> set[str]:
                 {"table": table},
             )
             return {row[0] for row in rows}
+    finally:
+        await engine.dispose()
+
+
+async def _column_type(url: str, table: str, column: str) -> str:
+    """One column's rendered type, typmod included -- `halfvec(1024)`.
+
+    The third sibling, added for `m09e`, which is the first head that changes
+    a column's **type** rather than adding or dropping one. `_column_set`
+    cannot see it: `embedding` is in that set before and after, so a
+    `downgrade()` replaced by `pass` passes every assertion the name-only
+    reader can make.
+
+    `format_type` rather than `information_schema.columns`, and the difference
+    is the whole point: `data_type` for a pgvector column is `USER-DEFINED`
+    and `character_maximum_length` is NULL, so the standard view knows the
+    column exists and nothing about its width. `pg_attribute.atttypmod` is
+    where a `halfvec`'s dimension lives, and `format_type` is what renders it
+    back into the spelling a migration wrote.
+    """
+    engine = build_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                text(
+                    "SELECT format_type(a.atttypid, a.atttypmod) "
+                    "FROM pg_attribute a "
+                    "JOIN pg_class c ON c.oid = a.attrelid "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = 'public' AND c.relname = :table "
+                    "AND a.attname = :column AND NOT a.attisdropped"
+                ),
+                {"table": table, "column": column},
+            )
+            return str(rows.scalar_one())
     finally:
         await engine.dispose()
 

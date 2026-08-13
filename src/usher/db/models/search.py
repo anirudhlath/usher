@@ -73,7 +73,22 @@ SEARCH_NAME_MAX_CHARS = 512
 #: a model swap that silently changes width writes vectors this column
 #: rejects, which is the loud failure, or (worse) a model that keeps the
 #: width and changes the space, which only `model_name` catches.
-EMBEDDING_DIMENSIONS = 384
+#:
+#: **384 -> 1024 in `m09e`, and the interesting part is what it cost.** The
+#: `model_name` fingerprint was designed so that a model swap needs no
+#: migration: change the string, every stored vector goes stale, the backfill
+#: re-claims it. That holds for any swap **at one width** and stops holding at
+#: the first swap that changes the width, because this number is `halfvec`'s
+#: typmod and a typmod is DDL. So the fingerprint scheme's reach is exactly
+#: "the same-width swap", which is a narrower promise than the one
+#: `Embedder.model_name`'s docstring made until this revision.
+#:
+#: **And it is a deployment-wide constant, not a per-model one**, which is the
+#: consequence that actually bites: with the column at 1024 the shipped
+#: service-free default cannot be `fastembed:BAAI/bge-small-en-v1.5` any more
+#: -- 384 wide, and every write would be refused. `config.py`'s
+#: `embedding_model` carries the replacement and the reasoning.
+EMBEDDING_DIMENSIONS = 1024
 
 
 class TitleEmbeddingRow(Base):
