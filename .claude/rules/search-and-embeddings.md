@@ -1135,18 +1135,67 @@ query and drag the whole vector toward a region full of thin, generic titles.
 **The limit of that table, stated because it is easy to over-read:** only the
 *gold* title was re-composed, so the cosines are compared against a corpus that
 still has credits in every other document. Re-embedding all 130,720 without
-credits would lift the whole distribution, so this predicts a **direction**, not
-a rank. What it settles is that the next thing to try is `compose_document`, not
-a third model.
+credits would lift the whole distribution, so it predicts a **direction**, not a
+rank. So the population was rebuilt and the ranks measured.
 
-**It also is not a free change**, which is why it is recorded rather than made:
-credits are in the document so that *"films with Bill Murray"* has a semantic
-lane. What makes removing them plausible rather than reckless is that
-`search_document` already carries `credit_names` as **weight class B** with a
-measured 0.396 — the lexical lane answers person queries, and RRF fuses the two.
-That is an argument, not a measurement, and the measurement it needs is a
-re-embed of the whole tier with `credits=()` scored against the same six cases
-plus a set nobody has built yet.
+### The whole tier re-embedded without credits, and the answer is "do not"
+
+`title_embeddings_nocredits`, all 130,720 rows, same model, same
+`compose_document` with `credits=()`, built and dropped the same afternoon.
+
+| case | 384, credits | 1024, credits | 1024, no credits |
+|---|---|---|---|
+| Groundhog Day | 64 | 416 | **87** |
+| Shawshank | 208 | 187 | **61** |
+| The Matrix | 262 | 50 | **46** |
+| WALL-E | 338 | 20 | **3** |
+| Jurassic Park | 1 | 1 | **1** |
+| Potter | 4 | 3 | **1** |
+
+On plot queries it is exactly what the cosine deltas predicted: five improve,
+one is already at the ceiling, none regresses. Rank sum **677 → 199**, worst
+case **416 → 87**.
+
+🔴 **And then the counter-case, which is the whole finding.** Credits are in the
+document so a person query has a semantic lane, and that was tested rather than
+assumed:
+
+| query | gold title | with credits | without |
+|---|---|---|---|
+| *"a Bill Murray comedy"* | Groundhog Day | **14** | **34,077** |
+| *"a film starring Keanu Reeves"* | The Matrix | **17** | **46,302** |
+| *"directed by Steven Spielberg"* | Jurassic Park | 4,629 | **91,419** |
+
+Three orders of magnitude. **The credits segment is load-bearing for person
+retrieval and actively harmful for plot retrieval, and no single document can be
+both.** `compose_document` is not carrying a mistake; it is carrying a
+compromise nobody had priced, and both sides of it are now priced.
+
+🔴 **The escape hatch this file proposed one paragraph earlier is refuted, by
+the measurement it asked for.** The argument was: removing credits is safe
+*because* `search_document` carries `credit_names` at weight class B (0.396), so
+the lexical lane answers person queries and RRF fuses the two. It does not.
+`websearch_to_tsquery('english', 'Bill Murray')` over the shipped
+`search_document` matches 122 titles and its top three by `ts_rank_cd` are
+**The Bill Murray Stories**, **Biography: Bill Murray** and **Saving Bill
+Murray** — documentaries *about* him, none of them films he is in. The mechanism
+is the weighting the class B measurement already records: name is **0.991** and
+`credit_names` is **0.396**, so a title with the person's name in its *title*
+outranks every film they acted in. Same shape for Keanu Reeves.
+
+**So neither lane answers "films with Bill Murray" without the credits segment
+in the embedding**, and the plausible-sounding division of labour — lexical does
+people, semantic does plots — is false in this schema. It was written into this
+file as *"an argument, not a measurement"*; it is now a measurement, and the
+argument was wrong.
+
+**What this leaves, and it is a design question rather than a fix:** the two
+retrieval modes want different documents, which is what a second vector per
+title, a query router, or an intra-document weighting exists for. None is built
+and none should be guessed at from six queries. What is settled is that
+`compose_document` stays exactly as it is until one of them is, and that the
+next person to notice plot retrieval is mediocre should read this section before
+deleting the credits line.
 
 🔴 **And one number an operator has to know before running anything:
 `usher similar --rebuild` went from 80 minutes to 21.6 hours.** The shipped
