@@ -590,12 +590,17 @@ state as user-originated.
 # nothing in `usher.domain` carries a vector.
 title_embeddings(
     title_id            UUID PRIMARY KEY REFERENCES titles ON DELETE CASCADE,
-    embedding           halfvec(384) NULL,   -- NULL is a written refusal
-    model_name          text NOT NULL,       -- "fastembed:BAAI/bge-small-en-v1.5"
+    embedding           halfvec(1024) NULL,  -- NULL is a written refusal
+    model_name          text NOT NULL,       -- "openai:BAAI/bge-m3"
     source_fingerprint  text NOT NULL,       -- md5 of the exact text embedded
     created_at, updated_at
 )
 ```
+
+*(`halfvec(384)` and `fastembed:BAAI/bge-small-en-v1.5` until 2026-08-13.
+Migration `m09e` widened the column for `BAAI/bge-m3` and deleted every stored
+row —
+[ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md).)*
 
 Model name is stored so a model change is a detectable, re-embeddable event
 rather than silent vector-space corruption. **M6 is where that sentence
@@ -603,19 +608,32 @@ became load-bearing**, and the shipped shape differs from the sketch this
 section used to carry in three ways that each carry meaning:
 
 - **`model_name` records the runtime as well as the checkpoint** —
-  `fastembed:BAAI/bge-small-en-v1.5`, not `bge-small-en-v1.5`. The
-  fastembed↔sentence-transformers vector difference for this same checkpoint
+  `fastembed:BAAI/bge-large-en-v1.5`, not `bge-large-en-v1.5`. The
+  fastembed↔sentence-transformers vector difference for one checkpoint
   is a max pairwise-similarity delta of 1.41e-03, **6× the halfvec
   quantisation error**, so the two runtimes are not interchangeable without a
   re-embed. Recording the runtime makes an implementation swap invalidate
   every vector through the stale predicate automatically, rather than through
   a migration somebody has to remember to write
   ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)).
+  ⚠️ **The prefix is a dispatch key as well as a fingerprint since 2026-08-13,
+  and the "no migration" clause is scoped**: `fastembed:` and `openai:` select
+  two different `Embedder` implementations, and a swap that changes the
+  vector's *width* is DDL rather than a re-embed
+  ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)).
 - **`source_fingerprint`, not `source_text_hash`** — the name the code uses.
   It is the `md5` of the exact assembled text, computed by *the same assembly
   the document composer uses*, which is what makes it quotable inside a SQL
   predicate. There is no `dimension` column: the width is the column's own
-  (`halfvec(384)`), and a model that changed it would be rejected by the cast.
+  (`halfvec(1024)`), and a model that changed it would be rejected by the cast.
+  ⚠️ **That rejection is the failure mode, not the resolution, and 2026-08-13
+  is where the difference showed.** The width is one *deployment-wide* typmod,
+  shared with `user_taste.centroid`, so a model of another width is not stored
+  badly — it is not stored at all, one failed `index` job at a time, in an
+  asyncpg message naming the expected width on neither side. The resolution is
+  a migration (`m09e`, 384 → 1024, every row deleted) plus a startup check in
+  `composition.embedder` that reports the mismatch before any job runs
+  ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)).
 - **`embedding` is nullable, and that is the degenerate-document rule.** A
   refusal is a *written* outcome, not a skipped one. A `NULL` embedding with
   a current `model_name` and a real fingerprint means "composed, refused, and
@@ -682,8 +700,8 @@ a failure that is silent under either one alone.
 | `people` | ✅ Canonical people: `(id, tmdb_id, name, sort_name, known_for_department, created_at, updated_at)`. Identity is a **partial-unique `tmdb_id`** (`WHERE tmdb_id IS NOT NULL`), never `name` — see below |
 | `credits` | ✅ The `people`↔`titles` join, one row per credit: `(id, person_id, title_id, kind, tmdb_credit_id, character, job, department, billing_order, created_at)`. `kind` is the `cast`/`crew` discriminator and `billing_order` is the cast's billing rank. **No `updated_at` and no trigger** — every write is an insert, because a credit is a fact about a payload rather than a mutable row |
 | `collections` | ✅ TMDb franchise grouping: `(id, tmdb_id, name, created_at, updated_at)`, `tmdb_id` partial-unique. `titles.collection_id`'s foreign-key target, at last |
-| `user_taste` | ✅ One centroid per user: `(user_id PK, centroid halfvec(384), model_name, source_watermark, title_count, computed_at)`. `centroid` and `source_watermark` are both **nullable on purpose** — a household below five engaged titles gets a written refusal rather than a skipped row, and a household with no watch state at all has no watermark to record. `(model_name, source_watermark)` together are [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s fingerprint here |
-| `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, blend_fingerprint, computed_at)`. A **batch artefact**, rebuilt rather than repaired. M6 blended the two signals it had data for; M7 makes it three of the four [05](05-search-and-similarity.md) specifies and adds **`blend_fingerprint`** (migration `ffb`), so "was this row computed under the current blend?" stopped being undecidable. `computed_at` stays beside it for the half that is still undecidable per row — *some other title was embedded since* ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)) |
+| `user_taste` | ✅ One centroid per user: `(user_id PK, centroid halfvec(1024), model_name, source_watermark, title_count, computed_at)`. `centroid` and `source_watermark` are both **nullable on purpose** — a household below five engaged titles gets a written refusal rather than a skipped row, and a household with no watch state at all has no watermark to record. `(model_name, source_watermark)` together are [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s fingerprint here. **`halfvec(384)` until `m09e`, and the two columns move together by construction**: a centroid is a mean of vectors from `title_embeddings.embedding` and is compared against it, so a different width would make the one comparison this table exists for a cast ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)) |
+| `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, blend_fingerprint, computed_at)`. A **batch artefact**, rebuilt rather than repaired. M6 blended the two signals it had data for; M7 makes it three of the four [05](05-search-and-similarity.md) specifies and adds **`blend_fingerprint`** (migration `ffb`), so "was this row computed under the current blend?" stopped being undecidable. `computed_at` stays beside it for the half that is still undecidable per row — *some other title was embedded since* ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)). ⚠️ **A third cause, found 2026-08-13: `blend_fingerprint` hashes the blend's constants and not the embedding model**, so a model swap leaves every row reading as current under a model the deployment no longer runs. `m09e` empties the table; the class fix is not made ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)) |
 | `genome_scores` | ✅ One title's MovieLens tag-genome vector: `(title_id, relevance halfvec(1128), genome_revision, computed_at)`. **One dense vector per title, not a tall `(title_id, tag_id, relevance)`** — see below |
 | `genome_tags` | ✅ What each of that vector's 1,128 lanes means: `(tag_id PK, tag, genome_revision)`. **1,128 rows, measured against the real `genome-tags.csv`.** Loaded by the same `bootstrap --phase movielens` that writes the vectors, from a member that phase already read for its width check, and stamped with the same revision — so `GenomeRepository.vocabulary(revision)` can refuse to name one release's lanes with another's. `tag_id` is `integer` rather than `smallint` so a too-wide vocabulary is refused by `ck_genome_tags_tag_id_in_vocabulary` rather than by asyncpg's unnamed encoder — see below. **No index beyond the primary key** and **no `computed_at`**: the only read is the whole table in lane order, and its age is `import_runs`. Migration `m08b` |
 | `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats. One row per *attempt*, so the availability sweep can say which run last finished cleanly |

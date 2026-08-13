@@ -279,6 +279,23 @@ def _cosine(centroid: Sequence[float], vector: Sequence[float] | None) -> float 
     can disagree with the first -- a new way for this function to answer
     confidently and wrongly, bought with a saving nothing can observe.
     Recorded here so the next reader does not re-derive it.
+
+    **Re-measured at 1024 lanes on 2026-08-13, because `m09e` made the width a
+    thing that moves and a declined optimisation is only as good as the number
+    it was declined on.** Same host, same shape, 200 candidates, medians of 30
+    runs: the whole call is **6.14 ms at 384 and 16.10 ms at 1024**, and the
+    redundant work specifically -- 200 recomputations of the centroid's norm,
+    which is exactly what the hoist removes -- is **1.69 ms at 384 and 4.44 ms
+    at 1024**. The 384 figure reproducing the 2026-08-07 measurement to 0.01 ms
+    is what says the two runs are comparable.
+
+    **The decision is unchanged and its margin is 2.6x smaller.** 4.44 ms once
+    per household in a nightly job is still a saving nothing can observe, so
+    the third parameter is still not worth it. Worth stating both ways round: a
+    reader who found the old 1.7 ms and scaled it in their head would have got
+    this about right, and a reader who found it and did *not* notice the width
+    had moved would have been quoting a number for a vector this project no
+    longer stores.
     """
     if vector is None or len(vector) != len(centroid):
         return None

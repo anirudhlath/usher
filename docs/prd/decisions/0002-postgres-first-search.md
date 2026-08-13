@@ -148,7 +148,11 @@ kernel and GPU driver updates.
 
 **Scale is not the constraint.** At 1M × 384 dimensions on a 64 GB host, every
 option's memory footprint is noise (pgvector ~2–3 GB HNSW, ~1.5 GB with
-`halfvec`). Published RAM objections are calibrated for per-GB cloud billing or
+`halfvec`). *(384 was the shipped width when this was written;
+[ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md) moved it to
+1024, so the `halfvec` figure is ~4 GB — which is still noise on a 64 GB host,
+so the claim this parenthetical supports is unaffected. Recorded rather than
+rewritten: the number is what the decision was taken on.)* Published RAM objections are calibrated for per-GB cloud billing or
 20M+ document corpora.
 
 ## Notes for implementation

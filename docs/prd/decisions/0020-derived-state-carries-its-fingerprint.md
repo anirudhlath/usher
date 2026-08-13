@@ -1,6 +1,10 @@
 # ADR-0020 — Derived state is fresh by construction, or carries its fingerprint
 
-**Status:** Accepted. Implemented in M6.
+**Status:** Accepted. Implemented in M6. ⚠️ **Narrowed 2026-08-13 by
+[ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md) in two places
+marked below**: *"a model swap … is the scheme replacing a migration"* holds
+only for a swap at one vector width, and `title_neighbors`' `blend_fingerprint`
+has a **third** cause of staleness the Uncertainty section did not enumerate.
 **Date:** 2026-08-02
 
 ## Context
@@ -44,8 +48,10 @@ drifted into**:
   than trusting the queue, `title_embeddings` records *what* was embedded
   (`source_fingerprint`, the `md5` of the exact assembled text) and *by what*
   (`model_name`, the runtime **and** the checkpoint —
-  `fastembed:BAAI/bge-small-en-v1.5`; see
-  [ADR-0022](0022-the-embedder-is-optional-and-its-contract-is-measured.md)).
+  `fastembed:BAAI/bge-large-en-v1.5` on the shipped default,
+  `openai:BAAI/bge-m3` on this deployment; see
+  [ADR-0022](0022-the-embedder-is-optional-and-its-contract-is-measured.md)
+  and [ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md)).
 
 Stale is then one predicate:
 
@@ -71,6 +77,14 @@ and combined with `enqueue`'s existing
 re-running it writes **no rows at all**. A model swap invalidates every
 vector automatically, which is the scheme replacing a migration. Editing a
 title's overview re-claims that one row with nothing being told.
+
+⚠️ **"The scheme replacing a migration" is scoped to a swap at one width, and
+2026-08-13 is where that was found out.** The vector's width is `halfvec`'s
+typmod on `title_embeddings.embedding` and on `user_taste.centroid`, and a
+typmod is DDL — so the *first* swap this project actually performed,
+`BAAI/bge-small-en-v1.5` → `BAAI/bge-m3`, needed migration `m09e` and destroyed
+every stored vector on the way. Within a width nothing above changes.
+[ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md).
 
 Coverage is *reported* rather than assumed: `SearchOutcome.semantic_coverage`
 is the fraction of the filtered population that actually had a vector, and a
@@ -262,6 +276,19 @@ fingerprint for it, and **nothing schedules `usher similar --rebuild`.** Two
 causes, one closed, and saying which is the difference between an improvement
 and a claim. A freshness predicate that looked like the others and did not mean
 the same thing would still be worse than an honest gap.
+
+⚠️ **There is a third cause, found 2026-08-13, and unlike the second it is
+decidable — it is simply not decided.** `blend_fingerprint()` hashes
+`_WEIGHTS`, `_NEIGHBORS_PER_TITLE` and `_CANDIDATE_POOL` and **not the
+embedding model**, so swapping the model leaves every neighbour row reading as
+current, in `[0, 1]`, with a plausible `rank`, derived from a model the
+deployment no longer runs — and `usher.similarity.neighbors.stale` reading zero
+throughout. That is this ADR's own failure mode arriving in the artefact it had
+already been applied to. `m09e` empties the table, which fixes the instance;
+**the class fix — feeding `model_name` into `blend_fingerprint()`, changing its
+signature and all three consumers — is not done**, and is recorded as the
+follow-up in `.claude/rules/search-and-embeddings.md`.
+[ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md).
 
 **This is also the milestone that made this ADR's own Uncertainty section
 live.** The paragraph above warns that a fingerprint proves the *text* is
