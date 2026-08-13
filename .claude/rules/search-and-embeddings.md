@@ -1045,23 +1045,128 @@ is functioning and is nowhere near a five-row box. This is the first
 relevance evidence this project has for the semantic lane; ADR-0022's *"relevance
 is not measured at all"* is annotated accordingly.
 
-**Three numbers are owed and none of them is written down anywhere yet**, because
-the re-embed of 130,720 titles through `bge-m3` was still running when this was
-written:
+### The run finished, 2026-08-13, and the model is not what was wrong
 
-1. the backfill's **throughput** through the remote runtime — which is a
-   different machine (GPU, over HTTP, batched) from every tokens/s figure in
-   this file, all of which are CPU and in-process;
-2. the **rebuilt HNSW index's size** at 1024 lanes, against the 146 MB measured
-   above at 384;
-3. whether **ranking actually improves** against the baseline in the paragraph
-   above.
+130,720 titles re-embedded through `openai:BAAI/bge-m3`, 0 refused, 08:15:32Z →
+10:01:27Z. The three numbers that were owed above, plus two nobody asked for and
+one that changes an operator's day.
 
-None of them has a placeholder here and none has a predicted direction. A
-`TBD` in this file would read as something somebody forgot rather than as a run
-in progress, and an extrapolation would be indistinguishable from a measurement
-three months from now. **Write them in when the run finishes, beside the figures
-they supersede.**
+**Throughput: 105.9 minutes, 20.6 rows/s — and the GPU bought the backfill
+nothing.** S4 measured the *CPU, in-process* fastembed backfill at 23.8 rows/s
+aggregate. Moving the model onto a 4090 and reaching it over HTTP made the
+backfill **slower**, and the reason was visible the whole time: sampled
+mid-run, **GPU utilisation 6% and `usher-postgres-1` at 56% CPU**. S4 had
+already priced the per-title work — a claim, three reads, a staged `COPY`
+through a temp table, and a commit — and said the queue runs at ~15% of the
+model's own rate. It still does; the model just got faster at the part that was
+never the bottleneck. **Do not quote a GPU embedder as a backfill improvement.**
+
+**Where the GPU does pay is the query, which is the workload that has a user
+waiting.** Single-text embed against the running endpoint, 30 calls, measured
+*while the backfill was saturating it*: **p50 5.7 ms, p95 9.9 ms, max 13.2 ms**.
+For scale, `/search` was 13.9 ms end to end in M9's live demo, so a 568M
+multilingual model adds about 40% to a search and not a multiple.
+
+**Storage at 1024 lanes, against the same table at 384 the day before:**
+
+| | 384 (130,673 rows) | 1024 (130,720 rows) | ratio |
+|---|---|---|---|
+| `ix_title_embeddings_hnsw` | 146 MB | **340 MB** | 2.33× |
+| `title_embeddings` total | 278 MB | **707 MB** | 2.54× |
+
+Both below the 2.67× the lane count alone would predict, so the graph and the
+row headers amortise a little. Same `m=16, ef_construction=64`, same partial
+predicate.
+
+### Ranking: four of six improved, one collapsed, and the diagnosis is the document
+
+Same six queries as the baseline, same SQL, only the embedder moved. Ranks are
+positions in the 130,720-row embedded population.
+
+| case | 384 | 1024 | |
+|---|---|---|---|
+| WALL-E | 338 | **20** | +318 |
+| The Matrix | 262 | **50** | +212 |
+| Shawshank | 208 | **187** | +21 |
+| Jurassic Park | 1 | **1** | held |
+| Potter | 4 | **3** | +1 |
+| Groundhog Day | 64 | **416** | **−352** |
+
+⚠️ **Six queries is not a relevance measurement and this table must not be
+quoted as one.** It is a before/after on a fixed case set that was written
+before `bge-m3` was under consideration — so it is at least not selected to
+flatter the new model — and that is the whole of its authority. It is the same
+thinness the query-expansion run above carries, and the same rule applies.
+
+🔴 **The Groundhog Day collapse was chased and it is not a model defect. The
+composed document is.** Its top 10 under the new model is noise (`Bad (2025)`,
+`There is a Monster (2024)`, `The Old Barber (2006)`) in a band of 0.54–0.58
+while the right answer sits at 0.4778. Then, embedding the *segments* rather
+than the document:
+
+| what was embedded | cosine |
+|---|---|
+| the shipped composed document | **0.4779** ← reproduces the stored vector to 1e-4 |
+| its overview alone | **0.5936** ← would rank **1st** |
+| name + overview | 0.5825 |
+
+The composer's own fingerprint (`546e12c2161166b2f04a707aefbbecfa`) was
+reproduced before any of this was believed, so the 0.4779 is the shipped path
+and not a reconstruction of it.
+
+**And the segment responsible is `credits`, on every case, without exception.**
+Re-composing each gold title with `credits=()` and changing nothing else:
+
+| case | shipped | no credits | delta |
+|---|---|---|---|
+| Potter | 0.5360 | 0.6302 | **+0.094** |
+| Groundhog Day | 0.4779 | 0.5498 | **+0.072** |
+| The Matrix | 0.5238 | 0.5839 | +0.060 |
+| WALL-E | 0.5187 | 0.5762 | +0.058 |
+| Shawshank | 0.4799 | 0.5284 | +0.049 |
+| Jurassic Park | 0.5935 | 0.6161 | +0.023 |
+
+**6 of 6, and that consistency is worth more than the six-query rank table
+above** — a mixed result across cases is a draw, a unanimous one across the
+same cases is a direction. Twelve actor names, third of seven segments and
+sitting *between* the title and the plot summary, are dead weight for a plot
+query and drag the whole vector toward a region full of thin, generic titles.
+
+**The limit of that table, stated because it is easy to over-read:** only the
+*gold* title was re-composed, so the cosines are compared against a corpus that
+still has credits in every other document. Re-embedding all 130,720 without
+credits would lift the whole distribution, so this predicts a **direction**, not
+a rank. What it settles is that the next thing to try is `compose_document`, not
+a third model.
+
+**It also is not a free change**, which is why it is recorded rather than made:
+credits are in the document so that *"films with Bill Murray"* has a semantic
+lane. What makes removing them plausible rather than reckless is that
+`search_document` already carries `credit_names` as **weight class B** with a
+measured 0.396 — the lexical lane answers person queries, and RRF fuses the two.
+That is an argument, not a measurement, and the measurement it needs is a
+re-embed of the whole tier with `credits=()` scored against the same six cases
+plus a set nobody has built yet.
+
+🔴 **And one number an operator has to know before running anything:
+`usher similar --rebuild` went from 80 minutes to 21.6 hours.** The shipped
+`TitleEmbeddingRepository.nearest_for` deliberately runs under
+`_EXACT_SCAN_OFF` — `enable_indexscan = off`, `enable_bitmapscan = off` — so it
+is an exact scan of the whole table per seed and the HNSW index is not involved.
+Measured on three consecutive warm pages of 50 seeds: **592.7 / 600.4 / 594.7
+ms/seed**, median **594.7**, against S4's **36.50** at 384. That is **16.3× for a
+2.67× wider vector**, which is superlinear and is the interesting part: the
+exact scan's working set went 278 MB → 707 MB, past both `shared_buffers`
+(128 MB) and this host's 96 MB L3, so the walk stopped being arithmetic-bound and
+became memory-bound. At 130,720 seeds the full walk is **21.6 hours**.
+
+⚠️ **The first attempt at that number was wrong by 16× and the error is worth
+recording.** A hand-written `ORDER BY embedding <=> … LIMIT 200` measured
+**3.20 ms/seed** and was very nearly reported as an 11× *speedup*. It was not
+the same query: with no GUCs set, Postgres served it from the HNSW index, while
+the shipped call forces an exact scan. **A per-seed price taken from a query you
+wrote yourself is a price for a query nobody runs** — drive the repository
+method, exactly as S4 did.
 
 ### The follow-up this change identified and did not make
 
