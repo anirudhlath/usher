@@ -542,29 +542,41 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
         stepped_back = await _index_set(url)
-        # `m09e`'s artefacts, re-pointed here the moment it became head — the
-        # ninth landing in a row to do this, and the first where neither
+        # `m09f`'s artefacts, re-pointed here the moment it became head — the
+        # tenth landing in a row to do this, and the second where neither
         # `_index_set` nor `_column_set` can carry the assertion.
         #
-        # **`m09e` is an *altering* head, so the direction is neither of the
-        # two this block has used before.** A creating head gives you `not in`
-        # (`m09a`, `m09d`) and a dropping head gives you `in` (`ffc`); this one
-        # changes two columns' width, so what `-1` observes is the **old
-        # value** — 384, the width before the revision, not the absence of
-        # anything. `embedding` and `centroid` are in `_column_set` on both
-        # sides of it, and `ix_title_embeddings_hnsw` is in `_index_set` on
-        # both sides, so every reader this file had before today is blind to
-        # the whole revision: a `downgrade()` body replaced by `pass` passes
-        # all of them. `_column_type` exists for that.
-        assert await _column_type(url, "title_embeddings", "embedding") == "halfvec(384)"
-        assert await _column_type(url, "user_taste", "centroid") == "halfvec(384)"
-        # The index in the same breath, and it is not redundant with the two
-        # above: `_resize` drops and recreates it around the `ALTER`, so a
-        # `downgrade()` that restored both widths and forgot to rebuild the
-        # graph would satisfy them and leave the semantic lane with no index
-        # at all — which nothing else in this suite would notice, because
+        # **`m09f` changes a *storage mode*, which is the least visible thing a
+        # migration in this project has ever changed.** Nothing about the
+        # column's name, type, width, nullability, constraints or indexes
+        # moves — `_column_set`, `_column_type` and `_index_set` all answer
+        # identically on both sides of it, so every reader this file had before
+        # today is blind to the entire revision and a `downgrade()` replaced by
+        # `pass` passes all of them. What moves is `pg_attribute.attstorage`,
+        # `e` at `m09e` and `p` at head, and `_column_storage` exists for that.
+        for table, column in (
+            ("title_embeddings", "embedding"),
+            ("user_taste", "centroid"),
+            ("genome_scores", "relevance"),
+        ):
+            assert await _column_storage(url, table, column) == "e", (
+                f"{table}.{column} should be back to pgvector's EXTERNAL default here"
+            )
+        # The index in the same breath, because `VACUUM FULL` rebuilds it with
+        # the table: a `downgrade()` that reset the storage and lost the graph
+        # would satisfy every assertion above and leave the semantic lane
+        # without an index, which nothing else in this suite would notice —
         # pgvector answers the same query by sequential scan.
         assert "ix_title_embeddings_hnsw" in stepped_back
+
+        # **A named stop at `m09d`, holding `m09e`'s three.** Displaced from the
+        # `-1` half the moment `m09f` became head, and displaced *because they
+        # had teeth*: `-1`-from-`m09f` lands on `m09e`'s applied state, where
+        # both columns are already 1024 wide and `== "halfvec(384)"` is false.
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m09d", direction="down"))
+        assert await _column_type(url, "title_embeddings", "embedding") == "halfvec(384)"
+        assert await _column_type(url, "user_taste", "centroid") == "halfvec(384)"
+        assert "ix_title_embeddings_hnsw" in await _index_set(url)
 
         # **A named stop at `m09c`, holding `m09d`'s five.** Displaced from the
         # `-1` half the moment `m09e` became head, and displaced *because they
@@ -758,6 +770,39 @@ async def _column_type(url: str, table: str, column: str) -> str:
                 text(
                     "SELECT format_type(a.atttypid, a.atttypmod) "
                     "FROM pg_attribute a "
+                    "JOIN pg_class c ON c.oid = a.attrelid "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = 'public' AND c.relname = :table "
+                    "AND a.attname = :column AND NOT a.attisdropped"
+                ),
+                {"table": table, "column": column},
+            )
+            return str(rows.scalar_one())
+    finally:
+        await engine.dispose()
+
+
+async def _column_storage(url: str, table: str, column: str) -> str:
+    """One column's `pg_attribute.attstorage` -- `p` PLAIN, `e` EXTERNAL.
+
+    The fourth sibling, added for `m09f`, which changes *only* this. Every
+    other reader in this file answers identically on both sides of that
+    revision: the name is in `_column_set`, the type and typmod are unchanged
+    for `_column_type`, and the index is in `_index_set`. So without this a
+    `downgrade()` body replaced by `pass` is invisible.
+
+    It is also the only schema fact in this file the ORM does not model.
+    SQLAlchemy has no storage concept and `compare_metadata` does not look at
+    `attstorage`, so `test_migration_matches_the_orm_metadata` reports no drift
+    either way -- which is exactly why the property needs a case of its own
+    rather than being left to the autogenerate comparison.
+    """
+    engine = build_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                text(
+                    "SELECT a.attstorage::text FROM pg_attribute a "
                     "JOIN pg_class c ON c.oid = a.attrelid "
                     "JOIN pg_namespace n ON n.oid = c.relnamespace "
                     "WHERE n.nspname = 'public' AND c.relname = :table "

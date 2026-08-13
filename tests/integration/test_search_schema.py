@@ -262,3 +262,57 @@ async def test_the_new_foreign_keys_carry_the_delete_rules_they_were_given(
         "fk_title_neighbors_title_id_titles": "c",
         "fk_title_neighbors_neighbor_id_titles": "c",
     }
+
+
+async def test_every_halfvec_column_stores_inline(session: AsyncSession) -> None:
+    """No vector in this schema may live in a TOAST relation.
+
+    **This is a performance property asserted as a schema property, because it
+    is invisible as either one on its own.** A `halfvec` is `8 + 2 * dim`
+    bytes; pgvector declares the type `EXTERNAL`, so a value moves out-of-line
+    once the tuple passes `TOAST_TUPLE_THRESHOLD` (2,032 bytes). That is 384
+    lanes inline and 1024 lanes out, which is a **threshold** the width crossed
+    in `m09e` and not a slope anybody would have projected.
+
+    Measured before `m09f` fixed it, on 130,720 real rows: `title_embeddings`
+    was 17 MB of heap pointing at 340 MB of TOAST, an exact-scan neighbour
+    query read **11x** the table's pages per seed, and
+    `SimilarityService.rebuild` went from 80 minutes to 21.6 hours -- of which
+    only 2.67x is the width. With the vectors inline the same query is
+    **110 ms/seed against 598**.
+
+    **The case is written over `pg_type` rather than over a list of columns**,
+    so a fourth vector column added without a `SET STORAGE` fails here rather
+    than silently costing 5x on a walk nobody re-times. That is the shape
+    `ports-and-error-taxonomy.md` records for two constants that must move
+    together: the migration's `_VECTOR_COLUMNS` is one of them and this scan is
+    the other, and only the scan can notice an omission.
+
+    `p` is PLAIN. `e` (EXTERNAL) is what pgvector declares and what
+    `m09f.downgrade()` restores.
+    """
+    result = await session.execute(
+        text(
+            "SELECT c.relname, a.attname, CAST(a.attstorage AS text) "
+            "FROM pg_class c "
+            "JOIN pg_attribute a ON a.attrelid = c.oid "
+            "JOIN pg_type t ON t.oid = a.atttypid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind = 'r' "
+            "AND t.typname IN ('halfvec', 'vector') "
+            "AND a.attnum > 0 AND NOT a.attisdropped"
+        )
+    )
+    columns = {(table, column): storage for table, column, storage in result.all()}
+
+    # The premise, and it is not decoration: a scan that matched nothing would
+    # satisfy every assertion below. `ffa` and `m09e` between them put three
+    # vector columns in this schema.
+    assert len(columns) >= 3, f"the premise: this scan found vector columns, got {columns}"
+    assert ("title_embeddings", "embedding") in columns
+    assert ("genome_scores", "relevance") in columns
+
+    out_of_line = {key for key, storage in columns.items() if storage != "p"}
+    assert not out_of_line, (
+        f"these vector columns would be TOASTed and cost ~5x on every exact scan: {out_of_line}"
+    )

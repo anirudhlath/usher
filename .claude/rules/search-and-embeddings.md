@@ -1217,6 +1217,59 @@ the shipped call forces an exact scan. **A per-seed price taken from a query you
 wrote yourself is a price for a query nobody runs** — drive the repository
 method, exactly as S4 did.
 
+### And 6.1× of that 16.3× was TOAST, not the width (`m09f`, same day)
+
+The superlinearity was the tell and it had a cause. `EXPLAIN (ANALYZE, BUFFERS)`
+over ten seeds read **10,061,071 buffers against a 90,000-page table** — 11×
+amplification — because `pgvector` declares `halfvec` storage **EXTERNAL** and a
+1024-lane value is **2,052 bytes** against `TOAST_TUPLE_THRESHOLD`'s **2,032**.
+At 384 lanes a vector was 772 bytes and sat inline; at 1024 every one moved
+out-of-line. Measured on the live table: `title_embeddings` was **17 MB of heap
+pointing at 340 MB of TOAST**.
+
+**So the width did not make the vectors 2.67× more expensive to scan; it pushed
+them over a threshold and made each one a TOAST index descent plus a heap
+fetch, per row, per seed.** `m09f` sets `PLAIN` on all three `halfvec` columns
+and rewrites. What it bought, on the shipped `nearest_for`:
+
+| | ms/seed |
+|---|---|
+| EXTERNAL, as `m09e` left it | 594.7 |
+| PLAIN | **95.7** |
+
+**6.2× on the component. 4.4× on the job**, and the difference between those two
+numbers is the part worth carrying: the whole `rebuild` walk went **561 →
+128 ms/seed** (20.4 h → 4.7 h), because with the scan fixed the *other* per-seed
+work — the genome pairs, the tag reads, the blend, the write — is what is left.
+**Quote 4.4× for the rebuild and 6.2× for the query; a component speedup is not
+a job speedup and this one differs by 40%.**
+
+Two more things fell out of it.
+
+🔴 **`genome_scores.relevance` is `halfvec(1128)` = 2,260 bytes and has been
+TOASTed since `ffa` shipped it** — 1,544 kB of heap against **41 MB** of TOAST.
+Every genome-similarity number this project has ever taken was taken through a
+TOAST fetch. Nothing is known to be wrong with them; they were simply never
+taken any other way. `db/models/taste.py` records the value's size (*"1,128
+halfvec lanes is 2,256 bytes plus a header"*) without drawing the conclusion,
+which is how a measured fact sits next to its own consequence for two
+milestones.
+
+**And `PLAIN` introduces a ceiling that `EXTERNAL` did not have**: it forbids
+out-of-line storage outright, so a value that will not fit in an 8 kB page makes
+the *insert fail* rather than spill. That caps `EMBEDDING_DIMENSIONS` at roughly
+**4,000 lanes**. Recorded on the constant. A wider model needs `MAIN`, which was
+**not measured**.
+
+⚠️ **A rate measured over a window is wrong when the writes are batched, and
+this one produced 2.78, 8.33 and 21.85 seeds/s for the same run.**
+`title_neighbors.computed_at` is `now()`, frozen per transaction, so all 500
+rows of a page share one timestamp: a short window catches a whole batch or none
+of it, and `count(distinct seed) / window` counts work done *before* the window
+opened. `max(computed_at) - min(computed_at)` over N batches spans **N−1**
+intervals, not N. Anchor the rate to the run's own start instead — 1,000 seeds
+128 s after launch is 128 ms/seed and does not depend on where the window falls.
+
 ### The follow-up this change identified and did not make
 
 **`blend_fingerprint()` does not cover the embedding model, so a model swap
