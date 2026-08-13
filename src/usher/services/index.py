@@ -75,8 +75,8 @@ class IndexService:
         **Safe to call twice with no observable difference**, and cheap the
         second time: the stored row is compared against the current
         `(model_name, fingerprint)` before the model is asked for anything.
-        Redelivery is not hypothetical -- `JobWorker.startup()` requeues
-        everything left `running` -- and at ~83 texts/s a requeued backfill
+        Redelivery is not hypothetical -- `JobWorker.recover()` requeues a
+        claim whose worker stopped heartbeating -- and at ~83 texts/s a requeued backfill
         that re-embedded would re-run the whole enriched tier.
 
         Re-raises rather than absorbing: `JobWorker` is the only thing that
@@ -173,7 +173,7 @@ class IndexService:
 
         **Opened here rather than around `index`'s whole body**, so a job that
         found the fingerprint already current emits no `index.embed` at all.
-        `JobWorker.startup()` requeues everything left `running`, so
+        `JobWorker.recover()` requeues an abandoned claim, so
         redelivery is ordinary, and a p50 computed over spans that skipped the
         model is a p50 of doing nothing.
         """

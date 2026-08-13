@@ -44,7 +44,7 @@ from usher.domain.enums import EnrichmentState, ImageKind, TitleKind
 from usher.domain.episode import Episode, Season
 from usher.domain.ids import new_id
 from usher.domain.image import Image
-from usher.domain.people import Credit, CreditKind, Person
+from usher.domain.people import Credit, CreditKind, CreditSource, Person
 from usher.domain.taste import GenreAffinity
 from usher.domain.title import Title
 from usher.domain.watch import User
@@ -350,6 +350,7 @@ class Library:
             person_id=person_id,
             title_id=title_id,
             kind=kind,
+            source=CreditSource.TMDB,
             tmdb_credit_id=str(new_id()),
             character=character,
             job=job,

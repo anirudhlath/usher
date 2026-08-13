@@ -69,7 +69,7 @@ from usher.domain.collection import Collection
 from usher.domain.enums import ImageKind, ProductionStatus, TitleKind
 from usher.domain.episode import Episode, Season
 from usher.domain.image import Image
-from usher.domain.people import Credit, CreditKind, Person, person_sort_name
+from usher.domain.people import Credit, CreditKind, CreditSource, Person, person_sort_name
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed
 from usher.ports.metadata import MetadataCandidate
@@ -379,6 +379,12 @@ def people_and_credits(
             person_id=people[one.tmdb_id].id,
             title_id=title_id,
             kind=one.kind,
+            # Named here rather than defaulted on the model, which is
+            # ADR-0036's whole point: this adapter is the only thing in `src/`
+            # that constructs a `Credit`, and it is the only thing that knows
+            # which source it read. A default would let the *next* writer --
+            # an IMDb one -- inherit `tmdb` by forgetting.
+            source=CreditSource.TMDB,
             tmdb_credit_id=one.tmdb_credit_id,
             character=one.character,
             job=one.job,

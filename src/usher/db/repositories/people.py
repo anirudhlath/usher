@@ -218,8 +218,8 @@ LIMIT :limit
 _CREDITS_DDL = """
 CREATE TEMP TABLE stg_credits (
     ordinal integer, id uuid, person_id uuid, title_id uuid, kind varchar(8),
-    tmdb_credit_id text, "character" text, job text, department text,
-    billing_order integer
+    source varchar(8), tmdb_credit_id text, "character" text, job text,
+    department text, billing_order integer
 ) ON COMMIT DROP
 """
 
@@ -229,6 +229,7 @@ _CREDITS_COLUMNS = (
     "person_id",
     "title_id",
     "kind",
+    "source",
     "tmdb_credit_id",
     "character",
     "job",
@@ -256,10 +257,10 @@ WITH deduped AS (
     ORDER BY COALESCE(tmdb_credit_id, CAST(id AS text)), ordinal DESC
 ), inserted AS (
     INSERT INTO credits (
-        id, person_id, title_id, kind, tmdb_credit_id,
+        id, person_id, title_id, kind, source, tmdb_credit_id,
         "character", job, department, billing_order
     )
-    SELECT id, person_id, title_id, kind, tmdb_credit_id,
+    SELECT id, person_id, title_id, kind, source, tmdb_credit_id,
            "character", job, department, billing_order
     FROM deduped
     RETURNING 1
@@ -533,6 +534,11 @@ class PostgresCreditRepository(CreditRepository):
                 # `enum_column`'s storage identifier is the member's `.value`;
                 # binding the member itself sends "CAST" and matches nothing.
                 row.kind.value,
+                # Same, one column over. ADR-0036: the row carries the source
+                # that supplied it, and `credits.source` is NOT NULL with no
+                # server default, so omitting this is a loud refusal at the
+                # INSERT rather than a quiet `tmdb` on an IMDb row.
+                row.source.value,
                 row.tmdb_credit_id,
                 row.character,
                 row.job,
@@ -548,7 +554,7 @@ class PostgresCreditRepository(CreditRepository):
                     # ix_credits_tmdb_credit_id on the very rows it is about
                     # to remove, so a redelivered batch would raise instead of
                     # answering. PRD 08's redelivery rule is not optional --
-                    # JobWorker.startup() requeues everything left `running`.
+                    # JobWorker.recover() requeues an abandoned claim.
                     await self._session.execute(
                         text(_DELETE_CREDITS), {"title_ids": list(title_ids)}
                     )

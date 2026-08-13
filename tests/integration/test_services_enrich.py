@@ -85,6 +85,9 @@ class _ReadsOnItsOwnConnection(JobQueue):
     ) -> Job | None:
         raise NotImplementedError
 
+    async def touch(self, job_ids: Sequence[uuid.UUID]) -> int:
+        raise NotImplementedError
+
     async def requeue_running(self, *, older_than_seconds: float = 0.0) -> int:
         raise NotImplementedError
 

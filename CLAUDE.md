@@ -307,6 +307,10 @@ uv run python scripts/measure_ingest.py --items 50000
 uv run python scripts/measure_ingest.py --scale 1126674
 uv run python scripts/measure_rows.py
 uv run python scripts/measure_suggest_tiers.py --all       # both suggest tiers
+uv run python scripts/measure_imdb_people.py --phase head  # M9 T3; downloads 1.49 GiB
+uv run python scripts/measure_browse.py                    # M9 B7
+uv run python scripts/measure_people_provenance.py --phase head   # ADR-0036; ~700 MiB
+uv run python scripts/measure_pair_rates.py
 
 set -a; . ./.env; set +a                              # never a literal credential
 uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json

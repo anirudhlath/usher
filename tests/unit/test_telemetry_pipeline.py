@@ -34,6 +34,7 @@ from pydantic import SecretStr
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
+from tests.fakes.job_scope import worker_over
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
@@ -48,7 +49,7 @@ from usher.ports.errors import PortUnavailable
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.enrich import EnrichService
 from usher.services.ingest import IngestService
-from usher.services.jobs import JobWorker, _links_for
+from usher.services.jobs import _links_for
 from usher.services.matching import MatchService
 from usher.telemetry import (
     QueueSnapshot,
@@ -159,13 +160,12 @@ async def test_a_job_records_its_duration_by_kind(meter_reader: InMemoryMetricRe
     p50/p99 off it and the "enrichment SLA missed" alert reads the same
     series."""
     queue = FakeJobQueue()
-    worker = JobWorker(queue, _no_commit)
     ran: list[Job] = []
 
     async def handler(job: Job) -> None:
         ran.append(job)
 
-    worker.register(JobKind.ENRICH, handler)
+    worker = worker_over(queue, {JobKind.ENRICH: handler}, commit=_no_commit)
     from usher.ports.jobs import JobRequest
 
     await queue.enqueue(

@@ -163,7 +163,7 @@ async def test_indexing_the_same_title_twice_writes_the_same_row_and_embeds_once
     service: IndexService,
 ) -> None:
     """PRD 08's "redelivery is safe by construction", plus the half that
-    makes it free. `JobWorker.startup()` requeues everything left `running`,
+    makes it free. `JobWorker.recover()` requeues an abandoned claim,
     so a process killed between the handler returning and `complete`
     committing produces exactly this.
 

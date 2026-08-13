@@ -57,6 +57,9 @@ from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.composition import (
     Pipeline,
+    SourceRegistry,
+    UnitOfWork,
+    _worker_handlers,
     build_curation_service,
     build_enrich_service,
     build_pipeline,
@@ -66,6 +69,8 @@ from usher.composition import (
     llm_client,
     metadata_provider,
     run_bootstrap,
+    worker_concurrency,
+    worker_kinds,
 )
 from usher.config import Settings
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
@@ -92,6 +97,7 @@ from usher.ports.repository import (
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import ITEM_IDS_KEY, REASON_KEY, ROWS_KEY, TITLE_KEY
+from usher.services.events import DeferredEventPublisher
 from usher.services.handlers import SourceBinding
 from usher.services.jobs import JobWorker
 from usher.services.rows import ROW_PROVIDERS
@@ -388,12 +394,12 @@ async def test_the_worker_offers_an_enrichments_frame_after_the_jobs_own_commit(
     pipeline = _pipeline_over_fakes(titles=titles, queue=queue, commit=_commit, events=_Bus())
 
     worker = build_worker(
-        pipeline,
+        _work_for(pipeline),
         _settings(),
         provider=FakeMetadataProvider(),
         embedder=None,
         client=None,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
     assert await worker.run_once() == 1
@@ -418,8 +424,16 @@ def test_only_the_worker_defers_and_the_push_and_reconcile_lanes_do_not() -> Non
     list of frames in the same order; only a second commit boundary
     distinguishes them, and a lane has none to hang the assertion on. So the
     claim asserted is the one that can be: a `DeferredEventPublisher` is
-    constructed in exactly one place in `src/`, inside `JobWorker`, and no
-    composition root can acquire one for a lane by wrapping something.
+    constructed in exactly one place in `src/`, and no composition root can
+    acquire one for a lane by wrapping something.
+
+    ⚠️ **That one place moved in M9's W1, from `services/jobs.py` to
+    `composition.py`, and the claim is unchanged.** The buffer used to be
+    `JobWorker`'s, wrapped once for the life of the worker; it is now built per
+    *scope*, because two concurrent jobs sharing one buffer means the failing
+    one's `discard()` empties the surviving one's frames. The construction site
+    is therefore inside `build_worker`'s scope factory -- still exactly one, and
+    still not reachable by a lane.
 
     Carries its own premise, because a scan that resolves nothing passes
     exactly like a scan that passes.
@@ -435,7 +449,7 @@ def test_only_the_worker_defers_and_the_push_and_reconcile_lanes_do_not() -> Non
     )
 
     assert sites, "the scan found no construction at all; it would pass over an empty tree"
-    assert sites == ["services/jobs.py"], f"a second lane wraps its publisher: {sites}"
+    assert sites == ["composition.py"], f"a second lane wraps its publisher: {sites}"
 
 
 async def test_no_embedder_configured_degrades_rather_than_raising(
@@ -479,12 +493,12 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
     a deployment can lack at build time.
     """
     worker = build_worker(
-        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
         provider=None,
         embedder=None,
         client=None,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
 
@@ -518,21 +532,21 @@ def test_a_write_back_handler_is_registered_in_every_build() -> None:
     the case passing against a registration nothing reaches.
     """
     bare = build_worker(
-        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
         provider=None,
         embedder=None,
         client=None,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
     equipped = build_worker(
-        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
         provider=FakeMetadataProvider(),
         embedder=FakeEmbedder(),
         client=FakeLLMClient(),
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
 
@@ -615,12 +629,12 @@ async def test_a_write_back_job_reaches_the_source_through_the_pipelines_own_rep
         return SourceBinding(source=source, adapter=adapter)
 
     worker = build_worker(
-        pipeline,
+        _work_for(pipeline),
         _settings(),
         provider=None,
         embedder=None,
         client=None,
-        resolve=resolve,
+        registry=_ScriptedRegistry(resolve),
         user_id=household,
     )
     await queue.enqueue([JobRequest(kind=JobKind.WATCH_WRITEBACK, key="emby-1", priority=80)])
@@ -647,12 +661,12 @@ def test_every_kind_a_bare_build_registers_is_named_by_the_docstring_that_lists_
     doc = inspect.getdoc(JobWorker.registered_kinds)
     assert doc is not None
     bare = build_worker(
-        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
         provider=None,
         embedder=None,
         client=None,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
     assert bare.registered_kinds, "the premise: a bare build registers something"
@@ -665,12 +679,12 @@ def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:
     """The control that makes the case above evidence rather than a
     tautology: without it, an implementation registering *nothing* passes."""
     worker = build_worker(
-        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
         provider=None,
         embedder=FakeEmbedder(),
         client=None,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
 
@@ -690,12 +704,12 @@ def test_a_worker_without_a_provider_registers_no_derive_handler() -> None:
     worker that has a key is `INDEX`'s bargain, one lane over.
     """
     worker = build_worker(
-        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
         provider=None,
         embedder=FakeEmbedder(),
         client=None,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
 
@@ -710,12 +724,12 @@ def test_a_worker_with_a_provider_registers_the_derive_handler() -> None:
     """The control that makes the case above evidence rather than a
     tautology: without it, an implementation registering *nothing* passes."""
     worker = build_worker(
-        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
         provider=FakeMetadataProvider(),
         embedder=None,
         client=None,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
 
@@ -845,12 +859,12 @@ def test_a_worker_without_an_llm_client_registers_no_curate_handler() -> None:
     line it passes against an implementation registering *nothing*.
     """
     worker = build_worker(
-        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
         provider=None,
         embedder=FakeEmbedder(),
         client=None,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
 
@@ -864,12 +878,12 @@ def test_a_worker_with_an_llm_client_registers_the_curate_handler() -> None:
     tautology. `INDEX` is asserted absent alongside it so the two guards
     cannot drift into "one client turns both on"."""
     worker = build_worker(
-        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
         provider=None,
         embedder=None,
         client=FakeLLMClient(),
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
 
@@ -907,12 +921,12 @@ async def test_the_worker_runs_a_curate_job_into_the_pipelines_own_curated_rows(
     household = new_id()
     assert household != bound, "the premise: the key names a household the root did not bind"
     worker = build_worker(
-        pipeline,
+        _work_for(pipeline),
         _settings(),
         provider=None,
         embedder=None,
         client=FakeLLMClient.returning(_ROWS, usages=[usage(model="test/answered-1")]),
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=bound,
     )
     await queue.enqueue([JobRequest(kind=JobKind.CURATE, key=str(household), priority=20)])
@@ -985,12 +999,12 @@ async def test_a_curate_job_for_an_empty_catalog_parks_and_buys_nothing() -> Non
     client = FakeLLMClient.returning(_ROWS)
     queue = FakeJobQueue()
     worker = build_worker(
-        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue, ledger=ledger),
+        _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue, ledger=ledger)),
         _settings(),
         provider=None,
         embedder=None,
         client=client,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
     await queue.enqueue([JobRequest(kind=JobKind.CURATE, key=str(new_id()), priority=20)])
@@ -1024,12 +1038,12 @@ async def test_a_curate_job_that_could_not_reach_the_model_backs_off_and_still_b
     settings = _settings(llm_model="test/asked-for-this-one")
     assert settings.llm_model != settings.embedding_model, "the premise: the two fields differ"
     worker = build_worker(
-        _pipeline_over_fakes(titles=titles, queue=queue, ledger=ledger),
+        _work_for(_pipeline_over_fakes(titles=titles, queue=queue, ledger=ledger)),
         settings,
         provider=None,
         embedder=None,
         client=FakeLLMClient.returning(PortUnavailable("the endpoint refused the connection")),
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
     await queue.enqueue([JobRequest(kind=JobKind.CURATE, key=str(new_id()), priority=20)])
@@ -1066,12 +1080,12 @@ async def test_the_model_is_loaded_once_across_three_worker_passes() -> None:
     pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())
     for _ in range(3):
         build_worker(
-            pipeline,
+            _work_for(pipeline),
             _settings(),
             provider=None,
             embedder=model,
             client=None,
-            resolve=_never_resolves,
+            registry=_no_sources(),
             user_id=uuid.uuid4(),
         )
 
@@ -1157,6 +1171,50 @@ def _raising(exc: Exception) -> Callable[[Settings], Embedder]:
 
 async def _never_resolves(_: str) -> SourceBinding | None:
     return None
+
+
+def _work_for(pipeline: Pipeline) -> UnitOfWork:
+    """A `UnitOfWork` handing back one already-built pipeline.
+
+    `build_worker` opens a scope per claim and per job since M9's W1, so it
+    takes a factory rather than a pipeline. Against fakes there is no session
+    to open and no `AsyncSession` to keep two coroutines off, so every scope
+    here is the same object -- which is exactly what
+    `tests/integration/test_services_jobs.py` must **not** do, and does not:
+    the property that concurrent jobs get *different sessions* is only
+    expressible against a real engine, and it is asserted there.
+    """
+
+    @asynccontextmanager
+    async def _open() -> AsyncIterator[Pipeline]:
+        yield pipeline
+
+    return _open
+
+
+class _ScriptedRegistry(SourceRegistry):
+    """A `SourceRegistry` whose resolver is given rather than looked up.
+
+    The real one reads `sources` and `media_items` and then builds an adapter
+    through `open_adapter`, which needs a source row, a credential row and a
+    factory -- three things none of the cases below are about. Subclassing
+    rather than passing a bare callable keeps `build_worker`'s signature
+    honest about what it takes: the registry is a process-lifetime resource
+    with an adapter cache, and a `Callable` argument would have let a caller
+    hand it something rebuilt per job.
+    """
+
+    def __init__(self, resolve: Callable[[str], Awaitable[SourceBinding | None]]) -> None:
+        super().__init__()
+        self._scripted = resolve
+
+    def bound(self, pipeline: Pipeline) -> Callable[[str], Awaitable[SourceBinding | None]]:
+        return self._scripted
+
+
+def _no_sources() -> SourceRegistry:
+    """The shipped default deployment's answer: nothing addresses that id."""
+    return _ScriptedRegistry(_never_resolves)
 
 
 async def test_the_pool_and_the_screen_read_one_taste_service() -> None:
@@ -1452,12 +1510,12 @@ async def _journal_of_a_full_bootstrap(
     pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue)
     monkeypatch.setattr(usher.composition, "_log_bootstrap_line", journal.append)
     worker = build_worker(
-        dataclasses.replace(pipeline, bulk=catalog, import_runs=runs),
+        _work_for(dataclasses.replace(pipeline, bulk=catalog, import_runs=runs)),
         settings,
         provider=None,
         embedder=None,
         client=None,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
     await queue.enqueue(
@@ -1642,16 +1700,18 @@ async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(
         queue = FakeJobQueue()
         pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue)
         worker = build_worker(
-            dataclasses.replace(
-                pipeline,
-                bulk=FakeBulkCatalogRepository(),
-                import_runs=FakeImportRunRepository(),
+            _work_for(
+                dataclasses.replace(
+                    pipeline,
+                    bulk=FakeBulkCatalogRepository(),
+                    import_runs=FakeImportRunRepository(),
+                )
             ),
             _settings(bulk_data_dir=tmp_path),
             provider=None,
             embedder=None,
             client=None,
-            resolve=_never_resolves,
+            registry=_no_sources(),
             user_id=uuid.uuid4(),
         )
         capsys.readouterr()
@@ -1695,8 +1755,13 @@ async def test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers
     really did commit.
 
     Both assertions are needed and neither implies the other: `is` the bus
-    says the right object was passed, and `is not worker.events` is what fails
-    if a later reader "fixes" this registration to match the four below it.
+    says the right object was passed, and the `DeferredEventPublisher` check is
+    what fails if a later reader "fixes" this registration to match the four
+    below it. The second used to be spelled `is not worker.events`; since M9's
+    W1 the buffer belongs to the *scope* rather than to the worker, so there is
+    no such attribute to compare against and the type is what carries the
+    claim -- the buffer is the only `EventPublisher` in `src/` a handler can be
+    handed that is not a bus.
     """
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
     seen: list[EventPublisher] = []
@@ -1710,12 +1775,12 @@ async def test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers
     queue = FakeJobQueue()
     pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue, events=_Recorder())
     worker = build_worker(
-        pipeline,
+        _work_for(pipeline),
         _settings(bulk_data_dir=tmp_path),
         provider=None,
         embedder=None,
         client=None,
-        resolve=_never_resolves,
+        registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
     await queue.enqueue(
@@ -1729,8 +1794,8 @@ async def test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers
     assert await worker.run_once() == 1, "the premise: the worker claimed the bootstrap job"
     assert len(seen) == 1, "the handler did not reach run_bootstrap exactly once"
     assert seen[0] is pipeline.events, "the handler was not handed the process bus"
-    assert seen[0] is not worker.events, (
-        "the bootstrap frames were handed JobWorker's deferred buffer, which holds them "
+    assert not isinstance(seen[0], DeferredEventPublisher), (
+        "the bootstrap frames were handed the scope's deferred buffer, which holds them "
         "until the whole phase completes -- a progress bar that jumps from 0% to 100%"
     )
 
@@ -1739,5 +1804,80 @@ class _Recorder(NullEventPublisher):
     """Distinguishable from every other publisher by identity, which is all
     the case above needs -- `NullEventPublisher()` instances compare equal to
     nothing but themselves, and an assertion spelled against the *class* would
-    pass against `worker.events`' inner publisher as readily as against the
+    pass against the scope buffer's inner publisher as readily as against the
     bus itself."""
+
+
+def test_every_configuration_registers_exactly_the_kinds_it_claims() -> None:
+    """`worker_kinds` and `_worker_handlers` are the one pair of lists in
+    `src/` that have to agree, and **both failure directions are quiet.**
+
+    `JobWorker` claims `list(self._concurrency)`, whose keys come from
+    `worker_kinds`; the callables come from `_worker_handlers`. They cannot be
+    one expression, because the handler map needs a `Pipeline` -- i.e. a
+    session -- and the claimable kinds have to be known before any session is
+    opened. So:
+
+    - a kind in `worker_kinds` with no handler is a `KeyError` **inside a
+      claimed job**, which parks nothing and crashes the worker; and
+    - a handler with no entry in `worker_kinds` is work nothing ever claims,
+      which is M4's *"a job kind whose handler is a stub is a queue that grows
+      forever"* arriving through the registration instead.
+
+    Neither is visible from the outside, which is why this walks all **eight**
+    provider/embedder/client configurations rather than the two a case would
+    naturally reach for: three independent guards make eight states, and the
+    interesting ones are the mixed builds nothing else constructs.
+    """
+    checked = 0
+    for provider in (None, FakeMetadataProvider()):
+        for model in (None, FakeEmbedder()):
+            for llm in (None, FakeLLMClient()):
+                pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())
+                handlers = _worker_handlers(
+                    pipeline,
+                    _settings(),
+                    provider=provider,
+                    embedder=model,
+                    client=llm,
+                    registry=_no_sources(),
+                    user_id=uuid.uuid4(),
+                    events=DeferredEventPublisher(NullEventPublisher()),
+                )
+                claimed = worker_kinds(provider=provider, embedder=model, client=llm)
+                assert set(handlers) == claimed, (
+                    f"provider={provider is not None} embedder={model is not None} "
+                    f"client={llm is not None}: claims {sorted(k.value for k in claimed)} "
+                    f"and registers {sorted(k.value for k in handlers)}"
+                )
+                checked += 1
+
+    assert checked == 8, f"the premise: all eight configurations were built -- {checked}"
+
+
+def test_the_concurrency_table_covers_exactly_the_kinds_a_build_claims() -> None:
+    """The third list in the same rule, one layer down.
+
+    `worker_concurrency` resolves `KIND_CONCURRENCY` against the deployment's
+    global, and a kind missing from it would be a `KeyError` at *build* time
+    rather than inside a job -- loud, but only for the configuration that
+    registers it, which for `curate` is the one nobody runs by default.
+
+    The clamp is asserted beside it because it is the half nothing else can
+    see: a per-kind constant chosen for a bigger box must not quietly override
+    an operator who set `USHER_JOB_CONCURRENCY=2`.
+    """
+    everything = worker_kinds(
+        provider=FakeMetadataProvider(), embedder=FakeEmbedder(), client=FakeLLMClient()
+    )
+    assert everything == set(JobKind), "the premise: a fully-equipped build claims every kind"
+
+    generous = worker_concurrency(_settings(), everything)
+    assert set(generous) == everything
+    assert generous[JobKind.ENRICH] == _settings().job_concurrency
+    assert generous[JobKind.INDEX] == 1
+
+    pinched = worker_concurrency(_settings(job_concurrency=2), everything)
+    assert max(pinched.values()) == 2, (
+        f"a per-kind constant outran the configured global: {pinched}"
+    )

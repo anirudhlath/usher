@@ -37,7 +37,7 @@ from usher.db.repositories.people import PostgresCreditRepository, PostgresPerso
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
-from usher.domain.people import Credit, CreditKind, Person
+from usher.domain.people import Credit, CreditKind, CreditSource, Person
 from usher.domain.title import Title
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
@@ -195,10 +195,34 @@ async def test_a_filmography_is_grouped_and_ordered_off_real_rows(
     )
     await _given_credits(
         sessions,
-        Credit(person_id=person.id, title_id=oldest.id, kind=CreditKind.CAST, billing_order=0),
-        Credit(person_id=person.id, title_id=newest.id, kind=CreditKind.CAST, billing_order=1),
-        Credit(person_id=person.id, title_id=undated.id, kind=CreditKind.CAST, billing_order=2),
-        Credit(person_id=person.id, title_id=newest.id, kind=CreditKind.CREW, job="Director"),
+        Credit(
+            person_id=person.id,
+            title_id=oldest.id,
+            kind=CreditKind.CAST,
+            source=CreditSource.TMDB,
+            billing_order=0,
+        ),
+        Credit(
+            person_id=person.id,
+            title_id=newest.id,
+            kind=CreditKind.CAST,
+            source=CreditSource.TMDB,
+            billing_order=1,
+        ),
+        Credit(
+            person_id=person.id,
+            title_id=undated.id,
+            kind=CreditKind.CAST,
+            source=CreditSource.TMDB,
+            billing_order=2,
+        ),
+        Credit(
+            person_id=person.id,
+            title_id=newest.id,
+            kind=CreditKind.CREW,
+            source=CreditSource.TMDB,
+            job="Director",
+        ),
     )
 
     response = await client.get(f"/people/{person.id}")
@@ -235,9 +259,15 @@ async def test_the_read_is_scoped_to_the_person_asked_for(
     second = await _given_title(sessions, "Their Other Film", year=2003)
     await _given_credits(
         sessions,
-        Credit(person_id=asked.id, title_id=mine.id, kind=CreditKind.CAST),
-        Credit(person_id=other.id, title_id=theirs.id, kind=CreditKind.CAST),
-        Credit(person_id=other.id, title_id=second.id, kind=CreditKind.CAST),
+        Credit(
+            person_id=asked.id, title_id=mine.id, kind=CreditKind.CAST, source=CreditSource.TMDB
+        ),
+        Credit(
+            person_id=other.id, title_id=theirs.id, kind=CreditKind.CAST, source=CreditSource.TMDB
+        ),
+        Credit(
+            person_id=other.id, title_id=second.id, kind=CreditKind.CAST, source=CreditSource.TMDB
+        ),
     )
 
     body = (await client.get(f"/people/{asked.id}")).json()
@@ -284,6 +314,7 @@ async def test_the_whole_answer_costs_three_statements(
                 person_id=person.id,
                 title_id=film.id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 billing_order=index,
                 tmdb_credit_id=f"an-invented-credit-{index}",
             )

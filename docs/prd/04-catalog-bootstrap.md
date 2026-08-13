@@ -318,10 +318,26 @@ the 10.38 one worker managed**, a 37% per-worker loss, so concurrency scales
 0.38% sample priced the median request to within 1.4% (0.0588 s against
 0.0580 s) and the **tail not at all**: p95 **0.4267 s against 0.1049 s**.
 Budget the tier at **~2 h on three workers**, and expect the third to earn
-less than the second. Three things a sample could not have found: one worker
+less than the second.
+
+✅ **The cause of that 37% was found and removed in M9's W1, and it was not
+contention between the three processes.** `JobWorker` claimed a batch of twenty
+and awaited them **one at a time**, so in-flight requests per process was
+exactly one and each worker's ceiling was `1/latency` — which is why adding a
+third process bought 1.90× rather than 3×, and why per-worker throughput *rose*
+when one died. The worker now runs a bounded pool of jobs, each on its own
+session, and the number to set is `USHER_JOB_CONCURRENCY` rather than a process
+count. **Do not re-derive the three-worker arithmetic from these figures**:
+they measure a lane that no longer exists, and a single process is now the
+shape to reason about. The measured before/after against a local stub, and what
+it does and does not license, is in
+`.claude/rules/tmdb-and-enrichment.md`. Three things a sample could not have found: one worker
 died mid-run on an unhandled `MissingGreenlet` and **orphaned its 20 claims
-in `running` permanently** (only `startup()` requeues those, and restarting
-steals the survivors' claims); **30 jobs parked on `ix_titles_imdb_id`**, a
+in `running` permanently** (only `startup()` requeued those, and restarting
+stole the survivors' claims — closed in M9's W1 by a lease plus a heartbeat,
+so the same twenty would now come back after five minutes with nothing else
+disturbed; the `MissingGreenlet` itself is **not** claimed fixed and
+[08](08-operations.md) says why); **30 jobs parked on `ix_titles_imdb_id`**, a
 write conflict where TMDb's `external_ids.imdb_id` disagrees with the bulk
 export's and is already held by another row; and the follow-up `INDEX` jobs
 **do not drain beside the crawl even with the embedder on**, because the

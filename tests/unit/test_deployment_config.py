@@ -355,8 +355,11 @@ def test_the_worker_switch_reaches_the_container() -> None:
     `"worker": false` and the lane stops. Setting it in `.env` did nothing,
     so an operator following the README leaves `worker: true` and then starts
     `usher work` in a second container: the double-worker state where
-    `JobWorker.startup()` requeues everything `running` and each steals the
-    other's live claims.
+    `JobWorker.startup()` requeued everything `running` and each stole the
+    other's live claims. *(M9's W1 closed that consequence -- recovery is a
+    lease now -- and the setting still matters, because two workers spend
+    `USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` twice against
+    limits that are per process.)*
     """
     assert "USHER_WORKER_ENABLED" not in _usher_service().get("environment", {})
     assert "USHER_WORKER_ENABLED" in _env_example_entries()

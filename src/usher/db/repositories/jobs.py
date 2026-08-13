@@ -230,11 +230,26 @@ WHERE id = :id
 RETURNING *
 """
 
+# The heartbeat, and `status = 'running'` is doing the same work here as in
+# `_REQUEUE` below: a beat that arrives after another worker already recovered,
+# completed or parked the job must move nothing. `clock_timestamp()` for this
+# module's usual reason -- a beat sent twenty minutes into a long transaction
+# has to stamp *now*, not when the transaction opened, or the lease it exists
+# to renew is renewed to a moment already in the past.
+_TOUCH = """
+UPDATE jobs SET updated_at = clock_timestamp()
+WHERE id = ANY(:ids) AND status = 'running'
+"""
+
 # `status = 'running'` is the whole predicate that keeps this off parked
 # poison: a requeue keyed on anything looser un-parks it on every restart,
 # which is the failure parking exists to end, arriving through the recovery
 # path. `attempts` and `last_error` are deliberately untouched -- a job that
 # keeps killing its worker must still reach the ceiling.
+#
+# `updated_at` is what the age is measured on, which is why `_TOUCH` above
+# moves exactly that column: the two statements are one mechanism and a change
+# to either that leaves the other alone silently breaks the lease.
 _REQUEUE = """
 UPDATE jobs SET status = 'pending', updated_at = clock_timestamp()
 WHERE status = 'running'
@@ -366,6 +381,16 @@ class PostgresJobQueue(JobQueue):
                 .one_or_none()
             )
         return None if row is None else Job.model_validate(dict(row))
+
+    async def touch(self, job_ids: Sequence[uuid.UUID]) -> int:
+        if not job_ids:
+            return 0
+        with self._session.no_autoflush:
+            result = cast(
+                CursorResult[Any],
+                await self._session.execute(text(_TOUCH), {"ids": list(job_ids)}),
+            )
+        return result.rowcount
 
     async def requeue_running(self, *, older_than_seconds: float = 0.0) -> int:
         with self._session.no_autoflush:

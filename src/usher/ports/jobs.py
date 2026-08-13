@@ -163,17 +163,48 @@ class JobQueue(ABC):
         """
 
     @abstractmethod
+    async def touch(self, job_ids: Sequence[uuid.UUID]) -> int:
+        """Say these claims are still being worked on. Returns rows moved.
+
+        The heartbeat half of the lease `requeue_running` reads. An
+        implementation moves whatever `requeue_running` compares against -- for
+        the SQL store that is `updated_at` -- and **only for rows still
+        `running`**, so a job another worker already recovered, completed or
+        parked is not resurrected by a beat that was already in flight.
+
+        Idempotent, and silent about ids it does not find: a worker whose claim
+        was recovered out from under it has nothing useful to do with the news
+        and must not fail its own job over its own telemetry.
+
+        `requeue_running`'s age threshold is meaningless without this. With no
+        heartbeat the threshold has to exceed the longest job a deployment can
+        run -- hours, for a `bootstrap` phase -- so the orphan window becomes
+        hours; with one, the threshold is about the *process* still being
+        alive and can be minutes.
+        """
+
+    @abstractmethod
     async def requeue_running(self, *, older_than_seconds: float = 0.0) -> int:
         """Return claimed-but-unfinished jobs to `pending`. Returns how many.
 
         PRD 08: "Startup requeues anything left `in_progress` by an unclean
-        shutdown." Called once at worker startup with the default (everything
-        currently `RUNNING`), which is correct when exactly one worker
-        process exists -- the deployment shape M4 ships. `older_than_seconds`
-        is there so a future multi-worker deployment can requeue only claims
-        older than any plausible job, rather than stealing a live worker's
-        work, and it is documented now because adding it later would mean
-        changing every call site.
+        shutdown."
+
+        ⚠️ **The `0.0` default requeues everything currently `RUNNING`, which
+        is safe at exactly one worker with exactly one job in flight -- and
+        that deployment no longer exists.** `JobWorker` runs its jobs
+        concurrently, so at `0.0` a worker recovering orphans would steal its
+        *own* live claims; two processes would steal each other's. M9's S3
+        measured the consequence of having only this lever: one of three
+        workers died holding 20 claims, and the only way to recover them also
+        corrupted the other two, so they were written off. `JobWorker.recover`
+        therefore always passes an explicit `older_than_seconds`, paired with
+        `touch` above.
+
+        The default is kept at `0.0` rather than moved, because a default that
+        silently *skips* work would be the worse failure of the two: a caller
+        who meant "everything" and got "nothing older than five minutes" sees
+        an empty return value and no error.
 
         Does not clear `attempts` or `last_error`: a job that has already
         failed twice and was then interrupted is still two attempts in, and

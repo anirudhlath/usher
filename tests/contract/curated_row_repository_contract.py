@@ -516,7 +516,7 @@ class CuratedRowRepositoryContract:
         self, repository: CuratedRowRepository, user_id: uuid.UUID, seeder: CuratedRowSeeder
     ) -> None:
         """PRD 08's redelivery rule: the job queue *will* redeliver, and
-        `JobWorker.startup()` requeues everything left `running`.
+        `JobWorker.recover()` requeues an abandoned claim.
 
         The wrong implementation this kills is insert-then-delete rather than
         delete-then-insert -- the reverse order meets this table's primary key

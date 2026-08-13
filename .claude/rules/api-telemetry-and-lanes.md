@@ -554,3 +554,65 @@ expired-and-forged decision observed rather than asserted. Both the mint and the
 redeem happened in the **same** process: a ticket minted under one
 `USHER_SECRET_KEY` and redeemed against a server started with another is
 undecryptable and looks exactly like a ticket bug.
+
+## M9 Task W1 — the worker lane is a bounded pool, and three things in it were not the `gather` (2026-08-12)
+
+**`build_worker` takes a `UnitOfWork`, not a `Pipeline`, and the worker lane
+builds it once per *process* rather than once per pass.** `_run_worker` used to
+open a session, rebuild the whole worker inside it and run one pass; the worker
+now holds a scope factory and opens a session per claim and per job, so the
+only per-pass work left is the gauge refresh, which needs a pipeline of its own
+and gets one. The build is still **lazy** — inside the loop, on the first
+iteration — because `await self._user_id()` is a database call, and `start()`'s
+promise that a lane connects to nothing is what makes `/health` answer 200 with
+Postgres down.
+
+**Three concurrency hazards inside the lane's own wiring, none of them the
+claim loop.** Each would have been introduced by adding a `gather` and leaving
+everything else alone:
+
+- **`SourceRegistry` held the pipeline.** `resolve` issues two reads of its own
+  (`sources.list_all`, `media_items.get_by_external_id`), so a registry
+  `rebind`-ed once a pass was a second door onto one `AsyncSession` — not the
+  handler's repositories, which the per-job scope separates, but the
+  *resolver's*. It now holds only the adapter cache and takes the scope's
+  pipeline as an argument (`bound(pipeline)`), which makes the split a
+  signature rather than a convention.
+- **Adapter construction had no lock.** It is the one `await` in `resolve` that
+  mutates the cache, so two jobs for one source both miss, both authenticate,
+  and one adapter is overwritten in the dict and never closed — a leaked socket
+  per race, visible only under load. Double-checked locking, with the re-read
+  inside the lock so the loser takes the winner's adapter.
+- **The event buffer was the worker's.** See
+  [ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)'s
+  amendment: `discard()` on a failing job emptied a *concurrent* job's frames.
+
+**`asyncio.wait`, never a `TaskGroup` and never `gather`.** This is the same
+argument `_guard` and the one-task-per-lane rule already make, one layer down: a
+task group cancels its siblings on the first escape, which turns one poisoned
+job into N claims abandoned mid-write, and `gather(return_exceptions=False)`
+returns while the siblings are still running and unawaited. The first escaping
+exception is re-raised after every task has settled, so the lane's own
+`except Exception` still sees it and nothing is left in flight. On
+`CancelledError` — which is how `stop()` works — the in-flight tasks are
+cancelled and awaited, so each job's `finally` fails or completes it *now*
+rather than leaving a claim for the lease to clean up minutes later.
+
+**Recovery moved from "once, at startup" to "on a timer, on a lease", and the
+lane's own case had to grow a second assertion to see the difference.**
+`test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass` asserted
+`requeues == 1` over three passes — which a lane calling `requeue_running()`
+**bare** satisfies exactly as well as a correct one, because the count is the
+same and only the *age* differs. The fake now records the argument, and the
+case asserts it is the lease: at `older_than_seconds=0.0` a recovery pass takes
+the worker's own live claims, which is a defect the count cannot express.
+Throttled to half a lease because it is an `UPDATE` scanning
+`status = 'running'` and there is nothing to find between leases.
+
+**One lane docstring is now false and is corrected in place:** *"one worker per
+deployment, not per process"*. Two workers no longer corrupt each other — the
+lease is what changed — so `USHER_WORKER_ENABLED=false` on a server beside a
+`usher work` container is a **capacity** decision rather than a correctness
+one. What two processes still do is spend the same upstream budget twice:
+`USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` are both per
+process, against a rate limit that is per client.

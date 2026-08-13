@@ -62,7 +62,7 @@ from usher.db.users import ensure_default_user
 from usher.domain.enums import EnrichmentState, HdrFormat, ImageKind, SourceKind, TitleKind
 from usher.domain.image import Image
 from usher.domain.jobs import JobKind, JobPriority, JobStatus
-from usher.domain.people import Credit, CreditKind, Person, person_sort_name
+from usher.domain.people import Credit, CreditKind, CreditSource, Person, person_sort_name
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
@@ -197,6 +197,7 @@ async def test_the_cast_is_top_billed_first_and_an_unbilled_credit_sorts_last(
                 person_id=bit_part.id,
                 title_id=title.id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 character="Waiter",
                 billing_order=5,
             ),
@@ -204,6 +205,7 @@ async def test_the_cast_is_top_billed_first_and_an_unbilled_credit_sorts_last(
                 person_id=lead.id,
                 title_id=title.id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 character="Ada Vane",
                 billing_order=0,
             ),
@@ -211,6 +213,7 @@ async def test_the_cast_is_top_billed_first_and_an_unbilled_credit_sorts_last(
                 person_id=uncredited.id,
                 title_id=title.id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 character="Passer-by",
                 billing_order=None,
             ),
@@ -218,6 +221,7 @@ async def test_the_cast_is_top_billed_first_and_an_unbilled_credit_sorts_last(
                 person_id=director.id,
                 title_id=title.id,
                 kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
                 job="Director",
                 department="Directing",
             ),
@@ -225,6 +229,7 @@ async def test_the_cast_is_top_billed_first_and_an_unbilled_credit_sorts_last(
                 person_id=elsewhere.id,
                 title_id=other.id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 character="Not In This Film",
                 billing_order=0,
             ),

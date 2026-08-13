@@ -107,7 +107,7 @@ class CuratedRowRepository(ABC):
         than as last night's.
 
         Idempotent by construction (PRD 08's redelivery rule, and
-        `JobWorker.startup()` requeues everything left `running`): the same
+        `JobWorker.recover()` requeues an abandoned claim): the same
         rows twice leave the same screen and report the same count. That is
         also why the order is delete-then-insert -- the reverse meets this
         table's primary key on the very rows it is about to remove.

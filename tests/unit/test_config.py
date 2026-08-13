@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,9 @@ from pydantic import ValidationError
 
 from usher.adapters.emby.push import DEFAULT_POLL_SECONDS, DEFAULT_STALE_AFTER_SECONDS
 from usher.config import Settings, get_settings
+from usher.db.base import build_engine
+from usher.domain.jobs import JobKind
+from usher.services.jobs import KIND_CONCURRENCY
 
 
 def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,6 +217,83 @@ def test_ingest_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -
     assert settings.job_batch_size == 20
     assert settings.job_max_attempts == 5
     assert settings.job_backoff_seconds == 30.0
+
+
+def test_the_worker_concurrency_settings_have_the_measured_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M9's W1, and every number here is a measurement rather than a taste.
+
+    `job_concurrency = 12` is Little's law over S3's measured tail: p95 HTTP
+    0.4267 s over 130,334 live requests, plus ~0.033 s of per-job Postgres
+    bookkeeping (S2's one-worker 10.38 rps against its own 0.0637 s mean HTTP),
+    is a p95 job of ~0.46 s -- so holding ADR-0005's ~25 rps takes ~11.5 in
+    flight. Below that the *architecture* is the ceiling again, which is the
+    defect W1 exists to remove.
+
+    The pool defaults are stated **twice** on purpose -- here and as
+    `build_engine`'s own argument defaults, because that function has callers
+    with no `Settings` (the integration fixtures, `alembic`'s `env.py`) and a
+    required argument would make each of them invent a number. This case is
+    what stops the two drifting, which is the whole reason a duplicated
+    constant is allowed to exist at all.
+
+    `KIND_CONCURRENCY` is asserted beside them because a per-kind ceiling above
+    the global would be silently clamped rather than refused, and a reader
+    editing one of those entries should meet the other list here.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    settings = Settings()
+    assert settings.job_concurrency == 12
+    assert settings.job_lease_seconds == 300.0
+    assert settings.db_pool_size == 20
+    assert settings.db_max_overflow == 10
+
+    signature = inspect.signature(build_engine)
+    assert signature.parameters["pool_size"].default == settings.db_pool_size
+    assert signature.parameters["max_overflow"].default == settings.db_max_overflow
+
+    assert set(KIND_CONCURRENCY) == set(JobKind), (
+        "a JobKind with no concurrency entry would silently inherit a number "
+        "chosen for something else"
+    )
+    assert KIND_CONCURRENCY[JobKind.ENRICH] is None, "the network-bound kind takes the global"
+    assert KIND_CONCURRENCY[JobKind.INDEX] == 1, "fastembed is CPU-bound at a flat tokens/s rate"
+    assert KIND_CONCURRENCY[JobKind.CURATE] == 1, "the reference endpoint has no context to spare"
+    assert KIND_CONCURRENCY[JobKind.BOOTSTRAP] == 1, "bulk_load_window commits the caller's session"
+
+
+def test_a_concurrency_the_pool_cannot_serve_is_refused_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure this refuses does not look like a configuration mistake.
+
+    Every job in flight holds a session, plus one for the claim and one for the
+    heartbeat. Over the pool's capacity SQLAlchemy's `QueuePool` **waits**
+    `pool_timeout` -- 30 s, the default this project does not change -- and
+    only then raises, so the symptom is a worker lane getting slower and slower
+    and finally parking jobs with a message about a pool. Refused at startup
+    instead, which is the shape `_query_expansion_needs_a_client` already uses.
+
+    The message names both variables for that validator's reason: an operator
+    who lowered the pool to fit a small Postgres has to be told which of the
+    two numbers to move.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_JOB_CONCURRENCY", "12")
+    monkeypatch.setenv("USHER_DB_POOL_SIZE", "10")
+    monkeypatch.setenv("USHER_DB_MAX_OVERFLOW", "3")
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    message = str(caught.value)
+    assert "USHER_JOB_CONCURRENCY" in message and "USHER_DB_POOL_SIZE" in message, message
+
+    # The boundary, so the case is about the arithmetic rather than about any
+    # pair of numbers: 12 + 2 needs exactly 14.
+    monkeypatch.setenv("USHER_DB_MAX_OVERFLOW", "4")
+    assert Settings().job_concurrency == 12
 
 
 def test_job_max_attempts_must_be_at_least_one(monkeypatch: pytest.MonkeyPatch) -> None:
