@@ -1,4 +1,15 @@
-"""`POST /admin/rows/regenerate` -- PRD 07's admin row action.
+"""PRD 07's admin row actions: `POST /admin/rows/regenerate` (M8), and
+`GET`/`PUT /admin/rows/providers` (M9).
+
+**The two are not variations on each other, and the split is worth naming
+before either is read.** Regeneration is a *request for work* -- it enqueues,
+answers 202, and touches no cache, because the artefact it asks for does not
+exist yet. The provider toggle is a *configuration write* -- it answers 200,
+and it clears the screen cache, because the artefact it changes is the screen
+every household is already looking at. Everything below headed "this route" is
+about the first; the toggle's own reasoning is on `set_row_provider_enabled`.
+
+## `POST /admin/rows/regenerate`
 
 **The route enqueues; the worker generates.** PRD 06 states it as a
 constraint on the artefact -- *"`LLMRow.build()` only hydrates stored output.
@@ -95,8 +106,8 @@ indistinguishable from one reporting zero.
 ## There is no 503 here to give a `code` to
 
 PRD 07's RFC 9457 envelope has one worked example, `503 source_unavailable`,
-and the deferral has survived `GET /titles/{id}` and `GET /home` because
-neither holds a `SourceAdapter` and so neither can reach an upstream at all.
+and it survived `GET /titles/{id}` and `GET /home` because neither holds a
+`SourceAdapter` and so neither can reach an upstream at all.
 **That is a claim about reads, and it does not transfer here unchanged** --
 not because this route writes (`GET /titles/{id}` writes too, once, on
 purpose) but because what it writes to is a subsystem that can be down while
@@ -107,6 +118,15 @@ which every endpoint is down. The handler therefore catches nothing -- a
 `PortUnavailable` propagates and becomes an ordinary 500 -- and
 `tests/unit/test_api_rows.py::test_an_unreachable_queue_is_not_translated_into_a_503`
 is what keeps the `except` from being added back.
+
+**The envelope has since landed and this argument is unchanged**, which is
+the point of stating it structurally rather than as a wait. ADR-0030
+**preserves** it as a standing rule: the vocabulary holds no
+`queue_unavailable` and no `database_unavailable` of any spelling, and this
+paragraph is the reason recorded there. The 500 is also a 500 by rule rather
+than by omission -- ADR-0030 refuses an `internal_error` member because
+nothing emits one, measured rather than inferred from the case above, which
+asserts a status code and nothing about the body.
 
 ## Two things this route deliberately does not do
 
@@ -119,6 +139,15 @@ one. PRD 06 already records the consequence and its owner: the cache is in the
 API process, the curation job runs under `usher work`, and cross-process
 invalidation is M9's.
 
+⚠️ **`PUT /admin/rows/providers/{slug}`, two functions down, *does* clear it,
+and that is not a change of mind.** The difference is whether the route's own
+write has already changed what a rebuild would produce: a toggle has (the next
+composition runs a different set of providers), an enqueue has not (the next
+composition reads the same `curated_rows`). A clear whose only effect is to
+rebuild an identical screen is a cost with no benefit, which is what this
+paragraph is about; a screen that is stale the instant the write commits is
+what the toggle's is about.
+
 **It takes no request body.** Not a household, not a row count, not a
 `force` flag. There is one household in M8 (PRD 01's authentication seam) and
 `DefaultUserIdDep` is where that is decided for every route at once; the row
@@ -127,15 +156,37 @@ rather than a parameter; and a `force` flag would be a request to defeat
 `(kind, key)`, which is the deduplication the milestone's cost claim rests on.
 """
 
+from typing import Any, Final
+
 from fastapi import APIRouter, status
 
-from usher.api.deps import DefaultUserIdDep, JobQueueDep
-from usher.api.dto.rows import RegenerateResponse
+from usher.api.deps import (
+    DefaultUserIdDep,
+    JobQueueDep,
+    RowCacheDep,
+    RowProviderSettingsRepositoryDep,
+)
+from usher.api.dto.problem import ProblemCode, ProblemResponse
+from usher.api.dto.rows import RegenerateResponse, RowProviderResponse, RowProviderUpdate
+from usher.api.errors import ProblemException
 from usher.domain.jobs import JobKind, JobPriority
 from usher.ports.jobs import JobRequest
+from usher.services.rows import ROW_PROVIDERS, row_provider_settings
 from usher.telemetry import current_traceparent
 
 router = APIRouter(prefix="/admin/rows", tags=["admin"])
+
+#: What `/openapi.json` says the toggle answers when it fails. The `404` is a
+#: slug the **registry** does not hold, which is a 404 about a provider that
+#: does not exist rather than about a row nobody has written yet -- absence
+#: from `row_provider_settings` means enabled. The `422` is declared rather
+#: than left to FastAPI, whose automatic one names `HTTPValidationError` while
+#: `api/errors.py` answers an RFC 9457 document carrying the same error list
+#: under `errors`. `tests/unit/test_api_openapi.py` holds both halves.
+_TOGGLE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    404: {"model": ProblemResponse, "description": "No provider is registered under that slug."},
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
 
 
 @router.post(
@@ -185,3 +236,94 @@ async def regenerate_rows(queue: JobQueueDep, user_id: DefaultUserIdDep) -> Rege
         ]
     )
     return RegenerateResponse(kind=JobKind.CURATE, key=str(user_id))
+
+
+@router.get("/providers", response_model=list[RowProviderResponse])
+async def list_row_providers(
+    provider_settings: RowProviderSettingsRepositoryDep,
+) -> list[RowProviderResponse]:
+    """Every registered row provider, and whether it composes.
+
+    **Derived from `ROW_PROVIDERS`, never from a literal and never from the
+    table.** The registry is the set of providers that exist -- a provider that
+    is not registered is dead code (boundary call 9) -- and
+    `row_provider_settings` holds only what an operator has touched, so a
+    listing read off the *table* would answer nothing on a fresh install and
+    would grow a row at a time as somebody clicked. The join is a **left** one
+    in `services/rows/__init__.py`, which is also where the default lives:
+    absence means enabled, and this endpoint is where a caller would otherwise
+    be tempted to spell that for itself.
+
+    In registry order rather than sorted by slug, so an operator's screen is
+    the same order as `usher home`'s report and does not reshuffle when a
+    provider is renamed.
+    """
+    return [
+        RowProviderResponse(slug=one.slug, enabled=one.enabled)
+        for one in row_provider_settings(await provider_settings.overrides())
+    ]
+
+
+@router.put("/providers/{slug}", response_model=RowProviderResponse, responses=_TOGGLE_FAILURES)
+async def set_row_provider_enabled(
+    slug: str,
+    update: RowProviderUpdate,
+    provider_settings: RowProviderSettingsRepositoryDep,
+    cache: RowCacheDep,
+) -> RowProviderResponse:
+    """Switch one provider on or off for this deployment.
+
+    **A slug the registry does not hold is a 404 and writes nothing.** An
+    override for a provider nothing registers is dead configuration that reads
+    exactly like working configuration -- an operator finds `enabled = false`
+    in the table and believes a shelf is off. The check is against
+    `ROW_PROVIDERS` and comes *before* the write, which is the half a status
+    code cannot show: "it answered 404" is also what a route that wrote the row
+    and then failed a lookup produces, so `tests/unit/test_api_rows.py` reads
+    `overrides()` back.
+
+    The code is the generic `NOT_FOUND` rather than a minted
+    `provider_not_found`: ADR-0030 ruling 1 closes the vocabulary at seven and
+    refuses per-resource 404s, because RFC 9457's `instance` already carries
+    the path -- `/admin/rows/providers/<slug>` says which provider was not
+    found more precisely than a code could.
+
+    **`RowCache.clear()`, not `invalidate(user_id, slugs)`.** A provider toggle
+    is deployment-wide and the per-user/per-slug invalidation cannot express
+    it: `invalidate` takes a household, and the households whose ~30 s screens
+    are now wrong are all of them. The cache is one object on `app.state`, so
+    the clear reaches every subsequent request **in this process**.
+
+    Two costs, both stated rather than left to be discovered:
+
+    - **It empties every household's screen on any toggle.** With one household
+      (PRD 01's authentication seam) that is free; the day authentication lands
+      it is one screen rebuild per user, on an operator action nobody performs
+      in a loop. Cheaper than the alternative, which is a per-household
+      invalidation that has to enumerate the `users` table from a route.
+    - **A second replica keeps serving its own ≤30 s screen.** This is the
+      cross-process gap `services/rows/cache.py` already records in full, and
+      this route restates rather than widens it: the bound is `_SCREEN_TTL`,
+      the same one a push-lane invalidation already has.
+
+    The clear is on the **success** path, after the write. It is also *before*
+    `get_session`'s commit, which is the one ordering this route cannot fix
+    from inside a handler: a concurrent `GET /home` landing in that window
+    reads the pre-toggle overrides in its own transaction and may re-cache a
+    screen for up to `_SCREEN_TTL`. Bounded by the same 30 s, and the same
+    shape as the replica case above.
+    """
+    if slug not in {provider.slug_prefix for provider in ROW_PROVIDERS}:
+        raise ProblemException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code=ProblemCode.NOT_FOUND,
+            detail="no row provider is registered under that slug",
+        )
+    await provider_settings.set_enabled(slug, enabled=update.enabled)
+    cache.clear()
+    # Built from the slug the registry matched and the value just written,
+    # rather than re-read: `set_enabled` flushes without committing, so a
+    # read-back would answer out of this request's own uncommitted transaction
+    # and could only ever agree with itself. What proves the write landed is
+    # the *next* request's `GET`, which is the assertion both test files make.
+    return RowProviderResponse(slug=slug, enabled=update.enabled)

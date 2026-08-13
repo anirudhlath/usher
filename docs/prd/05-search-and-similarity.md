@@ -76,13 +76,51 @@ a bigger one than the sentence implies.** Filling B cost three things:
   positional, so an uncredited title gains a seventh *empty* segment and its
   fingerprint moves too: there is no subset of the catalog that keeps its old
   one. That is ADR-0020's scheme working, and it is 25 s to 2 min at the
-  measured throughput.
+  measured throughput — *for a 2k–10k household library*. Over the 130,647-row
+  priority tier M9 enriched the same re-embed measured **2.31 hours**; the
+  sizing paragraph below carries the arithmetic and why the invariant is not
+  what predicts it.
 
 `SearchDocument.credits` was carried through M6 as an always-empty parameter
 so that M7 filled a caller rather than rewriting the type, and it is filled
 from `titles.credit_names` — which is **not** a `Title` field: it is `credits`
 projected to names and truncated to a ranking constant, so a domain model
 carrying it would be a cast list that is not the cast.
+
+**M9 stopped B being an enriched-tier column, and the paragraphs above are
+written as though it still is.** Under M7 alone, `credit_names` is non-empty
+only where `DeriveService` has run, which is the TMDb-enriched tier —
+measured at **0 of 1,271,138** rows on a bootstrap-only catalog, i.e. weight
+class B was reserved, filled, and in practice still empty for everybody who
+had not run a crawl. M9 fills it from IMDb's `title.principals` × `name.basics`
+for every title the crawl has not reached: **1,192,217 of 1,271,138 (93.8%)**,
+mean **9.11** names, 158,479,368 B of text. Two writers, one predicate —
+`enrichment_state = 'skeleton'` decides which owns a title — so `credit_names`
+still never disagrees with `credits`, because a title with any `credits` row
+is by construction not a skeleton.
+
+**What that costs, measured on a real 1,271,138-row `titles` rather than
+estimated.** The relation goes **872,759,296 B → 1,496,825,856 B after
+`VACUUM FULL` (+624,066,560 B, +71.5%)** — 3.9 bytes stored per byte of name —
+of which `ix_titles_search_document` is **4.54×** (40,304,640 → 182,951,936 B),
+which is the class-B lexemes arriving. **The transient is the number to budget
+against [08](08-operations.md)'s 8–12 GB, not the settled one**: before any
+vacuum the same table is 2,240,970,752 B, because one `UPDATE` over 1.19M rows
+leaves a dead tuple per live one.
+
+**And it is an ordering constraint on the roadmap rather than a free win —
+though not the one this paragraph claimed until 2026-08-12.** The embedded
+population is `enrichment_state <> 'skeleton'` and the fill writes under
+exactly the complement of that predicate, so filling B invalidates **no**
+embedding, on a bootstrap-only catalog or an enriched one, by construction.
+The constraint is *precedence*: run it after a priority tier is enriched and
+the fill correctly declines every title in that tier, so the **203,969 of the
+204,335 titles with ≥100 votes (99.82%)** that would have gained a
+`credit_names` never do — and no re-run repairs it, because the predicate
+goes on declining them. Backfill it before the crawl, not after. (The
+superseded sentence said the late ordering "invalidates nearly all" of the
+tier; it is refused by the fill's own `AND m.ours`, and it had reached the
+CLI's `--help` and the bootstrap report before an audit caught it.)
 
 **Measured class weights**, pg17.10, one term in three classes scored with
 `ts_rank(…, websearch_to_tsquery('english', …))`: name **0.991** (A),
@@ -131,7 +169,7 @@ Instead: a trigram index, candidates capped at a few hundred, then
 `levenshtein_less_equal` from the core `fuzzystrmatch` module as a re-rank over
 that capped set, ordered by popularity.
 
-**There is no narrow `title_search_names` table, and the trigram index goes
+**M6 built no narrow `title_search_names` table, and put the trigram index
 directly on `titles`.** This section used to specify a narrow
 `(title_id, name, kind, popularity)` table "over names and aliases", and its
 justification is exactly that — *aliases and people names*, one title
@@ -141,24 +179,92 @@ above), so the table would have held exactly one row per title duplicating
 second thing to keep fresh, and a new instance of precisely the staleness
 problem this milestone exists to eliminate. Boundary call 3.
 
-⏳ **Still not built after M7, and the condition is restated rather than
-renewed.** M6 deferred this to *"the day M7 lands aliases and people"*. **M7
-landed people and not aliases**, so the condition is not met — and a deferral
-silently rolled forward is the exact failure [09](09-roadmap.md) names for the
-tag genome (*"an obligation recorded only where it was postponed is one nobody
-plans"*). Both halves, with an owner:
+✅ **Built by `m09a`, with five columns and not the four this section
+sketches — and the paragraph above still stands.** The trigram index stays
+directly on `titles`, and the narrow table duplicates nothing from it: it
+carries **no `primary` rows**, because a canonical name is answered by
+`ix_titles_name_lower_prefix` on `titles` itself, so a `primary` row would be
+exactly the one-row-per-title copy boundary call 3 refused. Its two members
+are `alias` and `person`, and **both emitters are now built** — see the alias
+half below for the measurement that keeps the "duplicating `titles`" argument
+true of the rows actually written, which is that three retained akas rows in
+four restate the title's own name and are dropped.
 
-- **Aliases are not merely unbuilt, they are not in the cache.**
-  `alternative_titles` is in neither `append_to_response` list
-  ([03](03-sources-and-sync.md)), so aliases are absent from `raw_payloads`
-  entirely — landing them changes the crawl's *request shape* and re-fetches
-  the whole enriched tier. **Unassigned**, and named in PRD 03 rather than
-  left implied by this deferral.
-- **The people half now belongs with M9's two-tier suggest**, which
-  [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges and
-  which *replaces* the shipped suggest path rather than extending it. Building
-  the narrow table now means M9 redesigns it against a table built for the
-  design it is replacing. **Owner: M9**, together with the two-tier suggest.
+`(title_id, name, kind, region, language)`. **`region` and `language` are new
+and are not decoration:** IMDb `title.akas` is the alias source, and without
+them a French and a Brazilian alias for the same film are indistinguishable
+rows — a defect the loader cannot repair later without a second migration.
+
+🔴 **`popularity` — the fourth column this section specified — is refused,
+with a number.** `titles.popularity` is NULL on **all 1,271,138 rows**
+(measured 2026-08-03), which is why the shipped suggest ordering was inert and
+why the vote-count tiebreak was added. Copying a 100%-NULL column into a narrow
+table is precisely the duplication boundary call 3 refused; the re-rank reads
+`titles.vote_count`, as it already does. Correspondingly, *"ordered by
+popularity"* in the sketch above is aspirational rather than shipped.
+
+**Two tier-1 indexes, not one, and the pre-existing `ix_titles_name_lower_year`
+is neither.** That index is `(lower(name), year)` with the *default* opclass,
+which under this database's collation cannot answer `LIKE 'pre%'` at all —
+measured on `pgvector/pgvector:pg17`, the plan is a `Seq Scan` even with
+`enable_seqscan = off`. So `m09a` adds a btree on `lower(name)
+text_pattern_ops` to **both** `titles` and `title_search_names`. The `titles`
+one: p50 0.6 ms, p95 1.0 ms, max 10 ms, 44 MB, building in 0.559 s over
+1,271,138 rows, against the trigram path's 33.3 ms p50 and 734 ms max —
+re-measured by B3 on 2026-08-12 at **0.666 s / 44.2 MB**, the size to the
+tenth. **The `title_search_names` one is a different size of object and was
+never covered by those figures**: **4.527 s / 155.4 MB** over 10,896,525 rows.
+
+✅ **`m09a` builds the shape and both halves that fill it are now written, by
+two separate writers.** M6 deferred this to *"the day M7 lands aliases and
+people"*. **M7 landed people and not aliases** — a deferral silently rolled
+forward is the exact failure [09](09-roadmap.md) names for the tag genome (*"an
+obligation recorded only where it was postponed is one nobody plans"*). Both
+halves, with an owner:
+
+- ✅ **Aliases come from IMDb `title.akas`, which needs no API call and does
+  not touch the crawl's request shape.** The blocker this bullet used to carry
+  was real and is about a *different source*: `alternative_titles` is in
+  neither `append_to_response` list ([03](03-sources-and-sync.md)), so aliases
+  are absent from `raw_payloads` entirely and landing them there would
+  re-fetch the whole enriched tier. `BulkCatalogRepository.replace_aliases`
+  writes them from the bulk dump instead — `kind = 'alias'`, `region` and
+  `language` filled, the delete scoped by `imdb_ids` **and** `kind` so the
+  people half survives it.
+
+  **Three akas in four are not aliases at all, and dropping them is what keeps
+  boundary call 3 from being reversed by accident.** Measured over a real
+  1,271,138-title catalog: of 7,536,366 retained akas rows, **5,693,570
+  (75.5%) `lower()`-equal the title's own `name` or `original_name`** and are
+  not stored — such a row carries nothing `ix_titles_name_lower_prefix` on
+  `titles` does not already answer. What survives deduplicates on
+  `(title_id, lower(name))` to **1,663,364 rows in 307,822,592 B** (0.308 GB),
+  against a bar of 8M rows and 1.0 GB written down before the measurement.
+  **Only 399,046 of 1,271,138 titles (31.4%) gain even one alias**, so this is
+  a narrow, cheap win rather than a broad one, and the comparison is `lower()`
+  on both sides because that is the function the tier-1 index is built over.
+- ✅ **The credited-person half is written by
+  `CreditRepository.replace_for_titles`** — the call that already writes
+  `credits` and `titles.credit_names`, from the same `credit_names` mapping, in
+  the same transaction. **No second writer, no backfill job and no new
+  command**: the array and the table were already two spellings of one fact and
+  this is the third, so splitting the write is what makes them diverge, and the
+  symptom is a *suggest* hit on a name `credits` no longer holds. `kind` is
+  `person`, `region` and `language` are NULL on every such row (a credited
+  person's name has no locale), and the delete is scoped by `title_id` **and**
+  `kind` so the alias loader's rows survive it. The ranking — top ten billed
+  then every stored crew name — is carried by the UUIDv7 primary key, because
+  the table has no rank column and deliberately does not need one for aliases.
+  **A catalog derived before this landed holds no rows here until `usher
+  derive` re-runs over it**, which is worth knowing before timing a query
+  against it.
+
+The suggest path that *reads* the table is M9's, which
+[ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges and
+which *replaces* the shipped path rather than extending it — `m09a` builds the
+table as part of the design that replaces the path, which is what removes the
+"redesigns against a table built for the design it is replacing" objection this
+section used to carry.
 
 Stated honestly: **that call rests on a structural argument, not on a
 latency measurement.** No variant was built and timed against the direct
@@ -328,10 +434,41 @@ on a Ryzen 7 5800X3D, CPU): throughput is linear in **tokens**, not texts, and
 holds at **~8,000–10,700 tokens/s** across the whole range — 412.7 texts/s at
 19 tokens, 83.5 at 100, 18.7 at 516. A realistic `name + overview + genres +
 keywords` document is **~100–130 tokens**. So the enriched tier is **~25
-seconds to 2 minutes**; all 1,271,138 titles would be **4–6 hours**, which is
-the number the population choice avoids paying. Best CPU batch size is 16, flat
-to 64, worse at 128. GPU throughput is deliberately unmeasured — the probe
-found 210 MiB free of 24,564 and declined to disturb a running service.
+seconds to 2 minutes** at 2k–10k titles; all 1,271,138 titles would be **4–6
+hours**, which is the number the population choice avoids paying. Best CPU
+batch size is 16, flat to 64, worse at 128. GPU throughput is deliberately
+unmeasured — the probe found 210 MiB free of 24,564 and declined to disturb a
+running service.
+
+✅ **The invariant survived its first real tier and the sizing derived from it
+did not — measured 2026-08-12 over 130,647 enriched titles.** M9 enriched a
+priority tier rather than a household library, so the same code ran at 13–65×
+the population above. Three things came back. The **document** is exactly what
+was assumed: mean **125.4 tokens** over 1,000 sampled titles (median 118, p95
+197, max 323, none over the 512 window), inside the ~100–130 band. The
+**model** is exactly what was measured: **9,683 tokens/s** on real documents at
+one text per call, inside 8,000–10,700. But the **backfill** runs at
+**2,988 tokens/s across two workers — about 15% of the model's rate** — because
+an `index` job is the model *plus* a claim, three reads, a staged `COPY`
+through a temp table and a commit, per title, and because `usher work`
+re-counts the whole staleness predicate after every pass of ≤20 jobs (360.9 ms
+at this tier, **23% of one measured drain's wall clock**). **So a tokens/s
+figure sizes the model and never the queue**, and `usher index`'s printed
+estimate — which divides by the invariant — came back **2.5–3.3× optimistic**
+against a measured pass (109–145 s predicted, 361 s actual). Two source sites
+still describe the staleness scan's population as "2k-10k rows"
+(`telemetry.py:546`, `composition.py:1317`).
+
+✅ **And the candidate-pool walk behind `usher similar --rebuild` has a price
+for the first time: ~80 minutes over 130,647 embeddings** (2026-08-12). The
+exact brute-force scan is **36.5 ms per seed** at `rebuild`'s own 500-seed page
+and 37.4 at 50-seed pages, so `130,647 × 36.5 ms = 4,769 s`. Per-seed cost is
+**linear in the embedded population**, which makes the walk quadratic in it;
+seed-side paging is ~3 s of the total and page size is not a lever. The price
+is seed-independent to within 1.9%, so bounding the walk by *seed count* is
+sound while bounding it by a `list_embedded` prefix is not — those ids are
+UUIDv7 minted in IMDb `tconst` order, so a prefix is ordered by registration
+era. Full evidence in `.claude/rules/search-and-embeddings.md`.
 
 **Freshness is a predicate, never an inference.** `title_embeddings` records
 `model_name` (the runtime *and* the checkpoint, e.g.
@@ -420,31 +557,57 @@ first in-process consumer.
 
 - embedding cosine over overview text,
 - Jaccard over genres, keywords, cast, and crew,
-- MovieLens tag-genome cosine where available, weighted in only when present.
-  **The importer shipped in M7** (`usher bootstrap --phase movielens`,
+- ~~MovieLens tag-genome cosine where available, weighted in only when
+  present.~~ 🔴 **Built in M7 at weight 0.25 and REMOVED from the blend on
+  2026-08-12 by M9's S7, on a measurement.** The vectors are still imported,
+  still stored and still read per pair; they are no longer a term.
+  [ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md)
+  carries the full amendment and this is the short form.
+
+  The importer shipped in M7 (`usher bootstrap --phase movielens`,
   `genome_scores`), and Task 36 measured every denominator (2026-08-05, a
   `--phase all` catalog of 1,271,570 titles): 15,565 genome vectors are
   **1.22%** of all titles and **1.73%** of the 899,991 movies; **7.61%** of
   [04](04-catalog-bootstrap.md)'s "≥100 IMDb votes" priority tier (measured at
   204,494 titles) — the denominator that makes the "~7%" this line used to
-  carry roughly right; and **10.68%** of a real household's 5,020 owned titles
-  (10.72% of its owned movies). **The number that actually decides the term's
-  weight is the candidate-pair rate** — of the 100 candidates each seed's pool
-  holds, how many carry a `tags` value — measured (never squared: `coverage²`
-  would say 1.14%) at **1.81%** (9,069 of 502,000 pairs). **That is far below
-  the 10% floor the weight assumes**, so at 0.25 the genome reorders about one
-  neighbour list in fifty-five while costing a `<=>` and a TOAST fetch on every
-  candidate pair of every rebuild. **The term is kept for now, with two
-  caveats and a deferral**: the 1.81% is a *conservative* floor (no TMDb key
-  ran, so documents are name-shaped and the pool is name-selected, which
-  weakens exactly the correlation being measured); the genome is
-  **movies-only** and **frozen at 2023-07-20**, so its coverage of anything
-  newer is structurally zero and decays; and the choice between a genome-aware
-  candidate pool and reverting `_WEIGHTS` to M6's three signals is an **M9
-  decision** to make once a genuinely enriched tier can be measured — cheap and
-  detectable either way, because `title_neighbors.blend_fingerprint` records
-  which blend produced each row. **M7 blends it in at weight 0.25** — see the
-  four-way blend below. Two
+  carry roughly right; and **10.68%** of a real household's 5,020 owned titles.
+  **The number that decides the term's weight is the candidate-pair rate** — of
+  the 100 candidates each seed's pool holds, how many carry a `tags` value —
+  measured, never squared. M7 put it at **1.81%** (9,069 of 502,000 pairs), and
+  M9's S1 then established that those 502,000 pairs are exactly 5,020 owned,
+  **name-selected, pre-TMDb** seeds in a scratch database that no longer
+  exists: the tier promotion moved a label, not a document, so
+  `search_document`'s weight classes C and D were empty and the pool was drawn
+  by name.
+
+  **M9's S5 re-measured it over a genuinely enriched population and it is a
+  second measurement, never a delta: 2.4746% — 323,297 of 13,064,700 candidate
+  pairs, over 130,647 seeds, 15,525 of them carrying a vector (11.883%
+  single-side).** What is new is that the genome rate is now known over
+  documents that finally carry `overview`, `tagline`, `genres` and `keywords`,
+  which is what M9's enrichment existed to produce — and it is **still four
+  times below the 10% floor the 0.25 weight assumes**. Both figures stay in the
+  record with their populations attached. `coverage²` would have predicted
+  1.412%, so the measurement is **1.75×** the independent-draw prediction: pool
+  membership and genome membership are positively correlated, which is the
+  first time this project has had the correction factor rather than the
+  warning.
+
+  So the term comes out — the `_WEIGHTS` key and the `tags=` argument together,
+  never a 0.0 weight, which is arithmetically identical to absence while still
+  moving `blend_fingerprint`. **The `<=>` and the TOAST fetch per candidate
+  pair are NOT saved and that is deliberate**: the cost sentence this bullet
+  used to carry ("costing a `<=>` and a TOAST fetch on every candidate pair of
+  every rebuild") described the *read*, and the read stays so the rate remains
+  reported by `usher similar --rebuild` on every rebuild rather than by a query
+  somebody has to think to run. It is also the only remaining consumer of
+  ADR-0014's `None`-not-0.0 rule on this field.
+
+  **The ceiling is what makes this unlikely to reverse on more enrichment.**
+  `ml-latest` is **movies-only** and **frozen at 2023-07-20**, and scores
+  **16,376** movies — 18.9% of its own 86,537-movie list — so coverage of
+  anything newer is structurally zero and decays. M9's enrichment moved the
+  document and therefore the pool; it could not move the numerator. Two
   vectors are comparable only when they came from the same release, which is
   what `genome_scores.genome_revision` records and what
   `GenomeRepository.get_pair` refuses to blend across,
@@ -466,54 +629,94 @@ is a bare nullable UUID with no table that nothing in `src/` writes. So M6 shipp
 **embedding cosine (0.60) plus keyword Jaccard (0.25) and genre Jaccard
 (0.15)**, written as a sum of weighted terms over an explicit signal list.
 
-**M7 lands the third signal, and the blend is now four terms:**
+**M7 landed the third signal; M9's S7 removed it. The shipped blend is three
+terms, and the surviving weights are M7's rather than M6's:**
 
-| Term | M6 | M7 | Renormalised when `tags` is absent |
-|---|---|---|---|
-| `cosine` | 0.60 | 0.45 | 0.45 / 0.75 = **0.600** |
-| `tags` | — | **0.25** | absent |
-| `keywords` | 0.25 | 0.20 | 0.20 / 0.75 = **0.267** |
-| `genres` | 0.15 | 0.10 | 0.10 / 0.75 = **0.133** |
+| Term | M6 | M7 | **M9 (shipped)** | Renormalised share |
+|---|---|---|---|---|
+| `cosine` | 0.60 | 0.45 | **0.45** | 0.45 / 0.75 = **0.600** |
+| `tags` | — | 0.25 | **removed** | — |
+| `keywords` | 0.25 | 0.20 | **0.20** | 0.20 / 0.75 = **0.267** |
+| `genres` | 0.15 | 0.10 | **0.10** | 0.10 / 0.75 = **0.133** |
+
+**The three surviving weights are deliberately not "reverted to M6's".** The
+measurement licenses removing a term whose coverage cannot support its weight;
+it licenses nothing about keywords against genres, which is the only thing
+0.45/0.20/0.10 and M6's 0.60/0.25/0.15 differ on once `_blend` renormalises
+(0.600/0.267/0.133 against 0.600/0.250/0.150). Leaving them where M7 put them
+means the removal changes **no score at all** on the ~97.5% of pairs that
+carried no genome — those pairs were already scored under this exact
+denominator — so the change is confined to the 2.4746% the evidence is about.
+Restoring M6's numbers would be an unevidenced second decision moving every
+score in the table.
+
+**The removal costs a full rebuild and nothing else.** `blend_fingerprint()`
+moves from `78900b2bd89a649774d7fd3efe082621` to
+`78f3ecd20e654c0f6aa4bdf646ec099b`, so every stored `title_neighbors` row reads
+as stale until `usher similar --rebuild` runs — a **query**, answered by
+`SimilarityService.stale_neighbors()`, not an inference
+([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)). At
+130,647 embedded titles that rebuild is a full quadratic walk measured at
+**85.4 minutes**, so it is a scheduled operation. ✅ **It was run on
+2026-08-12 by M9's H7** — 88.3 minutes over the whole embedded population,
+`stale_neighbors()` **0**, and **3,266,175 rows** (130,647 seeds × 25) every
+one of them stamped `78f3ecd20e654c0f6aa4bdf646ec099b`. The row count is
+recorded beside the verdict because *"no stale rows"* is satisfied by an empty
+table, and an empty table is exactly what this one was until that run.
 
 ⏳ **Cast/crew Jaccard and collection membership are still not terms, and M7 is
 the milestone where the distinction between "the data landed" and "the term
 landed" has to be said out loud.** `people`, `credits` and `collections` are
 real tables as of M7 ([02](02-data-model.md)), so the *data* both signals need
-now exists — and `SimilarityService._WEIGHTS` has four keys, not six.
+now exists — and `SimilarityService._WEIGHTS` has **three** keys, not six.
 `NeighborSeed`/`NeighborCandidate` carry no cast, crew or collection field, so
 adding either is the same port-plus-two-fakes-plus-a-surface-pin change the tag
 genome turned out to be, **plus** a full `usher similar --rebuild` because
-adding a term re-weights the other four and moves every stored score. It is
+adding a term re-weights the others and moves every stored score. It is
 therefore a change with a fingerprint bump attached rather than a small one,
 and it is **unassigned** — recorded here at the moment its blocker was removed,
-so nobody later reads the four-signal blend as the four signals this section
-specifies.
+so nobody later reads the shipped blend as the four signals this section
+specifies. ⚠️ **And whichever signal arrives next, it must not be called
+`tags`.** That key is free as of S7 and it named the *tag genome*; M9's S6
+evaluated MovieLens **user tags** under the same word and refused it at 6.0821%
+(ADR-0035, which S6 owns). A stored score records only a `blend_fingerprint`,
+so a later reader finding
+`tags` back in `_WEIGHTS` could not tell which of the two signals a row
+contains. The genome, if it returns, is `genome`; a user-tag term is
+`user_tags`.
 
-**The three carried-over weights sum to 0.75, and that is the whole argument
-for these numbers rather than round ones.** `_blend` renormalises over the
-signals that are *present*, so on a pair with no genome — the overwhelming
-majority of them — the cosine share is **exactly 0.600, unchanged to three
-decimal places**, while keywords and genres move by +0.0167 and −0.0167. Such
-a pair's score therefore moves by `0.0167 × (keywords − genres)`, **bounded by
-±0.0167**, and two of them can only swap if they were already within 0.033 of
-each other. That is an arithmetic bound with a real residual, not a claim that
-the existing ordering is preserved.
+**The three surviving weights sum to 0.75, and that is the whole argument for
+these numbers rather than round ones.** `_blend` renormalises over the signals
+that are *present*, so the cosine share is **exactly 0.600, unchanged to three
+decimal places** against M6, while keywords and genres sit +0.0167 and −0.0167
+off it. A pair's score therefore differs from M6's by
+`0.0167 × (keywords − genres)`, **bounded by ±0.0167**, and two of them can
+only swap if they were already within 0.033 of each other. That is an
+arithmetic bound with a real residual, not a claim that the existing ordering
+is preserved. **It covered "the pairs with no genome" from M7 until S7 and now
+covers all of them**, which is exactly the shape of the removal.
 
-**A pair where only one side has a genome vector scores `None`, never 0.0**
+**A pair where only one side has a genome vector carries `None`, never 0.0**
 ([ADR-0014](decisions/0014-absence-is-not-zero.md)). This is the first site
 where `0.0` is not merely uninformative but *unreachable by real data*: every
 genome component is positive, so the true cosine of any real pair is well above
 zero — measured floor **0.2556** over all 268,157,000 ordered off-diagonal
-pairs, mean 0.6101, sd 0.0913.
+pairs, mean 0.6101, sd 0.0913. **Since S7 the rule defends the measurement
+rather than the blend**: nothing scores this value, and its only consumer is
+`NeighborRebuild.pairs_with_tags`, where a `0.0` would report a barely-covered
+catalog as fully covered — making a dead signal look live, which is the wrong
+direction for the number a later milestone would re-open the decision on.
 
-**The genome term's spread was measured before its weight was chosen, and its
-relevance was not.** The saturation bar was written down first — saturated if
-mean ≥ 0.70, or p1 ≥ 0.50, or sd < 0.05, or the top-10 neighbour gap < 0.15 —
-and no clause fired, so the vectors ship raw rather than mean-centred. That
-says the term is not inert. It says nothing about whether 0.25 beats 0.20: the
-weights remain **chosen with an argument, not measured**, because nothing in
-this project measures similarity relevance and M7 does not change that. The two
-claims are kept apart deliberately.
+**The genome term's spread was measured before its weight was chosen, its
+coverage was measured twice, and its relevance was never measured at all.** The
+saturation bar was written down first — saturated if mean ≥ 0.70, or p1 ≥ 0.50,
+or sd < 0.05, or the top-10 neighbour gap < 0.15 — and no clause fired, so the
+vectors ship raw rather than mean-centred. That says the term is **not inert**,
+and it stays true after the removal: what a pair rate settles is how *often*
+the term fires, not how good it is when it does. Nothing here says 0.20 beats
+0.25 — the surviving weights remain **chosen with an argument, not measured**,
+because nothing in this project measures similarity relevance. The three claims
+are kept apart deliberately.
 
 They stay constants rather than settings, because changing one changes what
 "similar" means and every stored row was written under the old meaning — which
@@ -564,6 +767,32 @@ thing would be worse than an honest gap. Nothing in M6 re-runs the rebuild —
 `usher similar --rebuild` is an operator's command or a cron entry — so PRD 06's
 "TTL: hours" is a statement about how long a consumer may cache what it read,
 not a promise about this table's age.
+
+**There is no fifth term over MovieLens *user tags*, and that is a measured
+refusal rather than an omission —
+[ADR-0035](decisions/0035-the-tags-similarity-term.md).** `ml-latest/tags.csv`
+(21,274,899 rows / 85 MB) reaches **49,055** titles in this catalog against the
+genome's 15,565, which is the reason a term over it looked worth building. M9
+ran the question as a gate with one pre-registered threshold and walked the real
+candidate pool once — **130,647 seeds, 13,064,700 candidate pairs, 2026-08-12** —
+measuring the rate that decides a weight, the fraction of pairs carrying the
+signal on **both** sides: **6.0821%** (794,606 pairs) at `>= 5` tags, **3.0999%**
+at `>= 10`, against the **10%** floor a 0.25 weight assumes. Two things follow
+and the second is the one that would otherwise be re-litigated. `>= 10` is
+*lower* than `>= 5` **by construction** — those pairs are a strict subset over
+an identical denominator — so a stricter threshold can never buy the rate. And
+the rate is not the binding reason: on the marginal population the **median pool
+pair shares no tag at all and 62.3% share none**, so a `_jaccard` that answers
+`None` only for an *empty* set would hand `_blend` a hard `0.0` — a confident
+negative — for most of the pairs the term fired on. **Presence with no overlap
+is evidence over a closed ~19-value genre vocabulary and is the default over an
+open user-tag one**, which is the same vocabulary-size argument this section
+already makes for keeping genres and keywords apart, landing the other way. The
+follow-up ADR-0035 names is a measurement (the rate at `>= 1` tag, the empty-
+overlap share, and whether a different instrument over the same rows puts the
+median firing pair above zero), not a build — and it explicitly is **not** "wait
+for more enrichment": the archive is frozen at 2023-07-20 and movies-only, so
+every further enrichment pass grows the denominator and moves coverage down.
 
 ### Mood queries
 
@@ -691,44 +920,107 @@ Retrieval is separated from ranking, deliberately:
 Owned titles are boosted but not exclusive: searching should surface things you
 don't have, clearly marked, because that feeds discovery.
 
-**Three of those six terms ship in M6 and three are M7's, each for a named
-reason** (`services/search.py`). Relevance, popularity and owned-vs-not have
-data behind them today. **Watch state** needs a user and `SearchRequest`
-carries none — `SearchFilters` is a closed vocabulary that deliberately has no
-user field, and M7 is the first milestone whose calls hold a user identity by
-construction. **Recency** has data (`year` across the catalog, `release_date`
-on the enriched tier) and no way to choose a decay constant: nothing in M6
-measures ranking, so a half-life picked here would read like a measurement and
-be a guess. There is also a double-counting argument, recorded as an argument
-rather than a measurement — TMDb's `popularity` is a rolling engagement figure
-and already leans recent. **Taste-centroid proximity** has no centroid; PRD 06
-owns the taste model and nothing computes one.
+**All six terms ship as of M9** (`services/search.py`). Relevance, popularity
+and owned-vs-not shipped in M6; **watch state, recency and taste-centroid
+proximity landed in M9**, each with the seam it was waiting on now filled.
 
-⏳ **M7 built the centroid and wired none of the three into ranking, and
-saying so is the point of this paragraph.** `TasteService` and `user_taste`
-exist ([06](06-rows-and-recommendations.md)), so *"nothing computes one"* has
-stopped being true — but wiring it into ranking is a `SearchService` change no
-M7 task makes, and leaving the sentence above unqualified would claim a
-capability that does not exist. What actually changed, term by term:
+**`SearchService.search` takes a household** (`user_id`), which is the seam
+watch state was blocked on for three milestones. It is a keyword on the method
+and **`SearchFilters` remains a closed vocabulary with no user field**: every
+field of `SearchFilters` is a flag on `usher search` and a query parameter on
+`GET /search`, so a user there is a household any caller could name. Both
+shipped callers resolve one before they search — the route through
+`DefaultUserIdDep`, the CLI through `ensure_default_user` — so until PRD 01's
+authentication seam is filled the household is the singleton default user and
+no request is unpersonalised. Nothing on the wire reports which household
+answered, deliberately: unlike a `fused` request degraded to full text, there
+is no reachable alternative for a field to distinguish.
 
-- **Taste-centroid proximity** — the centroid *table* exists and **is not a
-  ranking term**; in fact `TasteService.centroid` has no caller anywhere in
-  `src/` as of M7, so nothing writes `user_taste` either. Two things stand in
-  the way beyond the wiring: `SearchRequest` carries no user, and on the
-  request path the centroid is structurally `None`
-  anyway, because it needs an embedder and the route deliberately holds none
-  ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)).
-  So a naive wiring would ship a term that is inert on the default deployment
-  — the failure [06](06-rows-and-recommendations.md) already corrected once,
-  for `GenreAffinityProvider`. **Owner: M9**, with the user identity the
-  authentication seam owes.
-- **Watch state** — still no user on `SearchRequest`. M7's calls hold a user
-  identity, but they are *row* calls, not search calls; nothing narrowed the
-  gap. **Owner: M9.**
-- **Recency** — unchanged, and still blocked on the same thing: nothing
-  measures ranking, so there is no evidence to pick a decay constant from.
-  M9's `search_queries` ([10](10-telemetry-and-dashboards.md)) is what would
-  supply it. **Owner: M9.**
+**Watch state is a small boost, never a demotion, and the direction is a
+product judgement this PRD had left open.** A search is overwhelmingly a
+re-find intent, so demoting what the household has finished buries the film
+they just typed the name of; `RediscoverProvider` already treats a finished
+title as re-offerable. It reads `WatchStateRepository.played_title_ids`, which
+rolls a watched episode up to its series, so a television household is not
+answered films-only. The opposite reading is defensible for *discovery* and
+renders identically, which is why the choice is written down at the constant.
+
+🔶 **Recency's constant is chosen with an argument, not measured.** The term is
+`1 / (1 + age / 25 years)` over `release_date` where the enriched tier has one
+and `year` otherwise, **absent and never zero when both are null**
+([ADR-0014](decisions/0014-absence-is-not-zero.md), in a fifth place). Twenty-
+five years is where the curve should be steepest for a distinction a viewer
+would recognise; nothing measures it. **The double-counting caveat stands
+unresolved beside it** — TMDb's `popularity` is a rolling engagement figure
+that already leans recent, so the two terms are not independent — and what
+would settle both is `search_queries`
+([10](10-telemetry-and-dashboards.md)), which has no rows until after M9
+ships. The term ships anyway rather than leaving "three ranking terms" at two,
+and it is bounded so a wrong constant moves a score by at most its weight.
+
+**The weights are constrained rather than chosen freely, and the constraint is
+stateable.** The non-relevance weights sum **strictly** below half the
+relevance weight, so no combination of ownership, popularity, watch state,
+recency and taste can displace an exact match — 0.70 against 0.35 + 0.15 +
+0.15 + 0.02 + 0.02 + 0.005. The three M6 weights keep their exact ratio, so a
+hit with no popularity, no year and no household scores what M6 scored it; the
+blend renormalises over present signals, so adding a term moves only the rows
+that term is present on.
+
+🔴 **"Strictly" is a measurement, not a stylistic tightening.** The headroom
+left after the five M9 weights is 0.35 − 0.34 = 0.01, and **0.01 itself is not
+available**: taken exactly, the challenger's numerator `0.35 + 0.15 + 0.15 +
+0.02 + 0.02 + 0.01` is **0.7000000000000001** in IEEE-754 doubles — one ulp
+*above* 0.70 — so the rank-1 hit with every signal maximally for it sorts
+first and the property above fails. Not a tie broken by id: an inversion, and
+one only a case built at that exact corner can see. The usable interval is the
+open `(0, 0.01)`; the taste weight is its midpoint. Pinned by
+`test_no_combination_of_the_other_five_can_displace_an_exact_match`, which
+asserts the arithmetic rather than an ordering — a re-weighting that reorders
+nothing changes every score on the wire and is invisible to any number of
+ordering cases (M9 F4 measured this: `owned` 0.15 → 0.10 left all ten green).
+
+**Taste-centroid proximity is a term, and it is *read* rather than computed.**
+`TasteService.centroid` needs an embedder and a request holds none
+([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)),
+so routing the term through it would have shipped a weight that is inert on
+the shipped default — the failure [06](06-rows-and-recommendations.md) already
+corrected once, for `GenreAffinityProvider`. `TasteRepository.latest(user_id)`
+answers the household's stored `user_taste` row **whatever model wrote it**,
+read-only and with no staleness predicate: the predicate answers *"should I
+recompute?"*, which a process with no model cannot act on, and inheriting it
+would withhold the term from exactly the households that watch things.
+`centroid()` is untouched — it still refuses without an embedder and still
+writes its refusals — and read-only is what stops a request minting a
+`user_taste` row under a model it does not have.
+
+**The stored row's `model_name` is the filter on the other side.**
+`TitleEmbeddingRepository.list_for_titles` gained a keyword-only, optional
+`model_name`; the ranking path passes the centroid's, and `TasteService.
+centroid` and `CandidatePoolService` keep the unscoped call they argue for.
+Comparing a centroid computed under one checkpoint against vectors stored
+under another is the ST-vs-fastembed divergence — max pairwise-similarity delta
+1.41e-03, 6x the halfvec quantisation error — arriving as a confident cosine.
+
+🔶 **The term is `max(0, cos)` clamped into [0, 1], and `None` — never 0.0 —
+when there is no centroid or no vector under that model**
+([ADR-0014](decisions/0014-absence-is-not-zero.md), in a sixth place). A zero
+cosine is a real orthogonality claim about two vectors; "no worker has run" and
+"the backfill has not reached this title" are not claims about a title at all,
+and the absent case is the population rather than a corner — that sentence read
+*"`title_embeddings` is currently empty on every catalog this project holds"*
+until M9's S3/S4 filled the priority tier, and it is still the population
+afterwards: **130,647 of 1,272,367 titles (10.3%)** carry a vector, so nine
+titles in ten reach this term with nothing under that model. **What 0.005 can
+move is small and is stated rather than implied**: it cannot overturn `owned`
+or `played` at any cosine gap, and it overturns one step of relevance only from
+about rank 11 downward even at an impossible cosine gap of 1.0. Where it
+decides is where the other five have already tied, which equal index scores
+(one dense rank) make ordinary. **The magnitude was set by a full weight table,
+not by a measurement of what taste proximity is worth** — the alternatives were
+to take weight from popularity or owned, or to raise relevance's share, and
+both end the M6 byte-for-byte claim above to buy a larger weight for the
+weakest-evidenced term in the set.
 
 **Relevance enters the blend as a rank, never as a raw score.** A `ts_rank` is
 around 0.06, an RRF score around 0.016–0.033 and a cosine is in [-1, 1];
@@ -836,6 +1128,72 @@ inside a keystroke — with the trigram + `levenshtein_less_equal` path
 **debounced behind it**. They are complements: the btree has no typo
 tolerance at all (1.9%) and the trigram path cannot meet a keystroke budget
 at any setting.
+
+✅ **Tier 1 is built.** `PostgresPrefixSuggestIndex`
+(`adapters/search/prefix.py`) is the probe: `lower(name) LIKE 'typed%'` over
+`titles` **and** `title_search_names` as one `UNION`, so a person's name
+reaches their films from the first keystroke, ordered by the same three keys
+tier 2 uses under its distance (`popularity DESC NULLS LAST, vote_count DESC
+NULLS LAST, id ASC`) so the box does not reshuffle when the debounced tier
+arrives behind it. It reads the two `text_pattern_ops` indexes `m09a` ships and
+**writes nothing**, so ADR-0021's dual-write cost is still unpaid by a second
+implementation of that port.
+
+✅ **The shipped statement is now measured, and the union stays.** B3 ran it on
+2026-08-12 against the gate's own 1,271,138-title catalog with a
+`title_search_names` **person** arm of 10,896,525 rows over 1,191,768 titles
+(the `alias` arm is still empty — T7's), on a box verified quiet, against a bar
+committed before the run. Over the gate's 2,993 typo strings — the only
+workload comparable to the 0.6 ms figure above — the union answers at **p95
+1.465 ms** against a 10 ms bar, and `titles` alone at **0.947 ms**, reproducing
+the probe figure almost exactly. So the union does **not** cost tier 1 its
+budget, and the narrowing B3 was authorised to make is **not** made.
+
+🔶 **Tier 1 is a keystroke path from seven characters up and nowhere below
+it**, and that is the finding B5 has to design around rather than inherit.
+p95 by prefix length, union against `titles` alone:
+
+| prefix length | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| `titles` only | **291 ms** | 51 ms | 15 ms | 5 ms | 19 ms | 14 ms | 2.0 ms | 2.3 ms |
+| union | **2,707 ms** | 809 ms | 303 ms | 112 ms | 100 ms | 86 ms | 2.3 ms | 2.6 ms |
+
+Both arms miss a 10 ms keystroke budget below seven characters, so **narrowing
+the union would not have bought a keystroke path** — it would have moved a
+291 ms first keystroke to where a 2,707 ms one had been. **The mechanism is not
+the sort**, which is a top-N heapsort in 26 kB: it is the `UNION`'s
+de-duplication spilling 47 MB to disk and a bitmap heap scan going lossy
+(5,664,971 rows rechecked to keep 1,069,834). An *ordered* inner per-arm cap is
+therefore much cheaper than it was priced at, because it would bound the
+de-duplication's input rather than pay a sort that is already free — **not
+made here**, because B3 measures and does not tune. Coverage is the other
+lever and the curve is steep: at the 10,000-title enriched tier the same
+one-character probe is **489 ms**, and by four characters **5.5 ms**.
+
+✅ **Tier 2 is on the wire beside it, and the minimum prefix length is
+decided.** `GET /search/suggest?q=&tier=prefix|fuzzy&limit=` is one route with
+two separately-askable tiers, defaulting to `prefix`, echoing the tier that
+answered — and **declining to run tier 1 below a four-character prefix**, where
+the answer is `200` with no results, no query issued, and a
+`min_query_length` on every response so an empty box is legible and a client
+can apply the same rule without sending the request at all.
+
+**Four is derived from the curve above rather than chosen**: it is the shortest
+prefix at which tier 1's p95 is below tier 2's (112 ms against 211 ms; at three
+characters tier 1 is 303 ms and therefore *slower* than the tier it exists to be
+cheaper than). It is deliberately **not** the 10 ms keystroke bar, which is met
+only from seven characters up and which would leave the keystroke tier
+answering nothing for most of a typed word — abandoning the short one-word names
+that made the gate fail. Tier 2 is bounded at one character only, because
+nobody has measured *it* per prefix length and its defence is the client's
+debounce; **the server debounces nothing**. `usher suggest --tier` defaults to
+`fuzzy` and has no minimum at all, because a command is typed once.
+
+The whole argument, the alternatives — two routes with different cache TTLs, an
+ordered inner per-arm cap (now known to be much cheaper than it was priced at,
+and the first thing a follow-up should measure), a minimum of seven — and the
+two bars B3 failed with their attributions are in
+[ADR-0031](decisions/0031-the-two-tier-suggest.md).
 
 **The gate as this section defined it measured the wrong half, and that
 correction stands.** A synthetic dry run over 604 cases first showed it, and

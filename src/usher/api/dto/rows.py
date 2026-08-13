@@ -68,3 +68,65 @@ class RegenerateResponse(BaseModel):
 
     kind: JobKind
     key: str
+
+
+class RowProviderResponse(BaseModel):
+    """One registered row provider, and whether it composes (PRD 07, E2).
+
+    **Two fields, and the list this appears in is the *registry* left-joined
+    onto `row_provider_settings`** -- so there is an entry for every provider
+    whether or not anybody has ever touched it, and `enabled` is `true` for the
+    ones nobody has. That table ships empty and is never seeded (PRD 09 item 9),
+    so on a virgin database this endpoint answers ten entries all reading
+    `true`, which is the same thing *"providers are enabled by registration in
+    code"* has always meant -- now visible, and now changeable.
+
+    **`slug` is `RowProvider.slug_prefix` and never the class name.** It is the
+    identifier that already lives outside the codebase: `usher home`'s leftmost
+    column and `usher.row.build.duration`'s `provider` label both carry it, and
+    `ports/rows.py` calls it *"declared rather than derived"* for exactly this
+    reason. A class rename must not silently re-enable a provider somebody
+    turned off.
+
+    **`updated_at` is not here**, though the column exists. It records when an
+    operator last touched the row, and two thirds of this list has no row at
+    all -- so the field would be `null` for every provider nobody has
+    configured, which is indistinguishable from a provider whose row exists and
+    whose timestamp failed to write. A column that is absent for the common
+    case is not a field, it is a second endpoint's worth of question.
+
+    **No `title`, no `description` and no `family`.** A provider's human name
+    is `Row.title`, which is a property of the *rows it builds* rather than of
+    the provider -- `because-you-watched-<seed>` mints one per seed -- and
+    `family` is the key the composer's diversity constraints are stated in,
+    which `api/dto/home.py` already declines to publish for the same reason.
+    """
+
+    slug: str
+    enabled: bool
+
+
+class RowProviderUpdate(BaseModel):
+    """The whole body of `PUT /admin/rows/providers/{slug}`.
+
+    **One field, because the slug is the path and everything else about a
+    provider is code.** There is no `reason`, no `until` and no `user_id`: a
+    toggle is deployment-wide (there is one household, PRD 01's authentication
+    seam) and a scheduled re-enable would be a scheduler this milestone
+    deliberately does not build.
+
+    **`PUT {"enabled": bool}` rather than `POST .../enable` + `.../disable`.**
+    PRD 07's Admin table settles neither -- it had no row for either until this
+    commit added one -- and the pair was declined because two routes cannot
+    express *"set it to what I am looking at"*: an admin screen holds a
+    checkbox, and a client that has to choose a verb from the value it is
+    sending has re-implemented this DTO badly. It is also idempotent in the
+    HTTP sense, which the pair is only by accident.
+
+    Strict `bool`, so `"maybe"` is a 422 rather than a coerced `True`.
+    pydantic v2 refuses a non-boolean string here by default; the case that
+    says so is in `tests/unit/test_api_rows.py`, because "the framework does
+    this" is a claim about a version.
+    """
+
+    enabled: bool

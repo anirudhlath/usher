@@ -105,6 +105,119 @@ class ImdbRating:
 
 
 @dataclass(frozen=True, slots=True)
+class ImdbAka:
+    """One retained row of IMDb's `title.akas.tsv.gz`: a localised alias.
+
+    **Five fields for a five-column table, and the two that are not obvious
+    are the two that justify the table's shape.** `region` and `language` are
+    carried rather than dropped because `title_search_names` has columns for
+    them, and without them a French and a Brazilian alias of one film are
+    indistinguishable rows. Both are independently optional and NULL means
+    "not specific to a region", which is a different fact from any code:
+    measured over the whole pinned `title.akas.tsv.gz`
+    (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`, 58,906,368 data rows),
+    **12,748,984 rows carry no `region` and 19,243,152 carry no `language`**,
+    and the two sets are not the same rows.
+
+    **`ordering` is IMDb's own 1-based per-title sequence, carried
+    unconverted**, and the DTO says so because the sibling parser this task
+    did not build would have converted one: `title.principals`' `ordering`
+    was to be re-based onto `Credit.billing_order`, which is 0-based. Nothing
+    downstream of *this* record is 0-based -- `title_search_names` has no rank
+    column at all -- so the value is IMDb's, unchanged, and the first row of a
+    title is 1 (measured min 1, max 300). It is carried because a writer
+    deduplicating on `(title_id, casefold(name))` has to choose *which* of two
+    rows differing only in `region`/`language` to keep, and this is the only
+    per-title ordering the dump supplies.
+
+    **There is no `is_original_title` field, deliberately.** The parser drops
+    the rows IMDb flags with `isOriginalTitle = 1` -- see
+    `usher.adapters.bulk.imdb.parse_akas_row` for the measurement -- so a flag
+    carried here would be `False` on every instance that can exist. Nor are
+    `types` and `attributes` carried: 23 and 185 distinct values respectively
+    in that snapshot, no column to put either in, and no reader.
+    """
+
+    imdb_id: str
+    ordering: int
+    name: str
+    region: str | None
+    language: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ImdbName:
+    """One usable row of IMDb's `name.basics.tsv.gz`: a person and their name.
+
+    **Two fields out of six, and the four that are dropped are dropped
+    because there is nowhere to put them.** M9's T3 measured the `people` +
+    `credits` entity design at **2,701,697,024 B (2.702 GB) against a 2.0 GB
+    ceiling** and it was refused, so no `people` row is bulk-loaded from IMDb
+    at all -- `birthYear`, `deathYear`, `primaryProfession` and
+    `knownForTitles` have no column to land in. What survives the refusal is
+    the *name text*, which is the only part of a person weight class B of
+    `search_document` ever indexed.
+
+    `imdb_id` is an **nconst**, not a tconst. Every other record on this port
+    keys on a title, so the field means something different here and the
+    sibling `ImdbPrincipal` carries both -- which is why that one spells the
+    person's id `person_imdb_id` rather than repeating this name.
+
+    Measured over the pinned `name.basics.tsv.gz`
+    (`"a3b9681921c92e5917182d1ecc05bd2d-37"`, 15,563,615 data rows,
+    2026-08-11): **89 rows carry no `primaryName`** and the parser drops
+    them, the longest name is **105** characters, and **138 names contain a
+    literal `"` of which 7 open with one.**
+    """
+
+    imdb_id: str
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImdbPrincipal:
+    """One row of IMDb's `title.principals.tsv.gz`: a person on a title.
+
+    **`category`, `job` and `characters` are read and dropped**, the way
+    `ImdbAka` reads and drops `types` and `attributes`: nothing downstream of
+    this record has a column for a role, because there is no `credits` row.
+    The 13 categories are measured in `usher.adapters.bulk.imdb` and none is
+    filtered on.
+
+    `ordering` is IMDb's own 1-based per-title rank, carried unconverted --
+    there is no `billing_order` to re-base it onto. It is the only ranking the
+    dump supplies and it is what orders `titles.credit_names`, whose order
+    *is* the ranking. Measured over the pinned `title.principals.tsv.gz`
+    (`"08ce60665889cb40c7371e1eab44a1f2-93"`, 101,151,422 data rows,
+    2026-08-11): present and integral on every row, min 1, max 75, and
+    ascending within every one of the 11,491,032 titles.
+    """
+
+    imdb_id: str
+    ordering: int
+    person_imdb_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImdbCreditNames:
+    """Every name IMDb credits on one title, resolved and in rank order.
+
+    **The join of `title.principals` and `name.basics`, done in the adapter
+    because there is nowhere else to do it.** With no `people` table the
+    right-hand side of that join has no home in the database, so
+    `IMDbCreditNamesDataset` resolves it against an in-memory index and this
+    record is what crosses the port -- already ordered, already deduplicated,
+    and never empty. A title whose principals all name people `name.basics`
+    does not hold yields no record at all rather than an empty one, because
+    the writer *sets* `titles.credit_names` and an empty tuple would blank an
+    array some other source filled.
+    """
+
+    imdb_id: str
+    names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class TmdbId:
     """One line of TMDb's daily ID export.
 
@@ -243,10 +356,10 @@ class BulkDataset[RowT](ABC):
     """A third-party bulk dataset, streamed as resumable batches.
 
     Implementations: `IMDbTitleDataset`, `IMDbRatingDataset`,
-    `TMDbIdDataset`, `WikidataCrosswalkDataset`, `MovieLensGenomeDataset`
-    (`usher.adapters.bulk`). Port named for the role, implementations for
-    the service — the same split as `SourceAdapter`/`EmbyAdapter`
-    (ADR-0009).
+    `IMDbAkaDataset`, `TMDbIdDataset`, `WikidataCrosswalkDataset`,
+    `MovieLensGenomeDataset` (`usher.adapters.bulk`). Port named for the
+    role, implementations for the service — the same split as
+    `SourceAdapter`/`EmbyAdapter` (ADR-0009).
     """
 
     @property
@@ -262,7 +375,30 @@ class BulkDataset[RowT](ABC):
         """The attribution string this dataset's licence requires a client
         to display (PRD 04's hard rule 4). Never empty — a dataset with no
         attribution requirement returns its own name and source URL, so the
-        API surface has something to serve either way."""
+        API surface has something to serve either way.
+
+        **`GET /meta/attribution` does not call this property.** Its scan
+        (`tests/unit/test_api_meta.py`) is a static `ast` walk over
+        module-level `*_ATTRIBUTION` assignments in `usher.adapters` — it
+        never imports or instantiates a `BulkDataset`, because some
+        implementations want an `httpx.AsyncClient` at construction and a
+        route-serving scan has no business opening one. That means the scan
+        is structurally blind to exactly the case this docstring names: "a
+        dataset with no attribution requirement returns its own name and
+        source URL" is a *computed* expression, not a static assignment, so
+        it produces no match and the scan is silent rather than loud about
+        it. A class attribute (`attribution = "..."` in the class body,
+        never a module-level name) and a container
+        (`SOURCE_ATTRIBUTIONS = {...}`, which fails the `_ATTRIBUTION`
+        suffix check before `ast.literal_eval` would even run) are the same
+        miss. **A concrete override that wants to be seen must be a bare
+        `return <NAME>_ATTRIBUTION`, referencing a module-level constant** —
+        every current implementation (`imdb.py`, `movielens.py`,
+        `tmdb_ids.py`, `wikidata.py`) already has that shape, and
+        `test_every_bulkdataset_attribution_property_is_a_bare_scanned_constant`
+        is the canary: it fails if a future override stops matching it,
+        rather than `GET /meta/attribution` silently omitting a required
+        string."""
 
     @abstractmethod
     async def revision(self) -> str:

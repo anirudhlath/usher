@@ -1,0 +1,56 @@
+"""PRD 07's page envelope: the items, and where to resume.
+
+Two fields, and the argument for this file is mostly about the third one that
+is not here.
+
+**No `total`.** A count over a filtered 1.3M-row catalog is a sequential scan,
+paid on *every* page, for a number a client renders once and a keyset page
+cannot use for anything -- there is no page N to jump to. PRD 07 rules out
+offset paging on measured grounds (`list_unmatched`'s `OFFSET` is 43.7 ms at
+offset 0 and 388.9 ms at offset 1,126,574), and a `total` is the same cost
+arriving through a different clause. `/browse`'s facet counts are a different
+question, over a different aggregate, and are group B's.
+
+**`next_cursor` is `str | None` and is always present**, which is deliberately
+*not* the convention the rest of `api/dto/` keeps. Elsewhere an empty value is
+an absent key -- `ProblemResponse.errors` is dropped when there is nothing to
+say, and `dto/title.py` omits `cast`, `crew` and `images` rather than sending
+them empty. (That read *"four whole sections"* until 2026-08-11, when the last
+of the four M5 left absent landed: two became keys on that response and two
+became routes of their own, so three is the count and the fourth is not a key
+at all.) Here a client takes both arms on every listing it renders, so "the key
+is missing" and "there is no next page" would be the same bytes on the wire and
+a client would learn the difference by guessing.
+
+**`RowCardResponse.artwork` is the same call as this one and used to be the
+opposite**, which is worth naming here because this paragraph cited it as the
+precedent for absence. M7 shipped no artwork field at all, on the argument that
+an always-null one is a branch that never takes its other arm -- and the day M9
+filled the table the field arrived nullable-and-always-present, because both
+arms are now reachable and most cards on an underived catalog take the null
+one. The rule the two agree on is the rule: **a key is absent when its value
+could never be anything else, and present-and-null when a client has to
+branch.**
+
+**Generic over the item type**, so `/openapi.json` describes `TitleSummary[]`
+rather than `{"type": "object"}` -- the same argument `api/dto/health.py` made
+for typing the health responses, and worth restating because the untyped
+spelling costs nothing at the server and costs a generated client every field.
+"""
+
+from pydantic import BaseModel
+
+
+class Page[ItemT](BaseModel):
+    """One page of a keyset-paged listing.
+
+    `next_cursor` is opaque: it is `usher.api.cursor`'s artefact, a client
+    hands it back unread, and nothing about its contents is part of this
+    contract. See ADR-0034.
+    """
+
+    items: list[ItemT]
+    next_cursor: str | None = None
+
+
+__all__ = ["Page"]

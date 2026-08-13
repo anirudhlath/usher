@@ -253,6 +253,55 @@ async def test_a_transient_failure_is_not_re_claimable_by_a_second_worker_either
     assert run_after is not None, "a failed job with no backoff is a hot loop"
 
 
+async def test_the_newest_kind_stores_claims_and_completes_with_no_migration_behind_it(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`JobKind.WATCH_WRITEBACK` shipped without a migration, and this is that
+    claim measured rather than argued.
+
+    `db/models/jobs.py` declares `kind` through `enum_column(JobKind,
+    length=32)`, whose `native_enum=False` compiles to a plain `VARCHAR(32)`
+    and whose `create_constraint` defaults to `False` in SQLAlchemy 2.0 -- so
+    the database holds no membership CHECK and no native enum type, and
+    Pydantic owns membership. Nothing in the unit suite can see any of that:
+    `FakeJobQueue` is a dict keyed by `(kind, key)` and would accept a member
+    Postgres refuses, whichever way the column had really been declared.
+
+    Three separate things could each have needed a migration and none did:
+    the value has to be **storable** (a CHECK would refuse it), **round-trip**
+    (a native enum type would need an `ALTER TYPE` and the string would come
+    back as something else), and be **claimable** by
+    `kind = ANY(:kinds)`. So the assertions are the stored spelling read back
+    as raw SQL, the claim, and the deletion -- `watch_writeback` is fifteen
+    characters against a bound of thirty-two, which is the other thing a
+    silent truncation would break.
+    """
+    async with factory() as writer:
+        await _queue(writer).enqueue(
+            [JobRequest(kind=JobKind.WATCH_WRITEBACK, key="emby-1", priority=JobPriority.VISIBLE)]
+        )
+        await writer.commit()
+
+    async with factory() as reader:
+        stored = (
+            await reader.execute(text("SELECT kind FROM jobs WHERE key = 'emby-1'"))
+        ).scalar_one()
+    assert stored == JobKind.WATCH_WRITEBACK.value == "watch_writeback"
+
+    handled: list[str] = []
+    async with factory() as session:
+        worker = JobWorker(queue=_queue(session), commit=session.commit)
+        worker.register(JobKind.WATCH_WRITEBACK, _recorder(handled))
+        assert await asyncio.wait_for(worker.run_once(), CLAIM_TIMEOUT) == 1
+
+    assert handled == ["emby-1"]
+    async with factory() as after:
+        remaining = (
+            await after.execute(text("SELECT count(*) FROM jobs WHERE key = 'emby-1'"))
+        ).scalar_one()
+    assert remaining == 0, "a completed write-back kept its row"
+
+
 def _raising(exc: BaseException) -> Callable[[Job], Awaitable[None]]:
     async def _handle(job: Job) -> None:
         raise exc

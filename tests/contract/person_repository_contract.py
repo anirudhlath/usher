@@ -22,6 +22,7 @@ import uuid
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 
+from usher.domain.ids import new_id
 from usher.domain.people import CreditKind, Person
 from usher.ports.repository import PersonRepository
 
@@ -410,6 +411,37 @@ class PersonRepositoryContract:
         ranked = await repository.list_recurring_for_user(user_id)
         assert [one.person_id for one in ranked] == [recurring]
         assert ranked[0].watched_title_count == 4
+
+    async def test_get_returns_the_person_and_none_for_an_unknown_id(
+        self, repository: PersonRepository
+    ) -> None:
+        """`GET /people/{id}` is the caller M7 said would come, and this is
+        the read it needs.
+
+        **Two people seeded, and the assertion is on the value rather than on
+        truthiness.** The wrong implementation this kills is a `get` whose
+        `WHERE` lost its `id` predicate -- `SELECT * FROM people LIMIT 1`, or
+        a fake iterating its own dict and returning the first entry. Both are
+        non-`None`, both are a `Person`, and both render a filmography under
+        somebody else's name. One seeded person cannot tell them apart.
+
+        The `None` half is the other spelling: an implementation that raises
+        for a missing row turns `GET /people/{unknown}` into a 500, and one
+        that mints a placeholder turns it into a 200 about a person the
+        catalog does not hold.
+        """
+        await repository.upsert_many(
+            [person(93_000_070, "The One Asked For"), person(93_000_071, "The Other One")]
+        )
+        ids = await repository.resolve_tmdb_ids([93_000_070, 93_000_071])
+        wanted, other = ids[93_000_070], ids[93_000_071]
+
+        found = await repository.get(wanted)
+        assert found is not None
+        assert (found.id, found.name) == (wanted, "The One Asked For")
+        assert found.tmdb_id == 93_000_070
+        assert (await repository.get(other)) is not None
+        assert (await repository.get(new_id())) is None
 
     async def test_resolve_omits_ids_it_does_not_have(self, repository: PersonRepository) -> None:
         """Absent means "no such person", never "not asked".

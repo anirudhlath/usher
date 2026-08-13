@@ -36,9 +36,9 @@ be added if a client turns out to need flexible field selection.
 | Endpoint | Returns |
 |---|---|
 | `GET /home` | Ordered, hydrated rows with reasons and display hints |
-| `GET /search?q=&semantic=&limit=` | Unified results across catalog and library |
-| `GET /search/suggest?q=` | Type-ahead — the cheap narrow path from [05](05-search-and-similarity.md) |
-| `GET /browse?genre=&year=&sort=&owned=&cursor=` | Faceted paging with facet counts |
+| `GET /search?q=&mode=&limit=` | Unified results across catalog and library |
+| `GET /search/suggest?q=&tier=&limit=` | Type-ahead — the two tiers from [05](05-search-and-similarity.md), separately askable ([ADR-0031](decisions/0031-the-two-tier-suggest.md)) |
+| `GET /browse?genre=&year=&sort=&owned=&facets=&cursor=` | Keyset paging; facet counts on request, for a predicated browse only |
 
 > **Built in M7: `GET /home`.** ✅ Ordered, hydrated rows — `slug`, `title`,
 > `reason`, `display_hint` and cards — composed server-side and rendered in
@@ -58,10 +58,28 @@ be added if a client turns out to need flexible field selection.
 > curated row arrives in the same envelope as the other nine, which is what
 > shipping the family whole was for.
 >
-> **A card carries no artwork**, absent rather than null, for the reason
-> `GET /titles/{id}` carries no `images` key: there is no `Image` table and no
-> `poster_path`, M9 owns the proxy, and an always-null field is a client-side
-> branch that never takes its other arm.
+> ✅ **A card carries `artwork` since M9** — one `images.id`, or `null`. This
+> read *"a card carries no artwork, absent rather than null"* while there was
+> no `Image` table, no `poster_path` and no proxy; M9 built all three, and the
+> refusal named exactly this day as the one it was waiting for. The field is
+> **additive**: a client that shipped against its absence is untouched.
+>
+> **The id and nothing else.** Never a URL — that would bake this deployment's
+> CDN base and [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)'s
+> ladder rung into a screen a client caches — and never a provider path. A
+> client renders it by asking `GET /images/{id}`, which is the one place the
+> base, the rung and the cache headers are decided.
+>
+> **One id, chosen server-side against the row's own `display_hint`**: a poster
+> for `portrait`/`square`, a backdrop for `landscape`/`wide`. A list would be
+> the client re-deciding a question ADR-0006 puts on the server, and it could
+> not decide it anyway — the hint is a property of the *row*, one level above
+> the card. Correspondingly a card is never handed a **logo**, which is why
+> ADR-0032's refusal of `image/svg+xml` needs no discriminator on this surface.
+>
+> **`null` means the catalog holds no image of that kind for the title**, which
+> is the ordinary state of a title nothing has derived yet, and it is the answer
+> for every card on a library that has been synced and never enriched.
 >
 > **`display_hint` is a hint and never a layout** —
 > `portrait | landscape | wide | square`, ADR-0006's only concrete vocabulary,
@@ -82,15 +100,80 @@ be added if a client turns out to need flexible field selection.
 > over `titles.genres`, credits, collections — so
 > [08](08-operations.md)'s "never fails a request
 > local state can answer" is structural here, and there is still no 503 for the
-> RFC 9457 envelope below to describe. The model matters because `create_app`
-> builds one only when a worker runs in the same process; every similarity
-> input this route reads is *precomputed*, which is the same property
-> `usher index` has.
+> RFC 9457 envelope described under Errors below. The model matters
+> because `create_app` builds one only when a worker runs in the same process;
+> every similarity input this route reads is *precomputed*, which is the same
+> property `usher index` has.
 >
-> **Still M9's:** the RFC 9457 envelope, `usher.http.server.duration`,
-> `usher.cache.hits`/`.misses`, HTTP cache headers, and pagination.
+> ✅ **Answers a conditional request.** Every 200 carries an `ETag` — a
+> `sha256` strong tag over the exact serialised bytes, computed once — and
+> `Cache-Control: private, max-age=30`. `private`, never `public`: the screen
+> is composed for one household from a key that carries `user_id`, the same
+> reason `services/rows/cache.py` gives for its own key. `max-age` is
+> `services/home.py`'s own `_SCREEN_TTL`, restated rather than duplicated, so
+> the header and the cache cannot drift apart. A repeat request carrying the
+> returned `ETag` in `If-None-Match` gets back `304` with no body, repeating
+> both headers so the *next* request is conditional again.
+> `usher.api.caching.conditional_response` is the helper — a function the
+> route calls, never a global middleware, because a middleware would have to
+> read `GET /events`'s `StreamingResponse` to completion to hash it.
+> `GET /titles/{id}` does not adopt it: opening an unenriched title promotes
+> its `enrich` job, and a conditional short-circuit decided ahead of that
+> write would silently stop the promotion for exactly the clients that
+> already hold the title.
+>
+> **Still M9's, and everything else in this sentence now ships:** the RFC 9457
+> envelope (✅ shape only — `type`/`title`/`status`/`code`/`detail`/`instance`;
+> the `code` vocabulary itself is group V's ADR-0030 to settle, described under
+> Errors below), `usher.cache.hits`/`.misses` (✅, labelled
+> `cache=screen|row`, an expired entry counts as a miss), cache headers (✅,
+> above) and the opaque cursor (✅ — a codec at the HTTP boundary, described
+> under Pagination below; `/home` itself takes none, since ADR-0006
+> composes a screen rather than a page, and the paged routes that use the codec
+> are group B's). `usher.http.server.duration` was never a metric to add:
+> `FastAPIInstrumentor` already emits it (`ms`,
+> `opentelemetry.instrumentation.fastapi`), labelled with the route template
+> and status code, on every request including this one — PRD 10's row is
+> corrected to name what ships rather than exporting the same measurement
+> twice under a `usher.` prefix.
 
-> ⏳ **`GET /search` and `GET /search/suggest` are M9's.** M6 built everything
+> ✅ **`GET /browse` ships, and its Screens row above is corrected by the
+> measurement rather than by taste.** It read *"Faceted paging with facet
+> counts"* until 2026-08-12, when M9's B7 priced the two reads at catalog
+> scale against a bar written down and hashed before the first probe
+> (`scripts/measure_browse.py` carries it verbatim). **Unfiltered facet counts
+> are 330.81 ms p95 over 1,272,367 titles against a 200 ms bar**, so they are
+> not computed by default.
+>
+> **A genre predicate does not make them affordable, and that refutes the
+> fallback this document would otherwise have adopted.** A genre-predicated
+> facet request measures **324.43 ms** — indistinguishable from unfiltered —
+> because each facet is computed over the filtered population *minus its own
+> predicate*, so a request whose only filter is a genre counts genres over the
+> whole catalog by construction. `year` alone is 201.12 ms and still fails;
+> `genre` **and** `year` together, at 194.92 ms, is the only configuration
+> measured under the bar.
+>
+> So facets are **opt-in and predicated**: `?facets=true` *and* at least one of
+> `genre`, `year`, `owned`. The response **always** carries a `facets` object
+> with a `computed` flag, and when nothing was counted the `genres`/`years`
+> maps are **absent** rather than empty, with a `reason` of `not_requested` or
+> `unpredicated` — an empty map and "the server did not count these" are two
+> different facts about the catalog and a client cannot tell them apart. The
+> two reasons are separate because they have two different fixes.
+>
+> ⚠️ **A browse page is itself over budget and this document does not yet
+> promise otherwise.** The same run put a predicated page at **139.92 ms p95**
+> at the median-selectivity genre against a 50 ms bar, and the unfiltered page
+> at **321.29 ms** — the slowest of all, which refutes the expectation that an
+> unpredicated browse is the cheap one. Every plan is a ~95,000-buffer Parallel
+> Seq Scan with a 39–59 kB top-N heapsort, so **the sort is not the cost**, and
+> there is no lossy bitmap because there is no GIN index on `titles.genres` to
+> produce one. `.claude/rules/db-and-sql.md` carries the table, the plans and
+> the index recommendation; B6 shipped no index deliberately and named this
+> measurement as the decider.
+
+> ✅ **`GET /search` and `GET /search/suggest` both ship.** M6 built everything
 > behind them — `SearchService`, `PostgresSearchIndex`, `PostgresSuggestIndex`,
 > RRF fusion and the ranking blend — and **added no HTTP route**, delivering
 > the whole capability through `usher search` and `usher suggest` on the
@@ -113,38 +196,189 @@ be added if a client turns out to need flexible field selection.
 > means a completion was bought; an absent one means nothing about spend,
 > which is why the route reports it rather than inferring it.
 
+> ✅ **`GET /search` as shipped**, and the four things a client writes against.
+> **`?mode=`** is the `SearchMode` enum in `/openapi.json` — `full_text` (the
+> default) / `semantic` / `fused`; **`?semantic=` is not accepted at all**,
+> since two vocabularies for one field is worse than the rename and
+> `?semantic=true&mode=full_text` has no agreed answer. The body carries
+> `query`, `requested_mode`, `mode`, `semantic_coverage`, `expanded_query` and
+> `results`; **`expanded_query` is present-and-null** rather than absent, which
+> is deliberately not `GET /titles/{id}`'s absence convention — an absent
+> `images` says *this title has no artwork to offer*, a null
+> `expanded_query` says *nothing was substituted on this search*, and the
+> difference is that the second is a fact about **this request** which a client
+> acts on every time, where the first is a fact about the resource.
+> (That clause read *"this server has no such capability yet"* until M9 filled
+> the key; the distinction it draws is unchanged and its example was one
+> milestone out of date.) **A blank or
+> whitespace-only `q` is `200` with no results and buys no completion** — a
+> search box sends one between keystrokes — and **`?limit=` declares a floor
+> and no ceiling**, because `USHER_SEARCH_RESULT_LIMIT` is the ceiling and
+> spelling it twice is two numbers that agree until somebody moves one.
+> ⚠️ **`?mode=semantic` cannot succeed on an API-only deployment and answers
+> `422 validation_failed`** naming the remedy: `create_app` builds an embedding
+> model only when `USHER_WORKER_ENABLED` is true and does not expose it, so the
+> request scope holds none. `?mode=fused` narrows to full text instead and says
+> so through `requested_mode` ≠ `mode`. Closing that is a **new capability** —
+> expose the lifespan's model, or build a second one per API process at 65 MB
+> and a ~4.8 s cold load — not a change to this route. The 422 is the closest
+> member of [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s
+> closed seven: the request is well formed, names a mode this server cannot
+> process, and the client's remedy is to change it. **No member of that
+> vocabulary means "this deployment lacks a capability"** and this route mints
+> none; if a later one needs to distinguish *malformed* from *unserviceable
+> here*, that is an amendment to ADR-0030.
+
+> ✅ **`GET /search/suggest` as shipped**, and the three things a client writes
+> against. **`?tier=`** is the `SuggestTier` enum in `/openapi.json` —
+> `prefix` (the default) / `fuzzy` — and it is an enum rather than a
+> `typo_tolerant=` boolean because neither tier is a degraded form of the
+> other: `prefix` is a btree probe with **1.9% measured typo recall** and
+> `fuzzy` is the trigram + `levenshtein_less_equal` path that carries the
+> tolerance at 33.6 ms p50. The body carries `query`, `tier`,
+> `min_query_length` and `results`. **`tier` is the echo**, on
+> `requested_mode`'s argument minus the second field: a tier request is always
+> served by the tier it named, so there is nothing for a `requested_tier` to
+> differ from — but `?tier=` has a *default*, and the two tiers give different
+> answers to the same `q`, so a response that did not say which would be
+> uninterpretable beside another one. **`min_query_length` is the refusal made
+> legible**: this route runs no query at all for a `q` shorter than the
+> answering tier's minimum (**four characters on `prefix`, one on `fuzzy`**),
+> and without the field an empty box would be indistinguishable from *"no title
+> starts with that"*. **A blank or whitespace-only `q` is `200` with no results
+> on both tiers**, by the same rule, and **neither tier ever buys an LLM
+> completion** — structurally, since `QueryExpansionService.expand` sits in
+> front of the semantic embed and this path has none. `?limit=` declares a
+> floor and no ceiling, exactly as `GET /search` does. **The server does not
+> debounce and the client does.** ⚠️ **This route has no failure of its own**:
+> no embedder, no `SourceAdapter`, no household — a `DefaultUserIdDep` here
+> would be a `SELECT` per keystroke for an id nothing downstream reads — so the
+> only non-200 it can answer is a `422` from parameter validation. Why four
+> characters, why not seven, and why tier 2 is bounded differently:
+> [ADR-0031](decisions/0031-the-two-tier-suggest.md).
+
 ### Resources
 
 | Endpoint | Returns |
 |---|---|
-| `GET /titles/{id}` | Detail: metadata, credits, images, availability, watch state |
+| `GET /titles/{id}?search_id=` ✅ | Detail: metadata, credits, images, availability, watch state. The optional, opaque `search_id` from a `GET /search` response records **which result the household opened** ([10](10-telemetry-and-dashboards.md)'s `clicked_title_id`). Unknown, malformed or absent, it changes nothing and the resource is served identically — analytics never decides whether a resource is served |
 | `GET /titles/{id}/similar` | Precomputed neighbours with similarity reasons |
 | `GET /series/{id}/seasons` · `GET /seasons/{id}/episodes` | Series hierarchy |
 | `GET /episodes/{id}` | Episode detail |
-| `GET /people/{id}` | Filmography grouped by role |
-| `GET /collections/{id}` | Franchise contents with ownership completeness |
+| `GET /people/{id}` ✅ | Filmography grouped by role |
+| `GET /collections/{id}` ✅ | Franchise contents with ownership completeness |
 
-> **Built in M5: `GET /titles/{id}`, narrowed.** ✅ It carries metadata,
-> `enrichment_state`, `enrichment_error`, `availability` and `watch_state` —
-> every field backed by a table [M4](09-roadmap.md) fills. `credits`, `images`,
-> `similar` and the season/episode hierarchy are **absent rather than empty**:
-> `Person`/`Credit` land with M7 and `Image` with M9, each re-derived from
-> `raw_payloads` with no second network call ([09](09-roadmap.md)'s M4 boundary
-> call 2), and an empty list would be indistinguishable from a film with no
-> cast.
+> **Built in M5 narrowed, and M9 answered all four narrowings.** ✅ M5 shipped
+> metadata, `enrichment_state`, `enrichment_error`, `availability` and
+> `watch_state` — every field backed by a table [M4](09-roadmap.md) fills — and
+> left `credits`, `images`, `similar` and the season/episode hierarchy **absent
+> rather than empty** ([09](09-roadmap.md)'s M4 boundary call 2). This
+> paragraph named those four in the future tense for four milestones; it is
+> rewritten once, whole, now that all four are answered, because four M9 tasks
+> made it false in four different ways and a paragraph corrected a clause at a
+> time is one whose last clause is always wrong. **Two became keys on this
+> response and two became routes**: `credits` is `cast` and `crew` (below),
+> `images` is a list of ids and kinds (below), `similar` is
+> `GET /titles/{id}/similar`, and the hierarchy is `GET /series/{id}/seasons`
+> plus `GET /seasons/{id}/episodes`. Both tables are re-derived from
+> `raw_payloads` with no second network call ([ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)).
 >
-> **M7 landed `Person`, `Credit` and `Collection` and this route still carries
-> none of them**, which is the distinction between a table and a wire field and
-> is stated rather than left for a reader to infer from a milestone number.
-> `people`, `credits` and `collections` are real ([02](02-data-model.md)) and
-> `usher derive` fills them; adding a `credits` key here is a DTO, a hydration
-> read and a shape decision (how many, in what order, cast and crew together or
-> apart) that no M7 task makes. **Owner: M9**, with the rest of this route's
-> unbuilt surface. `Image` is unchanged and still M9's from both ends. **`GET /titles/{id}/similar` is M9's, not M6's** — this sentence said
-> "M6's" until M6 ran and added no HTTP route at all
-> ([09](09-roadmap.md)'s M6 boundary call 1). M6 built the
-> `SimilarityService` and the precomputed `title_neighbors` table that route
-> will read, and delivered the capability through `usher similar`.
+> ⚠️ **The absence convention survives all four and its meaning has changed.**
+> An empty list would still be indistinguishable from a film with no cast, so a
+> title with no derived credits carries neither `cast` nor `crew` and a title
+> with no artwork carries no `images` — never `[]`, never `null`. What absence
+> said until M9 was *"this server has not built it"*; what it says now is
+> *"this title has nothing here"*. **An earlier draft of the `images` work
+> shipped `"images": []`** on the reasoning that the convention was a statement
+> about unbuilt milestones; it is not, and the correction is the sentence
+> above.
+>
+> **M9 answered the credits shape decision, and the answer is two keys.** ✅
+> M7 landed `Person`, `Credit` and `Collection` as tables and this route
+> carried none of them — the distinction between a table and a wire field —
+> and the outstanding question was *how many, in what order, cast and crew
+> together or apart*. It is now: **`cast` and `crew` are separate keys, each
+> capped at 20, each ordered `billing_order` ascending with unbilled credits
+> last, and each present only when it has members.** Two reads rather than
+> one, because `CreditRepository.list_for_title` applies its cap to the
+> *ordered* result and a single 20-wide read spends the whole budget on a
+> well-billed cast and answers a film with no crew. The 20s are **chosen, not
+> measured**, on the bargain `adapters/tmdb/mapping._CAST_LIMIT` states for
+> its own 50 — a wrong cutoff drops the 21st-billed actor from one screen and
+> changes nothing else. An entry carries `person_id`, `name`, `character` and
+> `job`; `billing_order` is deliberately absent because it *is* the list
+> order, and handing it over invites a client-side re-sort whose obvious
+> spelling (`billing_order or 0`) puts an unbilled crew member above the lead.
+> `department` is absent for the weaker reason that this shape does not group
+> by it, and adding a field later is additive where removing one is not.
+>
+> ⚠️ **An underived title and a genuinely uncredited one are indistinguishable
+> on this route, and that is a recorded residual rather than a fix.** Both
+> answer with neither key, which is the correct render in both cases — a
+> client shows no cast section — and it is exactly what the absent-rather-than-
+> empty rule buys. What it does not buy is telling the two apart, because
+> nothing stores a per-title credits-derived-at. **It is the ordinary case, not
+> a corner**: the IMDb principals loader fills `titles.credit_names` for
+> ~93.8% of the catalog with no `people` or `credits` rows behind it, so a
+> title can be *searchable by a credited name* and answer this route with
+> nothing. Closing it is a column, a migration and a writer that M9 does not
+> contain; a `credits_derived` flag that nothing sets would be worse than the
+> silence.
+>
+> **`images` is a list of ids and kinds, and that is the whole entry.** ✅
+> `[{"id": "…", "kind": "poster"}, …]`, in the stored `(is_primary DESC, id)`,
+> present only when it has members. **A client composes
+> `GET /images/{id}?w=` from an id**, which is what makes *"clients never see
+> provider image URLs and never need a provider key"* a property of this
+> response body rather than only of the proxy: `provider` and `provider_path`
+> are exactly what a client would need to go around this API, and neither is on
+> the wire. There is no rendered `src` either — a URL built at serialisation
+> time fixes a width, and the width is the client's to choose through the
+> ladder ([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)).
+> `is_primary` is absent for `billing_order`'s reason one key over: it *is* the
+> order, and it is a judgement Usher's derivation makes rather than something
+> the provider publishes, so a client re-sorting on it would be re-deciding on
+> a flag it cannot interpret. `width`/`height`/`language` are absent for the
+> weaker reason — the stored dimensions are the provider's originals rather
+> than the size of the bytes a rung will answer with — and adding them is
+> additive.
+>
+> ⚠️ **Artwork this deployment cannot serve is filtered out of the list rather
+> than annotated in it, and that filter is reported off the wire rather than
+> on it.** The provider publishes some logos as `.svg`; the proxy declines that
+> type because its width ladder cannot bound it (ADR-0032), so a reference to
+> one is a link `GET /images/{id}` can never answer. Rendering it anyway would
+> be this API minting a broken link deliberately, and a `servable: false` field
+> would be a discriminator whose only honest client behaviour is to skip the
+> entry — this filter relocated into every client. The residual is that **a
+> title whose only artwork is declined answers exactly like a title with
+> none** — roughly one title in seventeen has an SVG logo, measured across 51
+> popular and top-rated titles. Unlike the credits residual above this one is
+> *reported*: `usher.images.references` ([10](10-telemetry-and-dashboards.md))
+> counts every read surface's references `served` against `unservable`, because
+> a filter with no counter makes "this catalog has no logos" and "this proxy
+> dropped all of them" the same answer. The row itself is kept in `images`, so
+> an operator debugging a missing logo finds it with one `SELECT`. **The same
+> filter runs on `GET /home`'s cards** ([06](06-rows-and-recommendations.md)),
+> on one definition, because two reads of one table disagreeing about what is
+> servable is the drift that predicate exists to prevent.
+>
+> **`GET /titles/{id}/similar` is M9's, and it now ships.** ✅ This sentence
+> said "M6's" until M6 ran and added no HTTP route at all
+> ([09](09-roadmap.md)'s M6 boundary call 1) — M6 built `SimilarityService`
+> and the precomputed `title_neighbors` table this route reads, and delivered
+> the capability only through `usher similar`. The route is a thin read over
+> `neighbors_of`: the body carries neighbours in the *stored* order (never
+> re-sorted on `score`), a title with none is `200` with an empty list, and
+> an unknown title is `404`. Freshness is **reported, not implied** — the
+> honest half this milestone can deliver, because nothing schedules `usher
+> similar --rebuild`. `computed_at` is the whole-artefact age (`null` means
+> never computed, a different fact from an empty list); `stale` is
+> `count_stale(blend_fingerprint(), title_id=…)` scoped to this seed, true
+> when the row's weights, stored count or candidate pool have since changed.
+> Neither subsumes the other: some third title being embedded into a seed's
+> neighbourhood since the last rebuild is undecidable per row, and a `stale:
+> false` seed can still be missing exactly that neighbour.
 >
 > **`availability` is one badge per copy of the title, never per episode.** An
 > episode's `MediaItem` carries its series' `title_id` as well as its own
@@ -176,23 +410,186 @@ be added if a client turns out to need flexible field selection.
 > structural property rather than a caught exception. `TitleReadService` holds
 > no `SourceAdapter` and a test asserts that on its imports.
 
+> **Built in M9: `GET /people/{id}`.** ✅ A person and their filmography, as
+> **groups**: `cast`, plus one group per crew `job`. The job strings are TMDb's
+> own, recorded rather than normalised — a normalisation map is a second
+> opinion nothing measures — so `role` is a **label to print, never a key to
+> branch on**. Groups are ordered `cast` first then the crew labels
+> alphabetically; within a group, titles are newest first by `year` with the
+> title id breaking a tie and unknown years **last**, which matters because
+> `year` is null on every skeleton row [04](04-catalog-bootstrap.md)'s IMDb
+> import wrote.
+>
+> **A person credited twice on one title in two jobs appears in both groups,
+> and the title appears once per group.** That is the other side of the
+> counting rule [06](06-rows-and-recommendations.md)'s People row states —
+> `RecurringPerson.watched_title_count` counts *distinct titles*, because a
+> person credited twice on one film is not two films watched — and it is
+> written here so nobody reconciles the two into a distinct-title collapse. Two
+> characters in one film is one entry in `cast`; writer *and* director on one
+> film is one entry in each of two groups.
+>
+> **`groups` is absent rather than `[]` when a person has no derived credits**,
+> on this section's standing rule: a client cannot tell an empty list from
+> "not derived yet", and the enriched tier is single-digit thousands of titles
+> out of 1.27M. A **404** for an unknown id, with the generic `not_found` of
+> [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md).
+>
+> **At most 50 credits are read, and that bound is the route's rather than the
+> port's.** There is no cursor: a franchise-sized filmography is not a browse,
+> and the day one is needed it is the same opaque codec `/browse` uses. A
+> response at exactly 50 entries may be truncated, which is why the number is
+> in the operation's description in `/openapi.json`.
+>
+> **Four fields [02](02-data-model.md)'s `Person` sketch carries are absent
+> rather than null**: `imdb_id`, `birth_year`, `death_year` and `biography`
+> live on TMDb's `/person/{id}` — one request per person — and are still
+> unassigned ([09](09-roadmap.md)'s M7 orphan). There is no column for them, so
+> there is nothing to render as null. `sort_name` is absent too: it equals
+> `name` on every row today, and a wire field is a promise.
+
+> **Built in M9: `GET /collections/{id}`.** ✅
+> [06](06-rows-and-recommendations.md)'s franchise signal — *"you own 2 of 4"*
+> — as a resource: `owned_count`, `total_count`, and **every** member in
+> release order with an `owned` flag apiece. A member list narrowed to the
+> owned subset would read "2 of 2", a completeness signal that always reads
+> complete; that is why `OwnedCollection` carries two *lists* rather than two
+> counts, and why the two numbers on the wire are their `len()` over what was
+> actually rendered. A client that counts the cards gets the same answer.
+>
+> **`owned` means an available, title-level media item** — the predicate
+> `/browse` settled, `episode_id IS NULL` **and** `available`, written into
+> both statements rather than implied. Both halves fail in the same direction:
+> a retracted copy on an unmounted drive and an episode-level row each read as
+> owned without them, so the page overstates. A collection holds only movies —
+> `belongs_to_collection` is a field of TMDb's `/movie/{id}` with no `/tv/{id}`
+> counterpart — so a series carrying a collection id is a defect and is not a
+> member here; `titles` carries no CHECK to stop such a row being *stored*, so
+> the read filters for itself rather than trusting the writer.
+>
+> **A franchise the household owns none of is a `200` with `owned_count: 0`**,
+> and only a franchise the catalog does not hold is a `404` (the generic
+> `not_found` of
+> [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)).
+> Collapsing the two would make "you own 0 of 7" unreachable, which is a real
+> answer for a client that followed a link from a film it does own.
+>
+> **This is not the home row's read with a filter.** `list_owned`'s floor of
+> two owned members is a statement about what belongs on a *screen*; a
+> franchise you own one of is a single film with a subtitle. Asking for one by
+> id carries **no floor at all**, because "you own 1 of 4" is the honest answer
+> and it is the one a household that has barely started something most wants.
+>
+> **No cursor, stated as a bound.** TMDb franchises are single-digit to
+> low-double-digit members and the hydration is one statement over all of them;
+> the whole answer is two statements regardless of size.
+> **Built in M9: the series hierarchy and `GET /episodes/{id}`.** ✅
+> `GET /series/{id}/seasons` answers every season of one title ordered by
+> `season_number`, unpaged — 32,409 series at a median of 9 seasons, and a
+> client renders all of them, so a cursor over a nine-row answer would be a
+> second round trip for a complete screen. `GET /seasons/{id}/episodes` is
+> keyset-paged by `episode_number` within the season
+> ([ADR-0034](decisions/0034-the-cursor-carries-a-position.md)), and
+> `GET /episodes/{id}` carries the episode's own fields plus its `title_id`
+> and `season_id`, so a client that opened an episode from a search result or
+> a Next Up card can climb back to its season and its series without a second
+> search. No `tmdb_id`, no `imdb_id` and no `external_id` on any of the three.
+>
+> **They stay separate routes, and the hierarchy is still absent from
+> `GET /titles/{id}`.** One measured series holds 20,000 episodes, so inlining
+> the tree would make the length of a title response a property of the show
+> rather than of the request. That is also why no route reads
+> `EpisodeRepository.list_for_title`, which answers both questions at once and
+> returns the whole tree with them — 20,001 rows in 22.901 ms over 402 buffers
+> for that series. Two bounded reads instead, each one statement, and a
+> statement-count case asserts the seasons route costs the same for 2 seasons
+> as for 25 and the episodes route the same for a page of 2 as for a page of
+> 50.
+>
+> **Season 0 is a season of the series here, and is still excluded from Next
+> Up.** Specials are TMDb's season 0 and Emby's `ParentIndexNumber: 0`; the
+> divergence is deliberate — *"what do I watch next"* has no place for them and
+> *"show me this series"* does — and one contract case pins both halves so that
+> "fixing" either to match the other fails.
+>
+> **An empty season list and an empty episode page are `200`, not `404`.** A
+> movie has no seasons and that is a fact about the title; and since M9's T1
+> moved enrichment onto one `append_to_response` request per series, a season
+> block TMDb declines to serve arrives as the same `200` with the key silently
+> absent as a season the show does not have — so a listed season whose block
+> never came leaves a real `Season` row with no episodes, and an empty page is
+> a state the catalog genuinely holds. `404` is reserved for a title, season or
+> episode id that does not exist at all, in the envelope below with the generic
+> `not_found` code, and one case per route asserts the two are distinguishable.
+>
+> **No `watch_state` on these responses.** `PUT /watch/episodes/{id}` under
+> *Actions* owns that state; a `watch_state` key on an episode would be a
+> second read per episode on a paged route. Adding it is an additive change to
+> the DTO.
+
 ### Actions
 
 | Endpoint | Effect |
 |---|---|
-| `POST /titles/{id}/play` · `POST /episodes/{id}/play` | Resolve ranked `StreamTarget`s |
+| `POST /titles/{id}/play?search_id=` · `POST /episodes/{id}/play?search_id=` ✅ | Resolve ranked `StreamTarget`s. The same optional, opaque `search_id` records **that a result was played** ([10](10-telemetry-and-dashboards.md)'s `played`) — only when a target was actually handed out, so a `409` and a `503` record nothing. It never writes `clicked_title_id`: that column names the result the household *opened*, and one writer setting both would collapse two facts into one |
 | `PUT /watch/titles/{id}` · `PUT /watch/episodes/{id}` | Set position / played |
-| `POST /watch/titles/{id}/played` · `DELETE …` | Mark played / unplayed |
+| `POST /watch/titles/{id}/played` · `DELETE /watch/titles/{id}/played` | Mark played / unplayed |
+
+> **Built in M9: the four watch-write rows.** ✅ They answer, and the service
+> behind them does four things in a fixed order — **write locally, invalidate
+> this household's watch-state rows, publish, enqueue the write-back**. The
+> write is stamped `origin = api`, which is what stops the next sync mistaking
+> Usher's own write for the source's truth and round-tripping it back.
+>
+> **The request never reaches a source.** [03](03-sources-and-sync.md)'s
+> *best-effort* write-back describes the caller, not the adapter, whose
+> `push_watch_state` raises by contract — so the guarantee that a client's
+> write never blocks or fails on a down server holds only because the request
+> does not make the call. It enqueues a `watch_writeback` job per source
+> **copy** instead, at `VISIBLE` priority, and a worker carries it with
+> backoff. A title the household owns no copy of still writes locally and
+> enqueues nothing: watch state attaches to the canonical Title, so it
+> survives adding, changing or losing a source.
+>
+> **`watchstate.updated` is published for the client's own write**, so a
+> multi-device household stays in step — the frame carries the title (or
+> episode) id, so a client can ignore its own echo rather than re-rendering on
+> it. It is the identical payload the push lane builds for a change that
+> arrived from the source, and it goes out with one `row.invalidated` per slug,
+> both **only when the stored row actually changed**: a repeat write of
+> identical state publishes nothing, or a full recompose runs per second of
+> playback. Both are offered only after the write has committed
+> ([ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md)).
+>
+> **The unplayed route is spelled out in the table above rather than elided.**
+> It read `` `DELETE …` `` until M9's H2, and an ellipsis is a cell no machine
+> can read: the extractor behind `tests/unit/test_api_openapi.py` yields the
+> literal `('DELETE', '…')` and the conformance check then fails on a path no
+> app could serve. A table this document's own check cannot parse is a table
+> that documents nothing.
+>
+> **`DELETE …/played` clears the played flag and nothing else** — not the
+> resume position, not `play_count`, not `last_played_at`. Emby's own
+> `DELETE /Users/{u}/PlayedItems/{item}` clears all three, measured against
+> 4.9.5.0, and the adapter already declines to use it; the local write must not
+> do at the database what the adapter declines to do at the source.
+>
+> **Episodes get `PUT` and no `/played` pair**, which is this table read
+> literally. It is an odd asymmetry at a library that is 999,927 episodes
+> ([03](03-sources-and-sync.md)) — marking an episode played is reachable only
+> through a full `PUT` body — and it is recorded here as an open question
+> rather than answered by a route nobody asked for.
 
 ### Admin
 
 | Endpoint | Purpose |
 |---|---|
-| `GET·POST·DELETE /admin/sources` | Configure sources |
+| `GET·POST /admin/sources` · `DELETE /admin/sources/{id}` | Configure sources |
 | `GET /admin/sources/{id}/status` | Connection, push availability, last sync |
 | `POST /admin/sources/{id}/sync` | Trigger reconcile |
 | `GET /admin/unmatched` · `POST /admin/unmatched/{id}/resolve` | Review queue |
 | `POST /admin/rows/regenerate` | Enqueue LLM curation for this household — 202, never a synchronous generate |
+| `GET /admin/rows/providers` · `PUT /admin/rows/providers/{slug}` | Switch a row provider on or off — the registry left-joined onto `row_provider_settings`, so there is an entry per registered provider and absence means enabled |
 | `GET /admin/bootstrap/status` · `POST /admin/bootstrap/{phase}` | Dataset import |
 
 > **Settled in M3.** `SourceAdapter.verify()` returns a `SourceStatus`
@@ -214,16 +611,13 @@ be added if a client turns out to need flexible field selection.
 > [03](03-sources-and-sync.md)'s "configure a normal user" is guidance an
 > operator can only follow if they can see which they did.
 >
-> **Built in M3: four of the six rows above** — four of *five* when this was
-> written, and the sixth is `POST /admin/rows/regenerate`, added to the table
-> by M8 and built by it (below). `GET`/`POST`/`DELETE
+> **Built in M3: four of the seven rows above** — four of *five* when this was
+> written, four of six once M8 added `POST /admin/rows/regenerate` (below), and
+> four of seven since M9 added the row-provider pair (below that). The count is
+> corrected in place each time rather than dropped, because it is the sentence
+> that says *which* of these were M3's. `GET`/`POST`/`DELETE
 > /admin/sources` and `GET /admin/sources/{id}/status` are live
-> (`usher.api.routers.sources`). `POST /admin/sources/{id}/sync` is not —
-> **and the reason recorded here was wrong by M4 and is corrected**: it said
-> "there is no reconciler until M5", but M4 built `ReconcileService` and both
-> its lanes. The route is M9's, exactly as [09](09-roadmap.md)'s boundary
-> call 4 states, and M4's `usher sync` already delivers the capability. The
-> status
+> (`usher.api.routers.sources`). The status
 > route answers **200 for every state a configured source can be in** —
 > rejected credentials, an unreachable host, a credential row that has gone
 > missing, and one that no longer decrypts because `USHER_SECRET_KEY` was
@@ -233,6 +627,60 @@ be added if a client turns out to need flexible field selection.
 > `404` is reserved for a source id that does not exist.
 > `POST` accepts a username and password and returns neither — see
 > [08](08-operations.md).
+>
+> **The delete's path is corrected in the table above, by M9's H2 and by a
+> machine rather than by a reading.** That cell compressed three methods onto
+> one path as `GET·POST·DELETE /admin/sources`, and the delete has always been
+> `DELETE /admin/sources/{id}` — so `/admin/sources/{id}` was a route this
+> document spelled nowhere, which is exactly what
+> `tests/unit/test_api_openapi.py`'s second direction (*the app's routes ⊆
+> every endpoint PRD 07 spells anywhere*) exists to find. It found it on its
+> first run.
+
+> **Built in M9's E3: `POST /admin/sources/{id}/sync`.** ✅ No longer *"not"* —
+> the reason recorded above it was already wrong by M4, which built
+> `ReconcileService` and both its lanes; `usher sync` delivered the capability
+> three milestones before this route existed to wire it, exactly as
+> [09](09-roadmap.md)'s boundary call 4 always said it would. **It enqueues
+> and returns 202. It does not reconcile** — the same shape M8 settled for
+> `POST /admin/rows/regenerate` below, for the identical reason: a reconcile
+> checkpoints and commits per batch, so a route that drove a six-hour walk
+> inside one request would be committing the request's session repeatedly
+> before the handler returned. The body is `{"kind": "sync", "key": "<source
+> id>:<lane>"}` — the queue's own identity, on the same two-field shape the
+> regenerate route answers with below, and for the same reason: neither
+> promises more than "this row is queued", because `status` and a row count
+> can both already be false by the time the response is read.
+>
+> **The key is `"{source id}:{lane}"`, never a bare source id.** `(kind, key)`
+> is unique, so a bare id would coalesce a requested `full` walk into a
+> pending `delta` one and answer 202 for a walk that never happens.
+> `?kind=full|delta` selects the lane and defaults to `delta`; `full` and
+> `delta` are two rows on the queue, never one collapsed into the other, and a
+> repeat of either writes zero — the ordinary promote-never-demote shape every
+> other kind already has.
+>
+> **Two refusals, both before anything is enqueued, both in this envelope.**
+> `404 not_found` for a source id that does not exist, read through a lookup
+> rather than through `status()`'s adapter-building one. `409 not_playable`
+> for a source an operator has parked (`enabled = false`) —
+> [03](03-sources-and-sync.md)'s `selected_sources` already skips a disabled
+> source even when named explicitly, so a 202 there would promise a walk the
+> worker will decline. **A reuse, not a minted `source_disabled`**: V1's
+> vocabulary is closed at seven
+> ([ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)),
+> and both this and a title with no playable copy are RFC 9110 §15.5.10's
+> identical claim — *conflict with the current state of the target resource,
+> stop asking* — so a client cannot act on the two differently; only `detail`
+> differs. See the ADR's amendment for the case against minting one.
+>
+> **Unauthenticated, like every route in this table** — named rather than
+> considered and dismissed; PRD 01's authentication seam owns the gap. And
+> **head-of-line blocking is a real cost of the design, priced in
+> [08](08-operations.md)'s job-reliability section**: a triggered sync shares
+> the one worker lane with `enrich`, `index`, `derive`, `curate` and `match`,
+> so a full walk can stall the others for the length of the walk. Accepted
+> for the queue's dedup and its durability across a restart, not solved here.
 
 > **Built in M8: `POST /admin/rows/regenerate`.** ✅ Shipped ahead of the admin
 > rows still outstanding above it by [09](09-roadmap.md)'s M7 boundary call 2,
@@ -307,12 +755,168 @@ be added if a client turns out to need flexible field selection.
 > process, and that a `PortUnavailable` from the queue really does become an
 > ordinary 500 rather than being caught somewhere on the way.
 
+> **Built in M9's E5: `POST /admin/bootstrap/{phase}`.** M2 shipped the bulk
+> importers as `usher bootstrap` and only as a separate process, which is the
+> fact [09](09-roadmap.md) and `ports/events.py` both cite for why
+> `bootstrap.progress` has never had a producer. **The route enqueues
+> `JobKind.BOOTSTRAP` and answers 202. It imports nothing** — a `--phase all`
+> run is 74.8 s against warm on-disk dumps and materially longer cold, since
+> the dataset cache keys on the upstream token and IMDb regenerates daily, so
+> the request can trigger a 224 MB download ([04](04-catalog-bootstrap.md)).
+> The body is `{"kind": "bootstrap", "key": "<phase>"}`, the same two-field
+> shape the sync and regenerate routes answer with and for the same reason.
+>
+> **`{phase}` is a typed path parameter, not a string this route checks
+> itself.** `BootstrapPhase` is one vocabulary read by the route, by
+> `/openapi.json` and by `usher bootstrap --phase`'s own `choices`, so the CLI
+> cannot accept a phase the route rejects, and an unknown phase is a **422
+> `validation_failed`** rather than a 404 — the route exists and was asked for
+> something outside its vocabulary. It enqueues nothing on that arm.
+>
+> **`all` and `<one phase>` are two keys and therefore two jobs**, which is the
+> opposite call from the sync route's composite key above and rests on a
+> property a sync does not have: every phase is resumable and idempotent, so a
+> job for `all` running after one for `imdb` re-reads a completed checkpoint,
+> yields no batch and costs a re-parse. Collapsing them would instead make an
+> operator's `--phase movielens` coalesce silently into somebody's `--phase
+> all`. A repeat of the same phase writes zero rows and is coalesced, exactly
+> as for `curate` above.
+>
+> **There is no refusal here beyond the phase's own type, and that is a
+> statement about what a request can know.** Every precondition a bootstrap has
+> — an empty catalog for `credit-names`, `aliases` and `movielens`, a writable
+> `USHER_BULK_DATA_DIR`, another process already owning the dataset's
+> `import_runs` row — is a fact about the instant the *worker* claims the job,
+> which the queue may hold for the length of whatever is ahead of it. Each is
+> therefore checked where it is true rather than restated here.
+>
+> **Two costs, both named rather than solved.** A bootstrap is the longest unit
+> of work in this system and holds the single worker lane for its duration —
+> [08](08-operations.md)'s job-reliability section prices that, and this route
+> adds no second lane. And the *server* process now writes to
+> `USHER_BULK_DATA_DIR`: in the shipped container that is a bind mount, and a
+> deployment that gave the API no writable data directory now learns so from a
+> route rather than from a command. **Unauthenticated, like every route in this
+> table.**
+>
+> **Built in M9's E6: `GET /admin/bootstrap/status`.** ✅ The reading half, and
+> it is the *same report* `usher bootstrap-status` has printed since M2 —
+> `services.bootstrap.BootstrapReport`, assembled once from four reads, printed
+> by the CLI and serialised here. A route that re-derived it would be a second
+> answer to *"what does 'not loaded' mean?"*, and the branch the two would
+> disagree on is the one nobody ever looks at.
+>
+> **It answers 200 for every state a database can be in** — no import ever run,
+> a `FAILED` run with its `error` string, a genome vocabulary loaded from
+> another release. Each is a fact about the thing being described rather than a
+> failure of the request, which is the rule `GET /admin/sources/{id}/status`
+> already sets. `error` reaches the body as the stored string, written by
+> `BootstrapService` as `str(exc)`: PRD 08's credentials-never-logged rule is
+> enforced where the string is *made*, not by a redaction at the wire, which
+> would be a second and weaker copy of it in the layer least able to know what
+> a credential looks like.
+>
+> **The genome vocabulary's verdict crosses as a member, not as a sentence.**
+> `VocabularyState` is one of `no_vectors`, `mixed_releases`, `not_loaded`,
+> `mismatched`, `named`; the English stays in the CLI. A client that had to
+> regex prose to tell *"never loaded"* from *"loaded from the wrong release"* —
+> two different operator actions — is a client this route has failed. There is
+> no percentage anywhere in the document, for `GenomeCoverage`'s own reason:
+> the counts carry their denominators and a caller picks its own.
+>
+> ⚠️ **Two aggregate reads per request, priced and stated rather than cached.**
+> Measured 2026-08-12 against a real 1,272,367-title catalog with a
+> 15,565-vector genome: `count_titles()` **80.6 ms**, `genome_coverage()`
+> **248.6 ms** plus **2.0 ms** for the revisions read — roughly a third of a
+> second, growing with the catalog rather than with the screen. That is an
+> admin page somebody opens on purpose. **No other route may copy this shape**,
+> and there is deliberately no cache: it would be an unmeasured mechanism on
+> the one page an operator opens precisely because they distrust what they last
+> saw.
+>
+> **Built in M9: `GET`/`PUT /admin/rows/providers`** — the control
+> [08](08-operations.md)'s Database layer has promised since M6 and the
+> discharge of [09](09-roadmap.md)'s M7 boundary call 9, which refused the
+> table until a route could write it.
+>
+> **The list is the registry, not the table.** `GET` answers one entry per
+> registered provider — ten today, derived from `services/rows/__init__.py`'s
+> `ROW_PROVIDERS` — each `{"slug": …, "enabled": …}`, where `slug` is
+> `RowProvider.slug_prefix`, the identifier `usher home`'s report and
+> [10](10-telemetry-and-dashboards.md)'s `provider` label already carry.
+> `row_provider_settings` holds **overrides only**: it ships empty, is never
+> seeded, and **absence means enabled**, so a virgin database answers ten
+> entries all reading `true` — which is what *"providers are enabled by
+> registration in code"* has always meant, now visible and now changeable.
+> Setting a provider back to `true` writes a row rather than deleting one; a
+> recorded action is not absence.
+>
+> **`PUT /admin/rows/providers/{slug}` takes `{"enabled": bool}`** and answers
+> the updated entry. A slug the registry does not hold is a **404 in the
+> envelope** carrying the generic `not_found` (the `instance` member names the
+> provider), and it **writes no row** — an override for a provider nothing
+> registers is dead configuration that reads exactly like working
+> configuration.
+>
+> **What makes it a control rather than a column: the shelf disappears.** A
+> disabled provider is filtered out of the registry in both composition roots —
+> `GET /home` and `usher home` — and out of the background screen refresh, so a
+> toggle survives the ~30 s screen cache instead of coming back on a timer. The
+> route clears `RowCache` **wholesale** on a successful toggle: a provider
+> toggle is deployment-wide and the per-user/per-slug invalidation cannot
+> express it. ⚠️ **A second replica keeps serving its own screen for up to the
+> 30 s TTL** — the cross-process gap [06](06-rows-and-recommendations.md)
+> already records, restated here rather than widened.
+>
+> **An operator may disable everything and get an empty screen**, and no
+> minimum-enabled floor is invented: a zero-row `GET /home` is already reachable
+> for a cold household, and a floor would be a policy with no evidence behind
+> it. There is no `user_id` — the toggle is deployment-wide — and nothing
+> schedules a re-enable.
+
+> **Built in M9: `GET /admin/unmatched` · `POST /admin/unmatched/{id}/resolve`.**
+> [02](02-data-model.md)'s *"unmatched items are never dropped"* has had a CLI
+> review queue since M4 (`usher unmatched`) and no wire until now. `GET` answers
+> the `Page` envelope above — items newest-arrival first, undated ones last,
+> `?source_id=` narrowing it and `?limit=` bounded at 200 — and pages by
+> **cursor**, never by offset. That is not a house-style preference: the same
+> read's `OFFSET` is measured at **43.7 ms at offset 0 and 388.9 ms at offset
+> 1,126,574**, and it is the measurement the Pagination section below cites.
+> `usher unmatched --offset` keeps the offset form, because an operator typing a
+> number at a terminal and a client following a token are two access patterns
+> rather than one duplicated.
+>
+> **A queue entry carries the source's own `external_id`, which every *client*
+> response refuses.** An operator resolves an unmatched file by finding it on
+> their own server, and that id is the only handle that gets them there;
+> `usher unmatched` has printed it since M4 for the same reason. This is the one
+> place in the surface where it is the subject rather than a leak.
+>
+> **`POST /admin/unmatched/{id}/resolve` takes `{title_id, episode_id?}`** and
+> answers the resolved row. The `episode_id` is the argument `usher unmatched
+> --resolve` could not offer — an operator has no way to read an `Episode.id`
+> off that listing — and the route **refuses an `episode_id` whose episode
+> belongs to a different title**, because nothing below it would:
+> [02](02-data-model.md) records that `media_items` has no CHECK tying the two
+> columns together and that a mismatched pair is a write real PostgreSQL
+> accepts. A `title_id` or `episode_id` this catalog does not hold, and the
+> mismatched pair, are each a **422 `validation_failed`** — the request parsed
+> and its instruction cannot be carried out, the shape `GET /search` already
+> uses for an unservable `?mode=semantic`. A media item id no row carries is a
+> **404 `not_found`**, generic, because RFC 9457's `instance` already names it.
+> No problem code is minted (ADR-0030 stands at seven).
+>
+> **It enqueues nothing and invalidates nothing**, matching
+> `usher unmatched --resolve` exactly: resolving writes `media_items.title_id`,
+> and no job, neighbour list or cached screen reads that column. Stated so a
+> later reader does not add a re-derive on the assumption it was forgotten.
+
 ### Meta
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` · `GET /health/ready` | Liveness and readiness |
-| `GET /meta/attribution` | Required IMDb/TMDb attribution strings ([04](04-catalog-bootstrap.md)) |
+| `GET /meta/attribution` | The four required attribution strings — IMDb, TMDb, MovieLens, Wikidata ([04](04-catalog-bootstrap.md)) |
 | `GET /openapi.json` | Schema |
 
 ## Response contracts
@@ -334,9 +938,14 @@ does not carry a `failed` tier.
   "year": 2021,
   "enrichment_state": "stub",     // overview not yet fetched
   "overview": null,
-  // no "images" key and no "credits" key -- absent, never null.
-  // The earlier draft of this example carried "images": {"poster": null},
-  // which is the exact shape the paragraph above refuses.
+  // no "images", "cast" or "crew" key -- absent, never null and never [].
+  // All three are built; this title simply has nothing for any of them, and
+  // that is the whole of what an absent key means since M9. Two earlier
+  // drafts of this example got it wrong in opposite directions: one carried
+  // "images": {"poster": null}, the shape the paragraph above refuses, and
+  // one carried "images": [] on the reasoning that the convention expired
+  // when the table landed. "credits" is not a key at all -- M9 answered that
+  // shape decision as two separate keys.
   "availability": [ { "source": "Emby", "quality": "2160p HDR10" } ],
   "watch_state": { "position_seconds": 1840, "played": false }
 }
@@ -356,7 +965,22 @@ breaking changes get `/v2`.
 
 Cursor-based (opaque, encodes sort position). Offset paging is not offered —
 it degrades badly over a 1.3M-row catalog and produces duplicates under
-concurrent writes.
+concurrent writes. Measured: `list_unmatched`'s `OFFSET` is 43.7 ms at offset 0
+and 388.9 ms at offset 1,126,574 (see [10](10-telemetry-and-dashboards.md)).
+
+A paged response is `{"items": [...], "next_cursor": "…"}` — no `total`, and
+`next_cursor` is `null` on the last page rather than absent. The cursor is
+opaque: a client hands it back unread. It carries a **sort position and nothing
+else** — no user, no grant, no offset — which is why it is unsigned, and **no
+port ever takes one**; repositories take typed keyset values. A cursor that
+does not match the query it is replayed against is a `400 invalid_cursor`. See
+[ADR-0034](decisions/0034-the-cursor-carries-a-position.md), which also carries
+the **three-arm** keyset predicate every paged route spells. Read it there
+rather than reconstructing it: the ADR originally specified a row comparison
+over `(key IS NOT NULL, key, id)`, and B6 measured that this is wrong for a
+nullable key — a row comparison evaluates to **NULL, not false**, when the
+first differing pair involves one, so resuming from an unkeyed row silently
+drops the whole unkeyed tail with every page still full.
 
 ### Errors
 
@@ -376,60 +1000,126 @@ RFC 9457 problem details, with a machine-readable `code`:
 The principle from [08](08-operations.md) holds at the boundary: a degraded
 subsystem narrows functionality, it never fails a request local state can answer.
 
-> **Not yet built, as of M3.** The admin source routes M3 ships return
-> FastAPI's default shapes — `{"detail": "source not found"}` for a 404 and
-> `{"detail": [ … pydantic errors … ]}` for a 422 — not the envelope above.
-> The envelope is a client contract, and the client-facing surface is
-> [09](09-roadmap.md)'s M9; defining a `code` vocabulary against four admin
-> routes would be guessing at it a milestone early. What M3 *does* enforce
-> is the part of the error path that could not wait: a 422 never echoes the
-> submitted request body, because that body carries a source credential.
-> See [08](08-operations.md)'s secrets rules.
->
-> **Still deferred after M5, and now for a sharper reason.** M5 adds a
-> streaming surface and two client routes, and neither forces the envelope.
-> RFC 9457 is a format for a response *body*; once `GET /events` has answered
-> `200 text/event-stream` there is no further status code to carry a problem
-> document, so the in-stream vocabulary is an SSE event (`resync_required`)
-> rather than a document. And the failure that *would* force it — the worked
-> example above, `503 source_unavailable` — is unreachable on `GET
-> /titles/{id}` by design: the service behind it holds no `SourceAdapter`, so
-> there is no request Usher can be asked to answer and genuinely cannot. The
-> first route whose honest answer is "the source is down and I cannot serve
-> this from local state" is `POST /titles/{id}/play`, in M9, alongside the
-> playback ticket [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)
-> owes. M5's two ordinary failures are the shapes M3 already ships: a 404 for
-> an unknown title and a 422 for a malformed id or `?titles=`.
->
-> **Still deferred after M7, and M7 is the milestone that tested the reason
-> rather than restating it.** M7 adds a client-facing route — `GET /home` —
-> and it does not force the envelope either, for the same structural reason
-> one layer along: every input is local state (watch state, media items,
-> `title_neighbors`, genre affinity, credits, collections), the route holds no
-> `SourceAdapter`, and [08](08-operations.md)'s own degradation table says
-> *"LLM call fails → Home composes without them"* — so the one upstream that
-> could be down is one this route already composes without. **There is no 503
-> here to give a `code` to.** Two client routes now, two milestones, and the
-> deferral has survived both on evidence rather than on inertia; the first
-> route whose honest answer is a domain-level failure is still M9's
-> `POST /titles/{id}/play`.
->
-> **Still deferred after M8, and its route needs a longer argument than M5's
-> and M7's rather than the same one.** Those two turn on holding no
-> `SourceAdapter`, which is a claim about *reads* — `GET /titles/{id}` already
-> writes, and so does `POST /admin/sources`, so "it writes" was never what the
-> envelope hung on. What is new is that `POST /admin/rows/regenerate` writes to
-> a subsystem that can be down while the process is up: the job queue, which is
-> PostgreSQL, and an outage of that is already reported as a 503 by
-> `GET /health/ready` for the whole process — so answering 503 *here* would say
-> "this endpoint is degraded, retry it" about a deployment in which every
-> endpoint is down, and would need the `code` vocabulary a milestone early to
-> say which. The handler therefore catches nothing: a `PortUnavailable` from
-> the queue propagates and becomes an ordinary 500. **A test asserts the
-> translation is absent rather than merely unused**, because "it did not answer
-> 503" is also what a route that swallowed everything would produce — the same
-> reason `TitleReadService`'s missing `SourceAdapter` is asserted on its
-> imports. The deferral has now survived a third milestone.
+**Built in M9, in two passes — the *shape* first, the vocabulary second.** The
+envelope was deferred four times (M3, M5, M7, M8) and each deferral turned on the
+same structural fact: no shipped route had a failure the envelope was *for*. What
+changed is that `POST /titles/{id}/play` holds a `SourceAdapter` and produced a
+real `503 source_unavailable`, so the vocabulary is designed against a failure
+that happened rather than one that was guessed at. **Two of the four deferrals are
+discharged and two are preserved as standing rules** —
+[ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
+answers each by name and keeps its reason.
+
+The split was not tidiness. Six drafters designing the `code` vocabulary alongside
+their own routes proposed **seventeen members against a benchmark of four, under two
+mutually exclusive conventions for the same status** — which is precisely what
+this section declined to guess at four times.
+
+#### The vocabulary
+
+**Seven members, closed by
+[ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md).**
+That record carries the table, the four rules that decide membership, and the
+members it refused; `tests/unit/test_api_problem_vocabulary.py` parses the table
+and compares it to `ProblemCode` in both directions, so **a route that needs a
+code the design did not give it amends the decision record in the same commit** or
+the suite is red.
+
+| code | status | when |
+|---|---|---|
+| `not_found` | 404 | the addressed resource does not exist, on any route — and on any unrouted path |
+| `validation_failed` | 422 | the request did not pass validation; the rejected fields ride in `errors`, never their values |
+| `method_not_allowed` | 405 | raised by the router before any handler, so every route answers it |
+| `invalid_cursor` | 400 | an opaque cursor that does not match the query it is replayed against ([ADR-0034](decisions/0034-the-cursor-carries-a-position.md)) |
+| `source_unavailable` | 503 | at least one source could not be reached and nothing playable was found on the ones that answered — retryable |
+| `not_playable` | 409 | every source holding a copy answered and none offers a way to play it |
+| `ticket_invalid` | 404 | a playback ticket that is expired or forged — one answer for both, deliberately ([ADR-0029](decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)) |
+
+**404 is generic and there is no per-resource variant.** No `title_not_found`, no
+`episode_not_found`, no `image_not_found`: `instance` already carries the path, a
+per-resource member grows the vocabulary linearly with the resource count, and
+every one of them is handled identically by a client. The one case that could have
+justified a second 404 — a title the household owns with no playable copy — is
+separated by **status** (`409 not_playable`) rather than by code. `ticket_invalid`
+is not an exception to this: it is not a statement about a resource but an opaque
+codec refusing its own input, the same shape as `invalid_cursor` one status over.
+
+#### Stability
+
+- **`code` is the machine-readable contract, and the status for a given code never
+  changes.** A code meaning 404 on one route and 409 on another would be two codes
+  wearing one name.
+- **The set is closed at any instant and may grow additively within a major
+  version**, so a client's `switch` on `code` needs a default arm — and that arm
+  keys off `status`, which is what the previous rule makes safe. Growth is governed
+  by [DTOs are versioned independently](#dtos-are-versioned-independently) rather
+  than by a second rule here.
+- **`title` and `detail` are prose and nothing may parse them.** Both may be
+  reworded in any release. `detail` interpolates nothing a client submitted.
+
+#### The shape
+
+Four properties, each of which is a rule rather than a detail:
+
+- **`type` is derived from `code` by one function** —
+  `https://usher.dev/errors/<code-in-kebab-case>` — never hand-written per member,
+  so a code and its type cannot drift apart. RFC 9457 says a `type` URI SHOULD
+  dereference to human-readable documentation; **this project does not control
+  `usher.dev`**, so the URI is an identifier deliberately never dereferenced. That
+  is a fact about the world rather than about the code, and no domain is
+  registered to make a document true.
+- **`status` is written once.** The handler builds the document and then builds
+  the response *from* `document.status`, so the body and the status line cannot
+  disagree.
+- **`instance` is the request *path*, never the request URL.** A rejected `?q=`
+  echoed back in `instance` is the same leak the 422 handler exists to prevent,
+  through a different field. Note the corollary, which is inherent to RFC 9457
+  rather than a compromise: a 422 for a malformed *path parameter* does carry
+  that parameter, because there is no `instance` that identifies the occurrence
+  and omits the path. No credential is ever in a path in this API.
+- **The 422 composes with the credential control rather than replacing it.** A
+  422 never echoes the submitted request body, because that body carries a source
+  credential (see [08](08-operations.md)'s secrets rules). The stripped
+  `loc`/`msg`/`type`/`ctx` list rides as RFC 9457's `errors` extension member and
+  `detail` is a **fixed sentence** that interpolates nothing submitted.
+
+**Two routes are exempt, by name, with their reasons recorded in code** — as a
+mapping in `dto/problem.py` that the "every route declares its problem responses"
+check imports rather than re-derives, so a route left alone on purpose does not
+read as one somebody forgot:
+
+- **`GET /health/ready`** keeps `ReadinessResponse` for its 503. Its real
+  consumers — Kubernetes, Docker `healthcheck`, load balancers — gate on the
+  status code and never parse the body, and the body they do not parse says which
+  check failed, which a `code` would not.
+- **`GET /events`** keeps its in-stream vocabulary (`resync_required`) for the
+  reason M5 recorded, which ADR-0030 **preserves as a standing rule** rather than
+  discharging: RFC 9457 formats a response body, and after `200
+  text/event-stream` there is no status code left to carry one. Its 422 for a
+  malformed `?titles=` is decided before the stream starts and *is* a problem
+  document.
+
+Both exemptions are about what a **handler** answers. A 405 is raised by the
+router before any handler runs, so every route — exempt or not — answers a problem
+document for one. The exemption set is closed over `create_app()`'s own route
+table, so a route added later that quietly joins it fails rather than passing
+silently.
+
+A status with no member in the vocabulary is **left in FastAPI's default shape**
+rather than given an invented code, and `_CODE_FOR_STATUS` covers only the three
+statuses raised by machinery Usher does not control (404 and 405 from Starlette's
+router, 422 from FastAPI). Every status Usher's own code raises names its code at
+the raise site. The consequence is named rather than hidden: a route raising a
+bare `HTTPException` for an unmapped status silently opts out of the envelope, and
+what closes that is the per-route "declares its problem responses" check, not a
+wider translation table. See ADR-0030 ruling 4.
+
+**The queue-outage rule stands, and it binds every future route that writes.**
+`POST /admin/rows/regenerate` answers an ordinary 500 when the job queue is
+unreachable, because a 503 there would say *"this endpoint is degraded, retry
+it"* about a deployment in which every endpoint is down. The vocabulary
+therefore holds no `queue_unavailable` and no `database_unavailable` of any
+spelling, and no `internal_error` either — nothing emits one.
 
 ## Streaming updates (SSE)
 
@@ -441,7 +1131,55 @@ subsystem narrows functionality, it never fails a request local state can answer
 | `watchstate.updated` | Title/episode id, position, played | Update progress | ✅ M5 |
 | `row.invalidated` | Row slug | Refetch that row | ✅ M7 |
 | `sync.progress` | Source, counts, phase | Admin UI only | ✅ M5 |
-| `bootstrap.progress` | Phase, percent | Admin UI only | — |
+| `bootstrap.progress` | Phase, dataset, rows seen, rows written, cursor position | Admin UI only | ✅ M9 |
+
+> **Built in M9's E7, and this row's payload column is *changed* rather than
+> implemented — so the change is argued here rather than applied silently.**
+> It read **"Phase, percent"** for eight milestones. There is no percent to be
+> had: `BulkCursor` carries `revision`, `position` and `rows_seen`, and
+> `position` is documented as *"a dataset-defined integer offset whose only
+> contract is that resuming from it never misses a record"* — a byte offset
+> for the IMDb dumps, a page number for the Wikidata crosswalk, whose SPARQL
+> result set has no total at all. A denominator would mean widening
+> `BulkCursor`/`BulkBatch` across all four M2 datasets, which one of them
+> could not satisfy anyway, so the payload states what the importer knows and
+> a client that wants a bar divides by whatever it knows about the dump.
+>
+> **The member had no producer until E5 put bootstrap on the queue**, and
+> `ports/events.py` said so in as many words: *"bootstrap runs in the CLI
+> process while the bus is in-process, so there is no channel from one to the
+> other."* A phase started through `POST /admin/bootstrap/{phase}` runs on the
+> worker lane, which in the shipped default is the API process holding the
+> bus. The member and its publisher land in one commit, both ways round: an
+> event type nothing emits is a client handler that waits forever, and a
+> publisher with no wire name is a `KeyError` inside a response that has
+> already answered `200 text/event-stream`.
+>
+> **One frame per committed batch, never one per run**, and never before that
+> batch's own commit ([ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md)).
+> One at the end is a progress bar that jumps from 0% to 100%, which is the
+> same call `sync.progress` makes. The rate is the smaller of the two: a
+> `--phase imdb` run raises **61** frames at the shipped 50,000-row batch size
+> — 26 for the 1,271,138 retained `title.basics` rows and 35 for the 1,700,615
+> `title.ratings` rows, arithmetic over measured counts rather than an
+> observed total — against `sync.progress`' **measured** 1,127 for one nightly
+> walk of the one library this project has measured.
+>
+> **Scoped to no title, which is what makes "Admin UI only" a property.** A
+> `?titles=` subscriber never sees one. A bulk import touches most of the
+> catalog, so a title id here would wake every detail screen in the household
+> once per batch — the same conclusion `row.invalidated` reaches from the
+> opposite direction.
+>
+> ⚠️ **In a split deployment no client is told, and the checkmark above does
+> not mean "works everywhere".** With `usher work` in its own container the
+> frames reach a `NullEventPublisher`, because M5's bus is in-process and the
+> `LISTEN/NOTIFY` implementation `ports/events.py` names still has no owner.
+> That is the identical, already-documented degradation `title.updated` has
+> had since M5 ([08](08-operations.md)), and it costs nothing durable:
+> `import_runs` is the record of a bootstrap and `GET /admin/bootstrap/status`
+> reads it, so a client that missed every frame can still see exactly where
+> the run got to.
 
 > **Settled in M7.** Published by the **push lane only**, at the same point it
 > publishes `watchstate.updated`, because a push event *is* a change — one
@@ -474,6 +1212,31 @@ subsystem narrows functionality, it never fails a request local state can answer
 > handler that waits forever, and a publisher with no wire name is a `KeyError`
 > inside a response that has already answered `200 text/event-stream`, where
 > there is no status code left to report it with.
+
+> **Settled in M9 — an event is a statement about committed state.** Every
+> event above is offered only after **every write the unit of work that raised
+> it made** has committed, not merely the write the event is about. So a client
+> that acts on a frame the moment it arrives — which is what the *Client
+> action* column instructs — can read the change and everything that shipped
+> with it. [ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md)
+> has the measurement and the reasoning.
+>
+> **It is an ordering guarantee and not a delivery one, and the distinction is
+> the whole of what is promised.** The bus is in-process and lossy by design:
+> an event is still lost when nobody is subscribed, when a subscriber's buffer
+> overflows, and when the process dies. `resync_required` and `Last-Event-ID`
+> answer every gap, exactly as before. Nothing here is durable, nothing here
+> needs a table, and a reader who arrives at a transactional outbox from this
+> paragraph has answered a different question.
+>
+> **Structural for jobs, and deliberately not for the lanes.** A `title.updated`
+> raised by `EnrichService` runs inside a job, whose transaction closes *above*
+> the service, so `JobWorker` holds the frame and offers it once the job's own
+> completion has committed — no handler decides this and none can forget it.
+> The push lane and a reconcile's `sync.progress` are **not** deferred: neither
+> is a job, each commits its own subject before it publishes, and a progress
+> event held behind a walk of 1,127 batches would arrive as one jump at the
+> end instead of a moving bar.
 
 - Subscriptions are scoped by query (`?titles=id1,id2`) so a detail screen isn't
   woken by unrelated churn.
@@ -562,37 +1325,129 @@ proxies that mangle upgrades, and it reconnects natively in browsers.
 
 ## Images
 
-`GET /images/{image_id}?w=&h=&fmt=` — the caching proxy from
-[02](02-data-model.md). Fetches from the provider on first request, resizes,
-stores on disk, serves with immutable cache headers thereafter.
+`GET /images/{image_id}?w=` — the caching proxy from [02](02-data-model.md).
+Fetches a provider **rung** on first request, stores the bytes on disk, and
+serves them with immutable cache headers thereafter. It does not decode and
+does not re-encode: nothing in Usher's runtime can read an image, and nothing
+needs to. See [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md).
 
-Clients never see provider image URLs and never need a provider key. Requested
-widths are clamped to a fixed ladder so the cache can't be trivially blown up by
-arbitrary dimensions.
+✅ **`Cache-Control: immutable` is earned, as of `m09c`.** It is honest only if
+an image id survives re-derivation; `m09a` shipped `images` with no unique key
+to make that true, and `m09c` added
+`uq_images_owner_provider_path` — `UNIQUE NULLS NOT DISTINCT (title_id,
+episode_id, person_id, provider, provider_path)` — so a re-derive upserts and
+returns the id the row was first inserted with. **Between those two revisions
+this route was specified to send a long `max-age` without `immutable`**; that
+interim is over.
+
+**Logos the provider stores as SVG are not served.** The CDN ignores the ladder
+for `image/svg+xml` — every rung returns the `original` bytes — so nothing the
+clamp does can bound one, and the proxy will not store active content under a
+year-long `max-age`. A minority of titles therefore have a logo this route
+returns nothing for; ADR-0032 records the measurement and the degradation.
+
+✅ **Built in M9, and the header ships.** `GET /images/{image_id}?w=` answers
+`Cache-Control: public, max-age=31536000, immutable` plus a strong `sha256`
+`ETag` over the exact bytes served, and a conditional request gets a `304`
+carrying both. `public`, unlike every other cached route here: an image takes no
+user, `images` has no user column, and the bytes are identical for every
+household, so a shared proxy caching them is the feature rather than the leak
+`usher.api.caching`'s `private` rule exists to prevent. The mechanics are that
+module's, not a second implementation.
+
+**The response names the rung it served** in `Content-Location`
+(`/images/{id}?w=780`), which is RFC 9110 §8.7's own mechanism for "you asked
+for 400 and this is the representation I selected" — so a client caches under a
+URL it can re-ask for rather than guessing the ladder. It is built from the
+route table and the *clamped* rung, never from the request's own path, so no
+byte a client sent reaches a response header.
+
+**Four failures and each is a problem document.** A missing row is
+`404 not_found`; **artwork this deployment declines to carry — the SVG logos
+above — is the same `404`**, because the provider answered correctly and a
+client owes it the same fallback it renders for a title with no logo. A CDN
+that did not answer is `503 source_unavailable` with `Retry-After`; a CDN that
+answered something else unusable is the same code without it. [08](08-operations.md)'s
+degradation table carries all four with the reason the fourth is not a 502:
+[ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s
+closed vocabulary has no member for one, and C5 asked rather than minting.
+
+Clients never see provider image URLs and never need a provider key. `w` is
+clamped **up** to a closed ladder of four widths — `154 342 780 1280`, a code
+constant — with `342` when it is omitted and a 422 for anything that is not a
+positive integer. There is no `original` rung: it is the one size with no width
+bound at all, measured at 173 KB to 4.7 MB across kinds (1.5× a poster's top
+rung, 8.1× a backdrop's), and serving it is the disk-and-bandwidth hazard the
+clamp exists to prevent.
+
+🔴 **This section promised `?w=&h=&fmt=` until 2026-08-11 and two of those three
+are withdrawn**, because the mechanism turned out not to support them and a
+parameter the server ignores is worse than one it never offered. **`h=`**: the
+provider publishes exactly one height rung, and only for `profile`, a kind M9
+does not emit — and artwork aspect ratio is fixed by kind, so a height is a
+width divided by a constant the client already knows. **`fmt=`**: the provider
+serves what it holds and negotiates format on `Accept`, not on a query string —
+measured, it will re-encode to WebP for a client that asks in the header and
+will not transcode to a format it does not hold. Format negotiation over
+`Accept` is the named successor, it is strictly additive, and it is worth
+roughly a third of the bytes; it is not built here.
+
+The clamp is also **not** what makes the space finite, which this section
+assumed: the provider's own CDN enforces a closed 15-rung allowlist and answers
+HTTP 400 to everything else. The ladder bounds *Usher's* disk cache at four
+entries per image and keeps Usher's API off a provider's vocabulary.
 
 ## Playback
 
-`POST /titles/{id}/play` returns ranked targets rather than a single URL:
+`POST /titles/{id}/play` and `POST /episodes/{id}/play` return ranked targets
+rather than a single URL, and **every `url` is a ticket** (see the M9 block
+quote below):
 
 ```jsonc
 {
   "targets": [
     {
       "kind": "direct",
-      "url": "https://…/stream.mkv",
+      "url": "https://usher.example/stream/gAAAAABo…",
       "container": "mkv", "video_codec": "hevc", "hdr_format": "HDR10",
       "resolution": "3840x2160", "audio": "truehd_atmos_7_1",
-      "runtime_seconds": 9360, "resume_position_seconds": 1840
+      "runtime_seconds": 9360, "resume_position_seconds": 1840,
+      "source": { "id": "…", "name": "Living Room Emby" }
     },
-    { "kind": "deep_link", "scheme": "infuse", "url": "infuse://x-callback-url/play?…" }
-  ],
-  "source": { "id": "…", "name": "Emby" }
+    {
+      "kind": "deep_link", "scheme": "infuse",
+      "url": "infuse://x-callback-url/play?url=https%3A%2F%2Fusher.example%2Fstream%2FgAAAAABo…",
+      "source": { "id": "…", "name": "Living Room Emby" }
+    }
+  ]
 }
 ```
 
 The client chooses based on what it can play. Usher supplies complete
 information and never proxies bytes — the deep-link construction currently done
 by hand in the Home Assistant card moves here, where it is testable.
+
+`GET /stream/{ticket}` redeems a ticket into a **`302`** whose `Location` is the
+real source URL, with `Cache-Control: no-store`. The client follows it and
+fetches the bytes from the source itself; Usher still never proxies them. An
+expired or forged ticket is a `404` — one answer for both, deliberately.
+
+**`source` is per target, not per response.** A household with two copies of one
+film has two sources and one list of targets ranked across both, so a
+response-level `source` object could only ever be right for a household with
+one. This paragraph corrects the example above, which carried it at the top
+level from M1 until M9 shipped the route.
+
+**Three failures, and each carries a `code` (see [Errors](#errors)).** A `404`
+for an id the catalog does not hold; a `409 not_playable` when every source
+holding a copy answered and none of them offers a way to play it (a series
+folder, a media source with no container); and a `503 source_unavailable` when
+at least one source could not be reached and nothing playable was found on the
+ones that could — retryable, and the first genuine instance of this envelope in
+the project. A source that fails while *another* source answers is not a
+failure at all: the playable targets are returned, which is PRD 08's "a degraded
+subsystem narrows functionality; it never fails a request local state can
+answer".
 
 > **Settled in M3.** The `StreamTarget` port DTO (`usher.ports.source`) now
 > carries both fields shown above: `scheme` (set only for `deep_link`
@@ -631,6 +1486,59 @@ by hand in the Home Assistant card moves here, where it is testable.
 > working until Emby prunes the session or an operator revokes it. See
 > [03](03-sources-and-sync.md) for the cache and ADR-0012 for the risks
 > accepted with it.
+>
+> **Superseded in M9 at the API boundary only, and every sentence above is
+> still true of `StreamTarget`.** The port DTO an adapter builds still carries
+> the session token in `url`, because a URL without one is a URL that does not
+> play; what changed is that `POST /play` no longer *returns* that object.
+> `usher.services.playback` substitutes a ticket for every `url` before the
+> response DTO is built, so the token now reaches a client only as the
+> `Location` of a `302` it followed on purpose. Read this quote as a
+> description of the layer below the route, and the M9 quote below as what the
+> route does with it.
+
+> **Settled in M9 — the playback ticket.** ADR-0012's successor is decided and
+> its cipher is built:
+> [ADR-0029](decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md).
+> A **ticket** is a Fernet token over an HKDF-SHA256 subkey of
+> `USHER_SECRET_KEY`, domain-separated from the source-credential subkey with
+> `info=b"usher.playback-ticket.v1"`, carrying the source URL as its
+> plaintext. `POST /titles/{id}/play` hands the client a ticket instead of the
+> source URL and `GET /stream/{ticket}` redeems one into a `302` — so Usher
+> still never proxies bytes. **The three routes landed in M9 and the JSON
+> example above is the shipped shape**; it carried the pre-ticket one until they
+> did.
+>
+> **Encrypted rather than merely signed**, because the payload *is* the URL
+> carrying `api_key`: a signed-but-readable token would publish the credential
+> it exists to hide. **Stateless** — there is no ticket table, so no revocation
+> before expiry; rotating `USHER_SECRET_KEY` is the coarse revocation that
+> exists. **Expired and forged are deliberately indistinguishable**, and
+> redemption raises nothing rather than building an error message a URL could
+> leak into.
+>
+> **What it changes is the artifact, not the grant.** The `302`'s `Location` is
+> the real URL, so the token still reaches the client that follows it; what
+> stops being a working credential is what the client stores, renders, caches
+> or pastes. The reduction is **weakest for the `deep_link` target**, which
+> hands the ticket to a third-party player that follows the redirect and then
+> holds the real URL exactly as it does today. There is deliberately no
+> `USHER_PLAYBACK_TICKET_TTL_SECONDS` — the TTL is a named constant at the one
+> place that mints, because nobody has yet measured how long a client sits
+> between receiving a target and following it. That constant is
+> `usher.api.routers.playback.TICKET_TTL_SECONDS`, **five minutes**, and its
+> value is a bound rather than a measurement: long enough for the slowest
+> legitimate hand-off (an OS prompt, a cold third-party player launch), short
+> enough that the window a stored or pasted URL stays useful for is minutes
+> rather than the hours a source token lives. M9's live run is what turns it
+> into a number.
+>
+> **The ticket URL is built with `request.url_for`, so it inherits the
+> request's own `Host`.** Behind a reverse proxy that does not send
+> `X-Forwarded-Proto`/`X-Forwarded-Host`, the ticket names the internal
+> address and the client follows a URL it cannot reach — which presents as a
+> playback bug. The fix is an operator setting (`uvicorn --proxy-headers`),
+> not a code change; see [08](08-operations.md).
 
 ## Authentication seam
 

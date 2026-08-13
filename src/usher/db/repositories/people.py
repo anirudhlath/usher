@@ -56,6 +56,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.repositories._errors import constraint_name
 from usher.db.staging import stage_records
+from usher.domain.enums import SearchNameKind
+from usher.domain.ids import new_id
 from usher.domain.people import Credit, CreditKind, Person
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import (
@@ -78,6 +80,12 @@ from usher.ports.repository import (
 # precondition rather than a style rule -- see db/staging.py's module
 # docstring for the three measured failures a public staging table produces.
 # `CREATE TEMP UNLOGGED TABLE` is a syntax error.
+# The one member of `SearchNameKind` this module writes, and it is bound as a
+# parameter rather than written into the SQL twice: the delete's scope and the
+# insert's value have to agree, and a literal in each is two places to change.
+# The other member is `alias`, whose emitter is group T's `title.akas` loader.
+_PERSON_NAME_KIND = SearchNameKind.PERSON.value
+
 _PEOPLE_DDL = """
 CREATE TEMP TABLE stg_people (
     ordinal integer, id uuid, tmdb_id integer,
@@ -132,6 +140,20 @@ WITH deduped AS (
 SELECT count(*) FILTER (WHERE inserted) AS inserted,
        count(*) FILTER (WHERE NOT inserted) AS updated
 FROM all_rows
+"""
+
+# `GET /people/{id}`'s first statement. Columns named rather than `SELECT *`,
+# even though `people` has no derived column and the model's field set is held
+# in exact 1:1 correspondence with the table's by
+# `tests/unit/test_db_models_people.py`: a `*` here would make a column added
+# later arrive at `Person.model_validate` as an unexpected key from a statement
+# nobody edited, which is a failure a long way from its cause.
+#
+# `pk_people` is the driving index and the whole predicate.
+_GET_PERSON = """
+SELECT id, tmdb_id, name, sort_name, known_for_department, created_at, updated_at
+FROM people
+WHERE id = CAST(:person_id AS uuid)
 """
 
 # Unnests the whole batch rather than looping: a single enriched movie names
@@ -302,6 +324,56 @@ WHERE t.id = w.title_id
   AND t.credit_names IS DISTINCT FROM w.names
 """
 
+# **The `person` half of `title_search_names`, written by the call that already
+# writes `credit_names` -- the third spelling of one fact.** The array and the
+# table were already two; this is the same names again, in a row per name, so a
+# `LIKE 'pre%'` probe can find a title by somebody credited on it.
+#
+# **The delete is scoped by `title_ids` AND by `kind`, and both halves are
+# load-bearing for a different reason.** `title_ids` is `_DELETE_CREDITS`'
+# argument unchanged: a title whose credits all disappeared upstream
+# contributes no rows, so a scope derived from the names leaves its stale ones
+# in place forever. `kind` is new here and is about a *second writer* -- group
+# T's `title.akas` loader lands `alias` rows in this same table, and a delete on
+# `title_id` alone makes the two mutually destructive, whichever runs second
+# erasing the other's rows with nothing raised and nothing logged.
+#
+# Served by `ix_title_search_names_title_id`, which `m09a` created for the
+# `ON DELETE CASCADE` lookup and which this delete's leading column is.
+_DELETE_SEARCH_NAMES = """
+DELETE FROM title_search_names
+WHERE title_id = ANY(CAST(:title_ids AS uuid[]))
+  AND kind = CAST(:kind AS text)
+"""
+
+# Three parallel *flat* arrays rather than one jsonb object, and the choice is
+# the opposite of `_WRITE_CREDIT_NAMES`' for a reason that is about the id
+# rather than about taste. That statement pairs one array with one title, which
+# `unnest(uuid[], text[][])` cannot express -- it flattens the second argument.
+# This one pairs one *name* with one title and one freshly minted UUIDv7, which
+# is exactly what a positional multi-argument `unnest` is: three arrays built
+# from one comprehension, so they cannot be of different lengths and cannot
+# pair the wrong name with the wrong title.
+#
+# **The ids are minted in Python, in order, and that is what carries the
+# ranking.** `m09a` gives this table no rank column -- an alias is a set, not a
+# ranking -- so the only thing recording that `credit_names`' order is
+# top-billed-first is that the row for the first name has the lowest id.
+# `gen_random_uuid()` would be one fewer parameter and would lose it.
+#
+# `region` and `language` are left to their column defaults, which is NULL: a
+# credited person's name is not specific to a locale, and NULL means exactly
+# that. Group T's half is what fills them.
+_INSERT_SEARCH_NAMES = """
+INSERT INTO title_search_names (id, title_id, name, kind)
+SELECT r.id, r.title_id, r.name, CAST(:kind AS text)
+FROM unnest(
+         CAST(:ids AS uuid[]),
+         CAST(:name_title_ids AS uuid[]),
+         CAST(:names AS text[])
+     ) AS r(id, title_id, name)
+"""
+
 _LIST_FOR_TITLE = """
 SELECT c.person_id AS person_id, p.name AS name, c.kind AS kind,
        c."character" AS character, c.job AS job, c.department AS department,
@@ -327,6 +399,16 @@ LIMIT :limit
 class PostgresPersonRepository(PersonRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get(self, person_id: uuid.UUID) -> Person | None:
+        with self._session.no_autoflush:
+            row = (
+                await self._session.execute(text(_GET_PERSON), {"person_id": person_id})
+            ).one_or_none()
+        # `one_or_none`, never `first`: `id` is the primary key, so two rows
+        # here would be a corrupt index rather than a result set to pick from,
+        # and `first` would answer one of them without saying so.
+        return Person.model_validate(dict(row._mapping)) if row is not None else None
 
     async def upsert_many(self, people: Sequence[Person]) -> BulkWriteResult:
         if not people:
@@ -418,6 +500,30 @@ class PostgresCreditRepository(CreditRepository):
     ) -> int:
         if not title_ids and not credits:
             return 0
+        # Built from the `credit_names` **mapping**, never from `credits`. The
+        # two are not the same list and were never meant to be:
+        # `services/derive._credit_names` truncates the cast at
+        # `_CREDIT_NAME_CAST_LIMIT = 10` and appends every stored crew name,
+        # while `credits` holds up to `mapping._CAST_LIMIT = 50` of them in
+        # provider order. Projecting the rows here would produce a plausible,
+        # populated, differently-ordered index nothing outside its own contract
+        # case would see.
+        #
+        # `dict.fromkeys` twice rather than a `set` twice, because both of
+        # these are ordered: the scope keeps the caller's order so the ids
+        # ascend with it, and the names keep `credit_names`' order, which *is*
+        # the ranking. One person credited as both cast and crew is one row
+        # here and two entries in the array -- the array is weight class B's
+        # input, where a repeated lexeme is a `ts_rank` contribution, and this
+        # is a name index.
+        search_ids: list[uuid.UUID] = []
+        search_title_ids: list[uuid.UUID] = []
+        search_names: list[str] = []
+        for scoped_id in dict.fromkeys(title_ids):
+            for name in dict.fromkeys(credit_names.get(scoped_id, ())):
+                search_ids.append(new_id())
+                search_title_ids.append(scoped_id)
+                search_names.append(name)
         records = [
             (
                 ordinal,
@@ -462,6 +568,26 @@ class PostgresCreditRepository(CreditRepository):
                             ),
                         },
                     )
+                    # The third destination, in the same nested block and
+                    # before the early return, for the same reason the array
+                    # is: a title in scope whose credits all disappeared has
+                    # its searchable names emptied rather than skipped. The
+                    # delete runs unconditionally and the insert only has
+                    # something to do when the mapping named a name.
+                    await self._session.execute(
+                        text(_DELETE_SEARCH_NAMES),
+                        {"title_ids": list(title_ids), "kind": _PERSON_NAME_KIND},
+                    )
+                    if search_ids:
+                        await self._session.execute(
+                            text(_INSERT_SEARCH_NAMES),
+                            {
+                                "ids": search_ids,
+                                "name_title_ids": search_title_ids,
+                                "names": search_names,
+                                "kind": _PERSON_NAME_KIND,
+                            },
+                        )
                     if not records:
                         return 0
                     await stage_records(

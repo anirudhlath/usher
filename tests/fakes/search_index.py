@@ -28,18 +28,37 @@ is:**
 - **It cannot fail.** No connection, no lock, no index build cost, no
   timeout, no `PortUnavailable`. Nothing here exercises a single error path.
 
+**`FakeSuggestIndex` doubles for the typo-tolerant tier, and the prefix tier's
+double answers a different question rather than the same one.** M9's two-tier
+suggest ships a second `SuggestIndex` -- `PostgresPrefixSuggestIndex`, a btree
+prefix probe whose measured typo recall is 1.9% -- and `FakeSuggestIndex`
+subclasses `TypoTolerantSuggestIndexContract`, i.e. the trigram path's
+contract. **`FakePrefixSuggestIndex` deliberately subclasses no contract at
+all**, and the reason this paragraph gave for having no double is still the
+reason: an in-memory prefix double checked against `SuggestIndexContract`
+would be `str.startswith` asserting against `str.startswith`, and what that
+tier's own cases are about is which index Postgres takes, so **that arm stays
+integration-only** (`tests/integration/test_adapters_search_prefix.py`).
+
+What the double is for is the question B5's route asks and no contract does:
+*which tier answered*. Its whole value is that the two doubles **disagree on a
+typo** -- one finds it, the other cannot -- which is a property no single index
+can have and therefore the one thing a two-armed case can hold a tier selector
+to. Seeded from one catalog with explicit ids so both tiers see the same rows.
+
 **Where `FakeSuggestIndex` is more forgiving, on purpose. Four places:**
 
 - **No candidate cap.** It computes edit distance over its whole dict, so
   the one property the real path exists for is structurally absent -- and its
   typo tolerance is therefore *better* than the real one, which is the
-  dangerous direction. `SuggestIndexContract`'s cap case is skipped here by
-  capability flag rather than passed.
+  dangerous direction. `TypoTolerantSuggestIndexContract`'s cap case is
+  skipped here by capability flag rather than passed.
 - **Levenshtein only**, with no trigram pre-filter and therefore none of
   `pg_trgm`'s similarity threshold or its recall cliff on short names.
 - **`given()` is a test-only writer.** The port has no write method
-  (ADR-0021) and the real implementation writes nothing at all, so the one
-  fact this class *cannot* model is the absence it exists to stand in for.
+  (ADR-0021) and neither real implementation writes anything at all, so the
+  one fact this class *cannot* model is the absence it exists to stand in
+  for.
 - **Python's `casefold()`, not Postgres's `lower()`** and not its collation,
   so nothing here says anything about non-ASCII names.
 """
@@ -151,7 +170,9 @@ class FakeSuggestIndex(SuggestIndex):
         self._names: dict[uuid.UUID, tuple[str, float]] = {}
         self._max_distance = max_distance
 
-    def given(self, *, name: str, popularity: float = 1.0) -> uuid.UUID:
+    def given(
+        self, *, name: str, popularity: float = 1.0, title_id: uuid.UUID | None = None
+    ) -> uuid.UUID:
         """Test-only writer, deliberately absent from the port.
 
         `SuggestIndex` has no write method and `PostgresSuggestIndex` writes
@@ -159,8 +180,15 @@ class FakeSuggestIndex(SuggestIndex):
         port so this class could implement them is exactly the change
         ADR-0021 exists to make visible, so the seam stays here, in
         `tests/`, where nothing in `src/` can reach it.
+
+        **`title_id` is optional so two tiers can be seeded over one
+        catalog.** A case that asks *which tier answered* has to hand the same
+        row to both doubles and to the `TitleRepository` the hydration reads
+        through; minting an id here would make the three disagree and the
+        hydration would drop every hit, which is a green empty box for the
+        wrong reason.
         """
-        title_id = new_id()
+        title_id = new_id() if title_id is None else title_id
         self._names[title_id] = (name, popularity)
         return title_id
 
@@ -181,6 +209,58 @@ class FakeSuggestIndex(SuggestIndex):
             SearchHit(title_id=title_id, score=1.0 / (1.0 + distance))
             for distance, _, title_id in scored[: max(limit, 0)]
         ]
+
+
+class FakePrefixSuggestIndex(SuggestIndex):
+    """Tier 1's matching rule and nothing else: the name starts with the typed
+    prefix.
+
+    **Subclasses no contract, deliberately**, for the reason this module's
+    docstring gives: checked against `SuggestIndexContract` it would be
+    `str.startswith` asserting against `str.startswith`, and the real tier's
+    cases are about which index Postgres takes. What it is for is a case that
+    has to tell **which tier answered** -- it finds no typo where
+    `FakeSuggestIndex` finds one, and that disagreement is the only thing a
+    tier selector can be held to.
+
+    Two further divergences from `PostgresPrefixSuggestIndex`, both in the
+    forgiving direction and neither reachable by anything above the port.
+    There is no `LIKE` escaping here, so nothing says what a typed `%` costs;
+    and the ordering is `popularity DESC, id` where the real statement is
+    `popularity DESC NULLS LAST, vote_count DESC NULLS LAST, id ASC`, because
+    a `SuggestIndex` hands back ids and a `vote_count` is not one of them.
+    """
+
+    def __init__(self) -> None:
+        self._names: dict[uuid.UUID, tuple[str, float]] = {}
+
+    def given(
+        self, *, name: str, popularity: float = 1.0, title_id: uuid.UUID | None = None
+    ) -> uuid.UUID:
+        """Test-only writer, on `FakeSuggestIndex.given`'s terms exactly."""
+        title_id = new_id() if title_id is None else title_id
+        self._names[title_id] = (name, popularity)
+        return title_id
+
+    async def suggest(self, prefix: str, limit: int = 10) -> list[SearchHit]:
+        # The real statement's own guard, mirrored: an empty box is the state
+        # of every page load and `LIKE '%'` is a whole-catalog sort for a
+        # question nobody asked. Without it this double would answer the whole
+        # dict for `""`, which is the one behaviour tier 1 provably does not
+        # have.
+        if not prefix.strip():
+            return []
+        wanted = prefix.casefold()
+        matched = [
+            (popularity, title_id)
+            for title_id, (name, popularity) in self._names.items()
+            if name.casefold().startswith(wanted)
+        ]
+        matched.sort(key=lambda row: (-row[0], row[1].bytes))
+        # 1.0 for every row, which is the shipped tier's own answer and its
+        # own reason: every row is an exact prefix match, so the distance
+        # tier 2 varies its score with is zero for all of them.
+        return [SearchHit(title_id=title_id, score=1.0) for _, title_id in matched[: max(limit, 0)]]
 
 
 def _terms(query: str) -> list[str]:
@@ -246,7 +326,8 @@ def _coverage(population: Sequence[SearchDocument]) -> float:
 
 def _edit_distance(left: str, right: str) -> int:
     """Plain Levenshtein. Not Damerau: a transposition costs 2 here, which
-    is what `SuggestIndexContract`'s transposition case is arranged for."""
+    is what `TypoTolerantSuggestIndexContract`'s transposition case is
+    arranged for."""
     previous = list(range(len(right) + 1))
     for row, one in enumerate(left, start=1):
         current = [row]

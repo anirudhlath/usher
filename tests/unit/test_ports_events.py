@@ -20,8 +20,17 @@ def test_every_event_kind_is_something_this_process_emits() -> None:
     publisher** (`PushApplyService`), which is this rule pointed the other way:
     a member with no publisher is the handler that waits forever, and a
     publisher with no member is a `KeyError` inside a response that has already
-    answered 200. `bootstrap.progress` is still absent, because bootstrap runs
-    in the CLI process while the bus is in-process.
+    answered 200.
+
+    **M9's E7 added the sixth, `bootstrap.progress`, on the same terms.** Its
+    absence was justified by a premise E5 removed: bootstrap ran only in the
+    CLI process while the bus is in-process, so there was no channel from one
+    to the other. `JobKind.BOOTSTRAP` put the work on the worker lane, which
+    in the shipped default is the API process holding this bus, and the member
+    lands in the same commit as `BootstrapService`'s publisher. What has not
+    changed is the split deployment: with `usher work` in its own container
+    the frames reach a `NullEventPublisher`, which is the degradation
+    `title.updated` has had since M5 rather than a new one.
 
     Renamed from `..._is_something_m5_emits`: the rule is about *this process*,
     not about one milestone, and a guard whose name pins a milestone is one the
@@ -32,6 +41,7 @@ def test_every_event_kind_is_something_this_process_emits() -> None:
         "watchstate.updated",
         "row.invalidated",
         "sync.progress",
+        "bootstrap.progress",
         "resync_required",
     }
 

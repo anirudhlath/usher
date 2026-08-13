@@ -6,45 +6,70 @@ wiring nothing checks.
 """
 
 import argparse
+import ast
 import asyncio
 import contextlib
 import dataclasses
+import gzip
+import inspect
+import pathlib
+import re
 import uuid
 import zipfile
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 import pytest
 
+import usher.cli
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.genome_repository import FakeGenomeRepository
 from tests.fakes.import_run_repository import FakeImportRunRepository
 from tests.fakes.llm_client import FakeLLMClient
+from usher.adapters.bulk.imdb import parse_akas_row
 from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.cli import (
     PHASES,
     SYNC_KINDS,
     _as_uuid,
+    _bootstrap,
     _filters_from,
-    _movielens,
     _print_search_answer,
-    _report_coverage,
     _run_lanes,
     _search,
     _vocabulary_line,
     build_parser,
     parse_args,
 )
+from usher.composition import (
+    _aliases,
+    _credit_names,
+    _movielens,
+    _percent,
+    _report_coverage,
+)
 from usher.config import Settings
-from usher.domain.bootstrap import ImportRunStatus
+from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.db.repositories.import_run import PostgresImportRunRepository
+from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.search import SearchResult
 from usher.ports.bulk import GENOME_TAG_COUNT, ImdbTitle
+from usher.ports.events import NullEventPublisher
 from usher.ports.repository import GenomeCoverage
 from usher.ports.search import SearchFilters, SearchMode
-from usher.services.bootstrap import BootstrapService
-from usher.services.search import SearchAnswer
+from usher.services.bootstrap import (
+    BootstrapReport,
+    BootstrapService,
+    VocabularyState,
+    VocabularyVerdict,
+    bootstrap_report,
+    vocabulary_verdict,
+)
+from usher.services.search import SearchAnswer, SuggestTier
 
 
 def test_no_arguments_still_means_serve() -> None:
@@ -376,6 +401,39 @@ def test_suggest_takes_a_prefix_and_a_limit() -> None:
     assert parse_args(["suggest", "quie"]).limit == 10
 
 
+def test_suggest_defaults_to_the_tier_that_tolerates_a_typo() -> None:
+    """**The route defaults to `prefix` and this command defaults to `fuzzy`,
+    and the disagreement is the decision** (ADR-0031): a route is driven per
+    keystroke and pays 2,707 ms p95 at one character, a command is typed once
+    and can afford it. `usher suggest` has been the typo-tolerant one since M6
+    and CLAUDE.md's Commands section documents it as such.
+
+    Asserted through the enum rather than against the string `"fuzzy"`,
+    because what the default has to be is *the tier that tolerates a typo* --
+    the same argument `SuggestTier`'s own docstring makes for being an enum
+    rather than a `typo_tolerant: bool`.
+
+    **Nothing else in this repository pins it**, measured rather than assumed:
+    flipping this default to `prefix` passed all 3,923 unit cases and the whole
+    of `tests/integration/test_cli_pipeline.py` before this case existed. The
+    damage is quiet -- `usher suggest "the quie"` answers `no match` for a
+    misspelt name instead of finding it, on a command whose documented purpose
+    is to find it.
+    """
+    assert SuggestTier(parse_args(["suggest", "quie"]).tier) is SuggestTier.FUZZY
+    assert SuggestTier(parse_args(["suggest", "quie", "--tier", "prefix"]).tier) is (
+        SuggestTier.PREFIX
+    )
+
+
+def test_suggest_refuses_a_tier_that_is_not_one_of_the_two() -> None:
+    """`argparse`'s `choices`, derived from the enum rather than written out,
+    so a third member cannot be reachable from the route and unreachable
+    here."""
+    with pytest.raises(SystemExit):
+        parse_args(["suggest", "quie", "--tier", "fuzy"])
+
+
 def test_suggest_refuses_a_limit_of_zero() -> None:
     """`usher search`'s rule, for the same reason -- a type-ahead box asking
     for nothing is an operator who meant something."""
@@ -402,8 +460,16 @@ def test_movielens_is_the_last_phase_before_all_and_the_order_is_execution_order
     tidy-up that alphabetises `PHASES`, which would put `crosswalk` and
     `movielens` before `imdb` and produce a phase that downloads 335 MiB,
     writes zero rows, and reports success.
+
+    Two edges rather than the whole tuple, because M9 added two phases between
+    `imdb` and `tmdb-ids` and pinning the literal in two places is how one of
+    them comes to be updated and the other merely made green.
+    `test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first`
+    is where the full tuple is asserted, with the measurement behind each new
+    edge.
     """
-    assert PHASES == ("imdb", "tmdb-ids", "crosswalk", "movielens", "all")
+    assert PHASES[-2:] == ("movielens", "all")
+    assert PHASES.index("imdb") < PHASES.index("movielens")
 
 
 async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
@@ -432,7 +498,9 @@ async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
 
     catalog = FakeBulkCatalogRepository()
     runs = FakeImportRunRepository()
-    service = BootstrapService(runs, catalog, _no_commit)
+    service = BootstrapService(
+        runs, catalog, _no_commit, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@localhost/db",
         secret_key="0" * 32,
@@ -440,7 +508,7 @@ async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
     )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
-        await _movielens(settings, client, catalog, service, _no_commit)
+        await _movielens(settings, client, catalog, service, _no_commit, print)
 
     assert await catalog.count_titles() == 0
     assert await runs.list_runs() == []
@@ -537,10 +605,16 @@ async def test_the_genome_phase_stores_the_tag_vocabulary_beside_the_vectors(
     cache = _genome_archive(tmp_path)
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles([_SEEDED_TITLE])
-    service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
+    service = BootstrapService(
+        FakeImportRunRepository(),
+        catalog,
+        _no_commit,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
-        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit)
+        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
 
     stored = catalog.genome_tags()
     assert len(stored) == GENOME_TAG_COUNT
@@ -587,10 +661,16 @@ async def test_the_vocabulary_is_stamped_with_the_token_the_vectors_were_stamped
 
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles([_SEEDED_TITLE])
-    service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
+    service = BootstrapService(
+        FakeImportRunRepository(),
+        catalog,
+        _no_commit,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit)
+        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
         # The premise, asserted against the transport rather than against the
         # run: one more resolution really does hand back a different token, so
         # an implementation that resolved a second time would have stamped
@@ -637,11 +717,13 @@ async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_voca
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles([_SEEDED_TITLE])
     runs = FakeImportRunRepository()
-    service = BootstrapService(runs, catalog, _no_commit)
+    service = BootstrapService(
+        runs, catalog, _no_commit, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
     settings = _genome_settings(cache)
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
-        await _movielens(settings, client, catalog, service, _no_commit)
+        await _movielens(settings, client, catalog, service, _no_commit, print)
         assert len(catalog.genome_tags()) == GENOME_TAG_COUNT
         # An M7-era catalog has no vocabulary. Both stores are emptied rather
         # than just the vocabulary, so the assertions below can distinguish
@@ -650,7 +732,7 @@ async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_voca
         # replayed every batch reaches the same position.
         catalog._genome_tags.clear()
         catalog._genome.clear()
-        await _movielens(settings, client, catalog, service, _no_commit)
+        await _movielens(settings, client, catalog, service, _no_commit, print)
 
     checkpoint = await runs.get("movielens.genome")
     assert checkpoint is not None
@@ -679,10 +761,12 @@ async def test_an_import_that_failed_writes_no_vocabulary(
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles([_SEEDED_TITLE])
     runs = FakeImportRunRepository()
-    service = BootstrapService(runs, catalog, _no_commit)
+    service = BootstrapService(
+        runs, catalog, _no_commit, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
-        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit)
+        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
 
     stored_run = await runs.get("movielens.genome")
     assert stored_run is not None and stored_run.status is ImportRunStatus.FAILED
@@ -707,14 +791,19 @@ async def test_the_status_report_says_when_the_vocabulary_names_the_stored_vecto
     passes every one of them."""
     genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-a"), 2: ("atmospheric", "etag-a")})
 
-    assert await _vocabulary_line(genome, _coverage(("etag-a", 5))) == "genome vocabulary: 2 tags"
+    verdict = await vocabulary_verdict(genome, _coverage(("etag-a", 5)))
+
+    assert verdict == VocabularyVerdict(state=VocabularyState.NAMED, tags=2)
+    assert _vocabulary_line(verdict) == "genome vocabulary: 2 tags"
 
 
 async def test_the_status_report_says_a_vocabulary_that_was_never_loaded_is_missing() -> None:
     """Every catalog bootstrapped before `m08b` is in this state, so it has to
     read as a thing to do rather than as a fault -- and the line names the
     command that fixes it, which is PRD 08's rule for an operator command."""
-    line = await _vocabulary_line(FakeGenomeRepository(), _coverage(("etag-a", 5)))
+    line = _vocabulary_line(
+        await vocabulary_verdict(FakeGenomeRepository(), _coverage(("etag-a", 5)))
+    )
 
     assert "not loaded" in line
     assert "--phase movielens" in line
@@ -733,7 +822,7 @@ async def test_the_status_report_renders_a_mismatched_vocabulary_rather_than_rai
     """
     genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-b")})
 
-    line = await _vocabulary_line(genome, _coverage(("etag-a", 5)))
+    line = _vocabulary_line(await vocabulary_verdict(genome, _coverage(("etag-a", 5))))
 
     assert "etag-a" in line
     assert "etag-b" in line
@@ -750,7 +839,9 @@ async def test_the_status_report_declines_to_judge_a_vocabulary_against_mixed_ve
     """
     genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-a")})
 
-    line = await _vocabulary_line(genome, _coverage(("etag-a", 5), ("etag-b", 2)))
+    line = _vocabulary_line(
+        await vocabulary_verdict(genome, _coverage(("etag-a", 5), ("etag-b", 2)))
+    )
 
     assert "more than one release" in line
 
@@ -760,9 +851,94 @@ async def test_the_status_report_says_nothing_is_named_when_there_are_no_vectors
     operator command to work against one. Kills an implementation that reports
     a missing vocabulary as a problem on a catalog that has nothing for it to
     explain."""
-    assert await _vocabulary_line(FakeGenomeRepository(), _coverage()) == (
+    assert _vocabulary_line(await vocabulary_verdict(FakeGenomeRepository(), _coverage())) == (
         "genome vocabulary: no vectors to name"
     )
+
+
+@pytest.mark.parametrize("state", list(VocabularyState))
+def test_every_vocabulary_state_the_report_can_carry_has_a_sentence_of_its_own(
+    state: VocabularyState,
+) -> None:
+    """A member added to `VocabularyState` and forgotten in the renderer falls
+    through to the `named` branch and prints `genome vocabulary: None tags` --
+    a sentence that is grammatical, plausible and about a state that did not
+    occur.
+
+    Parametrised over the enum rather than over the five branches, so the
+    coverage grows with the vocabulary and nobody has to remember. The
+    distinctness assertion is what has teeth: `len(set(...)) == len(...)` over
+    every member's rendering fails the moment two states render alike, which
+    is exactly what a fall-through produces.
+    """
+    verdict = VocabularyVerdict(state=state, tags=2, detail="a stored diagnosis")
+    sentences = {
+        one: _vocabulary_line(VocabularyVerdict(state=one, tags=2, detail="a stored diagnosis"))
+        for one in VocabularyState
+    }
+
+    assert sentences[state].startswith("genome vocabulary: ")
+    assert _vocabulary_line(verdict) == sentences[state]
+    assert len(set(sentences.values())) == len(VocabularyState)
+
+
+async def test_the_status_report_is_one_value_and_survives_an_untouched_database() -> None:
+    """`bootstrap_report` against a database no import has run, which is where
+    a report assembled from four reads is most likely to raise -- PRD 08's
+    rule that a diagnostic must work before the thing it diagnoses has.
+
+    This is the seam the whole report rests on: it takes **ports**, so the
+    five vocabulary branches and the empty case are unit-testable, while
+    `cli._status` opens its own engine and is not. A report that took a
+    session would have moved every one of the cases above into
+    `tests/integration/`.
+    """
+    report = await bootstrap_report(
+        FakeImportRunRepository(), FakeBulkCatalogRepository(), FakeGenomeRepository()
+    )
+
+    assert report == BootstrapReport(
+        runs=(),
+        titles=0,
+        genome=GenomeCoverage(
+            with_vector=0, titles=0, movies=0, enriched=0, enriched_with_vector=0, revisions=()
+        ),
+        vocabulary=VocabularyVerdict(state=VocabularyState.NO_VECTORS),
+    )
+
+
+async def test_the_status_report_carries_every_run_the_repository_holds_in_its_order() -> None:
+    """The report is a *carrier* for `list_runs()` and adds no policy of its
+    own -- no truncation, no re-sort, no filter on status.
+
+    Found by planting rather than by design: with every other case reaching
+    the report through a database or a fake holding **one** run, slicing it to
+    `stored[:1]` survived all 112 cases in this task's sweep selection. The
+    damage is the quiet kind -- a report that lists one dataset looks exactly
+    like a catalog on which one dataset has ever been imported, which on a
+    `--phase all` run is six datasets short and says nothing about it.
+
+    Asserted as an equality against the repository's *own* answer rather than
+    against a literal, so it pins the order as well as the membership and
+    keeps saying something if `list_runs()`' ordering is ever changed. The
+    premise guard is what stops the equality being trivially true against a
+    one-element list -- the exact condition under which the plant survived.
+    """
+    runs = FakeImportRunRepository()
+    await runs.save(ImportRun(dataset="imdb.title.basics", revision="an-invented-etag"))
+    await runs.save(
+        ImportRun(
+            dataset="wikidata.crosswalk",
+            revision="an-invented-etag",
+            heartbeat_at=datetime(2020, 1, 1, tzinfo=UTC),
+        )
+    )
+    stored = await runs.list_runs()
+    assert len(stored) == 2, "the premise: a one-run repository cannot see a truncation"
+
+    report = await bootstrap_report(runs, FakeBulkCatalogRepository(), FakeGenomeRepository())
+
+    assert report.runs == tuple(stored)
 
 
 def test_the_coverage_report_survives_an_enriched_tier_of_zero(
@@ -783,6 +959,7 @@ def test_the_coverage_report_survives_an_enriched_tier_of_zero(
         ),
         unmatched=0,
         tags=GENOME_TAG_COUNT,
+        report=print,
     )
     printed = capsys.readouterr().out
     assert "1.29% of 1271138 titles" in printed
@@ -812,6 +989,7 @@ def test_the_coverage_report_names_every_release_when_there_is_more_than_one(
         ),
         unmatched=4,
         tags=GENOME_TAG_COUNT,
+        report=print,
     )
     printed = capsys.readouterr().out
     assert "3 vectors stored (4 unmatched)" in printed
@@ -959,6 +1137,7 @@ async def test_a_semantic_search_hands_the_completion_client_to_the_pipeline(
     monkeypatch.setattr("usher.cli.embedder", _an_embedder)
     monkeypatch.setattr("usher.cli.llm_client", _client)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.ensure_default_user", _no_household)
     monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
 
     await _search(
@@ -993,6 +1172,7 @@ async def test_a_search_with_no_embedding_model_opens_no_completion_client(
 
     monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.ensure_default_user", _no_household)
     monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
 
     settings = _cli_settings(llm_enabled=True, query_expansion_enabled=True)
@@ -1022,6 +1202,7 @@ async def test_a_search_on_a_deployment_that_curates_but_does_not_expand_opens_n
     monkeypatch.setattr("usher.cli.embedder", _an_embedder)
     monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.ensure_default_user", _no_household)
     monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
 
     await _search(
@@ -1053,6 +1234,7 @@ async def test_a_full_text_search_opens_no_completion_client_at_all(
     monkeypatch.setattr("usher.cli.embedder", _an_embedder)
     monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.ensure_default_user", _no_household)
     monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
 
     await _search(
@@ -1064,6 +1246,42 @@ async def test_a_full_text_search_opens_no_completion_client_at_all(
     )
 
     assert captured["llm"] is None
+
+
+async def test_a_search_ranks_for_the_default_household(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`usher search` resolves the singleton household and hands it on.
+
+    Fails: a command that never resolves one, which renders identically -- the
+    same rows, the same scores, no error and no line to say the watch-state
+    term was absent. It is the one term whose absence is invisible in the
+    output, so only the argument says whether it ran.
+
+    `ensure_default_user` and not `default_user`, for `usher curate`'s reason:
+    this needs an id and nothing else.
+    """
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.ensure_default_user", _no_household)
+    monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
+
+    await _search(
+        _cli_settings(),
+        query="the quiet vacuum",
+        mode="full_text",
+        limit=5,
+        filters=SearchFilters(),
+    )
+
+    assert captured["search_kwargs"] == {
+        "mode": SearchMode.FULL_TEXT,
+        "limit": 5,
+        "filters": SearchFilters(),
+        "user_id": _CLI_HOUSEHOLD,
+    }
 
 
 async def _never_a_client(*_: object, **__: object) -> object:
@@ -1108,12 +1326,30 @@ async def _no_session(_: Settings) -> AsyncIterator[None]:
     yield None
 
 
+#: The household `_no_household` answers with. Fixed rather than minted, so a
+#: case can assert the id that reached the service is the id the command
+#: resolved rather than merely that one did.
+_CLI_HOUSEHOLD = uuid.UUID(int=0xA1)
+
+
+async def _no_household(_: object, **__: object) -> uuid.UUID:
+    """`db.users.ensure_default_user`, without the database it reads.
+
+    `_no_session` yields `None`, so the real one has nothing to run its
+    `SELECT` against. Substituted here rather than given a session because
+    which row the id came from is `tests/integration/test_cli_pipeline.py`'s
+    question; these cases are about what `_search` hands on.
+    """
+    return _CLI_HOUSEHOLD
+
+
 def _recording_pipeline(captured: dict[str, object]) -> Callable[..., object]:
-    """A `build_pipeline` that records its keyword arguments and answers a
-    `SearchAnswer` with nothing in it."""
+    """A `build_pipeline` that records its keyword arguments, and a `search`
+    that records its own, answering a `SearchAnswer` with nothing in it."""
 
     class _Search:
-        async def search(self, query: str, **_: object) -> SearchAnswer:
+        async def search(self, query: str, **kwargs: object) -> SearchAnswer:
+            captured["search_kwargs"] = kwargs
             return SearchAnswer()
 
     class _Pipeline:
@@ -1124,3 +1360,538 @@ def _recording_pipeline(captured: dict[str, object]) -> Callable[..., object]:
         return _Pipeline()
 
     return _build
+
+
+# --- the IMDb expansion phases ----------------------------------------
+#
+# `credit-names` and `aliases` are the two phases M9 adds, and both are joins
+# against a catalog the `imdb` phase has to have built first. The fixtures are
+# the committed synthetic slices the adapters' own tests read; the transports
+# below serve them out of a scratch cache directory, so no case here opens a
+# socket and no third-party row is committed.
+
+_BULK_FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
+
+_EXPANSION_TITLES = (
+    ImdbTitle(
+        imdb_id="tt99000010",
+        kind=TitleKind.MOVIE,
+        name='"A Quoted Synthetic Title"',
+        original_name='"A Quoted Synthetic Title"',
+        year=1962,
+        end_year=None,
+        runtime_minutes=111,
+        genres=("Crime", "Drama"),
+    ),
+    ImdbTitle(
+        imdb_id="tt99000020",
+        kind=TitleKind.MOVIE,
+        name="A Synthetic Feature",
+        original_name="A Synthetic Feature",
+        year=1988,
+        end_year=None,
+        runtime_minutes=123,
+        genres=("Drama",),
+    ),
+    ImdbTitle(
+        imdb_id="tt99000030",
+        kind=TitleKind.SERIES,
+        name="A Synthetic Series",
+        original_name="A Synthetic Series",
+        year=2004,
+        end_year=2009,
+        runtime_minutes=44,
+        genres=("Drama",),
+    ),
+)
+
+
+def _stage_slices(tmp_path: Path, *pairs: tuple[str, str]) -> Path:
+    cache = tmp_path / "bulk"
+    cache.mkdir(parents=True, exist_ok=True)
+    for source, name in pairs:
+        (cache / name).write_bytes(gzip.compress((_BULK_FIXTURES / source).read_bytes()))
+    return cache
+
+
+def _recording_local(cache: Path, asked: list[str]) -> httpx.MockTransport:
+    """`_local_archive`, plus the order the files were asked for.
+
+    The order is the assertion in `test_the_credit_names_phase_reads_name_
+    basics_before_title_principals`, and recording it here rather than
+    counting calls is the difference between "both files were read" -- which
+    the wrong order also satisfies -- and "this one was read first".
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = str(request.url).rsplit("/", 1)[-1]
+        asked.append(name)
+        (cache / f"{name}.revision").write_text('"fixture"')
+        return httpx.Response(
+            200, content=(cache / name).read_bytes(), headers={"etag": '"fixture"'}
+        )
+
+    return httpx.MockTransport(handler)
+
+
+def _expansion_settings(cache: Path, *, batch_size: int = 50_000) -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/db",
+        secret_key="0" * 32,
+        bulk_data_dir=cache,
+        bulk_batch_size=batch_size,
+    )
+
+
+async def _seeded_catalog() -> tuple[FakeBulkCatalogRepository, BootstrapService]:
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles(list(_EXPANSION_TITLES))
+    return catalog, BootstrapService(
+        FakeImportRunRepository(),
+        catalog,
+        _no_commit,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
+
+
+def test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first() -> None:
+    """Two edges, both measured, in a tuple `--phase all` executes in order.
+
+    **`credit-names` and `aliases` after `imdb`**: both join to `titles` on
+    `imdb_id`, so against an empty catalog they match nothing -- the same
+    argument `movielens` already makes, arriving at a 1.57 GiB download rather
+    than a 335 MiB one.
+
+    **`credit-names` before everything that enriches a title.**
+    `fill_credit_names` writes only where `enrichment_state = 'skeleton'`, so
+    a title an enrichment crawl has already reached is deferred to TMDb -- on
+    that run and on every later one. **203,969 of the 204,335 titles with
+    >=100 votes (99.82%)** gain a `credit_names` in this order and none of
+    them in the other, and no re-run repairs it. Ordering is the whole
+    mitigation and there is no other one.
+
+    It stales **no** embedding in either order, and this docstring said
+    otherwise until 2026-08-12: the embedded population is
+    `enrichment_state <> 'skeleton'`, the exact complement of what the fill
+    writes.
+
+    Kills a tidy-up that alphabetises `PHASES` -- which would put `aliases`
+    and `credit-names` before `imdb` and produce two phases that download
+    1.57 GiB, write nothing and report success.
+    """
+    assert PHASES == (
+        "imdb",
+        "credit-names",
+        "aliases",
+        "tmdb-ids",
+        "crosswalk",
+        "movielens",
+        "all",
+    )
+    assert PHASES.index("imdb") < PHASES.index("credit-names") < PHASES.index("aliases")
+
+
+async def test_the_credit_names_phase_reads_name_basics_before_title_principals(
+    tmp_path: Path,
+) -> None:
+    """A credit names a person, so the `nconst -> primaryName` index has to
+    exist before a principal is resolved against it.
+
+    **The order is asserted as a sequence, not as two memberships**: "both
+    files were read" is satisfied by the wrong order, which would resolve
+    every principal against an empty index and yield no record at all -- a
+    phase that completes, checkpoints, and blanks nothing while filling
+    nothing.
+
+    **This is the plan's `test_bootstrap_phase_people_runs_name_basics_before_
+    title_principals` under a name that describes what shipped.** There is no
+    `people` phase: T3 measured the `people` + `credits` design at 2.702 GB
+    against a 2.0 GB ceiling and refused it, so the two files are one dataset
+    resolving the join in the adapter, and the ordering they need is inside
+    that dataset rather than between two phases.
+    """
+    cache = _stage_slices(
+        tmp_path,
+        ("name.basics.slice.tsv", "name.basics.tsv.gz"),
+        ("title.principals.slice.tsv", "title.principals.tsv.gz"),
+    )
+    catalog, service = await _seeded_catalog()
+    asked: list[str] = []
+
+    async with httpx.AsyncClient(transport=_recording_local(cache, asked)) as client:
+        await _credit_names(_expansion_settings(cache), client, catalog, service, print)
+
+    assert asked, "the premise: the phase reached the transport at all"
+    assert asked.index("name.basics.tsv.gz") < asked.index("title.principals.tsv.gz")
+    assert catalog.credit_names("tt99000020") == (
+        "Ada Synthetic",
+        '"Bo Synthetic"',
+        "Cyd Synthetic",
+    )
+
+
+async def test_the_alias_phase_stores_every_alias_even_when_a_title_straddles_a_batch(
+    tmp_path: Path,
+) -> None:
+    """The phase is the writer's only caller, so this is where the loss the
+    port cannot detect actually shows up.
+
+    `replace_aliases` deletes by scope before it inserts. With a title's rows
+    split across two batches, the second call's scope names that title again
+    and its delete takes the rows the first call wrote -- and **nothing
+    raises**, because the port's `ValueError` guard is about a row *outside*
+    the scope and both halves are inside their own. `batch_size=1` against a
+    slice whose every title has two aliases is the shape that does it: before
+    `IMDbAkaDataset.group_of`, this stored one alias per title instead of two.
+
+    **The premise is read off the fixture, not off the result.** Spelled as
+    *"some title in `stored` has more than one alias"* it is a claim about the
+    outcome, so the defect falsifies the guard instead of the assertion and
+    the case reports a fixture problem it does not have -- measured, by
+    planting `group_of -> None` and watching it fail on `assert 1 > 1`. Read
+    off `parse_akas_row` over the committed slice it is a fact about the file,
+    which only an edit to the file can change.
+    """
+    per_title = Counter(
+        row.imdb_id
+        for row in map(
+            parse_akas_row,
+            (_BULK_FIXTURES / "title.akas.slice.tsv").read_text(encoding="utf-8").splitlines(),
+        )
+        if row is not None
+    )
+    assert max(per_title.values()) > 1, "the premise: the slice holds a title with two aliases"
+
+    cache = _stage_slices(tmp_path, ("title.akas.slice.tsv", "title.akas.tsv.gz"))
+    catalog, service = await _seeded_catalog()
+
+    async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
+        await _aliases(_expansion_settings(cache, batch_size=1), client, catalog, service, print)
+
+    stored = {
+        imdb_id: tuple(name for _, name, _, _ in catalog.search_names(imdb_id))
+        for imdb_id in ("tt99000010", "tt99000020", "tt99000030")
+    }
+    assert stored == {
+        "tt99000010": ("A Synthetic Festival Title", "A Synthetic Working Title"),
+        "tt99000020": ('"A Quoted Synthetic Alias"', "Un Long Métrage Synthétique"),
+        "tt99000030": ("Uma Série Sintética", "Une Série Synthétique"),
+    }
+
+
+async def test_the_alias_phase_writes_region_and_language_and_leaves_person_rows_alone(
+    tmp_path: Path,
+) -> None:
+    """Two properties the phase's own wiring is responsible for.
+
+    `region` and `language` reach the table -- `m09a` added those two columns
+    for this dump and without them a French and a Brazilian alias of one film
+    are indistinguishable rows. And B1's `person` rows survive: the scope is
+    `kind = 'alias'` as well as `imdb_ids`, so a credited person's searchable
+    name is not collateral of an alias re-import.
+    """
+    cache = _stage_slices(tmp_path, ("title.akas.slice.tsv", "title.akas.tsv.gz"))
+    catalog, service = await _seeded_catalog()
+    catalog.seed_person_search_name("tt99000020", "Ada Synthetic")
+
+    async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
+        await _aliases(_expansion_settings(cache), client, catalog, service, print)
+
+    assert catalog.search_names("tt99000020") == (
+        ("alias", '"A Quoted Synthetic Alias"', "GB", None),
+        ("alias", "Un Long Métrage Synthétique", "FR", "fr"),
+        ("person", "Ada Synthetic", None, None),
+    )
+
+
+async def test_the_credit_names_phase_refuses_an_empty_catalog_before_downloading(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`_movielens`' refusal, against a 1.09 GB pair of files instead of a
+    335 MiB archive, and with the same three properties: no request of any
+    kind, no `ImportRun`, and a message naming the phase to run first.
+
+    The outcome it prevents is the same one and is worse here for the size:
+    every row would match nothing, the run would checkpoint `COMPLETED`, and
+    every later `--phase all` would find that checkpoint and do nothing.
+    """
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"the credit-names phase reached the network: {request.url}")
+
+    catalog = FakeBulkCatalogRepository()
+    runs = FakeImportRunRepository()
+    service = BootstrapService(
+        runs, catalog, _no_commit, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+        await _credit_names(_expansion_settings(tmp_path), client, catalog, service, print)
+
+    assert await runs.list_runs() == []
+    printed = capsys.readouterr().out
+    assert "titles is empty" in printed
+    assert "--phase imdb" in printed
+
+
+async def test_the_alias_phase_refuses_an_empty_catalog_before_downloading(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same refusal, against 486 MiB. Separate from the credit-names case
+    rather than parametrised over both, because the two messages name
+    different files and a parametrised case asserting only the shared half is
+    how one of them would come to name the wrong one."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"the aliases phase reached the network: {request.url}")
+
+    catalog = FakeBulkCatalogRepository()
+    runs = FakeImportRunRepository()
+    service = BootstrapService(
+        runs, catalog, _no_commit, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+        await _aliases(_expansion_settings(tmp_path), client, catalog, service, print)
+
+    assert await runs.list_runs() == []
+    printed = capsys.readouterr().out
+    assert "title.akas" in printed
+    assert "--phase imdb" in printed
+
+
+async def test_the_credit_names_report_carries_a_denominator_and_the_crawl_ordering(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A count with the population it is a count *of*, and the one sentence
+    an operator has to read before scheduling this phase.
+
+    The ordering line is here rather than only in a PRD because getting it
+    wrong is not recoverable by re-running anything: run after a priority-tier
+    crawl and every enriched title is deferred to TMDb on this run and on
+    every later one, so 99.82% of that tier never gains IMDb names at all.
+
+    **This case is the proof of what the line must not say**, which is why it
+    now asserts the absence as well as the presence. `:1699`-equivalent below
+    reads back `()` for the *enriched* fixture title and the counter says
+    "1 deferred to TMDb" -- i.e. the case demonstrates the skip -- while the
+    printed sentence claimed until 2026-08-12 that an enriched tier gets
+    rewritten and staled. One case cannot both show a title being skipped and
+    assert that it is written.
+    """
+    cache = _stage_slices(
+        tmp_path,
+        ("name.basics.slice.tsv", "name.basics.tsv.gz"),
+        ("title.principals.slice.tsv", "title.principals.tsv.gz"),
+    )
+    # Two of the slice's three titles, so all three counters carry a number
+    # rather than a zero: `tt99000020` is filled, `tt99000030` is enriched and
+    # so belongs to TMDb, and `tt99000040`'s record never arrives at all --
+    # its only principal names a person `name.basics` does not hold. The
+    # catalog is missing nothing the dump credits, so `unmatched` is 0 here
+    # and the case says so rather than asserting a number the fixture cannot
+    # produce.
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_EXPANSION_TITLES[1], _EXPANSION_TITLES[2]])
+    catalog.mark_enriched("tt99000030")
+    service = BootstrapService(
+        FakeImportRunRepository(),
+        catalog,
+        _no_commit,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
+
+    async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
+        await _credit_names(_expansion_settings(cache), client, catalog, service, print)
+
+    printed = capsys.readouterr().out
+    assert "credit_names: 1 titles filled this run" in printed
+    assert "of 2 titles in the catalog" in printed
+    assert "0 credited titles this catalog does not hold" in printed
+    assert "1 deferred to TMDb" in printed
+    assert catalog.credit_names("tt99000030") == ()
+    assert "BEFORE the TMDb crawl" in printed
+    assert "deferred to TMDb for good" in printed
+    # The two assertions above prove the enriched title was *skipped*, so the
+    # report may not tell an operator its embedding was invalidated. A
+    # re-index they cannot need is a re-index we sent them to run.
+    assert "stale" not in printed
+    assert "usher index --backfill" in printed
+
+
+async def test_the_alias_report_says_where_the_rows_that_are_not_aliases_went(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`written` alone reads as a broken import: three retained akas rows in
+    four restate the title's own name (5,693,570 of 7,536,366, 75.5%), so a
+    report printing only what was stored would show a quarter of the file
+    arriving and say nothing about the rest.
+
+    The fixture is built to exercise the counter rather than to be
+    representative -- one row per title restating the title's own name, which
+    the parser cannot drop because only a comparison against the stored
+    `Title` can see it.
+    """
+    cache = tmp_path / "bulk"
+    cache.mkdir(parents=True)
+    body = (
+        "titleId\tordering\ttitle\tregion\tlanguage\ttypes\tattributes\tisOriginalTitle\n"
+        "tt99000020\t1\tA Synthetic Feature\tUS\ten\timdbDisplay\t\\N\t0\n"
+        "tt99000020\t2\tUn Long Métrage Synthétique\tFR\tfr\timdbDisplay\t\\N\t0\n"
+        "tt99000020\t3\tUN LONG MÉTRAGE SYNTHÉTIQUE\tCA\tfr\timdbDisplay\t\\N\t0\n"
+        "tt99000099\t1\tA Title No Catalog Holds\tUS\ten\timdbDisplay\t\\N\t0\n"
+    ).encode()
+    (cache / "title.akas.tsv.gz").write_bytes(gzip.compress(body))
+    catalog, service = await _seeded_catalog()
+
+    async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
+        await _aliases(_expansion_settings(cache), client, catalog, service, print)
+
+    printed = capsys.readouterr().out
+    assert "aliases: 1 stored this run of 4 rows read" in printed
+    assert "1 restate the title's own name" in printed
+    assert "1 repeat one already kept" in printed
+    assert "1 scoped ids matched no title" in printed
+    assert "25.00% of the rows read" in printed
+    assert "the catalog holds 3 titles" in printed
+
+
+def test_a_zero_denominator_is_a_sentence_naming_what_it_counted() -> None:
+    """`_percent` now serves two populations, and its zero branch prints the
+    noun. *"n/a (0 titles)"* under a line about rows read is a wrong sentence
+    rather than a missing one -- and a `0/0` percentage is what PRD 08's
+    "every command works against an empty database" rule is about."""
+    assert _percent(0, 0) == "n/a (0 titles)"
+    assert _percent(0, 0, noun="rows") == "n/a (0 rows)"
+    assert _percent(1, 4, noun="rows") == "25.00%"
+
+
+def test_every_subcommands_help_renders() -> None:
+    """`--help` is the one code path in the parser that interpolates, and
+    nothing else in this suite runs it.
+
+    argparse formats each `help=` string against its own parameter dict, so a
+    literal `%` raises `TypeError: %o format: an integer is required, not
+    dict` from `usher bootstrap --help` and from nowhere else. Found by
+    running it: `ruff`, `ruff format --check`, `mypy` and all 67 cases in this
+    file passed against a `--phase` help string containing a bare `~100%`,
+    because every one of them builds the parser and none of them renders it.
+
+    Over every subcommand rather than over `bootstrap` alone -- the defect is
+    a property of writing a help string, not of this command -- and the list
+    is read off the parser's own rendered choices rather than typed out, so a
+    subcommand added later is covered without anyone remembering to add it.
+    """
+    parser = build_parser()
+    rendered = parser.format_help()
+    choices = re.search(r"\{([a-z0-9,-]+)\}", rendered)
+    assert choices, "the premise: the top-level help lists its subcommands"
+    commands = choices.group(1).split(",")
+    assert len(commands) > 10, f"the premise: every subcommand is reached, got {commands}"
+    for name in commands:
+        with pytest.raises(SystemExit) as exit_info:
+            parser.parse_args([name, "--help"])
+        assert exit_info.value.code == 0, name
+
+
+def _without_docstrings(tree: ast.Module) -> str:
+    """`ast.unparse` with every docstring removed, so a text scan reads code
+    and not prose.
+
+    A blanket `"BootstrapService" not in source` is the cheaper spelling and
+    it cannot be used here: the case below argues about the class it must not
+    hold, by name, in its own docstring. Identifiers and string annotations
+    both survive `unparse`, which is the half that matters -- a string
+    annotation is the one form needing no import at all.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                node.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
+
+
+async def test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`usher bootstrap` is `composition.run_bootstrap` plus an engine, and
+    both halves of that sentence are asserted.
+
+    The behavioural proof that the two roots run the *same* phases in the
+    same order is
+    `tests/unit/test_composition.py::test_the_cli_and_the_handler_run_the_
+    same_phase_dispatch`, which needs a `Pipeline` and so lives beside the
+    helper that builds one. What can only be seen from here is the two facts
+    that make that proof about the CLI at all: this command calls the shared
+    function with the phase it was given and `print` as the sink, and this
+    module can no longer spell a dispatch of its own.
+
+    **The structural half is not decoration.** *"The CLI calls
+    `run_bootstrap`"* is satisfied by a module that calls it and then does
+    something else beside it, which is exactly the drift the extraction
+    exists to prevent -- so `usher.cli` is asserted to name no `BulkDataset`
+    and no `BootstrapService`, the way `test_api_bootstrap.py` asserts it of
+    the router.
+
+    ⚠️ **The `BootstrapService` half is asserted on the *name*, not on the
+    module, and that narrowing is E6's rather than a weakening.** E5 spelled it
+    as `"usher.services.bootstrap" not in named` because at the time that
+    module held one public class. It now also holds `BootstrapReport` and the
+    two pure functions both surfaces call, and `usher bootstrap-status` reads
+    them -- so a module-level ban would forbid exactly the sharing E6 exists
+    to create. The claim the docstring above always made is the one now
+    checked: no *driver*. Read off `ast.unparse` of a docstring-stripped tree,
+    so a string annotation and an attribute access are both caught and this
+    paragraph is not.
+
+    No connection is opened: `create_async_engine` is lazy, an `AsyncSession`
+    that issues no statement never connects, and `run_bootstrap` is replaced
+    before it could.
+    """
+    seen: list[tuple[object, ...]] = []
+
+    async def record(*args: object, **kwargs: object) -> None:
+        seen.append((*args, kwargs.get("report")))
+
+    monkeypatch.setattr(usher.cli, "run_bootstrap", record)
+    settings = Settings(database_url="postgresql+asyncpg://u:p@localhost/db", secret_key="0" * 32)
+
+    await _bootstrap(settings, BootstrapPhase.CREDIT_NAMES)
+
+    assert len(seen) == 1
+    catalog, runs, _commit, passed_settings, phase, report = seen[0]
+    assert isinstance(catalog, PostgresBulkCatalogRepository)
+    assert isinstance(runs, PostgresImportRunRepository)
+    assert passed_settings is settings
+    assert phase is BootstrapPhase.CREDIT_NAMES
+    assert report is print
+
+    source = pathlib.Path(inspect.getfile(usher.cli)).read_text()
+    tree = ast.parse(source)
+    named: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            named.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            named.add(node.module)
+    assert named, "the import scan found nothing, so it proves nothing"
+    assert [one for one in named if one.startswith("usher.adapters.bulk")] == []
+    assert "BootstrapService" not in _without_docstrings(tree)
+
+
+def test_the_phase_choices_are_the_vocabulary_and_not_a_second_copy_of_it() -> None:
+    """`--phase`'s `choices` and `BootstrapPhase` are one set, asserted as an
+    equality between two derivations rather than as two spelled-out lists.
+
+    Two lists would let `usher bootstrap --phase aliases` succeed against a
+    route that rejects it, or the reverse -- and a case that spelled both out
+    would go stale in exactly the same commit the drift arrived in. The
+    *order* is pinned separately, below, because a set says nothing about
+    execution order and the order is the measured part.
+    """
+    assert set(PHASES) == {phase.value for phase in BootstrapPhase}
+    assert set(build_parser().parse_args(["bootstrap"]).__dict__) >= {"phase"}
+    assert build_parser().parse_args(["bootstrap"]).phase == BootstrapPhase.ALL.value

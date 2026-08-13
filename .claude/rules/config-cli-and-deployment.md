@@ -146,6 +146,21 @@ size and understates the image by ~4.2x. Measured 2026-08-03 on the same build:
 **+24 MB / +7.2% across five milestones**, and M6 added no runtime dependency at
 all. Task 28's own command in the M6 plan is the `inspect` form, which would
 have reported a 4x improvement that did not happen.
+**Re-measured 2026-08-12 at M9's close: `359 MB`** (`docker build -t usher:m9-h6 .`
+off the M9 lock, `docker images` reporting `DISK USAGE 359MB` against
+`CONTENT SIZE 84.9MB`). M9's C1 read **358 MB** off the lock ten days earlier, so
+the milestone's whole HTTP surface — **eleven new routers, seventeen in all**,
+the image proxy, the playback ticket — cost **+3 MB / +0.8%** and no new runtime
+distribution. (*"Five routers"* stood here for one commit and was wrong: the
+count at the M9 plan commit was **6** and it is **17** at the close, measured as
+`ls src/usher/api/routers/*.py` minus `__init__.py`, not recalled.) **The
+methodology finding is the durable half and it is unchanged**: the two numbers on
+that line still differ by 4.2×, so a reader taking the smaller one is still off
+by a factor of four. What *has* changed is that Docker 29.6 labels the columns
+`DISK USAGE` and `CONTENT SIZE` rather than printing one ambiguous `SIZE`, which
+makes the trap visible at the terminal for the first time — do not read that as
+the trap being gone, because `docker image inspect --format '{{.Size}}'` still
+answers the compressed figure with no label at all.
 **The shipped image does NOT install the embedding extra, and that is what the
 compose stack pulls.** Built with `uv sync --frozen --no-dev --extra embedding`
 for comparison it is **607 MB** (venv 314 MB against 133 MB), **+251 MB and

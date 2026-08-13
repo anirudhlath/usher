@@ -125,12 +125,20 @@ Every configuration measured, same 2,993 cases:
   relevance+owned renormalised. `SimilarityService` never reads popularity.
 - **The candidate cap is not the binding constraint and the `levenshtein`
   re-rank never drops the true title.** Tracing 250 misses per configuration
-  back to the stage that lost them: at the shipped configuration **63.6% fell
+  back to the stage that lost them: at `GIN % @0.3 cap 200` **63.6% fell
   below the `%` floor, 36.4% were out-ranked, 0.0% were truncated by the cap,
   0.0% were dropped by the re-rank** — and the re-rank figure is 0.0% in
   *every* configuration measured. M6's design story put the cap at the
   centre; on real data it is inert until the floor is dropped, at which point
   it becomes a new defect (24.8% at 0.1) rather than the cure.
+  **"At the shipped configuration" was the wrong label on those two numbers
+  and is corrected here — 63.6/36.4 is the row *without* the vote tiebreak,
+  and the tiebreak shipped in the same run.** The configuration that ships is
+  `GIN % @0.3 cap 200 + vote tiebreak`, whose split is **82.8 / 0.0 / 0.0 /
+  17.2**, one table row below. M9's B3 was sent to reproduce "the shipped
+  split" and found the plan quoting this row's shares beside the other row's
+  p50 — a pairing no single run of `_SUGGEST` can satisfy. The two zeros are
+  the half that carries the claim and they are identical in both rows.
 - **Lowering the trigram floor does not convert misses into hits — it
   converts threshold-excluded misses into out-ranked ones.** 63.6%/36.4% at
   0.3 becomes 4.0%/71.2% at 0.1, recall goes 78.3% → 77.6%, and latency goes
@@ -158,6 +166,22 @@ Every configuration measured, same 2,993 cases:
   and `test_a_high_trigram_floor_destroys_fuzzy_recall` "proves" 0.1 rescues a
   case that at 1.27M rows it does not rescue. The comment is corrected; both
   values stay, each with its measured reason.
+  **Read "in `SuggestIndexContract`" as the class hierarchy since M9's B2, not
+  as one class.** That contract split in two when the prefix tier arrived: the
+  typo cases moved down to `TypoTolerantSuggestIndexContract`, which subclasses
+  it, so the sentence above is still true in the is-a sense and no longer names
+  where to look. The three typo cases are on the subclass, and the two
+  implementations that sign it are `PostgresSuggestIndex` and `FakeSuggestIndex`;
+  `PostgresPrefixSuggestIndex` signs the base only, on purpose. **This divergence
+  is therefore narrower than it was and the narrowing is not an improvement to
+  it** — tier 1 has no trigram floor to be wrong about, and the whole of the
+  0.1-versus-0.3 gap still sits on the tier that is now debounced behind it.
+  Leaving the typo cases on the base and skipping them for tier 1 was considered
+  and refused for a reason this file should carry: **a skipped case reads as
+  coverage in the summary line and asserts nothing**, and a tier whose entire
+  design is the *absence* of typo tolerance would then be described by three
+  permanent skips rather than by one integration case that asserts the absence
+  and proves the path ran first.
 **Confirmed, and worth the numbers.** Short names are the weak band and the
 curve is monotone in length (27.8 → 68.3 → 95.5 → 99.8 → 99.5). Transposition
 is the weakest class overall at 66.1% — and *within the 2–4 band it is
@@ -182,6 +206,136 @@ that needs KNN must *replace* the GIN index.
 suggest: btree prefix on every keystroke, the trigram path debounced behind
 it. Owned by M9 in PRD 09, because a debounce and a tier split are properties
 of a request boundary and M6 adds no route.
+
+**Tier 1 measured at catalog scale on 2026-08-12 (M9's B3), against a bar
+committed before the run, and the headline is that it passes the bar it was
+given and fails the job it exists for.** Same host, same 1,271,138-title
+`--phase imdb` catalog as the 2026-08-03 gate — `popularity` NULL on 100% of
+rows, `vote_count` on 538,937, all three numbers re-verified — plus a
+`title_search_names` **person** arm of **10,896,525 rows over 1,191,768
+titles**. The `alias` arm is **empty**; T7 owes it, so this is a union over one
+of two arms and every number below says so. Box measured quiet by the harness
+itself (zero foreign `pytest`, idle-sampled CPU drift **+0.0025**).
+
+*Regeneration is verified rather than claimed*: the procedure reproduces the
+gate's frame to the row — **81,054** shared lower-cased names, pools **432 /
+2,532 / 7,178 / 20,520 / 17,887**, and exactly **2,993** cases. What is *not*
+claimed is that the 750 sampled names are the same 750; the gate recorded its
+procedure and its pool sizes but not its draw order.
+
+| | bar | measured | |
+|---|---|---|---|
+| (1) tier-1 p95, `titles` only | ≤ 10 ms | **0.947 ms** | **PASS** |
+| (2) tier-1 p95, union at 10.9M rows | ≤ 10 ms | **1.465 ms** | **PASS** |
+| (3) tier-2 p50 | 33.6 ms ±10% | **39.59 ms** | **FAIL** |
+| (4) tier-1 recall@5 | 1.9% (1.6–2.2) | **2.67%** | **FAIL** |
+
+Bars (1) and (2) are scored on the 2,993 typo strings, which is the only
+workload comparable to the gate's `0.6 / 1.0 / 10 ms` btree row — and it
+reproduces it almost exactly: **p50 0.664, p95 0.947**, against a driver floor
+(`SELECT 1` through the same path) of **p50 0.425**. So over a third of tier 1's
+latency is the round trip, not the index.
+
+**The union does not cost tier 1 its budget, and B2's arm stays.** 1.465 ms
+against 10 ms at whole-catalog credited coverage. The plan's pre-recorded
+failure consequence — narrow tier 1 to `titles` and reach
+`title_search_names` from tier 2 alone — **does not fire**, and it was not
+allowed to fire on a different workload than the one the bar named.
+
+**What fails is the keystroke, and it fails on both arms.** p95 by prefix
+length, at `--reps 5`, titles-only against the union:
+
+| prefix length | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| `titles` only | **291 ms** | 51 ms | 15 ms | 5 ms | 19 ms | 14 ms | 2.0 ms | 2.3 ms |
+| union, 10.9M | **2,707 ms** | 809 ms | 303 ms | 112 ms | 100 ms | 86 ms | 2.3 ms | 2.6 ms |
+
+Tier 1 is a keystroke path from **seven characters up** and nowhere below it.
+The union is 9× worse at one character and the two converge at seven. Worst
+single probe measured: **`'m'` at 2,744 ms**, 78,203 `titles` rows and
+1,069,834 `title_search_names` rows.
+
+- **REFUTED — the sort is not the cost, and B2's residual-exposure argument
+  names the wrong mechanism.** B2 declined an inner per-arm cap partly because
+  *"an ordered one costs the same sort, so it buys nothing"*. In the plan for
+  the worst probe the sort is a **top-N heapsort in 26 kB** costing
+  microseconds. The cost is the `UNION`'s de-duplication — a `HashAggregate`
+  at **17 batches spilling 47 MB to disk per worker** — plus a
+  `title_search_names` bitmap heap scan that **goes lossy** (47,951 exact /
+  66,156 lossy heap blocks, **5,664,971 rows removed by filter** to keep
+  1,069,834), plus a hash join back to `titles` at 16 batches. The index probes
+  themselves are 6 ms and 40 ms. **An ordered inner cap would therefore be far
+  cheaper than B2 priced it**, because it would cap the HashAggregate's input
+  rather than paying a sort that is already free — but that is a design change
+  and this task does not tune, so it is handed on rather than made.
+- **CONFIRMED — the join back to `titles` costs more than the second arm's
+  index probe**, at every size measured.
+- **Parallelism is not the lever, and at the worst case it does nothing.**
+  Every W3 probe was also timed under `SET LOCAL
+  max_parallel_workers_per_gather = 0`, verified to have landed (`Gather`
+  present in the parallel plan, absent in the serial one). For the four largest
+  probes serial/parallel is **0.997–1.029** — two extra workers buy nothing,
+  because the work is disk-spill and heap-recheck rather than CPU. For
+  mid-sized probes it is **1.94–2.11**. So the concurrency worry is real in the
+  middle of the range and *absent* at the tail: the 2,744 ms is not a figure
+  that degrades further when the box is busy.
+- **Coverage is the lever, and the curve is steep.** At the enriched-tier size
+  the plan actually contemplates — 10,000 covered titles, 89,808 rows — the
+  union's one-character p95 is **489 ms** against 2,707 ms at 10.9M, and by
+  four characters it is **5.5 ms**, indistinguishable from titles-only. The
+  titles-only column is identical across both runs (291.23 against 290.24 ms at
+  length one), which is the control that says the only variable was table size.
+- **The union costs tier-1 recall, slightly.** 2.34% union against 2.67%
+  titles-only, entirely in the two short bands (2–4: 1.85% against 2.87%);
+  8 characters and up are identical. Person-name rows crowd the true title out
+  of a five-row box.
+- **Bar (4) fails and the index is not why.** 2.67% against a 1.6–2.2% window.
+  Tier 1 finds a typo'd name essentially only when the edit lands on the last
+  character and leaves a true prefix, so recall is a function of the sampled
+  names' lengths — and the draw order the gate never recorded is the one input
+  known to differ. 23 cases out of 2,993 separate the two figures.
+- **Bar (3) fails and `m09a` is not why — measured, not argued.** 39.59 ms
+  against a 30.24–36.96 ms window. The within-run A/B settles the attribution:
+  the identical 2,993 cases with both prefix indexes present and then both
+  dropped give **39.593 ms against 39.571 ms, a ratio of 1.001, with
+  byte-identical recall**. So the GIN/GiST lesson — that an added index can
+  silently tax the shipped path — **does not reproduce for a btree**, which is
+  the thing that needed proving rather than asserting. The 6 ms against
+  2026-08-03 is run-to-run, not `m09a`.
+- **Tier 2's miss split moved and the half that carries the claim did not.**
+  90.8% below the `%` floor / **0.0% truncated by the cap** / **0.0% dropped by
+  the re-rank** / 9.2% out-ranked, against the shipped row's 82.8 / 0.0 / 0.0 /
+  17.2. The two zeros hold **exactly**, so the cap and the re-rank are still
+  inert; the floor/out-ranked balance shifted 8 points on a different draw of
+  750 names. Tier-2 recall@5 **81.49%** against the recorded 82.5%, with the
+  band curve reproducing (2–4: 32.9%, 5–7: 77.0%, 8–11: 97.3%, 12–19: 99.7%,
+  20+: 100%).
+- **Index build and size.** `ix_titles_name_lower_prefix` **0.666 s / 44.2 MB**
+  over 1,271,138 rows, against the gate's 0.559 s / 44 MB — size reproduces
+  exactly, build time is run-to-run. `ix_title_search_names_name_lower_prefix`
+  **4.527 s / 155.4 MB** over 10,896,525 rows, which has no prior number
+  because the table did not exist when the gate ran.
+
+**Two things about measurement harnesses this run paid for, which are not about
+search.** A quiet-check that compares the one-minute load average before and
+after **condemns every clean run**, because a forty-minute run of continuous
+querying raises its own average — this one went 1.34 → 2.82 on a box that was
+provably idle throughout. And a foreign-process census that matches the whole
+command line counts *the shell that mentions the word*: `pgrep -f pytest`
+reported four processes on a box the coordinator had just measured clear, and
+all four were idle `sleep 5` waiters watching for pytest. Both were caught
+before they discarded a good run, both by predicting the failure rather than
+meeting it. Match argv **tokens**, exclude shells, and sample CPU **drift**
+between two moments when the harness itself is idle.
+
+**And a guard is vacuous below the scale that triggers the thing it guards.**
+The check that `SET LOCAL max_parallel_workers_per_gather = 0` actually removed
+the `Gather` cannot fire on a 4,000-row toy catalog, because the planner never
+chooses a Gather there — so a harness validated only on a fixture can carry
+silently inert checks into a real run. Proven on the real statement instead: **1
+Gather node without the knob, 0 with it.** Same family as this file's own
+finding that every typo case in `SuggestIndexContract` is green at a trigram
+floor no deployment uses.
 **Not settled by this run, named rather than implied:** real *typed* queries
 as opposed to synthetically mutated ones (that is `search_queries`, M9's);
 multi-typo queries (`_MAX_DISTANCE = 2` puts them out of reach by
@@ -481,3 +635,273 @@ The `usher similar --rebuild` freshness gap itself is stated in `CLAUDE.md`
 (always loaded); the one detail not there: `title_neighbors` carries a
 whole-artefact `computed_at` rather than a per-pair fingerprint, which is
 exactly why no per-row predicate can detect the staleness.
+
+## M9 Task S4 — the embedding path measured against a real 130,647-title tier, and the estimate `usher index` prints is the model's rate rather than the backfill's (2026-08-12)
+
+**The first run of this subsystem over a genuinely enriched tier.** Every
+figure above it was taken on a synthetic corpus or a ~10k population; S3 left
+130,647 enriched titles carrying weight classes C and D, and this is what the
+shipped code did with them. Host as always: Ryzen 7 5800X3D, CPU only,
+`pgvector/pgvector:pg17`.
+
+**The population, and what it is a count of.** `title_embeddings` is
+**130,647 rows, every one carrying a vector, 0 refused** — against S3's frozen
+`s3_tier_snapshot` of **130,806 ids**, of which 130,647 enriched. So the
+embedded population is **100.0% of the enriched population and 99.88% of the
+frozen tier**, and the 159-row gap is not missing embeddings: those titles are
+still `skeleton`, which `_POPULATION` (`t.enrichment_state <> 'skeleton'`)
+excludes, so no `index` job was ever owed for them. **The population predicate
+demonstrated at scale rather than asserted**: 1,141,720 skeletons, every one
+without an embedding row, and `count_stale` **0** — 1.14M rows that would match
+the staleness half and are excluded by the population half.
+
+**Two passes, and the second one's size is the measurement.** `EnrichService`
+enqueues `INDEX` and `DERIVE` together at `BACKFILL` and does not order them,
+so a title whose `INDEX` is claimed first embeds from a document with an empty
+weight-class-B segment and goes stale the moment `DERIVE` writes
+`credit_names`. Pass one drained both kinds. Pass two —
+`usher index --backfill`, sweeping the whole enriched tier in **3.3 s** —
+reported **8,603 stale titles swept, 8,603 index jobs written**: **6.58% of
+130,647**. Not an error, and not a race that mostly loses: `DERIVE` won for
+93.4% of the tier. Confirmed independently on the rows themselves — exactly
+8,603 have `updated_at > created_at`. A third sweep wrote **0**, and
+`usher index` bare reports **stale 0, refused 0**.
+
+**Wall clock.** Pass one's index phase ran 00:07:46Z (the instant the enrich
+queue emptied) → 02:26:19Z: **8,313 s = 2.31 h** for ~130,091 embeddings,
+**15.6 rows/s aggregate** across the two surviving workers, on a host also
+running other agents' test suites. Pass two, index-only and on a quiet box:
+8,603 jobs in **361 s**, **23.8 rows/s aggregate**.
+
+**The invariant holds and the backfill does not run at it — quote it for the
+model, never for the queue.** Real documents, measured with the shipped
+tokenizer over 1,000 sampled embedded titles: mean **125.4 tokens**, median
+118, p95 197, max 323, none over the checkpoint's 512 window. So the enriched
+`name + credits + overview + tagline + genres + keywords` document sits inside
+the **~100–130 tokens** this file already records, and `cli.py`'s 135-token
+estimate is the fair, slightly pessimistic figure it says it is. The *model*
+on those documents, one text per call — the shape `IndexService._embed` uses —
+runs at **9,683 tokens/s**, inside the **8,000–10,700 tokens/s** invariant. The
+*queue* moved 8,603 × 125.4 = 1,078,816 tokens in 361 s: **2,988 tokens/s
+across two workers, ~1,494 each — about 15% of the model's own rate.**
+
+**So `usher index`'s "estimated worker time" is off by a measured factor, and
+its arithmetic is not what is wrong with it.** It printed **109–145 s** for the
+pass that took **361 s** — **2.5–3.3×**. The line computes `stale × 135 /
+10,700` and `/ 8,000`, which prices *the model*; the backfill is the model plus
+a claim, three reads (`titles.get`, `credit_names_for`, `embeddings.get`), a
+staged `COPY` through a `CREATE TEMP TABLE ... ON COMMIT DROP`, and a commit —
+**per title**. `db/repositories/search.py`'s docstring prices that staging path
+"at the 2k-10k rows boundary call 4 embeds"; here it ran 130,647 times.
+
+**A quarter of the drain was the staleness gauge.** `usher work` calls
+`SearchGauges.refresh` after *every* `worker.run_once()` — a pass of at most 20
+jobs — and the refresh is three counts. At this tier `count_stale` is
+**360.9 ms** and `count_refused` **22 ms**. Pass two's 8,603 jobs is ~431
+passes, ~215 per worker, × 0.383 s = **82 s of the 361 s wall clock, 23%**,
+spent counting a backlog nothing reads while a backfill is running. S3 watched
+this grow 16.4 → 29.4 → 327.9 ms as the tier went 7,718 → 18,267 → 88,001; at
+130,647 it is 360.9 ms and has flattened, because the cost is the scan of the
+enriched population and that population has stopped moving. `telemetry.py:546`
+and `composition.py:1317` both still describe this scan's population as "2k-10k
+rows".
+
+**And an idle worker is not idle — the cost is on the database, which is why
+`ps` says otherwise.** Two workers with an empty queue burned **0 seconds of
+process CPU over 60 s** and simultaneously held `usher-m9-pg` at **9–67% CPU**:
+each 5-second poll is another gauge refresh, and the refresh is an O(tier)
+scan. Anyone measuring anything else on the same database must stop the
+workers, not merely observe that they are quiet.
+
+### The pool walk `SimilarityService.rebuild` draws — the first per-seed price in this project's history
+
+Priced by running `rebuild`'s own page shape read-only — `list_embedded` →
+`nearest_for(page_ids, limit=_CANDIDATE_POOL)` — against the real populated
+table, writing nothing.
+
+| what | measurement |
+|---|---|
+| 3 pages × 50 seeds | 1,902 / 1,843 / 1,859 ms → **37.36 ms/seed** |
+| 1 page × 500 seeds (`rebuild`'s default) | 18,250 ms → **36.50 ms/seed** |
+| `list_embedded`, 500 rows, at the 0/25/50/75/95th percentile cursors | 2.2–20.7 ms — flat, keyset confirmed |
+| prefix / suffix / random 50 seeds | 38.75 / 38.58 / 38.04 ms/seed |
+
+**Full walk: 130,647 × 36.5 ms = 4,769 s ≈ 80 minutes.** *Measured*: the
+per-seed cost, over 650 seeds, at the real population, on an idle box.
+*Extrapolated*: that the remaining ~130,000 seeds cost the same as the 650 —
+which is the only step here that is not a measurement, and which the
+prefix/suffix/random row is the check on. Page size is not a lever (the two
+page shapes agree within 2.3%) and the seed-side paging is ~3 s of the 80
+minutes.
+
+**The cost is linear per seed in the population, so the walk is quadratic in
+it.** Five points taken as the population grew under two-worker load: 30,562 →
+13.93; 44,344 → 19.18; 58,111 → 25.50; 71,967 → 29.55; 86,868 → 34.61 ms/seed.
+Fit ≈ `2.7 ms + 0.367 µs × N`, which predicts 50.7 ms/seed at 130,647 against
+the 36.5 measured there on a quiet box — **a loaded host overstates this by
+~39%, so a price taken during a drain is not the price**.
+
+**Bounding the walk by seed count is legitimate; bounding it by a
+`list_embedded` prefix is not.** The price is seed-independent to within 1.9%,
+so a random sample of seeds costs the same per seed and gives an unbiased
+estimate of pool composition. A prefix does not: `list_embedded` orders by
+`title_id`, the ids are UUIDv7 minted during a bulk import that walked IMDb
+`tconst` order, so a prefix is ordered by registration era.
+
+**A figure this project already had, in the place nobody looked.** The M9 plan
+states that "165.7–166.2 ms for 50 seeds and 619.9 ms for 200" appears nowhere
+in this repository. It appears twice — `db/repositories/search.py:263-264` and
+`tests/integration/test_services_similar.py:711-712` — and the plan's real
+point survives intact, because **neither site records the embedded population
+it was taken over**. Both are measuring where the `genome_scores` join belongs
+relative to `_EXACT_SCAN_OFF`, on a "real 15,565-row" genome table; the 50-seed
+baseline is a per-seed cost of ~3.3 ms, which is **11× cheaper than the same
+statement over 130,647 embeddings** for exactly the reason the linear fit
+above gives. A per-seed price without its population is not a price.
+
+### The mutation ledger for `test_a_title_embedded_before_its_credits_landed_is_stale_again`
+
+The shipped `_FINGERPRINT_SQL` already satisfies the new case, so its red was
+demonstrated rather than claimed. Two plants, harness outside the tree at
+`/var/tmp/m9-S4/plants.py`, each asserted present before the run that judged it
+and each restore verified by `md5sum` against `f804193a097e3b9dad7066c5c657a53d`.
+
+| plant | spelling | died on |
+|---|---|---|
+| careless | `usher_array_text(t.credit_names) \|\| CHR(10) \|\|` deleted | the **premise** — `assert True is False`; six SQL segments against the composer's seven, so no uncredited title agrees either |
+| careful | the same line replaced by `'' \|\| CHR(10) \|\|` | the **named assertion** — `assert False is True`; seven segments with a permanently empty third, so the premise passes and the credit write moves nothing |
+
+The careful spelling is the one worth keeping in mind: it preserves everything
+the case checks first and fails only the property the case is named for, which
+is the shape a linter and a careless plant both miss.
+## The blend's weight ceiling is open, and the boundary value inverts by one ulp (2026-08-11, M9 F5)
+
+**Measured while adding PRD 05's sixth ranking term, against the bound M6 and
+M9 F4 had both stated as an inequality with a slack of 0.01.**
+
+`_blend` renormalises over present signals, so the displacement bound compares
+*numerators*: a rank-0 hit with every other signal against it scores `0.70`,
+and a rank-1 hit with every other signal maximally for it scores
+`0.35 + 0.15 + 0.15 + 0.02 + 0.02 + w`. F4's constant comment read *"0.34
+against a ceiling of 0.35 leaves 0.01"*, which invites taking 0.01.
+
+| taste weight `w` | challenger numerator | exact match at 0.7 | verdict |
+|---|---|---|---|
+| 0.01 | **0.7000000000000001** | 0.7 | **exact match DISPLACED** |
+| 0.009 | 0.6999000000000001 | 0.7 | holds, margin 1.0e-04 |
+| 0.005 | 0.6950000000000001 | 0.7 | holds, margin 5.0e-03 |
+
+At `w = 0.01` the challenger is **one ulp above** — `0.7` is
+`0.69999999999999995559…` and the left-to-right sum overshoots it — so the
+sort key `(-score, title_id)` puts the challenger **first regardless of id**.
+It is an inversion, not a tie, and `_blend`'s summation order is the call
+site's kwargs order, so it is not even stable against reordering the argument
+list. **A bound stated as "sums below half" has to be read as strict, and the
+boundary value has to be evaluated in floating point rather than on paper** —
+same family as `mutation-sweeps.md`'s *"before pinning an exact number computed
+through floating point, check the arithmetic in the interpreter"*, arriving at
+a design constant rather than at a fixture.
+
+Two consequences carried in code. The shipped weight is **0.005**, the midpoint
+of the open interval `(0, 0.01)` — 0 excluded because a zero-weighted term is a
+weight that reads like a signal, 0.01 excluded by the table above, and nothing
+measured distinguishes any point between (`title_embeddings` holds **0 rows**
+on both surviving catalogs, so the term's effect size is unmeasurable today,
+not merely unmeasured). And the bound is now pinned by a case that calls
+`_blend` **directly** rather than through a fixture: *"popularity maximally for
+it"* is asymptotic — `p / (p + 10)` never reaches 1.0 — so no seeded catalog
+can reach the corner the bound is about, and an ordering case at any reachable
+configuration is green under every `w` in the table.
+
+**What a 0.005 term can move, so the weight is not mistaken for a measurement
+of the signal.** With all six present the denominator is 1.045, so the term
+spans 0.0048 of score. It cannot overturn `owned` (0.15) or `played` (0.02) at
+any cosine gap. It overturns one relevance step only where
+`0.005·Δcos > 0.70/((1+k)(2+k))`, i.e. **k ≥ 11** at an impossible `Δcos = 1.0`
+and k ≥ 25 at a realistic 0.2. Where it decides is where the other five have
+tied — which `_dense_ranks` makes ordinary rather than rare, because equal
+index scores share a rank and the relevance term then cancels exactly.
+
+## The two-tier suggest reached a request boundary, and the boundary is where the keystroke defect is answered (2026-08-12, M9 B5)
+
+B3's curve above is the measurement; this is what was done with it, so that a
+reader who opens `services/search.py` or `adapters/search/` does not have to
+find [ADR-0031](../../docs/prd/decisions/0031-the-two-tier-suggest.md) to learn
+the shape. **No statement changed** — no floor, no cap, no index, no `UNION`.
+
+- **`GET /search/suggest?q=&tier=prefix|fuzzy&limit=`**, one route, defaulting
+  to `prefix`, echoing the tier that answered. `SearchService` holds **both**
+  `SuggestIndex` implementations as required collaborators, named
+  `prefix_suggestions`/`fuzzy_suggestions` rather than positioned — two
+  adjacent parameters of one type are a swap that answers plausibly either way,
+  and only a case asserting a typo is *absent* from tier 1 can tell.
+- **The route does not run tier 1 below a four-character prefix**, and four is
+  derived from the curve rather than chosen: it is the shortest length at which
+  tier 1's p95 (112 ms) is below tier 2's (211 ms), which is the property the
+  whole split rests on. At three characters tier 1 is **303 ms** and therefore
+  slower than the tier it exists to be cheaper than. Not the 10 ms bar, which
+  would set the minimum at seven; not a `Settings` field, because the number is
+  a function of catalog size rather than of an operator's preference.
+- **Tier 2 is bounded at one character only**, because nobody has measured the
+  trigram statement *per prefix length* — its 33.6 ms p50 / 211 ms p95 /
+  730 ms max are whole-name figures, exactly as tier 1's 0.6 ms was before B3
+  re-measured it per length. A bound with no measurement under it is the shape
+  `ports-and-error-taxonomy.md` records. Its defence is the client's debounce;
+  **the server debounces nothing**.
+- **`usher suggest --tier` defaults to `fuzzy` where the route defaults to
+  `prefix`**, and `SearchService.suggest` takes `tier` as a required keyword
+  with **no default at all**, so neither boundary inherits the other's answer.
+  A route is driven per keystroke and a command is typed once.
+- **The ordered inner per-arm cap is still not made and is the first thing a
+  follow-up should measure.** G7 is refuted (the sort is a 26 kB top-N
+  heapsort; the cost is the `UNION`'s de-duplication spilling 47 MB and a lossy
+  bitmap heap recheck), so it is far cheaper than B2 priced it — but changing
+  the statement would leave B3's per-length curve describing a query that no
+  longer exists, and B5 ships no SQL.
+- **What is still not measured**, beyond the list this file already carries:
+  tier 2 per prefix length; the four-character minimum against real typed
+  queries, which is `search_queries` and has no rows until after M9; and the
+  curve over a `title_search_names` that carries T7's **alias** rows as well as
+  the 10.9M person rows it was taken over — the shipped table is larger than
+  the measured one, so the curve is optimistic in the direction that matters.
+
+## What one `search_queries` row costs, and the plan's own estimate of it was an order of magnitude out (2026-08-12, M9 F2)
+
+**Measured once, on a throwaway `pgvector/pgvector:pg17` container of this
+driver's own** — never `usher-m9-pg` or `usher-b3-pg`, which other agents hold
+— with the real migration chain (`alembic upgrade head`, `m09c`) and a warm
+connection, 2,000 iterations each. Driver outside the working tree at
+`/var/tmp/m9-F2/`.
+
+| | p50 | p95 | p99 | max |
+|---|---|---|---|---|
+| `record()` **+** `commit()` — what F2 adds per answered search | **3.957 ms** | 4.738 ms | 7.117 ms | 10.194 ms |
+| `record()` alone (SAVEPOINT + INSERT, no commit) | **0.909 ms** | 1.078 ms | — | 2.537 ms |
+| `commit()` alone | **2.965 ms** | 3.520 ms | — | 11.004 ms |
+| floor: `SELECT 1` + `commit()` on the same connection | 0.549 ms | 0.658 ms | — | — |
+
+**F2's acceptance said the write sits "on a path whose p50 is two orders of
+magnitude larger" and that is wrong by a factor of ten.** Against this file's
+recorded full-text figures — p50 **33.3 ms**, p95 **208.8 ms** over 2,993 cases
+at 1,271,138 titles — the write is **11.9% of a p50 search** and 2.3% of a p95
+one: **one** order of magnitude, not two, and at the median it is an eighth of
+the search rather than a hundredth. The conclusion the estimate was supporting
+survives (no bar is minted, and none is needed), but a reader pricing a future
+change off *"two orders of magnitude"* would be out by 10×.
+
+**Three quarters of it is the commit, not the INSERT**, and that is the part
+worth carrying: `search_queries` has no index beyond its primary key, so the
+INSERT itself is 0.9 ms and the rest is one WAL flush. Two consequences.
+`usher search` had no commit at all before F2, so it pays the whole 4 ms. On
+`GET /search` the request *did* already commit through `api/deps.get_session`
+— but on a read-only transaction that commit flushes nothing, so the marginal
+cost on the route is the same ~3.4 ms above the floor rather than the INSERT
+alone. And anything that later records a *keystroke* multiplies this by the
+suggest path's rate, which is the volume half of PRD 10's argument for why
+`GET /search/suggest` writes no row.
+
+Caveats, stated because they bound the number rather than decorate it: a fresh
+container with `fsync=on` and an empty table, on an otherwise-idle host, with
+one connection and one prepared statement — so this is the steady-state cost of
+a warm path and not a first-call or a contended one, and the INSERT figure is a
+property of a table with no secondary index that a later index would move.

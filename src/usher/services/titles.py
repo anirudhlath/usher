@@ -2,10 +2,13 @@
 
 **Nothing here calls a source, and that is the whole design.** PRD 08: "a
 degraded subsystem narrows functionality; it never fails a request local
-state can answer." Every fact this returns is in `titles`, `media_items` and
-`watch_states`, so an unreachable Emby cannot fail a title read -- not
-because the failure is caught, but because the call that could fail is never
-made. `usher.ports.errors` draws the same line from the other side:
+state can answer." Every fact this returns is in `titles`, `media_items`,
+`watch_states` and `credits`, so an unreachable Emby cannot fail a title read
+-- not because the failure is caught, but because the call that could fail is
+never made. The credits are the same argument against a *metadata* provider:
+they are re-derived from `raw_payloads` by `usher derive` and read from a
+table here, so an unreachable TMDb cannot fail this route either.
+`usher.ports.errors` draws the same line from the other side:
 `PortUnavailable` is "distinct from *the requested thing does not exist*",
 and `get_item` answers `None` for absence rather than raising.
 
@@ -33,22 +36,42 @@ import uuid
 from dataclasses import dataclass
 
 from usher.domain.enums import ENRICHMENT_RANK, EnrichmentState, HdrFormat
+from usher.domain.image import Image
 from usher.domain.jobs import JobKind, JobPriority
+from usher.domain.people import CreditKind
 from usher.domain.title import Title
 from usher.domain.watch import WatchState
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import (
+    CreditedPerson,
+    CreditRepository,
+    ImageRepository,
     MediaItemRepository,
     SourceRepository,
     TitleRepository,
     WatchStateRepository,
 )
+from usher.services.images import servable_images
 from usher.telemetry import current_traceparent
 
 # What a copy on a source that has since been deleted renders as. A
 # `KeyError` here is a 500 on the screen an operator opens to find out what
 # happened, for a row `ON DELETE CASCADE` is about to remove anyway.
 _UNKNOWN_SOURCE = "Unknown source"
+
+# How many cast and how many crew a detail response carries. **Both are
+# chosen, not measured**, and are labelled that way for the reason
+# `adapters/tmdb/mapping._CAST_LIMIT` labels its own 50: the consequence of a
+# wrong cutoff is bounded, because it drops the 21st-billed actor from one
+# screen and changes nothing else.
+#
+# Twenty is below the 50 `_CAST_LIMIT` *stores*, so this is a real cut rather
+# than a bound that never fires. Two constants rather than one shared number,
+# because they answer different questions -- a film's crew is a different
+# population from its cast, and a single cap would make tuning one of them
+# retune the other.
+CAST_LIMIT = 20
+CREW_LIMIT = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +106,31 @@ class TitleDetail:
     title: Title
     availability: tuple[TitleAvailability, ...]
     watch_state: WatchState | None
+    # Top-billed first, and crew apart from cast (PRD 07's outstanding shape
+    # decision, answered by M9). **Empty here, absent on the wire** --
+    # `api/dto/title.py` is the one place that turns the first into the
+    # second, so every reader of this dataclass gets a sequence rather than a
+    # `None` it has to narrow.
+    #
+    # A title can have `titles.credit_names` and no `Credit` rows at all: the
+    # IMDb principals loader fills that column for ~93.8% of the catalog with
+    # no `people`/`credits` behind it. This reads credits, so the honest
+    # answer for such a title is empty.
+    cast: tuple[CreditedPerson, ...]
+    crew: tuple[CreditedPerson, ...]
+    # This title's artwork in `(is_primary DESC, id)`, **already filtered** to
+    # what `GET /images/{id}` can serve. Empty here, absent on the wire, on
+    # exactly `cast`/`crew`'s terms.
+    #
+    # The filtering happens in the service rather than in the DTO because
+    # `is_servable_path` is the proxy's own definition and a second copy of it
+    # in `api/dto/` would be a provider-shaped inference in the layer PRD 01's
+    # no-source-concept rule is about (`usher.ports.images` says so from the
+    # other side). It happens *here* rather than in the repository because
+    # `ImageRepository.list_for_title` is the faithful record of what the
+    # provider published, which is what an operator debugging a missing logo
+    # needs one `SELECT` to find.
+    images: tuple[Image, ...]
     # Whether this read moved an enrichment job to the front of the queue.
     # Returned rather than kept internal because it is what makes the
     # read-through path observable end to end -- PRD 10's "promotion latency
@@ -98,21 +146,48 @@ class TitleReadService:
         sources: SourceRepository,
         watch_states: WatchStateRepository,
         queue: JobQueue,
+        credits: CreditRepository,
+        images: ImageRepository,
     ) -> None:
         self._titles = titles
         self._media_items = media_items
         self._sources = sources
         self._watch_states = watch_states
         self._queue = queue
+        self._credits = credits
+        self._images = images
 
     async def detail(self, title_id: uuid.UUID, *, user_id: uuid.UUID) -> TitleDetail | None:
         """One title, everything local about it, and a promotion if it needs
         one. `None` when no such title exists -- the route turns that into a
         404, and a raise would make the common case travel an exception path.
 
-        Four reads, none of them per-copy: the title, its media items, the
+        **Seven reads over six repositories, none of them per-copy,
+        per-credit, per-person or per-image**: the title, its media items, the
         source list (a household has sources in the single digits, and one
-        batched read serves every badge), and this user's watch state.
+        batched read serves every badge), this user's watch state, one
+        `CreditRepository.list_for_title` per `CreditKind`, and this title's
+        artwork. It was four reads over four repositories until M9's `credits`
+        key and six over five until its `images` key.
+
+        **Those two numbers are asserted rather than described.**
+        `tests/unit/test_services_titles.py::
+        test_the_read_count_this_docstring_states_is_the_count_it_makes`
+        parses the words above and counts the awaited calls against the fakes,
+        because a plan cannot know which of two concurrent tasks merges last
+        and a sentence nothing checks is a sentence that goes stale on the
+        first one that does.
+
+        The two credit reads are two rather than one because `list_for_title`
+        applies its `limit` to the *ordered* result: a single `kind=None` read
+        capped at 20 spends the whole budget on a well-billed cast and answers
+        a film with no crew.
+
+        There is no `PersonRepository` here and there must not be one --
+        `CreditedPerson` carries the person's name joined in, which is what
+        keeps a cast list from being one read per credit. The images read is
+        the same shape from the other side: it returns whole rows, so nothing
+        here resolves an id into anything.
         """
         title = await self._titles.get(title_id)
         if title is None:
@@ -120,6 +195,9 @@ class TitleReadService:
         copies = await self._media_items.list_for_title(title_id)
         names = {source.id: source.name for source in await self._sources.list_all()}
         watch_state = await self._watch_states.get_for_title(user_id, title_id)
+        cast = await self._credits.list_for_title(title_id, kind=CreditKind.CAST, limit=CAST_LIMIT)
+        crew = await self._credits.list_for_title(title_id, kind=CreditKind.CREW, limit=CREW_LIMIT)
+        images = servable_images(await self._images.list_for_title(title_id))
         promoted = await self._promote(title)
         return TitleDetail(
             title=title,
@@ -146,6 +224,9 @@ class TitleReadService:
                 for copy in copies
             ),
             watch_state=watch_state,
+            cast=tuple(cast),
+            crew=tuple(crew),
+            images=images,
             promoted=promoted,
         )
 

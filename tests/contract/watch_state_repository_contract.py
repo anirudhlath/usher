@@ -36,7 +36,7 @@ import pytest
 
 from usher.domain.enums import WatchStateOrigin
 from usher.ports.errors import PortDataMalformed
-from usher.ports.ingest import WatchStateMerge
+from usher.ports.ingest import WatchStateMerge, WatchStateWrite
 from usher.ports.repository import WatchStateRepository
 
 WALK_AT = datetime(2026, 7, 31, 3, 0, tzinfo=UTC)
@@ -69,6 +69,23 @@ def merge(
         observed_at=observed_at,
         play_count=play_count,
         last_played_at=last_played_at,
+    )
+
+
+def write(
+    user_id: uuid.UUID,
+    title_id: uuid.UUID | None,
+    *,
+    episode_id: uuid.UUID | None = None,
+    position_seconds: int = 90,
+    played: bool = False,
+) -> WatchStateWrite:
+    return WatchStateWrite(
+        user_id=user_id,
+        title_id=title_id,
+        episode_id=episode_id,
+        position_seconds=position_seconds,
+        played=played,
     )
 
 
@@ -470,6 +487,181 @@ class WatchStateRepositoryContract:
             [merge(user_id, None, episode_id=episode_id, position_seconds=42)]
         )
         assert await repository.get_for_title(user_id, title_id) is None
+
+    # -- set_from_client: the first local watch write with origin = api --
+
+    async def test_a_client_write_survives_a_later_walk_carrying_an_older_observed_at(
+        self, repository: WatchStateRepository, user_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """The failing test this task was written against.
+
+        `set_from_client` is the other side of `merge_from_source`'s
+        conflict rule: `trg_watch_states_set_updated_at` stamps the write
+        instant unconditionally, so a client write is automatically newer
+        than any walk whose `observed_at` is in the past -- and `WALK_AT`
+        (2026-07-31) is safely in the past of whenever this suite actually
+        runs, which is what makes the ordering true without needing to
+        freeze or fake a clock. It fails with `AttributeError` before the
+        method exists, and fails again against an implementation that
+        writes `origin = source` or that lets the merge through.
+        """
+        result = await repository.set_from_client(
+            write(user_id, title_id, position_seconds=500, played=False)
+        )
+        assert result.origin is WatchStateOrigin.API
+
+        changed = await repository.merge_from_source(
+            [merge(user_id, title_id, position_seconds=10, observed_at=WALK_AT)]
+        )
+        assert changed == 0, "a walk from before the client wrote must not apply at all"
+
+        stored = await repository.get_for_title(user_id, title_id)
+        assert stored is not None
+        assert stored.position_seconds == 500, "the client's position stands"
+        assert stored.origin is WatchStateOrigin.API, "still api, not overwritten by the walk"
+
+    async def test_a_client_write_creates_the_row_with_origin_api(
+        self, repository: WatchStateRepository, user_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """The mutation `origin = api` -> `source` fails this alone: nothing
+        else in this case depends on the merge conflict rule at all."""
+        result = await repository.set_from_client(
+            write(user_id, title_id, position_seconds=42, played=False)
+        )
+        assert result.position_seconds == 42
+        assert result.played is False
+        assert result.origin is WatchStateOrigin.API
+        assert result.play_count == 0
+        assert result.last_played_at is None
+
+        stored = await repository.get_for_title(user_id, title_id)
+        assert stored == result
+
+    async def test_a_client_write_on_the_episode_branch(
+        self, repository: WatchStateRepository, user_id: uuid.UUID, episode_id: uuid.UUID
+    ) -> None:
+        """Separate SQL, separate unique constraint, and 999,827 of the one
+        measured source's 1,126,674 items are episodes -- the majority
+        branch, exactly as it is for `merge_from_source`."""
+        result = await repository.set_from_client(
+            write(user_id, None, episode_id=episode_id, position_seconds=12, played=True)
+        )
+        assert result.title_id is None
+        assert result.episode_id == episode_id
+        assert result.play_count == 1
+
+        stored = await repository.get_for_episode(user_id, episode_id)
+        assert stored is not None
+        assert stored.position_seconds == 12
+
+    async def test_marking_played_advances_play_count_and_stamps_last_played_at(
+        self, repository: WatchStateRepository, user_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        result = await repository.set_from_client(
+            write(user_id, title_id, position_seconds=7200, played=True)
+        )
+        assert result.played is True
+        assert result.play_count == 1
+        assert result.last_played_at is not None
+
+    async def test_marking_played_twice_does_not_advance_play_count_twice(
+        self, repository: WatchStateRepository, user_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """Matches Emby's own `POST /PlayedItems`, which M3 measured as
+        advancing `PlayCount` to 1 idempotently rather than incrementing.
+        The mutation `GREATEST(play_count, 1)` -> `play_count + 1` fails
+        this alone: the first press already reads 1 under either spelling,
+        and only the second press tells them apart.
+        """
+        await repository.set_from_client(write(user_id, title_id, played=True))
+        result = await repository.set_from_client(write(user_id, title_id, played=True))
+        assert result.play_count == 1
+
+    async def test_marking_played_does_not_lower_an_existing_play_count(
+        self, repository: WatchStateRepository, user_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """`GREATEST(play_count, 1)`, not a bare `1`: a household's real,
+        backfilled history must survive a client's own mark-played press.
+        The plausible-looking wrong implementation this kills is
+        `play_count = 1` unconditionally, which the case above cannot see
+        because both spellings agree starting from zero.
+
+        This is also the only case that writes to a row a *source* created
+        and then re-checks what a client write did to it: the row exists
+        because of `merge_from_source` (`origin=source`), so `set_from_client`
+        here always lands on the `DO UPDATE` branch, never the `INSERT` one.
+        `assert result.origin is API` is what a dropped `origin = 'api'` in
+        that branch's `SET` clause fails -- every other case that reads
+        `.origin` reads a row the `INSERT` path created, where the literal is
+        never in question. And `last_played_at` must move off the merge's own
+        `LAST_PLAYED` -- a stale value dated 2026-07-20 that a `CASE WHEN
+        excluded.played THEN now() ELSE watch_states.last_played_at END`
+        arm reading `ELSE` would leave standing, which the fixture's own
+        `LAST_PLAYED` constant is far enough in the past to make loud.
+        """
+        await repository.merge_from_source(
+            [merge(user_id, title_id, played=True, play_count=7, last_played_at=LAST_PLAYED)]
+        )
+        result = await repository.set_from_client(write(user_id, title_id, played=True))
+        assert result.play_count == 7
+        assert result.origin is WatchStateOrigin.API, "the DO UPDATE branch must set it too"
+        assert result.last_played_at is not None
+        assert result.last_played_at != LAST_PLAYED, "the client's own press re-stamps it"
+
+    async def test_unmarking_played_leaves_history_alone_but_still_writes_the_position(
+        self, repository: WatchStateRepository, user_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """M3's live run found `DELETE /Users/{u}/PlayedItems/{item}`
+        destructive well beyond its name: it clears `PlayCount`,
+        `LastPlayedDate` *and* a non-zero resume position. The local write
+        must not do at the database what `EmbyAdapter.push_watch_state`
+        already refuses to do at the source -- and `position_seconds` is
+        still written unconditionally, so unmarking played is not a
+        licence to leave it stale either. Four separate assertions, because
+        a suite checking only some of them would have ratified a bug in any
+        of the others -- this module's own docstring records that lesson
+        once already, one column over. `result.played is False` is the one
+        that matters most and is the easiest to leave out: this is the only
+        case in the suite that flips `played` True -> False through the
+        `DO UPDATE` branch and then reads `.played` back, so a dropped
+        `played = excluded.played` in that branch's `SET` clause -- which
+        leaves a title the client explicitly un-marked reading as watched --
+        fails nothing else here.
+        """
+        await repository.set_from_client(
+            write(user_id, title_id, played=True, position_seconds=100)
+        )
+        seeded = await repository.get_for_title(user_id, title_id)
+        assert seeded is not None
+        assert seeded.play_count == 1
+        assert seeded.last_played_at is not None
+
+        result = await repository.set_from_client(
+            write(user_id, title_id, played=False, position_seconds=55)
+        )
+
+        assert result.played is False, "the DO UPDATE branch must still write the flag"
+        assert result.play_count == 1, "unmarking played does not reset play history"
+        assert result.last_played_at == seeded.last_played_at, "and leaves the date alone too"
+        assert result.position_seconds == 55, "the position is still written, never cleared"
+
+    async def test_a_client_write_naming_neither_target_is_rejected(
+        self, repository: WatchStateRepository, user_id: uuid.UUID
+    ) -> None:
+        with pytest.raises(PortDataMalformed):
+            await repository.set_from_client(write(user_id, None))
+
+    async def test_a_client_write_naming_both_targets_is_rejected_and_writes_no_half_row(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        with pytest.raises(PortDataMalformed):
+            await repository.set_from_client(write(user_id, title_id, episode_id=episode_id))
+        assert await repository.get_for_title(user_id, title_id) is None
+        assert await repository.get_for_episode(user_id, episode_id) is None
 
 
 async def _seed_progress(

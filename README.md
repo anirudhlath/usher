@@ -11,8 +11,8 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 
 Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
 adapter), M4 (ingest pipeline), M5 (push and read-through), M6 (search),
-M7 (rows and recommendations) and M8 (LLM curation) are complete — see
-[`docs/plans/`](docs/plans/) for the task breakdowns and
+M7 (rows and recommendations), M8 (LLM curation) and M9 (the API surface) are
+complete — see [`docs/plans/`](docs/plans/) for the task breakdowns and
 [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
 
 M3, M4 and M5 are each verified against a live Emby server, and M4's metadata
@@ -20,9 +20,24 @@ half against the live TMDb API. M5's run is the first in this repository to
 have parsed a real `/embywebsocket` message. **M6's typo-tolerance gate ran on
 2026-08-03 against a real 1,271,138-title catalog and failed** — short names
 are the weak band and no configuration comes close to an as-you-type latency
-budget. The result is recorded with its numbers and the follow-up (a two-tier
-suggest) has an owner in M9
-([ADR-0002](docs/prd/decisions/0002-postgres-first-search.md)).
+budget. The result is recorded with its numbers, and the follow-up it obliged —
+a two-tier suggest — **shipped in M9**
+([ADR-0002](docs/prd/decisions/0002-postgres-first-search.md),
+[ADR-0031](docs/prd/decisions/0031-the-two-tier-suggest.md)).
+
+**M9's own live verification of playback and watch write-back ran on
+2026-08-12, and both halves passed.** `POST /titles/{id}/play` → a minted ticket
+→ `GET /stream/{ticket}` → `302` → a **real `206` with real bytes** from the
+source, with the play body's leak check proven by a positive control before its
+absence was believed; and the watch write-back driven through the shipped routes
+and a real worker pass, read back **from Emby**, then restored **byte-for-byte**.
+Twenty-three bounded requests, no walk. ⚠️ It ran *after* the milestone closed:
+M9 had recorded it as an unrunnable gap on the strength of checking one `.env`
+file, and the credentials were in a secrets file one directory over.
+[`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) carries the result. It
+matters because M3, M4 and M5's live runs each found something their fakes
+agreed with and reality did not — including Emby's watch-state write-back route
+being simply wrong.
 
 **M7 composes a home screen**: nine row providers, scored and diversified
 server-side, plus the taste centroid, the MovieLens tag genome as a third
@@ -44,17 +59,42 @@ general: **the prompt's grouping instruction is not self-enforcing and nothing
 in the system checks it.** Curated rows are additive, so the home screen is
 correct without them.
 
-**The HTTP surface is deliberately small, and M8 is the second milestone since
-M5 to grow it**: `/health`, `/health/ready`, `/titles/{id}`, **`/home`**,
-`/events` (SSE), **`POST /admin/rows/regenerate`** (M8 — enqueues a curation
-job and answers 202, never a synchronous generate) and the `/admin/sources`
-routes. `GET /home` returns the whole
-screen in one response — **no cursor**, which is what
-[ADR-0006](docs/prd/decisions/0006-server-composed-home.md) specifies, and no
-error envelope, because every input is local state and there is no upstream
-failure it can be asked about. Still M9's: search, suggest, similarity,
-browse, the image proxy, and the RFC 9457 envelope. Everything else is driven
-from the command line — see below.
+**The HTTP surface was deliberately small for eight milestones, and M9 is the
+one that finished it** — 38 operations across
+[PRD 07](docs/prd/07-client-api.md)'s five tables, all of them answering through
+one error envelope:
+
+- **Screens** — `GET /home`, `GET /search`, `GET /search/suggest?tier=`,
+  `GET /browse`.
+- **Resources** — `GET /titles/{id}` (now carrying `cast`, `crew` and `images`),
+  `GET /titles/{id}/similar`, `GET /episodes/{id}`,
+  `GET /series/{id}/seasons`, `GET /seasons/{id}/episodes`,
+  `GET /people/{id}`, `GET /collections/{id}`, `GET /images/{id}`.
+- **Actions** — `POST /titles/{id}/play` and `POST /episodes/{id}/play`,
+  `GET /stream/{ticket}`, `PUT /watch/titles/{id}`, `PUT /watch/episodes/{id}`,
+  `POST`/`DELETE /watch/titles/{id}/played`.
+- **Admin** — the `/admin/sources` routes plus `POST /admin/sources/{id}/sync`,
+  `GET /admin/unmatched` and `POST /admin/unmatched/{id}/resolve`,
+  `GET /admin/bootstrap/status` and `POST /admin/bootstrap/{phase}`,
+  `GET`/`PUT /admin/rows/providers`, `POST /admin/rows/regenerate`.
+- **Meta** — `/health`, `/health/ready`, `GET /meta/attribution`, `/events`
+  (SSE), and `/openapi.json`.
+
+**Every failure is an RFC 9457 problem document** —
+`application/problem+json`, with a `code` from a **closed seven-member
+vocabulary** that [ADR-0030](docs/prd/decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
+encodes and a test parses back out of the ADR, so a route cannot invent an
+eighth. `/events` and `/health/ready` are the two exemptions, and both are
+asserted rather than skipped. Paging is **keyset only, never an offset**
+([ADR-0034](docs/prd/decisions/0034-the-cursor-carries-a-position.md)):
+`GET /home` still returns the whole screen in one response with no cursor at
+all, which is what
+[ADR-0006](docs/prd/decisions/0006-server-composed-home.md) specifies.
+Playback hands back a short-lived opaque ticket that `302`s to the real target
+([ADR-0029](docs/prd/decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)),
+so the shareable artifact is opaque rather than a URL with somebody's session
+token in it. Everything the API does is also driven from the command line —
+see below.
 
 ## Requirements
 
@@ -75,6 +115,7 @@ from the command line — see below.
 ```bash
 cp .env.example .env
 openssl rand -hex 32          # paste this into USHER_SECRET_KEY= in .env
+mkdir -p data/images && sudo chown 1000:1000 data/images
 docker compose up -d --build
 
 curl -sf http://localhost:8100/health        # {"status":"ok"}
@@ -99,14 +140,28 @@ application never sees it. `USHER_COMPOSE_*` is the one namespace reserved for
 variables like that; every other `USHER_*` key is a real setting, and an
 unknown one is refused at startup rather than ignored, so a typo is loud.
 
+The `chown` is the one line that is not obvious, and it is the image proxy's.
+`./data/images` is bind-mounted to `/data/images` and is where
+`GET /images/{id}` caches artwork it has fetched. **Docker creates a missing
+bind-mount source as `root`**, the container runs as uid 1000, and a bind
+mount's host-side ownership wins over the `chown` in the Dockerfile — so
+without this the proxy answers 500 on every cold image and nothing else in the
+stack notices. Skip it if `data/images` already exists and you own it. There is
+no eviction and none is wanted: the width ladder bounds the cache at four
+entries per image, and reclaiming space is `rm -rf data/images`, which costs a
+re-fetch and nothing else.
+
 **Every key in `.env` reaches the container**, because compose hands it the
-whole file (`env_file:`). The four exceptions are marked `[compose-owned]` in
+whole file (`env_file:`). The five exceptions are marked `[compose-owned]` in
 `.env.example` and listed in `compose.yml`'s `environment:` block with the
 reason each belongs to the container topology rather than to you:
 `USHER_DATABASE_URL` (the hostname on the compose network),
 `USHER_HOST`/`USHER_PORT` (what the published port, the `EXPOSE` and the
-healthcheck all assume) and `USHER_SECRET_KEY` (substituted so a missing one
-fails at `docker compose up` rather than in a container log).
+healthcheck all assume), `USHER_SECRET_KEY` (substituted so a missing one
+fails at `docker compose up` rather than in a container log) and
+`USHER_IMAGE_CACHE_DIR` (the container side of the bind mount above — the
+`.env` value is a relative path, which inside the container would put the
+cache in the image's own writable layer).
 
 Migrations run automatically on container start.
 
@@ -142,16 +197,52 @@ reported by name without its value, because a setting may be a credential.
 **Populate the catalog** — pulls IMDb's `title.basics`/`title.ratings` dumps,
 TMDb's *public daily id export* files (no API key needed for these) and
 Wikidata's SPARQL endpoint. About three minutes and 1.27M titles on a
-reasonable machine. Resumable: kill it and re-run, and it continues from its
-checkpoint. See
+reasonable machine for those three; the two IMDb expansion phases below read
+another 1.49 GiB and take rather longer. Resumable: kill any phase and re-run,
+and it continues from its own checkpoint. See
 [`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md).
 
 ```bash
-uv run usher bootstrap                     # every phase
-uv run usher bootstrap --phase imdb        # one at a time: imdb | tmdb-ids | crosswalk | movielens | all
-uv run usher bootstrap --phase movielens   # the MovieLens tag genome (M7), ~335 MB, ~10 min
-uv run usher bootstrap-status              # progress per dataset, and catalog size
+uv run usher bootstrap                       # every phase, in the order below
+uv run usher bootstrap --phase imdb          # one at a time: imdb | credit-names | aliases
+uv run usher bootstrap --phase credit-names  #              | tmdb-ids | crosswalk | movielens | all
+uv run usher bootstrap --phase aliases       # IMDb title.akas -> searchable aliases, ~487 MB
+uv run usher bootstrap --phase movielens     # the MovieLens tag genome (M7), ~335 MB, ~10 min
+uv run usher bootstrap-status                # progress per dataset, and catalog size
 ```
+
+**`credit-names` and `aliases` are the two IMDb phases M9 added, and they cost
+no API call at all.** `credit-names` joins `name.basics` to
+`title.principals` in the importer and fills `titles.credit_names`, which is
+weight class B of the search document — **1,192,217 of 1,271,138 titles
+(93.8%)** gain a mean of 9.11 names. `aliases` reads `title.akas` and fills
+the `alias` half of `title_search_names` — **1,663,364** aliases over
+**399,046 titles (31.4%)**, each with its `region` and `language`. Both refuse
+an empty catalog and say which phase to run first, both are resumable from
+their own checkpoint, and together they add **1.49 GiB** to what a
+`--phase all` downloads. Neither writes a `people` or a `credits` row: that
+design measured 2.702 GB against a 2.0 GB ceiling and was refused
+([`04`](docs/prd/04-catalog-bootstrap.md)).
+
+⚠️ **Run `credit-names` before the TMDb enrichment crawl, not after.** It
+writes only where `enrichment_state = 'skeleton'`, so TMDb keeps every title
+it has already reached — which means a title you crawl first is one this fill
+declines for good, on that run and on every later one. Measured: **203,969 of
+the 204,335 titles with ≥100 votes (99.82%)** gain a `credit_names` when the
+fill runs first, and none of them when it runs last. It **stales no
+embedding** in either order — only non-skeletons are embedded, and only
+skeletons are filled — so the cost of getting the order wrong is missing
+names, not a re-index.
+
+**After either phase, re-index — and here is the measured number of
+embeddings it invalidates.** `usher index --backfill`, then `usher similar
+--rebuild` once the index jobs have run; this is the same freshness gap
+`usher similar` documents below, arriving at a much larger population. On a
+freshly bootstrapped catalog the count of newly-stale embeddings is
+**zero** — every title `credit-names` can touch is a `skeleton`, and skeletons
+are never embedded — so the obligation is real but the bill is nil until the
+catalog has been enriched. `usher index` prints the stale count either way, so
+the number is checkable rather than taken on trust.
 
 `movielens` runs **last** under `--phase all`, and refuses outright against an
 empty catalog: the genome joins `titles` on `imdb_id`, so there is nothing to
@@ -262,9 +353,11 @@ gates it; without it a worker simply never claims `index` jobs, and full-text
 and trigram still serve the whole catalog. `usher index` itself loads no model
 — staleness is a question about a recorded model *name*.
 
-`usher search` and `usher suggest` are the read side, and M6 adds no HTTP
-route — the CLI delivers the whole capability, exactly as `bootstrap` and the
-ingest commands do, and M9 owns the routers.
+`usher search` and `usher suggest` are the read side, and M6 added no HTTP
+route — the CLI delivered the whole capability, exactly as `bootstrap` and the
+ingest commands do. **M9 shipped the routers** (`GET /search`,
+`GET /search/suggest?tier=`) and the CLI is still the second composition root
+rather than a thin client of them: both build the same `SearchService`.
 
 ```bash
 uv run usher search "the quiet vacuum"                 # hybrid by default
@@ -416,9 +509,12 @@ to unreachable when the endpoint honours the JSON schema, so a report of
 zeros like the one above is the system working. ⚠️ One model, one evening;
 none of those numbers is a property of "an LLM".
 
-It takes no arguments at all. The household is the singleton default user
-that stands in for authentication until M9, so a `--user` flag would be an id
-nobody can look up on a deployment that has exactly one.
+It takes no arguments at all. The household is the singleton default user that
+stands in for authentication — **still, after M9, which deliberately did not
+build it** (its boundary call 1: designing authorization against routes landing
+in the same milestone is the mistake the error envelope was deferred four times
+to avoid). So a `--user` flag would be an id nobody can look up on a deployment
+that has exactly one.
 
 **It is one of three surfaces onto the same `CurationService`** — the other
 two are `POST /admin/rows/regenerate`, which enqueues a `curate` job and
@@ -573,8 +669,38 @@ argument error (including `--resolve` without `--title`).
 This project ships importers, never data. Each deployment downloads its own
 datasets and holds its own API keys.
 
-- Information courtesy of IMDb (https://www.imdb.com). Used with permission.
-- This product uses the TMDB API but is not endorsed or certified by TMDB.
+**`GET /meta/attribution` is where a client gets these strings**, and it is the
+surface a client should render from rather than this section — PRD 04's hard
+rule 4 is that the API exposes them so every client can display them, and until
+M9 that route was named in three documents and served by nothing. It answers a
+list of four `{source, text}` entries, one per dataset this project can import,
+in PRD 04's own licensing-table order — pinned by a test, because a licensing
+surface's response bytes should be deterministic:
+
+```bash
+curl -s http://localhost:8100/meta/attribution
+```
+
+It is **static and deliberately not filtered by what this deployment has
+actually imported**. `import_runs` could answer that, and the answer would be
+wrong in the direction that matters: on a fresh install it is empty, so a
+licence string would be withheld from exactly the deployment most likely to be
+rendering freshly imported data. Over-display costs a client one citation too
+many; under-display is a licence breach. TMDb's table row also asks for a logo,
+which a string cannot carry and this project does not ship — that half stays a
+client obligation.
+
+The four, reproduced here for a reader who is not running the service:
+
+- **IMDb** — Information courtesy of IMDb (https://www.imdb.com). Used with
+  permission.
+- **TMDb** — This product uses the TMDB API but is not endorsed or certified by
+  TMDB. Data from The Movie Database (https://www.themoviedb.org).
+- **Wikidata** — ID crosswalk from Wikidata (https://www.wikidata.org),
+  available under CC0 1.0.
+- **MovieLens** — F. Maxwell Harper and Joseph A. Konstan. 2015. The MovieLens
+  Datasets: History and Context. ACM Transactions on Interactive Intelligent
+  Systems (TiiS) 5, 4: 19:1-19:19. https://doi.org/10.1145/2827872
 
 ## License
 

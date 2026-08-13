@@ -149,7 +149,20 @@ yield cosines that are wrong *and plausible*, which is worse than a missing
 signal in exactly the way this ADR keeps finding.
 [ADR-0024](0024-the-genome-is-one-dense-vector-per-title.md).
 
-**In the blend, `NeighborCandidate.tags` is `None` for a half-covered pair.**
+**In the measurement, `NeighborCandidate.tags` is `None` for a half-covered
+pair.**
+
+⚠️ **This site said "in the blend" until 2026-08-12, and the blend is where it
+no longer is.** M9's S7 removed the genome term from `SimilarityService`
+([ADR-0024](0024-the-genome-is-one-dense-vector-per-title.md)'s amendment: a
+2.4746% candidate-pair rate against the 10% floor the 0.25 weight assumed). The
+value is still read, still carried on the port DTO, and still counted — so the
+rule below **still binds and now has exactly one consumer**,
+`NeighborRebuild.pairs_with_tags`, which counts `tags is not None` and is the
+number a later milestone would re-open that decision on. The argument's
+*conclusion* is unchanged; the paragraph on structural consequence at the end
+of this section is the part that describes a code path that no longer exists,
+and it is marked there rather than deleted.
 
 `NeighborCandidate.tags` is the MovieLens tag-genome cosine for a *pair* of
 titles, and it is `None` when **either** side has no `genome_scores` row. Every
@@ -166,20 +179,39 @@ So writing `0.0` for a half-covered pair asserts that two films share no tags,
 which **no real pair can truthfully say** — the single most confident wrong
 statement available in the blend.
 
-**And its consequence is structural rather than marginal.** `_blend`
-renormalises over the signals that are present, so `None` correctly drops the
-term and scores the pair on what is known. `0.0` instead applies a maximally
-negative genome term to every pair that straddles the coverage boundary — which
-reorders every genome-bearing title's neighbour list to put every *other*
-genome-bearing title above every un-genomed one. At the genome's real coverage
-that is a small clique pinned to the top of the overwhelming majority of
-lists, produced by a value no measurement supports, with no error and nothing
-in any gauge to see it.
+**And its consequence *was* structural rather than marginal — M7 to M9's S7.**
+`_blend` renormalises over the signals that are present, so `None` correctly
+dropped the term and scored the pair on what was known. `0.0` instead applied a
+maximally negative genome term to every pair that straddled the coverage
+boundary — which reordered every genome-bearing title's neighbour list to put
+every *other* genome-bearing title above every un-genomed one. At the genome's
+real coverage that is a small clique pinned to the top of the overwhelming
+majority of lists, produced by a value no measurement supports, with no error
+and nothing in any gauge to see it. **`SimilarityService` no longer blends this
+value, so that specific damage is unreachable today** — kept in past tense
+rather than deleted, because it is the argument that would apply again the day
+any signal of this shape becomes a term.
 
-The clamp that keeps `tags` inside `[0, 1]` lives in the **service**, not in
-SQL, for the reason `cosine`'s clamp already does: `title_neighbors.score` is
-`CHECK (score >= 0 AND score <= 1)`, so the bound has to hold for every
-implementation of the port rather than for the one that remembered. And
-`_clamped` is a function rather than a `min`/`max` at the call site precisely
-because of this ADR: `max(0.0, value or 0.0)` is the obvious repair for the
-`None` arm and it silently reintroduces the collapse.
+**The live consequence is now the measurement, and it runs the other way.**
+`0.0` is not `None`, so a port that answered `0.0` for a half-covered pair
+would make `pairs_with_tags` count it — reporting a catalog the genome barely
+touches as one it fully covers. That is a **dead signal looking live**, in the
+one number an operator would use to decide whether to bring the term back.
+Pinned on both arms:
+`test_a_pair_carries_a_genome_cosine_only_when_both_sides_have_one` against the
+real join, `test_a_half_covered_pair_is_not_counted_as_a_genome_pair` against
+the counter.
+
+⚠️ **`_clamped` is gone with the term, and that is worth saying because its
+argument was good.** It kept `tags` inside `[0, 1]` in the **service** rather
+than in SQL, for the reason `cosine`'s clamp still does:
+`title_neighbors.score` is `CHECK (score >= 0 AND score <= 1)`, so the bound
+has to hold for every implementation of the port rather than for the one that
+remembered. And it was a function rather than a `min`/`max` at the call site
+precisely because of this ADR — `max(0.0, value or 0.0)` is the obvious repair
+for the `None` arm and it silently reintroduces the collapse. **Both arguments
+transfer verbatim to whatever `[0, 1]`-valued optional signal becomes a term
+next; neither survives as code, because a value that reaches no scorer needs no
+clamp.**
+`test_a_genome_cosine_a_port_put_outside_the_unit_interval_cannot_reach_a_score`
+is what would notice `candidate.tags` being re-passed without one.

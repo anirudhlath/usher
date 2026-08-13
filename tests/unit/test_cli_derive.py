@@ -8,21 +8,38 @@ database, and that `--backfill` walks the cache **inline** rather than
 enqueueing.
 """
 
+import contextlib
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import pytest
 
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
+from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.title_repository import FakeTitleRepository
-from usher.cli import build_parser
+from usher.cli import _derive, build_parser
+from usher.config import Settings
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
-from usher.services.derive import DeriveService
+from usher.services.derive import DerivationReport, DeriveService
+
+
+def _cli_settings() -> Settings:
+    return Settings(database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher", secret_key="0" * 32)
+
+
+@contextlib.asynccontextmanager
+async def _no_session(_: Settings) -> AsyncIterator[None]:
+    """`_session_for` without the engine. The claim under test is what the
+    command *prints*, and opening a real connection would make it a claim
+    about Postgres -- `tests/unit/test_cli.py` takes the same shape for the
+    same reason."""
+    yield None
 
 
 def test_derive_parses_with_its_defaults() -> None:
@@ -50,6 +67,7 @@ class _Fakes:
         self.people = FakePersonRepository()
         self.credits = FakeCreditRepository(self.people, self.titles)
         self.collections = FakeCollectionRepository()
+        self.images = FakeImageRepository()
         self.queue = FakeJobQueue()
 
     def service(self) -> DeriveService:
@@ -63,6 +81,7 @@ class _Fakes:
             people=self.people,
             credits=self.credits,
             collections=self.collections,
+            images=self.images,
             commit=commit,
         )
 
@@ -227,3 +246,88 @@ async def test_a_derive_job_for_a_deleted_title_completes(fakes: _Fakes) -> None
     handler = derive_handler(fakes.service())
 
     await handler(Job(kind=JobKind.DERIVE, key=str(uuid.uuid4())))
+
+
+async def test_the_backfill_report_prints_every_count_the_walk_produced(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**A number a report does not print is a number nobody sees**, and this
+    command is the only surface `images_written` has.
+
+    The five lines are asserted together rather than only the new one, because
+    the wrong implementation here is not a missing line -- it is a line printed
+    against the wrong field, and `images written: 4` is indistinguishable from
+    `collections linked: 4` unless both are pinned in one place. Every count in
+    the report is therefore distinct, so no two lines can be satisfied by the
+    same attribute.
+
+    **A count, never a ratio**, for the reason the bare form's docstring
+    gives one screen up: `images_written / payloads_read` is `0/0` on the empty
+    database PRD 08 requires every command to work against.
+    """
+    report = DerivationReport(
+        payloads_read=6,
+        titles_derived=5,
+        people_written=4,
+        credits_written=3,
+        collections_written=2,
+        images_written=1,
+    )
+
+    class _Service:
+        async def derive_all(self, *, page_size: int, limit: int) -> DerivationReport:
+            return report
+
+    async def _a_provider(_: Settings) -> tuple[object, Callable[[], Awaitable[None]]]:
+        async def _close() -> None:
+            return None
+
+        return object(), _close
+
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.build_pipeline", lambda *_, **__: object())
+    monkeypatch.setattr("usher.cli.metadata_provider", _a_provider)
+    monkeypatch.setattr("usher.cli.build_derive_service", lambda *_: _Service())
+
+    await _derive(_cli_settings(), backfill=True, limit=0, page_size=500)
+
+    assert capsys.readouterr().out.splitlines() == [
+        "payloads read: 6",
+        "titles derived: 5",
+        "people written: 4",
+        "credits written: 3",
+        "collections linked: 2",
+        "images written: 1",
+    ]
+
+
+async def test_a_derivation_that_found_no_artwork_still_prints_the_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**Zero is the number this line exists to print.** `images` joined
+    `*_APPEND_TO_RESPONSE` in M4, so most of a real cache predates it, and an
+    operator's first `usher derive --backfill` will report far fewer images
+    than titles. A report that suppressed the line when it was zero would make
+    "the cache is old" and "the write is broken" look identical -- and the
+    second is what an operator would assume, because the line they saw last
+    time is gone.
+    """
+
+    class _Service:
+        async def derive_all(self, *, page_size: int, limit: int) -> DerivationReport:
+            return DerivationReport(payloads_read=9, titles_derived=9)
+
+    async def _a_provider(_: Settings) -> tuple[object, Callable[[], Awaitable[None]]]:
+        async def _close() -> None:
+            return None
+
+        return object(), _close
+
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.build_pipeline", lambda *_, **__: object())
+    monkeypatch.setattr("usher.cli.metadata_provider", _a_provider)
+    monkeypatch.setattr("usher.cli.build_derive_service", lambda *_: _Service())
+
+    await _derive(_cli_settings(), backfill=True, limit=0, page_size=500)
+
+    assert "images written: 0" in capsys.readouterr().out.splitlines()

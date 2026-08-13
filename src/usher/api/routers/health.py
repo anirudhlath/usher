@@ -4,6 +4,8 @@ Readiness is degraded rather than binary, so a dashboard can distinguish
 "down" from "running without a source".
 """
 
+from typing import Any, Final
+
 from fastapi import APIRouter, Response
 from loguru import logger
 from sqlalchemy import text
@@ -19,6 +21,21 @@ from usher.api.dto.health import (
 from usher.db.migrations.status import code_head_revision, database_revision
 
 router = APIRouter(tags=["meta"])
+
+#: **The one non-2xx in this API that is not a problem document**, declared so
+#: that is a fact `/openapi.json` states rather than one a reader has to infer
+#: from its absence. This probe's real consumers -- Kubernetes, Docker
+#: `healthcheck`, load balancers -- gate on the status code and never parse the
+#: body, so the 503 keeps `ReadinessResponse` and reports *which* check failed
+#: instead of naming a code. A2 exempted it, ADR-0030 ruled on it, and
+#: `tests/unit/test_api_openapi.py`'s exemption tuple asserts this shape rather
+#: than skipping the status.
+_DEGRADED: Final[dict[int | str, dict[str, Any]]] = {
+    503: {
+        "model": ReadinessResponse,
+        "description": "At least one readiness check failed; `checks` says which.",
+    },
+}
 
 
 @router.get("/health", response_model=LivenessResponse)
@@ -71,7 +88,7 @@ async def _check_migrations(session: AsyncSession) -> bool:
         return False
 
 
-@router.get("/health/ready", response_model=ReadinessResponse)
+@router.get("/health/ready", response_model=ReadinessResponse, responses=_DEGRADED)
 async def ready(
     session: SessionDep, lanes: LaneSupervisorDep, response: Response
 ) -> ReadinessResponse:

@@ -95,9 +95,16 @@ named here so the trail is complete:**
   [06](../06-rows-and-recommendations.md) said "concurrently" and that was a
   corruption rather than a preference —
   [ADR-0025](0025-rows-build-sequentially.md).
-- **A card carries no artwork**, absent rather than null, which is the same
-  call `GET /titles/{id}` made for its `images` key. "The server composes" does
-  not mean the server invents a field it has no table for.
+- **A card carried no artwork until M9, and now carries one image id.** Absent
+  rather than null was the same call `GET /titles/{id}` made for its `images`
+  key: "the server composes" does not mean the server invents a field it has no
+  table for. M9 built the table, so the field exists — and it is *this* ADR
+  that decides its shape rather than the client's: **one** id, picked
+  server-side from the row's own `display_hint` (a poster for
+  `portrait`/`square`, a backdrop for `landscape`/`wide`). A list of every
+  image, left for the client to choose from, would be exactly the re-deciding
+  this document exists to refuse, and the card is one level below the hint that
+  answers it.
 
 ## Why not GraphQL
 

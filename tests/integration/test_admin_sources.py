@@ -29,9 +29,11 @@ hard way earlier in this project:
    them.
 """
 
+import dataclasses
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -53,15 +55,19 @@ from usher.adapters.emby.adapter import EmbyAdapter
 from usher.api.app import create_app
 from usher.api.deps import get_lane_supervisor, get_source_adapter_factory
 from usher.api.lanes import LaneSupervisor
-from usher.composition import Pipeline
+from usher.composition import Pipeline, build_pipeline, build_worker
 from usher.config import Settings
 from usher.db.base import build_engine
 from usher.db.models.source import SourceCredentialRow, SourceRow
 from usher.db.repositories.credentials import build_cipher
+from usher.db.users import ensure_default_user
+from usher.domain.jobs import JobKind
 from usher.domain.source import Source
+from usher.domain.sync import SyncRunKind, SyncRunStatus
 from usher.ports.credentials import SourceCredentials
+from usher.ports.errors import PortUnavailable
 from usher.ports.events import NullEventPublisher
-from usher.ports.source import SourceAdapter, SourceAdapterFactory
+from usher.ports.source import SourceAdapter, SourceAdapterFactory, SourceItem, SourceItemKind
 
 # Distinctive, and deliberately not the fixtures' usual "usher" /
 # "correct-horse-battery": an absence assertion against a string that
@@ -106,16 +112,24 @@ class _FakeServerFactory(SourceAdapterFactory):
     open (it only closes clients it created) -- which means this factory has
     to keep them and the fixture has to dispose of them. One instance per
     app, not one per request, so that list survives to teardown.
+
+    `adapters` is the E3 addition: `sync_handler`'s "the adapter is closed"
+    claim needs the *built* adapter back, not just the client underneath it
+    -- `EmbyAdapter.aclose()` sets its own closed flag and never touches an
+    injected client, so the client list alone cannot show it.
     """
 
     def __init__(self, server: FakeEmbyServer) -> None:
         self._server = server
         self.clients: list[httpx.AsyncClient] = []
+        self.adapters: list[EmbyAdapter] = []
 
     def build(self, source: Source, credentials: SourceCredentials) -> SourceAdapter:
         client = httpx.AsyncClient(transport=self._server.transport(), base_url=source.base_url)
         self.clients.append(client)
-        return EmbyAdapter(source, credentials, client=client)
+        adapter = EmbyAdapter(source, credentials, client=client)
+        self.adapters.append(adapter)
+        return adapter
 
 
 @pytest.fixture
@@ -159,10 +173,27 @@ async def app(
     `test_listing_sources_never_carries_a_credential` fails depending on
     collection order. `TRUNCATE ... CASCADE` also clears
     `source_credentials`, which is the foreign key's whole point.
+
+    `jobs` is truncated alongside `sources` for the same reason and is the
+    E3 addition: `jobs.key` carries no foreign key to `sources`
+    (`fixtures-and-fakes.md`'s "titles and jobs do not" cascade), so a `sync`
+    route's own ingest walk enqueuing an ordinary `match` job for an
+    unmatched item -- the everyday PRD 03 behaviour, not a defect -- would
+    otherwise survive into the next test in this file and inflate the count
+    a worker claims there.
+
+    **Truncated on the way out too, not just on the way in.** E3's own
+    tests are the last in this file and are the first here to commit a
+    source and never delete it, so whichever committed row the *last* test
+    to run happened to leave behind used to survive purely by luck of which
+    test that was -- and did, until these were added: `test_cli_pipeline.py`
+    assumes an empty `sources` table and found "Living Room Emby" sitting in
+    it. Symmetric cleanup makes that independent of collection order rather
+    than accidentally true.
     """
     engine = build_engine(postgres_url)
     async with engine.begin() as conn:
-        await conn.execute(text("TRUNCATE sources CASCADE"))
+        await conn.execute(text("TRUNCATE sources, jobs CASCADE"))
     await engine.dispose()
 
     application = create_app(
@@ -184,6 +215,10 @@ async def app(
     finally:
         for adapter_client in factory.clients:
             await adapter_client.aclose()
+        teardown_engine = build_engine(postgres_url)
+        async with teardown_engine.begin() as conn:
+            await conn.execute(text("TRUNCATE sources, jobs CASCADE"))
+        await teardown_engine.dispose()
 
 
 @pytest.fixture
@@ -436,8 +471,19 @@ async def test_status_renders_an_undecryptable_credential(
 
 
 async def test_status_of_an_unknown_source_is_404(client: AsyncClient) -> None:
+    """404 in PRD 07's RFC 9457 envelope since M9, against the real route
+    rather than only against the unit app that overrides its service."""
     response = await client.get("/admin/sources/01936f2a-0000-7000-8000-000000000000/status")
     assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json() == {
+        "type": "https://usher.dev/errors/not-found",
+        "title": "Not found",
+        "status": 404,
+        "code": "not_found",
+        "detail": "source not found",
+        "instance": "/admin/sources/01936f2a-0000-7000-8000-000000000000/status",
+    }
 
 
 async def test_deleting_a_source_removes_its_credential_row(
@@ -502,16 +548,30 @@ async def test_a_rejected_request_does_not_echo_the_credential_it_carried(
     Two shapes are checked, because they fail differently: a *missing*
     field echoes its siblings, and a *wrong-typed* field echoes only
     itself.
+
+    **M9 wrapped PRD 07's RFC 9457 envelope around that handler and this
+    case moved with it, in the same commit.** The stripped error list is now
+    the `errors` extension member; `detail` is a fixed sentence. Each half
+    keeps its positive control -- the request really carried the credential
+    and the route really rejected it -- because a body that never contained
+    the value is also what a handler that never ran produces, and the
+    envelope is exactly the kind of change that could make a handler stop
+    running.
     """
     incomplete = _payload()
     del incomplete["base_url"]
+    assert PASSWORD in str(incomplete), "the positive control never submitted a password"
     response = await client.post("/admin/sources", json=incomplete)
-    assert response.status_code == 422
+    assert response.status_code == 422, "the route accepted a body it should have rejected"
+    assert response.headers["content-type"] == "application/problem+json"
+    assert [error["loc"] for error in response.json()["errors"]] == [["body", "base_url"]]
     assert_carries_no_credential(response.text, where="the 422 for a missing field")
 
     wrong_type = dict(_payload(), password={"nested": PASSWORD})
+    assert PASSWORD in str(wrong_type), "the positive control never submitted a password"
     response = await client.post("/admin/sources", json=wrong_type)
-    assert response.status_code == 422
+    assert response.status_code == 422, "the route accepted a body it should have rejected"
+    assert [error["loc"] for error in response.json()["errors"]] == [["body", "password"]]
     assert_carries_no_credential(response.text, where="the 422 for a wrong-typed password")
 
 
@@ -561,3 +621,172 @@ async def test_the_openapi_schema_has_no_password_in_a_response(
 
     request_schema = schema["components"]["schemas"]["SourceCreateRequest"]["properties"]
     assert request_schema["password"]["writeOnly"] is True
+
+
+# -- POST /admin/sources/{id}/sync, driven end to end (M9's E3) -----------
+
+
+async def _never_resolves(_: str) -> None:
+    """A `match`/`watch_history` resolver a `sync`-only worker must never
+    call: nothing enqueues either kind in these cases, so reaching this
+    would mean `run_once` claimed a kind it should not have."""
+    return None
+
+
+@asynccontextmanager
+async def _drained_pipeline(
+    app: FastAPI, worker_factory: SourceAdapterFactory, *, user_id: uuid.UUID
+) -> AsyncIterator[Pipeline]:
+    """Claim and run exactly the worker's registered kinds, once, over a
+    fresh session -- the same shape `usher work --once` drives, with the
+    adapter factory swapped for one pointed at the in-memory server.
+
+    Yields the `Pipeline` while its session is still open, so a case can
+    read back what the run wrote without a second round trip losing the
+    transaction's own view, and closes the session on the way out --
+    `session_factory()` outside an `async with` would otherwise leak one per
+    case, the same trap `_session_for` in `usher.cli` exists to avoid.
+    """
+    settings: Settings = app.state.settings
+    session_factory: async_sessionmaker[AsyncSession] = app.state.session_factory
+    async with session_factory() as session:
+        pipeline = dataclasses.replace(build_pipeline(session, settings), adapters=worker_factory)
+        worker = build_worker(
+            pipeline,
+            settings,
+            provider=None,
+            embedder=None,
+            client=None,
+            resolve=_never_resolves,
+            user_id=user_id,
+        )
+        await worker.startup()
+        ran = await worker.run_once()
+        assert ran == 1, "the claim found more or fewer than the one enqueued sync job"
+        yield pipeline
+
+
+async def test_a_claimed_sync_job_walks_items_then_watch_state_and_closes_the_adapter(
+    client: AsyncClient, app: FastAPI, server: FakeEmbyServer
+) -> None:
+    """The end-to-end walk: one claimed `sync` job produces a `sync_runs`
+    row for the item lane and one for the watch lane, driven against the
+    real `EmbyAdapter` over a real `FakeEmbyServer` -- the identical stack
+    `test_status_reports_a_healthy_source` already exercises, one route
+    over -- and the adapter is closed afterwards.
+
+    `EmbyAdapter.aclose()` never touches the injected client (the fixture
+    owns that), so the only way to see it ran is the port's own contract:
+    every method raises `PortUnavailable` afterwards.
+    """
+    created = (await client.post("/admin/sources", json=_payload())).json()
+    source_id = uuid.UUID(created["id"])
+    server.add_item(
+        SourceItem(external_id="emby-1", name="A Film", kind=SourceItemKind.MOVIE, year=1999),
+        datetime(2026, 8, 1, tzinfo=UTC),
+    )
+
+    response = await client.post(f"/admin/sources/{source_id}/sync")
+    assert response.status_code == 202
+
+    session_factory: async_sessionmaker[AsyncSession] = app.state.session_factory
+    async with session_factory() as user_session:
+        user_id = await ensure_default_user(user_session)
+        await user_session.commit()
+
+    worker_factory = _FakeServerFactory(server)
+    try:
+        async with _drained_pipeline(app, worker_factory, user_id=user_id) as pipeline:
+            runs = await pipeline.runs.list_for_source(source_id, limit=5)
+    finally:
+        for adapter_client in worker_factory.clients:
+            await adapter_client.aclose()
+
+    by_kind = {run.kind: run for run in runs}
+    assert set(by_kind) == {SyncRunKind.DELTA, SyncRunKind.WATCH_STATE}, (
+        f"expected one item-lane run and one watch-lane run, got {sorted(by_kind)}"
+    )
+    assert by_kind[SyncRunKind.DELTA].status is SyncRunStatus.COMPLETED
+    assert by_kind[SyncRunKind.DELTA].items_seen == 1
+    assert by_kind[SyncRunKind.WATCH_STATE].status is SyncRunStatus.COMPLETED
+
+    assert len(worker_factory.adapters) == 1, "one job, one adapter -- built once, closed once"
+    with pytest.raises(PortUnavailable):
+        await worker_factory.adapters[0].get_item("emby-1")
+
+
+async def test_the_adapter_closes_even_when_the_item_lanes_walk_raises(
+    client: AsyncClient, app: FastAPI, server: FakeEmbyServer
+) -> None:
+    """`ReconcileService.reconcile` never lets a `UsherPortError` escape --
+    it records a `FAILED` run instead -- so the property worth pinning
+    against a real adapter is not "the handler survives a raise" but "the
+    connection pool is released whether the walk that raised inside it was
+    caught three layers down or not". `aclose()` in a `finally` is what
+    buys that, and it is invisible to every assertion above the walk.
+    """
+    created = (await client.post("/admin/sources", json=_payload())).json()
+    source_id = uuid.UUID(created["id"])
+    server.offline = True
+
+    response = await client.post(f"/admin/sources/{source_id}/sync")
+    assert response.status_code == 202
+
+    session_factory: async_sessionmaker[AsyncSession] = app.state.session_factory
+    async with session_factory() as user_session:
+        user_id = await ensure_default_user(user_session)
+        await user_session.commit()
+
+    worker_factory = _FakeServerFactory(server)
+    try:
+        async with _drained_pipeline(app, worker_factory, user_id=user_id) as pipeline:
+            runs = await pipeline.runs.list_for_source(source_id, limit=5)
+    finally:
+        for adapter_client in worker_factory.clients:
+            await adapter_client.aclose()
+
+    assert runs, "the walk never reached the point of recording a run at all"
+    assert {run.status for run in runs} == {SyncRunStatus.FAILED}
+
+    assert len(worker_factory.adapters) == 1
+    with pytest.raises(PortUnavailable):
+        await worker_factory.adapters[0].get_item("emby-1")
+
+
+async def test_a_sync_job_completes_rather_than_parks_when_the_credential_row_has_gone(
+    client: AsyncClient, app: FastAPI, server: FakeEmbyServer
+) -> None:
+    """`composition.open_adapter` answers `None` for exactly this, and PRD
+    08 reserves parking for work a human must look at -- an operator with
+    three sources needs the second and third to run when the first's
+    credential has gone missing, and a parked `sync` job would put that
+    problem on the wrong screen."""
+    created = (await client.post("/admin/sources", json=_payload())).json()
+    source_id = uuid.UUID(created["id"])
+
+    response = await client.post(f"/admin/sources/{source_id}/sync")
+    assert response.status_code == 202
+
+    session_factory: async_sessionmaker[AsyncSession] = app.state.session_factory
+    async with session_factory() as session:
+        user_id = await ensure_default_user(session)
+        await session.execute(
+            text("DELETE FROM source_credentials WHERE source_id = :source_id"),
+            {"source_id": source_id},
+        )
+        await session.commit()
+
+    worker_factory = _FakeServerFactory(server)
+    try:
+        async with _drained_pipeline(app, worker_factory, user_id=user_id) as pipeline:
+            depth = await pipeline.queue.depth()
+            parked = await pipeline.queue.parked(limit=10)
+            runs = await pipeline.runs.list_for_source(source_id, limit=5)
+    finally:
+        for adapter_client in worker_factory.clients:
+            await adapter_client.aclose()
+
+    assert depth[JobKind.SYNC] == 0, "the job is gone -- completed, not left pending"
+    assert parked == [], "no adapter to open is not poison; the job must not park"
+    assert runs == [], "no adapter, so neither lane ran"
+    assert worker_factory.adapters == [], "no credentials, so no adapter was ever built"

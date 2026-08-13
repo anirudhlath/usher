@@ -52,6 +52,10 @@ index.title                       ← M6, a child of job.index
 home.compose                      ← M7, one per GET /home or usher home
 └── row.build                        one per row actually built
 
+rows.refresh                      ← M9, the serve-stale lane's root span,
+└── row.build                        Linked (never parented) to the request
+                                     that served the stale screen
+
 job.curate                        ← M8, a worker's root span like the three
 └── curation.generate                above it; one per generation
     └── llm.complete                 the one completion it is allowed
@@ -72,7 +76,9 @@ so this is asserted as parentage rather than existence
 A worker's `job.*` span is the deliberate exception: a **root with a `Link`**
 back to the enqueueing span, because the request that enqueued it has
 usually already returned and a child span of a finished parent misstates
-causality.
+causality. **M9's `rows.refresh` is the second, on identical terms** — [06](06-rows-and-recommendations.md)'s
+serve-stale lane builds a screen out of band, having been handed the key by a
+request that has already answered.
 
 **`index.fulltext` was in this tree until M6 and is deliberately gone, rather
 than unimplemented.** The search document is a `GENERATED ALWAYS AS (…)
@@ -111,8 +117,16 @@ reader would assume:
   version of the permanently empty panel this file's preamble argues against.
 - **A cached row produces no `row.build` span**, for the same reason it records
   no histogram point: the cache returns before the span opens. So the number of
-  `row.build` children of a `home.compose` is the number of *misses*, and a
-  warm request is a lone parent with none.
+  `row.build` children of a `home.compose` is the number of *misses on that
+  composition*, and a warm request is a lone parent with none. ⚠️ **It is not
+  the number of misses in the deployment, and M9 is where that stopped being
+  the same sentence.** A `rows.refresh` builds outside any request, so its
+  `row.build` spans have **no `home.compose` parent at all** — the refresh
+  opens none, deliberately, rather than minting a second `home.compose` nobody
+  asked for or nesting under a request that has returned. So "misses" is a
+  group-by over both roots, and the refresh's cost stays visible where it
+  always was: as `usher.row.build.duration` points, carrying the same
+  `provider` label, with no parent composition.
 
 Spans carry `title_id`, `source`, and `trigger` (`demand` vs `background`) as
 attributes, so "why did the title I just opened take 45 seconds" is one query.
@@ -126,7 +140,7 @@ is maintained rather than aspirational.
 
 | Metric | Type | Labels | Emitted |
 |---|---|---|---|
-| `usher.http.server.duration` | histogram | route, status | M9 |
+| `http.server.duration` | histogram | `http.target`, `http.status_code` | ✅ M9 |
 | `usher.search.duration` | histogram | mode | ✅ M6 |
 | `usher.search.results` | histogram | mode | ✅ M6 |
 | `usher.home.compose.duration` | histogram | — | ✅ M7 |
@@ -150,7 +164,9 @@ is maintained rather than aspirational.
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
 | `usher.embedding.duration` | histogram | — | ✅ M6 |
-| `usher.cache.hits` / `.misses` | counter | cache | M9 |
+| `usher.cache.hits` | counter | cache, freshness | ✅ M9 |
+| `usher.cache.misses` | counter | cache | ✅ M9 |
+| `usher.images.references` | counter | outcome | ✅ M9 |
 | `usher.search.embeddings.stale` | gauge | — | ✅ M6 |
 | `usher.search.embeddings.refused` | gauge | — | ✅ M6 |
 | `usher.similarity.neighbors.stale` | gauge | — | ✅ M7 |
@@ -159,6 +175,28 @@ is maintained rather than aspirational.
 | `usher.bootstrap.batch.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.phase.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.failures` | counter | dataset, kind | ✅ M2 |
+
+**`http.server.duration` is a correction, not an addition, and carries no
+`usher.` prefix on purpose.** M9 re-measured through a real `create_app()` and
+real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor`
+(wired in `create_app`, `api/app.py:127`) already emits this histogram on
+every request — unit `ms`, scope `opentelemetry.instrumentation.fastapi` —
+with `http.target` set to the **route template**
+(`/titles/{title_id}`, not the raw path, so two distinct title ids collapse
+into one series) and `http.status_code`. That is exactly what this row asked
+for, under OpenTelemetry's own semantic-convention name rather than ours, so
+the row now names what ships instead of asking for a second histogram over
+the same measurement — recording `usher.http.server.duration` alongside it
+would double the export for one relabelled series, the same
+two-vocabularies-under-one-name hazard this document already warns about for
+`provider` below.
+**The semconv opt-in is a named hazard, not a footnote**: setting
+`OTEL_SEMCONV_STABILITY_OPT_IN=http` renames this metric to
+`http.server.request.duration`, changes its unit from `ms` to seconds, and
+swaps `http.target` for `http.route` — any one of which empties a dashboard
+panel built against the names above, silently, with no error anywhere.
+Nothing in this project's config sets that variable; it is recorded here so
+the day someone does, the panel that goes quiet is not a mystery.
 
 **`mode`'s vocabulary is `full_text` / `semantic` / `fused`** — `SearchMode`'s
 own values, lower-case, and written down here because a label whose vocabulary
@@ -212,11 +250,64 @@ written down here for the reason the paragraph above gives — `continue-watchin
   before it opens the timer, deliberately, so this histogram measures the cost
   of *building* a row and not the cost of serving one. The population is
   therefore misses, and the hit rate is not recoverable from it —
-  `usher.cache.hits`/`.misses` is M9's, and until then the cold/warm pair
-  `usher home` prints is the only measurement of the row cache there is.
+  `usher.cache.hits`/`.misses` is what answers that instead (M9), recorded
+  where the read happens (`RowCache.read_screen`/`get_row`), labelled
+  `cache` = `row` / `screen` and, by rule rather than a closed list, whatever
+  value the next cache appends in the commit that ships it. An entry found
+  expired counts as a **miss**, not a hit — it is a rebuild, the same
+  population the histogram above measures.
+- **The exception is a *served-stale* read, which is a hit carrying
+  `freshness="stale"`, and the pair of decisions is worth spelling out
+  because [06](06-rows-and-recommendations.md)'s serve-stale trade is only
+  legible here.** A **hit**, because the request was answered out of the cache
+  and paid no rebuild — counting it a miss would make the hit rate report a
+  compose that did not happen, on the very series a reader takes as "requests
+  that avoided one". **Not a plain hit**, because a plain hit hides the thing
+  being traded: the household is looking at a screen older than its TTL, and no
+  other series would say so. `freshness` (`fresh` | `stale`) is on the **hits**
+  counter only — a miss served nothing, so it has no freshness to report — which
+  keeps the pair at four series and makes "what fraction of served screens were
+  stale" a group-by rather than an inference.
+
+**`usher.images.references` exists because a filter with no counter is
+invisible.** Both read surfaces — `GET /titles/{id}`'s `images` key and
+`GET /home`'s card artwork — drop references the image proxy can never
+serve, on one definition (`usher.ports.images.is_servable_path`), because two
+reads of one table disagreeing about what is servable is exactly the drift
+that predicate exists to prevent. The provider publishes some logos as `.svg`,
+and
+[ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)'s width
+ladder cannot bound that type — so without a counter *"this catalog has no
+logos"* and *"this proxy dropped all of them"* are the same body, the same
+empty space on a screen, and the same answer to an operator holding only the
+API. Three things a dashboard query has to know:
+
+- **`outcome` is two values, `served` and `unservable`**, and both are
+  recorded on **every** read, zeros included. A drop count with no denominator
+  cannot be read: 4,000 unservable references is a broken deployment on a small
+  catalog and roughly one title in seventeen on a large one (measured across 51
+  popular and top-rated titles). And a series absent from the export is
+  indistinguishable from a series nobody counts — `usher.curation.dropped`'s
+  rule below, and it matters more here, because silence is the exact condition
+  this instrument exists to break.
+- **It counts *references a read considered*, not images in the catalog, and
+  the two surfaces consider different populations.** A title detail weighs
+  every image the title has; a shelf card weighs the **one** the composer
+  already chose. So the absolute is proportional to traffic and the two
+  surfaces are not summable into a catalog-wide rate — the ratio is what is
+  readable, and it is readable per surface only if a dashboard splits by the
+  route, which this counter does not carry a label for. Deliberate: a `route`
+  dimension on a per-request counter is the cardinality footgun
+  `usher.curation.dropped`'s closed vocabulary exists to avoid, and
+  `http.server.duration` already carries the route template for anyone
+  correlating.
+- **A rising `unservable` share is not by itself an incident.** It is the
+  provider publishing more SVG logos, and the reopening trigger for ADR-0032 is
+  a household needing those logos *rendered*, whose answer is a rasteriser
+  rather than a wider ladder.
 
 **`usher.curation.rows` and `usher.curation.dropped` are the milestone's only
-two metrics, and neither is about money.** This document's own first principle
+two curation metrics, and neither is about money.** This document's own first principle
 puts LLM spend on Postgres — `llm_calls` is the record — so there is no
 `usher.llm.*` series at all. What these two answer is the question no
 `llm_calls` row can: **whether the validator is eating the output.** A call
@@ -417,12 +508,154 @@ llm_calls(
   generation_id                     -- ✅ M8. NULL for a purpose that produces
 )                                   --    no rows. See below
 
-search_queries(                       -- M9, whole. Not built in M6; see below
-  id, at, user_id, query, mode,
+search_queries(                       -- ✅ M9 (`m09a`): the table, whole.
+  id, at, user_id, query, mode,       -- ✅ M9 (F2): written per answered search
   result_count, latency_ms,
-  clicked_title_id, played          -- outcome attribution
+  clicked_title_id, played          -- outcome attribution. ✅ M9 (F3)
 )
 ```
+
+✅ **`search_queries` exists as of `m09a` with these nine columns and no tenth,
+and as of F3 every one of them has a named writer.** *Whole* is what the table
+got and it
+was only half of what the paragraph above asks for — the argument for shipping
+all nine at once is that a dashboard reading a half-populated analytics table
+cannot tell a real zero from a column nobody filled, and an empty table is at
+least honestly empty. `SearchQueryRepository.record` writes `id`, `at`,
+`user_id`, `query`, `mode`, `result_count` and `latency_ms` at the moment a
+search answers (F2); `record_outcome` fills `clicked_title_id` and `played`
+afterwards (F3), from the two actions a client actually performs.
+
+✅ **The outcome half is two writers, two columns, and no route that sets
+both.** `GET /search` returns the row's own id as an opaque `search_id`;
+`GET /titles/{id}?search_id=…` records the **click**, because opening a result
+is the only moment anything knows *which* one the household opened; and
+`POST /titles/{id}/play` (or `/episodes/{id}/play`) carrying the same id
+records the **play**, naming no title. No new endpoint was needed for either.
+The split is what stops the ambiguity this document spends a paragraph
+refusing from arriving anyway through the back door: a single writer setting
+both would make `clicked_title_id` mean *"the last thing this household did
+with this search"* rather than *"which result it opened"*.
+
+Four properties of that update, each a decision rather than an implementation
+detail:
+
+- **The update is scoped `WHERE id = :search_id AND user_id = :user_id`**, and
+  that is a security boundary rather than tidiness. A `search_id` is
+  client-supplied and UUIDv7 is partially time-ordered and therefore partially
+  guessable, so without the scope one household writes attribution onto
+  another's row — silently, with no error, no log line and no metric.
+- **First write wins on `clicked_title_id`**, so a repeated or later, different
+  click cannot rewrite history. That is what makes the column answer *"what did
+  this search lead to"* rather than *"what did this client last do"* — and it
+  is also what makes the row immutable after its outcome, which is why this
+  table needs no `updated_at` and no trigger.
+- **`played` is monotonic and moves only toward `true`.** Nothing in this
+  design means *"undo the play"*, so a later call that has not itself observed
+  one is stale information rather than a correction.
+- **An unknown, stale or malformed `search_id` is ignored, never a 4xx.** This
+  is analytics, not a resource: pruning is an operator's `DELETE` (below), so a
+  client outliving its row is ordinary, and a client that truncated its id must
+  not be denied a title that exists.
+
+**Which absence means what, because a reader computing a no-click rate needs
+all three and only one of them is a real zero.**
+
+| what you see | what it means |
+|---|---|
+| a row with `clicked_title_id IS NULL` and `played = false` | **the signal.** The search answered and the household opened nothing — the no-click rate this table exists to compute |
+| a row with `clicked_title_id` set and `played = false` | **also the signal.** A click that never became a play, which is the row `usher search`'s own gate cannot produce and a synthetic typo set cannot imitate |
+| a row with `played = true` and `clicked_title_id IS NULL` | legal and meaningful: the household played a result without ever asking for its detail page, so no click was ever reported. Not a hole |
+| a play with **no row at all** | simply **unattributed**. A client that carried no `search_id` — a home row, a deep link, a bookmark — is not a search that led nowhere, and counting it as one would make the denominator the whole library |
+| **no rows from `GET /search/suggest`** | by design, on either tier (F2, and the two amendments below). The type-ahead box contributes nothing to any rate on this table |
+
+⚠️ **So the denominator is answered searches, never plays.** *"Plays with no
+search"* and *"searches with no play"* are counted in different tables — the
+first is not in this one at all — and a panel dividing one by the other is
+measuring how often people search rather than how well search works.
+
+**One row per *answered* search, and four things that are deliberately not
+rows.** Each is a decision rather than an omission, and each is stated here
+because the absence is invisible in the data:
+
+- **A blank or whitespace-only query.** A search box sends one between every
+  character, and `SearchService` refuses one before it reaches an index. Counted
+  they would dominate this table exactly as they would dominate the two
+  histograms, and the zero-result rate below would become a measure of how fast
+  somebody types.
+- **A search with no household.** `user_id` is `NOT NULL` behind a real foreign
+  key, so a search nobody is speaking for has no row rather than a row with a
+  hole in it. Unreachable from either shipped caller — `GET /search` and
+  `usher search` both resolve the singleton default user first.
+- **A page of a search.** Neither `GET /search` nor `SearchService.search` takes
+  a cursor, so a search is one row and cannot become one per scroll. The day
+  either grows pagination this is a decision to make again, not a default.
+- **A keystroke.** See the next paragraph.
+
+🔴 **`GET /search/suggest` writes no row, on either tier, and what that costs
+is stated rather than hidden.** `mode` is a `SearchMode` — three reachable
+values — and a suggest request is parameterised by a disjoint `SuggestTier`
+(`prefix` | `fuzzy`), so storing both under one column is the
+two-vocabularies-under-one-name hazard this document already names for
+`provider`. It would also make every mode-split panel in dashboards 1 and 4 a
+measure of the type-ahead box: tier 1 is p50 **0.6 ms** against full text's p50
+**33.3 ms** over the same 2,993 cases
+([05](05-search-and-similarity.md)), so a client driving the box per keystroke
+would out-number *and* out-weight the searches by an order of magnitude each.
+
+**The cost is that this table cannot answer the question below that it is most
+wanted for** — *whether real users type 2–4-character queries at all*, which is
+a question about the suggest box. Two ways to fix it, both **PRD 10
+amendments** and both deliberately out of M9's scope, named here so M10 plans
+one rather than rediscovering the choice:
+
+1. **A fourth `SearchMode` member** (a `suggest` value, or one per tier). It is
+   the smaller schema change — no column, no migration for the enum's Postgres
+   side beyond widening a CHECK — and the larger *wire* change: `SearchMode` is
+   `GET /search`'s `?mode=` and `SearchAnswer`'s two fields, so a member no
+   search lane can serve becomes reachable on a route that would have to refuse
+   it.
+2. **A tenth column** (`surface`, `search | suggest`, or a nullable `tier`). It
+   keeps the two vocabularies apart, which is the objection above answered
+   rather than absorbed, and it costs a migration plus a decision about every
+   existing row. It is also the only one of the two that can record *which tier*
+   answered, which is the half [ADR-0031](decisions/0031-the-two-tier-suggest.md)
+   would actually want measured.
+
+Either way the volume argument stands on its own and does not go away with the
+vocabulary one, because of the next paragraph.
+
+**What the row costs, measured once rather than assumed:** `record()` plus the
+commit is p50 **3.957 ms** / p95 4.738 ms over 2,000 iterations against a real
+`pgvector/pgvector:pg17`, of which the INSERT is 0.9 ms and the WAL flush is
+3.0 ms. Against the shipped full-text path's p50 33.3 ms
+([05](05-search-and-similarity.md)) that is **11.9% of a median search** — one
+order of magnitude smaller, not the two an earlier estimate assumed, which is
+worth knowing before anything prices a *keystroke* against it. No bar is minted
+and none is needed; the full table and its caveats are in
+`.claude/rules/search-and-embeddings.md`.
+
+⚠️ **Nothing owns this table's size, and that is stated rather than left
+implied.** There is no retention job and no scheduler anywhere in `src/` —
+every periodic thing in this project is an operator's cron line ([M8's boundary
+call 8](09-roadmap.md)) — so `search_queries` grows monotonically at one row per
+answered search, forever. On the shipped surface that is bounded by how often a
+household presses enter, which is why it is tolerable in M9; it is *not* what a
+keystroke-recording amendment above would produce, and pricing the retention is
+part of that amendment rather than a follow-up to it. Pruning is
+`DELETE FROM search_queries WHERE at < now() - interval '90 days'`, an
+operator's SQL, and the table has **no index on `at`**, so that statement is a
+sequential scan until somebody adds one.
+
+The same "whole" cuts the other way: `requested_mode` is wire-only and is
+deliberately **not** a tenth column. `played` is `NOT NULL` rather than
+nullable for exactly the reason in this paragraph. `user_id` is `ON DELETE
+RESTRICT` — a household's search history is user state — and
+`clicked_title_id` is `ON DELETE SET NULL`, because a deleted title must not
+delete the record that somebody searched. The table ships **no index beyond
+its primary key**: its readers are the dashboards below, and an index whose
+reader is a later milestone is the failure [09](09-roadmap.md)'s boundary call
+9 names.
 
 🔴 **This paragraph read *"`litellm` reports per-call cost natively, so cost
 analysis is exact SQL rather than estimated counters"* and its premise is
@@ -481,10 +714,10 @@ are better evidence than a synthetic typo set.
 **It was assigned to no milestone, and M6 assigns it to M9 whole.** Its
 columns split cleanly in two:
 
-| Columns | Nature | Fillable in M6? |
-|---|---|---|
-| `at`, `query`, `mode`, `result_count`, `latency_ms` | retrieval-side — everything `SearchService` already knows | yes |
-| `user_id`, `clicked_title_id`, `played` | outcome attribution — a click and a play are things a *client* does | **no.** Needs an HTTP surface, which is M9's (M6 adds no route, boundary call 1), and a real `user_id`, which is the authentication seam [01](01-architecture.md) leaves open |
+| Columns | Nature | Fillable in M6? | Writer |
+|---|---|---|---|
+| `at`, `query`, `mode`, `result_count`, `latency_ms` | retrieval-side — everything `SearchService` already knows | yes | **F2** |
+| `user_id`, `clicked_title_id`, `played` | outcome attribution — a click and a play are things a *client* does | **no.** Needs an HTTP surface, which is M9's (M6 adds no route, boundary call 1), and a real `user_id`, which is the authentication seam [01](01-architecture.md) leaves open | **F3** for `clicked_title_id`/`played`; **F2** for `user_id` — see below |
 
 Creating it in M6 would ship a table three of whose seven columns nothing ever
 fills. **This document's own first principle is that a documented thing
@@ -496,6 +729,27 @@ exactly the signal the column exists to carry. The whole point of this table
 is the sentence above it: it turns the gate into a live measurement. **A
 no-click rate computed over a column nothing writes is not better evidence
 than anything.** So the table lands with the surface that can fill it: **M9**.
+The **"Fillable in M6?" column is left standing as the historical record it
+is** — it answers a question M6 was actually asked, not a question about M9's
+task split, which is what the **Writer** column is for.
+
+🔶 **F1's divergence, recorded rather than smoothed over.** The row above
+groups `user_id` with the outcome half because an authenticated deployment
+needs the seam [01](01-architecture.md) leaves open. M9 ships no
+authentication (group F's boundary calls) — `user_id` is the singleton
+default user — so on the seam this milestone actually has, `user_id` is
+already known at the moment a search answers, and it costs nothing to write
+it early rather than wait for the attribution call that fills the other two.
+`SearchQueryRepository.record` (F2) therefore writes `user_id` alongside the
+five retrieval-side columns, and `record_outcome` (F3) writes only
+`clicked_title_id` and `played`.
+
+✅ **And `user_id` earned a second job in F3 that this row did not anticipate:
+it is the *scope* of the outcome update, not only a column.** On an
+unauthenticated deployment that reads like a formality; it is not one, and it
+is a predicate rather than a comment because the day the seam above is filled
+is the day a `search_id` guessed from a timestamp stops being harmless. The
+column is written once, by `record`, and never moved.
 
 **M6's contribution is the two histograms** — `usher.search.duration` and
 `usher.search.results`, both labelled by mode — which answer latency and
@@ -520,6 +774,17 @@ better than.
 Row attribution (`played` joined back to the row a title was launched from) does
 the same for [06](06-rows-and-recommendations.md) — it shows which
 `RowProvider`s earn their slot.
+
+⚠️ **That sentence is an aspiration and M9 does not deliver it — stated here
+because F3 lands `played` and a reader would otherwise assume it did.** This
+column is joined to a **search**, not to a row: `search_queries` has no row
+slug, no `generation_id` and no provider, and a play launched from a home
+shelf carries no `search_id` at all, so it is one of the *unattributed* plays
+in the table above. Attributing a play to the shelf it came from needs a
+handle `GET /home` does not hand out and a column this table does not have —
+the same shape [06](06-rows-and-recommendations.md)'s "cost per play
+attributed to an LLM row" panel needs, and a PRD amendment rather than a
+follow-up to this one.
 
 ## Dashboards
 
@@ -583,12 +848,29 @@ image proxy hit rate and cache size.
 **Home composition time is backed by real data as of M7**, from both sides:
 `usher.home.compose.duration` for the total and `usher.row.build.duration`'s
 `provider` label for the breakdown, with `home.compose → row.build` spans for
-the drill-down. Three panels on this dashboard are **not** backed: API latency
-by endpoint needs `usher.http.server.duration` (M9), cache hit rates need
-`usher.cache.hits`/`.misses` (M9), and search→play conversion needs
-`search_queries`' outcome columns (M9). And one caveat travels with the home
-panels — the build histogram's population is cache *misses* only, so a p50
-that rises after a deploy may be a colder cache rather than a slower provider.
+the drill-down. **API latency by endpoint and cache hit rates are backed as of
+M9**: the former by `http.server.duration` (no `usher.` prefix — see the
+correction above the metric table), the latter by `usher.cache.hits`/
+`.misses`. **The zero-result rate is backed as of M9's F2** — it is
+`search_queries.result_count = 0` over the rows a real household produced,
+which is the live measurement this whole table exists to turn ADR-0002's gate
+into, and it counts only *answered* searches: a blank query and a keystroke are
+not rows, so the denominator is searches rather than characters typed.
+**Search→play conversion is backed as of M9's F3** — `played` over the same
+denominator, with the no-click rate (`clicked_title_id IS NULL`) beside it — so
+every panel on this dashboard now has a writer behind it. ⚠️ Read both against
+the absence table above before quoting either: a play carrying no `search_id`
+is not in this table at all, so the conversion rate is *"of searches, how many
+led to a play Usher was told about"* and never *"of plays, how many came from
+a search"*. And
+one caveat travels with the home panels — the build histogram's population is
+cache *misses* only, so a p50 that rises after a deploy may be a colder cache
+rather than a slower provider. **Two M9 additions change how these panels
+read.** The hit rate splits on `freshness`, so "served, but stale" is its own
+number rather than folded into the good one; and the build histogram now
+includes rows built by the `rows.refresh` lane, which have no `home.compose`
+parent — so the histogram's population is *all* builds while the span drill-down
+under a request shows only that request's.
 
 ### 5 — Cost & Compliance
 

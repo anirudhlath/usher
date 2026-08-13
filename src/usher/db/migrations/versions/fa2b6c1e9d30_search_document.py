@@ -153,12 +153,18 @@ settle it -- the fraction of the real catalog whose `original_name` differs
 from `name`, and suggest recall@5 with and without -- belong to the
 real-catalog gate, where a recall number means something.
 
-**There is no `title_search_names` table** (boundary call 3). PRD 05's
-narrow table is justified by aliases and people names, neither of which has
-a data source in M6, so it would hold exactly one row per title duplicating
-`titles(id, name, kind, popularity)` -- a second copy to keep fresh, which
-is the problem this milestone exists to eliminate. When M7 lands aliases and
-people, the narrow table is the migration that adds them.
+**There is no `title_search_names` table in this revision** (boundary call
+3). PRD 05's narrow table is justified by aliases and people names, neither
+of which has a data source in M6, so it would hold exactly one row per title
+duplicating `titles(id, name, kind, popularity)` -- a second copy to keep
+fresh, which is the problem this milestone exists to eliminate.
+
+**`m09a` creates it**, once both halves have a source, and the duplication
+this paragraph refuses is still refused there: it carries no `primary` rows
+and no `popularity` column, so `titles` remains the only place a canonical
+name is stored. The condition was restated by M7 rather than silently
+renewed -- M7 landed people and not aliases -- which is why this sentence
+names a revision and not a milestone.
 
 Reversible. The downgrade drops both indexes, the column and the function,
 and leaves the three extensions installed -- see above.

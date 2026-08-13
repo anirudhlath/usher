@@ -7,13 +7,36 @@ from datetime import UTC, datetime
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from usher.api.errors import validation_error_without_the_request_body
+from usher.api.errors import (
+    http_error_as_a_problem_document,
+    validation_error_without_the_request_body,
+)
 from usher.api.lanes import LaneSupervisor
-from usher.api.routers import events, health, home, rows, sources, titles
+from usher.api.routers import (
+    bootstrap,
+    browse,
+    collections,
+    events,
+    health,
+    home,
+    images,
+    meta,
+    people,
+    playback,
+    rows,
+    search,
+    series,
+    sources,
+    titles,
+    unmatched,
+    watch,
+)
 from usher.composition import (
     DefaultUserId,
     embedder,
+    image_proxy,
     llm_client,
     metadata_provider,
     nothing,
@@ -22,7 +45,7 @@ from usher.composition import (
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.services.events import InMemoryEventBus
-from usher.services.rows.cache import RowCache
+from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
 
 
@@ -58,6 +81,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         client, close_client = (
             await llm_client(settings) if settings.worker_enabled else (None, nothing)
         )
+        # `GET /images/{id}`'s two process-scoped halves. **Unconditional,
+        # unlike the three above**: those are worker capabilities and answer
+        # `(None, no-op)` where no worker runs here, but this one is on a
+        # request path that every deployment serves. There is no switch and
+        # nothing to be missing -- the CDN needs no credential (ADR-0032) and
+        # both inputs have defaults -- so a nullable here would be a
+        # degradation nothing can cause. One `httpx.AsyncClient` per process
+        # for `metadata_provider`'s reason: a client per request is a
+        # connection pool per request.
+        image_fetcher, image_store, close_images = image_proxy(settings)
+        app.state.image_fetcher = image_fetcher
+        app.state.image_store = image_store
         lanes = LaneSupervisor(
             settings,
             unit_of_work(session_factory, settings, events=bus, provider=provider),
@@ -67,6 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             embedder=model,
             client=client,
             rows=row_cache,
+            refreshes=row_refreshes,
         )
         app.state.lanes = lanes
         # PRD 10's `usher.source.push.connected` / `.reconnects`. Registered
@@ -109,6 +145,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await close_provider()
             await close_model()
             await close_client()
+            await close_images()
             await engine.dispose()
 
     app = FastAPI(
@@ -154,16 +191,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # this same object, which is why it is built before `lanes` reads it.
     row_cache = RowCache(clock=lambda: datetime.now(UTC))
     app.state.row_cache = row_cache
+    # PRD 06's "served stale while refreshing": the handover between a request
+    # that found a screen inside its grace window and the one lane that
+    # replaces it. Here rather than in the lifespan on exactly the terms above
+    # -- it is a bounded dict-and-deque, not a resource with a lifetime -- and
+    # **one per app, never per request**, since a request-scoped queue would
+    # deduplicate nothing and be drained by nobody. Built before `lanes` for
+    # the same reason `row_cache` is: the lifespan closes over both.
+    row_refreshes = RefreshQueue()
+    app.state.row_refreshes = row_refreshes
     # Replaces FastAPI's default 422 body, which echoes the submitted
     # request -- and `POST /admin/sources` submits a source credential. See
     # usher.api.errors; this is a security control, not a response-shape
     # preference, and it is registered here so it covers every route rather
-    # than only the one that made it necessary.
+    # than only the one that made it necessary. PRD 07's RFC 9457 envelope
+    # now wraps it, and composes rather than replaces: the stripped error
+    # list rides as an extension member and `detail` is a fixed sentence.
     app.add_exception_handler(RequestValidationError, validation_error_without_the_request_body)
+    # **Starlette's** `HTTPException`, not FastAPI's subclass, so the two the
+    # router raises before any handler runs -- an unrouted 404 and a 405 --
+    # answer the same envelope as the ones handlers raise. Registered on the
+    # app for the reason above: a route added later inherits the shape
+    # instead of having to remember it.
+    app.add_exception_handler(StarletteHTTPException, http_error_as_a_problem_document)
+    app.include_router(bootstrap.router)
+    app.include_router(browse.router)
+    app.include_router(collections.router)
     app.include_router(events.router)
     app.include_router(health.router)
     app.include_router(home.router)
+    app.include_router(images.router)
+    app.include_router(meta.router)
+    app.include_router(people.router)
+    app.include_router(playback.router)
     app.include_router(rows.router)
+    app.include_router(search.router)
+    app.include_router(series.router)
     app.include_router(sources.router)
     app.include_router(titles.router)
+    app.include_router(unmatched.router)
+    app.include_router(watch.router)
     return app

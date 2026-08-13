@@ -78,6 +78,7 @@ from usher.services.curation_validate import (
     TITLE_KEY,
     DropReason,
 )
+from usher.services.search import SuggestTier
 
 # The blend these arranged rows claim to have been computed under. A literal,
 # never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
@@ -130,9 +131,22 @@ async def _purge(settings: Settings) -> None:
             "DELETE FROM llm_calls",
             "DELETE FROM watch_states",
             "DELETE FROM media_items",
+            # M9's analytics table, and it has to precede the users delete
+            # below: `search_queries.user_id` is `ON DELETE RESTRICT` on
+            # purpose, so a row `usher search` committed turns that statement
+            # into a foreign-key violation. Like `llm_calls` two lines up it
+            # cascades from nothing; unlike it, it *does* have a `user_id` --
+            # which is exactly what makes the ordering load-bearing rather than
+            # the scoping.
+            "DELETE FROM search_queries",
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM sources WHERE name LIKE 'cli-%'",
             "DELETE FROM titles WHERE sort_name = 'cli-orphan'",
+            # M9's overrides table. It ships **empty** and is never seeded, so
+            # `DELETE FROM` restores the shipped state exactly -- and it is what
+            # makes `usher home`'s provider count a fact rather than a hope
+            # about whether an earlier case in this file disabled something.
+            "DELETE FROM row_provider_settings",
         ):
             await session.execute(text(statement))
         await session.commit()
@@ -677,15 +691,66 @@ async def test_search_says_no_match_rather_than_printing_nothing(
     assert "results=0" in printed
 
 
-async def test_suggest_finds_a_title_by_a_prefix_of_its_name(
-    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+async def test_a_cli_search_leaves_a_search_queries_row_behind_the_process(
+    cli_settings: Settings, clean_slate: None, clean_search: None
 ) -> None:
-    """The type-ahead path end to end through the real trigram index, and
-    with **no model loaded** -- `SuggestIndex` is its own port precisely
-    because this tier serves the whole catalog without one."""
+    """**The root that would lose the row, and the only one where "durable"
+    means anything a session cannot fake.**
+
+    `cli._session_for` yields a session and disposes the engine **without ever
+    committing**, so a `search_queries` row left for the caller is rolled back
+    on the way out and `usher search` records nothing, silently. What makes
+    that invisible in every other file is that `api/deps.get_session` *does*
+    commit -- so a service leaning on its caller looks correct on the route and
+    is wrong here.
+
+    Read back through a session opened **after** `_search` returned and its
+    engine was disposed, which is as close to "survives the process" as a test
+    in this process gets: nothing of the writer's is still open.
+
+    The household is the same singleton `usher search` resolved, and the row's
+    presence proves the household row committed too -- `ensure_default_user`
+    only flushes, and `search_queries.user_id` is a real foreign key, so a
+    commit carrying the row without its household would have been refused
+    rather than silently partial.
+    """
+    await _seed_searchable(cli_settings, [_searchable("The Quiet Vacuum")])
+
+    await _search(cli_settings, query="vacuum", mode="full_text", limit=5, filters=SearchFilters())
+
+    async with _session_for(cli_settings) as reader:
+        rows = (
+            await reader.execute(
+                text(
+                    "SELECT q.query, q.mode, q.result_count, q.played, q.clicked_title_id, "
+                    "u.name FROM search_queries q JOIN users u ON u.id = q.user_id"
+                )
+            )
+        ).all()
+
+    assert [(one.query, one.mode, one.result_count) for one in rows] == [("vacuum", "full_text", 1)]
+    assert [(one.played, one.clicked_title_id) for one in rows] == [(False, None)]
+    assert [one.name for one in rows] == ["default"]
+
+
+@pytest.mark.parametrize("tier", [tier.value for tier in SuggestTier])
+async def test_suggest_finds_a_title_by_a_prefix_of_its_name(
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str], tier: str
+) -> None:
+    """The type-ahead path end to end through the real indexes, and with **no
+    model loaded** -- `SuggestIndex` is its own port precisely because this
+    tier serves the whole catalog without one.
+
+    **Both tiers, because `build_pipeline` now constructs two of them and only
+    a real request can say that both resolved.** A `build_search_service` that
+    handed the trigram index to both slots passes every unit case in the
+    project -- the fakes are two objects either way -- and fails here only if
+    the statement each tier issues is really run against the real schema.
+    `PostgresPrefixSuggestIndex` reads `ix_titles_name_lower_prefix`, which
+    exists only because `m09a` shipped it."""
     title = _searchable("The Quiet Vacuum")
     await _seed_searchable(cli_settings, [title])
-    await _suggest(cli_settings, prefix="The Quiet Vacu", limit=5)
+    await _suggest(cli_settings, prefix="The Quiet Vacu", limit=5, tier=tier)
     printed = capsys.readouterr().out
     assert str(title.id) in printed, printed
 
@@ -722,7 +787,7 @@ async def test_every_search_command_prints_and_never_logs(
     try:
         for mode in ("full_text", "fused"):
             await _search(cli_settings, query="vacuum", mode=mode, limit=5, filters=SearchFilters())
-        await _suggest(cli_settings, prefix="quiet", limit=5)
+        await _suggest(cli_settings, prefix="quiet", limit=5, tier=SuggestTier.FUZZY.value)
         await _similar(cli_settings, title_id=new_id(), limit=5, rebuild=False)
     finally:
         logger.remove(handler)
@@ -793,6 +858,10 @@ async def test_home_composes_a_screen_against_an_empty_database(
     out = capsys.readouterr().out
     assert "10 providers, 10 proposed nothing" in out
     assert "screen: 0 rows, 0 cards" in out
+    # The other direction of M9 E2's line, and the control for the case below:
+    # on a virgin `row_provider_settings` every provider composes, so "none" is
+    # what an operator reads when the empty screen is *not* a toggle's doing.
+    assert "disabled by an operator: none (0 of 10 registered" in out
 
 
 async def test_home_prints_a_line_for_a_provider_that_proposed_nothing(
@@ -857,6 +926,50 @@ async def test_home_prints_a_cold_and_a_warm_composition(
     # at all, and the table above it is empty -- a measurement that silently
     # became a benchmark of a dict.
     assert "seasonal" in out, "the last run was a cache hit, so --repeat measured the cache"
+
+
+async def test_home_omits_a_disabled_provider_and_names_the_ones_switched_off(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**A setting honoured by one composition root and not the other is two
+    different products** (M9 E2).
+
+    `GET /home` filters `ROW_PROVIDERS` against `row_provider_settings` in
+    `api/deps.py`; this command builds its own `HomeService` from
+    `pipeline.row_providers` and would have gone on composing the provider an
+    operator switched off through the admin route -- which is the surface an
+    operator reaches for *when a shelf is missing*, so it is the worst one to
+    be wrong.
+
+    **The row is written through the repository rather than through the route**,
+    deliberately: the claim is that this command reads the *table*, so a fixture
+    that went through `PUT /admin/rows/providers/{slug}` would leave the
+    question of whether the two share a process open. Nothing here has an HTTP
+    server at all.
+
+    Three assertions and the third is the one the acceptance criterion is
+    about. A disabled provider has **no line in the table** -- it never
+    proposed, so `ComposeReport` has no entry for it -- which is
+    indistinguishable from a provider that was deleted from the registry. The
+    printed line is what stops an operator being told to read the database.
+    `recently-added` is the control: the report still has nine lines, so "the
+    line is gone" is a statement about one provider rather than about a report
+    that stopped printing.
+    """
+    async with _session_for(cli_settings) as session:
+        await build_pipeline(session, settings=cli_settings).row_provider_settings.set_enabled(
+            "seasonal", enabled=False
+        )
+        await session.commit()
+
+    await _home(cli_settings, limit=10, repeat=1)
+
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert not any(line.startswith("seasonal") for line in lines), out
+    assert any(line.startswith("recently-added") for line in lines), out
+    assert "9 providers, 9 proposed nothing" in out
+    assert "disabled by an operator: seasonal (1 of 10 registered" in out
 
 
 async def test_home_prints_and_never_logs_its_answer(
@@ -960,6 +1073,10 @@ async def _purge_curation(settings: Settings) -> None:
             # correlation key -- so a committing curate case has to clear the
             # whole table rather than scope a delete by household.
             "DELETE FROM llm_calls",
+            # `search_queries` does **not** cascade from `users` -- it is the
+            # one `ON DELETE RESTRICT` reference to that table -- so it goes
+            # first or the delete below fails on a foreign key.
+            "DELETE FROM search_queries",
             # `curated_rows` and the stored taste profile both cascade from
             # `users`, so this one delete reaches everything the run wrote for
             # the household.
@@ -1152,3 +1269,156 @@ async def test_curate_says_what_it_dropped_when_nothing_survived(
     assert len(ledger) == 1, "the call was billed and the ledger has to say so"
     assert ledger[0].ok is False
     assert f"{DropReason.NOT_IN_POOL.value}={_CARDS}" in ledger[0].error
+
+
+async def test_curate_says_a_pool_below_the_card_floor_cannot_fill_one_row(
+    cli_settings: Settings,
+    clean_slate: None,
+    clean_curation: None,
+    scripted_llm: FakeLLMClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """**M9 Task G4, end to end and with nothing between the guard and the
+    screen.** `curation_validate._row` discards a row carrying fewer than
+    `DEFAULT_MIN_CARDS` *distinct* cards, so a catalog of four cannot produce
+    one surviving row however good the completion is -- and before this guard
+    the household paid a completion to find that out, every night.
+
+    **The premise is the second arm, and it is why `calls == []` means
+    anything.** A fake with nothing scripted, a household that never reached
+    the service, and a catalog of zero all produce an empty `calls` list;
+    what distinguishes the guard is that the *same* fixture, one title richer,
+    buys exactly one completion. So this case seeds four, asserts the refusal
+    bought nothing and was billed nothing, then seeds a fifth and asserts the
+    call it declined to make a moment ago now happens.
+
+    The scripted response is left in place across both arms deliberately: on
+    the first the client is never asked for it, on the second it is, and a
+    fixture that only became answerable for the second arm would be asserting
+    an empty deque rather than a guard.
+    """
+    scripted_llm.responses.append(_completion(range(1, _CARDS + 1)))
+    seeded = await _seed_candidates(cli_settings, _CARDS - 1)
+    async with _session_for(cli_settings) as session:
+        household = await ensure_default_user(session)
+        await session.commit()
+        pool = await build_pipeline(session, cli_settings).titles.list_unwatched_candidates(
+            household, limit=cli_settings.curation_pool_size
+        )
+    assert len(pool) == len(seeded) == _CARDS - 1, (
+        "the premise: the pool this command will read holds four candidates, so it is "
+        f"the card floor and not the empty-pool guard that refuses ({len(pool)})"
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        await _curate(cli_settings)
+
+    message = str(exit_info.value)
+    assert f"{_CARDS - 1} candidates" in message, message
+    assert f"at least {_CARDS}" in message, message
+    # The empty pool is the other arm of the same guard and has its own
+    # sentence; reading this one as that one would hide the count entirely.
+    assert "empty" not in message, message
+    assert "previous rows still stand" in message, message
+    assert "Traceback" not in message, message
+    assert re.search(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", message) is None, message
+    assert scripted_llm.calls == [], "a pool that cannot fill one row bought a completion"
+    assert capsys.readouterr().out == "", "a refused generation printed a report"
+    async with _session_for(cli_settings) as session:
+        billed = (await session.execute(text("SELECT count(*) FROM llm_calls"))).scalar_one()
+    assert int(billed) == 0, "a pool that cannot fill one row was billed for a completion"
+
+    await _seed_candidates(cli_settings, 1)
+    await _curate(cli_settings)
+
+    assert len(scripted_llm.calls) == 1, (
+        "the premise: this fixture can buy a completion, so the empty list above "
+        "is the guard and not the harness"
+    )
+    assert f"pool: {_CARDS} candidates" in capsys.readouterr().out
+
+
+async def test_work_parks_a_curate_job_whose_pool_cannot_fill_one_row(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_slate: None,
+    clean_curation: None,
+    cli_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """**The disposition, asserted rather than described.** With this file's
+    seeding helpers, which is why a `usher work` case lives in the `usher
+    curate` section.
+
+    `PortDataMalformed` **parks**, and
+    `test_work_parks_a_curate_job_it_cannot_serve_and_buys_nothing` above
+    asserts that for a catalog of nothing. This asserts it for a catalog of
+    four -- the arm the widened inequality added, and the only one where a
+    completion was previously bought.
+
+    **Parking is a permanent block, and this pins it as one.** `_ENQUEUE`
+    carries `WHERE jobs.status <> 'parked'`, so every later enqueue for this
+    household writes **zero** rows until a human releases the job. That is what
+    makes *"until a human releases it"* a fact rather than a warning, and it is
+    why the disposition had to follow M9 Task G3's verdict rather than a
+    preference: G3 measured that ownership is an `ORDER BY` key and not a
+    filter, so the pool is `min(catalog_unwatched, USHER_CURATION_POOL_SIZE)`
+    and only a *catalog* below the floor reaches here. That is the empty
+    catalog's shape -- an operator's problem, not a transient one that the next
+    sync fixes -- and a park is right for it. Had the pool honoured an
+    ownership claim, this would fire for an ordinary small library and a park
+    would be a permanent block on a condition that grows out of itself.
+
+    Its own settings rather than the shared fixture, for the reason the case
+    above gives: `USHER_LLM_ENABLED` is what makes this root build a curate
+    handler at all, and no socket is opened because the guard answers in front
+    of the client.
+    """
+    seeded = await _seed_candidates(cli_settings, _CARDS - 1)
+    monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)
+    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
+    monkeypatch.setenv("USHER_LLM_ENABLED", "true")
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.llm_enabled is True, "the premise: the fixture really turned it on"
+    household = new_id()
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        pool = await pipeline.titles.list_unwatched_candidates(
+            household, limit=settings.curation_pool_size
+        )
+        assert len(pool) == len(seeded) == _CARDS - 1, (
+            "the premise: the pool this handler will read holds four candidates, so it "
+            f"is the card floor and not the empty-pool guard that refuses ({len(pool)})"
+        )
+        await pipeline.queue.enqueue(
+            [JobRequest(kind=JobKind.CURATE, key=str(household), priority=JobPriority.BACKFILL)]
+        )
+        await session.commit()
+
+    await _work(settings, once=True)
+
+    assert "1 jobs" in capsys.readouterr().out
+    async with _session_for(settings) as session:
+        status = (
+            await session.execute(
+                text("SELECT status FROM jobs WHERE kind = 'curate' AND key = :k"),
+                {"k": str(household)},
+            )
+        ).scalar_one()
+        # The whole table: `llm_calls` carries no `user_id` -- `generation_id`
+        # is its only correlation key -- and the purge fixtures empty it either
+        # side.
+        billed = (await session.execute(text("SELECT count(*) FROM llm_calls"))).scalar_one()
+        written = (await session.execute(text("SELECT count(*) FROM curated_rows"))).scalar_one()
+    assert status == "parked", "a pool below the card floor did not park"
+    assert int(billed) == 0, "a pool that cannot fill one row was billed for a completion"
+    assert int(written) == 0
+
+    async with _session_for(settings) as session:
+        again = await build_pipeline(session, settings).queue.enqueue(
+            [JobRequest(kind=JobKind.CURATE, key=str(household), priority=JobPriority.BACKFILL)]
+        )
+        await session.commit()
+    assert again == 0, "a parked curate job is not the permanent block this case claims"
+    get_settings.cache_clear()

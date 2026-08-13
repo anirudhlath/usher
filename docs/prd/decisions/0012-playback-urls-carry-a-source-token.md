@@ -1,11 +1,14 @@
 # ADR-0012 — A playback URL carries a source token, in v1
 
-**Status:** Accepted for v1, with a named successor in M9. Implemented in M3
+**Status:** Accepted for v1, with a named successor in M9 — **now decided:
+[ADR-0029](0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)
+built option 1 below.** Implemented in M3
 ([plan](../../plans/2026-07-30-m3-emby-adapter.md), Task 7). Both of the
 mitigations recorded below as "recommended, not implemented" have since
 shipped — dropping `DeviceId` from a playback URL in M3, and the
 administrator check in M5 — so the accepted risk is now *observable* rather
-than merely documented. It is still accepted.
+than merely documented. **The risk this ADR accepts is still accepted** — see
+"The successor, in M9" below for what ADR-0029 changes and what it does not.
 
 ## Context
 
@@ -128,17 +131,48 @@ included — and it is not bounded in *time* by anything Usher controls.
   `.url` itself all return the token in full — verified. This is not a gap
   to close: `.url` has to stay intact or the target is an unplayable link,
   and each of those is a deliberate read of a field rather than an
-  accidental render of an object. It is therefore a rule callers keep, and
-  it has one live consumer rather than a hypothetical one: **M9's `/play`
-  response is a serialization of exactly this shape.** There, the token in
-  the body is the point. Anywhere else a serializer reaches a
-  `StreamTarget` — an RFC 9457 `detail`, a cached response, a telemetry
-  attribute built with `model_dump` — is a real leak that the `__repr__`
-  guard does not catch and no test currently pins. `usher.ports.source`'s
-  class docstring states this scoped to the four rendering paths it names,
-  which is the version a reader meets in the code; this ADR previously
-  claimed the guard covered *every* path, which was false for all six
-  above.
+  accidental render of an object. It is therefore a rule callers keep.
+
+  **M9's successor (ADR-0029) changes which read of `.url` is sanctioned,
+  and this paragraph is corrected rather than merely extended.** It
+  previously said `/play`'s response *is* the one live consumer of the
+  rule above — "the token in the body is the point" — which was true of
+  v1's pre-ticket shape and stopped being true the moment
+  `PlaybackService` began substituting a minted ticket for every `.url`
+  before a `StreamTarget` reaches the API layer. `/play`'s body is now a
+  **fourth** surface a serializer must never leak the token onto, beside
+  the three named below, rather than the one surface exempted from the
+  rule. ADR-0029 is the decision; this ADR states only the consequence for
+  the field-access rule.
+
+  **Four surfaces, and each is pinned by name now, D5's task.** A
+  serializer reaching a `StreamTarget` before the substitution runs is a
+  real leak the `__repr__` guard does not catch — an RFC 9457 `detail`
+  (`tests/unit/test_api_playback_leaks.py::
+  test_the_503_detail_never_carries_the_upstream_messages_own_token`), a
+  cached response (`RowCache`;
+  `test_the_row_cache_never_stores_a_token_or_a_ticket`, which also sweeps
+  every other dict-shaped object on `app.state` structurally), the success
+  body itself
+  (`test_the_success_body_never_carries_the_source_url_the_ticket_replaced`),
+  and a telemetry attribute built with `model_dump` — the one surface that
+  needs a real outbound call to pin honestly rather than vacuously, so it
+  lives in `tests/integration/test_playback_leaks.py::
+  test_no_exported_span_attribute_carries_the_token` against a real
+  `EmbyAdapter` over a real loopback socket, asserting `url.full`/`http.url`
+  on the httpx client spans `HTTPXClientInstrumentor` produces alongside
+  every other exported attribute. The same file's
+  `test_the_debug_log_sink_never_carries_the_token_across_a_play_then_redeem_cycle`
+  pins the log sink named in the handling rules above, across a whole
+  play-then-redeem cycle rather than over one rendered `StreamTarget`. And
+  a structural pin over `api/dto/playback.py`'s `ast.unparse`
+  (`test_the_playback_dto_module_names_no_bulk_serializer`) keeps a bulk
+  dump — the sixth field-access path above — from reappearing at the one
+  module that maps `StreamTarget` onto the wire. `usher.ports.source`'s
+  class docstring still states the `__repr__` guard's scope as the four
+  rendering paths it names, which is the version a reader meets in the
+  code; this ADR previously claimed the guard covered *every* path, which
+  was false for all six field-access ones above.
 - **The redaction cuts at the query, rather than matching on `api_key=`.**
   The deep-link target hides the whole direct URL, token and all,
   percent-encoded inside its *own* query string, so a parameter-name match
@@ -224,6 +258,18 @@ Option 1 is preferred: it needs no authentication work and is a pure
 addition to the API surface M9 is building anyway. The obligation is
 recorded in [09](../09-roadmap.md)'s M9 entry as well as here — a successor
 named only inside the document that defers it is not a plan.
+
+**Built, M9 — option 1, exactly as named above, and this paragraph is
+amended rather than rewritten.**
+[ADR-0029](0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)
+records the cipher (Fernet over an HKDF-SHA256 subkey of
+`USHER_SECRET_KEY`), the TTL, and the no-revocation-before-expiry cost this
+option always implied. Its own framing — *"what it changes is the artifact,
+not the grant"* — is the same claim the opening line of this section makes,
+restated once the thing existed to measure: weakest for `deep_link`, and
+accepted rather than solved. **Option 2 remains unbuilt and its blocker is
+unchanged** — no client identity exists until PRD 01's authentication seam
+does, so a per-client scoped token still has nothing to scope to.
 
 ## Recommended, not implemented
 

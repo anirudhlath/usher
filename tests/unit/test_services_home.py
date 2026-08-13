@@ -15,7 +15,9 @@ to "what does a fake row do", one file away from the one `tests/fakes/` already
 holds.
 """
 
+import ast
 import dataclasses
+import pathlib
 from collections import Counter
 from collections.abc import Sequence
 
@@ -29,6 +31,7 @@ from usher.domain.rows import BuiltRow, RowCard, RowFamily
 from usher.domain.taste import GenreAffinity
 from usher.ports.rows import RowContext, ScoredRow
 from usher.services.home import _MAX_PER_FAMILY, HomeService
+from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
 from usher.services.rows.genre_affinity import GenreAffinityProvider
 
@@ -566,3 +569,158 @@ async def test_a_screen_the_cache_can_answer_reads_no_taste_at_all(ctx: RowConte
     # miss here would re-propose and rebuild.
     assert _slugs(second) == _slugs(first)
     assert cache.get_screen(ctx.user.id) is not None
+
+
+# ---------------------------------------------------------------------------
+# The registry left-joined onto the stored overrides (M9 E2).
+#
+# `row_provider_settings` ships **empty** and is never seeded, so
+# `RowProviderSettingsRepository.overrides()` answers only what an operator has
+# touched and **absence is meaningful**. A caller spelling `.get(slug, False)`
+# therefore disables every provider nobody has ever touched -- ten shelves
+# gone, on a virgin database, silently. Three docstrings on the port warn about
+# it and nothing in the types prevents it; these cases are what does.
+#
+# **None of the three registry pins moves, and that was checked rather than
+# assumed.** `test_rows_invariants.py` (class names + `len(...) == 10`),
+# `test_the_registry_holds_the_ten_providers_prd_06_specifies_under_their_own_
+# names` above (`slug_prefix`) and `test_domain_rows.py` (`RowFamily`) all
+# assert about `ROW_PROVIDERS` and `RowFamily`, and **neither is touched**: the
+# filter applies to *what a composer is handed*, and the overrides table ships
+# empty, so the default composition is what M8 left. That is also why no
+# row-count assertion moves the way `RowFamily.CURATED` moved them (M8 trap 1)
+# -- the reachable screen length is unchanged until a row is stored, and the
+# two cases that assert a count (`len(screen) == 10` here, `len(ROW_PROVIDERS)
+# == 10` in `test_api_home.py`) are over an explicit stub list and over the
+# untouched registry respectively.
+# ---------------------------------------------------------------------------
+
+
+def test_a_provider_no_one_has_ever_touched_renders_as_enabled() -> None:
+    """The virgin-database case, and the one the wrong default gets wrong.
+
+    An empty `overrides()` is the *shipped* state of this table -- M1's `m09a`
+    creates it with no rows and PRD 09 item 9 says it is *"deliberately not
+    seeded with ten slugs"* -- so this is not an edge case, it is the state
+    every deployment starts in and most stay in forever.
+
+    The slug set is compared against `{p.slug_prefix for p in ROW_PROVIDERS}`
+    rather than against a literal, so an eleventh provider cannot be forgotten
+    here. `test_the_registry_holds_the_ten_providers_prd_06_specifies_under_
+    their_own_names` above is where the literal lives, once.
+    """
+    settings = row_provider_settings({})
+
+    assert {one.slug for one in settings} == {one.slug_prefix for one in ROW_PROVIDERS}
+    assert [one.enabled for one in settings] == [True] * len(ROW_PROVIDERS)
+    assert enabled_row_providers(settings) == ROW_PROVIDERS
+
+
+def test_a_stored_false_removes_exactly_that_provider_and_leaves_the_other_nine() -> None:
+    """The toggle, and the assertion that says it is a toggle rather than a
+    switch: nine survive, in registry order, and the tenth is the one named."""
+    kept = enabled_row_providers(row_provider_settings({"continue-watching": False}))
+
+    assert [one.slug_prefix for one in kept] == [
+        one.slug_prefix for one in ROW_PROVIDERS if one.slug_prefix != "continue-watching"
+    ]
+    assert len(kept) == len(ROW_PROVIDERS) - 1
+
+
+def test_a_stored_true_is_a_recorded_action_and_not_a_disable() -> None:
+    """`set_enabled(slug, enabled=True)` writes a row, and a row is not
+    absence.
+
+    The two spellings of "enabled" -- never touched, and touched back to on --
+    must render identically, because an operator who disabled a provider and
+    then changed their mind has not left it in a third state. This is the arm
+    that fails against a join reading `slug not in overrides`.
+    """
+    settings = {one.slug: one.enabled for one in row_provider_settings({"seasonal": True})}
+
+    assert settings["seasonal"] is True
+    assert enabled_row_providers(row_provider_settings({"seasonal": True})) == ROW_PROVIDERS
+
+
+def test_an_override_for_a_slug_the_registry_does_not_hold_renders_nothing() -> None:
+    """Dead configuration is not rendered as a provider, which is the read half
+    of the 404 `PUT /admin/rows/providers/{slug}` answers.
+
+    An override for a provider nothing registers reads exactly like working
+    configuration -- an operator sees a row in the table and believes something
+    is off. The route refuses to write one; this says the join would not honour
+    it either, so the two defences are independent.
+    """
+    settings = row_provider_settings({"a-provider-nobody-wrote": False})
+
+    assert {one.slug for one in settings} == {one.slug_prefix for one in ROW_PROVIDERS}
+    assert enabled_row_providers(settings) == ROW_PROVIDERS
+
+
+def test_the_join_is_applied_to_whatever_registry_it_is_handed() -> None:
+    """`usher home` and the refresh lane compose over `pipeline.row_providers`,
+    which is `row_providers(semantic=...)` and **not** `ROW_PROVIDERS` -- a
+    different tuple of different instances. A join that ignored its second
+    argument and read the module constant would filter the wrong list and,
+    because the two agree by slug, would be invisible everywhere else."""
+    handed = (_stub("alpha", score=0.5), _stub("beta", score=0.4))
+
+    kept = enabled_row_providers(row_provider_settings({"alpha": False}, handed))
+
+    assert [one.slug_prefix for one in kept] == ["beta"]
+
+
+def test_the_overrides_mapping_is_never_bound_outside_the_join_that_defaults_it() -> None:
+    """**The structural defence, and the reason it is structural.**
+
+    `overrides()` returns only the slugs somebody has written, so the whole
+    correctness of this feature is one two-argument `.get` -- and the wrong
+    spelling, `.get(slug, False)`, is one character from the right one, reads
+    perfectly, and turns a virgin database into a blank home screen. Nothing in
+    `Mapping[str, bool]` distinguishes them, and E1's reviewer flagged exactly
+    this consequence for the first caller.
+
+    So the mapping is never *bound to a name* outside `services/rows/__init__
+    .py`: every call site hands `await settings.overrides()` straight into the
+    join as an argument, which means a second reader has to change this case
+    before it can spell a default of its own. That is not a proof of
+    correctness -- the join's own default is pinned by the four cases above --
+    it is a proof that there is exactly one place to get it right.
+
+    Walked over the AST rather than grepped: a substring search for
+    `.overrides()` cannot tell an argument from an assignment, which is the
+    entire distinction being asserted.
+    """
+    fetched: dict[str, int] = {}
+    joined: dict[str, int] = {}
+    for path in sorted(pathlib.Path("src/usher").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "overrides"
+        ]
+        if not calls:
+            continue
+        inside = {
+            id(node)
+            for parent in ast.walk(tree)
+            if isinstance(parent, ast.Call)
+            and isinstance(parent.func, ast.Name)
+            and parent.func.id == "row_provider_settings"
+            for argument in parent.args
+            for node in ast.walk(argument)
+        }
+        fetched[str(path)] = len(calls)
+        joined[str(path)] = sum(1 for call in calls if id(call) in inside)
+
+    # The premise: this scan found the call sites at all. Without it a typo in
+    # the attribute name, or a rename of the port method, makes the assertion
+    # below `{} == {}` -- a check that passed because nothing ran.
+    assert sum(fetched.values()) >= 3, f"the scan found no overrides() call sites: {fetched}"
+    assert fetched == joined, (
+        "a module binds `overrides()` to a name instead of handing it to the join, "
+        f"so it can spell its own default: {fetched} fetched, {joined} joined"
+    )

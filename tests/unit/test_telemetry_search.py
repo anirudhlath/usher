@@ -38,20 +38,27 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
-from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
+from tests.fakes.search_index import (
+    FakePrefixSuggestIndex,
+    FakeSearchIndex,
+    FakeSuggestIndex,
+)
+from tests.fakes.search_query_repository import FakeSearchQueryRepository
+from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
+from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.title import Title
 from usher.ports.jobs import JobRequest
-from usher.ports.repository import ScoredNeighbor
-from usher.ports.search import SearchDocument, SearchMode
+from usher.ports.repository import ScoredNeighbor, SearchQueryRecord
+from usher.ports.search import SearchDocument, SearchMode, SearchOutcome, SearchRequest
 from usher.services.handlers import index_handler
 from usher.services.index import IndexService
 from usher.services.jobs import JobWorker
-from usher.services.search import SearchService
+from usher.services.search import SearchAnalytics, SearchService
 from usher.services.similar import blend_fingerprint
 from usher.telemetry import (
     SearchSnapshot,
@@ -139,9 +146,13 @@ def _document(title: Title) -> SearchDocument:
 def _service(titles: FakeTitleRepository, index: FakeSearchIndex) -> SearchService:
     return SearchService(
         index,
+        FakePrefixSuggestIndex(),
         FakeSuggestIndex(),
         titles,
         FakeMediaItemRepository(),
+        FakeWatchStateRepository(),
+        FakeTasteRepository(),
+        FakeTitleEmbeddingRepository(),
         result_limit=50,
         embedder=FakeEmbedder(),
     )
@@ -196,9 +207,13 @@ async def test_the_mode_label_is_the_mode_that_ran(meter_reader: InMemoryMetricR
     await index.index_many([_document(title)])
     service = SearchService(
         index,
+        FakePrefixSuggestIndex(),
         FakeSuggestIndex(),
         titles,
         FakeMediaItemRepository(),
+        FakeWatchStateRepository(),
+        FakeTasteRepository(),
+        FakeTitleEmbeddingRepository(),
         result_limit=50,
         embedder=None,
     )
@@ -223,6 +238,121 @@ async def test_a_blank_query_is_not_counted_as_a_search(
     titles = FakeTitleRepository()
     assert await _service(titles, FakeSearchIndex()).search("   ") is not None
     assert "usher.search.duration" not in _recorded(meter_reader)
+
+
+async def test_the_row_and_the_histogram_are_the_same_interval(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """`search_queries.latency_ms` and `usher.search.duration` are one clock
+    read with two consumers (F2), and this is the case that says so.
+
+    They are the two things an operator compares when a search-latency panel
+    and the analytics table disagree, so the interesting failure is not either
+    of them being *wrong* -- it is the two being **different intervals**, taken
+    a few statements apart, differing by whatever happened between. That
+    difference is the cost of the analytics write itself, which is precisely
+    the quantity a reader would be using the panel to look for.
+
+    Nothing here pins a *value*: a real `perf_counter` delta is whatever this
+    box was doing. The equality is the claim, and the premise below is what
+    stops it being satisfied by two zeroes.
+    """
+    titles = FakeTitleRepository()
+    index = FakeSearchIndex()
+    title = _title("The Quiet Vacuum")
+    await titles.add(title)
+    await index.index_many([_document(title)])
+    queries = FakeSearchQueryRepository()
+
+    async def _commit() -> None:
+        return None
+
+    service = SearchService(
+        index,
+        FakePrefixSuggestIndex(),
+        FakeSuggestIndex(),
+        titles,
+        FakeMediaItemRepository(),
+        FakeWatchStateRepository(),
+        FakeTasteRepository(),
+        FakeTitleEmbeddingRepository(),
+        result_limit=50,
+        analytics=SearchAnalytics(queries=queries, commit=_commit),
+    )
+
+    await service.search("vacuum", user_id=uuid.UUID(int=0xA1))
+
+    (row,) = queries.rows.values()
+    ((_, seconds),) = _recorded(meter_reader)["usher.search.duration"]
+    assert seconds > 0.0, "the premise: the interval is not two zeroes agreeing"
+    assert row.latency_ms == int(seconds * 1000)
+
+
+async def test_the_analytics_write_is_not_counted_as_search_latency(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """The `search_queries` INSERT sits **outside** the interval
+    `usher.search.duration` records, and this is the only place that is
+    observable.
+
+    **`search_queries.latency_ms` cannot see it and that is worth saying**, so
+    that the next reader does not add the cheaper assertion and think it
+    covers this: the row needs its latency *before* it can be written, so
+    every ordering of the write computes the same number for the column. The
+    histogram is the half a reordering moves -- and it moves it in the
+    direction that hides the cost, because an operator reading a search-latency
+    panel would be attributing the write's time to retrieval.
+
+    Sixty seconds is absurd on purpose: two orders of magnitude above anything
+    a real INSERT costs, so the arithmetic cannot be satisfied by a coincidence
+    of scale.
+
+    Fails against a `record()` awaited before the `elapsed` read -- the natural
+    spelling of "record it, then measure" -- which reports **60.25 s** for a
+    250 ms search.
+    """
+    now = [1_000.0]
+
+    def clock() -> float:
+        return now[0]
+
+    class _Slow(FakeSearchQueryRepository):
+        async def record(self, record: SearchQueryRecord) -> None:
+            now[0] += 60.0
+            await super().record(record)
+
+    class _Spending(FakeSearchIndex):
+        async def search(self, request: SearchRequest) -> SearchOutcome:
+            now[0] += 0.25
+            return await super().search(request)
+
+    titles = FakeTitleRepository()
+    index = _Spending()
+    title = _title("The Quiet Vacuum")
+    await titles.add(title)
+    await index.index_many([_document(title)])
+    queries = _Slow()
+
+    async def _commit() -> None:
+        return None
+
+    await SearchService(
+        index,
+        FakePrefixSuggestIndex(),
+        FakeSuggestIndex(),
+        titles,
+        FakeMediaItemRepository(),
+        FakeWatchStateRepository(),
+        FakeTasteRepository(),
+        FakeTitleEmbeddingRepository(),
+        result_limit=50,
+        analytics=SearchAnalytics(queries=queries, commit=_commit),
+        clock=clock,
+    ).search("vacuum", user_id=uuid.UUID(int=0xA1))
+
+    assert len(queries.rows) == 1, "the premise: the slow write actually ran"
+    ((_, seconds),) = _recorded(meter_reader)["usher.search.duration"]
+    assert seconds == pytest.approx(0.25)
 
 
 async def test_an_embed_call_records_its_duration(meter_reader: InMemoryMetricReader) -> None:

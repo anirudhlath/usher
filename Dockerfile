@@ -60,14 +60,18 @@ COPY --from=builder --chown=usher:usher /app/src ./src
 COPY --chown=usher:usher alembic.ini ./
 
 # /data/images is where compose.yml bind-mounts a host directory for the
-# image cache a later milestone's proxy will write to -- nothing in M1
-# writes here yet. Pre-creating it owned by the non-root user only helps
-# when the container runs *without* that bind mount (a bind mount's host-
-# side ownership wins once mounted); if the host directory doesn't exist
-# yet, Docker will create it as root on first `docker compose up`, which a
-# future milestone's writer will need `chown 1000:1000 data/images` (or
-# equivalent) to use. Documented, not solved here -- there is no writer to
-# test against yet.
+# image proxy's cache. **M9 gave this mount its writer** --
+# `usher.adapters.images.disk.DiskImageBlobStore`, reached from
+# `GET /images/{id}` and pointed here by USHER_IMAGE_CACHE_DIR, which is one
+# of the five variables compose's `environment:` block owns. Pre-creating it
+# owned by the non-root user helps when the container runs *without* that
+# bind mount (a bind mount's host-side ownership wins once mounted); if the
+# host directory doesn't exist yet, Docker creates it as root on first
+# `docker compose up` and the proxy cannot write to it. That is now a README
+# line -- `mkdir -p data/images && sudo chown 1000:1000 data/images` -- rather
+# than a deferral: the store creates its own subdirectories on demand, so the
+# *root* is the only thing an operator has to get right, and it fails loudly
+# with an EACCES rather than silently serving nothing.
 RUN mkdir -p /data/images && chown -R usher:usher /data
 
 USER usher

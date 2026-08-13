@@ -29,6 +29,7 @@ from pydantic import AwareDatetime
 from usher.domain.collection import Collection
 from usher.domain.enums import TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.image import Image
 from usher.domain.people import Credit, Person
 from usher.domain.title import Title
 from usher.ports.ingest import ProviderRef
@@ -101,7 +102,8 @@ class EnrichmentResult:
 
 @dataclass(frozen=True)
 class DerivationResult:
-    """Everything one *cached* payload yields about people and franchises.
+    """Everything one *cached* payload yields about people, franchises and
+    artwork.
 
     **A sibling of `EnrichmentResult`, not a field on it**, and the
     invitation to make it a field is right there in that class's own
@@ -133,6 +135,22 @@ class DerivationResult:
     error: `belongs_to_collection: null` (a standalone film), the key absent
     entirely (**every series**), and an object with no usable id or name.
 
+    **`images` is the one field whose ids are *not* placeholders, and that is a
+    property of the table rather than of this type.** `Person` and `Collection`
+    are re-pointed through `resolve_tmdb_ids` because a provider gives each an
+    integer id; artwork has none, so `images` carries the natural key
+    `uq_images_owner_provider_path` infers -- the caller hands these rows
+    straight to `ImageRepository.replace_for_titles`, whose upsert answers with
+    the id the row was first inserted with. A minted `Image.id` therefore
+    survives only for a path this catalog has never seen, which is what makes
+    `Cache-Control: immutable` on `GET /images/{id}` true across re-derivations
+    (ADR-0032).
+
+    Every image is owned by the `title_id` this call was given. Episode stills
+    and person headshots are the two owner kinds `images` models and M9 writes
+    neither -- group C's boundary call, and `ck_images_exactly_one_owner` is
+    what keeps a future writer honest rather than a convention here.
+
     Frozen but **not hashable in practice**, exactly like `EnrichmentResult`:
     `Title.field_provenance` is a dict on the neighbouring type and the same
     property is recorded here so the two read alike.
@@ -141,6 +159,7 @@ class DerivationResult:
     people: tuple[Person, ...]
     credits: tuple[Credit, ...]
     collection: Collection | None
+    images: tuple[Image, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,9 +258,9 @@ class MetadataProvider(ABC):
 
     @abstractmethod
     def to_derivation(self, payload: dict[str, Any], title_id: uuid.UUID) -> DerivationResult:
-        """Normalise a raw payload into people, credits and a collection. See
-        `DerivationResult` for what it carries and why it is not a field on
-        `EnrichmentResult`.
+        """Normalise a raw payload into people, credits, a collection and
+        artwork. See `DerivationResult` for what it carries and why it is not a
+        field on `EnrichmentResult`.
 
         Same contract as `to_result`, clause for clause: `title_id` is passed
         in and never minted (ADR-0003), and this is **synchronous and pure**
@@ -252,10 +271,21 @@ class MetadataProvider(ABC):
         against a rate limit to read data already sitting in a JSONB column.
 
         A payload this provider cannot read -- no `credits`, no
-        `created_by`, no `belongs_to_collection` -- yields an **empty**
-        result, never an error. That is what most of the catalog looks like:
-        a payload cached before `credits` joined `*_APPEND_TO_RESPONSE`, or
-        an entity the provider has none for.
+        `created_by`, no `belongs_to_collection`, no `images` -- yields an
+        **empty** result, never an error. That is what most of the catalog
+        looks like: a payload cached before `credits` joined
+        `*_APPEND_TO_RESPONSE`, or an entity the provider has none for.
+
+        **`images` is the field where that clause is least likely to be
+        exercised and most likely to be misread.** Two shapes reach it and
+        neither is an error: a payload cached before `images` joined the append
+        list has no such key at all, and a payload that has one may carry three
+        empty arrays -- which is what the recorded `series.json` holds. Neither
+        is empty *overall*, because a detail response's `poster_path` and
+        `backdrop_path` are top-level fields rather than an appended namespace,
+        so an unappended payload still derives its two primaries. An operator
+        reading a low `images written` against a large cache is seeing the age
+        of the cache, not a defect.
         """
 
     @abstractmethod

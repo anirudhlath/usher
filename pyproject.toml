@@ -101,7 +101,13 @@ src = ["src", "tests"]
 # other groups transcribe verbatim; ruff 0.16+ formats/lints Markdown-embedded
 # code by default, so without this exclude `ruff format .` silently rewrites
 # plan prose out from under whoever runs it.
-extend-exclude = ["docs"]
+#
+# `.claude/` is here for the same reason and was missing until M9 measured it:
+# every file under `.claude/rules/` is prose carrying code fences, and one of
+# them had its fence rewritten by `ruff format --check` the first time it ran.
+# The rules files are evidence — a fence reshaped to satisfy a formatter is a
+# quotation that no longer matches what was measured.
+extend-exclude = ["docs", ".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
@@ -359,11 +365,78 @@ allow_indirect_imports = true
 name = "the shared http helpers import no concrete adapter"
 type = "forbidden"
 source_modules = ["usher.adapters.http"]
+#
+# **`usher.adapters.images` joined this list in M9 and the list is the whole
+# contract**, which is why adding a package here is not bookkeeping: this is a
+# `forbidden` contract, so a seventh adapter package left out is a package the
+# contract silently stops covering — the gate still reports 9 kept, 0 broken
+# and the newest adapter is the one thing nothing constrains. The image fetcher
+# is a fifth consumer of `adapters/http.py` (it takes `UNTRANSLATED_FAILURES`
+# and `port_error_for`), so it is exactly the shape this edge exists for.
+#
+# It deliberately does **not** join the contract above. That one's name is
+# about search, embedding and LLM implementations — the two classes ADR-0002
+# and ADR-0022 name as swappable and the one ADR-0027 does — and adding an
+# image adapter to it would make the name false. Contract 2 (*adapters are
+# driven, not driving*) covers the new package for free. So M9 adds a
+# forbidden module, not a tenth contract.
 forbidden_modules = [
     "usher.adapters.bulk",
     "usher.adapters.embedding",
     "usher.adapters.emby",
+    "usher.adapters.images",
     "usher.adapters.llm",
     "usher.adapters.search",
     "usher.adapters.tmdb",
+]
+
+# **The tenth contract, and the invariant it holds is the only one in this
+# project that no top-level contract can see.** The nine above are stated at
+# `usher.api`, `usher.services`, `usher.ports`, `usher.domain`, `usher.adapters`,
+# `usher.db`, `usher.config` and `usher.cli` -- top-level packages -- so an
+# import between two *submodules* of `usher.ports.repository` is invisible to
+# every one of them. Measured by A1's own sweep: inverting `_results.py` into
+# `bulk.py` and importing it back the other way passes `ruff check`,
+# `ruff format --check`, `mypy` and all nine contracts, and is caught only by
+# `tests/unit/test_ports_repository_package.py::test_no_aggregate_module_imports_
+# another_aggregate_module`, one bespoke AST scan in one file.
+#
+# `testing-discipline.md`'s own rule from M8 Task 17 is what settles it --
+# *prefer a graph property wherever one is expressible* -- and here one is:
+# `independence` forbids an import in **either** direction between any pair of
+# the listed modules, including indirect chains, which a `forbidden` contract
+# cannot express without twenty source/forbidden pairs. The two checks do not
+# subsume each other and both are kept: the AST scan sees a module the list has
+# forgotten, and the contract sees an indirect chain the scan's single-hop
+# `ImportFrom` walk does not.
+#
+# **The list is the contract, exactly as the one above says of its own**, so
+# `test_the_independence_contract_names_every_aggregate_port_module` derives the
+# expected membership from the package and fails if a new port module lands
+# unlisted. `usher.ports.repository._results` is deliberately absent: it is the
+# shared private module every aggregate is allowed to import, and listing it
+# would forbid the thing this design is for.
+[[tool.importlinter.contracts]]
+name = "no aggregate port module imports another"
+type = "independence"
+modules = [
+    "usher.ports.repository.bulk",
+    "usher.ports.repository.collection",
+    "usher.ports.repository.curation",
+    "usher.ports.repository.episode",
+    "usher.ports.repository.genome",
+    "usher.ports.repository.image",
+    "usher.ports.repository.import_run",
+    "usher.ports.repository.llm_call",
+    "usher.ports.repository.matching",
+    "usher.ports.repository.media_item",
+    "usher.ports.repository.people",
+    "usher.ports.repository.row_provider_settings",
+    "usher.ports.repository.search",
+    "usher.ports.repository.search_query",
+    "usher.ports.repository.source",
+    "usher.ports.repository.sync",
+    "usher.ports.repository.taste",
+    "usher.ports.repository.title",
+    "usher.ports.repository.watch_state",
 ]

@@ -1,0 +1,10 @@
+tconst	ordering	nconst	category	job	characters
+tt99000020	1	nm99000010	actress	\N	["Ada"]
+tt99000020	2	nm99000020	actor	\N	["Bo"]
+tt99000020	3	nm99000030	director	\N	\N
+tt99000020	4	nm99000030	writer	writer	\N
+tt99000020	5	nm99000040	actor	\N	\N
+tt99000030	2	nm99000050	composer	\N	\N
+tt99000030	1	nm99000030	actor	\N	["Cyd"]
+tt99000030	3	nm99000060	actor	\N	\N
+tt99000040	1	nm99000060	self	\N	["Self"]

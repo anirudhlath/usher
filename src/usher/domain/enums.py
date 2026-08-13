@@ -100,6 +100,46 @@ class MatchMethod(StrEnum):
     UNMATCHED = "unmatched"
 
 
+class ImageKind(StrEnum):
+    """What an artwork reference *is*, from [PRD 02](../../../docs/prd/02-data-model.md)'s
+    `Image`. Five members, and every one of them is emitted by a real
+    provider payload rather than reserved: `poster`/`backdrop`/`logo` hang off
+    a title, `still` off an episode, `profile` off a person — which is the
+    same three-way split `ck_images_exactly_one_owner` enforces in SQL, and
+    the reason the vocabulary is not a per-owner enum each.
+
+    Nothing here constrains the pairing: `Image(kind=PROFILE, title_id=…)` is
+    still storable, exactly as `ProductionStatus` documents its movie/series
+    grouping without enforcing it. The grouping documents intent.
+    """
+
+    POSTER = "poster"
+    BACKDROP = "backdrop"
+    LOGO = "logo"
+    STILL = "still"
+    PROFILE = "profile"
+
+
+class SearchNameKind(StrEnum):
+    """Why a row exists in `title_search_names`, and it is deliberately two
+    members rather than three.
+
+    Each has a named emitter inside M9: `alias` is the `title.akas` loader and
+    `person` is the two-tier suggest's people half. **There is no `primary`
+    member** — canonical names are served by `ix_titles_name_lower_prefix` on
+    `titles` itself, so a `primary` row would be exactly the one-row-per-title
+    duplication M6's boundary call 3 refused, arriving under a new table name.
+
+    This project forbids an enum member nothing emits:
+    `LLMPurpose.QUERY_EXPANSION` sat unemitted for two milestones and M8 had
+    to either build it or delete it. A third member is added the day something
+    writes it and not before.
+    """
+
+    ALIAS = "alias"
+    PERSON = "person"
+
+
 class HdrFormat(StrEnum):
     """Canonical HDR formats. A source's own vocabulary (Emby, for
     instance, emits strings like "DolbyVision") is translated into one of

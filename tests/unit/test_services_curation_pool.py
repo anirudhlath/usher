@@ -330,9 +330,11 @@ async def test_with_no_embedder_the_embedding_table_is_never_read() -> None:
     seen: list[int] = []
     original = household.embeddings.list_for_titles
 
-    async def _counted(title_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, tuple[float, ...]]:
+    async def _counted(
+        title_ids: Sequence[uuid.UUID], *, model_name: str | None = None
+    ) -> dict[uuid.UUID, tuple[float, ...]]:
         seen.append(len(title_ids))
-        return await original(title_ids)
+        return await original(title_ids, model_name=model_name)
 
     household.embeddings.list_for_titles = _counted  # type: ignore[method-assign]
 
@@ -499,6 +501,44 @@ async def test_the_re_rank_returns_every_candidate_it_was_given() -> None:
 
     assert embedded | bare <= {one.id for one in pool}
     assert len({one.id for one in pool}) == len(pool), "a candidate came back twice"
+
+
+async def test_the_pool_reads_vectors_unscoped_by_model_and_keeps_its_no_opinion_path() -> None:
+    """`TitleEmbeddingRepository.list_for_titles` grew a keyword-only,
+    **optional** `model_name` in M9 (F5), and this service keeps the call it
+    has. That is the half a widening can break silently.
+
+    The module docstring argues for the unscoped read explicitly: a candidate
+    whose vector this centroid cannot be compared against is *no opinion*, and
+    the width mismatch that produces is the documented reason `_cosine` answers
+    `None` rather than letting `zip(strict=True)` fail a nightly generation.
+    Narrowing this call would repair that by construction and quietly delete
+    the behaviour the case below asserts -- so the argument is pinned here,
+    and the behaviour one case down.
+
+    Fails: `list_for_titles(ids, model_name=centroid.model_name)`, which is the
+    obvious "improvement" and which makes the whole of
+    `test_a_vector_of_another_width_leaves_its_candidate_where_it_was`
+    unreachable.
+    """
+    household = await _household_with_a_centroid()
+    await household.title("A Candidate", vote_count=500, owned=True, vector=_pole(0))
+    asked: list[str | None] = []
+    original = household.embeddings.list_for_titles
+
+    async def _recorded(
+        title_ids: Sequence[uuid.UUID], *, model_name: str | None = None
+    ) -> dict[uuid.UUID, tuple[float, ...]]:
+        asked.append(model_name)
+        return await original(title_ids, model_name=model_name)
+
+    household.embeddings.list_for_titles = _recorded  # type: ignore[method-assign]
+
+    pool = await household.service(embedder=FakeEmbedder()).for_user(USER)
+
+    assert pool, "the premise: a non-empty pool, or the centroid read never happens"
+    assert asked, "the premise: the vector read really did happen"
+    assert asked == [None] * len(asked)
 
 
 async def test_a_vector_of_another_width_leaves_its_candidate_where_it_was() -> None:

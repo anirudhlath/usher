@@ -58,6 +58,30 @@ class TestFakeBulkCatalogRepository(BulkCatalogRepositoryContract):
         assert isinstance(repo, FakeBulkCatalogRepository)
         repo.mark_enriched(imdb_id)
 
+    async def credit_names_of(
+        self, repo: BulkCatalogRepository, imdb_id: str
+    ) -> tuple[str, ...] | None:
+        assert isinstance(repo, FakeBulkCatalogRepository)
+        return repo.credit_names(imdb_id)
+
+    async def derive_credit_names(
+        self, repo: BulkCatalogRepository, imdb_id: str, names: tuple[str, ...]
+    ) -> None:
+        assert isinstance(repo, FakeBulkCatalogRepository)
+        repo.mark_derived(imdb_id, names)
+
+    async def search_names_of(
+        self, repo: BulkCatalogRepository, imdb_id: str
+    ) -> tuple[tuple[str, str, str | None, str | None], ...]:
+        assert isinstance(repo, FakeBulkCatalogRepository)
+        return repo.search_names(imdb_id)
+
+    async def seed_person_search_name(
+        self, repo: BulkCatalogRepository, imdb_id: str, name: str
+    ) -> None:
+        assert isinstance(repo, FakeBulkCatalogRepository)
+        repo.seed_person_search_name(imdb_id, name)
+
     async def indexes_intact(self, repo: BulkCatalogRepository) -> bool:
         """Vacuously true: this fake has no index to suspend. Asserted
         anyway so the contract case is not skipped for one implementation

@@ -1,0 +1,10 @@
+titleId	ordering	title	region	language	types	attributes	isOriginalTitle
+tt99000020	1	A Synthetic Feature	\N	\N	original	\N	1
+tt99000020	2	Un Long Métrage Synthétique	FR	fr	imdbDisplay	\N	0
+tt99000020	3	"A Quoted Synthetic Alias"	GB	\N	\N	\N	0
+tt99000020	4	\N	DE	de	\N	\N	0
+tt99000030	1	A Synthetic Series	\N	\N	original	\N	1
+tt99000030	2	Uma Série Sintética	BR	pt	imdbDisplay	\N	0
+tt99000030	3	Une Série Synthétique	FR	fr	imdbDisplay	\N	0
+tt99000010	1	A Synthetic Working Title	\N	\N	working	\N	0
+tt99000010	2	A Synthetic Festival Title	XWW	\N	imdbDisplayfestival	dubbed version	0

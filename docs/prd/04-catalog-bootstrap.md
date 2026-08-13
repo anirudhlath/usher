@@ -26,19 +26,43 @@ All figures below were measured on 2026-07-28.
 
 | Dataset | Provides | Size | Time |
 |---|---|---|---|
-| [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/) | 12.7M titles, 1.7M ratings, 100M cast/crew rows, 58M localised titles | 1.83 GiB gz | 20–40 min |
+| [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/) | 12.7M titles, 1.7M ratings, **101,151,422** cast/crew rows, **58,906,368** localised titles, **15,563,615** names | **1.832 GiB gz** (1,967,348,042 B over seven files) | 20–40 min |
 | [TMDb daily ID export](https://developer.themoviedb.org/docs/daily-id-exports) | 1.23M movie + 228k series IDs **with popularity** | 31 MiB gz | < 1 min |
 | Wikidata SPARQL | ~386k verified IMDb↔TMDb↔TVDb ID pairs (CC0) | no download | ~18 s of query time |
 | TMDb API (per-id crawl) | Overviews, artwork, keywords, full credits | — | 1.5–2.5 h for the priority tier |
 | [MovieLens tag genome](https://grouplens.org/datasets/movielens/) (`ml-latest.zip`) | **18,472,128** movie×tag relevance scores for **16,376** movies over 1,128 tags | **334.6 MiB** (350,896,731 B) | ~10 min |
 
 > **What Phases 0–2 actually download: ~250 MiB, not 2.2 GiB** (measured
-> 2026-07-30). From IMDb, only `title.basics.tsv.gz` (214.4 MiB) and
-> `title.ratings.tsv.gz` (8.2 MiB) — the other five files carry cast, crew,
-> akas, and episodes, which need entities that do not exist yet (see Phase 0).
-> From TMDb, the two ID exports (`movie_ids` measured at 26.1 MiB, plus the
-> much smaller `tv_series_ids`). Wikidata downloads nothing. The rest of the
-> 2.2 GiB in the Cost table belongs to Phases 3–4.
+> 2026-07-30, re-measured 2026-08-11). From IMDb, only `title.basics.tsv.gz`
+> (**214.9 MiB**) and `title.ratings.tsv.gz` (**8.2 MiB**) — the other five
+> files carry cast, crew, akas, and episodes. From TMDb, the two ID exports
+> (`movie_ids` measured at 26.1 MiB, plus the much smaller `tv_series_ids`).
+> Wikidata downloads nothing. The rest of the 2.2 GiB in the Cost table belongs
+> to Phases 3–4.
+
+> **The IMDb row's two headline figures were re-measured on 2026-08-11 and both
+> hold.** *"100M cast/crew rows"* is 101,151,422 `title.principals` data rows
+> and *"58M localised titles"* is 58,906,368 `title.akas` data rows; the seven
+> files total 1,967,348,042 B, i.e. 1.832 GiB, against the row's stated
+> 1.83 GiB. What the row never said is how little of that survives a join
+> against this catalog: **12,626,452 of the 101,151,422 principals (12.5%)** and
+> **7,536,366 of the 58,906,368 akas (12.8%)** name one of the 1,271,138 titles
+> `_RETAINED_TYPES` keeps, because the other 87% belong to the episodes,
+> shorts, video games and adult titles Phase 0 drops.
+>
+> **The three unimported files are 1.49 GiB of the 1.83 GiB**, and they are
+> `title.principals.tsv.gz` (742.3 MiB), `title.akas.tsv.gz` (486.5 MiB) and
+> `name.basics.tsv.gz` (293.7 MiB). The per-file sizes and what each costs in
+> stored rows are in `.claude/rules/bootstrap-and-datasets.md`, together with
+> the measured refusal of a `people`/`credits` design for the whole catalog.
+>
+> **The seven files are not one snapshot.** On 2026-08-11 five carried
+> `Last-Modified: Tue, 11 Aug 2026 00:47–00:48 GMT` while `name.basics` and
+> `title.akas` carried `Mon, 10 Aug 2026 12:53 GMT` — twelve hours older. A
+> cross-file join therefore spans two regenerations by default, which is
+> observable rather than theoretical: **969 of the 3,212,911 `nconst` values
+> that day's `title.principals` referenced did not exist in that day's
+> `name.basics` at all.**
 
 ### What the bulk data does *not* contain
 
@@ -54,6 +78,20 @@ for the full catalog would be ~120 GB, so Usher references and lazily caches
 ## Phased import
 
 Each phase is independently runnable, resumable, and checkpointed.
+
+**The order below is the order `usher bootstrap --phase all` runs, and three
+of its edges are constraints rather than presentation.** Phase 0 first,
+because every later phase joins to `titles` on `imdb_id` and an empty catalog
+joins to nothing. **Phase 0b before Phase 3**, because the fill
+writes only where `enrichment_state = 'skeleton'` — so a title Phase 3 has
+enriched is deferred to TMDb permanently, and **203,969 of the 204,335 titles
+with ≥100 votes (99.82%)** gain a `credit_names` in this order and none of
+them in the other. It stales no embedding in either order: the embedded
+population is the exact complement of what the fill writes. And Phase 4's genome last, for Phase 0's reason.
+
+`--phase` names them `imdb`, `credit-names`, `aliases`, `tmdb-ids`,
+`crosswalk`, `movielens` and `all`; the tuple in `usher.cli.PHASES` is in
+execution order and carries the same three reasons.
 
 ### Phase 0 — IMDb skeleton (~30 min)
 
@@ -77,6 +115,39 @@ Pruning that keeps this sane: retain `movie`, `tvMovie`, `tvSeries`, and
 > its people/episode modelling in M4). Retaining exactly the four `titleType`s
 > above is what yields the 1,127,975 figure this section already cites.
 
+> **Half of that correction has itself been overtaken, 2026-08-11 (M9).**
+> **`title.akas` now has somewhere to land** — `m09a` created
+> `title_search_names`, with a `region` and a `language` column — and
+> `usher.adapters.bulk.imdb.parse_akas_row` plus `IMDbAkaDataset` are the
+> parser and the dataset for it, with
+> `BulkCatalogRepository.replace_aliases` the write. It stores an expected
+> **1,663,364 deduplicated aliases over 399,046 of 1,271,138 titles (31.4%)**,
+> because three retained akas rows in four restate the title's own name and
+> are dropped. **Both are wired as of M9's T8** — `--phase aliases` and
+> `--phase credit-names`, described under Phase 0b below — so an operator
+> running `--phase all` now does pay the **486.5 MiB**. The one thing that
+> paragraph said the phase owed has been paid: **a title's aliases reach the
+> writer in one call**, because `IMDbAkaDataset.group_of` closes a title's run
+> before it closes a batch. At the shipped batch size the row-count spelling
+> would have split a title at **all 924** of a full import's batch
+> boundaries and silently deleted **3,867** rows it had already written.
+>
+> **The other half hardened rather than lifted.** `title.principals` and
+> `name.basics` are now refused on a *measurement* rather than on a missing
+> table: loaded against a real 1,271,138-title catalog, the `people` +
+> `credits` design measured **2.702 GB against a 2.0 GB ceiling** — 2.395 GB
+> stripped to five columns and three indexes — so **no `people` or `credits`
+> row is bulk-loaded from IMDb at all**, and the two sources never own one
+> entity. `title.crew` and `title.episode` keep the status the paragraph above
+> describes. Full evidence, with its bar written before the download, is in
+> `.claude/rules/bootstrap-and-datasets.md`.
+>
+> The akas retention policy, and what each clause was measured to cost, is on
+> `parse_akas_row` itself. In one line: every row whose `title` can be stored
+> is kept, the rows IMDb flags `isOriginalTitle = 1` are dropped (21.6% of the
+> file, costing **7 aliases in 1,663,330**), and nothing is filtered on
+> `region`, `language`, `types` or `attributes`.
+
 **Index handling during Phase 0 — measured, decided.** `ix_titles_sort_name`
 and `ix_titles_name_lower_year` are dropped before the load and rebuilt
 after, **but only when `titles` is empty** — a first bootstrap has nothing to
@@ -97,6 +168,66 @@ applies to an empty catalog), and it also produces a ~24% smaller, less
 fragmented pair of indexes than building them incrementally across 1.27M
 individual upserts. The seam is `BulkCatalogRepository.bulk_load_window`, so
 reversing this is a one-line change to `_SUSPENDABLE_INDEXES`.
+
+### Phase 0b — the IMDb expansion: credit names and aliases
+
+Two more IMDb files each become a phase of its own —
+`usher bootstrap --phase credit-names` and `--phase aliases` — and **neither
+makes an API call**. They are what gives a `skeleton` title a cast to be found
+by and an alias to be found under, on a catalog the TMDb crawl will never
+reach the far tail of.
+
+| phase | reads | writes | expected result on a 1,271,138-title catalog |
+|---|---|---|---|
+| `credit-names` | `name.basics` (293.7 MiB) × `title.principals` (742.3 MiB) | `titles.credit_names` | **1,192,217 titles (93.8%)** gain a mean of **9.11** names |
+| `aliases` | `title.akas` (486.5 MiB) | `title_search_names` where `kind = 'alias'` | **1,663,364** aliases over **399,046 titles (31.4%)** |
+
+**Both refuse an empty catalog with the phase to run first**, before
+downloading anything, exactly as the genome phase does: both are joins on
+`imdb_id`, and against an empty `titles` each would read its whole file, write
+nothing, checkpoint `COMPLETED`, and make every later `--phase all` a no-op.
+
+**Three properties are worth stating because they are not obvious from the
+table.**
+
+**No `people` or `credits` row is written.** The `people` + `credits` entity
+design was measured against this catalog at **2.702 GB against a 2.0 GB
+ceiling** and refused, so `credit-names` resolves the
+`title.principals` × `name.basics` join in the importer against a 345 MiB
+in-memory index and stores the *names* — `titles.credit_names` is a `text[]`
+that already existed, and weight class B of `search_document` already indexes
+it. The consequence for a resume is that the index is rebuilt from the whole
+of `name.basics` on **every** run, resumed or not: a fixed **19.5 s** before
+the first batch.
+
+**TMDb wins every title it has reached.** `fill_credit_names` writes only
+where `enrichment_state = 'skeleton'`; a title the crawl has enriched is
+counted as `deferred` and left alone, because `CreditRepository.
+replace_for_titles` owns that column for those titles. So this phase's yield
+*shrinks* as enrichment grows, which is the second half of the ordering
+constraint above.
+
+**An alias equal to the title's own name is not stored.** Three retained akas
+rows in four (**5,693,570 of 7,536,366, 75.5%**) restate `titles.name` or
+`titles.original_name` under `lower()` and are dropped — a name
+`ix_titles_name_lower_prefix` already answers is not an alias. The phase's own
+report prints that count beside the stored one, because a report showing only
+a quarter of the file arriving would otherwise read as a broken import.
+
+**What this costs to download.** The `## Sources` note above measures Phases
+0–2 at ~250 MiB; those are the phases as they stood before this one existed.
+Phase 0b adds **1.49 GiB**, so a full `--phase all` now transfers roughly
+**1.74 GiB** before the TMDb crawl and the genome archive. Nothing is
+downloaded that an operator did not ask for: each phase is separately
+runnable, and `--phase imdb` alone still costs the ~223 MiB it always did.
+
+**After it, re-index.** Filling `credit_names` changes `search_document`, so
+the titles it touched need `usher index --backfill` and then `usher similar
+--rebuild` — the freshness gap `README.md` already documents, arriving at a
+much larger population. On a fresh bootstrap the count of newly-stale
+embeddings is **zero**, because nothing is embedded until a title leaves the
+`skeleton` tier; that is a fact about ordering, not a reason to skip the
+re-index on a catalog that has been enriched.
 
 ### Phase 1 — TMDb ID universe (< 1 min)
 
@@ -160,29 +291,90 @@ Tier 1 is the default and is sufficient for any realistic home library plus a
 generous recommendation pool. One request per title thanks to
 `append_to_response`.
 
-**"One request per title" holds for a movie and does not for a series**, and
-the table above predates that distinction. A series costs one request plus
-one per season, because TMDb's series detail lists its seasons and carries no
-episodes ([03](03-sources-and-sync.md)). Measured live 2026-08-01: the sampled
+⚠️ **That table's tier-1 row is measured now, and it was wrong in three
+independent places, all flattering. Read this paragraph instead of the row.**
+Measured 2026-08-11 (M9 S2) over a systematic 1-in-261 sample of the movie
+tier — 500 titles, drained through the shipped `usher work`, 499 × 200 and
+1 × 404. **The population is 130,806, not ~189k**: of the 161,789 movies at
+`vote_count >= 100`, only 130,806 carry a `tmdb_id`, and `EnrichService.
+_ref_for` parks the other 30,983 on their first attempt rather than fetching
+them. **The rate is not the rate limit**: `JobWorker` runs jobs sequentially
+and the token bucket lives on one client per process, so one worker runs at
+`1/latency` — measured **10.38 rps against a bucket set to 30**, a per-title
+cycle whose mean is 0.0963 s and of which HTTP is 65%. **So tier 1 is ~3.5 h
+at one worker** (95% CI [3.41, 3.59]), not 1.5–2.5 h. It also writes **~1.0
+GiB into `raw_payloads`** and **two follow-up jobs per enriched title**
+(`INDEX` and `DERIVE`), the `INDEX` half of which nothing claims unless
+`USHER_EMBEDDING_ENABLED` is on. Full evidence in
+`.claude/rules/tmdb-and-enrichment.md`.
+
+⚠️ **The whole tier has now been run, and the one sentence deleted above —
+"reaching 30 rps needs three worker processes each configured to `30/N`" —
+was wrong.** Measured 2026-08-12 (M9 S3) over the real **130,806** titles:
+130,334 requests in **1.98 h**, 130,141 × 200, 107 × 404, **86 × 502**, no
+429. Three workers achieved **19.76 rps, not 30** — **6.59 rps each against
+the 10.38 one worker managed**, a 37% per-worker loss, so concurrency scales
+**1.90× and not 3×** and the token bucket never bound on any worker. The
+0.38% sample priced the median request to within 1.4% (0.0588 s against
+0.0580 s) and the **tail not at all**: p95 **0.4267 s against 0.1049 s**.
+Budget the tier at **~2 h on three workers**, and expect the third to earn
+less than the second. Three things a sample could not have found: one worker
+died mid-run on an unhandled `MissingGreenlet` and **orphaned its 20 claims
+in `running` permanently** (only `startup()` requeues those, and restarting
+steals the survivors' claims); **30 jobs parked on `ix_titles_imdb_id`**, a
+write conflict where TMDb's `external_ids.imdb_id` disagrees with the bulk
+export's and is already held by another row; and the follow-up `INDEX` jobs
+**do not drain beside the crawl even with the embedder on**, because the
+claim orders `priority DESC, created_at`, everything is `BACKFILL`, and the
+enqueue wrote all 130,804 enrich rows inside 1.3 s. Outcome: **130,647 of
+130,806 enriched (99.88%)**, `overview` on 99.33% and `genres` on 99.98%,
+995 MB of `raw_payloads`, and 261,294 follow-up jobs left to drain at ~1.9 h.
+
+⚠️ **And the tier is not a fixed population, because enriching a title can
+remove it from the tier.** `vote_count` is enrichable, the bulk loader writes
+IMDb `numVotes` into it and TMDb's own `vote_count` overwrites that on
+enrichment — a different electorate entirely. Measured over 537 enriched tier
+movies: **80 still satisfy `>= 100` (14.9%)**, median TMDb vote count **16**
+against a median IMDb `numVotes` of **581** on the unenriched tier. The
+keyset walk is unaffected (a row leaves the tier only after the cursor has
+passed it), but **any tier statistic re-derived from the predicate after the
+crawl answers about a population roughly a seventh the size**. The enriched
+row records `"vote_count": "tmdb"` in `field_provenance`; no predicate reads
+it.
+
+**"One request per title" holds for a series too now, and it did not until
+M9.** A series used to cost one request plus one per season, because TMDb's
+series detail lists its seasons and carries no episodes
+([03](03-sources-and-sync.md)). Measured live 2026-08-01: the sampled
 long-running series cost ten requests each, and 30 series carried 320 seasons
-between them — **median 9**. So the series half of a full pass is 32,409 ×
+between them — **median 9**. So the series half of a full pass *was* 32,409 ×
 (1 + 9) ≈ **324k requests**.
 
-**`append_to_response=season/N` collapses that back to one** — 32,409, i.e.
-**~10x** — verified, including the 20-item ceiling that bounds it at 14
-seasons alongside the six namespaces already appended (a series with more
-seasons than that needs a second request; a small tail), and including that a
-season the series does not have is silently omitted rather than erroring.
-Recorded here, not yet taken; it is a change to the adapter's `fetch` and to
-[03](03-sources-and-sync.md)'s request table, and belongs in its own change.
+**`append_to_response=season/N` collapses that back to one** — **~32k against
+~324k, i.e. ~10x** — verified, including the 20-item ceiling that bounds it at
+14 seasons alongside the six namespaces already appended (a series with more
+seasons than that needs **`ceil(n/20)` further requests, not a second one** —
+refuted live 2026-08-11, where 74 listed seasons cost five; a small tail, which
+is why the figure is ~32k rather than 32,409 exactly), and including that a
+season the series does not have is silently omitted rather than erroring. Both
+legs of the ~10x are the wrong *shape* even where the order of magnitude
+holds: `Σ(1 + N)` needs the **mean** season count where this paragraph uses the
+median, and the append side is `32,409 + Σ ceil(n/20)` rather than 32,409.
+[03](03-sources-and-sync.md) and `.claude/rules/tmdb-and-enrichment.md` carry
+the measurement. **Taken**: the
+adapter's `fetch` issues the blind `season/0…season/13` window, reconciles it
+against the `seasons[]` summary the same response carries, and follows up only
+for listed numbers that window missed.
 
 Two honest caveats on the 324k, because it is a planning figure and not a
 measurement. The median comes from **30 series that skew popular**, and
-popular series have more seasons than a library's median does, so this is an
-upper bound. And an earlier draft of this paragraph said "~190k → ~35k, ~5x":
-`~190k` was the tier-1 *title* count from the table above, borrowed one
-section over and read as a series *request* count. `CLAUDE.md` records the
-correction. 32,409 × 10 is 324k; ~190k would require a median of ~4.9.
+popular series have more seasons than a library's median does, so **~324k is
+an upper bound on that measurement rather than a prediction** of what the
+`1+N` shape would have cost a real catalog. And an earlier draft of this
+paragraph said "~190k → ~35k, ~5x": `~190k` was the tier-1 *title* count from
+the table above, borrowed one section over and read as a series *request*
+count. `CLAUDE.md` records the correction. 32,409 × 10 is 324k; ~190k would
+require a median of ~4.9.
 
 TMDb disabled its old hard rate limit in 2019; current guidance is a ceiling
 "somewhere in the 40 requests per second range". Usher self-limits to ~25 rps
@@ -271,10 +463,34 @@ rather than squared, because `coverage²` would have said 1.14% and a real pool
 is not an independent draw. See [05](05-search-and-similarity.md) for what that
 does to the term's weight.
 
-⏳ **Still not measured: coverage against a genuinely *enriched* tier.** That
-run had no TMDb key, so its "owned" titles are name-shaped skeletons and its
-candidate pools are name-selected — which weakens exactly the correlation being
-measured, making 1.81% a conservative floor rather than an estimate.
+**That run had no TMDb key**, so its "owned" titles are name-shaped skeletons
+and its candidate pools are name-selected — which weakens exactly the
+correlation being measured, making 1.81% a conservative floor rather than an
+estimate. **The population is half the number and the arithmetic recovers it**:
+502,000 candidate pairs over a 100-title pool is exactly **5,020 seeds**, and
+those 5,020 were the household's owned titles, moved onto the enriched tier by
+a direct `UPDATE` that changed the label and not the document. So 1.81% is a
+floor over 5,020 owned, name-shaped seeds and is **not a baseline** for a run
+over a larger or differently-selected population.
+
+✅ **Measured against a genuinely enriched tier on 2026-08-12 (M9's S5), and it
+is a second measurement rather than a rise.** M9 enriched and embedded 130,647
+priority-tier titles, then walked the pool `SimilarityService.rebuild()` draws
+once, read-only: **323,297 of 13,064,700 candidate pairs — 2.4746% — over
+130,647 seeds, 15,525 of them carrying a vector (11.883% single-side)**. The
+genome's 15,565 stored rows reconcile to those 15,525 with no residue (7 still
+`skeleton`, 33 outside the frozen tier). `coverage²` would have predicted
+1.412%, so the measurement is **1.75×** the independent-draw prediction —
+pool membership and genome membership are positively correlated, and this is
+the first time this project has had the correction factor rather than the
+warning. The conservative-floor argument was therefore right in direction and
+the result is still **four times below the 10% floor the 0.25 weight assumed**:
+[05](05-search-and-similarity.md) and
+[ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md) record
+the term's removal. The ceiling is in this document's own dataset table —
+`ml-latest` scores **16,376** movies, **18.9%** of its own 86,537-movie list,
+movies-only and frozen at 2023-07-20 — so no amount of further enrichment moves
+the numerator.
 
 **Two physical properties of this snapshot the importer verifies rather than
 assumes.** Both were measured for M7 and neither is documented by GroupLens
@@ -349,6 +565,41 @@ is clamped rather than rejected, and a caller may not read an exhausted feed
 as proof that nothing older changed — the full recovery path is a
 re-enrichment sweep over `titles`, not this feed.
 
+**A phase can be started over HTTP since M9.** `POST /admin/bootstrap/{phase}`
+enqueues `JobKind.BOOTSTRAP` keyed on the phase and answers **202**; the work
+runs on the single `JobWorker` lane, through the *same* dispatch
+`usher bootstrap` runs (`composition.run_bootstrap`), so the two roots cannot
+disagree about which phases exist or in what order they run. `{phase}` is
+typed as `BootstrapPhase`, so the seven members above are what `/openapi.json`
+describes and an unknown phase is a 422 rather than a 404. **Nothing
+schedules it** — there is still no scheduler anywhere in `src/`, so a nightly
+re-import is an operator's press or a cron entry
+([09](09-roadmap.md)), and the daily cadence in the table above is a
+recommendation rather than a behaviour. Three consequences are worth stating
+where an operator will read them: a bootstrap is the longest unit of work in
+this system and holds the lane for its duration
+([08](08-operations.md)); the *server* process now writes to
+`USHER_BULK_DATA_DIR`, which in the shipped container is a bind mount; and the
+ordering constraint above is unenforced by design — **run `credit-names`
+before a TMDb crawl, not after**, because the fill defers to TMDb on every
+enriched title, so run the other way round the 203,969 of 204,335 ≥100-vote
+titles that would have gained names never do, and re-running does not repair
+it.
+
+**And a phase's progress can be read over HTTP since M9's E6.**
+`GET /admin/bootstrap/status` ([07](07-client-api.md)) answers every
+`import_runs` checkpoint with its cursor and counters, the catalog's title
+count, the genome coverage above and whether the stored tag vocabulary can
+name the lanes of the stored vectors. It is the *same* report
+`usher bootstrap-status` prints — one `BootstrapReport`, one decision, two
+renderings — so a `FAILED` phase reads identically at a terminal and on an
+admin screen. **200 for every state**, including "no import has ever run": a
+diagnostic that refused to answer before the thing it diagnoses had run would
+be useless on exactly the deployment that needs it. ⚠️ The two aggregates it
+reads cost roughly **a third of a second on a 1.27M-title catalog**
+(`count_titles()` 80.6 ms, `genome_coverage()` 250.6 ms, measured
+2026-08-12), which is priced for an operator's page and for nothing else.
+
 ## Licensing — ship importers, never data
 
 Usher's MIT license is unaffected by any of these sources, because Usher never
@@ -396,8 +647,9 @@ Hard rules encoded in the project:
 2. **Never scrape imdb.com** — IMDb's terms permit the published dumps only.
 3. **Honour the TMDb cache ceiling.** `provider_cache_meta` tracks fetch times;
    nothing is retained past 6 months without refresh.
-4. **Render attribution in clients.** The API exposes required attribution
-   strings so every client can display them.
+4. **Render attribution in clients.** `GET /meta/attribution`
+   ([07](07-client-api.md)) serves the four required strings — IMDb, TMDb,
+   MovieLens, Wikidata — so every client can display them.
 5. **Commercial use is out of scope.** Both IMDb and TMDb require separate
    licensing for it, and TMDb explicitly names AI/ML training on their content
    as commercial.

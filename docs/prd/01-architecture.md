@@ -282,6 +282,7 @@ own semaphore, so a slow upstream can't starve the API:
 | Source sync workers | 4 | Emby is slow (~1–5 s/request observed) |
 | Embedding | 1 batch worker | CPU/GPU |
 | **Row build** (M7) | **1, sequential — and not a setting** | `AsyncSession` |
+| **Screen refresh** (M9) | **1 lane, 1 refresh in flight, ≤ 32 keys queued** | `REFRESH_QUEUE_SIZE`; full means dropped |
 
 ⏳ **This table is the design, and three of its rows are not what shipped** —
 enrichment workers, source sync workers and embedding. (The row-build row below
@@ -313,6 +314,22 @@ kinds are minutes of background work — and it is the number to look at first i
 a queue ever appears to stall on a curating deployment. A lane of its own is
 the fix if it stops being acceptable, not a semaphore: the ceiling here is one
 upstream call, not concurrency.
+
+✅ **M9's screen-refresh row is a real lane with a real number, and it is here
+because [06](06-rows-and-recommendations.md)'s "served stale while refreshing"
+is otherwise a background task nobody can put a ceiling on.** One
+`asyncio.Task` in `api/lanes.py` drains a bounded deduplicating queue of stale
+screen keys one at a time, so the pool sees **at most one extra session** on
+top of the push lanes and the worker; the queue holds 32 keys and `schedule`
+**drops** rather than blocks when it is full, because a request path that
+awaited a full queue would block on exactly the load that filled it. Dropping
+costs one hard miss on the next request past the grace window — the cost M7
+paid on every screen expiry — which is what makes drop-on-full the safe choice
+rather than merely the convenient one. It is gated on `create_app` building a
+cache and a queue rather than on a setting: a switch here would configure the
+one state serve-stale must never reach, a stale screen with nothing behind it.
+Not a source lane, so `/health/ready`'s `lanes.push` and its status code are
+unchanged by it.
 
 **The row-build row is the one line in this table that is a decision rather
 than a design**, and it is here because a concurrency table that silently omits

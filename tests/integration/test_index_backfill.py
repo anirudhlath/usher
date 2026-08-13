@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from usher.cli import _index
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
-from usher.db.repositories.search import PostgresTitleEmbeddingRepository
+from usher.db.repositories.search import STALE_EMBEDDING, PostgresTitleEmbeddingRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobPriority
@@ -39,6 +39,19 @@ from usher.services.search import compose_document
 _MARK = "index-backfill-case"
 _MODEL = "fastembed:BAAI/bge-small-en-v1.5"
 _VECTOR = tuple([0.05] * 384)
+
+# The only interpolation is `STALE_EMBEDDING` itself, which is a module
+# constant built from module constants; both values a caller supplies cross as
+# bound parameters. Spelled at module level rather than inline for the reason
+# `_COUNT` is: this is the shipped predicate quoted, and a reader has to be
+# able to see that nothing else is in it.
+_IS_STALE = f"""
+SELECT EXISTS (
+    SELECT 1 FROM titles AS t
+    LEFT JOIN title_embeddings AS e ON e.title_id = t.id
+    WHERE t.id = :title_id AND ({STALE_EMBEDDING})
+)
+"""  # noqa: S608
 
 
 def _title(
@@ -122,6 +135,31 @@ async def _sweep(settings: Settings, *, limit: int = 0, page_size: int = 1000) -
     await asyncio.wait_for(
         _index(settings, backfill=True, limit=limit, page_size=page_size), timeout=30.0
     )
+
+
+async def _is_stale(sessions: async_sessionmaker[AsyncSession], title_id: uuid.UUID) -> bool:
+    """The shipped predicate, imported and scoped to one title.
+
+    **Imported rather than transcribed**, which is what
+    `db/repositories/search.py`'s own docstring asks of later tasks: "a
+    predicate written twice is two predicates, and the failure that produces
+    is a dashboard reading zero while the backfill still claims rows".
+
+    **Scoped by id rather than read off `count_stale`**, and that is not
+    tidiness either. This module commits for real -- `_index` opens its own
+    engine, so a rolled-back fixture transaction would be invisible to it --
+    so every row any other module in this suite has committed is inside
+    `count_stale`'s population too. A count would be an assertion about the
+    whole database; `EXISTS` over one id is an assertion about this case.
+    `_POPULATION` is deliberately left off for the same reason: the title
+    below is `ENRICHED` by construction and the claim here is about the
+    staleness half alone.
+    """
+    async with sessions() as session:
+        result = await session.execute(
+            text(_IS_STALE), {"title_id": title_id, "model_name": _MODEL}
+        )
+        return bool(result.scalar_one())
 
 
 async def _index_keys(sessions: async_sessionmaker[AsyncSession]) -> set[str]:
@@ -458,3 +496,77 @@ async def test_a_re_run_terminates_and_still_honours_limit(
 
     printed = capsys.readouterr().out
     assert "2 stale titles swept, 0 index jobs written" in printed, printed
+
+
+async def test_a_title_embedded_before_its_credits_landed_is_stale_again(
+    sessions: async_sessionmaker[AsyncSession], settings: Settings, clean: None
+) -> None:
+    """**Why one backfill pass over a freshly enriched tier is not enough.**
+
+    `EnrichService` enqueues `INDEX` and `DERIVE` for the same title in the
+    same breath, both at `BACKFILL`, and deliberately does not order them --
+    the queue claims by `priority DESC, created_at` and the two rows are
+    written in one transaction, so which is served first is the executor's
+    choice. A title whose `INDEX` is claimed first is embedded from a document
+    whose weight-class-B segment is empty, and the instant `DERIVE` writes
+    `credit_names` the stored fingerprint stops reproducing -- because
+    `_FINGERPRINT_SQL` reads that column at position three. The title is stale
+    again, with nothing having failed.
+
+    This is the mirror of
+    `test_search_repository.py::test_an_indexed_title_with_credits_stops_matching_the_stale_predicate`,
+    which pins the *closure*: index a credited title and it stops matching.
+    This one pins the *opening*: index an uncredited title and it starts
+    matching again the moment it acquires credits. Both are properties of the
+    same seventh segment and neither implies the other -- a fingerprint that
+    ignored `credit_names` entirely satisfies the closure case and fails this
+    one.
+
+    **The premise is the first assertion, not a comment**: a title embedded
+    with the composer's own fingerprint is not stale. Without it a case that
+    reported "stale" throughout -- which is what a fingerprint that cannot
+    reproduce an *uncredited* document does -- would read as a pass.
+
+    Red demonstrated by mutation rather than claimed, since the shipped
+    `_FINGERPRINT_SQL` already satisfies this. Both spellings were planted,
+    and the pair is the point:
+
+    - the `usher_array_text(t.credit_names) || CHR(10) ||` line deleted --
+      the careless spelling -- fails the **premise**, because SQL then
+      assembles six segments against `compose_document`'s seven and no
+      uncredited title agrees either;
+    - `usher_array_text(t.credit_names)` replaced by `''` -- the careful
+      spelling, seven segments with a permanently empty third -- passes the
+      premise and fails the **second** assertion, which is the one this case
+      is named for.
+    """
+    title = _title("The Quiet Vacuum")
+    await _seed(sessions, title)
+    async with sessions() as session:
+        await PostgresTitleEmbeddingRepository(session).upsert_many(
+            [
+                TitleEmbeddingUpsert(
+                    title_id=title.id,
+                    embedding=_VECTOR,
+                    model_name=_MODEL,
+                    source_fingerprint=compose_document(title, credits=()).fingerprint,
+                )
+            ]
+        )
+        await session.commit()
+
+    assert await _is_stale(sessions, title.id) is False, (
+        "the premise: a title just embedded from its own document is not stale"
+    )
+
+    async with sessions() as session:
+        await session.execute(
+            text("UPDATE titles SET credit_names = CAST(:names AS text[]) WHERE id = :id"),
+            {"names": ["Marlow Vance", "Iris Kemp"], "id": title.id},
+        )
+        await session.commit()
+
+    assert await _is_stale(sessions, title.id) is True, (
+        "credits landed after the embed and the title did not become stale again -- "
+        "one backfill pass would leave it embedded from a document with no weight class B"
+    )

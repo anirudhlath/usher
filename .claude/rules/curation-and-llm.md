@@ -135,23 +135,37 @@ the design is that the prompt's grouping instruction is not self-enforcing and
 nothing in this system checks it.** In PRD 06 and PRD 09, not only in a task
 queue, because a reader of PRD 06 is the person who needs it.
 
-- **The pool has no ownership *filter* and the prompt says it does.**
+- ✅ **The pool has no ownership *filter* and the prompt said it did —
+  settled 2026-08-11, see the section below.**
   `TitleRepository.list_unwatched_candidates` uses ownership as an `ORDER BY`
   key only — deliberately, so PRD 06's *"the pool spans the whole catalog"*
-  stays true — while `curation_prompt.build_prompt` opens *"one household's
+  stays true — while `curation_prompt.build_prompt` opened *"one household's
   **own** film and television library."* On a household whose unwatched-owned
   set is smaller than the pool, the tail is titles it does not own under a
   sentence asserting it does. Both sentences are defensible and they disagree;
-  filed as a decision (#40) rather than settled.
+  filed as a decision (#40) rather than settled. **The prompt gave way.**
 - **`_cards` de-duplicates within a row only.** A title on two shelves of one
   generation is not counted `duplicate` and is not prevented; the prompt's rule
   7 is the only defence, and a prompt rule is not a guarantee.
-- **`min_cards = 5` means a small unwatched pool yields zero rows, every time,
-  at full price.** Rows carried 5–6 cards at pool 200 and **2–3 at pool 5 and
-  pool 8**, so every row was `row_too_short` and the generation was billed for
-  nothing. That is ADR-0014 working as designed *and* a household paying a
-  completion a night for a permanently empty shelf, with nothing warning the
-  operator before the money.
+- ✅ **`min_cards = 5` meant a small unwatched pool yielded zero rows, every
+  time, at full price — settled 2026-08-11 (M9 Task G4).** Rows carried 5–6
+  cards at pool 200 and **2–3 at pool 5 and pool 8**, so every row was
+  `row_too_short` and the generation was billed for nothing. That is ADR-0014
+  working as designed *and* a household paying a completion a night for a
+  permanently empty shelf, with nothing warning the operator before the money.
+  `CurationService.generate`'s empty-pool guard is now
+  `len(candidates) < self._min_cards` rather than `not candidates`, so the
+  refusal is in front of `complete_json` and nothing is billed. ⚠️ **Quote the
+  frequency with the fix:** the pool is
+  `min(catalog_unwatched, USHER_CURATION_POOL_SIZE)` and ownership is a sort
+  key, not a filter (the section below), so only a catalog whose whole
+  unwatched set is below five reaches the guard — **rare, not nightly**. The
+  general form, which is the transferable half: *a guard's value is the product
+  of what it prevents and how often the state it fires on is reachable, and the
+  second factor is a property of the read it sits behind rather than of the
+  guard. Measure the read before pricing the guard.* Here the same guard would
+  have been a nightly saving under the filtered pool G3 declined, and the
+  arithmetic it rests on would have been identical.
 - **Four of the five `DropReason` members never fired in 20 generations**, and
   under a provider honouring `strict: true` three are close to unreachable —
   `unparseable` and `row_unusable` are shape failures guided decoding prevents,
@@ -194,6 +208,84 @@ consequence for PRD 10 is that on the shipped default `llm_calls` is **100%
 `curation`** and every `generation_id` is non-NULL, so the partial index on
 `generation_id IS NOT NULL` is right under both populations rather than because
 expansion rows are a majority.
+
+## The pool's ownership claim, settled 2026-08-11 (M9 Task G3)
+
+**The filter could add nothing, and that is the measurement that decided it.**
+A pool-composition sweep through the real `PostgresTitleRepository` — its own
+`pgvector/pgvector:pg17` container, schema built by the real Alembic chain, a
+1,000-title catalog, no watch history, `limit = 200`, `U` unwatched-and-owned
+titles chosen with `random.Random(20260811)`:
+
+| `U` | pool as shipped | of which owned | pool filtered to owned |
+|---|---|---|---|
+| 0 | 200 | 0 — 0.0% | **0** |
+| 3 | 200 | 3 — 1.5% | **3** |
+| 5 | 200 | 5 — 2.5% | 5 |
+| 8 | 200 | 8 — 4.0% | 8 |
+| 20 | 200 | 20 — 10.0% | 20 |
+| 200 | 200 | 200 — 100.0% | 200 |
+
+The owned column is exactly `min(U, limit)` at every row, because `owned DESC`
+is the **first** sort key and the owned titles are therefore a prefix of the
+answer. So a filter deletes the tail and adds nothing; at `U = 200` both arms
+return the identical set. Below `DEFAULT_MIN_CARDS = 5` it deletes the
+generation, and the unreachable band is wider than the arithmetic says —
+the 2026-08-07 run measured rows of **2–3 cards at pool 5 and pool 8**, all
+`row_too_short`, so `U = 5` and `U = 8` clear the `>= 5` bar on paper and
+produced nothing live. **The general form: before choosing between a filter and
+a claim, check whether the filter's answer is a *subset* of the sort's — if the
+ranking key already puts the whole population at the head, the filter is
+subtractive by construction and there is nothing to weigh against its cost.**
+
+🔴 **The ownership marker was priced and declined, against a bar written before
+the number.** Four completions, `max_tokens=1`, same endpoint and same model,
+pool 200 sampled from the IMDb dumps with ADR-0028's criteria:
+
+| arm | prompt tokens | delta |
+|---|---|---|
+| shipped prompt | **4,251** | anchor — 4,304 on 2026-08-07, within 1.2% |
+| opening sentence corrected only | **4,277** | **+26, once** |
+| \+ *"in the library"* / *"not in the library"* | 5,257 | **4.900 tok/candidate** |
+| \+ *"owned"* / *"not owned"* | 4,857 | **2.900 tok/candidate** |
+
+Bar: 2.0 tokens a candidate, ~10% of the 20.40 the shipped candidate line
+already costs. The cheapest legible wording missed by 45% and is **14.2%** on
+top of every line. Derived from the 12,540 recorded above for pool 600, a
+terse-marked pool 600 would sit ~14,280 prompt tokens, which with
+`llm_max_output_tokens = 2048` leaves **56 tokens** under `max_model_len`, and
+the verbose one would be over it — so the marker would have turned a measured
+working configuration into HTTP 400. **A per-item prompt decoration is priced
+per candidate and paid at the pool ceiling; check it against the ceiling, not
+against the default pool.**
+
+⚠️ **The prompt's role sentence is pinned, and `.claude/rules/testing-discipline.md`
+used to name it as the archetype of framing prose deliberately left unpinned**
+("The five left alive are framing prose … the role sentence, the two history
+headers …", the 2026-08-06 sweep). The opening line was a claim about the pool's
+*membership*, so a `WHERE` clause would have had to honour it, and it is pinned
+by `test_the_opening_line_does_not_claim_the_household_owns_every_candidate`.
+**The test a prompt sentence has to pass to be "framing" is not how it reads —
+it is whether any query, constant or validator in the system would have to be
+true for the sentence to be.**
+
+**That file is now corrected at the source and this stays as the
+cross-reference.** It was left as a cross-reference alone from 2026-08-11 to
+2026-08-12, because G3's file set did not include it — and that was the wrong
+call for a reason worth keeping: **`testing-discipline.md`'s `paths:`
+frontmatter is what loads for a test author, and `curation-and-llm.md`'s does
+not.** The reader who needs the corrected rule was the one reader guaranteed to
+get the false one. A finding filed only in the file whose author happened to
+have it open is a finding routed by *authorship* rather than by *audience*; when
+they differ, edit the file the audience loads and cross-reference the other way.
+
+**Evidence (c), named rather than implied:** the 2026-08-07 run recorded
+`media_items = 0`, so **no real ownership distribution has ever been observed
+on this project** and *"how often is a household's unwatched-owned set below
+200?"* is unmeasured. The call is the arm insensitive to that guess — the
+shipped read returns every owned candidate at every `U`, so being wrong about
+the distribution costs a longer tail rather than an empty shelf. M9's live Emby
+run is the first chance to measure it.
 
 ## Review findings, 2026-08-10
 

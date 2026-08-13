@@ -12,8 +12,9 @@ Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
 scans this file.
 """
 
+import math
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
@@ -22,17 +23,26 @@ import pytest_asyncio
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.fakes.search_index import FakeSuggestIndex
+from tests.fakes.embedding import planted_pair
+from tests.fakes.search_index import FakePrefixSuggestIndex, FakeSuggestIndex
 from usher.adapters.search.postgres import PostgresSearchIndex, _predicates
+from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.media_item import PostgresMediaItemRepository
+from usher.db.repositories.search import PostgresTitleEmbeddingRepository
+from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.db.repositories.source import PostgresSourceRepository
+from usher.db.repositories.taste import PostgresTasteRepository
 from usher.db.repositories.title import PostgresTitleRepository
+from usher.db.repositories.watch_state import PostgresWatchStateRepository
+from usher.db.users import ensure_default_user
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
+from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
-from usher.ports.ingest import MediaItemUpsert
+from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
+from usher.ports.repository import StoredTaste, TitleEmbeddingUpsert
 from usher.ports.search import SearchFilters, SearchMode
-from usher.services.search import SearchService
+from usher.services.search import SearchAnalytics, SearchService
 
 SEEN_AT = datetime(2026, 8, 2, 3, 0, tzinfo=UTC)
 
@@ -66,11 +76,28 @@ def _service(session: AsyncSession) -> SearchService:
     """
     return SearchService(
         PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K),
+        FakePrefixSuggestIndex(),
         FakeSuggestIndex(),
         PostgresTitleRepository(session),
         PostgresMediaItemRepository(session),
+        PostgresWatchStateRepository(session),
+        PostgresTasteRepository(session),
+        PostgresTitleEmbeddingRepository(session),
         result_limit=100,
     )
+
+
+_TASTE_MODEL = "fake:test-384"
+
+
+def _dot(left: Sequence[float], right: Sequence[float]) -> float:
+    """Cosine over two unit vectors, for a case's own premise.
+
+    A bare dot is a cosine only because both sides are unit before the cast and
+    drift by at most 1.21e-04 after it; every case using this asserts a gap two
+    orders of magnitude wider than that.
+    """
+    return sum(one * other for one, other in zip(left, right, strict=True))
 
 
 async def _seed_title(
@@ -125,13 +152,17 @@ async def _seed_copy(
 
 async def _seed_episode_copy(
     session: AsyncSession, *, source_id: uuid.UUID, series_id: uuid.UUID, external_id: str
-) -> None:
+) -> uuid.UUID:
     """One `media_items` row shaped the way `IngestService` writes an episode:
     the *series'* `title_id` **and** the episode's own `episode_id`.
 
     Written through raw SQL rather than through `upsert_many` because
     `media_items.episode_id` is a real foreign key and this case does not care
     which episode it points at -- only that the row is not the series' own.
+
+    Answers the episode's id, which the watch-state roll-up case writes against:
+    a watch state on the *series* would make that case pass against the
+    title-keyed read it exists to refuse.
     """
     season_id = uuid.uuid4()
     episode_id = uuid.uuid4()
@@ -165,6 +196,7 @@ async def _seed_episode_copy(
             "seen": SEEN_AT,
         },
     )
+    return episode_id
 
 
 @contextmanager
@@ -347,6 +379,207 @@ async def test_a_hydrated_result_carries_the_row_and_not_just_an_id(
 
 
 @pytest.mark.integration
+async def test_a_household_costs_exactly_two_more_statements_and_it_names_them(
+    session: AsyncSession,
+) -> None:
+    """The read count, against real SQL rather than against a counter.
+
+    Three statements without a household -- the retrieval, `list_by_ids`,
+    `owned_title_ids`. **Five** with one: those three plus
+    `played_title_ids` and `TasteRepository.latest`, one each, whatever the hit
+    count -- and **no vector read at all**, because this household has no
+    stored centroid, which is the shipped state of every deployment whose
+    worker has never run.
+
+    Fails: a per-hit household read, which is the N+1 the batch port exists to
+    delete and which answers identically; a household read issued when there is
+    no household, which costs two statements per search on every caller that
+    has none; and a `list_for_titles` gated on the *row* rather than on the
+    *centroid*, which puts a `title_id IN (...)` over the whole candidate set
+    on every search of every un-indexed deployment and answers `{}`.
+
+    `_record_statements` captures off `before_cursor_execute` and nothing is
+    transcribed, so the count is the count Postgres saw. The three per-table
+    assertions are what say the extra statements are the ones this pair of
+    tasks added rather than a second hydration read that happens to make the
+    arithmetic work.
+    """
+    for index in range(8):
+        await _seed_title(session, f"Vacuum Study {index:02d}")
+    await session.flush()
+    service = _service(session)
+    household = uuid.uuid4()
+
+    without: list[str] = []
+    with _record_statements(session, without):
+        anonymous = await service.search("vacuum", limit=8)
+    with_one: list[str] = []
+    with _record_statements(session, with_one):
+        theirs = await service.search("vacuum", limit=8, user_id=household)
+
+    assert len(anonymous.results) == 8, "the premise: there are more hits than statements"
+    assert len(theirs.results) == 8
+    assert len(without) == 3, f"three statements without a household: {without}"
+    assert len(with_one) == 5, f"five statements with one: {with_one}"
+    assert [one for one in without if "watch_states" in one] == []
+    assert [one for one in without if "user_taste" in one] == []
+    assert len([one for one in with_one if "watch_states" in one]) == 1
+    assert len([one for one in with_one if "user_taste" in one]) == 1
+    assert [one for one in with_one if "title_embeddings" in one] == []
+
+
+@pytest.mark.integration
+async def test_a_stored_centroid_ranks_a_search_on_a_process_that_holds_no_model(
+    session: AsyncSession,
+) -> None:
+    """PRD 05's sixth term end to end, over the two `halfvec` round trips no
+    fake can express — the centroid's and the candidates'.
+
+    Nothing here holds an `Embedder`. `_service` builds none, and neither does
+    `api/deps.get_search_service`; the centroid is written the way a worker
+    writes one and *read* through `TasteRepository.latest`, which is the whole
+    of what this task closed. Fails: a term routed through
+    `TasteService.centroid`, which answers `None` with no embedder and would
+    leave the two rows tied.
+
+    The angle is planted rather than hoped for, and the premise is read back
+    **through the repository** — after the `halfvec` cast, whose measured max
+    round-trip cosine error is 1.21e-04, three orders of magnitude below the
+    0.5 gap seeded here.
+
+    The vector read is asserted to be **scoped and issued once**: this is the
+    six-statement arm of the count case above — the retrieval plus the service's
+    five port reads, where a household with no stored centroid pays five — and
+    the model name on the wire is what stops a mid-swap deployment blending two
+    spaces.
+    """
+    near = await _seed_title(session, "Vacuum Study Alpha")
+    far = await _seed_title(session, "Vacuum Study Beta")
+    household = await ensure_default_user(session)
+    axis, near_vector = planted_pair(math.pi / 3)
+    _, far_vector = planted_pair(math.pi / 2)
+    embeddings = PostgresTitleEmbeddingRepository(session)
+    await embeddings.upsert_many(
+        [
+            TitleEmbeddingUpsert(
+                title_id=near.id,
+                embedding=tuple(near_vector),
+                model_name=_TASTE_MODEL,
+                source_fingerprint="0" * 32,
+            ),
+            TitleEmbeddingUpsert(
+                title_id=far.id,
+                embedding=tuple(far_vector),
+                model_name=_TASTE_MODEL,
+                source_fingerprint="1" * 32,
+            ),
+        ]
+    )
+    taste = PostgresTasteRepository(session)
+    await taste.put(
+        StoredTaste(
+            user_id=household,
+            centroid=tuple(axis),
+            model_name=_TASTE_MODEL,
+            source_watermark=None,
+            title_count=12,
+            computed_at=SEEN_AT,
+        )
+    )
+    await session.flush()
+
+    stored = await taste.latest(household)
+    assert stored is not None and stored.centroid is not None, (
+        "the premise: the row is readable without a model name"
+    )
+    seen = await embeddings.list_for_titles([near.id, far.id], model_name=stored.model_name)
+    assert _dot(stored.centroid, seen[near.id]) > _dot(stored.centroid, seen[far.id]) + 1e-2, (
+        "the premise: the gap survives the halfvec cast by three orders of "
+        "magnitude more than its 1.21e-04 round-trip error"
+    )
+
+    service = _service(session)
+    statements: list[str] = []
+    with _record_statements(session, statements):
+        answer = await service.search("vacuum study", limit=10, user_id=household)
+
+    scores = {one.title_id: one.score for one in answer.results}
+    assert set(scores) == {near.id, far.id}
+    assert scores[near.id] > scores[far.id]
+    assert len(statements) == 6, f"six statements when a centroid exists: {statements}"
+    vector_reads = [one for one in statements if "title_embeddings" in one]
+    assert len(vector_reads) == 1
+    assert "model_name" in vector_reads[0], (
+        "the vector read must be scoped by the model the stored centroid names"
+    )
+
+
+@pytest.mark.integration
+async def test_a_watched_episode_lifts_its_series_in_a_search(
+    session: AsyncSession, source: Source
+) -> None:
+    """The roll-up, and it is the trap a fake cannot see.
+
+    `played_title_ids` reaches a series through
+    `COALESCE(ws.title_id, e.title_id)`, so a household that has finished an
+    *episode* has played the series. Fails: a title-keyed read, which returns a
+    films-only answer -- correct-looking, correctly ordered, and silently
+    unpersonalised for every television household there is.
+
+    The premise is asserted twice over: the two hits carry equal index scores,
+    so the relevance term cancels and the watch-state term is the only thing
+    left; and the watch state written is against the **episode**, never against
+    the series row the assertion is about.
+    """
+    series = await _seed_title(session, "Vacuum Chamber Diaries", kind=TitleKind.SERIES)
+    film = await _seed_title(session, "The Quiet Vacuum")
+    episode_id = await _seed_episode_copy(
+        session, source_id=source.id, series_id=series.id, external_id="episode-1"
+    )
+    household = await ensure_default_user(session)
+    watch_states = PostgresWatchStateRepository(session)
+    await watch_states.merge_from_source(
+        [
+            WatchStateMerge(
+                user_id=household,
+                title_id=None,
+                episode_id=episode_id,
+                position_seconds=0,
+                played=True,
+                runtime_seconds=2700,
+                observed_at=SEEN_AT,
+                play_count=1,
+                last_played_at=SEEN_AT,
+            )
+        ]
+    )
+    await session.flush()
+    assert await watch_states.played_title_ids(household, [series.id, film.id]) == {series.id}, (
+        "the premise: the roll-up sees the episode, and the film is genuinely unplayed"
+    )
+
+    service = _service(session)
+    anonymous = {
+        one.title_id: one.score for one in (await service.search("vacuum", limit=10)).results
+    }
+    theirs = {
+        one.title_id: one.score
+        for one in (await service.search("vacuum", limit=10, user_id=household)).results
+    }
+
+    assert set(anonymous) == {series.id, film.id} == set(theirs)
+    # Scores rather than positions, because the two names do not tie on
+    # `ts_rank` and a rank-0/rank-1 gap is 0.35 against a watch-state weight of
+    # 0.02 -- an ordering assertion here would be an assertion about full-text
+    # scoring. What the household changes is the *gap*, and it changes it in
+    # both directions at once: the series gains the boost, and the film gains a
+    # present-and-zero signal that renormalises its score down.
+    assert theirs[series.id] > anonymous[series.id]
+    assert theirs[film.id] < anonymous[film.id]
+    assert theirs[series.id] - theirs[film.id] > anonymous[series.id] - anonymous[film.id]
+
+
+@pytest.mark.integration
 async def test_a_search_that_matches_nothing_costs_no_hydration(session: AsyncSession) -> None:
     """The empty-candidate guard, where it is observable. Fails: a `_rank` that
     issues `list_by_ids([])` and `owned_title_ids([])` anyway -- two statements
@@ -362,3 +595,119 @@ async def test_a_search_that_matches_nothing_costs_no_hydration(session: AsyncSe
 
     assert answer.results == ()
     assert len(seen) == 1, f"{len(seen)} statements for a search that matched nothing: {seen}"
+
+
+@pytest.mark.integration
+async def test_the_analytics_row_is_committed_and_a_second_session_can_read_it(
+    postgres_url: str,
+) -> None:
+    """**The commit, observed from outside the transaction that made it.**
+
+    Every repository in this project flushes and never commits, so a
+    `search_queries` row written inside a search is this session's own
+    uncommitted work until somebody commits it -- and a search writes nothing
+    else, so there is no later write to carry it. `api/deps.get_session`
+    happens to commit when a handler returns; `cli._session_for` disposes its
+    engine without ever committing, which is the root that would lose the row
+    silently. So `SearchService` commits, and this is what says the commit is
+    real rather than "visible within the same still-open transaction" --
+    reading back through the *same* session would pass against a service that
+    only flushed.
+
+    **The second arm is the control that makes the first one a claim about the
+    commit.** The identical search over the identical fixture with a no-op
+    commit leaves the row invisible to a third session and then rolled back, so
+    the difference between the two arms is exactly one `await commit()`. The
+    sweep that makes this worth a case rather than a convention is
+    `QueryExpansionService`'s: **a deleted `commit()` survived 42 cases.**
+
+    Its own engine rather than the per-test `session` fixture, for
+    `test_a_write_is_invisible_to_a_second_session_until_the_caller_commits`'
+    reason: that fixture's isolation is a transaction the harness rolls back,
+    so committing on it would leave rows behind for every later case in this
+    session-scoped container.
+    """
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    household = new_id()
+    name = f"search-analytics-{household}"
+    try:
+        async with factory() as setup:
+            await setup.execute(
+                text("INSERT INTO users (id, name) VALUES (:id, :name)"),
+                {"id": household, "name": name},
+            )
+            await _seed_title(setup, "The Kestrelbound Vacuum")
+            await setup.commit()
+
+        async with factory() as first:
+            answer = await _analytics_service(first).search(
+                "kestrelbound", limit=10, user_id=household
+            )
+            assert len(answer.results) == 1, "the premise: the search answered"
+
+        async with factory() as second:
+            assert await _recorded_queries(second, household) == [("kestrelbound", "full_text", 1)]
+
+        async with factory() as uncommitted:
+            service = _analytics_service(uncommitted, commit=_nothing)
+            assert (
+                len((await service.search("kestrelbound", limit=10, user_id=household)).results)
+                == 1
+            )
+
+        async with factory() as third:
+            # Still one -- the second search flushed a row and nothing made it
+            # durable, so the session above rolled it back on close.
+            assert len(await _recorded_queries(third, household)) == 1
+    finally:
+        async with factory() as cleanup:
+            await cleanup.execute(
+                text("DELETE FROM search_queries WHERE user_id = :id"), {"id": household}
+            )
+            await cleanup.execute(text("DELETE FROM users WHERE id = :id"), {"id": household})
+            await cleanup.execute(
+                text("DELETE FROM titles WHERE name = :name"),
+                {"name": "The Kestrelbound Vacuum"},
+            )
+            await cleanup.commit()
+        await engine.dispose()
+
+
+async def _nothing() -> None:
+    """A commit that does not, so the arm above differs by exactly one call."""
+    return None
+
+
+def _analytics_service(
+    session: AsyncSession, *, commit: Callable[[], Awaitable[None]] | None = None
+) -> SearchService:
+    """`_service`, plus PRD 10's `search_queries` writer over the same session."""
+    return SearchService(
+        PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K),
+        FakePrefixSuggestIndex(),
+        FakeSuggestIndex(),
+        PostgresTitleRepository(session),
+        PostgresMediaItemRepository(session),
+        PostgresWatchStateRepository(session),
+        PostgresTasteRepository(session),
+        PostgresTitleEmbeddingRepository(session),
+        result_limit=100,
+        analytics=SearchAnalytics(
+            queries=PostgresSearchQueryRepository(session),
+            commit=session.commit if commit is None else commit,
+        ),
+    )
+
+
+async def _recorded_queries(
+    session: AsyncSession, household: uuid.UUID
+) -> list[tuple[str, str, int]]:
+    """Every `search_queries` row for one household, oldest first."""
+    rows = await session.execute(
+        text(
+            "SELECT query, mode, result_count FROM search_queries WHERE user_id = :id ORDER BY id"
+        ),
+        {"id": household},
+    )
+    return [(one.query, one.mode, one.result_count) for one in rows]

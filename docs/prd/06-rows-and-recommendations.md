@@ -91,7 +91,9 @@ affinities: Callable[[], Awaitable[Sequence[GenreAffinity]]]
   centroid needs an embedder and the route deliberately holds none, so every
   `GET /home` paid a `user_taste` read for a value that was both unused and
   unusable. A field with no consumer is what this project deletes; the
-  argument is `RowCard`'s absent artwork field, one layer up.
+  argument was `RowCard`'s absent artwork field, one layer up — and M9's
+  `images` is the same argument from the other side, added by the task that
+  first reads it rather than by the task that built the port.
   `test_every_row_context_field_is_read_by_at_least_one_provider` now scans for
   the next one rather than counting.
 - **`affinities` replaced `taste` as the taste signal a row actually reads.**
@@ -122,7 +124,8 @@ So rows are pure functions of context and trivially testable with fakes.
 `BuiltRow` and `RowCard` are Pydantic DTOs (`usher.domain.rows`). `RowCard`
 carries `title_id`, `kind`, `name`, `year`, `enrichment_state`, `owned`, and
 the progress triple `position_seconds` / `runtime_seconds` / `played`, plus ⏳
-`episode_id` / `episode_label` for the two rows that are about a chapter.
+`episode_id` / `episode_label` for the two rows that are about a chapter, plus
+`artwork`.
 
 ⏳ **`title_id` is always the *series*, never the episode**, and the chapter
 rides alongside it. Every other field on the card — `kind`, `name`, `year`,
@@ -135,16 +138,49 @@ composed on the server so the zero-padding is decided once rather than by each
 client — ADR-0006's "the server composes", applied to a string. Both are `None`
 on every card of the other seven rows.
 
-Three fields an earlier draft of this sentence listed are **deliberately
+**`artwork` is one image id, chosen server-side against the row's own
+`display_hint`** — a poster for `portrait`/`square`, a backdrop for
+`landscape`/`wide`. M7 shipped no such field at all, absent rather than null,
+because there was no `Image` entity, no `images` table and no `poster_path` on
+`titles`; M9 built all three (the entity and the natural key, the derivation
+from `raw_payloads`, and `GET /images/{id}`), so the field arrives **populated**
+and the addition is additive to a DTO that never lied about having it.
+
+Three consequences worth stating, because each was a live alternative:
+
+- **An id, never a URL and never a path.** A URL bakes the CDN base and
+  [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)'s ladder rung
+  into a screen a client caches; a path is provider vocabulary. `GET /images/{id}`
+  is where both are decided, and the id survives a re-derivation because
+  `uq_images_owner_provider_path` is the natural key.
+- **One, not a list.** The poster/backdrop choice is keyed on the row's hint,
+  which lives one level above the card — a client cannot make it, and
+  ADR-0006 would not have it make it.
+- **`null` is a real answer**, and on a catalog that has been synced but never
+  derived it is the answer for every card. It is *not* an
+  [ADR-0014](decisions/0014-absence-is-not-zero.md) site: that rule is about a
+  falsy value being read as a measurement, and a UUID has no zero.
+
+A card also paints a poster or a backdrop and **never a logo**, which is why
+ADR-0032's refusal of `image/svg+xml` needs no discriminator here: *"no logo"*
+and *"a logo we will not serve"* would produce the identical rendering anyway.
+🔴 **That sentence read *"the `kind` filter makes an unservable logo
+unreachable from a card"* until 2026-08-11, and the clause is one measurement
+short.** The `kind` filter excludes *logos*; what excludes a **poster or a
+backdrop published as `.svg`** is only the provider's present habit, which is
+an empirical property of TMDb and not a guarantee this code holds. So the
+shelf read filters on `usher.ports.images.is_servable_path` exactly as
+`GET /titles/{id}`'s `images` key does ([07](07-client-api.md)) — two reads of
+one table disagreeing about what is servable is the drift that one definition
+exists to prevent. The degradation is stated rather than discovered: the shelf
+read has **already chosen one image**, so a title whose chosen poster is
+unservable renders `artwork: null` rather than falling through to its second
+poster — which is the same render the paragraph above is about, and which is
+the whole reason a card carries no discriminator instead.
+
+Two further fields an earlier draft of this sentence listed are **deliberately
 absent**, each for a stated reason:
 
-- **artwork refs** — M9 owns the `Image` entity, the `images` table and
-  `GET /images/{id}`. There is no `poster_path` on `titles` either, so the
-  choice was an always-null field or no field, and
-  [ADR-0006](decisions/0006-server-composed-home.md)'s sibling call on
-  `GET /titles/{id}`'s absent `images` key settles it the same way: *"an empty
-  list would be indistinguishable from a film with no cast."* M9 adds the
-  field additively, to a DTO that never lied about having it.
 - **rating** — `watch_states` has no rating column at all, and neither does
   `SourceWatchState`. A `rating` on a card is a field with no source.
 - **progress**, as a fraction — `runtime_seconds` is nullable, so a fraction
@@ -265,6 +301,21 @@ A provider returns nothing when it has nothing to say. The home service collects
 all proposals, sorts by score, applies diversity constraints (no three
 consecutive similarity rows; cap per family), builds the top N
 **sequentially**, drops any that build empty, and returns them.
+
+**Which providers compose is the registry minus what an operator switched off
+(M9).** `services/rows/__init__.py`'s `ROW_PROVIDERS` is still the composition
+point — registration in code is what makes a provider exist — and
+`row_provider_settings` is a table of **overrides** left-joined onto it, written
+only by `PUT /admin/rows/providers/{slug}` ([07](07-client-api.md)). It ships
+empty and is never seeded, so **absence means enabled** and a deployment nobody
+has configured composes exactly the registry. The join is one function, used by
+every composer that exists — `GET /home`, `usher home`, and the background
+screen refresh — because a setting honoured by one root and not another is two
+different products, and a refresh composing the unfiltered registry would write
+the disabled shelf back into the screen cache the toggle just cleared. This is
+*filtering*, never *enumeration*: no composition root names a provider, so the
+eleventh one composes with no wiring change. [09](09-roadmap.md)'s M7 boundary
+call 9 is where the refusal and its expiry condition are recorded.
 
 > **"Concurrently" was wrong and is corrected here rather than implemented**
 > ([09](09-roadmap.md)'s M7 boundary call 8). `AsyncSession` is explicitly not
@@ -735,6 +786,20 @@ Generation runs nightly and on demand:
    proximity where a centroid exists. The pool spans the whole catalog, not
    just the library, so suggestions can include things to seek out.
 
+   ✅ **Settled 2026-08-11: this sentence won a two-year-old disagreement with
+   the prompt, and the prompt was corrected to match it.** `build_prompt`
+   opened *"one household's **own** film and television library"*, a claim only
+   an ownership filter could honour. Measured through the real Postgres
+   repository: a household owning 20 unwatched titles gets a pool of 200 that
+   is **10.0%** owned, one owning none gets a pool that is **0%** owned — and
+   the filter would have added nothing, because `owned DESC` is the first sort
+   key so the pool already contains **every** unwatched-owned title the
+   household has. Its only effect is to delete the tail, and below `min_cards`
+   to delete the generation. Evidence, the arm not taken and the ownership
+   marker priced and declined are in
+   [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s 2026-08-11
+   amendment.
+
    ⏳ **"with ratings" is the fourth site in this document where a rating this
    schema does not have was assumed**, after `RowCard`, `RediscoverProvider`
    and the centroid — and the substitution the Taste section already writes
@@ -760,7 +825,11 @@ Generation runs nightly and on demand:
      `episodes.title_id` so a watched episode takes its series with it, and
      expressed *inside* the statement rather than subtracted after a `LIMIT`.
      Ownership and popularity are **ranking keys**, which is what keeps
-     *"the pool spans the whole catalog"* true. The order is `owned DESC,
+     *"the pool spans the whole catalog"* true — and which M9 Task G3
+     re-confirmed on 2026-08-11 rather than reversing, with the measurement
+     that `owned DESC` being the *first* key makes the owned titles a prefix,
+     so no ownership filter could ever add a candidate this read does not
+     already return. The order is `owned DESC,
      carries an affinity genre DESC, vote_count DESC NULLS LAST, id` — and
      the `id` tail decides **membership** rather than only order, because the
      `LIMIT` falls inside a tie: losing it makes two reads of one unchanged
@@ -781,7 +850,8 @@ Generation runs nightly and on demand:
      vector, a NULL one, or one of another model's width — keeps its exact
      index. That is stronger than "unembedded candidates are not dropped" and
      is chosen for the reason M7 quoted the genome's *candidate-pair* rate
-     (1.81%) rather than its coverage: an artefact whose shape depends on how
+     (1.81%, over 5,020 owned seeds — the population is part of that number)
+     rather than its coverage: an artefact whose shape depends on how
      far `usher index --backfill` has drained is one that changes for reasons
      the household cannot see. The pool is a function of the household, not
      of the embedder.
@@ -923,31 +993,65 @@ curated rows are additive, [08](08-operations.md)'s *"Home composes without
 them"* holds, and a duplicated genre shelf is a disappointment rather than a
 defect.
 
-**Four limits the run named, each recorded rather than fixed:**
+**Four limits the run named, recorded rather than fixed — the first and the
+third have since been settled, both on 2026-08-11, and each bullet says how:**
 
-- ⚠️ **The pool has no ownership *filter*, and the prompt says it does.**
-  `TitleRepository.list_unwatched_candidates` uses ownership as an `ORDER BY`
-  key only — deliberately, so *"the pool spans the whole catalog, not just the
-  library"* above stays true — while `curation_prompt.build_prompt` opens *"one
-  household's **own** film and television library."* On a household whose
-  unwatched-and-owned set is smaller than the pool size, the tail of the pool
-  is titles it does not own, under a sentence asserting it does. The two
-  sentences are each defensible and they disagree; which one gives way is a
-  product decision and is **filed as one**, not settled here.
+- ✅ **The pool had no ownership *filter* and the prompt said it did — settled
+  2026-08-11 by correcting the prompt.** `TitleRepository.list_unwatched_candidates`
+  uses ownership as an `ORDER BY` key only — deliberately, so *"the pool spans
+  the whole catalog, not just the library"* above stays true — while
+  `curation_prompt.build_prompt` opened *"one household's **own** film and
+  television library."* On a household whose unwatched-and-owned set is smaller
+  than the pool size, the tail of the pool was titles it does not own, under a
+  sentence asserting it does. Both sentences were defensible and the fork was
+  filed as a product decision rather than a defect; **M9 Task G3 measured it
+  and the pool won.** A pool-composition sweep through the real Postgres
+  repository (1,000-title catalog, `limit = 200`) found the owned fraction
+  running 0.0% → 1.5% → 2.5% → 4.0% → 10.0% → 100.0% as the household's
+  unwatched-owned set grows 0 → 3 → 5 → 8 → 20 → 200 — **and found that the
+  filter could add nothing**, because `owned DESC` is the first sort key so the
+  pool already carries every unwatched-owned title there is. Filtering is
+  purely subtractive, and at 3 owned titles it leaves a pool that cannot fill
+  one row. The prompt now says some candidates are in the library and some are
+  not, for **+26 prompt tokens once**; a per-candidate ownership marker was
+  priced at **2.9–4.9 tokens a candidate** against a bar of 2.0 declared before
+  the measurement, and **is not rendered** — `RowCard.owned` and
+  [05](05-search-and-similarity.md)'s *"clearly marked"* are the client's half.
+  Full evidence, the arm not taken, and what would reverse the call are in
+  [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s 2026-08-11
+  amendment.
 - ⚠️ **De-duplication is within a row only.** `curation_validate._cards`
   collapses a repeat inside one row and counts it `duplicate`; a title
   appearing on *two* shelves of the same generation is not counted at all. The
   prompt's *"Do not use the same candidate in more than one row"* is the only
   defence, and a prompt rule is not a guarantee — the same thing this section
   says one level up about the grouping instruction.
-- ⚠️ **`min_cards = 5` means a small unwatched pool yields zero rows, every
-  time, at full price.** Rows carried 5–6 cards at pool 200 and **2–3 at pool 5
-  and pool 8**, so every row was discarded as `row_too_short` and the
-  generation was billed and produced nothing. That is
+- ✅ **`min_cards = 5` meant a small unwatched pool yielded zero rows, every
+  time, at full price — settled 2026-08-11 by refusing before the spend.**
+  Rows carried 5–6 cards at pool 200 and **2–3 at pool 5 and pool 8**, so every
+  row was discarded as `row_too_short` and the generation was billed and
+  produced nothing. That is
   [ADR-0014](decisions/0014-absence-is-not-zero.md) working — a padded row
-  would be a fabricated recommendation — and it is also a household that pays a
+  would be a fabricated recommendation — and it was also a household paying a
   completion a night for a permanently empty shelf, with nothing warning the
-  operator before the money.
+  operator before the money. **M9 Task G4 widened the guard
+  `CurationService.generate` already carried for an empty pool**, from
+  `len(pool) == 0` to `len(pool) < min_cards`. That a pool below the floor
+  cannot produce one surviving row is arithmetic rather than a judgement —
+  `_row` discards a row of fewer than `min_cards` *distinct* cards and `_cards`
+  de-duplicates by title id — so the refusal sits in front of `complete_json`,
+  writes no `llm_calls` row, and gives the operator a sentence naming how many
+  candidates were found and what the floor is. `PortDataMalformed` parks the
+  job, exactly as the empty pool has always done, and no setting was added:
+  `min_cards` crosses the prompt, the schema and the validator from one
+  definition. ⚠️ **Priced honestly, this is rare rather than nightly.** The pool
+  is `min(catalog_unwatched, USHER_CURATION_POOL_SIZE)` and ownership is a sort
+  key rather than a filter (the first bullet above), so only a catalog whose
+  *whole* unwatched set is below five ever reaches the guard. Had the ownership
+  filter shipped instead, the same guard would have fired for ordinary small
+  libraries — and a park, which blocks every later enqueue for that household
+  until a human releases it, would have been the wrong disposition for a
+  condition the next sync fixes.
 - ⚠️ **Four of the five `DropReason` members never fired in 20 generations**,
   and under a provider honouring `strict: true` three of them are close to
   unreachable: `unparseable` and `row_unusable` are shape failures guided
@@ -970,8 +1074,8 @@ ran); and no hosted provider was touched at all.
 
 | Layer | Lifetime |
 |---|---|
-| Built rows | ✅ Per-row TTL, in-process — 60 s (Continue Watching, Next Up) to 12 h (Seasonal), each row's own |
-| Composed home screen | ✅ 30 s per user, in-process |
+| Built rows | ✅ Per-row TTL, in-process — 60 s (Continue Watching, Next Up) to 12 h (Seasonal), each row's own. **No stale-serve grace**, and see below for why |
+| Composed home screen | ✅ 30 s per user, in-process, **plus a 60 s stale-serve grace — M9** (`SCREEN_STALE_GRACE`). Between 30 s and 90 s the cached screen is still served and a refresh is scheduled; past 90 s it is a hard miss and the request rebuilds |
 | **Neighbour tables** | ⚠️ **Not rebuilt on anything.** This row was false in M6 and is false now; what changed is that half of it is finally *observable* — see below |
 | Curated rows | ✅ **M8** — 5 min per built row, in-process, on `CuratedProvider`'s rows out of `curated_rows`. Not "until regenerated": the artefact is immutable until a generation replaces it, and this number is how long a household keeps seeing last night's shelf after tonight's replaced it, because the job runs in another process |
 | Taste centroid | ⏳ **Recomputed when the household's `max(watch_states.updated_at)` moves** — a fingerprint, not an event |
@@ -988,18 +1092,46 @@ never blocks on a slow row.
 > **invalidation does not cross processes**, which is the same change as the
 > cross-process `EventPublisher` and is named with it rather than built.
 >
-> **"Served stale while refreshing" is not implemented in M7 and is M9's.** A
-> background refresh needs a session it did not get from a request: the
-> request's own is committed and closed by `get_session`, and sharing it with a
-> task is the `AsyncSession` concurrency hazard [09](09-roadmap.md)'s boundary
-> call 8 refuses one layer up — with the same "usually works" signature. Its
-> own session is a connection outside the request pool's accounting, per stale
-> key, on demand; and `api/lanes.py`'s supervisor is one lane per *source*,
-> enumerable and bounded, where this would be one task per stale key. The
-> payoff is one request per TTL per user, because every other request in the
-> window is already a hit. It lands with `usher.cache.hits`/`.misses`, because
-> a refresh path with no hit/miss metric is a mechanism nobody can see working.
-> **M7 caches and expires.**
+> **"Served stale while refreshing" is built in M9, in neither of the two
+> shapes M7 named as wrong.** Not one task per stale key — unbounded, and in no
+> concurrency table — and not `api/lanes.py`'s per-source granularity, which is
+> bounded on the wrong axis. It is **one `rows.refresh` lane draining one
+> bounded deduplicating queue of stale keys, each refresh on a session of its
+> own through `composition.unit_of_work`, drop-on-full**. M7's reason for
+> deferring stands and is what shapes it: the request's session is committed
+> and closed by `get_session` when the handler returns, and sharing it with a
+> task is the `AsyncSession` concurrency hazard
+> [ADR-0025](decisions/0025-rows-build-sequentially.md) refuses one layer up,
+> with the same "usually works" signature. The queue therefore carries a frozen
+> `User` and nothing request-scoped. Its bound is `REFRESH_QUEUE_SIZE` = 32 keys
+> with one consumer, quoted in [01](01-architecture.md)'s concurrency table.
+>
+> **Three properties, each of which is a different way to get this wrong.**
+> *The screen never waits on it* — the handover is a **synchronous** callable,
+> so there is nothing for a request to await and the spelling that breaks it
+> does not type-check. *The refresh is bounded* — full means **dropped**, never
+> blocked, which is safe because an entry past `TTL + grace` is a hard miss and
+> the next request rebuilds, i.e. exactly what M7 already paid on every expiry.
+> *How stale is too stale* is `SCREEN_STALE_GRACE`, 60 s, in the table above.
+>
+> **The grace window is gated on there being a refresher.** A composer handed
+> none — `usher home`, whose process ends when the command does — serves nothing
+> stale at all, because a stale screen with nothing behind it to replace it is
+> strictly worse than the miss it avoided and is silent.
+>
+> **A stale serve counts as a `usher.cache.hits` point carrying
+> `freshness="stale"`.** A hit because the request paid no rebuild; labelled
+> because a plain hit hides the one thing the feature trades away. See
+> [10](10-telemetry-and-dashboards.md).
+>
+> **Row TTLs are unaffected, and the consequence is worth stating.** A screen
+> refresh re-proposes, re-selects and re-orders while *reusing* every row whose
+> own TTL is still running, so a screen seconds old can carry a five-minute-old
+> `recently-added` shelf. That is the second layer doing its job — rebuilding
+> every row on every 30 s screen expiry is the cost it exists to avoid — and it
+> is why the row half has no grace of its own: the refresh unit is a screen, and
+> a per-row grace with no per-row refresh behind it would serve stale rows that
+> nothing ever replaces.
 >
 > **Invalidation is driven by the push lane and by demand reads, never by the
 > nightly walk** — the same scale argument [07](07-client-api.md) makes for

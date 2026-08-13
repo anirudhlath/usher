@@ -1,6 +1,6 @@
 """In-memory `CollectionRepository`.
 
-**Where this is more forgiving than Postgres, on purpose.** Five places, each
+**Where this is more forgiving than Postgres, on purpose.** Six places, each
 of which the paired `tests/integration/test_collection_repository.py` run is
 what actually closes:
 
@@ -23,6 +23,12 @@ what actually closes:
   *changed* rather than *touched*.
 - **`xmax = 0` has no analogue.** `inserted`/`updated` are dict membership,
   which *is* the answer rather than a measurement of it.
+- **No release date, so `get`'s members come back in insertion order.** The
+  real one orders them `release_date NULLS LAST, year NULLS LAST, title_id`,
+  which is the order a franchise page renders in -- so the shared contract
+  asserts on the member *set* and only
+  `tests/integration/test_collection_repository.py` can assert the sequence.
+  Same divergence `list_owned` already carries, at a second read.
 
 `titles` and `media_items` are test-double affordances written only by
 `FakeCollectionSeeder`; the port never writes either.
@@ -76,6 +82,47 @@ class FakeCollectionRepository(CollectionRepository):
             if one.id == collection_id:
                 return one.name
         raise KeyError(collection_id)
+
+    async def get(self, collection_id: uuid.UUID) -> OwnedCollection | None:
+        self.calls += 1
+        try:
+            name = self._name_of(collection_id)
+        except KeyError:
+            return None
+        # `kind = 'movie'` here as well as in `attach_titles`, and not shared
+        # with it: the real one repeats the clause in a second statement, so a
+        # fake that filtered once would make the second statement's copy
+        # unobservable on this arm.
+        members = [
+            title_id
+            for title_id in self.catalog.order
+            if self.catalog.collection_ids.get(title_id) == collection_id
+            and self.catalog.kinds.get(title_id) is TitleKind.MOVIE
+        ]
+        return OwnedCollection(
+            collection_id=collection_id,
+            name=name,
+            # Insertion order, because this fake has no release date. The
+            # sequence is therefore asserted only in the integration arm; see
+            # the module docstring's sixth divergence.
+            title_ids=tuple(members),
+            owned_title_ids=frozenset(members) & self._owned_titles(),
+        )
+
+    def _owned_titles(self) -> set[uuid.UUID]:
+        """`episode_id IS NULL AND available`, which both reads apply.
+
+        One helper here and **two written-out copies in Postgres**, where
+        `_LIST_OWNED` and `_GET_COLLECTION` are separate statements. That is a
+        divergence worth knowing about rather than tidying: each of those
+        copies has its own contract case, and a mutation to one of them fails
+        only that case there while failing both here.
+        """
+        return {
+            item.title_id
+            for item in self.catalog.media_items
+            if item.episode_id is None and item.available
+        }
 
     async def upsert_many(self, collections: Sequence[Collection]) -> BulkWriteResult:
         self.calls += 1
@@ -135,11 +182,7 @@ class FakeCollectionRepository(CollectionRepository):
 
     async def list_owned(self, *, min_owned: int = 2, limit: int = 5) -> list[OwnedCollection]:
         self.calls += 1
-        owned_titles = {
-            item.title_id
-            for item in self.catalog.media_items
-            if item.episode_id is None and item.available
-        }
+        owned_titles = self._owned_titles()
         members: dict[uuid.UUID, list[uuid.UUID]] = {}
         for title_id in self.catalog.order:
             collection_id = self.catalog.collection_ids.get(title_id)

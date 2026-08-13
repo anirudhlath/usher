@@ -1,4 +1,5 @@
-"""The in-process client event bus (PRD 07's SSE channel).
+"""The in-process client event bus (PRD 07's SSE channel), and the publisher
+that holds a unit of work's events until it commits.
 
 **One rule, and everything here is shaped by it: a subscriber that stopped
 reading may not slow, block, or fail the service that published.**
@@ -37,6 +38,18 @@ real rather than theoretical: `api/routers/events.py` reaches its first
 push lane publishes from another task. Snapshotting the ring in
 `subscribe`, with no `await` between the snapshot and the `add`, is what
 makes the two halves disjoint.
+
+**`DeferredEventPublisher` is the second implementation in this module and
+it is not a transport.** It is an `EventPublisher` that holds what it is
+given and offers it to a real one on demand --
+[ADR-0033](../../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)'s
+ordering rule, made a property of `JobWorker` rather than of each handler.
+It buys **ordering, not durability**: the events it holds live in a list in
+one process, exactly as the bus's own queues do, and a process that dies
+holding them loses them the same way it loses everything else on this
+channel. That is not a gap an outbox table would close here, because the
+job the events belong to dies with them and `startup()`'s `requeue_running`
+re-runs it.
 """
 
 import asyncio
@@ -227,6 +240,100 @@ class InMemoryEventBus(EventPublisher):
             epoch=self._epoch,
             event=ClientEvent(kind=ClientEventKind.RESYNC_REQUIRED, data={"reason": reason}),
         )
+
+
+class DeferredEventPublisher(EventPublisher):
+    """Holds a unit of work's events and offers them once it has committed.
+
+    [ADR-0033](../../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md):
+    **an event is a statement about committed state, and that is a rule about
+    ordering.** Every publisher in `src/` commits the event's own *subject*
+    before it publishes -- measured at all five sites G1 found -- and the
+    enrich path still satisfies only the weaker form, because its unit of work
+    is `JobWorker`'s and closes above it. Wrapping the publisher a worker's
+    handlers are given is what makes the stronger form structural: whoever
+    decides *when* to flush is the code that owns the transaction, and no
+    handler has to remember anything.
+
+    ⚠️ **Not every handler wants that, and `bootstrap` is the one that does
+    not.** E7 added a sixth publish site whose unit of work is its *own* --
+    `BootstrapService` commits per batch and stages nothing for `JobWorker` to
+    close -- so `composition.build_worker` hands that registration the process
+    bus rather than this buffer. Wrapping it would hold a whole run's progress
+    until the run finished, and `discard()` would throw away frames naming
+    batches that really committed. ADR-0033 carries the amendment; the point
+    for a reader here is that this class is the default for a job's frames and
+    not a law about them.
+
+    Three properties, none of them accidental:
+
+    - **`publish` holds and never delivers.** It is an `append`, so it cannot
+      raise and cannot suspend, which is the port's own contract and the one
+      thing `EnrichService` finishing a title at 04:00 depends on.
+    - **`flush` is the only delivery, and it cannot fail its caller.** It runs
+      on a path where the job is already complete and committed, so a
+      publisher breaking `publish`'s never-raises contract must not turn a
+      finished job into a failed one -- the caller has nothing left to undo.
+    - **`discard` is how a failed unit of work lets go.** A rolled-back job's
+      frames name changes that did not happen, and the honest answer is
+      silence plus the re-run `requeue_running` already provides.
+
+    Unbounded, deliberately: the buffer's lifetime is one job, which publishes
+    a handful of events at most, and the caller empties it either way. A bound
+    here would be a second overflow policy beside the bus's own, answering to
+    nobody -- `resync_required` is a statement to *a subscriber*, and this
+    object has none.
+    """
+
+    __slots__ = ("_held", "_inner")
+
+    def __init__(self, inner: EventPublisher) -> None:
+        self._inner = inner
+        self._held: list[ClientEvent] = []
+
+    @property
+    def held(self) -> int:
+        """How many events are waiting on the commit. Zero between jobs."""
+        return len(self._held)
+
+    async def publish(self, event: ClientEvent) -> None:
+        """Hold it. Never raises, never suspends, delivers nothing."""
+        self._held.append(event)
+
+    async def flush(self) -> None:
+        """Offer everything held, in the order it was raised, and let go.
+
+        The list is taken *before* the first delivery rather than cleared
+        after the last, so an inner publisher that published back into this
+        one could not make the loop re-read what it is draining -- and so an
+        exception from the middle of a flush still leaves the buffer empty
+        rather than holding a tail the next job would deliver.
+        """
+        held, self._held = self._held, []
+        for event in held:
+            try:
+                await self._inner.publish(event)
+            except Exception:
+                # The port says `publish` never raises. This is the one
+                # caller that reaches it after a commit it cannot undo, so
+                # the contract being broken has to cost the frame and not
+                # the job -- and it has to be loud, because a channel that
+                # silently stops delivering is `resync_required`'s own
+                # failure mode with nothing to send it through.
+                logger.exception("a client event could not be offered after its job committed")
+
+    def discard(self) -> None:
+        """Drop everything held, because the work it describes did not land.
+
+        Synchronous: it is called from a `finally`, and a cleanup that can
+        suspend is a cleanup that can be cancelled halfway.
+        """
+        if self._held:
+            logger.debug(
+                "dropped {count} client events whose unit of work did not commit",
+                count=len(self._held),
+            )
+            self._held.clear()
 
 
 def _parse_event_id(raw: str) -> tuple[str, int] | None:

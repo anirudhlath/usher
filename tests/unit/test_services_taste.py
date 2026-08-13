@@ -1055,3 +1055,42 @@ async def test_a_history_that_moves_is_re_read_rather_than_answered_from_the_mem
     assert after is not None
     assert _cos(before.vector, a) == pytest.approx(1.0, abs=1e-9)
     assert _cos(after.vector, b) > _cos(after.vector, a)
+
+
+async def test_the_centroid_reads_vectors_unscoped_by_model() -> None:
+    """`TitleEmbeddingRepository.list_for_titles` grew a keyword-only,
+    **optional** `model_name` in M9 (F5). This caller keeps the call it has,
+    and the reason is `centroid`'s own opening line: the model is read off the
+    *embedder*, and the window's vectors are whatever is stored for the titles
+    the household engaged with.
+
+    Scoping it here would look like an improvement and would change what a
+    centroid *is*: mid-swap, the window's already-re-embedded titles would be
+    the only contributors, so the mean would be taken over whichever subset the
+    backfill happened to have reached — a well-formed unit vector computed from
+    a job queue's progress, and `title_count` would report it as though it were
+    a fact about the household.
+
+    Fails: `list_for_titles(ids, model_name=model_name)`, which is one keyword
+    and which no assertion about the returned angle can see, because on a
+    single-model fixture the two spellings answer identically.
+    """
+    house = _Household()
+    a, _ = planted_pair(math.pi / 2)
+    for _ in range(5):
+        await house.watched(a)
+    asked: list[str | None] = []
+    original = house.embeddings.list_for_titles
+
+    async def _recorded(
+        title_ids: Sequence[uuid.UUID], *, model_name: str | None = None
+    ) -> dict[uuid.UUID, tuple[float, ...]]:
+        asked.append(model_name)
+        return await original(title_ids, model_name=model_name)
+
+    house.embeddings.list_for_titles = _recorded  # type: ignore[method-assign]
+
+    centroid = await house.service().centroid(USER)
+
+    assert centroid is not None, "the premise: this household has a centroid to compute"
+    assert asked == [None], "the premise plus the claim: one read, and it named no model"

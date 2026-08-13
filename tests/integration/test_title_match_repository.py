@@ -173,14 +173,34 @@ async def test_a_batch_costs_a_bounded_number_of_statements(
 async def test_name_year_matching_uses_the_expression_index(
     session: AsyncSession, catalog: TitleCatalog
 ) -> None:
-    """`ix_titles_name_lower_year` is on `(lower(name), year)`. A query that
-    lowercases the *probe* instead of the column cannot use it, and the fake
-    -- which matches on `name.lower()` in Python -- agrees with either
-    spelling. Only the plan tells them apart.
+    """A query that lowercases the *probe* instead of the column cannot use an
+    expression index on `lower(name)` at all, and the fake -- which matches on
+    `name.lower()` in Python -- agrees with either spelling. Only the plan
+    tells them apart.
 
     Explains the repository's own statement, binds and all, rather than a
     hand-copied lookalike: a plan assertion about a query nothing issues reads
     like coverage and is worse than none.
+
+    **Asserted on the `Index Cond`, not on an index name, and that is a
+    correction `m09a` forced.** This read `"ix_titles_name_lower_year" in
+    plan` while that was the only expression index on `lower(name)`; `m09a`
+    added a second (`ix_titles_name_lower_prefix`, `lower(name)
+    text_pattern_ops`, tier 1 of the two-tier suggest), whose opclass family
+    contains `=`, so the planner may serve this equality from either. The
+    `Index Cond` is the property the case is actually about and it is strictly
+    stronger than a name: an index name in a plan does not prove the *column*
+    was the thing lowercased.
+
+    **The swap costs nothing, measured rather than assumed.** On
+    `pgvector/pgvector:pg17` at 200,000 titles, `EXPLAIN (ANALYZE, BUFFERS)`
+    over this exact statement: `ix_titles_name_lower_prefix` gives
+    `cost=0.42..8.45`, **4 buffers, 0.031 ms**, and dropping it so
+    `ix_titles_name_lower_year` must serve gives `cost=0.43..8.45`, **4
+    buffers, 0.031 ms** -- byte-identical plans below the index node. The
+    narrower index wins the tie because it is one column narrower; the
+    two-column one remains the only one that can also serve the `year`
+    predicate from the index, which is why both are kept.
     """
     for index in range(_PLAN_ROWS):
         await catalog.given_title(
@@ -198,7 +218,7 @@ async def test_name_year_matching_uses_the_expression_index(
         .scalars()
         .all()
     )
-    assert "ix_titles_name_lower_year" in plan, plan
+    assert "Index Cond: (lower(name) = lower(p.name))" in plan, plan
     assert "Seq Scan on titles" not in plan, plan
 
 

@@ -37,6 +37,9 @@ in three other files, each of which passed in isolation.
 """
 
 import asyncio
+import gzip
+import json
+import pathlib
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -49,14 +52,18 @@ from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import usher.composition
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.streaming_asgi_transport import StreamingASGITransport
 from usher.api.app import create_app
 from usher.api.lanes import LaneSupervisor
-from usher.composition import DefaultUserId, unit_of_work
+from usher.composition import DefaultUserId, run_bootstrap, unit_of_work
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
+from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.repositories.title import PostgresTitleRepository
+from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
@@ -181,15 +188,37 @@ class _CommittedStateProbe(EventPublisher):
     own session** -- a different connection, in a different transaction --
     cannot see an uncommitted write, so the wrong order is a recorded
     `stub` rather than a flaky refetch.
+
+    **It records the rows the handler *wrote*, not only the row the event is
+    about**, and the two answer different questions.
+    `titles.enrichment_state` answers *"was the client told too early?"* --
+    it is the subject of the frame, and the whole `?titles=` contract is that
+    a client may refetch it. The `jobs` rows answer *"what is still open at
+    the instant of the frame?"*, which is
+    [ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)'s
+    subject: the enrich handler stages two `BACKFILL` requests
+    (`enrich.py:270-277`) into a transaction that is `JobWorker`'s rather
+    than its own, and that transaction does not close until
+    `complete(job.id)` + `_commit()` (`jobs.py:143-147`).
+
+    **Until G2 those two reads disagreed, and now they cannot.** This probe
+    recorded `[('enrich', 'running')]` -- the handler's own claim and neither
+    of the jobs it had just enqueued -- because the frame was offered from
+    inside that window. The worker now holds the frame until the window is
+    closed, so the same read on the same second connection is the state a
+    client can act on: the enqueues committed, and the claim gone with the
+    `DELETE` that completed it.
     """
 
     def __init__(self, inner: EventPublisher, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._inner = inner
         self._sessions = sessions
         self.seen: list[tuple[ClientEventKind, str | None]] = []
+        self.jobs_seen: list[list[tuple[str, str]]] = []
 
     async def publish(self, event: ClientEvent) -> None:
         committed: str | None = None
+        jobs: list[tuple[str, str]] = []
         if event.title_id is not None:
             async with self._sessions() as session:
                 committed = (
@@ -198,7 +227,17 @@ class _CommittedStateProbe(EventPublisher):
                         {"id": event.title_id},
                     )
                 ).scalar_one_or_none()
+                jobs = [
+                    (row[0], row[1])
+                    for row in (
+                        await session.execute(
+                            text("SELECT kind, status FROM jobs WHERE key = :key ORDER BY kind"),
+                            {"key": str(event.title_id)},
+                        )
+                    ).all()
+                ]
         self.seen.append((event.kind, committed))
+        self.jobs_seen.append(jobs)
         await self._inner.publish(event)
 
 
@@ -259,17 +298,25 @@ async def _read_frame(lines: AsyncIterator[str]) -> str:
         collected.append(line)
 
 
-async def _wait_for_subscriber(bus: InMemoryEventBus) -> None:
+async def _wait_for_subscriber(bus: InMemoryEventBus, *, count: int = 1) -> None:
     """The route subscribes inside its response generator, so the
     subscription lands when the first chunk is produced rather than when the
     request returns. Publishing before it lands is a publish to nobody, and
     this project has already had one concurrency case time out on exactly
-    that harness bug rather than on the code it was written for."""
+    that harness bug rather than on the code it was written for.
+
+    `count` is for the two-subscriber case below, where waiting for *one*
+    would let the bootstrap start with the filtered stream not yet attached
+    -- and "the filtered subscriber saw nothing" would then be true for the
+    wrong reason, which is the failure that case's liveness control exists
+    to make impossible."""
     for _ in range(400):
-        if bus.subscribers >= 1:
+        if bus.subscribers >= count:
             return
         await asyncio.sleep(0.005)
-    raise AssertionError("no subscriber appeared on the bus; this case would measure nothing")
+    raise AssertionError(
+        f"fewer than {count} subscribers appeared on the bus; this case would measure nothing"
+    )
 
 
 async def _job_xmin(sessions: async_sessionmaker[AsyncSession], key: uuid.UUID) -> str | None:
@@ -345,6 +392,14 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
     # lane between the two, which is an accident of the harness rather than
     # a property of the code. On a host where the commit won that race, the
     # refetch would be green and this line would still be red.
+    # **The positive control, before any claim is read out of the probe.** A
+    # publisher that never ran records nothing, and every assertion about
+    # what it saw then passes vacuously -- `[] == []`. Measured while writing
+    # ADR-0033: the sibling harness for `push._apply_items` recorded exactly
+    # that, because the fixture had seeded no title the match ladder could
+    # find, and read as a result it would have said "the availability event
+    # publishes nothing".
+    assert probe.seen, "the probe recorded no publish at all; nothing below measures anything"
     assert probe.seen == [(ClientEventKind.TITLE_UPDATED, "enriched")], (
         "at the instant of the publish, another connection could not yet see the "
         "enrichment -- the publish is happening before the commit"
@@ -352,9 +407,38 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
     assert refetched.json()["enrichment_state"] == "enriched", (
         "the client was told before the enrichment committed"
     )
+    # **The residual window, closed.** ADR-0033 measured its exact contents
+    # -- the two `BACKFILL` requests `enrich.py:270-277` stages and the
+    # `DELETE` that completes the job -- and G2 made the ordering a property
+    # of `JobWorker` rather than of each handler, so the frame is offered
+    # after `complete(job.id)` and its commit. This line read
+    # `[[("enrich", "running")]]` until then: the handler's own claim and
+    # neither of the jobs it had just enqueued.
+    #
+    # **This is the whole of what the change bought, on the wire.** Every
+    # write the unit of work made is committed before the client hears about
+    # it, so a client acting on the frame -- `?titles=` says refetch -- reads
+    # a catalog with no half-finished job in it. It is also the assertion
+    # that would go red first if a future `_run` flushed early, because the
+    # `enrich` row reappears as `running` the instant the flush moves back
+    # inside the window.
+    assert probe.jobs_seen == [[("derive", "pending"), ("index", "pending")]], (
+        "at the instant of the frame every write the job made should be committed -- "
+        "the two BACKFILL enqueues visible and the claim gone with the DELETE"
+    )
     # And the job is gone rather than parked: a lane that "completed" by
     # failing would still have published nothing, but a lane that published
     # and then parked would leave a client told about work that did not land.
+    #
+    # **A single read, and that is G1's bounded poll retired rather than
+    # merely tidied.** `_job_xmin_settles` existed because the client was
+    # told strictly before the completing commit, so this assertion raced it
+    # -- 6 failures in 13 runs unplanted, 5 of 5 with a 0.25 s delay planted
+    # between the handler returning and `complete()`. The frame the test
+    # already read above is now offered *after* that commit, so the state is
+    # committed before the reader can reach this line and there is nothing
+    # left to wait for. Restoring the poll would hide exactly the regression
+    # the line above catches.
     assert await _job_xmin(sessions, stub.id) is None
 
 
@@ -424,3 +508,114 @@ async def test_a_slow_client_is_told_to_resync_and_the_publisher_is_unaffected(
     # this adds is that it stays true with a real response body attached to
     # the other end.
     assert elapsed < 1.0, f"{settings.sse_queue_size * 4} publishes took {elapsed:.3f}s"
+
+
+async def test_a_bootstrap_batch_reaches_an_unfiltered_subscriber_and_never_a_filtered_one(
+    client: httpx.AsyncClient,
+    bus: InMemoryEventBus,
+    sessions: async_sessionmaker[AsyncSession],
+    postgres_url: str,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`bootstrap.progress` on the wire: the row PRD 07's SSE table carried
+    with no milestone against it until M9's E7.
+
+    **Both arms, because "the filtered subscriber saw nothing" is also what a
+    dead subscriber produces.** The filtered stream is proved live by a
+    `title.updated` published after the bootstrap, carrying the title it
+    subscribed to -- without that control this case passes against a route
+    that never subscribed, a bus that dropped everything, and a filter that
+    rejects every frame.
+
+    **Two batches, not one.** `bulk_batch_size=2` over the committed
+    five-row IMDb slice gives three, which is what distinguishes one frame
+    per *batch* from one per *run* -- the `0% to 100%` failure
+    `ReconcileService._publish_progress` already names for `sync.progress`.
+    The frames are read in order and their cursors must ascend, which is the
+    half a set-membership assertion would miss.
+
+    Driven through `composition.run_bootstrap` rather than through
+    `BootstrapService`, so the publisher this case observes is the one the
+    shared dispatch really constructs. Nothing downloads: the same
+    `MockTransport` handler `tests/integration/test_admin_bootstrap.py` uses,
+    over the same committed synthetic slice.
+    """
+    cache = tmp_path / "bulk"
+    cache.mkdir(parents=True)
+    fixtures = pathlib.Path(__file__).parent.parent / "fixtures" / "bulk"
+    for source, name in (
+        ("title.basics.slice.tsv", "title.basics.tsv.gz"),
+        ("title.ratings.slice.tsv", "title.ratings.tsv.gz"),
+    ):
+        (cache / name).write_bytes(gzip.compress((fixtures / source).read_bytes()))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = str(request.url).rsplit("/", 1)[-1]
+        (cache / f"{name}.revision").write_text('"fixture"')
+        return httpx.Response(
+            200, content=(cache / name).read_bytes(), headers={"etag": '"fixture"'}
+        )
+
+    monkeypatch.setattr(
+        usher.composition,
+        "bulk_client",
+        lambda _: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    watched = uuid.uuid4()
+
+    try:
+        async with (
+            client.stream("GET", "/events") as everything,
+            client.stream("GET", f"/events?titles={watched}") as detail,
+        ):
+            unfiltered = aiter(everything.aiter_lines())
+            filtered = aiter(detail.aiter_lines())
+            await _wait_for_subscriber(bus, count=2)
+
+            async with sessions() as session:
+                await run_bootstrap(
+                    PostgresBulkCatalogRepository(session),
+                    PostgresImportRunRepository(session),
+                    session.commit,
+                    Settings(
+                        database_url=postgres_url,
+                        secret_key=SECRET_KEY,
+                        bulk_data_dir=cache,
+                        bulk_batch_size=2,
+                    ),
+                    BootstrapPhase.IMDB,
+                    report=lambda _: None,
+                    events=bus,
+                )
+
+            first = await asyncio.wait_for(_read_frame(unfiltered), timeout=BOUND)
+            second = await asyncio.wait_for(_read_frame(unfiltered), timeout=BOUND)
+
+            # The liveness control for the filtered arm, published *after*
+            # the bootstrap so the frames it must not have seen are already
+            # behind it in the same stream's ordering.
+            await bus.publish(ClientEvent(kind=ClientEventKind.TITLE_UPDATED, title_id=watched))
+            control = await asyncio.wait_for(_read_frame(filtered), timeout=BOUND)
+    finally:
+        async with sessions() as cleanup:
+            await cleanup.execute(text("DELETE FROM titles WHERE imdb_id LIKE 'tt99%'"))
+            await cleanup.execute(text("DELETE FROM import_runs WHERE dataset LIKE 'imdb.title.%'"))
+            await cleanup.commit()
+
+    assert "event: bootstrap.progress" in first, first
+    assert "event: bootstrap.progress" in second, second
+    opening = json.loads(first.split("\n")[2].removeprefix("data: "))
+    following = json.loads(second.split("\n")[2].removeprefix("data: "))
+    assert opening["dataset"] == "imdb.title.basics"
+    assert opening["phase"] == "imdb"
+    assert "title_id" not in opening, "an admin frame with a title id is a detail screen's problem"
+    assert following["position"] > opening["position"], (
+        "the premise: two batches, so this is one frame per batch and not one per run"
+    )
+    assert following["rows_seen"] > opening["rows_seen"]
+
+    # The filtered subscriber's very first frame is the control, which is
+    # only true if it received none of the bootstrap frames before it.
+    assert "event: title.updated" in control, control
+    assert str(watched) in control

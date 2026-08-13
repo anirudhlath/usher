@@ -331,9 +331,44 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 |---|---|---|
 | **Push** | WebSocket event | **Apply it inline when it is small; defer to a delta when it is large.** A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk instead, because a request per item against a 1,126,789-item library is a design defect rather than a slow path |
 | **Reconnect delta** | Socket re-established | Items changed since the last cursor. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds |
-| **Full reconcile** | Nightly | Walk the source; upsert everything; mark unseen items `available = false` |
+| **Full reconcile** | Nightly, or an operator's `POST /admin/sources/{id}/sync` (M9) | Walk the source; upsert everything; mark unseen items `available = false` |
 
 Polling is the backstop, not the design.
+
+**A triggered sync is a queued job, never a walk run inside the request.**
+M9's E3 delivers the route as `JobKind.SYNC`: the handler is `usher sync`'s
+own body — the item lane, then the watch lane, in that order, over one
+adapter closed in a `finally` — run by the worker rather than by the request
+that asked for it, for the reason `api/deps.py`'s `get_reconcile_service`
+already states one layer down: *"a reconcile checkpoints and commits per
+batch, so a route that drove a six-hour walk inside one request would be
+committing the request's session repeatedly before the handler returned."*
+The route's own 202 promises the row is queued and nothing about how soon it
+runs — [08](08-operations.md)'s job-reliability section prices the
+consequence, a single worker lane shared with every other queued kind.
+
+**A third caller of `reconcile()` already existed before this route did, and
+the design is safe against it by construction rather than by coincidence.**
+The Reconnect-delta row above — `LaneSupervisor._close_gap` — runs the
+identical pair (`reconcile.reconcile(source, DELTA, adapter)`, then
+`watch.sync(...)`) on its own adapter whenever a source's push socket comes
+back, entirely independently of the job queue; and `usher sync` has always
+been a third way to trigger the same pair, from a second process. So a
+triggered `sync` job can genuinely run concurrently with the push lane's own
+gap-closer, or with an operator's cron — this route adds a caller, not a new
+kind of overlap. Three things already make that safe rather than merely
+survivable, all pre-dating this route: the availability sweep only ever runs
+on a **full** walk, so two concurrent **delta** walks (the reconnect lane's
+only kind, and this route's default) never race on retraction at all; every
+write is an upsert keyed on `(source_id, external_id)`, so two walks
+observing the same item at nearly the same instant converge rather than
+conflict; and the sweep's own predicate is purely time-based
+(`last_seen_at < run.started_at`), so a concurrent walk that observes an item
+*after* another run's `started_at` is read as "still there" by that run's own
+sweep regardless of which task wrote it. A `full` sync requested through this
+route while the push lane happens to be closing a gap on the same source is
+therefore not a new failure mode this route introduces; it is the existing
+concurrent-walk safety argument exercised by a fourth caller.
 
 **A push `ITEM_REMOVED` retracts nothing.**
 [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
@@ -596,8 +631,8 @@ mostly offline.
 
 ### 3. Enrich
 
-One TMDb request per title, plus per-season episode fetches for series, and
-sets `field_provenance`.
+One TMDb request per title — for a series that one request carries the whole
+season hierarchy, see the table below — and sets `field_provenance`.
 
 **The `append_to_response` list is not the same for both id spaces**, which
 is a correction to what this section said before M4 built the adapter:
@@ -614,26 +649,51 @@ successful.
 | Kind | Request |
 |---|---|
 | movie | `GET /movie/{id}?append_to_response=credits,keywords,images,videos,external_ids,release_dates` |
-| series | `GET /tv/{id}?append_to_response=credits,keywords,images,videos,external_ids,content_ratings`, then `GET /tv/{id}/season/{n}` per season |
+| series | `GET /tv/{id}?append_to_response=credits,keywords,images,videos,external_ids,content_ratings,season/0,…,season/13` — one request, seasons and episodes included; listed seasons outside that window cost `ceil(n/20)` follow-ups carrying only `season/N` items, so a series costs `1 + ceil(n/20)` requests and **not** a flat two |
 
 Two facts about that second row, both measured live on 2026-08-01 and both
 consequential enough to state here rather than in an adapter docstring:
 
 - **`credits` is a valid TV namespace** (`aggregate_credits` exists
   alongside it and is *also* valid — it is a second view, not a replacement).
-- **`append_to_response=season/N` works**, so the per-season requests in
-  that row are optional rather than necessary. One request carrying
+- **`append_to_response=season/N` works**, so a series costs one request
+  rather than one per season. One request carrying
   `credits,keywords,images,videos,external_ids,content_ratings` plus
   `season/0…season/13` — exactly TMDb's documented 20-item ceiling, which is
   enforced with an HTTP 400 at 21 — returned Game of Thrones' entire
   hierarchy, all 373 episodes across 9 seasons, in place of the ten requests
-  the row above costs. A season the series does not have is silently omitted
-  rather than erroring, and the appended block is byte-identical to the
-  season's own detail response but for a missing top-level `id`, which the
-  series' own `seasons[]` summary already carries. **This is recorded and
-  not yet taken**: it is a change to this row, to the adapter's `fetch`, and
-  to the request-budget arithmetic in [04](04-catalog-bootstrap.md), and it
-  belongs in its own change rather than folded into a verification run.
+  the `1+N` shape cost. A season the series does not have is silently omitted
+  rather than erroring, which is what makes a blind window legal, and the
+  appended block is byte-identical to the season's own detail response but
+  for a missing top-level `id`, which the series' own `seasons[]` summary
+  already carries. **Taken, and this row is it.** TMDb permits any integer
+  season number, so the blind window is reconciled against the `seasons[]`
+  summary the same response carries and any listed number it missed is
+  fetched by a follow-up; a follow-up spends no slot on a namespace, so it
+  gets all twenty. Identity with the `1+N` payload is the contract — the
+  block is merged over the summary exactly as the per-season response was,
+  and no `season/N` key survives into `raw_payloads`. The request-budget
+  arithmetic is in [04](04-catalog-bootstrap.md).
+
+**The shipped path was verified against the live API on 2026-08-11, and it
+refuted the follow-up count this section used to state.** 14 series carrying
+306 listed seasons, plus 2 movies as a control, each fetched down both the
+shipped path and the `1+N` path it replaced. Identity held **exactly** — all
+14 composed payloads equal field for field — so the property the whole change
+rests on is now measured against TMDb and not only against fixtures. But *"a
+follow-up"* was singular in two places here and *"a second request"* is how
+[04](04-catalog-bootstrap.md) put it, and the real count is
+**`1 + ceil(n/20)`, where `n` is the listed seasons numbered 14 and up**: 1, 2,
+3, 4 and 5 requests were all observed, five of them on a 74-season series, and
+the only bound is the size of the upstream `seasons[]` array. Confirmed
+unchanged by the same run: the 20-item ceiling (21 is a 400, 20 is a 200), the
+silent omission of an unlisted season number, and an appended block differing
+from the season route's own response by the top-level `id` and nothing else —
+now over 306 seasons rather than three.
+`.claude/rules/tmdb-and-enrichment.md` carries the run guess by guess,
+including the two questions it could **not** settle: no listed season was ever
+omitted from the append (0 in 306, 626 with the earlier run) and none was ever
+refused by its own route, so both stay unverified rather than confirmed.
 
 The same divergence runs through the field names (`title`/`name`,
 `release_date`/`first_air_date`, `keywords.keywords`/`keywords.results`, a
@@ -776,20 +836,39 @@ a stage described only by what it does reads as one that does everything:
   is worth a paragraph in the PRD: it is a *class* of bug this pipeline keeps
   producing.
 
-### 5. Derive — people, credits and collections, with no second network call
+### 5. Derive — people, credits, collections and artwork, with no second network call
 
-✅ **Shipped in M7**, and it is the stage this section previously described
-only as a promise: *"`Person`, `Credit` and `Collection` are populated by the
-milestone that first reads them"* named no mechanism, no job kind and no
-command. All three now come out of `raw_payloads` — `DeriveService`,
-`JobKind.DERIVE` and its handler, and `usher derive` on the command line.
+✅ **Shipped in M7 and completed in M9**, and it is the stage this section
+previously described only as a promise: *"`Person`, `Credit` and `Collection`
+are populated by the milestone that first reads them"* named no mechanism, no
+job kind and no command. All four now come out of `raw_payloads` —
+`DeriveService`, `JobKind.DERIVE` and its handler, and `usher derive` on the
+command line. **`Image` is M9's addition and it needed no new anything**: the
+same walk, the same page, the same transaction, the same job and the same
+command, so an operator gets artwork references from `usher derive --backfill`
+with no second crawl. `usher derive --backfill` prints an `images written`
+count beside the other four.
 
 **No second network call**, which is [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)'s
 whole point arriving three milestones after the cache was built, and M4's
-boundary call 2 paying off: the payloads the enrichment crawl already fetched
-carry `credits`, `created_by` and `belongs_to_collection`, so re-deriving is a
-read of a local table. A household that enriched its library last year can
-derive today, offline.
+boundary call 2 paying off in full: the payloads the enrichment crawl already
+fetched carry `credits`, `created_by`, `belongs_to_collection` and `images`, so
+re-deriving is a read of a local table. A household that enriched its library
+last year can derive today, offline. **Artwork is the entity that makes that a
+property rather than a slogan**, because it is the one a reader expects to need
+a request: the derived rows carry a provider *path*, and fetching the bytes is
+the serve-time proxy's job
+([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)) rather than
+this stage's.
+
+⚠️ **Expect a small `images written` against a large cache, and it is the age
+of the cache rather than a defect.** `images` is one of the six
+`append_to_response` namespaces, so only payloads fetched with it derive a
+full set — but `poster_path` and `backdrop_path` are top-level detail fields
+rather than part of that namespace, so **every** cached payload derives the two
+references M9's two artwork consumers actually render. The rest are language
+variants, and a per-kind cap keeps a popular film's hundred posters from
+becoming a hundred rows.
 
 **The join back is the trap, and it is a data-integrity one rather than a
 performance one.** `raw_payloads` has no `title_id` — it is keyed by the
@@ -813,19 +892,67 @@ payloads, titles carrying credits, people and collections; `usher derive
 --backfill` re-derives inline rather than enqueueing, because a derivation is
 a local read and a queue in front of it buys latency and a second failure
 mode. It also maintains `titles.credit_names`, weight class B's denormalised
-input, in the same call and the same transaction that writes `credits` — one
-writer, so the two
-cannot disagree ([05](05-search-and-similarity.md)).
+input, in the same call and the same transaction that writes `credits`, so
+the two cannot disagree ([05](05-search-and-similarity.md)).
 
-⏳ **`alternative_titles` is not derived, because it is not in the cache**, and
-this is named here rather than left implied by the deferral it blocks.
-It appears in neither `append_to_response` list above, so aliases are not in
-`raw_payloads` at all — landing them changes the crawl's *request shape* and
-re-fetches the whole enriched tier, i.e. it is a metadata-provider change
-wearing a search table's name. It is the blocker on
-[05](05-search-and-similarity.md)'s `title_search_names`, and it is
-**unassigned**: M9 owns the people half of that table and nothing owns this
-one.
+✅ **`credit_names` has a second source as of M9, and the two partition the
+catalog rather than sharing it.** IMDb's `title.principals` joined to
+`name.basics` fills the column for every title this crawl has *not* reached,
+with **no API call at all** — 1,192,217 of 1,271,138 titles (93.8%) gain a
+mean of 9.11 names. The rule is one predicate: `BulkCatalogRepository
+.fill_credit_names` writes only where `enrichment_state = 'skeleton'`, so a
+title TMDb has enriched is TMDb's, permanently and in both directions — a
+skeleton IMDb filled is overwritten by the derivation that later reaches it,
+and never flapped back. That is what keeps the paragraph above true across a
+second writer that holds no `credits` row: a skeleton has no `raw_payloads`,
+so it has no `credits` for its array to disagree with.
+
+**No `people` and no `credits` row is bulk-loaded from IMDb**, which is what
+M9 shipped. ⚠️ **Two of the three reasons this paragraph gave for it do not
+survive scrutiny, and they are corrected here rather than left standing.**
+
+- **The size measurement is real; the ceiling it failed was not.** The entity
+  design measured **2.702 GB** (2.395 GB stripped to five columns) against a
+  **2.0 GB** bar derived from [08](08-operations.md)'s `~8–12 GB` figure — one
+  row of a table titled *Resource envelope*, which is a sizing estimate for an
+  operator and not a constraint anything enforces. Measured on the host on
+  2026-08-12: **784 GB free**, so the design was refused at 0.34% of available
+  space. Pre-registering the bar was right; the number had nothing behind it.
+- **People *can* be merged across the two sources on an id.** This paragraph
+  previously said they could not, "at all". That overstates
+  `.claude/rules/bootstrap-and-datasets.md`, which states it correctly: a TMDb
+  `credits.cast[]`/`crew[]`/`created_by[]` entry carries no `nconst`, so people
+  cannot be merged **without a second request each**. The qualifier was dropped
+  one hop up and "expensive" became "impossible". Verified live 2026-08-12:
+  `GET /person/6193/external_ids` answers `imdb_id: nm0000138`. The cost is
+  **1,536,654 distinct TMDb person ids** across the 5,614,150 credit rows of
+  the 130,678 enriched titles — roughly **23 hours** at the 18.3 req/s the M9
+  enrichment sustained, one-time, batchable and resumable.
+- **The dedup gap is real and stands.** `credits`' only unique key is
+  `tmdb_credit_id`, NULL on every IMDb row, so the table cannot deduplicate an
+  IMDb load. That is a missing natural key rather than a property of the data.
+
+The name *text* is the part of a person weight class B indexes, so M9 wrote the
+names and not the entities, and that shipped state is unchanged by the above.
+Whether the entities follow is reopened, not settled here.
+
+✅ **`alternative_titles` is still not derived and no longer blocks anything,
+because M9 took the aliases from IMDb instead.** It appears in neither
+`append_to_response` list above, so aliases are not in `raw_payloads` at all —
+landing them there would change the crawl's *request shape* and re-fetch the
+whole enriched tier, i.e. it is a metadata-provider change wearing a search
+table's name, and that argument is unchanged. What changed is that it is no
+longer the only route: IMDb's `title.akas` is an alias source needing **no API
+call at all**, and `BulkCatalogRepository.replace_aliases` fills
+[05](05-search-and-similarity.md)'s `title_search_names` from it —
+**1,663,364 deduplicated aliases over 399,046 of 1,271,138 titles (31.4%)**,
+with `region` and `language`, at no cost to this crawl.
+
+**So this paragraph is now a statement about TMDb's payload and not a
+deferral.** If `alternative_titles` is ever wanted it is for what IMDb does not
+supply (a TMDb-side `type` vocabulary, and coverage for titles with no IMDb
+id), and that is a metadata-provider decision with its own re-fetch cost —
+not an obligation this table is waiting on.
 
 ## Watch state
 

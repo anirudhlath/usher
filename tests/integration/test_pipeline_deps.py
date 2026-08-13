@@ -23,6 +23,7 @@ from asgi_lifespan import LifespanManager
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.api.app import create_app
 from usher.api.deps import (
@@ -33,6 +34,7 @@ from usher.api.deps import (
     get_default_user_id,
     get_episode_repository,
     get_home_service,
+    get_image_repository,
     get_ingest_service,
     get_job_queue,
     get_match_service,
@@ -42,6 +44,9 @@ from usher.api.deps import (
     get_reconcile_service,
     get_row_cache,
     get_row_context,
+    get_search_service,
+    get_session,
+    get_similarity_service,
     get_source_repository,
     get_sync_run_repository,
     get_taste_repository,
@@ -57,6 +62,7 @@ from usher.api.deps import (
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.users import DEFAULT_USER_NAME
+from usher.services.search import SearchService, SuggestTier
 
 _PROVIDERS = {
     "titles": get_title_repository,
@@ -99,12 +105,32 @@ _PROVIDERS = {
     # `taste` service, awaited later by the one provider that reads them). Two
     # counts of two different things, one sentence.
     "curated_rows": get_curated_row_repository,
+    # M9's, and the eleventh `Depends` on `get_row_context` -- `RowCard.artwork`
+    # is read through it by `BaseRow.hydrate` rather than by any one provider.
+    # Here for the same reason `curated_rows` is: a dependency annotated
+    # without `Depends` raises `FastAPIError` at route registration, which no
+    # unit test overriding `get_row_context` can see.
+    "images": get_image_repository,
     "taste_repository": get_taste_repository,
     "default_user": get_default_user,
     "taste_service": get_taste_service,
     "row_context": get_row_context,
     "row_cache": get_row_cache,
     "home_service": get_home_service,
+    # M9's `GET /titles/{id}/similar`, over finished M6 wiring. Resolved
+    # through FastAPI's own graph for the reason every provider above is:
+    # `get_similarity_service` takes `session.commit` as a bound method, which
+    # only exists once `SessionDep` has resolved a real session, and a plain
+    # call cannot reach that failure mode.
+    "similarity_service": get_similarity_service,
+    # M9's `GET /search`, and the first provider here that reaches its
+    # collaborators through `usher.composition` rather than naming them: the
+    # import-linter contract that keeps `PostgresSearchIndex` inside its
+    # package lists `usher.api` whole, so `api/deps.py` cannot construct one.
+    # That indirection is exactly the shape this file exists for -- a factory
+    # whose signature drifted would still import cleanly and would 500 at
+    # request time.
+    "search_service": get_search_service,
 }
 
 
@@ -153,8 +179,10 @@ async def test_every_pipeline_provider_resolves_in_a_request(probe: AsyncClient)
                 "Title",
                 "Row",
                 "Home",
+                "Search",
                 "Taste",
                 "User",
+                "Similarity",
             )
         )
 
@@ -318,3 +346,115 @@ async def test_the_reconcile_service_carries_this_deployments_tuning(
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             body = (await client.get("/_probe/tuning")).json()
     assert body == {"batch_size": 7, "max_retract_fraction": 0.5}
+
+
+async def test_the_search_service_the_graph_resolves_holds_both_suggest_tiers(
+    postgres_url: str,
+) -> None:
+    """**A `Depends` graph that resolves is not a graph that wired the right
+    objects, and the two suggest tiers are the case where those come apart.**
+
+    `SearchService` takes two `SuggestIndex` collaborators, adjacent and
+    identically typed. A `build_search_service` that handed
+    `PostgresSuggestIndex` to both slots resolves, constructs, passes mypy,
+    passes every unit case in `tests/unit/test_api_suggest.py` (its fakes are
+    two objects whatever the factory does), and answers a plausible box on
+    both tiers -- while `?tier=prefix`, the default on the keystroke path,
+    quietly costs 33.6 ms p50 instead of the btree probe it was designed to
+    be, and gains a typo tolerance ADR-0031 says it does not have.
+
+    So this asserts the **types**, which is the only thing that separates the
+    two wirings at the point of construction. The behavioural half is
+    `tests/integration/test_search_route.py::
+    test_the_two_tiers_are_two_indexes_in_the_composed_graph`, which proves
+    each one runs its own statement against the real schema; neither subsumes
+    the other -- a swap of the two arguments passes this case and fails that
+    one, and a factory that built the right pair and never handed it over
+    fails this one first.
+
+    Reaching a private attribute is deliberate and is the narrower of the two
+    options: the alternative is a public accessor on `SearchService` that
+    exists only for a test, on a class whose whole design is that nothing
+    above it holds an index.
+    """
+    app = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
+    seen: dict[str, str] = {}
+
+    def route(service: Annotated[SearchService, Depends(get_search_service)]) -> dict[str, str]:
+        seen.update({tier.value: type(index).__name__ for tier, index in service._tiers.items()})
+        return seen
+
+    app.get("/_probe/suggest_tiers")(route)
+    async with LifespanManager(app) as manager:
+        transport = ASGITransport(app=manager.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/_probe/suggest_tiers")
+
+    assert response.status_code == 200, response.text
+    assert seen == {
+        SuggestTier.PREFIX.value: "PostgresPrefixSuggestIndex",
+        SuggestTier.FUZZY.value: "PostgresSuggestIndex",
+    }
+
+
+async def test_the_search_service_the_graph_resolves_writes_search_queries_over_this_session(
+    postgres_url: str,
+) -> None:
+    """**PRD 10's analytics row, on the root that would lose it silently.**
+
+    A `Depends` graph that resolves is not a graph that wired the write. A
+    `get_search_service` handing over a `SearchService` with `analytics=None`
+    answers every search correctly, records both histograms, passes every unit
+    case in `tests/unit/test_api_search.py` (whose fakes are handed in) and
+    leaves `search_queries` empty forever -- with no error, no log line and no
+    field on the wire to say so. The table is what turns ADR-0002's
+    Meilisearch gate into a live measurement, so an empty one is the whole
+    feature missing.
+
+    Three things, and the third is the one only a request can see: the pair is
+    present, the repository is over **this request's** session, and the commit
+    is that session's own bound method rather than some other callable. A row
+    written through a repository on another session never reaches the
+    transaction the request commits, and a commit that is not this session's
+    leaves the row to be rolled back when the request closes.
+
+    Reaching private attributes is deliberate and is the narrower of the two
+    options, exactly as in the tiers case above: the alternative is a public
+    accessor on `SearchService` that exists only for a test.
+    """
+    app = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
+    seen: dict[str, bool] = {}
+
+    def route(
+        service: Annotated[SearchService, Depends(get_search_service)],
+        session: Annotated[AsyncSession, Depends(get_session)],
+    ) -> dict[str, bool]:
+        analytics = service._analytics
+        seen["wired"] = analytics is not None
+        if analytics is not None:
+            seen["this session"] = analytics.queries._session is session  # type: ignore[attr-defined]
+            seen["this session's commit"] = analytics.commit == session.commit
+        return seen
+
+    app.get("/_probe/search_queries")(route)
+    async with LifespanManager(app) as manager:
+        transport = ASGITransport(app=manager.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/_probe/search_queries")
+
+    assert response.status_code == 200, response.text
+    assert seen == {"wired": True, "this session": True, "this session's commit": True}

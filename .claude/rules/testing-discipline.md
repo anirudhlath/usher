@@ -540,10 +540,28 @@ through the door that rule does not cover.
 
 **Closed 2026-08-06.** 42 cases (from 35), and the prompt sweep re-run at
 **26 mutations — 20 killed, 5 deliberately unpinned, 1 control surviving as
-designed**. The five left alive are framing prose with no constant, no rendered
-number and no `DropReason` behind them: the role sentence, the two history
-headers, the *"Group by something a person would recognise"* rule and the
-`reason` bullet's wording. Named here rather than pinned, because a verbatim
+designed**. Five were left alive as framing prose with no constant, no rendered
+number and no `DropReason` behind them — **and three of the five have since been
+pinned, so read the list with its outcomes rather than as it stood**:
+
+- **the role sentence — PINNED** by M9's G3, 2026-08-11. It was never framing:
+  it claimed the candidates are *"one household's **own** library"* and the pool
+  carries no ownership filter, so it is a claim another component would have had
+  to honour.
+- **`"This household has not finished anything yet."` — PINNED** 2026-08-07.
+  A **branch**, not framing: one arm of `if history:`, and the arm most fixtures
+  actually render.
+- **the non-empty history header — still unpinned**, and still genuinely framing.
+- **the *"Group by something a person would recognise"* rule — still
+  unpinned**, and the one M8's live run measured the model ignoring 88% of the
+  time. Nothing in this system checks it, which is a finding rather than a gap
+  in this list.
+- **the `reason` bullet's *"one sentence"* — PINNED** 2026-08-07. A **bound**:
+  `MAX_REASON_CHARS = 1000` and `validate_curation` drops the whole row as
+  `row_unusable` rather than truncating.
+
+**Two left, not five, and the corrections are worked through below.** Named
+rather than pinned, in the two cases that remain, because a verbatim
 assertion on the sentences most likely to be *tuned* is a change-detector, and
 the line drawn is: **every constant and every rendered number in a prompt gets
 a case, and so does every rule a validator will drop a row for** (ADR-0028
@@ -564,6 +582,48 @@ the whole row as `row_unusable` — while the *heading* width beside it, whose
 worst case is cosmetic, was already pinned. **Ask of a prompt sentence whether
 it is one arm of a conditional and whether a validator will discard anything
 over it, before asking whether it is prose somebody might tune.**
+
+**A third of the five is now pinned too, and it is the *role sentence* — which
+the list above carried as the archetype of framing prose until this correction,
+and which is now marked ❌ there.** Corrected 2026-08-11 by M9's G3, and the
+list itself was rewritten to say so on 2026-08-12: the annotation had been added
+down here while the sentence up there still named the role sentence among the
+unpinned five, so a test author arriving through this file's `paths:`
+frontmatter — which is what binds them — read the false version and never
+reached the correction. **A correction filed below the claim it corrects is not
+a correction; it is a second claim.** The sentence was not framing: it
+asserted that the candidates below it are *"one household's **own** film and
+television library"*, and the pool the prompt is handed **is not filtered by
+ownership** — a measured fact (`owned DESC` is only a sort key, so a 200-title
+pool is 0.0%–10.0% owned for a household owning 0–20 unwatched titles). So the
+opening line made a claim about the data that the code contradicts, which is a
+third category the "is this framing prose?" test does not have: **a sentence can
+be neither a constant, nor a rendered number, nor a conditional arm, and still
+be a *claim some other component has to honour*.** G3 corrected the line and
+pinned the claim.
+
+**How it is pinned matters more than that it is, and the first spelling was
+wrong.** `==` against the whole 47-word rendered line reads as thorough and is a
+change-detector: ADR-0028 prices that sentence at +26 prompt tokens, so it is a
+standing candidate for cost tuning, and every future copy-edit that kept the
+claim intact would have failed. It also made the sweep *coarse* — all four
+plants died on the same equality, so the verdict could not tell a restored
+defect from a rewording. Narrowed to two literal substrings (the ownership claim
+absent, an explicit not-all-owned statement present), the same four still die and
+now on two different axes, and the control that proves the narrowing is real is a
+**harmless copy-edit that keeps the claim** — which the `==` spelling would have
+killed. **The general form, and it points the opposite way to the `one_line`
+rule two entries down: when a rendered sentence is a claim some other component
+has to honour, pin the claim and not the prose; when the rendering itself is the
+defence, pin the line.** Ask which of the two the artefact is before choosing.
+This repository has now been bitten by each.
+
+So of the five, **three are pinned and two are still deliberately alive** — the
+non-empty history header, and the *"Group by something a person would
+recognise"* rule, which is the one M8's own live run measured the model ignoring
+88% of the time and which nothing in this system checks. The line the entry
+above draws still holds; what has moved three times is where it falls, and each
+move was a *plant*, never a re-reading of the sentence.
 
 **An assertion whose subject is fixed by a model validator cannot fail, and
 `assert x.error` next to `assert x.ok is False` is the shape.**
@@ -884,3 +944,88 @@ reordering, a mapping or an involution — a swap, a negation, a transpose, a
 two-element rotation — whether the expected value is distinguishable from the
 value the inverse operation produces, and if it is not, seed the smallest case
 that is. For a permutation that is a 3-cycle; two elements will never do it.
+
+**A case's premise is a claim about a collaborator, so another task can make it
+false — and the case then fails on a true statement about the system.** Found
+2026-08-11 when M9's A4 (a conditional GET on `GET /home`) and A6 (serve-stale
+on the screen cache) met on the milestone branch, each green in its own
+worktree. A4's `test_a_changed_screen_changes_the_etag` advanced an injected
+clock **31 s** against a 30 s `_SCREEN_TTL` and said so in its docstring: *"the
+second answers from a fresh compose rather than from the 30 s screen cache"*.
+A6 gave expired entries a 60 s grace during which they are *served* while a
+refresh is scheduled, so at 31 s the second request answered the first screen's
+bytes, the new title was absent, and the ETag was **correctly** identical. The
+failure message read *"the screen changed and the ETag did not"* and every word
+of it was wrong: the screen had not changed, and the ETag was right.
+
+Three things worth carrying, and the third is the general one.
+
+- **The repair is the premise, not the assertion.** Stepping past
+  `_SCREEN_TTL + SCREEN_STALE_GRACE` restores the state the case always needed
+  and used to get from the TTL alone. Loosening the assertion, or pinning the
+  ETag differently, would have preserved a green case over a premise nobody
+  believed.
+- **A docstring explaining why a case works is a load-bearing claim about
+  another module, and it goes stale silently.** A4's sentence was true when
+  written and false one merge later, with nothing in the tooling able to
+  notice. When a case's setup encodes a *number* from another module, import
+  the constant — A4 already did this for `max-age` (`_SCREEN_TTL`, not `30`)
+  and not for the clock advance, which is exactly where it broke.
+- **The interaction deserves its own case, on the side that is now intended
+  behaviour.** "A read inside the grace window serves the previous bytes and
+  therefore the same ETag" was the thing the red was reporting, and nothing
+  pinned it; without it the next person to see that failure has no way to tell
+  the feature from the bug. Its third assertion is the one with teeth — that
+  the stale read *scheduled a refresh* — because a `HomeService` that opened
+  the window and scheduled nothing passes every other assertion in the file
+  and is serve-stale-forever. **When a cross-task interaction produces a red,
+  ask which of the two behaviours is now correct and write the case that says
+  so, rather than only repairing the case that broke.**
+
+And a smaller one from the same repair: **a negative assertion over a rendered
+body needs a control that the value can appear there at all.** `assert
+str(new_title_id) not in response.text` is satisfied by a renamed DTO field, by
+a provider that would never have shown that title, and by a body that is empty
+for an unrelated reason. The control is the same fixture, the same client and
+the same title one boundary later, asserting the id *is* present.
+
+## `pytest.raises(Child)` is satisfied by a child of anything, so a subclass relationship is only pinned by an `isinstance` on the parent
+
+**Found 2026-08-11 in M9 Task C4's follow-up sweep, and it is the kind of gap
+that reads as covered.**
+
+`MediaTypeNotServable` subclasses `PortDataMalformed` for one reason: **nothing
+forks.** Every existing `except PortDataMalformed` keeps working and only the
+consumer that wants the distinction has to learn a second name. That is the
+entire value of the design — and `pytest.raises(MediaTypeNotServable)` says
+nothing about it. `raises` checks that the raised object is an instance of the
+class it was given; it is indifferent to what that class inherits from, so a
+`MediaTypeNotServable` re-parented to `UsherPortError`, to `Exception`, or to
+nothing in the taxonomy at all passes every such case unchanged.
+
+Measured. The plant `class MediaTypeNotServable(UsherPortError)` fails **one**
+assertion in the whole suite, and it is
+`assert isinstance(caught.value, PortDataMalformed)`. Everything else — three
+`pytest.raises(MediaTypeNotServable)` cases across the fetcher and both blob
+store arms, the contract suite, the `.media_type` assertion — stays green while
+every downstream `except` in `services/` and `api/` has silently stopped
+catching it.
+
+**The rule: when a new exception type's purpose is its ancestry, assert the
+ancestry.** `pytest.raises(Child)` states "the narrow thing was raised";
+`isinstance(caught.value, Parent)` states "and the broad handlers still see
+it". They are two different claims and the second is usually the one the design
+was for. The same case should assert the *negative* on its sibling — that the
+type an unrelated fault raises is **not** the child — or "everything is
+catchable as the parent" is trivially satisfied by never having narrowed
+anything.
+
+🔴 **And the first spelling of that plant was a `NameError`, not a kill.**
+`ports/images.py` imports only `PortDataMalformed`, so
+`class MediaTypeNotServable(UsherPortError)` alone fails at import and the run
+reports *errors at collection* — which scores as BROKEN-MUTATION and says
+nothing about the suite. Re-spelled with the import widened **and** the
+`detail=` argument dropped (it goes with the base that took it), it passes
+`ruff check` and reaches the suite. Second instance in that one task of
+`CLAUDE.md`'s careless/careful rule, and the first outside the import graph:
+**the careless spelling of "change a base class" is one that will not import.**

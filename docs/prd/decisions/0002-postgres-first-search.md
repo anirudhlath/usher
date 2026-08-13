@@ -9,6 +9,20 @@ recommendation; implemented in M6. **M6 adds no Meilisearch either way**
 amended, and a scoped follow-up with an owner. See "Evidence — the gate,
 measured".
 
+**✅ That follow-up is discharged, and its outcome is
+[ADR-0031](0031-the-two-tier-suggest.md) — the two-tier suggest.** M9 built
+tier 1 (`PostgresPrefixSuggestIndex`), measured it at catalog scale against a
+bar committed beforehand, and put both tiers on one route as
+`GET /search/suggest?tier=prefix|fuzzy`. **Read ADR-0031 before re-opening
+anything in this document about the type-ahead box**, and read it *particularly*
+before quoting consequence 2's *"the only thing measured that fits inside a
+keystroke"*, which that ADR narrows: the figure is real over whole names and a
+keystroke is not a whole name — at a one-character prefix the same statement is
+291 ms on `titles` alone and 2,707 ms over the union, so tier 1 is a keystroke
+path from **seven characters up** and the route declines to run it below four.
+Meilisearch remains gated exactly as this document scopes it and is still not
+built; nothing here is reversed.
+
 ## Context
 
 The initial design specified PostgreSQL as the canonical store plus Meilisearch
@@ -63,6 +77,29 @@ its condition has now fired, and three things follow:
    thing measured that fits inside a keystroke. It has no typo tolerance at
    all (1.9%), so the two are complements rather than alternatives: the btree
    on every keystroke, the trigram path debounced behind it.
+
+   **Amended 2026-08-12 by M9's B3, which measured the shipped tier-1
+   statement rather than the probe, and the amendment is a narrowing of the
+   claim rather than a reversal.** Those figures reproduce — p50 0.664 / p95
+   0.947 ms over the same 2,993 strings on the same catalog, and p95 1.465 ms
+   once the statement unions `title_search_names` at 10,896,525 rows. But
+   *"the only thing measured that fits inside a keystroke"* was measured on
+   whole mutated names, which are long and selective, and **a keystroke is
+   not that**: at a one-character prefix the same statement is **291 ms on
+   `titles` alone and 2,707 ms over the union**, missing a 10 ms budget on
+   both arms at every prefix shorter than seven characters. Tier 1 is a
+   keystroke path from seven characters up. The mechanism is the `UNION`'s
+   de-duplication spilling to disk and a lossy bitmap heap recheck, **not**
+   the sort, which is a 26 kB top-N heapsort. Full curve, both arms, in
+   `.claude/rules/search-and-embeddings.md`; the route-level consequence
+   belongs to ADR-0031.
+
+   **Separately verified, because this ADR's own evidence says an added index
+   can silently tax the shipped path:** `m09a`'s two btrees do **not**. The
+   identical 2,993 cases, within one run, with both prefix indexes present and
+   then both dropped: **39.593 ms against 39.571 ms p50, ratio 1.001,
+   byte-identical recall**. The GIN/GiST result does not generalise to a
+   btree, and it needed measuring rather than reasoning about.
 3. **Meilisearch remains a post-v1 candidate and is now a *justified* one
    rather than a hypothetical.** [ADR-0021](0021-the-suggest-path-is-its-own-port.md)'s
    port split is what keeps that follow-up at one class plus a write path,
@@ -260,10 +297,19 @@ back to the stage that lost it:
 
 | configuration | below the `%` floor | truncated by the cap | dropped by the re-rank | out-ranked in the final ORDER BY |
 |---|---|---|---|---|
-| GIN `%` @0.3 (as shipped) | **63.6%** | 0.0% | **0.0%** | 36.4% |
+| GIN `%` @0.3 (no tiebreak) | **63.6%** | 0.0% | **0.0%** | 36.4% |
 | GIN `%` @0.2 | 26.0% | 7.6% | 0.0% | 66.4% |
 | GIN `%` @0.1 | 4.0% | 24.8% | 0.0% | 71.2% |
-| GIN `%` @0.3 + tiebreak | 82.8% | 0.0% | 0.0% | 17.2% |
+| **GIN `%` @0.3 + tiebreak — the configuration that ships** | 82.8% | 0.0% | 0.0% | 17.2% |
+
+**The first row said "as shipped" and the last row is what ships**, which is a
+label this document carried until 2026-08-12 and which cost B3 a
+reconciliation: M9's plan quoted the last row's p50 (33.6 ms) beside the first
+row's shares (63.6/36.4), and no single run of `_SUGGEST` can satisfy both.
+Re-measured on the same catalog with a different draw of 750 names, the shipped
+row is **90.8 / 0.0 / 0.0 / 9.2** — the floor/out-ranked balance moves with the
+sample, and **the two zeros are exact in every row of this table and in the
+re-run**, which is the part the claim rests on.
 
 Three things follow, and two of them contradict what this project assumed.
 

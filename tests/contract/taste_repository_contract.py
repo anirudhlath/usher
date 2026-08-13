@@ -229,6 +229,124 @@ class TasteRepositoryContract:
         assert found.centroid is None
         assert found.source_watermark is None
 
+    # -- the unpredicated read ---------------------------------------------
+
+    async def test_latest_is_none_for_a_household_with_nothing_stored(
+        self, repository: TasteRepository, user_id: uuid.UUID
+    ) -> None:
+        """The absent arm. `None` here means *nothing was ever computed*, which
+        a ranking caller reads as "no term" -- and which is the shipped state
+        of every deployment whose worker has not run."""
+        assert await repository.latest(user_id) is None
+
+    async def test_latest_answers_a_row_written_under_another_model(
+        self, repository: TasteRepository, user_id: uuid.UUID
+    ) -> None:
+        """**The whole reason this method exists.**
+
+        A request holds no embedder, so it has no `model_name` to ask `get()`
+        with -- and `get()` would answer `None` for every name but the one that
+        happens to be stored. `latest` answers the row and lets the caller read
+        the name off it, which is what turns "a worker computed a centroid" into
+        "a request can serve one".
+
+        Kills the implementation that spells this as `get(user_id,
+        model_name=<anything>)`: against the deployment's *own* model it looks
+        right, and against a stored row written by any other checkpoint --
+        which includes every deployment that has swapped one -- it silently
+        answers nothing at all.
+        """
+        await self.add_history(user_id, at=EARLIER)
+        await repository.put(
+            self.stored(
+                user_id,
+                centroid=_vector(0.5),
+                watermark=EARLIER,
+                model_name="fake:some-other-checkpoint",
+            )
+        )
+
+        found = await repository.latest(user_id)
+
+        assert found is not None
+        assert found.model_name == "fake:some-other-checkpoint"
+        assert found.centroid is not None
+        assert found.centroid[0] == pytest.approx(0.5, abs=1e-3)
+
+    async def test_latest_answers_a_written_refusal_rather_than_raising(
+        self, repository: TasteRepository, user_id: uuid.UUID
+    ) -> None:
+        """The second arm, and it is the state `StoredTaste`'s docstring exists
+        to make representable: a household below the minimum has a **row** whose
+        centroid is NULL.
+
+        Answered, never raised, and never collapsed into "no row": a ranking
+        caller reads it as "no term", which is the same answer -- but an
+        implementation that raised would 500 a search for the emptiest
+        household in the deployment, and one that could not represent it at all
+        is the recompute-forever bug the column exists to prevent.
+        """
+        await self.add_history(user_id, at=EARLIER)
+        await repository.put(self.stored(user_id, centroid=None, watermark=EARLIER, title_count=3))
+
+        found = await repository.latest(user_id)
+
+        assert found is not None
+        assert found.centroid is None
+        assert found.title_count == 3
+
+    async def test_latest_answers_a_row_that_get_calls_stale(
+        self, repository: TasteRepository, user_id: uuid.UUID
+    ) -> None:
+        """**No staleness predicate**, and the two reads disagreeing here is the
+        design rather than a leak.
+
+        `STALE_TASTE` answers *"should I recompute?"*, and a caller with no
+        embedder cannot act on it. Worse, the watch state that moves the
+        watermark is the same watch state the centroid was computed from -- so a
+        `latest` that inherited the predicate would withhold the term from
+        exactly the households that watch things, which is all of them.
+
+        `get()` is asserted alongside, because "both answer the row" is what a
+        `latest` implemented as `return await self.get(...)` produces and this
+        case would otherwise ratify it.
+        """
+        await self.add_history(user_id, at=EARLIER)
+        await repository.put(self.stored(user_id, centroid=_vector(0.5), watermark=EARLIER))
+        await self.add_history(user_id, at=LATER)
+
+        assert await repository.get(user_id, model_name=MODEL) is None
+        found = await repository.latest(user_id)
+        assert found is not None
+        assert found.source_watermark == EARLIER
+
+    async def test_latest_is_scoped_to_one_household(
+        self, repository: TasteRepository, user_id: uuid.UUID, other_user_id: uuid.UUID
+    ) -> None:
+        """An unscoped read hands one household's taste to another, and the
+        result renders perfectly: a populated, correctly-shaped, 384-lane unit
+        vector that ranks this member's search by somebody else's viewing."""
+        await self.add_history(user_id, at=EARLIER)
+        await repository.put(self.stored(user_id, centroid=_vector(0.5), watermark=EARLIER))
+
+        assert await repository.latest(other_user_id) is None
+
+    async def test_latest_never_writes(
+        self, repository: TasteRepository, user_id: uuid.UUID
+    ) -> None:
+        """Read-only, asserted as a *state* rather than as a signature.
+
+        The boundary this holds is that a request path cannot mint a
+        `user_taste` row under a model it does not have — `TasteService.
+        centroid` writes its refusals, and a request doing the same would stamp
+        an absent model onto the household's cache and then invalidate it on
+        every read.
+        """
+        assert await repository.latest(user_id) is None
+        assert await repository.latest(user_id) is None
+
+        assert await repository.get(user_id, model_name=MODEL) is None
+
     # -- the three staleness disjuncts -------------------------------------
 
     async def test_a_different_model_name_makes_the_stored_centroid_unreadable(

@@ -621,6 +621,13 @@ class PostgresSearchIndex(SearchIndex):
 # deployment uses. The comment that used to sit here asserted the opposite
 # and was simply wrong.
 #
+# Since M9 those typo cases live on `TypoTolerantSuggestIndexContract`, which
+# subclasses `SuggestIndexContract` -- so the sentence above is still true in
+# the is-a sense and no longer says where to look. They are signed by this
+# class and by `FakeSuggestIndex`; `PostgresPrefixSuggestIndex` signs the base
+# alone and has no trigram floor to be wrong about. The divergence below is
+# therefore narrower than it was, and entirely on this tier.
+#
 # Both values are kept, and the reason each is what it is, is measured.
 #
 # **Why the contract needs 0.1.** On the very fixtures it seeds:
@@ -784,11 +791,18 @@ class PostgresSuggestIndex(SuggestIndex):
 
     ADR-0021 gives this its own port with no write method, and this class is
     why: it reads `titles` through a trigram index and maintains no artefact
-    of its own. Boundary call 3 declined PRD 05's `title_search_names` table
-    for the same reason -- with no aliases and no people in M6 it would hold
-    one row per title duplicating `titles(id, name, kind, popularity)`, a
-    second copy and a second staleness problem, in the milestone whose whole
-    purpose is to delete staleness problems.
+    of its own. M6's boundary call 3 declined PRD 05's `title_search_names`
+    table for the same reason -- with no aliases and no people it would have
+    held one row per title duplicating `titles(id, name, kind, popularity)`,
+    a second copy and a second staleness problem.
+
+    **M9's `m09a` builds that table, and this class still writes nothing and
+    still does not read it.** The narrow table holds *aliases* and *people* --
+    the two things that finally have sources -- and deliberately no `primary`
+    rows, so nothing in it duplicates `titles`, and `popularity` is refused
+    there with the measurement that killed it here too (NULL on all 1,271,138
+    rows). Reading it is the two-tier suggest's job, which *replaces* this
+    path rather than extending it.
 
     **GIN, not the GiST PRD 05 specifies.** At 2.08M names the `%` path is
     ~110x faster under GIN (1.671 ms / 205 buffers against 182.5 ms /

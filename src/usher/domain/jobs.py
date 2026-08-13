@@ -136,6 +136,84 @@ class JobKind(StrEnum):
     `depth()`, which promises a key per kind so PRD 10's `usher.jobs.queued`
     never stops reporting a series.
 
+    `watch_writeback` carries PRD 03's outbound write back to the source a
+    client's own watch write is about. **Its key is the source's own
+    `external_id`** -- the third kind to spell a key that way, alongside
+    `match` and `watch_history` -- and it carries **no payload at all**, which
+    is the whole design rather than an economy. The handler re-reads the
+    household's current local row at run time and pushes that, so five `PUT`s
+    during one minute of playback coalesce into **one** row (`(kind, key)` is
+    unique) and the write that lands is the newest, and a retry is idempotent
+    because it replays nothing. A job carrying the state it was enqueued with
+    would have neither property: the queue would hold five stale positions and
+    a backoff would eventually push an old one over a newer one.
+
+    One job per source *copy*, never per file: a title write reads
+    `media_items` with `episode_id IS NULL`, because an episode's row carries
+    its series' `title_id` too and 999,927 of the one measured library's
+    1,126,789 items are episodes -- so the unbounded read would put 20,000
+    jobs on the queue for one press of a 20,000-episode series.
+
+    **Its registration is unconditional**, which puts it with `match` and
+    `watch_history` rather than with `curate` two paragraphs up: nothing about
+    a write-back is optional. `composition.build_worker` withholds `enrich`,
+    `derive`, `index` and `curate` from a deployment that lacks the
+    collaborator each needs -- a TMDb key, an embedding model, an LLM
+    endpoint -- and this one needs only the session's own repositories, so
+    every build claims it and no household's own write is left to a process
+    that never arrives.
+
+    `sync` is `POST /admin/sources/{id}/sync`, as an enqueue -- M4 deferred
+    the route to M9 with the capability already delivered through
+    `usher.cli`, and M8 ratified the shape a triggered walk has to take:
+    `usher sync`'s body minus the printing, run by a worker rather than
+    inline, because a reconcile checkpoints and commits per batch and a route
+    that drove a six-hour walk inside one request would be committing the
+    request's session repeatedly before the handler returned. **Its key is
+    `"{source_id}:{lane}"`, not a bare source id, and the composite is the
+    whole design.** `(kind, key)` is unique, so a bare source id would
+    coalesce a requested *full* walk into a pending *delta* one and answer
+    202 for a walk that never happens -- the same trap a bare `user_id`
+    would be for `curate` if two households shared one, one lane over.
+    `lane` is one of `SyncRunKind.FULL`/`SyncRunKind.DELTA`'s wire values;
+    `SyncRunKind.WATCH_STATE` is never a valid lane here, because the watch
+    lane is not a thing an operator triggers on its own -- it is the second
+    half of every triggered sync, run by the handler immediately after the
+    item lane, exactly as `usher sync` already runs it. Registered
+    unconditionally, the way `match`, `watch_history` and `watch_writeback`
+    are: there is no optional process resource behind it, only the adapter
+    factory every composition root already builds.
+
+    `bootstrap` is `POST /admin/bootstrap/{phase}`, on `sync`'s terms one
+    row up: M2 delivered the capability as `usher bootstrap` and M9 puts the
+    *same* dispatch on the queue so a route can start one. **Its key is a
+    `BootstrapPhase`'s wire value** -- `imdb`, `credit-names`, `aliases`,
+    `tmdb-ids`, `crosswalk`, `movielens` or `all` -- which makes it the
+    second kind whose key names neither a title, a source item nor a
+    household. `(kind, key)` unique is doing real work here: pressing *imdb*
+    twice while one runs coalesces into the run in flight, and a second
+    process bootstrapping the same dataset is separately guarded by
+    `ImportRunRepository.start()`'s `RepositoryConflict`, which
+    `BootstrapService._concede_to_other_owner` answers by touching nothing
+    and returning the winner's row.
+
+    **`all` and `imdb` are two keys and therefore two jobs**, deliberately,
+    and that is the opposite call from `sync`'s composite key one paragraph
+    up. A `sync` key had to name its lane because a `full` walk coalescing
+    into a pending `delta` one answers 202 for a walk that never happens;
+    here every phase's work is *resumable and idempotent*, so `all` running
+    after `imdb` re-reads `imdb`'s completed checkpoint, yields no batch and
+    costs a re-parse rather than a wrong answer. Collapsing the two into one
+    key would instead make an operator's `--phase movielens` silently
+    coalesce into somebody's `--phase all`.
+
+    **Registered unconditionally**, with `match`, `watch_history`, `sync` and
+    `watch_writeback`: there is no optional process resource behind a bulk
+    import, only `USHER_BULK_DATA_DIR` and an outbound HTTPS client that
+    every deployment can build. What a deployment may not have is a
+    *writable* data directory, and that is a run-time failure recorded on the
+    `import_runs` row rather than a build-time absence -- see PRD 08.
+
     **Adding a member here needs no migration**, verified rather than
     assumed: `db/models/jobs.py` declares `kind` through `enum_column`, whose
     `native_enum=False` compiles to a plain `VARCHAR(32)` and whose
@@ -150,6 +228,9 @@ class JobKind(StrEnum):
     INDEX = "index"
     DERIVE = "derive"
     CURATE = "curate"
+    WATCH_WRITEBACK = "watch_writeback"
+    SYNC = "sync"
+    BOOTSTRAP = "bootstrap"
 
 
 class JobStatus(StrEnum):
@@ -191,24 +272,33 @@ class Job(DomainModel):
     """One outstanding unit of work.
 
     `key` is the kind's own identifier for the work, and it is **one column,
-    three kinds of identifier**: a `Title.id` for `enrich`, `index` and
-    `derive`; a source's own `external_id` for `match` and `watch_history`; a
-    `User.id` for `curate`. All three as a string, so one column serves every
-    kind without a polymorphic payload. `(kind, key)` is unique; enqueueing
+    five kinds of identifier**: a `Title.id` for `enrich`, `index` and
+    `derive`; a source's own `external_id` for `match`, `watch_history` and
+    `watch_writeback`; a `User.id` for `curate`; a composite
+    `"{source_id}:{lane}"` for `sync`, the one kind whose key names two
+    things rather than one -- see `JobKind.SYNC`; and a `BootstrapPhase`'s
+    wire value for `bootstrap`, which names a *dataset group* and no row at
+    all. All five render as a string, so one column serves every kind
+    without a polymorphic payload.
+    `(kind, key)` is
+    unique; enqueueing
     the same work twice promotes rather than duplicates.
     `usher.services.handlers` is where a key is converted back, and
     `_uuid_key` takes the expected thing as an argument precisely because
-    three answers to "what is this key" means three different sentences in
-    `jobs.last_error`. **`curate` is the one that names neither a title nor a
-    source item**, which is why `(kind, key)` does this milestone's cost work
-    rather than merely tidying the queue -- see `JobKind.CURATE`.
+    several answers to "what is this key" means several different sentences
+    in `jobs.last_error`. **`curate` is the one that names neither a title nor
+    a source item**, which is why `(kind, key)` does this milestone's cost
+    work rather than merely tidying the queue -- see `JobKind.CURATE`.
 
-    **The two source-scoped kinds key on the source's id for the item, not
+    **The three source-scoped kinds key on the source's id for the item, not
     on `MediaItem.id`, and that is a deliberate trade with a known cost.**
-    Every enqueue site is inside a walk, which holds the source's own id and
-    would need a round trip per item to turn it into a `MediaItem.id` --
-    1,126,674 of them a walk, which is the shape of defect this whole
-    pipeline is built to avoid. The cost is that `(kind, key)` is unique
+    Two of the three enqueue sites are inside a walk, which holds the source's
+    own id and would need a round trip per item to turn it into a
+    `MediaItem.id` -- 1,126,674 of them a walk, which is the shape of defect
+    this whole pipeline is built to avoid. `watch_writeback`'s is not: it is
+    one press, and it has already read the rows in order to find the copies at
+    all, so it pays the same spelling for consistency rather than for cost.
+    The cost is that `(kind, key)` is unique
     across *sources*: two servers that address different items by the same
     string collapse into one job, and the second item's work is skipped
     until something re-enqueues it. Emby and Jellyfin both mint per-server

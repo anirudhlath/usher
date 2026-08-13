@@ -14,30 +14,43 @@ deployment with no TMDb key produced a `WARNING` every `IDLE_SLEEP_SECONDS`
 that the information is still surfaced rather than merely quieted.
 """
 
+import ast
+import dataclasses
+import inspect
 import io
 import os
+import pathlib
 import uuid
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 
+import httpx
 import pytest
 from loguru import logger
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+import usher
+from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.image_repository import FakeImageRepository
+from tests.fakes.import_run_repository import FakeImportRunRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient, usage
+from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
+from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
+from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
@@ -47,30 +60,40 @@ from usher.composition import (
     build_curation_service,
     build_enrich_service,
     build_pipeline,
+    build_search_service,
     build_worker,
     embedder,
     llm_client,
     metadata_provider,
+    run_bootstrap,
 )
 from usher.config import Settings
+from usher.db.repositories.search_query import PostgresSearchQueryRepository
+from usher.domain.bootstrap import BootstrapPhase, ImportRun
 from usher.domain.curation import LLMPurpose
-from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
-from usher.domain.jobs import JobKind, JobStatus
+from usher.domain.jobs import JobKind, JobPriority, JobStatus
+from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.embedding import Embedder
 from usher.ports.errors import PortUnavailable
-from usher.ports.events import NullEventPublisher
+from usher.ports.events import ClientEvent, EventPublisher, NullEventPublisher
+from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import (
+    CrosswalkLinkResult,
     CuratedRowRepository,
     LLMCallRepository,
+    MediaItemRepository,
     TitleRepository,
     WatchStateRepository,
 )
+from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import ITEM_IDS_KEY, REASON_KEY, ROWS_KEY, TITLE_KEY
 from usher.services.handlers import SourceBinding
+from usher.services.jobs import JobWorker
 from usher.services.rows import ROW_PROVIDERS
 from usher.services.taste import TasteService
 
@@ -92,7 +115,9 @@ def _pipeline_over_fakes(
     curated: CuratedRowRepository | None = None,
     ledger: LLMCallRepository | None = None,
     watch_states: WatchStateRepository | None = None,
+    media_items: MediaItemRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
+    events: EventPublisher | None = None,
 ) -> Pipeline:
     """A `Pipeline` carrying the fields `build_worker`'s factories read.
 
@@ -112,7 +137,7 @@ def _pipeline_over_fakes(
     settled = _Recording() if commit is None else commit
 
     unused = cast(Any, None)
-    # `build_derive_service` reads three more slots than
+    # `build_derive_service` reads four more slots than
     # `build_enrich_service` does, so they are real fakes rather than
     # `unused`: `build_worker` constructs the service eagerly, and a `None`
     # there fails at construction rather than at the one wiring decision
@@ -136,10 +161,12 @@ def _pipeline_over_fakes(
         credentials=unused,
         titles=titles,
         matching=unused,
-        media_items=unused,
+        media_items=unused if media_items is None else media_items,
         episodes=FakeEpisodeRepository(),
         watch_states=history,
         payloads=FakeRawPayloadStore(),
+        bulk=FakeBulkCatalogRepository(),
+        import_runs=FakeImportRunRepository(),
         runs=unused,
         queue=queue,
         embeddings=embeddings,
@@ -150,6 +177,7 @@ def _pipeline_over_fakes(
         people=people,
         credits=FakeCreditRepository(people, titles_store),
         collections=FakeCollectionRepository(),
+        images=FakeImageRepository(),
         adapters=unused,
         matcher=unused,
         ingest=unused,
@@ -162,7 +190,8 @@ def _pipeline_over_fakes(
             titles=titles, embeddings=embeddings, taste=taste, size=POOL_SIZE
         ),
         row_providers=ROW_PROVIDERS,
-        events=NullEventPublisher(),
+        row_provider_settings=FakeRowProviderSettingsRepository(),
+        events=NullEventPublisher() if events is None else events,
         commit=settled,
     )
 
@@ -308,10 +337,105 @@ async def test_the_enrich_service_enqueues_into_the_pipelines_own_queue() -> Non
     queue = FakeJobQueue()
     pipeline = _pipeline_over_fakes(titles=titles, queue=queue)
 
-    service = build_enrich_service(pipeline, _settings(), FakeMetadataProvider())
+    service = build_enrich_service(
+        pipeline, _settings(), FakeMetadataProvider(), events=NullEventPublisher()
+    )
     await service.enrich(title.id)
 
     assert (await queue.depth())[JobKind.INDEX] == 1
+
+
+async def test_the_worker_offers_an_enrichments_frame_after_the_jobs_own_commit() -> None:
+    """[ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)
+    through the real wiring, which is the half `tests/unit/test_services_jobs.py`
+    cannot make.
+
+    That file pins `JobWorker`'s buffer against a handler written for it;
+    this one asserts the *decision* `build_worker` makes -- that the
+    `EnrichService` it constructs is handed `worker.events` rather than
+    `pipeline.events`. The two are indistinguishable from inside either
+    module: a worker that buffers correctly and a factory that hands the
+    bare bus past it publishes exactly as it does today, and every case in
+    both files stays green.
+
+    Driven through `run_once` rather than by reading a private attribute off
+    the service, for the reason
+    `test_the_enrich_service_enqueues_into_the_pipelines_own_queue` states
+    above it: the claim is about what a running deployment does.
+    """
+    log: list[str] = []
+
+    class _Bus(NullEventPublisher):
+        async def publish(self, event: ClientEvent) -> None:
+            log.append("publish")
+
+    async def _commit() -> None:
+        log.append("commit")
+
+    titles = FakeTitleRepository()
+    title = Title(
+        kind=TitleKind.MOVIE,
+        tmdb_id=90000550,
+        name="The Quiet Vacuum",
+        sort_name="quiet vacuum, the",
+        enrichment_state=EnrichmentState.STUB,
+    )
+    await titles.add(title)
+    queue = FakeJobQueue()
+    await queue.enqueue(
+        [JobRequest(kind=JobKind.ENRICH, key=str(title.id), priority=JobPriority.DEMAND)]
+    )
+    pipeline = _pipeline_over_fakes(titles=titles, queue=queue, commit=_commit, events=_Bus())
+
+    worker = build_worker(
+        pipeline,
+        _settings(),
+        provider=FakeMetadataProvider(),
+        embedder=None,
+        client=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+    assert await worker.run_once() == 1
+
+    assert log.count("publish") == 1, f"the enrichment published {log.count('publish')} frames"
+    assert log[-1] == "publish", f"the frame was offered mid-job: {log}"
+    assert log[-2] == "commit", f"nothing was committed between the handler and the frame: {log}"
+
+
+def test_only_the_worker_defers_and_the_push_and_reconcile_lanes_do_not() -> None:
+    """The push and reconcile lanes publish as they go, and that is a
+    decision rather than an omission.
+
+    Neither is a job: each commits its own subject before it publishes
+    (`push.py:170` and `:275`, `reconcile.py:245`), so both already satisfy
+    ADR-0033's stronger form with no buffer at all -- and a `sync.progress`
+    frame held behind a 1,127-batch walk turns a progress bar into a single
+    jump at the end.
+
+    **Structural, because the defect is an absence and no lane's output can
+    show it.** "Published as it went" and "published at the end" are the same
+    list of frames in the same order; only a second commit boundary
+    distinguishes them, and a lane has none to hang the assertion on. So the
+    claim asserted is the one that can be: a `DeferredEventPublisher` is
+    constructed in exactly one place in `src/`, inside `JobWorker`, and no
+    composition root can acquire one for a lane by wrapping something.
+
+    Carries its own premise, because a scan that resolves nothing passes
+    exactly like a scan that passes.
+    """
+    root = pathlib.Path(usher.__file__).parent
+    sites = sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "DeferredEventPublisher"
+    )
+
+    assert sites, "the scan found no construction at all; it would pass over an empty tree"
+    assert sites == ["services/jobs.py"], f"a second lane wraps its publisher: {sites}"
 
 
 async def test_no_embedder_configured_degrades_rather_than_raising(
@@ -347,8 +471,12 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
     The `ENRICH` and `CURATE` halves are asserted alongside it, so the three
     guards cannot drift into "two guarded, one not", and `MATCH` is asserted
     so an implementation registering *nothing* cannot pass. This is the
-    default deployment -- no key, no extra, no model -- and its two claimable
-    kinds are the whole of what it can do.
+    default deployment -- no key, no extra, no model -- and its five
+    claimable kinds (`match`, `watch_history`, `watch_writeback`, `sync`,
+    `bootstrap`) are the whole of what it can do. `bootstrap` joined them in
+    M9's E5 for `sync`'s reason: a bulk import needs a writable data
+    directory and an outbound client, neither of which is a process resource
+    a deployment can lack at build time.
     """
     worker = build_worker(
         _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
@@ -360,7 +488,177 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
         user_id=uuid.uuid4(),
     )
 
-    assert worker.registered_kinds == frozenset({JobKind.MATCH, JobKind.WATCH_HISTORY})
+    assert worker.registered_kinds == frozenset(
+        {
+            JobKind.MATCH,
+            JobKind.WATCH_HISTORY,
+            JobKind.WATCH_WRITEBACK,
+            JobKind.SYNC,
+            JobKind.BOOTSTRAP,
+        }
+    )
+
+
+def test_a_write_back_handler_is_registered_in_every_build() -> None:
+    """The kind a client's own press enqueues, so no deployment may lack it.
+
+    M4's rule -- *"a job kind whose handler is a stub is a queue that grows
+    forever"* -- and this is the shape it takes when the handler exists but
+    the registration is guarded: `run_once` claims `list(self._handlers)`, so
+    a `WATCH_WRITEBACK` behind any condition leaves the shipped default
+    deployment enqueueing a job on every `PUT /watch/...` that nothing ever
+    claims. That is not the benign "leave it for a worker that can run it"
+    bargain `INDEX` makes, because there is no such worker: the handler needs
+    a TMDb key, an embedder and an LLM endpoint exactly as much as `match`
+    does, which is not at all.
+
+    Asserted against the **bare** build -- no provider, no embedder, no
+    client -- because that is the configuration every guard would exclude it
+    from, with the fully-equipped build beside it as the control that stops
+    the case passing against a registration nothing reaches.
+    """
+    bare = build_worker(
+        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _settings(),
+        provider=None,
+        embedder=None,
+        client=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+    equipped = build_worker(
+        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _settings(),
+        provider=FakeMetadataProvider(),
+        embedder=FakeEmbedder(),
+        client=FakeLLMClient(),
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+
+    assert JobKind.WATCH_WRITEBACK in bare.registered_kinds
+    assert JobKind.WATCH_WRITEBACK in equipped.registered_kinds
+
+
+async def test_a_write_back_job_reaches_the_source_through_the_pipelines_own_repositories() -> None:
+    """The registration end to end: a real job, claimed by a real worker,
+    arriving at a real adapter.
+
+    Two things only this shape can say. `mypy` holds the *types* of the two
+    repositories `build_worker` hands the handler and says nothing about them
+    being the **pipeline's** -- a second `FakeMediaItemRepository` built here
+    would type-check and would answer `None` for every key, so the case reads
+    the state back through the objects the pipeline holds. And the `user_id`
+    is the one the root bound, which is the half `watch_history` already
+    depends on: a handler reading some other household's row would push a
+    position this household never set.
+
+    `run_once() == 1` is the premise, not the result -- a worker that never
+    claimed the kind returns 0 and every later assertion would be about an
+    empty ledger.
+    """
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="Living Room",
+        base_url="https://emby.example",
+        credentials_ref="ref",
+        device_id="device",
+    )
+    adapter = FakeSourceAdapter(source)
+    adapter.seed(
+        SourceItem(external_id="emby-1", name="A Film", kind=SourceItemKind.MOVIE),
+        datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    media_items = FakeMediaItemRepository()
+    title_id = new_id()
+    await media_items.upsert_many(
+        [
+            MediaItemUpsert(
+                source_id=source.id,
+                external_id="emby-1",
+                title_id=title_id,
+                episode_id=None,
+                container=None,
+                video_codec=None,
+                audio_codec=None,
+                width=None,
+                height=None,
+                hdr_format=None,
+                audio_channels=None,
+                file_size_bytes=None,
+                runtime_seconds=None,
+                added_at=None,
+                last_seen_at=datetime(2026, 8, 11, tzinfo=UTC),
+            )
+        ]
+    )
+    watch_states = FakeWatchStateRepository()
+    household = new_id()
+    await watch_states.set_from_client(
+        WatchStateWrite(
+            user_id=household,
+            title_id=title_id,
+            episode_id=None,
+            position_seconds=613,
+            played=False,
+        )
+    )
+    queue = FakeJobQueue()
+    pipeline = _pipeline_over_fakes(
+        titles=FakeTitleRepository(),
+        queue=queue,
+        watch_states=watch_states,
+        media_items=media_items,
+    )
+
+    async def resolve(external_id: str) -> SourceBinding | None:
+        return SourceBinding(source=source, adapter=adapter)
+
+    worker = build_worker(
+        pipeline,
+        _settings(),
+        provider=None,
+        embedder=None,
+        client=None,
+        resolve=resolve,
+        user_id=household,
+    )
+    await queue.enqueue([JobRequest(kind=JobKind.WATCH_WRITEBACK, key="emby-1", priority=80)])
+
+    assert await worker.run_once() == 1, "the worker never claimed the write-back job"
+
+    assert adapter.recorded("emby-1") == (613, False)
+    assert queue.jobs_of(JobKind.WATCH_WRITEBACK) == [], "a successful job kept its row"
+
+
+def test_every_kind_a_bare_build_registers_is_named_by_the_docstring_that_lists_them() -> None:
+    """`JobWorker.registered_kinds`' docstring names which kinds are in every
+    build, and that sentence was written deliberately to be falsified here --
+    M8's trap 2 in a new location, where updating it silently is the failure
+    it exists to prevent.
+
+    Derived from the bare build rather than from a literal list, so a sixth
+    unconditional kind cannot be added without the prose moving with it. The
+    claim is pinned rather than the prose: a verbatim assertion on the
+    sentence would fail every future copy-edit that left the claim intact,
+    which is the change-detector this repository has already been bitten by
+    once.
+    """
+    doc = inspect.getdoc(JobWorker.registered_kinds)
+    assert doc is not None
+    bare = build_worker(
+        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _settings(),
+        provider=None,
+        embedder=None,
+        client=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+    assert bare.registered_kinds, "the premise: a bare build registers something"
+
+    unnamed = sorted(kind.name for kind in bare.registered_kinds if kind.name not in doc)
+    assert unnamed == [], f"in every build and unmentioned by the docstring: {unnamed}"
 
 
 def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:
@@ -996,6 +1294,48 @@ async def test_a_switch_on_with_no_client_to_hand_still_builds_no_expander() -> 
         await engine.dispose()
 
 
+async def test_both_search_roots_write_search_queries_over_this_sessions_commit() -> None:
+    """PRD 10's `search_queries`, wired on the two roots that build a
+    `SearchService`, and the *commit* is the half that has to be this
+    session's.
+
+    Three wirings, three ways for the analytics to go missing, and each is
+    silent:
+
+    - **No analytics at all.** Every search answers correctly, both histograms
+      record, and the table PRD 10 turns ADR-0002's Meilisearch gate into a
+      live measurement with stays empty forever. There is no error and no log
+      line, which is why this is a wiring assertion rather than a behavioural
+      one.
+    - **A repository over another session**, so the row never reaches the
+      transaction the search commits.
+    - **A commit that is not this session's**, which leaves the row to be
+      rolled back when the read closes -- and a search writes nothing else, so
+      there is no second write to carry it. `cli._session_for` disposes its
+      engine without committing, so on that root the loss is total.
+
+    **Both roots, because `build_pipeline` delegating to `build_search_service`
+    is a fact about today's code rather than a guarantee.** `usher search`
+    reaches this through `build_pipeline` and `api/deps.get_search_service`
+    reaches it directly; a `build_pipeline` that re-assembled a `SearchService`
+    of its own would return a working one and record nothing.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        session = AsyncSession(engine)
+        direct = build_search_service(session, _settings())
+        through_the_pipeline = build_pipeline(session, _settings()).search
+
+        for service in (direct, through_the_pipeline):
+            analytics = service._analytics
+            assert analytics is not None
+            assert isinstance(analytics.queries, PostgresSearchQueryRepository)
+            assert analytics.queries._session is session
+            assert analytics.commit == session.commit
+    finally:
+        await engine.dispose()
+
+
 def _expanding(**rest: object) -> Settings:
     """The only configuration that buys a rewrite: both switches on.
 
@@ -1009,3 +1349,395 @@ def _expanding(**rest: object) -> Settings:
         query_expansion_enabled=True,
         **rest,  # type: ignore[arg-type]
     )
+
+
+# ---------------------------------------------------------------------------
+# `run_bootstrap` -- one dispatch, two roots (M9's E5).
+# ---------------------------------------------------------------------------
+
+
+class _JournallingCatalog(FakeBulkCatalogRepository):
+    """`FakeBulkCatalogRepository` that writes down when the load window opens
+    and closes and when the crosswalk is linked.
+
+    The window's two edges are recorded separately rather than as one entry,
+    because *"the window wraps both IMDb passes"* and *"the window wraps each
+    pass"* differ only in where the closes fall.
+    """
+
+    def __init__(self, journal: list[str]) -> None:
+        super().__init__()
+        self._journal = journal
+
+    def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
+        return self._journalled_window()
+
+    @asynccontextmanager
+    async def _journalled_window(self) -> AsyncIterator[None]:
+        self._journal.append("window-open")
+        async with super().bulk_load_window():
+            yield
+        self._journal.append("window-close")
+
+    async def link_crosswalk(self) -> CrosswalkLinkResult:
+        self._journal.append("link-crosswalk")
+        return await super().link_crosswalk()
+
+
+class _JournallingRuns(FakeImportRunRepository):
+    """Every dataset this run touched, in the order it touched them.
+
+    The transport in these cases refuses every request, so `BulkDataset.
+    revision()` raises `PortUnavailable` and `BootstrapService.
+    import_dataset` records a `FAILED` run rather than downloading 335 MiB.
+    A dataset that gets as far as `start()` therefore writes **twice** -- the
+    started row and the failed one -- and consecutive repeats are collapsed,
+    because this case is about the order of the phases and not about how many
+    writes each one makes.
+    """
+
+    def __init__(self, journal: list[str]) -> None:
+        super().__init__()
+        self._journal = journal
+
+    def _note(self, entry: str) -> None:
+        if not self._journal or self._journal[-1] != entry:
+            self._journal.append(entry)
+
+    async def start(self, dataset: str, revision: str) -> ImportRun:
+        self._note(dataset)
+        return await super().start(dataset, revision)
+
+    async def save(self, run: ImportRun) -> None:
+        self._note(run.dataset)
+        await super().save(run)
+
+
+def _offline_client(*_: object, **__: object) -> httpx.AsyncClient:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("the bootstrap dispatch reached the network")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+
+
+async def _journal_of_a_full_bootstrap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *, through_the_worker: bool
+) -> list[str]:
+    """`--phase all` driven either the way `usher bootstrap` drives it or the
+    way the `bootstrap` job handler does, over the same fakes."""
+    journal: list[str] = []
+    catalog = _JournallingCatalog(journal)
+    runs = _JournallingRuns(journal)
+    settings = _settings(bulk_data_dir=tmp_path)
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+
+    if not through_the_worker:
+        # Byte for byte what `cli._bootstrap` calls, minus the engine it owns
+        # and with the report sink pointed at the same journal -- which is
+        # what makes the three catalog-dependent phases visible at all, since
+        # each of them refuses an empty catalog with a sentence rather than
+        # touching a dataset.
+        await run_bootstrap(
+            catalog,
+            runs,
+            _nothing,
+            settings,
+            BootstrapPhase.ALL,
+            report=journal.append,
+            events=NullEventPublisher(),
+        )
+        return journal
+
+    queue = FakeJobQueue()
+    pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue)
+    monkeypatch.setattr(usher.composition, "_log_bootstrap_line", journal.append)
+    worker = build_worker(
+        dataclasses.replace(pipeline, bulk=catalog, import_runs=runs),
+        settings,
+        provider=None,
+        embedder=None,
+        client=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+    await queue.enqueue(
+        [
+            JobRequest(
+                kind=JobKind.BOOTSTRAP, key=BootstrapPhase.ALL.value, priority=JobPriority.DEMAND
+            )
+        ]
+    )
+    assert await worker.run_once() == 1, "the premise: the worker claimed the bootstrap job"
+    return journal
+
+
+async def _nothing() -> None:
+    return None
+
+
+#: Which phase each journal entry belongs to. The three catalog-dependent
+#: phases contribute a refusal *sentence* rather than a dataset name against
+#: an empty catalog, which is what makes all six visible in one run.
+_PHASE_OF = (
+    (BootstrapPhase.IMDB, ("window-", "imdb.title.")),
+    (BootstrapPhase.CREDIT_NAMES, ("credit-names", "imdb.credit_names")),
+    (BootstrapPhase.ALIASES, ("aliases", "imdb.title.akas")),
+    (BootstrapPhase.TMDB_IDS, ("tmdb.ids.",)),
+    (BootstrapPhase.CROSSWALK, ("wikidata.crosswalk", "link-crosswalk")),
+    (BootstrapPhase.MOVIELENS, ("movielens",)),
+)
+
+
+def _phases_in(journal: list[str]) -> list[BootstrapPhase]:
+    """The journal's entries collapsed to the phase each belongs to, in first
+    -sighting order, with an entry nothing claims raising rather than being
+    silently dropped -- a mapping that fell through would turn a reordered
+    phase into a missing one, which reads as a shorter list rather than as a
+    wrong one."""
+    seen: list[BootstrapPhase] = []
+    for entry in journal:
+        phase = next(
+            (one for one, prefixes in _PHASE_OF if entry.startswith(prefixes)),
+            None,
+        )
+        assert phase is not None, f"no phase claims the journal entry {entry!r}"
+        if phase not in seen:
+            seen.append(phase)
+    return seen
+
+
+async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The proof that the extraction landed is **behavioural, not
+    structural**: the same phases, in the same order, whichever root drove
+    them.
+
+    A structural assertion -- "the handler imports `run_bootstrap`" -- is
+    satisfied by a handler that imports it and then does something else, and
+    it is satisfied forever by a `run_bootstrap` whose arms have drifted from
+    the ones `usher bootstrap` reaches. What cannot be satisfied that way is
+    an identical journal of window edges, dataset names and the crosswalk
+    link, produced twice over the same fakes.
+
+    Three facts about that journal are asserted by name, because each is a
+    measured decision the order alone would not pin:
+
+    - **One window, both IMDb passes inside it.** Wrapping each pass
+      separately rebuilds `ix_titles_sort_name` and
+      `ix_titles_name_lower_year` between them and pays for the rebuild
+      twice -- 35.8 s suspended against 40.2 s kept (11.0% faster) with a
+      rebuilt pair ~24% smaller, 97 MB against 127 MB
+      (`.claude/rules/bootstrap-and-datasets.md`).
+    - **`link-crosswalk` immediately after the crosswalk import.** The import
+      stores pairs; the link is what attaches them to `titles`.
+    - **Every phase in `BootstrapPhase`'s declared order**, asserted against
+      the enum rather than against the other driver. **A parity assertion
+      cannot see a permutation** -- both roots call one function, so a
+      reordered dispatch reorders both journals identically and they still
+      match. Measured: moving the `credit-names` arm in front of the `imdb`
+      one survived this case until the order was pinned against the enum, and
+      the damage is the one Track 2 named -- `credit-names` joins to `titles`
+      on `imdb_id`, so ahead of `imdb` it refuses an empty catalog and the
+      phase silently does nothing, while behind a TMDb crawl it defers every
+      enriched title to TMDb permanently and 203,969 of the 204,335
+      >=100-vote titles never gain a `credit_names` at all. (It stales no
+      embedding in either position; this sentence said it staled that tier
+      until an audit checked it against `fill_credit_names`' own predicate.)
+    """
+    through_cli = await _journal_of_a_full_bootstrap(
+        monkeypatch, tmp_path, through_the_worker=False
+    )
+    through_worker = await _journal_of_a_full_bootstrap(
+        monkeypatch, tmp_path, through_the_worker=True
+    )
+
+    assert through_cli, "the premise: driving the dispatch records something"
+    assert through_worker == through_cli
+
+    window = through_cli.index("window-open"), through_cli.index("window-close")
+    inside = through_cli[window[0] + 1 : window[1]]
+    assert inside == ["imdb.title.basics", "imdb.title.ratings"]
+    assert through_cli.count("window-open") == 1
+    assert through_cli.count("window-close") == 1
+
+    assert through_cli[through_cli.index("wikidata.crosswalk") + 1] == "link-crosswalk"
+    assert _phases_in(through_cli) == [
+        one for one in BootstrapPhase if one is not BootstrapPhase.ALL
+    ]
+
+
+async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """One `httpx.AsyncClient` for seven datasets, closed in a `finally`.
+
+    A client per *phase* would defeat connection reuse across the whole run;
+    a client per worker *pass* would be built ~17,280 times a day at the
+    lane's 5 s floor, which is the arithmetic `build_worker`'s own docstring
+    records for a log line. The `finally` is the other half: the phase that
+    raises here is `bulk_load_window` itself, which is the one thing in the
+    dispatch outside `import_dataset`'s `except UsherPortError` and therefore
+    the only way a bootstrap run ends by raising.
+    """
+    built: list[httpx.AsyncClient] = []
+
+    def recording(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        client = _offline_client()
+        built.append(client)
+        return client
+
+    monkeypatch.setattr(usher.composition, "bulk_client", recording)
+    journal: list[str] = []
+    settings = _settings(bulk_data_dir=tmp_path)
+
+    await run_bootstrap(
+        _JournallingCatalog(journal),
+        _JournallingRuns(journal),
+        _nothing,
+        settings,
+        BootstrapPhase.ALL,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+    assert len(built) == 1
+    assert built[0].is_closed
+
+    class _WindowRaises(_JournallingCatalog):
+        def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
+            raise RuntimeError("the window could not be opened")
+
+    with pytest.raises(RuntimeError, match="the window could not be opened"):
+        await run_bootstrap(
+            _WindowRaises(journal),
+            _JournallingRuns(journal),
+            _nothing,
+            settings,
+            BootstrapPhase.IMDB,
+            report=lambda _: None,
+            events=NullEventPublisher(),
+        )
+    assert len(built) == 2
+    assert built[1].is_closed
+
+
+async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`run_bootstrap` takes a report sink because the two roots want the
+    same sentences in different places, and this is the half a default
+    argument would have got wrong.
+
+    `usher bootstrap` prints; a worker inside the server process must not,
+    because its stdout is a log stream and a bare line in it has no level, no
+    timestamp and no trace id. The refusal sentence is the one that always
+    renders against an empty catalog, so it is what this case reads back.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    sink: list[str] = []
+    handle = logger.add(lambda message: sink.append(message.record["message"]), level="INFO")
+    try:
+        queue = FakeJobQueue()
+        pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue)
+        worker = build_worker(
+            dataclasses.replace(
+                pipeline,
+                bulk=FakeBulkCatalogRepository(),
+                import_runs=FakeImportRunRepository(),
+            ),
+            _settings(bulk_data_dir=tmp_path),
+            provider=None,
+            embedder=None,
+            client=None,
+            resolve=_never_resolves,
+            user_id=uuid.uuid4(),
+        )
+        capsys.readouterr()
+        await queue.enqueue(
+            [
+                JobRequest(
+                    kind=JobKind.BOOTSTRAP,
+                    key=BootstrapPhase.MOVIELENS.value,
+                    priority=JobPriority.DEMAND,
+                )
+            ]
+        )
+        assert await worker.run_once() == 1
+    finally:
+        logger.remove(handle)
+
+    assert capsys.readouterr().out == ""
+    assert any("titles is empty" in line for line in sink)
+
+
+async def test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers_buffer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The one registration in `build_worker` that is handed `pipeline.events`
+    rather than `worker.events`, pinned from **both** sides.
+
+    G2 measured that swapping those two objects at a registration site is
+    invisible to every unit case of `JobWorker` -- the handler runs, the job
+    completes, the frames arrive, and only *when* they arrive differs. That
+    blind spot is why the enrich registration has a composition-level case,
+    and it is exactly as wide here with the polarity inverted: this producer
+    must **not** be deferred.
+
+    `DeferredEventPublisher`'s own docstring sizes its buffer for *"a handful
+    of events at most"*, and a bootstrap raises one per committed batch -- 26
+    for `--phase imdb`'s title pass alone at the shipped 50,000 batch size. So
+    a deferred bootstrap delivers its whole progress bar as a single jump
+    after the run it was describing has finished, which is the `0% to 100%`
+    failure `ReconcileService._publish_progress` already names, and
+    `discard()` on a failing job would throw away frames naming batches that
+    really did commit.
+
+    Both assertions are needed and neither implies the other: `is` the bus
+    says the right object was passed, and `is not worker.events` is what fails
+    if a later reader "fixes" this registration to match the four below it.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    seen: list[EventPublisher] = []
+
+    async def record(*args: object, **kwargs: object) -> None:
+        publisher = kwargs["events"]
+        assert isinstance(publisher, EventPublisher)
+        seen.append(publisher)
+
+    monkeypatch.setattr(usher.composition, "run_bootstrap", record)
+    queue = FakeJobQueue()
+    pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue, events=_Recorder())
+    worker = build_worker(
+        pipeline,
+        _settings(bulk_data_dir=tmp_path),
+        provider=None,
+        embedder=None,
+        client=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+    await queue.enqueue(
+        [
+            JobRequest(
+                kind=JobKind.BOOTSTRAP, key=BootstrapPhase.IMDB.value, priority=JobPriority.DEMAND
+            )
+        ]
+    )
+
+    assert await worker.run_once() == 1, "the premise: the worker claimed the bootstrap job"
+    assert len(seen) == 1, "the handler did not reach run_bootstrap exactly once"
+    assert seen[0] is pipeline.events, "the handler was not handed the process bus"
+    assert seen[0] is not worker.events, (
+        "the bootstrap frames were handed JobWorker's deferred buffer, which holds them "
+        "until the whole phase completes -- a progress bar that jumps from 0% to 100%"
+    )
+
+
+class _Recorder(NullEventPublisher):
+    """Distinguishable from every other publisher by identity, which is all
+    the case above needs -- `NullEventPublisher()` instances compare equal to
+    nothing but themselves, and an assertion spelled against the *class* would
+    pass against `worker.events`' inner publisher as readily as against the
+    bus itself."""

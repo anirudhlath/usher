@@ -89,7 +89,7 @@ class Title(BaseModel):
     content_rating: str | None
 
     community_rating: float | None       # provider aggregate, TMDb 0-10 scale
-    vote_count: int | None
+    vote_count: int | None               # IMDb numVotes until enriched, TMDb's after
     popularity: float | None
 
     collection_id: UUID | None
@@ -110,13 +110,41 @@ hashable.
 `field_provenance` exists so a second metadata provider can be added later
 without ambiguity about which source won a given field.
 
-🔶 **Deferred to M9:** a GIN index on `genres` for faceted `/browse`
-([07](07-client-api.md)) facet counts at catalog scale. Measured at 300k
-rows: a facet count seq-scans in 78.7 ms, projecting to ~3.3 s at IMDb's
+🔶 **Deferred to M9** *(and M9 reached it, measured it, and still did not add
+it — see the paragraph after this one)***:** a GIN index on `genres` for faceted
+`/browse` ([07](07-client-api.md)) facet counts at catalog scale. Measured at
+300k rows: a facet count seq-scans in 78.7 ms, projecting to ~3.3 s at IMDb's
 full 12.7M. Not added in M1 because `CREATE INDEX CONCURRENTLY` can add it
 online with no table rewrite whenever M9 lands — there is no cost to
 waiting and a real cost (write overhead through M2's bulk load, and every
-write after) to adding it before anything queries by facet. The same
+write after) to adding it before anything queries by facet.
+
+❌ **M9 shipped `GET /browse` with no such index, deliberately, and the
+projection above is not what a real catalog does.** Measured 2026-08-12 by M9's
+B7 over 1,272,367 titles against a bar written and hashed before the first
+probe: unfiltered facet counts are **330.81 ms p95** — not ~3.3 s — and every
+browse plan is the same `Parallel Seq Scan on titles`, ~95,000 buffers, with a
+**39–59 kB top-N heapsort**, so **the sort is not the cost and the scan is**.
+Two findings decided it, and both are reasons the index would not have been the
+fix this row assumed:
+
+- **A predicate does not make facets affordable**, because each facet is
+  computed over the filtered population *minus its own predicate* — a
+  genre-predicated request is 324.43 ms against an unfiltered 330.81, and a
+  genre matching **one** title is 321.93. So facets ship **opt-in and
+  predicated** (`?facets=true` plus at least one of `genre`/`year`/`owned`),
+  with a `computed` flag and *absent* rather than empty maps.
+- **The GIN index would introduce a hazard that does not exist today.** With no
+  index, `genres @> '{Fantasy}'` is a `Filter:` on a sequential scan and there
+  is no bitmap to be lossy; a GIN index on `genres` is precisely what would
+  create the 66,188-lossy-block recheck M9's B3 measured one subsystem over.
+
+The unindexed cost is real and this row is **not** closed as "no longer wanted":
+a browse page is over its own 50 ms bar at 139.92 ms predicated and 321.29 ms
+unfiltered. What changed is that the remedy is no longer obvious. The plans, the
+bar and the one accidental 317× finding beside them — `(key IS NOT NULL) DESC,
+key <dir>` and `key <dir> NULLS LAST` are the same *order* and different *sort
+keys*, and only the second is indexable — are in `.claude/rules/db-and-sql.md`. The same
 applied to indexes on `media_items.added_at`/`last_seen_at`/`available` and
 `titles.collection_id`. Three of those five have since landed:
 `ix_media_items_sweep` covers `last_seen_at`/`available` for the availability
@@ -215,6 +243,30 @@ is `CHECK (>= 0)` and nullable, because a crew credit has no billing.
 wholesale when that payload is re-derived; there is no update path for a
 trigger to fire on.
 
+✅ **Four of these fields reach the wire, and M9 is where that was decided.**
+`GET /titles/{id}` renders `person_id`, the person's `name`, `character` and
+`job` ([07](07-client-api.md) has the full shape: `cast` and `crew` as
+separate keys, each capped at 20 and absent when empty). **`billing_order`
+and `department` are stored and deliberately not rendered.** `billing_order`
+is the response's own ordering, already spent by the time a client sees it —
+shipping the column invites a client-side re-sort, and the obvious spelling
+of that (`billing_order or 0`) puts an unbilled crew member above the lead,
+which is the defect `ORDER BY billing_order ASC NULLS LAST` exists to
+prevent, relocated somewhere nobody here can fix it. `department` is a
+coarser grouping than that shape uses; adding it later is additive, and
+removing a field clients render is not. `tmdb_credit_id` stays off the wire
+for [ADR-0003](decisions/0003-own-uuid-identity.md)'s reason — identity in an
+API contract is Usher's own UUIDv7 and a provider id is an indexed attribute.
+
+⚠️ **A title can carry `titles.credit_names` and no `credits` rows at all**,
+and after the IMDb principals loader that is the ordinary state rather than a
+corner: it fills that column for ~93.8% of the catalog without deriving a
+single `people` or `credits` row, because it reads a bulk dataset rather than
+a TMDb payload. So weight class B can match a person's name on a title whose
+`credits` are empty, and `GET /titles/{id}` correctly answers such a title
+with neither `cast` nor `crew`. The two are populated by different pipelines
+and neither implies the other.
+
 ⏳ **`imdb_id`, `birth_year`, `death_year` and `biography` are not built, and
 they are not deferred pending a decision — they are a different milestone's
 network budget.** None of them is on a `credits.cast[]`, `credits.crew[]` or
@@ -290,18 +342,68 @@ backdrop_path}`.
 
 Artwork is referenced, never bulk-mirrored — mirroring posters for a 1.2M-title
 catalog would be ~120 GB. Usher stores references and serves them through a
-caching proxy that fetches, resizes, and stores on first request.
+caching proxy that fetches a provider **rung** and stores the bytes on first
+request — 🔴 it does not resize, which this line claimed until 2026-08-11, and
+nothing in Usher's runtime can decode an image
+([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)).
 
 ```python
 class Image(BaseModel):
     id: UUID
     title_id: UUID | None; episode_id: UUID | None; person_id: UUID | None
     kind: ImageKind                      # poster | backdrop | logo | still | profile
-    provider: str; remote_url: str
+    provider: str; provider_path: str
     width: int | None; height: int | None
     language: str | None
     is_primary: bool
 ```
+
+✅ **The table landed in `m09a`, the model, the port and the repository in
+`m09c`.** `usher.domain.image.Image`, `usher.ports.repository.image.
+ImageRepository` and `usher.db.repositories.image.PostgresImageRepository`
+exist and are 1:1 with `ImageRow` by field name
+(`tests/unit/test_domain_image.py`), and **the writer landed with them**:
+`DeriveService` fills the table from `raw_payloads` with no second network
+call, on the same walk as people, credits and collections
+([03](03-sources-and-sync.md) stage 5). `GET /images/{id}` itself is still to
+come.
+
+🔴 **`provider_path`, not `remote_url` — corrected 2026-08-11 and the sketch
+above moved with it.** [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)
+settled the proxy on `{base}{rung}{path}`, so a stored full URL would make
+choosing a rung a find-and-replace inside a URL Usher did not mint, on every
+request, and would turn a CDN-base change into a data migration across 1.27M
+titles. `m09c` renamed the column and its CHECK; the table was empty on every
+deployment, so nothing was backfilled.
+
+**An image id survives a re-derivation, and that is a constraint rather than a
+hope.** `uq_images_owner_provider_path` is
+`UNIQUE NULLS NOT DISTINCT (title_id, episode_id, person_id, provider,
+provider_path)`, and the write is an upsert on it, so a second `usher derive`
+returns the id the row was first inserted with. **The obvious spelling of that
+key does not work**: `UNIQUE (title_id, provider, provider_path)` is what the
+request said and it is inert for two owner kinds in three, because Postgres
+defaults to `NULLS DISTINCT` and an episode- or person-owned row has
+`title_id IS NULL`. Measured on PostgreSQL 17.10 — it admitted 2 rows where 1
+is correct. ADR-0032 depends on this: without the key its
+`Cache-Control: immutable` is a lie the first time a title is re-derived.
+
+⏳ **There is no `sort_order`, so the read order is `(is_primary DESC, id)`.**
+`id` is first-sighting order, which means a provider that re-ranks a title's
+posters can move exactly one thing in Usher's answer — which of them is
+primary. Recorded as a limit rather than a defect: `m09c` was authorised for
+the key, and ADR-0032's request puts the read order with whoever reads images.
+
+Three things the table settles that this sketch leaves open. The three owner
+columns are constrained by `ck_images_exactly_one_owner`
+(`num_nonnulls(title_id, episode_id, person_id) = 1`) rather than by a
+polymorphic `(owner_kind, owner_id)` pair, which could carry no foreign key at
+all. All three foreign keys are **`ON DELETE CASCADE`**, and that is forced
+rather than chosen: `SET NULL` would leave zero owners, which the CHECK
+refuses, so the parent delete would fail naming a table the operator never
+touched. And `kind`'s vocabulary is closed as the `ImageKind` enum above —
+`poster | backdrop | logo | still | profile` — stored as `VARCHAR(16)`, since
+this schema creates no native Postgres enum type anywhere.
 
 ### Source / MediaItem
 
@@ -347,6 +449,29 @@ section opens with, and that `CLAUDE.md` states project-wide.
 
 **Unmatched items are never dropped.** A `MediaItem` with `title_id IS NULL`
 sits in a review queue exposed over the admin API for manual resolution.
+**Built in M9:** `GET /admin/unmatched` reads it and
+`POST /admin/unmatched/{id}/resolve` writes it ([07](07-client-api.md)'s Admin
+table); `usher unmatched` has delivered the same capability since M4.
+
+**The queue pages by cursor, and the reason is this column's nullability.**
+`added_at` is optional above and is the sort key the queue is ordered by, so a
+page boundary can land inside the group of items no source could date — which
+is precisely the population an operator is reviewing, since a source that could
+not date a file is a source that told us least about it. The keyset therefore
+carries all three arms of
+[ADR-0034](decisions/0034-the-cursor-carries-a-position.md)'s predicate; the
+row-comparison spelling that record originally shipped evaluates to NULL rather
+than false at such a boundary and drops the whole undated tail while every page
+served still looks full.
+
+**Nothing in this schema ties `title_id` to `episode_id`, so the resolve route
+checks it.** They are two independent foreign keys with no CHECK between them —
+deliberately, because an episode's `MediaItem` is *supposed* to carry its
+series' `title_id` beside its own `episode_id`. The cost is that a hand
+resolution naming an episode of a **different** series is a valid row that every
+read on this port answers with, and measured against real PostgreSQL the write
+succeeds. `POST /admin/unmatched/{id}/resolve` refuses that pairing before it
+writes; there is no second line of defence below it.
 
 **`added_at` is COALESCEd forward, which is not the same as immutable — and
 the difference is what M7's Recently Added row is exposed to.** The shipped
@@ -709,10 +834,26 @@ exists — a curated row names three to eight titles, in order — but it is a
 and will neither check nor cascade it. `llm_calls` appears on no line at all:
 it references nothing, by the same argument.
 
-⏳ **One of those lines still describes a table that does not exist.** `Image`
-has no table, no model and no port anywhere in `src/`, and it lands with M9,
-re-derived from `raw_payloads` with no second network call
-([09](09-roadmap.md)'s M4 boundary call 2).
+✅ **`Title 1─* Image` is real, writer included.** `m09a` gave `Image` a table
+and a SQLAlchemy row, `m09c` gave it a domain model, a port and a Postgres
+repository — `ImageRepository.replace_for_titles` is the write and
+`list_for_title` the read — and `DeriveService` is what calls the write. The
+rows are re-derived from `raw_payloads` with **no second network call**
+([09](09-roadmap.md)'s M4 boundary call 2, now paid in full): a derivation
+mints a fresh `Image.id` per sighting and the upsert on
+`uq_images_owner_provider_path` hands back the id the row was first inserted
+with, so `usher derive` can run nightly without invalidating a client's cached
+artwork.
+
+The diagram line understates the table by one edge, deliberately: `images` can
+hang off an *episode* or a *person* as well as a title (`still` and `profile`
+are two of the five `ImageKind` members), which is three foreign keys and one
+CHECK rather than the single parent the `1─*` notation can draw. **The natural
+key covers all three owners and the port covers one**: M9's two artwork
+consumers are both title-shaped, so `ImageRepository` has no
+`replace_for_episodes` and no `replace_for_people`, while
+`uq_images_owner_provider_path` constrains an episode still and a person
+headshot exactly as it constrains a poster.
 
 `Collection`, `Person` and `Credit` **landed in M7** (`fd7c3a5b9e12`), which
 also gave `titles.collection_id` — a bare nullable UUID with no foreign key

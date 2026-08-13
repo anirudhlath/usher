@@ -7,8 +7,8 @@ Three layers, split by what changes and when:
 | Layer | Holds | Changes |
 |---|---|---|
 | **Environment** | `DATABASE_URL`, port, log level, embedding model, `USHER_SECRET_KEY`, TMDb key, ✅ the LLM endpoint, model and key (M8) | Deploy time |
-| **Config file** (TOML) | Rate limits, TTLs, enrichment tier, image cache ladder | Restart |
-| **Database** | Sources, users, ⏳ row provider enable/disable (**M9** — see below) | Runtime, via admin API |
+| **Config file** (TOML) | Rate limits, TTLs, enrichment tier. 🔴 **Not the image cache ladder** — it said so until 2026-08-11 and the ladder is a code constant ([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)): mechanism before setting, and a knob nothing reads is dead config wearing a control's name | Restart |
+| **Database** | Sources, users, ✅ row provider enable/disable (**M9** — see below) | Runtime, via admin API |
 
 Sources live in the database because they are added through the admin API. A
 deployment that needs a compose edit and a restart to connect a media server is
@@ -21,7 +21,20 @@ cannot discover and a documented key that is not a setting are both test
 failures (`tests/unit/test_deployment_config.py`). M6 added nine of them,
 four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`. **M8 added eight
 `USHER_LLM_*` plus `USHER_CURATION_POOL_SIZE` and
-`USHER_QUERY_EXPANSION_ENABLED`** — ten. That last one arrived on 2026-08-07
+`USHER_QUERY_EXPANSION_ENABLED`** — ten. **M9 adds four `USHER_IMAGE_*`** —
+`_CACHE_DIR`, `_MAX_BYTES`, `_FETCH_TIMEOUT_SECONDS` and `_CDN_BASE_URL` —
+and the interesting one is the fifth it does **not** add: the width ladder is a
+code constant, for the reason the middle row above now carries
+([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)).
+`USHER_IMAGE_CDN_BASE_URL` is a setting for `USHER_TMDB_BASE_URL`'s reason (a
+household behind a restrictive network puts a proxy in front) and is *also* the
+answer to a question that would otherwise be a network call: resolving the
+provider's `secure_base_url` per cold image is a second round trip, against an
+authenticated endpoint, for a value that changes approximately never. And
+`USHER_IMAGE_CACHE_DIR` is the **fifth** entry in `compose.yml`'s
+`environment:` block, which had held four since M5 — a bind-mount path is a
+topology fact in exactly the way a database hostname is, and the other three
+are the operator's. That last one arrived on 2026-08-07
 and is the one place this project ships **two** switches over one dependency:
 `USHER_LLM_ENABLED` builds the client, and query expansion is off even when it
 is on, because the retrieval measurement in
@@ -83,11 +96,12 @@ failure as a table listing a control nothing implements.
   the top-N cap reshape the result, so an operator turning the dial would
   watch a screen change for reasons the dial does not explain.
 
-⏳ **"Row provider enable/disable" is annotated rather than struck, because
-unlike the two above it is a control that should exist — it just cannot yet.**
+✅ **"Row provider enable/disable" was annotated rather than struck, because
+unlike the two above it is a control that should exist — and in M9 it does.**
 The bottom row claims it is available *"runtime, via admin API"*, and the admin
-API is M9's; M6 added no route and M7 added exactly one, `GET /home`. So the
-mechanism is missing on the same principle the concurrency bullet states:
+API was M9's; M6 added no route and M7 added exactly one, `GET /home`. Until
+then the mechanism was missing on the same principle the concurrency bullet
+states:
 
 > A `row_providers` table with ten rows all reading `enabled = true` is
 > indistinguishable from no table, right up until an operator finds it and
@@ -96,6 +110,17 @@ mechanism is missing on the same principle the concurrency bullet states:
 > composition point, nine entries in M7 and **ten since M8 registered
 > `CuratedProvider`** — and the runtime control lands with the admin API that can
 > write it. **M9**, and [09](09-roadmap.md)'s M7 boundary call 9.
+
+**M9 discharged it, and the refusal's own condition is what the discharge had
+to satisfy.** `row_provider_settings(slug_prefix PK, enabled, updated_at)`
+(migration `m09a`) is written by `PUT /admin/rows/providers/{slug}` and read by
+every composer ([07](07-client-api.md),
+[06](06-rows-and-recommendations.md)) — so toggling it does something, which is
+the sentence above turned into a requirement. The half of the refusal that
+survives is that the table is created **empty and is never seeded**: absence
+means enabled, exactly as *"enabled by registration in code"* already meant, so
+there is no state where the table exists and says nothing, and no migration
+carrying a second copy of the registry.
 
 This is the same argument [10](10-telemetry-and-dashboards.md) makes about
 `search_queries`: a table whose writer does not exist gets its shape fixed
@@ -254,10 +279,12 @@ local state can answer.**
 | Push socket drops | Backoff reconnect; delta reconcile on reconnect; after N failures mark `supports_push = false` and lean on the nightly walk. **The failure counter resets on delivery, not on connection** — a proxy that upgrades and then buffers connects perfectly every time, so a counter reset by connecting never reaches the ceiling and this row silently never fires ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). |
 | TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected. |
 | TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades. |
+| Provider image CDN unreachable | ✅ M9: catalog and every rendered card unaffected — an artwork reference is a row, not a fetch, so browsing, search and the home screen never touch the CDN. A **cold** image (no entry for that `(image id, rung)`) answers `503 source_unavailable` with `Retry-After`; a **cached** one still serves, because `GET /images/{id}` reads the disk before the network. The CDN needs no credential, so this row has no authentication arm. An answer the proxy cannot serve splits in two: artwork this deployment declines to carry (an `image/svg+xml` logo, ~1 title in 17) is an ordinary `404 not_found`, and everything else — a 4xx, a body past `image_max_bytes`, a captive portal's HTML under a 200 — is `503 source_unavailable` with **no** `Retry-After`, since re-asking produces the same answer. That second one's honest status is a 502 and [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s closed vocabulary has no code for one. |
 | LLM call fails | Previous curated rows persist. Home composes without them. ✅ M8: the failure is fatal to the *job* and never to the screen — a failed generation never reaches `replace_for_user`, so this row is a property of the control flow rather than of a transaction. **Only the failures that translate to `PortDataMalformed` park the job** rather than retrying into the same answer: a 4xx that is none of 429, 401/403 or 408 (so 400, 402, 404, 409, 422), a 200 whose body does not conform, and a generation that validated to zero rows. The other three families **back off** — `JobWorker` parks on `PortDataMalformed` alone and marks every other `UsherPortError` retryable (`services/jobs.py`, `JobWorker._run`), so 429 (`PortRateLimited`), 401/403 (`PortAuthFailed`) and 408 or any 5xx (`PortUnavailable`) all retry with jittered backoff. *(This sentence read "a 4xx that is not 429 parks the job" until 2026-08-07, which over-parked three families; measured against the adapter's `_decode` and `JobWorker`'s two `except` arms.)* |
 | LLM call fails during a **search** (query expansion) | ✅ M8: the search runs on the query the user typed and `expanded_query` is absent. **The attempt is still billed** — one `llm_calls` row per attempted call — so the warning arrives after the money. Off by default ([05](05-search-and-similarity.md)), which is why this is a narrower row than the one above. |
 | Embedder unavailable | Semantic search falls back to full-text, flagged in the response. |
 | Meilisearch down (if enabled) | Fall back to the Postgres index. It is never the only index. |
+| Worker in its own process (`USHER_WORKER_ENABLED=false` on the server, `usher work` beside it) | ✅ M9: every SSE frame a *job* raises reaches a `NullEventPublisher` and no client is told — `title.updated` since M5, and `bootstrap.progress` since M9's E7 put `JobKind.BOOTSTRAP` on the queue. The bus is in-process and the `LISTEN/NOTIFY` implementation `ports/events.py` names has no owner. **Nothing durable is lost**: the catalog, `import_runs` and `sync_runs` are written by the worker either way, so `GET /admin/bootstrap/status` and `GET /admin/sources/{id}/status` report the same thing in both topologies and a client that heard nothing can still see where a run got to. The cost is latency to a *screen*, not correctness. |
 | Postgres down | Total outage. The one hard dependency, deliberately. |
 
 ## Job reliability
@@ -275,6 +302,21 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
   instantly re-claimable" a property rather than a probability. Implemented in
   `usher.db.repositories.jobs`, one `CASE` inside the failure statement;
   `job_backoff_seconds` is the base.
+- **A server-supplied `Retry-After` is a floor added to that same jittered
+  delay, never a replacement for it.** ✅ M9: `PortRateLimited.retry_after`
+  had been assigned at six sites across four adapters since M4 and read
+  nowhere — a 429 that told this project exactly when to come back was
+  answered with the queue's own jittered guess instead. `JobQueue.fail`
+  now takes `retry_after_seconds`, and `JobWorker._fail` reads it off a
+  caught `PortRateLimited` by `isinstance`, never by `getattr` (a future
+  exception member must not accidentally opt into the behaviour). The hint
+  is clamped at zero before it is added: a `Retry-After` carrying RFC 9110's
+  HTTP-date form can already be in the past, and an unclamped hint would
+  pull a rate-limited job's retry *earlier* than the ordinary schedule — the
+  exact hot loop the backoff exists to prevent. **No ceiling is imposed on
+  the hint itself** — a hostile or buggy upstream can ask for an arbitrarily
+  long wait, bounded only by the attempt ceiling below and visible as
+  `usher.jobs.queued` failing to drain. Recorded, not solved.
 - **Malformed data does not back off at all — it parks on the first attempt.**
   `PortDataMalformed` means the upstream answered and the answer was wrong, so
   five identical retries only delay a human seeing it by the whole backoff
@@ -287,10 +329,17 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
   naming an item its source has since deleted, or one no configured source
   addresses, is not poison — parking it fills the review list with things that
   are simply gone, and a parked job needs a human to release it. Parking is
-  reserved for work a human has to look at. The three handlers
-  (`usher.services.handlers`) are where this is decided; a job whose *key* is
-  unparseable is the opposite case and does park, because that is a real
-  defect somebody has to see.
+  reserved for work a human has to look at. The handlers
+  (`usher.services.handlers`) are where this is decided — including `sync`'s
+  own three ways of finding nothing to do (M9's E3): a source deleted between
+  enqueue and claim; a source *disabled* between enqueue and claim, re-checked
+  in the handler rather than trusted from the route's own 409, because
+  head-of-line blocking (below) can hold the row behind another walk for
+  minutes — long enough for an operator to park a source that was healthy when
+  they pressed the button; and a source whose credential row has gone missing,
+  which `composition.open_adapter` already answers `None` for. A job whose
+  *key* is unparseable is the opposite case and does park, because that is a
+  real defect somebody has to see.
 - **Re-enqueueing does not un-park.** Poison a human has not looked at is not
   fixed by asking for it again, and a parked job's priority is not promoted
   behind their back either.
@@ -317,6 +366,22 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
   is the thing worth engineering against; visible failure is fine.
 - Jobs are idempotent by construction, so redelivery is always safe.
 - Startup requeues anything left `in_progress` by an unclean shutdown.
+- **Head-of-line blocking is accepted, priced, and recorded — M9's E3, and the
+  one lane this queue has.** `POST /admin/sources/{id}/sync` (`JobKind.SYNC`)
+  and `POST /admin/bootstrap/{phase}` put the two longest units of work in
+  this system on the same single `JobWorker` lane every other kind shares —
+  `services/jobs.py`'s claim loop is strictly sequential — so `enrich`,
+  `index`, `derive`, `curate` and `match` are unavailable for the duration of
+  either, hours in the sync case, triggered by an unauthenticated route. The
+  queue is chosen anyway, for its dedup on `(kind, key)`, its durability
+  across a restart (`JobWorker.startup()` requeues everything `running`), and
+  the precedent `POST /admin/rows/regenerate` already ratified. It is bounded
+  rather than unbounded — both handlers commit per batch, so no transaction
+  spans the job — and `usher sync` / `usher bootstrap` remain the way to run
+  one off the queue, at the cost of a second process rather than a second
+  lane. No second lane is added to change this trade; a deployment large
+  enough to need one is a deployment large enough to need `usher work` run
+  from a second host instead.
 
 ## Observability
 

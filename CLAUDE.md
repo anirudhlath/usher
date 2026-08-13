@@ -7,9 +7,14 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M8 complete, verified and swept, on `milestone/m8-curation`.** Eight
-milestones are built and verified, several of them against live third-party
-services rather than only against fakes:
+**Status: M9 complete on `milestone/m9-api-surface`.** Nine milestones are built
+and verified, several of them against live third-party services rather than only
+against fakes. **M9 shipped with a gap in that column and the gap is now
+closed**: its H4/H5 live Emby run happened on 2026-08-12, after the milestone
+gate, because the milestone had concluded no credentials existed here by
+checking one `.env` and stopping. **A negative established by looking in the one
+place the answer was expected is not a negative** — the row below is the one to
+read before trusting the playback and write-back paths end to end:
 
 | | delivers | live-verified against |
 |---|---|---|
@@ -21,15 +26,17 @@ services rather than only against fakes:
 | **M6** | `search_document` + GIN, trigram type-ahead, embeddings, `title_neighbors`, RRF fusion, the search CLI | a real 1,271,138-title catalog |
 | **M7** | the composed home screen — nine row providers, `HomeService`, `TasteService`, `DeriveService`, the tag genome, `GET /home` | a real 1,271,570-title catalog |
 | **M8** | LLM curation end to end — `OpenAICompatibleClient` (litellm declined), `curated_rows` + `llm_calls`, the candidate pool, `CurationService` and its validator, `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate`, `usher curate`, the genome tag vocabulary, query expansion | a local vLLM serving `gemma-4-26b-a4b` over a real 1,271,138-title catalog |
+| **M9** | the whole HTTP surface — PRD 07's Screens, Resources, Actions, Admin and Meta tables behind one RFC 9457 envelope over a closed seven-member `code` vocabulary; keyset cursors; search, the two-tier suggest, browse, similarity, the series hierarchy; the image proxy (`images` + `GET /images/{id}`) and artwork on `RowCard`; `POST /titles|episodes/{id}/play` with the playback ticket and outbound watch write-back; the admin completion (sync, unmatched, bootstrap status + trigger, row-provider toggles, `bootstrap.progress`); `search_queries` whole; `GET /meta/attribution`. **Track 2:** `append_to_response=season/N`, the IMDb akas and credit-names bulk expansion, the priority-tier TMDb crawl | the **live TMDb v3 API** (S3: 130,334 requests over 1.98 h, 130,647 titles enriched; T2/T3 against the real IMDb dumps) **and a real Emby 4.9.5.0** — H4/H5 ran 2026-08-12 in 23 bounded requests with no walk: `/play` → ticket → `302` → a real **206** with `video/x-matroska` bytes, the play body leaking nothing with its positive control fired first, and the watch write-back read back *from Emby* and restored **byte-for-byte**. ⚠️ They ran **after** the milestone closed, because M9 recorded "no Emby credentials on this host" having checked `~/code/usher/.env` and nowhere else |
 
 Task breakdowns are in `docs/plans/`, one file per milestone.
 [PRD 09](docs/prd/09-roadmap.md) is what's next. **Do not invent commands for
 tooling that does not exist yet** — check the Commands section below first.
 
-**What each milestone deliberately did *not* build** — M8's eight boundary
-calls, M7's nine, M6's nine, M4's four, and the typo-tolerance gate that failed
-its own bar — is in `.claude/rules/milestone-boundary-calls.md`, which loads
-when you work under `docs/plans/` or on the roadmap.
+**What each milestone deliberately did *not* build** — M9's eight boundary
+calls, M8's eight, M7's nine, M6's nine, M4's four, the typo-tolerance gate that
+failed its own bar and the IMDb entity design that failed its own size bar — is
+in `.claude/rules/milestone-boundary-calls.md`, which loads when you work under
+`docs/plans/` or on the roadmap.
 
 ⚠️ **M8's own subject document carries a finding worth knowing before you read
 anything else about curation.** Against `gemma-4-26b-a4b`, **88% of generated
@@ -151,9 +158,10 @@ so a session pays only for what it touches.
 | `emby-push-and-ingest.md` | `adapters/emby/**`, the pipeline services | M3/M4/M5's live runs against a real Emby 4.9.5.0 — the wrong write-back route, `UserData` divergence, the websocket's real cadence, the match ladder's measured yield |
 | `tmdb-and-enrichment.md` | `adapters/tmdb/**`, `services/enrich.py` | the 712-request live run, the 4xx taxonomy, `append_to_response=season/N`, movie/TV divergence across three API layers |
 | `search-and-embeddings.md` | `adapters/search/**`, `adapters/embedding/**` | the typo-tolerance gate that failed, GIN vs GiST, RRF's five traps, `fastembed` vs `sentence-transformers`, `halfvec`, `hnsw.iterative_scan` |
-| `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py` | the sequential build's two very different p95s, the genome's real coverage and its denominators |
+| `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py`, `similar.py` | the sequential build's two very different p95s, the genome's real coverage and its denominators, and why M9 removed the genome from the similarity blend |
 | `curation-and-llm.md` | `adapters/llm/**`, `services/curation*.py`, `query_expansion.py` | M8's live run — the 88% genre-heading finding, the real per-candidate token cost, the pool ceiling the reference endpoint cannot serve, why the coercion is the primary path, and query expansion measuring worse |
 | `bootstrap-and-datasets.md` | `adapters/bulk/**` | IMDb TSV parsing, MovieLens archive selection, Wikidata timing, the cache-key finding |
+| `ports-and-error-taxonomy.md` | `src/usher/ports/**`, `src/usher/adapters/**` | what a failure is *called* — a refusal and a fault sharing one type, when a subclass beats a new member, the frequency question to ask before reusing one, and the two-constants-must-move-together shape |
 | `api-telemetry-and-lanes.md` | `api/**`, `telemetry.py`, `composition.py` | SSE and `ASGITransport`, OTel provider caching, the instrumentor that produced no spans for three milestones, lane supervision and readiness |
 | `config-cli-and-deployment.md` | `config.py`, `cli.py`, `compose.yml`, `Dockerfile` | the settings failure that printed its own credential, `.env`'s two readers, `env_file:` vs `environment:`, image measurement, CI tag pinning |
 | `milestone-boundary-calls.md` | `docs/plans/**` | what each milestone deliberately did not build |
@@ -185,7 +193,7 @@ Every one of these must be green before a commit lands:
 uv run ruff check .              # lint
 uv run ruff format --check .     # formatting
 uv run mypy src tests            # strict, including tests/
-uv run lint-imports              # architecture contracts — 8 kept, 0 broken
+uv run lint-imports              # architecture contracts — 10 kept, 0 broken
 uv run pytest                    # full suite; tests/integration/ needs Docker
 ```
 
@@ -244,7 +252,7 @@ docker compose down                          # data/ bind mounts survive
 ```bash
 uv run usher --help
 
-uv run usher bootstrap --phase all           # IMDb + TMDb ids + Wikidata crosswalk
+uv run usher bootstrap --phase all           # every phase below, in this order
 uv run usher bootstrap --phase imdb          # one phase at a time; resumable
 uv run usher bootstrap-status
 
@@ -271,6 +279,18 @@ uv run usher curate                          # one LLM generation; pool, rows, d
 uv sync --extra embedding                    # optional: fastembed, 167 MiB, no torch
 ```
 
+**`--phase` is `BootstrapPhase`, and its members are in execution order:**
+`imdb`, `credit-names`, `aliases`, `tmdb-ids`, `crosswalk`, `movielens`, `all`.
+The order is measured rather than stylistic — `credit-names`, `aliases` and
+`movielens` all join to `titles` on `imdb_id` so all three follow `imdb`, and
+`credit-names` comes before anything that *enriches* a title because the fill
+writes only skeletons, so a title already enriched is deferred to TMDb for good
+(**203,969 of 204,335** ≥100-vote titles gain names in this order and none in
+the other; it stales no embedding in either, the embedded population being the
+exact complement of what it writes). One vocabulary rather than two:
+`POST /admin/bootstrap/{phase}` and `argparse`'s `choices=` are the same enum,
+so a phase cannot exist on one boundary and not the other.
+
 **Nothing runs `usher similar --rebuild` for you**, and that is the one
 freshness gap in the project: a title's neighbours go stale when some *other*
 title gets an embedding, which no per-row predicate can decide. It is an
@@ -286,11 +306,32 @@ uv run python scripts/measure_bulk_load.py            # downloads the real dump
 uv run python scripts/measure_ingest.py --items 50000
 uv run python scripts/measure_ingest.py --scale 1126674
 uv run python scripts/measure_rows.py
+uv run python scripts/measure_suggest_tiers.py --all       # both suggest tiers
 
 set -a; . ./.env; set +a                              # never a literal credential
 uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json
 uv run python scripts/capture_tmdb_fixture.py --kind movie --id <id> > /tmp/shape.json
 ```
+
+**`/tmp` on this host is tmpfs — RAM — so a pre-registered bar never goes
+there.** A throwaway shape dump above is fine in `/tmp`; a bar, a run log, or
+anything else whose value depends on *when it was written* is not, because the
+whole point of it is that it provably predates the numbers and a reboot erases
+the proof. Write those to `/var/tmp` (btrfs `@tmp`, durable) or into the repo,
+and record a `sha256` when you write them. M9's B3 wrote its bar to `/tmp`
+before noticing, and every pre-registered bar in that milestone had been going
+there.
+
+**A measurement harness needs its own quiet-check, and both obvious ones are
+wrong.** Comparing the one-minute load average before and after condemns every
+clean run, because a long run of continuous querying raises its own average —
+B3's went 1.34 → 2.82 on a box that was provably idle throughout. And a
+foreign-process census matching the whole command line counts *the shell that
+mentions the word*: `pgrep -f pytest` reported four processes on a box measured
+clear, and all four were idle `sleep 5` waiters watching for pytest. Match argv
+**tokens**, skip any process whose `comm` is a shell or `sleep`, and compare
+CPU **drift** between two moments when the harness itself is idle.
+`scripts/measure_suggest_tiers.py` has the working version.
 
 ### Live verification
 

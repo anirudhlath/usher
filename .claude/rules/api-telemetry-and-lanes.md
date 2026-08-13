@@ -25,6 +25,78 @@ streaming_asgi_transport.py` is the replacement: the app runs in a task,
 — `StreamingResponse.__call__` only runs `listen_for_disconnect` below spec
 2.4, so at 2.4+ a client going away would not cancel the body iterator and
 the route's `finally` would never run.
+**All five `events.publish` sites commit before they publish, and the open
+transaction at the instant of an `enrich` frame is `JobWorker`'s rather than
+the handler's.** Measured 2026-08-11 (M9 G1) against real Postgres 17, each
+site driven on a **committing** session with a second connection reading the
+event's own subject inside `publish`. `enrich.py:289` sees
+`enrichment_state='enriched'` (committed :208); `push.py:209` and `:244` see
+the merged `watch_states` row (committed :170); `push.py:278` sees the
+`media_items` row (committed :275); `reconcile.py:267` sees
+`sync_runs.items_seen` at 2 then 4 (committed :245). So PRD 09's carried-debt
+sentence — *"a client is told an event landed before the transaction that
+produced it committed"* — is **false of the event's subject at every site**,
+and is corrected there and in
+`docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md`.
+
+What survives is smaller and one layer up. At the same instant, the only
+`jobs` row visible for that key is `('enrich', 'running')`; the two `BACKFILL`
+requests staged at `enrich.py:270–277` become
+`('derive','pending'), ('index','pending')` only after `JobWorker._run`
+reaches `complete(job.id)` + `_commit()` (`jobs.py:143–147`). **That pair, plus
+the `DELETE` that completes the job, is the entire content of the residual
+window** — so a rollback there costs two enqueues and one duplicate
+`title.updated` on the `requeue_running` re-run, not a lie to a client. **The
+property G2 buys is ordering, not durability, and it needs no outbox table.**
+
+*Five as of 2026-08-11. **M9's E7 added a sixth**,
+`BootstrapService._publish_progress`, which satisfies the same rule at the same
+reading — it publishes immediately after the per-batch `self._commit()`, and
+`JobWorker` commits a `bootstrap` job's claim before the handler runs, so no
+transaction of the worker's spans the work either. It is deliberately **not**
+wrapped in `DeferredEventPublisher`: deferring one frame per committed batch
+behind a 26-batch `--phase imdb` load is the 0%-to-100% jump the frame exists to
+prevent, there is no residual window left for the buffer to close, and
+`discard()` on a failed job would drop frames naming batches that really did
+commit. ADR-0033 carries the amendment; `composition.build_worker` carries the
+argument at the registration site, pinned from both sides because swapping the
+two publishers there is invisible to every unit case of `JobWorker`.*
+
+**`xmin` is not evidence of an uncommitted read, and a whole milestone's worth
+of agents read it as one.** `test_sse_end_to_end.py`'s
+`assert await _job_xmin(...) is None` failing as `assert '745' is None` was
+relayed three times as *"a row a transaction has not committed is visible"*.
+Postgres never shows an uncommitted row version to another connection; `xmin`
+names the transaction that wrote the version the reader **can** see. Measured
+at the failure: `xmin='745', status='running', attempts=0`, against the
+reader's own `pg_current_snapshot() = '749:749:'` — an **empty** in-progress
+list — so 745 is settled and committed. It is the *claim's* `UPDATE`
+(`run_once`'s commit at `jobs.py:118–124`) still being current because the
+`DELETE` has not committed. **Before reading an `xmin` as a visibility
+anomaly, read `pg_current_snapshot()` beside it: if the writer is below the
+snapshot's xmin and absent from its in-progress list, nothing anomalous
+happened and what you are looking at is an ordering window.**
+
+**The same case's flakiness is that window, and the control three separate
+reports got wrong was the variable, not the count.** Unplanted on one tree at
+load average 7–9: **6 failures in 13 runs**, every one on `_job_xmin` and every
+one reporting the identical row state. With `await asyncio.sleep(0.25)`
+planted in `JobWorker._run` between the handler returning and
+`complete(job.id)`: **5 of 5**, still on `_job_xmin`, with `probe.seen` and the
+refetch both passing — which is what separates *"the assertion races the
+completing commit"* from *"the client was told too early"*. Three
+implementers reported 5/5, 3/9 and "green, 927 integration passing" on the same
+base; all three are consistent with a load-sensitive race and **none of them
+distinguishes a defect from a scheduling window, because a rate is not a
+mechanism.** A planted delay is, and it costs one line.
+
+**A probe that never ran records nothing, and every absence claim over it
+passes.** The G1 harness for `push._apply_items` first recorded `[]` — the
+fixture had seeded no title the match ladder could find, and `_apply_items`
+publishes only for an outcome carrying a `title_id`. Read as a result it says
+*"the availability event publishes nothing"*. `test_sse_end_to_end.py` now
+asserts `probe.seen` non-empty before any claim is read out of it.
+
 **A replay ring and a per-subscriber queue are fed by the same `publish`
 calls, so a lazily-resolved replay duplicates.** `InMemoryEventBus.subscribe`
 snapshots the ring *before* it adds the subscriber, with no `await` in
@@ -360,3 +432,125 @@ costs nothing. And the defect was invisible to every assertion in the suite but
 one: **an intercepted-record path is asserted almost entirely by what must not
 arrive**, so the single case requiring a stdlib record to arrive is what caught
 a total mute. Both arms, or a "nothing reached the sink" fix passes.
+
+**`app.routes` on FastAPI 0.140 does not contain the app's routes, and a walk
+over it reads as a passing sweep.** Measured 2026-08-11 building A2's "every
+route answers a problem document" case. `include_router` appends **one opaque
+`fastapi.routing._IncludedRouter`** per router rather than flattening its
+routes into the app, so `[r for r in create_app().routes if isinstance(r,
+APIRoute)]` finds **zero** of Usher's fourteen routes — and four of FastAPI's
+own (`/openapi.json`, `/docs`, `/docs/oauth2-redirect`, `/redoc`), which are
+plain Starlette `Route`s and are not even `APIRoute`s, so the same walk
+filtered on `APIRoute` returns an empty list that a `for` loop iterates
+happily. Descend through `route.original_router.routes` recursively, and carry
+a premise guard that the descent found a known path: this is the "a run that
+did not run is not a pass" family arriving in a route walk, and it is the shape
+every "every route declares X" scan in this milestone is built on. Note also
+that `/admin/sources` is **two** `APIRoute` objects (one per method), so any
+per-path assertion has to group by `route.path` first — and Starlette's 405
+carries the `Allow` header of the *first* partial match only, so
+`PUT /admin/sources` answers `Allow: POST` rather than `GET, POST`.
+
+**RFC 9457's `instance` is the request path, so a 422 for a malformed *path
+parameter* does echo the value it rejected, and there is no spelling that
+avoids it.** Found 2026-08-11 landing the envelope: `GET /titles/not-a-uuid`
+now answers `"instance": "/titles/not-a-uuid"`, which failed M5's
+`test_a_malformed_id_is_a_422_that_does_not_echo_it` on its blanket
+`"not-a-uuid" not in response.text`. The credential rule is untouched and the
+distinction is worth stating precisely, because the next reader will reach for
+the blanket assertion again: PRD 08 is about what a client **submitted as
+data** — a body or a query string — and both are still absent, `instance` being
+`request.url.path` and **never** `request.url`. No credential is ever in a path
+in this API; `?q=` is a query and is dropped. The narrowed case asserts over
+pydantic's `input` (the field that carried whole request bodies) rather than
+over the whole response text.
+
+**The structural claim four milestones deferred the envelope on is now
+discharged, and the second red is the measurement worth keeping.** The entry
+above ends *"the first route whose honest answer is 'the source is down and I
+cannot serve this from local state' is M9's `POST /titles/{id}/play`"*. It is,
+and it landed 2026-08-11. Two reds on the way, both recorded because the second
+is the one that says something about `api/errors.py`: before the route existed
+the case failed `assert 404 == 503`; against a route raising a **bare**
+`HTTPException(503)` it failed `KeyError: 'code'`. `_CODE_FOR_STATUS` holds 404,
+405 and 422 only, and `http_error_as_a_problem_document` hands an unmapped
+status to FastAPI's own handler rather than inventing a name — so a 503 with no
+`ProblemCode` member answers `{"detail": …}` at `application/json`, which is
+indistinguishable from the pre-envelope shape. **A route with a status nobody
+has minted a code for silently opts out of the envelope**, and the only thing
+that notices is a case asserting `body["code"]`. Adopting the envelope is
+`raise ProblemException(status_code=…, code=…, detail=…)`; adopting the
+*status* is not enough.
+
+**`request.url_for` substitutes a path parameter raw, so the caller owns the
+percent-encoding.** Read from the source and confirmed 2026-08-11:
+`starlette.routing.Route.url_path_for` → `replace_params` →
+`StringConvertor.to_string`, whose whole body is `str(value)` plus two asserts
+(`"/" not in value`, non-empty). Nothing encodes. So
+`api/deps.py`'s `quote(ticket, safe="=")` is not belt-and-braces over a library
+that would have done it — it is the only encoding step on that path. Related
+and measured the same day: **`RedirectResponse` re-quotes the `Location` it is
+given**, with `safe=":/%#?=@[]!$&'()*+,;"`, which leaves a realistic Emby
+direct URL byte-identical (`?api_key=…&DeviceId=…` measured unchanged) and
+escapes only characters illegal in a URI anyway (`a b.mkv?q=1|2` →
+`a%20b.mkv?q=1%7C2`). `%` is in the safe set, so there is no double-encoding
+hazard for a URL that already carries an escape.
+
+**`api/dto/` names every model `…Response`, nested ones included, and that is
+load-bearing.** `tests/unit/test_api_dto.py` discovers response models by
+`name.endswith("Response")` and asserts none declares a credential-shaped field
+or a `SecretStr`. `WatchStateResponse`, `AvailabilityResponse` and
+`RowCardResponse` are all nested and all follow it; the M9 plan spelled the
+playback ones `PlayTarget`/`PlaySource`, under which they would have been the
+only models in the package the scan could not see — and `PlayTargetResponse` is
+the one model in the API that renders a value derived from a credential-bearing
+URL. Shipped as `PlayTargetResponse`/`PlaySourceResponse`, for the reason
+`ProblemResponse`'s own docstring gives for its name.
+
+## M9's live run (H4) — three route findings, measured 2026-08-12
+
+The Emby half of that run is in `.claude/rules/emby-push-and-ingest.md`; these
+three are about the *route* and belong here.
+
+🔴 **Starting the shipped app against a real source is itself an unbounded
+walk, and nothing warns you.** `LaneSupervisor` starts a push lane per **enabled**
+source, and the lane's reconnect gap-closer calls
+`reconcile(source, SyncRunKind.DELTA, adapter)`. Against a real household —
+1,126,789 items on the one this project measures — that is exactly the walk
+`emby-push-and-ingest.md` forbids, issued by a bare
+`uvicorn usher.api.app:create_app --factory` with default settings and no
+command of its own. H4/H5's run set `USHER_PUSH_ENABLED=false` and
+`USHER_WORKER_ENABLED=false` for that reason (and the second is required anyway,
+because H5's worker pass has to be a real `usher work --once`). **Any live HTTP
+run against a real source must set both, or budget for a delta walk it did not
+ask for.** The two settings are also what make such a run's request budget
+*statable*: with the lanes on, the count is whatever a websocket and a gap
+closer decide.
+
+**`quote(ticket, safe="=")` is a no-op at the length the shipped path actually
+produces, confirmed live.** D1 measured the encoding question over synthetic
+plaintext lengths; H4 measured the artefact: a ticket minted for a real Emby
+direct URL is **292 characters**, url-safe base64 plus `=` padding, and the
+segment that comes back out of Starlette is byte-identical to the one minted.
+No `%` appears in the path at any point.
+
+**The `deep_link` wrapper does not double-encode, and this is the specific
+defect H4 was dispatched to look for.** `PlaybackService._with_tickets` rebuilds
+a deep link as `wrap_deep_link(<the ticket URL>)`, so the whole Usher URL —
+itself already percent-encoded once by `quote(ticket, safe="=")` — is
+percent-encoded again by `quote(inner_url, safe="")`. Measured against the real
+route: the `url=` parameter decoded **exactly once** is byte-identical to the
+`direct` target's ticket URL, and a `GET` of that decoded string answers the
+same `302` to the same `Location`. One encode, one decode; the two are inverses
+at this length and alphabet.
+
+**Ticket expiry, driven against the wall clock rather than a frozen one.**
+`TICKET_TTL_SECONDS: Final = 300` is a module constant and deliberately not a
+setting, so a live run cannot lower it — the honest alternative is to wait. One
+ticket minted by the running server was honoured at **127 s** (`302`) and
+refused at **312 s** (`404 ticket_invalid`), and a four-character tamper of a
+live ticket answered `404 ticket_invalid` as well, which is D1's one-answer-for-
+expired-and-forged decision observed rather than asserted. Both the mint and the
+redeem happened in the **same** process: a ticket minted under one
+`USHER_SECRET_KEY` and redeemed against a server started with another is
+undecryptable and looks exactly like a ticket bug.

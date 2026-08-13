@@ -20,11 +20,15 @@ from tests.contract.bulk_catalog_repository_contract import (
     BulkCatalogRepositoryContract,
 )
 from usher.db.base import build_engine, build_session_factory
+from usher.db.models.search import SEARCH_NAME_MAX_CHARS
 from usher.db.models.source import SourceRow
 from usher.db.models.title import TitleRow
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.genome import PostgresGenomeRepository
-from usher.domain.enums import SourceKind
+from usher.domain.enums import SourceKind, TitleKind
+from usher.domain.ids import new_id
+from usher.ports.bulk import ImdbAka, ImdbTitle
+from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import BulkCatalogRepository
 
 # Spelled out rather than derived from `_SUSPENDABLE_INDEXES`, so a name
@@ -126,6 +130,65 @@ class TestPostgresBulkCatalogRepositoryContract(BulkCatalogRepositoryContract):
             {"imdb_id": imdb_id},
         )
 
+    async def credit_names_of(
+        self, repo: BulkCatalogRepository, imdb_id: str
+    ) -> tuple[str, ...] | None:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        result = await repo._session.execute(
+            text("SELECT credit_names FROM titles WHERE imdb_id = :imdb_id"),
+            {"imdb_id": imdb_id},
+        )
+        value = result.scalar_one_or_none()
+        return None if value is None else tuple(value)
+
+    async def derive_credit_names(
+        self, repo: BulkCatalogRepository, imdb_id: str, names: tuple[str, ...]
+    ) -> None:
+        # Exactly what `DeriveService` leaves behind — `credit_names` written
+        # beside a title that is off the skeleton tier — spelled as SQL rather
+        # than by calling `PostgresCreditRepository.replace_for_titles`, which
+        # would need `people` and `credits` rows this task deliberately never
+        # writes.
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        await repo._session.execute(
+            text(
+                "UPDATE titles SET enrichment_state = 'enriched', credit_names = :names "
+                "WHERE imdb_id = :imdb_id"
+            ),
+            {"imdb_id": imdb_id, "names": list(names)},
+        )
+
+    async def search_names_of(
+        self, repo: BulkCatalogRepository, imdb_id: str
+    ) -> tuple[tuple[str, str, str | None, str | None], ...]:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        result = await repo._session.execute(
+            text(
+                "SELECT s.kind, s.name, s.region, s.language "
+                "FROM title_search_names s JOIN titles t ON t.id = s.title_id "
+                "WHERE t.imdb_id = :imdb_id ORDER BY s.kind, s.name, s.region, s.language"
+            ),
+            {"imdb_id": imdb_id},
+        )
+        return tuple((kind, name, region, language) for kind, name, region, language in result)
+
+    async def seed_person_search_name(
+        self, repo: BulkCatalogRepository, imdb_id: str, name: str
+    ) -> None:
+        # Exactly what `PostgresCreditRepository.replace_for_titles` leaves
+        # behind for one credited person — a `kind = 'person'` row with a
+        # Python-minted UUIDv7 and no region or language — spelled as SQL
+        # rather than by calling that repository, which would need `people`
+        # and `credits` rows this task never writes.
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        await repo._session.execute(
+            text(
+                "INSERT INTO title_search_names (id, title_id, name, kind) "
+                "SELECT :id, t.id, :name, 'person' FROM titles t WHERE t.imdb_id = :imdb_id"
+            ),
+            {"id": new_id(), "name": name, "imdb_id": imdb_id},
+        )
+
     async def indexes_intact(self, repo: BulkCatalogRepository) -> bool:
         assert isinstance(repo, PostgresBulkCatalogRepository)
         return await _index_names(repo._session) >= _SUSPENDED
@@ -144,6 +207,169 @@ async def test_apply_ratings_upsert_tmdb_ids_upsert_crosswalk_accept_empty_batch
     assert await PostgresBulkCatalogRepository(session).apply_ratings([]) == 0
     assert await PostgresBulkCatalogRepository(session).upsert_tmdb_ids([]) == 0
     assert await PostgresBulkCatalogRepository(session).upsert_crosswalk([]) == 0
+
+
+async def test_an_over_long_alias_is_refused_for_the_whole_call_and_names_the_constraint(
+    session: AsyncSession,
+) -> None:
+    """**The measurement `parse_akas_row`'s length filter exists for, asserted
+    where it is actually enforced.** 33 rows of the pinned
+    `title.akas.tsv.gz` exceed `SEARCH_NAME_MAX_CHARS` (longest 831), and
+    `ck_title_search_names_name_within_btree_bound` refuses them — per
+    *statement*, so one such row takes a ten-thousand-row batch with it. That
+    is why the parser drops them upstream, and it is a claim about *this*
+    repository that only a real database can check: the fake has no CHECK to
+    mirror and `tests/unit` cannot see this at all.
+
+    Two assertions, and the second is the one `SEARCH_NAME_MAX_CHARS`' own
+    docstring argues for. **The bound is a named CHECK rather than the btree's
+    own refusal precisely so `constraint_name()` has something to report** —
+    an index-side refusal carries no constraint name, and a loader handed one
+    long alias could not tell it from any other write failure.
+
+    And the batch's earlier aliases survive, which is the half that matters
+    operationally: a refusal that had already run the DELETE would silently
+    strip a title's aliases and report a conflict about a different one.
+    """
+    repo = PostgresBulkCatalogRepository(session)
+    await repo.upsert_titles([SHAWSHANK])
+    await repo.replace_aliases(
+        [ImdbAka(imdb_id=SHAWSHANK.imdb_id, ordering=1, name="Kept", region="FR", language=None)],
+        imdb_ids=[SHAWSHANK.imdb_id],
+    )
+
+    with pytest.raises(RepositoryConflict) as caught:
+        await repo.replace_aliases(
+            [
+                ImdbAka(
+                    imdb_id=SHAWSHANK.imdb_id,
+                    ordering=2,
+                    name="x" * (SEARCH_NAME_MAX_CHARS + 1),
+                    region=None,
+                    language=None,
+                )
+            ],
+            imdb_ids=[SHAWSHANK.imdb_id],
+        )
+
+    assert caught.value.constraint == "ck_title_search_names_name_within_btree_bound"
+    result = await session.execute(
+        text(
+            "SELECT s.name FROM title_search_names s JOIN titles t ON t.id = s.title_id "
+            "WHERE t.imdb_id = :imdb_id"
+        ),
+        {"imdb_id": SHAWSHANK.imdb_id},
+    )
+    assert [row[0] for row in result] == ["Kept"]
+
+
+async def test_the_canonical_comparison_is_the_databases_own_lower_and_not_pythons(
+    session: AsyncSession,
+) -> None:
+    """**Three case-folding functions disagree on real IMDb names, and only
+    one of them is the right answer here.** Measured 2026-08-11 over the whole
+    pinned `title.akas.tsv.gz` (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`):
+    **32,223 of 46,202,631 retained rows (0.070%) have `str.lower()` !=
+    `str.casefold()`**, in two families — German `ß` and Greek final sigma.
+
+    | pair | Postgres `lower()` | Python `str.lower()` | Python `casefold()` |
+    |---|---|---|---|
+    | `ΟΔΟΣ` / `Οδος` | **not equal** | equal | equal |
+    | `STRASSE` / `Straße` | not equal | not equal | **equal** |
+
+    Python's `str.lower()` applies Unicode's *contextual* final-sigma rule and
+    the database's `lower()` does not, so the fake's answer and this one
+    genuinely differ on the first row — recorded in
+    `tests/fakes/bulk_catalog_repository.py`'s divergence list rather than
+    fixed, because reimplementing a collation in Python is a second
+    implementation and not a stand-in. **This case is integration-only for
+    exactly that reason**, and it is the only thing in the suite that can tell
+    the three functions apart.
+
+    Postgres's answer is not merely the one that ships — it is the *correct*
+    one, and by construction: the whole test for keeping an alias is whether it
+    reaches anything `ix_titles_name_lower_prefix` does not already answer, and
+    that index is a btree over the database's own `lower(name)`. Under it
+    `Οδος` really is a distinct entry, so the row really does add reachability.
+    A `casefold()` comparison would drop it and lose recall for a rule about an
+    index it does not describe.
+    """
+    greek = ImdbTitle(
+        imdb_id="tt99000150",
+        kind=TitleKind.MOVIE,
+        name="ΟΔΟΣ",
+        original_name=None,
+        year=1999,
+        end_year=None,
+        runtime_minutes=90,
+        genres=(),
+    )
+    repo = PostgresBulkCatalogRepository(session)
+    await repo.upsert_titles([greek])
+
+    result = await repo.replace_aliases(
+        [
+            ImdbAka(imdb_id=greek.imdb_id, ordering=1, name="Οδος", region="GR", language="el"),
+            ImdbAka(imdb_id=greek.imdb_id, ordering=2, name="οδοσ", region="CY", language="el"),
+        ],
+        imdb_ids=[greek.imdb_id],
+    )
+
+    # The second row is what `lower('ΟΔΟΣ')` really produces, so it is the
+    # canonical restatement this database can see; the first is not.
+    assert (result.written, result.canonical) == (1, 1)
+    stored = await session.execute(
+        text(
+            "SELECT s.name FROM title_search_names s JOIN titles t ON t.id = s.title_id "
+            "WHERE t.imdb_id = :imdb_id"
+        ),
+        {"imdb_id": greek.imdb_id},
+    )
+    assert [row[0] for row in stored] == ["Οδος"]
+
+
+async def test_the_alias_prefix_probe_uses_the_tables_own_prefix_index(
+    session: AsyncSession,
+) -> None:
+    """**The reason the rows are worth storing at all**, and it is asserted on
+    the plan rather than on an index name: `m09a` builds
+    `ix_title_search_names_name_lower_prefix` as a btree over `lower(name)
+    text_pattern_ops`, and tier 1 of the two-tier suggest reads this table with
+    `lower(name) LIKE 'typed%'`.
+
+    An alias that lands in a table the probe seq-scans is a row with a cost and
+    no benefit, and nothing else in this task's own files can see that. The
+    `Index Cond` is what is asserted, for the reason B2's case records: an
+    index *name* is satisfied by any index that happens to be usable, and the
+    near-miss here — a default-opclass index on the same expression — is
+    exactly the thing that cannot serve this query.
+    """
+    repo = PostgresBulkCatalogRepository(session)
+    await repo.upsert_titles([SHAWSHANK])
+    await repo.replace_aliases(
+        [
+            ImdbAka(
+                imdb_id=SHAWSHANK.imdb_id,
+                ordering=1,
+                name="Un Long Métrage Synthétique",
+                region="FR",
+                language="fr",
+            )
+        ],
+        imdb_ids=[SHAWSHANK.imdb_id],
+    )
+    await session.execute(text("SET LOCAL enable_seqscan = off"))
+
+    plan = await session.execute(
+        text(
+            "EXPLAIN SELECT name FROM title_search_names "
+            "WHERE lower(name) LIKE 'un long%' AND kind = 'alias'"
+        )
+    )
+    rendered = "\n".join(row[0] for row in plan)
+
+    assert "ix_title_search_names_name_lower_prefix" in rendered, rendered
+    assert "Index Cond" in rendered, rendered
 
 
 async def test_copy_writes_the_server_default_columns(session: AsyncSession) -> None:

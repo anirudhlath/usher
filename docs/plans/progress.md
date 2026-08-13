@@ -21,7 +21,7 @@ milestone smoke test passes.
 | M6 | Search (FTS, embeddings, RRF) | docs/plans/2026-08-02-m6-search.md | ✅ MERGED to main (b0c04e5), 2,433 passed / 5 skipped. ADR-0002's gate ran and **failed** |
 | M7 | Rows | docs/plans/2026-08-03-m7-rows.md | ✅ MERGED to main (6d9b2a1), 3,217 passed / 5 skipped, 7 import contracts |
 | M8 | Curation (LLM) | docs/plans/2026-08-06-m8-curation.md | ✅ complete on `milestone/m8-curation`, 8 import contracts — see the M8 section at the end of this file |
-| M9 | API surface | — | not planned |
+| M9 | API surface | docs/plans/2026-08-10-m9-api-surface.md | ✅ complete on `milestone/m9-api-surface`, 10 import contracts — **74 tasks planned, and two names travel with the milestone**: T4 was **withdrawn** when its own pre-registered bar failed (2.702 GB against a 2.0 GB ceiling), and **H4/H5 ran late** — 2026-08-12, after the gate, against a real Emby 4.9.5.0 in 23 bounded requests, both halves passing and the write to a real account restored byte-for-byte. They had been recorded as an unrunnable gap on the strength of checking one `.env` file. H7 is the gate and the final whole-suite sweep |
 | M10 | Hardening + dashboards | — | not planned |
 
 **This table was stale from M3 down until 2026-08-07** — it said "IN PROGRESS"
@@ -1522,7 +1522,7 @@ deferred to M9 (a real enriched tier), cheap and detectable via `blend_fingerpri
 | 1 | ~23% of `--phase all` carries a popularity | confirmed | 22.9% |
 | 4 | lost recall is out-ranked, not floor | confirmed | R2 recovers exactly the 38 marginal misses |
 | 7 | enriched-tier genome coverage ≫ 1.82% | confirmed | 10.68% of owned |
-| 8 | pair rate above `coverage²` | confirmed | 1.81% vs 1.14% |
+| 8 | pair rate above `coverage²` | confirmed | 1.81% vs 1.14%, over 5,020 owned seeds |
 
 **Source corrections in the same task:** `adapters/search/postgres.py`'s stale `_SUGGEST` comment and
 `SearchService._popularity_term`'s "most of 1,271,138 rows" both fixed and scoped to the phase each
@@ -1949,3 +1949,1067 @@ failure that PRD 05 cites it for; PRD 10 argued its partial index from a majorit
 does not produce; `.claude/rules/milestone-boundary-calls.md` pointed at *"the M6 live-verification
 section below"*, which has never existed in that file; and this file's own status table had said
 "IN PROGRESS" for M3 and "not planned" for M4–M7 since M3.
+
+## ✅ M9 Task S1 — M7's 1.81% was measured over 5,020 owned seeds, settled before anything in M9 quotes it (2026-08-11)
+
+**Refutation first: the two populations differ, so 1.81% — a floor over 5,020 owned seeds — is NOT a
+baseline for M9's run, and saying so is the deliverable.** `/tmp/m9-gate/BAR.md`'s open question — M7
+measured a candidate-pair rate, which requires a populated `title_embeddings`, and M8's live
+verification recorded `title_embeddings = 0` — is not a contradiction at all. The two sentences
+describe **different databases**, and M7's no longer exists. No number is changed here; S7
+re-measures the value.
+
+**The arithmetic is the load-bearing half, and it is exact.** `SimilarityService.rebuild` accumulates
+`candidate_pairs` as `sum(len(pool))` over `self._embeddings.nearest_for(…, limit=_CANDIDATE_POOL)`,
+and `_CANDIDATE_POOL` is **100** — so **502,000 / 100 = 5,020 seeds, exactly**, with every seed
+drawing a full pool (which any embedded population above 101 produces). This file's own M7 Task 36
+entry already said the counters were read *"over a 5,020-title owned population"*, and PRD 04 calls
+it *"a real household's 5,020 owned copies"*; the division is what makes those two sentences one fact
+rather than a coincidence. Two further checks against the same run agree: `seeds_with_genome / seeds` =
+10.68% is 536/5,020, and `rows` = 125,500 is 5,020 × `_NEIGHBORS_PER_TITLE` (25).
+
+**And the primary artefact survived, so this is not an inference.** `/tmp/m7-gate/` was committed to
+nothing and is still on the host. `step8_pairrate.py` drove the **shipped** `IndexService` and
+`SimilarityService` against a scratch database `m7gate` (1,271,570 titles) on port 55432, and
+`step8_pairrate.out` is the run: `promoted 5020 owned titles to the enriched tier`, `seeds : 5020`,
+`candidate pairs : 502000`, `pairs with a tags cos : 9069`, `PAIR RATE : 1.81%`, `BAR C (>= 10%) :
+FAIL` — the 5,020 seeds and the rate printed by one counter, in one run, ten lines apart. The
+promotion is one statement, quoted rather than paraphrased:
+
+    UPDATE titles SET enrichment_state = 'enriched'
+    WHERE EXISTS (SELECT 1 FROM media_items m WHERE m.title_id = titles.id AND m.available)
+
+**It moved the tier label and not the document, which is the whole finding.**
+`db/repositories/search.py`'s `_POPULATION` is `t.enrichment_state <> 'skeleton'`, so that `UPDATE` is
+the only thing that made those 5,020 eligible to be embedded; `search_document` is a generated column
+over `titles`, and with no TMDb key nothing had written `overview`, `tagline` or `keywords`. Weight
+classes C and D were empty and B was unfilled, so the pool `nearest_for` drew was selected by **name**
+similarity. The script's own docstring states this as its one deviation and calls the result a
+conservative reading. *(One honest detail: the surviving `.out` prints `stale titles to embed: 0` /
+`embedded 0 titles` above a 5,020-seed rebuild, so it is a **re-run** whose embeddings were already
+current from an earlier pass of the same script. It changes no number.)*
+
+**The two live counts, read-only 2026-08-11 — corroboration, not proof, which is why the arithmetic
+leads.**
+
+| container | titles | `title_embeddings` | `title_neighbors` | `genome_scores` | `media_items` | non-skeleton |
+|---|---|---|---|---|---|---|
+| `usher-m9-pg` (:55432) | 1,272,367 | 0 | 0 | 15,565 | 0 | 0 |
+| `usher-postgres-1` | 1,271,138 | 0 | 0 | 0 | 0 | 0 |
+
+Neither is M7's catalog — that was **1,271,570** titles, a third number — and `pg_database` on
+`usher-postgres-1` lists only `usher`, so `m7gate` and `m7home` are gone. **`media_items = 0` is a
+sharper tell than `title_embeddings = 0`**: neither survivor holds the household whose ownership
+*defined* the population, so neither could reproduce the measurement even after an index backfill.
+
+**The conclusion, in the sentence every quoting paragraph now carries: 1.81% is a floor measured over
+5,020 owned, name-shaped, pre-TMDb seeds, and it is not a baseline for a ~130,806-seed enriched-movie
+population.** All three inputs to a pair rate change between the two runs — the seed set (one
+household's ownership → `kind = 'movie' AND vote_count >= 100` with a `tmdb_id`, 26× larger), the
+document (classes C and D go from empty to filled), and therefore the pool. **S7's number is a second
+measurement, never a delta**, and any write-up placing the two side by side has to say so.
+
+**Two claims in the task's own draft are false against the tree and are recorded rather than
+propagated.** *"Five files quote the rate and none names the population in the same paragraph"* is
+wrong: PRD 04's Task-36 paragraph and PRD 05's `### Similarity` bullet each already carry `5,020` and
+`1.81%` in one block and are untouched. The measured red set was exactly five blocks — PRD 04's ⏳
+paragraph, PRD 06's re-rank bullet, PRD 09's *"coverage promise finally has denominators"* bullet,
+ADR-0024's `## Uncertainty`, and this file's M7 guess table — and the scan is measured rather than
+asserted. Second, a scan globbing all of `docs/` hits `docs/specs/2026-08-10-m9-api-surface-design.md`
+twice, and `.claude/rules/prd-maintenance.md` forbids editing an old spec to match, so a guard scoped
+that way could only be satisfied by breaking that rule.
+
+**The guard:** `tests/unit/test_genome_baseline_carries_its_population.py` — every Markdown block
+(consecutive non-blank lines, so a table is one block) in `docs/prd/**/*.md` plus this file that
+carries the literal `1.81` must also carry `5,020`. Red on the five above before the edits, green
+after. Both controls were planted and both fire on their own `E` line: dropping the PRD glob trips the
+ADR-in-corpus assertion, and globbing `*.markdown` while keeping the ADR trips the hit floor
+(`1 >= 8`). The floor is today's exact count (**eight** blocks over six files), i.e. a tripwire rather
+than slack.
+
+**Found and not fixed, because it is outside the declared paragraph and PRD 04 is also being edited by
+Track 1:** PRD 04 calls the population *"5,020 owned **copies**"* where the measurement's predicate
+counts distinct owned **titles**. `.claude/rules/rows-and-genome.md` and PRD 05 both already say
+"titles". One word, in a paragraph this task did not open.
+
+---
+
+### ✅ M9 Task G1 — the SSE-in-transaction reading, settled before anything is repaired (2026-08-11)
+
+**The bar was written down before the first run**, and the refutations come first.
+
+**PRD 09's consequential claim is refuted.** *"A client is told an event landed before the
+transaction that produced it committed"* is **false at all five `events.publish` sites in `src/`**,
+each driven against a **committing** session with a second connection reading the event's own
+subject inside `publish`: `enrich.py:289` sees `enrichment_state='enriched'` (committed :208);
+`push.py:209` and `:244` see the merged `watch_states` row (committed :170); `push.py:278` sees the
+`media_items` row (committed :275); `reconcile.py:267` sees `sync_runs.items_seen` at 2 then 4
+(committed :245). The entry was written from one site, which is the error it was recording.
+
+**The literal claim survives and is materially smaller than the roadmap's sentence.** The open
+transaction at the instant of an `enrich` frame is `JobWorker`'s, not `EnrichService`'s, and it does
+not hold the title. Measured at the same instant on the same connection, the only visible `jobs` row
+is `('enrich', 'running')`; the two `BACKFILL` requests staged at `enrich.py:270–277` appear as
+`('derive','pending'), ('index','pending')` only after `complete(job.id)` + `_commit()`
+(`jobs.py:143–147`). **That pair plus the completing `DELETE` is the entire residual window**, so a
+rollback there costs two enqueues and one duplicate `title.updated` on the `requeue_running` re-run.
+Not a lie to a client.
+
+**The verdict, in [ADR-0033](../prd/decisions/0033-an-event-is-a-statement-about-committed-state.md):
+the ordering is worth enforcing structurally, and what it buys is *ordering, not durability*.** It
+needs no outbox and no table. The arm not taken — *leave it, the convention stands* — is written out
+with its own argument, and the single reason it is not taken is that the failure mode deferral adds
+is not new: an event dropped by a crashing lane and an event published twice by a re-running job are
+the same crash, and `requeue_running` is already the recovery for it.
+
+**`xmin` is not evidence of an uncommitted read.** The flake sighting circulating on this milestone —
+`assert '745' is None` — was relayed three times as *"a row a transaction has not committed is
+visible"*. Postgres shows no such thing. Measured at the failure: `xmin='745', status='running'`
+against the reader's own `pg_current_snapshot() = '749:749:'`, an **empty** in-progress list, so 745
+is settled and committed. It is the *claim's* `UPDATE` still current because the `DELETE` has not
+committed.
+
+**The flake reproduced deterministically, which is what a rate could not do.** Unplanted on this tree
+at load average 7–9: **6 failures in 13 runs**, every one on `_job_xmin` and every one reporting the
+identical row state. With `await asyncio.sleep(0.25)` planted in `JobWorker._run` between the handler
+returning and `complete(job.id)`: **5 of 5**, on `_job_xmin` and no other line, with `probe.seen` and
+the refetch both passing — which is what separates *"the assertion races the completing commit"* from
+*"the client was told too early"*. Three implementers reported 5/5, 3/9 and "green"; all three are
+consistent, and none distinguishes a defect from a scheduling window, because **a rate is not a
+mechanism**. Every plant took a `cp` backup and every restore was verified by `md5sum` and by reading
+the file back.
+
+**A probe that never ran records nothing.** The `push._apply_items` harness first recorded `[]` —
+the fixture seeded no title the match ladder could find, and that path publishes only for an outcome
+carrying a `title_id`. Read as a result it says *"the availability event publishes nothing"*.
+`test_sse_end_to_end.py` now asserts `probe.seen` non-empty before any claim is read out of it.
+
+**Found stale and corrected:** `ports/events.py`:22–23 named `EnrichService`,
+**`WatchStateSyncService`** and the push lane as the three publishers. `WatchStateSyncService` holds
+no `EventPublisher` at all; the third is `ReconcileService`, which `services/events.py`'s module
+docstring and [ADR-0019](../prd/decisions/0019-the-client-event-channel-is-a-port.md) both already
+said — one file disagreeing with two.
+
+**Left recorded, not fixed, and out of scope here:** `JobWorker._run`'s `try` wraps the handler only,
+so an exception from the completing commit at `jobs.py:147` propagates past the `else` and leaves the
+job `running` until the next `startup()`. Pre-existing, affects every kind, belongs with whoever owns
+`requeue_running`'s cadence.
+
+**Zero behaviour change:** `git diff --stat src/` is a docstring-only edit to `ports/events.py`.
+`tests/integration/test_sse_end_to_end.py` gains the generalised probe, the positive control, an
+assertion pinning today's residual window (**which G2 flips** — planted, it fails on its own message
+with `[('derive','pending'),('enrich','running'),('index','pending')]`), and a **bounded** poll in
+place of the load-dependent immediate read.
+### ✅ M9 Task G3 — the pool's ownership claim: measured, and the prompt is what gave way (2026-08-11)
+
+**Carried debt from PRD 09, filed by M8's live run as a product decision and settled here.**
+`TitleRepository.list_unwatched_candidates` uses ownership as an `ORDER BY` key and never as a
+filter; `curation_prompt.build_prompt` opened *"one household's **own** film and television
+library."* Both sentences were defensible. **Arm 2 ships — the prompt is corrected — and the pool is
+untouched.**
+
+**The decision rule was written down before the sweep ran**, and one of its two falsifiers was the
+plan's own recommendation: arm 1 would ship if a filtered pool were `>= min_cards` at every `U > 0`,
+or if the unfiltered pool's owned fraction collapsed even at `U = 200`. Neither held.
+
+**Evidence (a) — deterministic, model-free, through the real Postgres repository.** Own
+`pgvector/pgvector:pg17` container, schema from the real Alembic chain, 1,000-title catalog, no watch
+history, `limit = 200`, `U` unwatched-and-owned titles seeded with `random.Random(20260811)`. The
+filtered arm is the identical statement with `owned` moved from the `ORDER BY` into the `WHERE`.
+
+| `U` | pool as shipped | of which owned | pool filtered | filtered fills a row |
+|---|---|---|---|---|
+| 0 | 200 | 0 — 0.0% | **0** | **no** |
+| 3 | 200 | 3 — 1.5% | **3** | **no** |
+| 5 | 200 | 5 — 2.5% | 5 | yes |
+| 8 | 200 | 8 — 4.0% | 8 | yes |
+| 20 | 200 | 20 — 10.0% | 20 | yes |
+| 200 | 200 | 200 — 100.0% | 200 | yes |
+
+🔴 **The refutation that decided it is stronger than the rule asked for: the filter can add
+nothing.** `owned DESC` is the *first* sort key, so the owned titles are a prefix — the owned column
+is exactly `min(U, 200)` at every row, the shipped read already returns every unwatched-owned title
+the household has, and at `U = 200` the two arms return the identical set. Filtering is purely
+subtractive; below `DEFAULT_MIN_CARDS = 5` it deletes the generation. The unreachable band is wider
+than the arithmetic — M8 measured **2–3 cards at pool 5 and pool 8**, all `row_too_short` — so `U = 5`
+and `U = 8` clear the bar on paper and produced nothing live.
+
+🔴 **Evidence (b) overturned half the plan's own recommendation.** The plan recommended *arm 2 plus a
+per-candidate ownership marker*. Priced the way the 4,304 was priced — `usage.prompt_tokens`,
+`max_tokens=1`, **4 completions**, `gemma-4-26b-a4b` over the local vLLM, pool 200 from the IMDb
+dumps: shipped **4,251** (the 2026-08-07 anchor of 4,304, within 1.2%), corrected sentence **+26
+tokens once**, *"owned"*/*"not owned"* markers **+2.900 tokens a candidate**, *"in the
+library"*/*"not in the library"* **+4.900**. The bar — 2.0 tokens a candidate, ~10% of the 20.40 the
+candidate line already costs — was declared before the measurement and the cheapest wording missed it
+by 45%. **No marker ships.** At pool 600, this endpoint's measured ceiling, the terse marker would
+leave 56 tokens under `max_model_len` and the verbose one would be over it.
+
+**Evidence (c), stated rather than guessed:** M8 recorded `media_items = 0`, so no real ownership
+distribution has ever been observed here. The call is the arm *insensitive* to that — being wrong
+about the distribution costs a longer tail, not an empty shelf — and the amendment names M9's live
+Emby run as what could reverse it.
+
+**A third design was declined for the reason it was attractive.** The owned prefix means one sentence
+(*"candidates 1–N are in the library"*) would carry the same information for ~15 tokens. It was
+invented *after* the numbers came in, and it couples the prompt to the repository's sort order.
+Named in ADR-0028 as an option a later task may take with its own pre-declared rule.
+
+**Where it landed.** The opening line of `curation_prompt.build_prompt` — **one sentence replaced by
+two**, and stating it as "one sentence changed" understates the diff: the false claim is deleted and
+an explicit not-all-owned clause is added beside it, which is the whole of what the +26 tokens buy.
+Nothing else in the prompt moves. ADR-0028 gains a dated amendment
+in place (no new id, nothing renumbered); PRD 06's *Assemble context* step, its *"ranking keys"*
+bullet and its first live-run limit; PRD 09's carried-debt bullet (the `min_cards` half is explicitly
+left open for its own task); `list_unwatched_candidates`' *"Membership is unwatched, and nothing
+else"* paragraph; `composition.py`'s *"~20.4 prompt tokens a candidate"* comment, which is the place
+that invites the marker question; and `.claude/rules/curation-and-llm.md`.
+
+**And a third entry for a list in the prompt's own test file.** Its docstring named the opening line
+as the archetype of framing prose deliberately left unpinned, beside `_COLD_START` (a *branch*) and
+the `reason` bound. It was neither: it was a claim about pool *membership*, so a `WHERE` clause would
+have had to honour it. **The test is not how a prompt sentence reads — it is whether any query,
+constant or validator in the system would have to be true for it to be.**
+
+**Mutation sweep — 6 plants over `services/curation_prompt.py`, 4 targets killed and 2
+equivalent-mutant controls surviving all five gate steps: the ledger is in
+`.claude/rules/mutation-sweeps.md`,** which `CLAUDE.md` names as the home for *"every
+per-task sweep ledger with its survivors"*.
+
+**Mutation sweep — 6 plants over `services/curation_prompt.py`: 4 targets killed, 2
+equivalent-mutant controls surviving as designed, 0 unintended survivors, 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place against the whole `tests/unit` selection
+and **re-run unchanged after merging `milestone/m9-api-surface`**, which grew that selection from
+3,041 cases to 3,081 — a survivor is only a survivor of the selection it ran against, and 44 test
+files arrived between the two runs. Same six verdicts, same single case killing all four targets,
+same restored digest. The plant list and its expected verdict were written down first, with the
+three `.pyc` defences in force (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept before every run,
+an equivalent-mutant control), and every restore verified by `md5sum` against a pre-plant digest.
+**A prompt sweep's yield is near 100% because nothing observes a prompt unless a case opts in by
+name**, so the rendered artefact was enumerated before the control flow: the four targets are the
+pre-2026-08-11 opening restored, the corrective clause merely *deleted* (the false claim gone but
+the pool's real span unstated), the clause *inverted* back into an ownership claim, and the opening
+line deleted outright. **Each kills exactly one case and it is the same one for all four** —
+`test_the_opening_line_does_not_claim_the_household_owns_every_candidate` — which is the
+measurement behind the two-assertion shape: T2 is invisible to the negative half and T1/T3 are
+invisible to a negative that only reads line 1.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `MIN_ROWS`/`MAX_ROWS` definition order swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `build_prompt`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first is a fact about the *code* rather than about what the tools look at: two module-level
+`int` assignments that reference neither each other nor anything between them, in a module with no
+import-time side effect — and it is an ordering control that is **not** an `__all__` reorder, which
+`ruff`'s `RUF022` would have rejected. The docstring reword was checked first against the
+docstring-scan grep: twelve test files scan source, and the only one touching this module
+(`test_one_whitespace_collapse_defends_both_prompts`) walks `ast.FunctionDef` and compares
+`node.body[-1]`, so a docstring at `body[0]` is outside it.
+
+### ✅ M9 Task G4 — a pool that cannot fill one row buys no completion (2026-08-11)
+
+**The other half of the carried-debt entry G3 settled, and the half that was arithmetic rather than
+a decision.** `curation_validate._row` discards a row carrying fewer than `min_cards` **distinct**
+cards and `_cards` de-duplicates by title id, so a pool below the floor cannot produce one surviving
+row however good the completion is: every row is `row_too_short`, `validate_curation` rejects,
+`llm_calls` records `ok = false` with real tokens and a real cost, and the household paid for a
+guaranteed-empty answer.
+
+**The change is one inequality.** `CurationService.generate`'s `if not candidates:` — sited in front
+of `complete_json` precisely so an empty pool buys nothing — becomes
+`if len(candidates) < self._min_cards:`. Same raise, same site, same `PortDataMalformed`, so
+`curate_handler`'s *"Nothing is caught here"* is intact and **`git diff src/usher/cli.py` is empty**:
+`_curate`'s existing `except PortDataMalformed` already renders the sentence and appends *"(the
+household's previous rows still stand)"*. No new setting — `min_cards` crosses the prompt, the JSON
+schema and the validator from `curation_validate.DEFAULT_MIN_CARDS`, and `config.py` and
+`composition.py` each already record that `USHER_CURATION_MIN_CARDS` was planned and never shipped.
+
+**The disposition follows G3's verdict rather than a preference, and G3 shipped arm 2.** The pool
+does not honour an ownership claim, so it is `min(catalog_unwatched, USHER_CURATION_POOL_SIZE)` and
+a small *library* does not make a small pool — only a catalog whose whole unwatched set is below the
+floor reaches the guard. That is the empty catalog's shape, which is an operator's problem and does
+not improve on a backoff, so the guard **shares the empty pool's raise and parks**. Had G3 shipped
+arm 1 the same guard would have fired on ordinary small households, a park would have been a
+permanent block on a transient condition, and `cli.py` and `services/handlers.py` would have joined
+the file list.
+
+⚠️ **Priced honestly: this is rare, not nightly, and the write-up says so because a guard sold as
+protecting a common case when it protects a rare one is a claim this repository would rather have
+measured.** What it is worth is the completion it declines on the run where it fires — an
+`llm_calls` row with real tokens and a real cost against a screen that could not have changed. The
+general form, recorded in `.claude/rules/curation-and-llm.md`: *a guard's value is what it prevents
+times how often the state it fires on is reachable, and the second factor is a property of the read
+it sits behind, not of the guard.*
+
+**Two sentences from one guard**, because they are two diagnoses. A pool of zero keeps *"the
+candidate pool is empty; there is nothing to curate"* word for word — two cases and a nine-line
+comment argue about that string, and it carries no household id for reasons dated 2026-08-07. A pool
+below the floor reads *"the candidate pool holds 4 candidates and a row needs at least 5; there is
+nothing to curate"*, which is the count and the floor and nothing an operator cannot look up.
+
+**Three cases, and each one's premise is the half that makes its negative assertion mean anything.**
+`calls == []` is also what a fixture that never reached the service produces, and
+`tests/fakes/llm_client.py` repeats its last scripted response forever, so no count is constrained
+unless a case constrains it.
+
+- `test_a_pool_below_the_card_floor_buys_no_completion` (unit) exercises `min_cards - 1`,
+  `min_cards` and `min_cards + 1` **in one case** — the inputs where the arithmetic changes — and
+  ends on `bought == {4: 0, 5: 1, 6: 1}`. Its below-floor arm reads the pool back through
+  `CandidatePoolService` first and asserts it is **non-empty**, because the shipped `not candidates`
+  guard already buys nothing at zero: without that premise the case would go green against the
+  unwidened inequality the moment a fixture stopped seeding.
+- `test_curate_says_a_pool_below_the_card_floor_cannot_fill_one_row` (integration) drives the real
+  pool, the real guard and the real rendering with only the client substituted, asserts the sentence,
+  `calls == []` and `SELECT count(*) FROM llm_calls = 0` — **then seeds a fifth title and runs
+  again**, where the same fixture buys exactly one completion. The scripted response is in place for
+  both arms deliberately: a fixture that only became answerable for the second arm would be
+  asserting an empty deque rather than a guard.
+- `test_work_parks_a_curate_job_whose_pool_cannot_fill_one_row` (integration) reads `jobs` back after
+  the handler and pins `parked`, then pins that **a later `enqueue` at the same priority writes zero
+  rows** — `_ENQUEUE`'s `WHERE jobs.status <> 'parked'` — which is what makes *"until a human
+  releases it"* a fact rather than a warning.
+
+**Every one of the three was verified red before the fix**, against the shipped `if not candidates:`
+restored by hand under a `cp` backup: the unit case on `assert client.calls == []` with a
+`RecordedCall` in the list, the `usher curate` case on `'4 candidates' in "…no row survived
+validation of 1 returned (not_in_pool=1, row_too_short=1)"`, and the `usher work` case on
+`assert 1 == 0` for the billed row. **The park assertion is not what fails there** — the unwidened
+code parks too, on `PortDataMalformed(outcome.error)` from the far side of a paid-for completion —
+which is exactly why the billing assertion carries that case and the disposition assertion is a pin
+rather than the test. The CLI case's own teeth were measured separately by narrowing `_curate`'s
+`except PortDataMalformed` to `except PortRateLimited`: it fails, everything else passes.
+
+**Mutation sweep — 7 plants: 4 targets killed, 1 target measured as an equivalent mutant and
+reported rather than replaced, 2 equivalent-mutant controls surviving as designed. 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN, and every verdict matched the expectation written down first.** Run
+2026-08-11 in place over `src/usher/services/curation.py` and `src/usher/services/handlers.py`, with
+the three `.pyc` defences in force (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under **`src/`
+and `tests/`** before every run, an equivalent-mutant control), `compile()` rather than `ast.parse`
+as the dry run, and every restore verified by `md5sum` against a pre-plant digest. Selection, stated
+because a survivor list is only true of the selection it was measured against: **`tests/unit` plus
+`tests/integration/test_cli_pipeline.py`** — 3,113 passed / 4 skipped, 32–41 s a run. Not the whole
+integration directory, for the reason B2's ledger records: this tree carries a flaky
+`test_sse_end_to_end` case and a sweep scored on *did the run fail* cannot run against a suite
+holding one.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the guard spelled `<=` instead of `<` | KILLED | 2 — the unit boundary case and the `usher curate` case, both on the `min_cards` arm |
+| P2 the guard sited after `complete_json` instead of before it | KILLED | 7 — every case in the project that asserts a refusal bought nothing |
+| P3 the guard reading `len(handles)` instead of `len(candidates)`, the map hoisted above it | **SURVIVED** | — |
+| P4 the guard's raise swallowed into a completed job (`curate_handler`) | KILLED | 5 |
+| P5 `_nothing_to_curate`'s two arms swapped | KILLED | 4 |
+
+**P3 is a genuine equivalent mutant and is reported with its reason rather than replaced by a plant
+that dies.** `handles` is `{index: title.id for index, title in enumerate(candidates, start=1)}`, so
+`enumerate` is injective on the key and `len(handles) == len(candidates)` for every input the type
+system permits — the two programs cannot differ. It is still worth naming as a target, because the
+hoist it requires moves the map's construction in front of a guard whose whole point is that nothing
+happens before it; that is a structural claim, and the way to hold it would be a structural
+assertion, not a behavioural one. **Before writing a survivor up as a coverage gap, check whether the
+mutant and the original differ on any state the system can be in.**
+
+**P1's blast radius is the number worth carrying.** Two cases in 3,113, and both are this task's —
+the boundary at exactly `min_cards` exists nowhere else in the repository, so an off-by-one in the
+one inequality this task ships is invisible to every case written before it. That is the measurement
+behind the acceptance's insistence that the boundary be exercised at `min_cards - 1`, `min_cards`
+**and** `min_cards + 1` rather than at a comfortably small pool.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| `CurationService.__init__`'s `self._min_cards` / `self._now` writes swapped | PASS | PASS | PASS | PASS | PASS (3,113) |
+| one sentence of `_nothing_to_curate`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (3,113) |
+
+The first is a fact about the *code* rather than about what the tools look at: two attribute writes
+from two distinct parameters, neither expression reading the other's target, so no layer below the
+constructor can observe the order — the `SearchService.__init__` control's shape, one service over.
+Neither control is an `__all__` reorder or an import reorder, which `ruff` would have rejected. The
+docstring reword was checked first against the docstring-scan grep: fourteen test files scan source,
+and the two that touch this module (`test_services_curation.py`'s import walk and
+`test_services_llm_ledger.py`'s `ast.Call` walk for `LLMCall`) both read **nodes**, not prose.
+
+**Where it landed.** `CurationService.generate`'s guard and its raise-site comment; a new private
+`_nothing_to_curate`; the module docstring's *"the one path that records nothing"* paragraph, which
+said *"an empty candidate pool"* and is now wider; PRD 06's third live-run limit and the sentence
+introducing that list (one settled bullet became two); PRD 09's carried-debt bullet, the ⚠️ half G3
+left open; and `.claude/rules/curation-and-llm.md`'s matching bullet. `src/usher/cli.py` and
+`src/usher/services/handlers.py` are unchanged.
+
+**Gate:** ruff, `ruff format --check` (508 files), `mypy` over 483 files, `lint-imports` 9 kept / 0
+broken, **3,083 unit / 4 skipped** (from 3,081) and **969 integration / 8 skipped** (from 967), PRD
+link check `OK`.
+## M9 Task S2 — the tier enqueue script, and the live prefix that prices S3 (2026-08-11)
+
+`scripts/enqueue_tier_enrichment.py` walks
+`kind = 'movie' AND vote_count >= 100 AND tmdb_id IS NOT NULL` on a keyset
+cursor and enqueues `JobKind.ENRICH` at `JobPriority.BACKFILL`, **bounded in
+the iterator** — `--limit` is subtracted from the size of the *next page asked
+for*, not trimmed off a drained walk. Three unit arms over the shipped title
+and queue fakes, all three red against a stub first: the predicate one
+conjunct at a time (the NULL-`tmdb_id` arm named for its reason — `_ref_for`
+parks it on attempt one), `--limit 3` against a page size of 2 reading exactly
+two pages of sizes `[2, 1]`, and a page nothing in it clears still advancing
+the cursor. The test loads the module with
+`importlib.util.spec_from_file_location` and says so: `[tool.mypy] files =
+["src", "tests"]` means **mypy does not check `scripts/`**, the status
+`scripts/measure_rows.py` has had since M7, named rather than discovered.
+
+**The number this exists to produce: S3 costs 3.50 h of wall clock on one
+`usher work` process** (130,806 fetches × a mean per-title cycle of 0.0963 s;
+95% CI [3.41, 3.59] h), **~1.0 GiB into `raw_payloads`**, and **261,612
+follow-up `INDEX`/`DERIVE` jobs** the plan does not price — of which the
+130,806 `INDEX` half is claimed by nothing unless `USHER_EMBEDDING_ENABLED` is
+turned on. Measured over a **systematic 1-in-261 sample, 500 titles, 0.38% of
+the tier**, drained through the shipped worker 21:44:00Z → 21:44:48Z; bar
+written to `/tmp/m9-enrich/BAR.md` before the first request; driver and probe
+outside the tree at `/tmp/m9-exec/S2/`. 539 requests across the whole task,
+**499 × 200 and 1 × 404** on the priced segment, no 429 and no 5xx.
+
+**Four plants, four killed, each naming its own case** — the `tmdb_id`
+conjunct dropped, the bound respelled as a post-filter over a drained walk,
+the cursor advanced on the last *enqueued* id (which also takes arm (a) as
+collateral, and which hangs without the page-source ceiling the fake carries
+for exactly that), and the page size no longer bounded by the remaining
+budget. Run in place with `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept
+before every run, the anchor asserted to appear exactly once, and every
+restore verified by `md5sum`.
+
+**The headline refutation is not about speed. Enriching a title can remove it
+from the tier**: `vote_count` is enrichable, the bulk loader writes IMDb
+`numVotes` and TMDb's own `vote_count` overwrites it, so **80 of 537 enriched
+tier movies (14.9%) still satisfy `>= 100`** — median TMDb count 16 against a
+median IMDb 581. The keyset walk is safe (a row leaves the tier only after the
+cursor passed it) and an `OFFSET` walk would not have been. PRD 04's Phase-3
+tier row and PRD 02's `vote_count` line move in this commit. Four further
+refutations, the two-instrument timing table, the flat-cost-across-eras
+measurement that makes the extrapolation linear, and the invalid first cache
+test are in `.claude/rules/tmdb-and-enrichment.md`.
+
+## M9 Task S3 — the priority tier enriched, and three things only a 130,806-row run could find (2026-08-12)
+
+**The run S2 priced, executed whole.** 22:08:53Z → 00:07:46Z, **130,334
+requests**, **130,141 × 200, 107 × 404, 86 × 502**, no 429, no transport
+error, no `Retry-After` on anything. Bar written to `/tmp/m9-exec/S3/BAR.md`
+before the first request; enqueue driver and per-pid HTTP probe outside the
+tree at `/tmp/m9-exec/S3/`, recording path only and never the query string.
+`alembic current` reported **m09a** and was upgraded to **m09c (head)** first.
+
+**Over the frozen tier of 130,806 ids** (`s3_tier_snapshot`, taken 22:02:21Z
+before the first request, because enrichment moves the predicate it selects
+on): **130,647 enriched (99.88%)**, 159 still skeleton, and every one of the
+159 accounted for — 109 TMDb 404s, 30 `imdb_id` conflicts, 20 orphaned by a
+worker crash. Weight class C landed at 99.33% `overview` / 41.72% `tagline`
+and class D at 99.98% `genres` / 63.00% `keywords`. `raw_payloads` **995 MB**,
+mean stored payload **7,001 B** against S2's predicted 6,914 — 1.3% out.
+
+**Refuted, and it was this repository's own arithmetic in PRD 04: "three
+workers at `30/N` each reach 30 rps".** Per-worker throughput does not survive
+concurrency. Three workers achieved **19.76 rps**, 6.59 each against the
+10.38 S2 measured on one — a **37% per-worker loss** and a scaling factor of
+**1.90×, not 3×**. The bucket was never binding on any worker. S2's 0.38%
+sample got the median request right (0.0588 s against 0.0580 s) and the tail
+completely wrong: **p95 0.4267 s against 0.1049 s, 4.1×**. Concurrency moves
+the tail, and a sequential sample cannot see it. Whole run **1.98 h** against
+the 3.50 h [3.41, 3.59] one-worker bar. PRD 04's Phase-3 paragraph moves in
+this commit.
+
+**A worker crashed 78 minutes in** — unhandled `MissingGreenlet` out of
+`usher work`, a path no test has executed — and **its 20 claimed jobs are
+orphaned in `status='running'` permanently**, because `JobWorker.startup()`
+runs once at process start and restarting to recover them would steal the
+other two workers' live claims. That is a dead end at N > 1, stated rather
+than worked around.
+
+**A failure class no taxonomy in the repository covers: 30 parked jobs are
+`ix_titles_imdb_id` write conflicts**, not upstream failures. TMDb's
+`external_ids.imdb_id` disagrees with the bulk export's and the id it returns
+is already held by another catalog row — confirmed by re-fetching five
+through the shipped provider. It is not `PortDataMalformed`, so each burns all
+five attempts and re-fetches every time.
+
+**And the first 5xx this repository has ever seen from TMDb: 86 × 502 in two
+exact bursts of 43**, inside 526 s, none carrying `Retry-After`, all
+classified `PortUnavailable` and all recovered — the retry taxonomy firing on
+a branch that had never run in production.
+
+**`title_embeddings` stayed at 542 for the whole run and jumped the moment the
+enrich queue emptied, and `USHER_EMBEDDING_ENABLED` was not the reason.** The
+claim orders `priority DESC, created_at`, every job is `BACKFILL`, and the
+enqueue wrote all 130,804 enrich rows in a 1.3-second window — so every
+follow-up job sorts behind every enrich job and `LIMIT 20` never reaches one.
+The embedder being on was verified three ways, including the absence of
+`composition.embedder`'s no-op warning from all three logs while its LLM
+sibling is present in all three. **So the ruling was right and its reason was
+one step off**: enabling the embedder makes index jobs claimable, but a bulk
+enqueue at one priority defers them wholesale. 261,294 follow-up jobs — two
+per success, exactly as S2 measured — remain, priced at **~1.9 h** on the two
+surviving workers. They are durable; the index pass is S4's.
+
+**One measurement for whoever touches the worker loop:** `SearchGauges.refresh`
+runs after every 20 jobs and its `count_stale` went **16.4 ms → 29.4 ms →
+327.9 ms** as the enriched tier grew 7,718 → 18,267 → 88,001. The repository's
+own docstring prices that query at "2k-10k rows" and "a few times a day".
+
+Full evidence, both post-states, and the five confirmed crosswalk conflicts in
+`.claude/rules/tmdb-and-enrichment.md`.
+
+## M9 Task S4 — the tier embedded, both passes, and the pool walk priced at ~80 minutes (2026-08-12)
+
+**The deliverable, with its denominator.** `title_embeddings` holds **130,647
+rows, every one carrying a vector, 0 refused** — **100.0% of S3's enriched
+population and 99.88% of its frozen `s3_tier_snapshot` of 130,806 ids**. The
+159-row gap (109 TMDb 404s, 30 `imdb_id` write conflicts, 20 orphaned by the
+crashed worker) is not missing embeddings: those rows are still `skeleton`, and
+`db/repositories/search.py:180`'s `_POPULATION` excludes skeletons, so no
+`index` job was ever owed for them. **The premise guard, both halves.** Before:
+S3's pre-run state at 22:02:21Z recorded `title_embeddings` **0** and
+`title_neighbors` 0. The second half is demonstrated at the end rather than
+asserted — 1,141,720 skeletons, every one without an embedding row, and
+`count_stale` **0**. After: stale 0, refused 0, and a third
+`usher index --backfill` writes 0.
+
+**The two-pass number, which is the measurement and not an error: 8,603.**
+`EnrichService` enqueues `INDEX` and `DERIVE` together at `BACKFILL` unordered,
+so a title indexed before its `DERIVE` embeds from a document with an empty
+weight class B and goes stale the instant `credit_names` lands. Pass two swept
+the whole tier in 3.3 s and wrote **8,603 index jobs — 6.58% of 130,647**;
+`DERIVE` won the race for the other 93.4%. Confirmed on the rows: exactly 8,603
+carry `updated_at > created_at`. Pass one's index phase took **2.31 h**
+(00:07:46Z → 02:26:19Z, 15.6 rows/s aggregate, contended host); pass two took
+**361 s** (23.8 rows/s, index-only, quiet host).
+
+**The headline refutation is about a number the shipped CLI prints.**
+`usher index` estimated **109–145 s** for the pass that took **361 s** —
+**2.5–3.3× out** — and its arithmetic is fine. It computes `stale × 135 tokens
+/ 8,000–10,700 tokens per second`, which prices *the model*; the backfill is
+the model plus a claim, three reads and a staged `COPY` through a temp table
+and a commit, **per title**. Measured separately on the same host and the same
+documents: the model at one text per call runs at **9,683 tokens/s, inside the
+invariant**, while the queue delivered **2,988 tokens/s across two workers —
+15% of it**. The document itself is exactly what the invariant assumed: mean
+**125.4 tokens** over 1,000 sampled titles, inside the recorded ~100–130.
+
+**A quarter of the drain was a gauge.** `usher work` refreshes `SearchGauges`
+after every pass of ≤20 jobs, and at this tier `count_stale` is **360.9 ms**.
+Pass two spent **82 s of its 361 s — 23%** — counting a backlog nothing reads
+during a backfill. S3 handed this over at 327.9 ms and 88,001 titles; it has
+flattened, because the cost is the scan of the enriched population. Two source
+sites still describe that scan's population as "2k-10k rows"
+(`telemetry.py:546`, `composition.py:1317`). **And an idle worker is not
+idle**: two workers with an empty queue burned 0 s of process CPU over 60 s
+while holding `usher-m9-pg` at 9–67%, because every 5-second poll is another
+O(tier) scan. They were stopped rather than left.
+
+**The pool walk S5 depends on is ~80 minutes.** Priced read-only through
+`rebuild`'s own page shape against the real table: **36.50 ms/seed** at a
+500-seed page (`rebuild`'s default) and 37.36 at 50-seed pages, agreeing within
+2.3%. **130,647 × 36.5 ms = 4,769 s ≈ 80 min.** The per-seed cost is measured
+at the real population over 650 seeds; the full walk is that number multiplied
+out, which is the one extrapolation and is labelled as one. The price is
+linear per seed in the population — five points from 30,562 to 86,868 fit
+`2.7 ms + 0.367 µs × N` — so the walk is **quadratic**, and a loaded host
+overstates it by ~39% (the fit predicts 50.7 ms/seed where a quiet box measures
+36.5). Bounding by seed count is legitimate and bounding by a `list_embedded`
+prefix is not: the price is seed-independent to within 1.9% (prefix 38.75,
+suffix 38.58, random 38.04), while a prefix is ordered by registration era
+because the ids are UUIDv7 minted in IMDb `tconst` order.
+
+**And the figure the plan said this repository does not contain, it contains
+twice.** "165.7–166.2 ms for 50 seeds" is at `db/repositories/search.py:263`
+and `tests/integration/test_services_similar.py:711`. The plan's conclusion
+stands anyway, for a better reason than the one it gave: **neither site records
+the population it was measured over**, both are measuring where the
+`genome_scores` join belongs, and that per-seed ~3.3 ms is 11× cheaper than the
+same statement over 130,647 embeddings.
+
+**The new case's red was demonstrated, not claimed.**
+`test_a_title_embedded_before_its_credits_landed_is_stale_again` is the mirror
+of M7's closure case: index an *un*credited title, then write `credit_names`,
+and it must match the stale predicate again. Two plants in `_FINGERPRINT_SQL`,
+both restored against an `md5sum` — deleting the `credit_names` segment kills
+the **premise** (six SQL segments against the composer's seven), and replacing
+it with `''` kills the **named assertion** while leaving the premise green.
+Ledger and every measurement above in `.claude/rules/search-and-embeddings.md`.
+## ✅ M9 Task S5 — THE GATE: 6.08%, and three of the bar's four guesses refuted (2026-08-12)
+
+**The verdict, read off [`/tmp/m9-gate/BAR.md`](/tmp/m9-gate/BAR.md)'s single
+threshold without adjustment: `< 10%`, so the tags term is NOT built in M9.**
+Within that arm it is the upper band — *"the signal is real but does not clear
+the floor a weight would assume"* — so ADR-0035 records a scoped follow-up with
+the number attached rather than a refusal. **No line of `src/` is touched on
+this arm**: `services/similar.py` and `tests/unit/test_services_similar.py` do
+not appear in the diff, as BAR.md requires.
+
+**Refutations first, as the bar's own preamble asks. Three of its four guesses
+fall, and the one that survives is the one that decides the gate.**
+
+1. 🔴 **Guess 1 — "3–5%" — refuted upward. The measurement is 6.0821%.** Its
+   arithmetic fails on both inputs. It scaled M7's single-side-to-pair ratio of
+   0.238 by a **tier-wide** 14.46%, and the population that is actually embedded
+   carries **21.094%** — and the ratio is not a constant even inside one walk:
+   the genome's is **0.208** (2.4746/11.883) against tags' **0.288**
+   (6.0821/21.094), a 38% spread over the identical pool. Carried onto the right
+   coverage, 0.238 predicts 5.02%, which the plan named as the figure to refute;
+   the measurement is 21% above it. Guess 1's own caveat — *"pools are
+   correlated, not independent draws"* — is the half that held, and is now
+   quantified rather than warned about (below).
+2. ✅ **Guess 2 — "it does not clear 10%" — confirmed.** 6.0821% is the only
+   guess that survives, and it is the one the bar turns on.
+3. 🔴 **Guess 3 — "`>= 10` scores a HIGHER pair rate on fewer titles" —
+   refuted, and backwards.** It scores **3.0999%** against 6.0821%, on 18,470
+   seeds against 27,558. It **cannot** score higher: pairs at `>= 10` are a
+   strict subset of pairs at `>= 5` over an identical denominator, so the rate
+   is monotone by construction. What is worth having is why the gap is the size
+   it is, and the decomposition is exact — coverage falls 21.094% → 14.137%
+   (×0.670), a pair needs **both** sides so that enters squared (×0.449), and
+   the heavily-tagged population genuinely is more clustered in each other's
+   pools (×1.135, below). 6.0821% × 0.449 × 1.135 = **3.099%**. **"More tags per
+   title" is a real effect and it is swamped by its own coverage loss, because
+   both-sides squares everything.** The guess's second clause — *"covers so few
+   titles the product is worse"* — is right, and is the whole mechanism rather
+   than a counterweight to a first clause that is false.
+4. 🔴 **Guess 4 — "tag-set Jaccard on the marginal population is near-chance" —
+   refuted on its mechanism, confirmed on its conclusion, for a sharper
+   reason.** Measured against `ml-latest/tags.csv` itself (21.3M rows, read
+   outside the tree, no row committed) over a uniform random 2,000-seed sample:
+   pool pairs on the marginal population (tagged, no genome) mean **0.0261**
+   against a chance baseline of **0.0034** — **7.7× chance**, and 5.8× over the
+   whole qualifying population. Not near-chance. But the bar's illustrative
+   *"two 4-tag sets sharing one tag gives 0.14"* sits between p90 (0.0833) and
+   p99 (0.2222), not at the centre: **the median marginal pool pair shares no
+   tag at all, and 62.3% of them share none.** That is not a missing signal, it
+   is a **present** one — `_jaccard` answers `None` only when a *set* is empty,
+   so two titles with five tags each and nothing in common yield a hard `0.0`,
+   which `_blend` renormalises as a confident negative and which would therefore
+   **demote** 62.3% of the very pairs the term was added to promote, relative to
+   pairs carrying no tag data at all. ADR-0014's argument arriving from the
+   set-valued side, and the single sharpest reason not to build.
+
+**The walk, and both rates over one pool.** `scripts/measure_pair_rates.py`
+drove `rebuild`'s own page shape read-only over the whole embedded population —
+**130,647 seeds, 262 pages of 500, 13,064,700 candidate pairs, 5,125 s
+(85.4 min)** against S4's ~80-minute prediction, on a box with nothing else
+dispatched. Counted over the **pool** `nearest_for` returns, never over stored
+rows, and writing nothing.
+
+| both sides carry | pairs | **rate** | seeds | single-side | coverage² | measured ÷ coverage² |
+|---|---|---|---|---|---|---|
+| a `genome_scores` row | 323,297 | **2.4746%** | 15,525 | 11.883% | 1.412% | **1.75×** |
+| ≥ 5 MovieLens tags | 794,606 | **6.0821%** | 27,558 | 21.094% | 4.449% | **1.37×** |
+| ≥ 10 MovieLens tags | 404,993 | **3.0999%** | 18,470 | 14.137% | 1.999% | **1.55×** |
+
+⚠️ **The genome's 2.4746% is a second measurement and is NOT a before/after
+against M7's 1.81%.** S1 settled that M7's number came from 5,020 owned,
+name-selected, pre-TMDb seeds in a database that no longer exists, and saying so
+is the deliverable. What is new — and is what S3's enrichment existed to
+produce — is the genome's pair rate over a population whose documents carry real
+`overview`/`tagline`/`genres`/`keywords`. It is **still four times below the
+10% floor the 0.25 weight assumes**, so PRD 09's open question about that weight
+is answered with a number rather than a hunch.
+
+**`coverage²` is wrong in a measurable direction, and the size of the error is
+the finding.** All three signals beat their independent-draw prediction, by
+1.37–1.75×, so pool membership and signal membership are positively correlated —
+most strongly for the genome, whose coverage concentrates in popular, older,
+heavily-embedded films. This project has carried the warning since M7 (*"measured,
+never squared"*); it now has the correction factor.
+
+**A random sample agrees with the exhaustive walk, which is the walk's own
+control.** The 2,000-seed uniform sample above measures the `>= 5` both-sides
+rate at **6.4125%** against the walk's 6.0821% — 5.4% apart, on S4's licence that
+a random seed sample is unbiased for pool composition where a `list_embedded`
+prefix is not.
+
+**`nearest_for` was asserted deterministic rather than assumed, over a full
+500-seed page**: two reads returned identical pools, id for id and in order.
+That is what licenses comparing this walk with S7's rebuild — and the walk's
+genome counter is byte-for-byte `rebuild`'s `pairs_with_tags / candidate_pairs`,
+pinned to it by `tests/unit/test_scripts_measure_pair_rates.py` driving both over
+one shared fake.
+
+**The one fatal spelling was written first on purpose and the case was red
+against it.** An accumulator counting the *stored* rows rather than the *pool*
+answers **147/1,000 = 14.70%** where the pool answers **182/1,560 = 11.67%** on
+the same 40-title fixture — plausible, four points high, and high **by
+construction**, because the stored rows are the pool already sorted by a blend
+that weights the very signal being counted at 0.25. The failure named it:
+`assert 1000 == 1560`.
+
+⚠️ **The tag plant no longer reproduces BAR.md's table exactly, and this is
+reported rather than absorbed.** Joined over titles of **any kind** it is now
+49,055 / 15,385 / 33,670 / 14,448 / 6,266 against the bar's 49,05**6** / 15,385 /
+33,67**1** / 14,448 / 6,266 — three cells exact, two one lower, so exactly one
+title stopped matching and it carries **no genome and one-to-four tags**.
+Corroborated independently by the tier's "any tags" read, 45,090 where the plan
+recorded 45,091 while genome, `>= 5` and `genome-or-5` agree exactly. The
+mechanism was demonstrated rather than assumed: **`imdb_id` is in
+`EnrichService._ENRICHABLE`**, so TMDb's `external_ids.imdb_id` overwrites
+IMDb's, and streaming all 12,707,540 rows of `title.basics.tsv.gz` finds **28
+enriched titles whose current `imdb_id` is not a tconst IMDb holds at all** —
+a lower bound, since a rewrite onto another valid tconst is invisible to that
+check. None of the 28 could be tied to a tagged id through `links.csv`, so the
+individual title is characterised and not named. **A tag plant is not stationary
+across an enrichment run.**
+
+**The definition to join on is "titles of any kind", and the 381 are a
+classification finding.** Filtered to `kind = 'movie'` the same queries give
+48,674 / 15,385 / 33,289 / 14,222 / 6,135; the difference is exactly **381 titles
+this catalog classifies as `series` whose IMDb ids appear in a movies-only
+dataset**. They cost the walk nothing — the embedded population is
+`kind = 'movie'` and holds **zero** series — so BAR.md's row label *"tagged
+movies joined"* is wrong about them while its number is right.
+
+**And `ml_tags_tmp.n_tags` counts tag *applications*, not distinct tags.** Of the
+27,558 embedded titles it puts at `>= 5`, **61.7% disagree with a case-folded
+distinct count** and **485 (1.8%) hold fewer than five distinct tags**. At 1.8%
+it moves no verdict; a threshold named "≥ 5 tags" is nonetheless counting
+something slightly more generous than its name.
+
+**The genome's 15,565 rows reconcile to the walk's 15,525 seeds with no
+residue**: **33** are outside the frozen `s3_tier_snapshot` (22 movies with no
+`tmdb_id` but ≥ 100 votes, 8 with neither, 3 with a `tmdb_id` and fewer than 100
+IMDb votes) and **7** are in the tier but still `skeleton` — part of S4's 159-row
+gap, and `_POPULATION` excludes skeletons, so no `index` job was ever owed for
+them. 15,525 + 33 + 7 = 15,565.
+
+**What this measured, said plainly: membership, not relevance.** Nothing here
+establishes that a tags term makes a neighbour list *better*. The same caveat M7
+attached to the genome's 0.25 weight applies unchanged, and guess 4's Jaccard
+distribution is why the distinction is load-bearing rather than pedantic.
+
+Every measurement above, and the pool-versus-stored ledger, in
+`.claude/rules/rows-and-genome.md`.
+
+Gate: ruff clean, `ruff format --check` 587 files, `mypy` 572 files,
+`lint-imports` **9 kept / 0 broken**, **3,939 unit / 4 skipped**, **1,207
+integration / 22 skipped**, PRD link check `OK`. `test_no_third_party_data.py`'s
+repo-wide row scan passes and **no dataset row is committed** — the walk's
+output, the Jaccard probe and the IMDb drift check all live outside the tree
+under `/var/tmp/m9-S5/`.
+
+## ✅ M9 Task S6 — ADR-0035: the refusal written down, and the zero is the reason rather than the rate (2026-08-12)
+
+**The gate answered and this is the deliverable it was built to be able to
+produce.** S5's 6.0821% is the `< 10%` arm of
+[`/tmp/m9-gate/BAR.md`](/tmp/m9-gate/BAR.md)'s single threshold, upper band, so
+[ADR-0035](../prd/decisions/0035-the-tags-similarity-term.md) records the number
+and names a **scoped follow-up with the number attached** rather than a bare
+refusal. **Documentation-only, as the plan's own risk paragraph predicted** —
+`git diff --stat` touches nothing under `src/`, and `services/similar.py` and
+`tests/unit/test_services_similar.py` do not appear, which is what BAR.md
+required in as many words.
+
+**Failing test first, and it is the one the task names.** `0035-*.md` landed
+without its register row and
+`tests/unit/test_decision_register.py::test_every_adr_file_is_listed_in_the_decisions_register`
+went red naming it exactly — `ADRs missing from the register:
+['0035-the-tags-similarity-term.md']` — then green on the appended row. That
+case scans in both directions and its floor is `len(files) >= 23` against 35
+ADRs, so **it needed no edit**.
+
+🔴 **The ADR is written around the distribution and not around the rate, and
+that is the one editorial call in it.** The rate misses the floor by 39%, which
+is a real reason and the weaker one. The binding reason is that
+**`_jaccard` answers `None` only for an *empty* set**: on the marginal
+population the **median pool pair shares no tag at all and 62.3% share none**,
+so each of those yields a hard `0.0` that `_blend` renormalises as a confident
+negative. **The term would demote most of the pairs it fired on.** Stated as
+ADR-0014 arriving from the other side — that rule covers *absence*, and this is
+**presence with no overlap**, which is evidence over a closed ~19-value genre
+vocabulary and the default over an open user-tag one. PRD 05 already argues
+from vocabulary size for keeping genres and keywords apart; the same argument
+applied to user tags lands on refusing the term.
+
+**And the reason that ordering is load-bearing rather than stylistic: the rate
+is buyable and the distribution is not.** Single-side coverage at `>= 1 tag` is
+**34.47%** on this population, which projects to **11.9%** on independent draws
+and **16.3%** at the measured 1.37× correlation factor — over the floor on both
+arithmetics. A later reader who lowers the threshold clears the bar *and makes
+the zero worse*, because at one to four tags a disjoint pair is overwhelming.
+So the ADR says in its Decision section that the rate is explicitly not the
+thing to re-check first.
+
+**The follow-up, and the direction it rules out with a number.** Three
+read-only measurements, no table, no importer, no migration: the `>= 1` pair
+rate counted over **distinct** tags, the empty-overlap share at whatever
+threshold clears, and whether TF-IDF over the tag strings or an embedding of the
+joined tag text puts the median firing pair above zero — the three instruments
+the task's own brief names, kept apart because they have three different failure
+modes over unnormalised free text. **"Wait for more enrichment" is explicitly
+not the follow-up**: clearing 10% at `>= 5` needs **27.0%** single-side coverage
+against 21.094%, about **7,700 more `>= 5`-tagged titles inside the same
+130,647-title population**, while the archive is frozen at 2023-07-20 and
+movies-only and **19,222** of this catalog's tagged titles carry one to four
+tags and no genome. Enrichment reaches titles MovieLens never tagged, so every
+further pass grows the denominator and moves coverage **down**. The ceiling is a
+property of the dataset.
+
+**The build's real size is priced in the ADR before the answer is chosen rather
+than after** — an importer for a member never read (21,274,899 rows / 85 MB), a
+`title_tags` table, **a migration id that does not exist** (`m09a` is M1's,
+`m09b` group T's, `m09c` spare and requestable but **not minted here**), a
+`NeighborCandidate` field, two widened statements in
+`db/repositories/search.py`, both fakes, the contract suite, and a full
+`usher similar --rebuild`.
+
+**Four things the ADR carries because they are what make it evidence rather
+than a verdict**, each with its refutation: guess 3 refuted **backwards** and
+decomposed exactly (`6.0821% × 0.449 × 1.135 = 3.099%`, monotone by
+construction because `pairs≥10 ⊂ pairs≥5` over one denominator); guess 1
+refuted **upward**, its 0.238 single-side-to-pair ratio measured **non-constant
+inside one walk** at 0.208 for the genome against 0.288 for tags; guess 4
+refuted on its mechanism at **7.7× chance** and confirmed on its conclusion for
+the sharper reason above; and the genome's **2.4746%** recorded as a **second
+measurement, never a delta** against M7's 1.81% over **5,020** name-selected
+seeds — still four times below the floor, with the *weight* question left where
+it belongs, in ADR-0024 and S7's hands. The two smaller carries are in the ADR's Uncertainty section:
+`ml_tags_tmp.n_tags` counts tag **applications** (61.7% of the `>= 5` population
+disagree with a case-folded distinct count; 485, or 1.8%, hold fewer than five),
+and **BAR.md's tag table no longer reproduces exactly** — one title, mechanism
+demonstrated, `imdb_id` being in `EnrichService._ENRICHABLE` and 28 enriched
+titles now carrying an `imdb_id` IMDb does not hold.
+
+**What this task deliberately did not touch**, so S7 can run concurrently: no
+`src/`, no ADR-0024 amendment, no PRD 09, no blend. The plan's `S7 ← S6` edge
+holds only on the `>= 10%` arm.
+
+Files: `docs/prd/decisions/0035-the-tags-similarity-term.md` (new),
+`docs/prd/decisions/README.md` (one appended row),
+`docs/prd/05-search-and-similarity.md` (`### Similarity` only, appended at its
+end so S7's edits to the genome paragraphs rebase cleanly),
+`.claude/rules/rows-and-genome.md`, `docs/plans/progress.md`.
+
+### ✅ M9 Task G2 — the ordering rule made structural: a job's events are offered after the job's own commit (2026-08-11)
+
+**[ADR-0033](../prd/decisions/0033-an-event-is-a-statement-about-committed-state.md) is now a property
+of `JobWorker` rather than of five hand-written comments.** G1 measured that the roadmap's claim was
+false at all five publish sites and that what survived was one layer up — the transaction open at an
+`enrich` frame is the *worker's*, holding two `BACKFILL` enqueues and the `DELETE` that completes the
+job. This task closed that window. A worker holds a `DeferredEventPublisher` wrapping whatever
+publisher it was built with; `composition.build_worker` hands `worker.events` to every service it
+constructs; `_run` flushes after `complete()` and `_commit()` and discards in a `finally`. **A sixth
+handler that publishes gets the ordering without writing a line, and a handler that fails cannot keep
+it.**
+
+**The evidence on the wire is G1's own probe, flipped.** `_CommittedStateProbe` reads the `jobs` table
+on a second connection at the instant of the frame: `[('enrich','running')]` before, and
+`[('derive','pending'), ('index','pending')]` after — the residual window's entire contents,
+committed. **And G1's bounded `_job_xmin_settles` poll is deleted**, which is the cheapest available
+proof: it existed because `assert await _job_xmin(...) is None` raced the completing commit, and a
+single read is now correct because the frame the case already read arrives strictly after it.
+
+**Measured both ways, with G1's `asyncio.sleep(0.25)` planted between the handler returning and
+`complete(job.id)`, `cp`-backed and restored by md5.** With the change in place: **5 passes of 5**.
+With the wiring reverted (`build_enrich_service` handed `pipeline.events`) and the plant still in
+place: **5 failures of 5**, every one on `jobs_seen`, reporting `[[('enrich','running')]]`. With the
+`jobs_seen` assertion additionally neutralised so the *other* half could report: **3 of 3** on
+`assert '745' is None` — the exact failure G1 documented, and the licence for retiring the poll.
+
+**The failing test first was an interleaving, never a membership check.**
+`["complete", "commit", "publish"]` against the `["publish", "complete", "commit"]` the same fixture
+recorded, failing on index 2. Its twin — a failed job offers nothing, premise-guarded that an event
+*was* raised — landed in the same commit, because a buffer that flushed on both paths passes the
+first and is exactly the bug the buffer exists to prevent.
+
+**The push and reconcile lanes are not wrapped, and that is asserted structurally because it cannot
+be asserted behaviourally.** Neither is a job, each commits its own subject before publishing, and a
+`sync.progress` held behind a 1,127-batch walk is a progress bar that arrives as one jump. But
+*"published as it went"* and *"published at the end"* are the same list of frames in the same order —
+only a second commit boundary distinguishes them, and a lane has none. So the claim asserted is the
+one that can be: `DeferredEventPublisher` is constructed in exactly **one** place in `src/`.
+
+**Sweep: 12 mutations, 12 killed, 2 controls surviving all five gate steps.** Two findings, both in
+`.claude/rules/mutation-sweeps.md`. *"Flush per batch"* spelled as an **added** flush after the loop
+is a no-op — the `finally` already emptied the buffer — and read as a survivor until it was re-spelled
+as the flush **moved**, at which point it fails 4. And deleting the `NullEventPublisher()` default
+survived, because `flush`'s `except Exception` — which exists so a broken publisher cannot un-complete
+a finished job — swallows the `AttributeError` and logs an `ERROR` per event instead. **A guard
+written so a caller cannot fail is a guard that hides the caller's own wiring defect.** Closed by an
+arm asserting loguru at `ERROR` recorded nothing. Its careless spelling dies on `mypy`; only the one
+carrying `# type: ignore[arg-type]` reached the suite.
+
+**What this bought and what it did not.** Ordering, not durability. The bus is in-process and lossy by
+design, `resync_required` still answers every gap, and **no table was added** — ADR-0033's own warning
+that a reader arriving at a transactional outbox has answered a different question. What the deferral
+converts is the enrich path's duplicate: a crash in the residual window now publishes *nothing*,
+`requeue_running` re-runs the job, and the re-run publishes once. Before, the same crash published
+twice.
+
+Gate: ruff clean, `mypy` 564 files, **9 kept / 0 broken**, **3,791 unit / 4 skipped**, **1,170
+integration / 22 skipped**, PRD link check `OK`.
+
+## ✅ M9 Task S7 — the genome term is removed on its own re-measurement; the read, the counter and the rebuild obligation stay (2026-08-12)
+
+**The blend changed.** `SimilarityService._WEIGHTS` loses `"tags"` and
+`_neighbors_for` stops passing `tags=` to `_blend`. That is the whole of the
+behaviour change and it closes the obligation PRD 09 handed M9 by name: the
+tag-genome weight left at 0.25 on coverage that does not support it.
+
+**The number it was decided on, and it is a second measurement.** S5's one
+read-only pool walk over the whole embedded population — **130,647 seeds, 262
+pages, 13,064,700 candidate pairs, 5,125 s** — puts the genome's candidate-pair
+rate at **2.4746%** (323,297 pairs) over **15,525** seeds carrying a vector,
+**11.883%** single-side. S1 had already settled that M7's **1.81%** came from
+**5,020 owned, name-selected, pre-TMDb seeds** in a database that no longer
+exists — the promotion was a tier-label `UPDATE` that moved no document, so
+`search_document`'s weight classes C and D were empty and `nearest_for` drew
+the pool **by name**. Both numbers stay in the record with their populations
+attached; neither is a delta on the other. What 2.4746% newly says is what the
+genome does over documents that finally carry `overview`/`tagline`/`genres`/
+`keywords`, which is what S3's 130,647-title enrichment existed to produce —
+and it is **still four times below the 10% floor the 0.25 weight assumes**.
+S5's coverage reconciliation is exact: 15,565 genome rows = 15,525 embedded +
+7 still `skeleton` + 33 outside the frozen tier.
+
+### What was NOT done, stated first because it is the risk
+
+**No `usher similar --rebuild` was run, and the task does not claim the
+obligation is discharged.** `blend_fingerprint()` moves
+`78900b2bd89a649774d7fd3efe082621` → `78f3ecd20e654c0f6aa4bdf646ec099b`, so
+every stored `title_neighbors` row is stale by construction. At 130,647
+embedded titles the rebuild is a full quadratic walk — S4 priced the equivalent
+at ~80 minutes, S5's actual was **85.4** — so it is a scheduled operation
+needing a cleared box, not the last five minutes of a task.
+
+**What H7 must run, and what it must record.** The plan's D5 is right that
+nothing live-verifies `/similar` (H4 and H5 cover playback and watch
+write-back), so this discharges through H7's acceptance and needs the thing the
+spec forgot:
+
+```
+uv run usher similar --rebuild        # ~85 min at 130,647 embedded titles
+uv run usher similar <any title id>   # reports the blend it was computed under
+SELECT count(*) FROM title_neighbors; # the count that must be recorded
+```
+
+- `stale_neighbors()` **0**, and
+- **`title_neighbors`' row count recorded beside the verdict.** Without it the
+  criterion is satisfied by an **empty table**, which is exactly what every
+  catalog on this host holds today (`usher-m9-pg` and `usher-postgres-1` both
+  measured 0 rows). The expected count is `seeds × 25` less any seed with fewer
+  than 25 candidates, i.e. ~3.27M at this population.
+- And the rebuild's own `pairs_with_tags / candidate_pairs` must **agree with
+  2.4746%**. The pool is invariant to a weight change by construction
+  (`_CANDIDATE_POOL` and `_NEIGHBORS_PER_TITLE` untouched), which is what makes
+  it a valid control; a disagreement means S5's walk and the rebuild drew
+  different pools and is the first thing to report.
+
+### The failing tests came first, and two of them were red
+
+| case | before | failure message |
+|---|---|---|
+| `test_the_tag_genome_cosine_no_longer_reorders_a_pool` | **RED** | `[UUID(…1b), UUID(…1c)] != [UUID(…1c), UUID(…1b)]` — the genome-bearing candidate at the *lower* cosine still won |
+| `test_every_row_written_under_the_four_signal_blend_reads_as_stale` | **RED**, on its premise | `assert '78900b2bd89a649774d7fd3efe082621' != '78900b2bd89a649774d7fd3efe082621'` — the running blend *was* the four-signal one |
+
+The other three are guards rather than red-first cases and the report says so:
+`test_a_zero_weight_signal_is_arithmetically_identical_to_an_absent_one` (green
+on arrival, by arithmetic — it is red against the *assumption* an implementer
+arrives with, as the plan says),
+`test_every_signal_the_blend_is_handed_has_a_weight_and_no_weight_is_zero`, and
+`test_a_half_covered_pair_is_not_counted_as_a_genome_pair`.
+
+### The revert's real shape, and why the careless one is invisible
+
+`_WEIGHTS["tags"] = 0.0` is **arithmetically the same program** as the signal
+being absent — `_blend` adds `_WEIGHTS[name] * value` to `total` and
+`_WEIGHTS[name]` to `applied`, so a zero moves neither — while still entering
+`blend_fingerprint()`, declaring every row stale and buying an 85-minute
+rebuild for a table whose every score is unchanged. **No behavioural assertion
+can tell the two apart**, so the guard is structural: an AST scan asserting
+`{keywords handed to _blend} == set(_WEIGHTS)` (which refuses *both* halves of
+the split — key without argument is a dead weight, argument without key is a
+`KeyError` on the first pair) plus `0.0 not in _WEIGHTS.values()`.
+
+### Three findings this task owns
+
+- **The removal changes no score at all on ~97.5% of pairs, and the arithmetic
+  is exact.** `score_with = (W · score_without + 0.25 · g) / (W + 0.25)`, so
+  with all three other signals present it is `0.75 · score_without + 0.25 · g`.
+  The three surviving weights are left at M7's 0.45 / 0.20 / 0.10, so
+  genome-less pairs are scored under precisely the denominator they already
+  were. **Reverting them to M6's 0.60 / 0.25 / 0.15 was declined**: the two
+  differ only on keywords-against-genres after renormalisation
+  (0.600/0.267/0.133 against 0.600/0.250/0.150), which a pair rate says nothing
+  about — an unevidenced second decision that would move every row instead of
+  the 2.4746%.
+- **The term was a promotion exactly when `g > score_without`**, and the genome
+  cosine's measured floor is 0.2556 with p1 0.4075 and mean 0.6101 over
+  268,157,000 pairs. ⚠️ **The three-signal score's own distribution over a real
+  pool is NOT measured** — `title_neighbors` is empty everywhere on this box —
+  so how often that reordered a list is unknown and is not claimed. The
+  identity is exact; the frequency is not.
+- **The read is kept and the cost claim is corrected rather than repeated.**
+  PRD 05 said the term cost "a `<=>` and a TOAST fetch on every candidate pair
+  of every rebuild"; that describes the *read*, and the read stays, so removing
+  the weight saves the arithmetic and none of the I/O. What it buys is that the
+  number a later milestone would re-open this on keeps being printed by
+  `usher similar --rebuild` rather than by a query somebody has to think to run
+  — and it leaves ADR-0014's `None`-not-0.0 rule with exactly one live
+  consumer, `pairs_with_tags`, where a `0.0` would report a barely-covered
+  catalog as fully covered. **A dead signal looking live** is the wrong
+  direction for that number.
+
+### Documents moved in the same commit
+
+ADR-0024 (status line + a dated amendment section, never a silent
+contradiction), ADR-0014 (its fourth site moved from the blend to the counter,
+and `_clamped`'s two arguments preserved in prose now that the function is
+gone), PRD 04 (the ⏳ "still not measured against an enriched tier" marker
+discharged), PRD 05's `### Similarity` (the bullet, the weights table, the
+reweighting bound), PRD 09 (the M9 row and the deferred-choice bullet),
+`.claude/rules/rows-and-genome.md`, and `usher similar --rebuild`'s own report
+line, which said pairs *"scored a genome cosine"* and now says they *carried a
+genome vector on both sides — measured, not blended*.
+
+⚠️ **`rows-and-genome.md` gained `src/usher/services/similar.py` as a trigger
+path** (and CLAUDE.md's index row with it). Half that file is about the genome,
+the genome's only consumer was the similarity blend, and the trigger list did
+not name that module — so the sessions most likely to undo this decision were
+the ones the file never loaded for.
+
+**The freed name `tags` is a trap and it is resolved in ADR-0024**: the genome,
+if it returns, is `genome`; a user-tag term is `user_tags`. S6 evaluated
+MovieLens *user* tags under the same word (refused at 6.0821%), a stored score
+records only a fingerprint, and a later reader finding `tags` back in
+`_WEIGHTS` could not tell which signal a row contains.
+
+**S6 and S7 were run concurrently and the plan's `S7 ← S6` edge does not
+apply.** That edge holds only on the ≥10% arm where both would edit
+`services/similar.py`; the gate returned 6.0821%, so S6 touches no code. S7
+owns ADR-0024's amendment and the blend; S6 owns ADR-0035 and the refusal.
+
+### The sweep: 7 plants, 5 targets all killed, 2 controls surviving all five gate steps
+
+Full ledger in `.claude/rules/mutation-sweeps.md`; two results belong here.
+
+🔴 **The plant list found a gap before any plant ran, and it is the third
+constant this milestone has needed a literal-valued case for.** Nothing could
+see a revert of `cosine`/`keywords`/`genres` to M6's 0.60/0.25/0.15:
+`test_every_pair_is_scored_within_m6s_reweighting_bound` derives both of its
+assertions from `_WEIGHTS`, and a **renormalising** blend is invariant to any
+positive rescaling of its weight table — so no assertion computed from
+`_WEIGHTS` can distinguish two tables that are multiples of each other. It pins
+that the weights are *in force* and not what they *are*. Closed by a
+literals-only case; re-planted, the revert fails **that case alone** out of 55.
+After D4's `TICKET_TTL_SECONDS` and B9's `CAST_LIMIT`, with the same tell: the
+constant on both sides of the assertion.
+
+🔴 **The careless revert is killed by two cases and neither is behavioural**,
+which is the measurement behind this task's central claim.
+`_WEIGHTS["tags"] = 0.0` with the argument restored passes **every** ordering,
+score and staleness case in the file, and dies only on the AST scan and the
+literal-valued case. The damage it would ship is not a wrong score — it is a
+`blend_fingerprint()` that moves, declaring a 3.27M-row table stale and buying
+an 85-minute rebuild for a table whose every score is unchanged.
+
+**And a case that had been a change-detector since M7**, found by reading three
+verdicts that made no sense: `test_reordering_the_weights_without_changing_one_
+leaves_the_fingerprint` monkeypatched a hand-**transcribed** copy of `_WEIGHTS`,
+so it failed on any change to a value or to the key set and reported a kill for
+three plants that had nothing to do with insertion order. Respelled as
+`dict(reversed(list(_WEIGHTS.items())))` with both premises asserted.
+
+Gate: ruff clean, `ruff format --check` 587 files, `mypy` over 572 files,
+`lint-imports` **9 kept / 0 broken**, **3,946 unit / 4 skipped**, **1,207
+integration / 22 skipped**, PRD link check `OK`. Tree `md5`-verified clean after
+the sweep.

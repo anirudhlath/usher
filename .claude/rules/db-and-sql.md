@@ -58,6 +58,17 @@ vocabulary) shipped 2026-08-07; the rule for the next milestone is now
 mechanical rather than a decision:
 `m09a`, then `m10a`.
 
+**M9 took the convention and shipped one revision where a draft plan wanted
+seven, and the reason generalises.** `m09a` (`images`, `search_queries`,
+`row_provider_settings`, `title_search_names`, the two tier-1 prefix indexes)
+carries four tables sharing no column, no foreign key and no lifetime — `m08a`'s
+precedent. The refuted alternative was `m09a`…`m09g`, one id per task group, on
+the theory that a revision each lets them author in parallel: it does the
+opposite, because **every integration test runs `alembic upgrade head`**, so a
+worktree holding `m09d` cannot migrate until `m09a`–`m09c` merge. A
+pre-allocated chain is a serial spine across every group that holds a link in
+it. Allocate a revision id per *merge*, never per author.
+
 **The zero-padding is the whole point and must not be "simplified" away.**
 Unpadded, `sorted(["m8a", "m9a", "m10a"])` is `["m10a", "m11a", "m8a", "m9a"]`
 — `m10a` sorts *first*, because `"1" < "8"` and string comparison never
@@ -88,10 +99,12 @@ because twelve rows happened to be nine.
 **`tests/integration/test_migrations.py`'s down/up cycle needs attention from
 every group that adds a migration, and the `-1` half breaking is the design,
 not the defect.** The `-1`-from-head half asserts on whatever the *current*
-head reverses, so it has to be re-pointed every time. **Five landings, five
+head reverses, so it has to be re-pointed every time. **Six landings, six
 loud breaks** — Group F re-pointed it for `ffa`, `af64ba2` (the `ffb`
-migration itself) for `ffb`, M7 Task 36 for `ffc`, M8 Task 8 for `m08a`, and
-M8 Task 19 for `m08b`.
+migration itself) for `ffb`, M7 Task 36 for `ffc`, M8 Task 8 for `m08a`,
+M8 Task 19 for `m08b`, and M9 Task M1 for `m09a`. The sixth was run and
+watched to fail before it was touched: `AssertionError: assert
+'pk_genome_tags' not in {...}`.
 
 **An inherited `-1` assertion that had teeth cannot survive a new head, and
 the failure is always loud.** Having teeth *means* being true at the state
@@ -453,6 +466,45 @@ just by running it:**
   autogenerate never sees them, in either direction — adding, dropping, or
   changing one is always a hand-written `op.execute(...)` migration.
 
+**An expression index with an operator class has three spellings, two of them
+wrong, and only one of the two is loud.** Measured 2026-08-10 on `m09a`'s two
+`lower(name) text_pattern_ops` indexes, by compiling the DDL and by running
+`compare_metadata` against a real `pgvector/pgvector:pg17`:
+
+| spelling | compiled DDL | `compare_metadata` |
+|---|---|---|
+| `Index(n, text("lower(name) text_pattern_ops"))` | **right** | `UserWarning: … Expression compare cannot proceed` and the index is **skipped** |
+| `Index(n, text("lower(name)"), postgresql_ops={"lower(name)": "text_pattern_ops"})` | `CREATE INDEX … (lower(name))` — **opclass silently dropped** | compares, against the wrong index |
+| `Index(n, func.lower(column("name")).label("lower_name"), postgresql_ops={"lower_name": "text_pattern_ops"})` | **right** | compares, no warning |
+
+`postgresql_ops` keys match a column name or an expression's **label**, never
+its text, and an unmatched key is not an error — so the middle row builds a
+default-opclass index that is not an error either and simply cannot serve
+`LIKE 'pre%'`. The first row is the careless-versus-careful pattern inverted:
+the *readable* spelling is the one that quietly costs you
+`test_migration_matches_the_orm_metadata`'s coverage of that index. Take the
+third; it is byte-identical to the first and diffable.
+
+**And the default opclass genuinely cannot serve a prefix, which is what makes
+"two indexes that look like one" a measurement.** On the pre-`m09a` schema with
+`SET enable_seqscan = off`, `WHERE lower(name) LIKE 'pre%'` plans as `Seq Scan
+on titles` at cost 1e10 against the existing `ix_titles_name_lower_year`
+(`(lower(name), year)`, default opclass) — not merely not-chosen, not
+choosable. With `(lower(name) text_pattern_ops)` present the same query is
+`Index Scan`, `Index Cond: ((lower(name) ~>=~ 'pre') AND (lower(name) ~<~
+'prf'))`.
+
+**A schema case filtered by `conname LIKE '%<suffix>'` is exhaustive only until
+the next migration.** Found the same day: M4's
+`test_the_new_episode_foreign_keys_carry_the_delete_rule_they_were_given` reads
+`WHERE contype = 'f' AND conname LIKE '%episode_id_episodes'`, and `m09a` gave
+`images` a third foreign key to `episodes` — so an M4 case about ADR-0010's
+two-way asymmetry failed on a correct entry in a table it is not about. Widening
+the expected map would have made that case silently own every future episode
+FK's delete rule; it is scoped by `conrelid` instead. **A `pg_constraint` read
+in a case about specific constraints is scoped by relation, not by a name
+pattern** — the pattern is a taxonomy nobody re-enumerates.
+
 **And the trap is not "a bounded `NUMERIC`" — it is any column narrower than
 the field feeding it, which includes every `Integer` in this schema.** Found
 2026-08-06, one task after the `numeric field overflow` entry further up this
@@ -586,3 +638,344 @@ before choosing: `raiseload=True` was set temporarily and the **full** unit and
 integration suites run green, then reverted. **The deferral loops over
 `DERIVED_COLUMNS` rather than naming the two columns**, so a future derived
 column that nobody defers fails the case that exists for it.
+
+## The keyset over a nullable column, 2026-08-11 (M9 B6)
+
+**A row comparison is NULL rather than false, so the textbook keyset predicate
+silently drops the whole unkeyed tail — and every page it served looked full.**
+Measured on `pgvector/pgvector:pg17`, a five-row table of which three have a
+NULL key, resuming from the first of those (`id = 1`):
+
+| spelling | rows returned |
+|---|---|
+| `((k IS NOT NULL), k, id) > ((:ak IS NOT NULL), :ak, :aid)` | `(5, id=4)`, `(7, id=5)` — **both keyed rows, neither remaining unkeyed one** |
+| the three-arm predicate below | `(NULL, id=2)`, `(NULL, id=3)` |
+
+Postgres evaluates `ROW(a,b,c) > ROW(d,e,f)` element-wise and answers **unknown**
+when the first differing pair involves a NULL — and unknown is not true, so the
+`WHERE` rejects the row. The damage is the quietest kind: the client gets full
+pages, in order, ending early.
+
+This is not an edge case on this schema. `titles.year`, `titles.popularity` and
+`titles.vote_count` are all nullable, and `popularity` was measured NULL on
+**all 1,271,138 rows** of a bootstrap-only catalog, so on a fresh install the
+unkeyed group is most of the table. ADR-0034 shipped the row-comparison
+spelling as the milestone-wide instruction for three groups writing keyset SQL
+independently; it is corrected there with this table, and the correction
+includes the leading term's direction — `(key IS NOT NULL)` **ascending** puts
+NULLs *first*, which contradicted the ADR's own "NULL sorts last" sentence one
+line above it.
+
+The spelling that works, and it is `IS NOT DISTINCT FROM` written out:
+
+```sql
+ORDER BY (key IS NOT NULL) DESC, key <ASC|DESC>, id ASC
+
+-- resuming from a keyed position
+WHERE key IS NULL OR key <cmp> :after_key
+   OR (key = :after_key AND id > :after_id)
+-- resuming from an unkeyed position: only the rest of that group can follow
+WHERE key IS NULL AND id > :after_id
+```
+
+Two branches in Python rather than one expression in SQL is a legitimate
+rendering: the branch is on whether `:after_key` is NULL, which the caller knows
+before it builds the statement. `db/repositories/title.py`'s `_browse_after` is
+the worked example.
+
+**The `ORDER BY` was written out as `key.is_not(None).desc(), key <dir>` for
+exactly one day, and B7 measured that it costs 317×.** The argument for writing
+it out was legibility with teeth — the keyset predicate has to agree with the
+`ORDER BY` term for term, and two spellings of one rule is how they stop
+agreeing. It is a good argument about correctness and it is wrong about cost:
+`sort=name` is **299.21 ms p50 written out against 0.92 ms as
+`key <dir> NULLS LAST`** over 1,272,367 titles, byte-identical on 25 of 25
+positions, because `titles.sort_name` is `NOT NULL`, `ix_titles_sort_name`
+already exists, and **an index is matched by the sort-key *expression***.
+Postgres 17 does not simplify `sort_name IS NOT NULL` to `true` even on a
+`NOT NULL` column, so the written-out form has a leading key nothing carries
+and the page becomes a 95,000-buffer Parallel Seq Scan. **The general form: two
+spellings of one order are two different sort keys, and a legibility decision
+about SQL text can be a plan decision.** Reproduced on a **seven-row** fixture
+with `SET LOCAL enable_seqscan = off`, which is this file's own
+`text_pattern_ops` idiom and is what separates "not chosen" from "not
+choosable":
+
+| clause | plan | total cost |
+|---|---|---|
+| `sort_name ASC NULLS LAST, id ASC` | `Limit → Incremental Sort (Presorted Key: sort_name) → Index Scan using ix_titles_sort_name` | **2.72** |
+| `(sort_name IS NOT NULL) DESC, sort_name, id` | `Limit → Sort (Sort Key: ((sort_name IS NOT NULL)) DESC, …) → Seq Scan` | **1e10** — the disabled-node penalty |
+
+**Only the `ORDER BY` moved; `_browse_after`'s three arms are untouched.** So
+the clause and the predicate no longer read as one rule, and the agreement is
+now a **test** rather than a reading:
+`test_the_shipped_order_is_byte_identical_to_the_written_out_one` runs both
+spellings position for position, for every `BrowseSort` member, over a
+population carrying NULLs *and* ties in every key, unpaged and as a keyset
+walk. That is strictly stronger than the legibility was — and it is worth
+noticing that restoring the written-out spelling fails **only** the plan case
+and none of the 172 others, which is what "the same order" means when it is
+measured instead of argued.
+
+**The premise guard on that case caught the fixture, not the code, on its first
+run** — `popularity` and `vote_count` had no tie, so their `id` tail was
+unobservable and the equivalence would have been about four rows instead of
+seven. One row carrying a tie for every key at once fixed it. This is the
+`assert far_id < near_id` rule paying out in the direction nobody plans for.
+
+Plant verdicts on the shipped clause, all against the browse selection:
+`nulls_last` dropped (Postgres's `DESC` default is NULLS FIRST) fails **15**;
+the `id` tail dropped fails **5**; deleting the `key.is_(None)` disjunct from
+the predicate fails 7.
+
+**The nullable sorts are not fixed by this and the reason matters.** `year`,
+`popularity` and `vote_count` have no index at all, so all three remain a
+sequential scan (235.55 / 229.50 / 231.21 ms). A `(col DESC NULLS LAST, id)`
+btree on each would serve them — and **under the written-out spelling could not
+have been matched even if it existed**, so this change is what makes such an
+index possible rather than what makes it unnecessary. Recommended and
+deliberately not minted here: `ix_titles_popularity` is this schema's own
+precedent for an index declared on a guess, unusable, and dropped two
+milestones later in `ffc`, and Track 1 is not taking a third revision for an
+optimisation. A GIN index on `genres` is a separate and genuinely open
+question — B7 found none exists, so the lossy-bitmap recheck B3 measured one
+subsystem over would be *created* by adding it, not avoided.
+
+**Offset paging duplicates under a concurrent insert, measured rather than
+asserted.** PRD 07 has claimed this since M1 and nothing tested it, because
+testing it needs a repository exposing a wire-paged read and none existed until
+`TitleRepository.browse`. Five rows, page size three, one row committed between
+the two requests that sorts *into the page already served*: `OFFSET 3` serves
+`Charlie` twice and the keyset serves the pre-insert population once.
+`tests/integration/test_title_repository.py::
+test_offset_duplicates_a_row_a_concurrent_insert_pushed_down_and_the_keyset_does_not`,
+and it asserts the premise that the insert really did land behind the cursor —
+a row inserted *after* it is an ordinary page-2 row under both spellings.
+**One correction to the claim while verifying it: an insert duplicates and does
+not drop.** The population grew by one, so the window that slid by one still
+reaches the last row. A row *never* served needs a concurrent delete, which is
+a different write; PRD 07 says "produces duplicates", which is what this
+measures, and neither document now claims the other half.
+
+**A facet counted over its own predicate is the aggregate defect that looks
+correct on every request that does not use it.** `browse_facets` computes each
+facet over the filtered population **minus that facet's own predicate**, which
+is what makes the counts navigable — folded back, the genre facet answers "how
+many Horror films are Horror", i.e. the size of the page already on screen.
+Both halves need a case: *dropping its own* (`genre="Horror"` must not change
+the genre map) and *keeping the others* (the genre map must still honour `year`
+and `owned`). Measured, the two folds fail 2 and 3 cases respectively and
+nothing else in the file notices.
+
+`unnest` goes in a **subquery** rather than beside the `GROUP BY`: a
+set-returning function is legal in a target list and a `GROUP BY` over its
+output needs somewhere to name it. `select(func.unnest(TitleRow.genres)
+.label("genre")).where(...).subquery()` infers its own `FROM titles`, so no
+lateral join is needed. A title whose `genres` is `'{}'` unnests to no rows and
+is in no bucket, which is the same statement the `years` read makes with
+`IS NOT NULL`.
+
+## The review queue's keyset, and the index that does not carry its sort (2026-08-11, M9 E4)
+
+`GET /admin/unmatched` pages `media_items WHERE title_id IS NULL` by keyset
+rather than by `OFFSET`. Measured with `EXPLAIN (ANALYZE, BUFFERS)` on
+`pgvector/pgvector:pg17` against **200,000 items of which 70,000 are unmatched
+and 23,333 of those undated**, on the statements imported from
+`db/repositories/media_item.py` rather than transcribed, `ANALYZE`d first,
+`limit = over_fetch(50) = 51`:
+
+| statement | scanned → served | buffers | sort | time |
+|---|---|---|---|---|
+| keyset, page 1 | 70,000 → 51 | 966 | top-N heapsort, 36 kB | **16.4 ms** |
+| keyset, resuming from a **dated** boundary at depth ~35,000 | 34,999 → 51 | 966 | top-N heapsort, 36 kB | **23.0 ms** |
+| keyset, resuming from an **undated** boundary 100 from the end | 99 → 51 | 328 | quicksort, 38 kB | **1.9 ms** |
+| offset, page 1 | 70,000 → 51 | 966 | top-N heapsort, 36 kB | 17.4 ms |
+| offset, `OFFSET 69,900` | 69,951 → 51 | 966 + `temp read=690 written=691` | **external merge, 3,264 kB + a worker's 2,256 kB, on disk** | **57.3 ms** |
+
+**Three things, and the second is the one this milestone did not own.**
+
+- **The keyset's page cost is flat in depth and the offset's is not.** At
+  70,000 unmatched rows the deep offset is 3.3× page 1, spills its sort to disk
+  and recruits a parallel worker; the keyset's deepest page is its *cheapest*.
+  That is the same defect as the production figure this project already carries
+  (43.7 ms at offset 0, 388.9 ms at offset 1,126,574), reproduced at a
+  sixteenth of the scale — so the shape is the finding, not the milliseconds.
+- **The sort dominates the keyset page too, and the index is why.**
+  `ix_media_items_unmatched` is `Index("ix_media_items_unmatched", "source_id",
+  postgresql_where=text("title_id IS NULL"))` (`db/models/source.py:122-126`) —
+  it carries **neither `added_at` nor `id`**, so every page is a top-N heapsort
+  over the whole *unmatched population* (966 buffers, 70,000 rows). Bounded by
+  the queue rather than by the table, which is what makes it survivable; but on
+  a library that has bootstrapped and never run a match pass, the unmatched
+  population **is** the library. A covering
+  `(added_at DESC NULLS LAST, id DESC) WHERE title_id IS NULL` would remove the
+  sort entirely. **That is a migration E4 does not own and did not mint.** The
+  M9 plan named `m09c` as the spare to *request*; C2 has since minted `m09c` for
+  the `images` natural key, so the spare named in the plan no longer exists —
+  `m09b` is unallocated and is what a request would be for. Recorded either way,
+  which is what the plan asks for.
+- **Only the undated resume gets an index-narrowed plan, and that asymmetry is
+  worth expecting.** `added_at IS NULL AND id < :after_id` is a `BitmapAnd` over
+  `pk_media_items` and `ix_media_items_unmatched` — the primary key can serve
+  the `id` bound. The dated arm is a three-way disjunction, which no index here
+  can serve, so it lands as a `Filter` on the same scan page 1 does. Both are
+  the same 966 buffers; the difference between 16.4 ms and 23.0 ms is the filter
+  being evaluated per row.
+
+**And the predicate is spelled as three arms rather than as a row comparison,
+for the reason ADR-0034 was corrected**: `added_at` is nullable here and the
+undated group is the population an operator is reviewing, so the row form's
+NULL-not-false answer would drop the whole tail with every page still full.
+Contrast `db/repositories/episode.py`, where both sort columns are
+`nullable=False` and B12 *measured* the two-arm spelling equivalent — the
+difference between the two reads is a fact about their columns, and each says so
+in its own docstring.
+
+## M9 Task B7 — `/browse` priced at catalog scale: both bars failed, the sort is not the cost, and the `ORDER BY`'s spelling is worth 317× (2026-08-12)
+
+**Bar written, hashed and committed before the first probe** —
+`/var/tmp/m9-B7/BAR.md`,
+`sha256 256f28ba8102a47677acb3fe34afe8dc52787ab3d42c1f2ad2e88ef949cdfba9`,
+2026-08-12T06:31:44-05:00, restated verbatim in `scripts/measure_browse.py`'s
+docstring and re-hashed at run time so an edit after a number was seen shows up
+in the log. `/var/tmp` and not `/tmp`, which is tmpfs on this host.
+
+**Catalog, recorded with every number because a phase read as a catalog fact is
+how the last one went wrong:** 1,272,367 titles (1,141,720 skeleton / 0 basic /
+130,647 enriched), `alembic m09c`, autoanalyzed. NULL fractions of the four
+sort keys: `sort_name` **0**, `year` 147,848, `vote_count` 732,587,
+`popularity` **980,523** — so *"popularity is NULL on all 1,271,138 rows"* is
+now false on a partly-enriched catalog and 77% is the right figure to carry.
+118,856 titles carry no genre. `media_items` is **empty**, so every `owned`
+number here is an `EXISTS` against an empty table and is **not** the filter
+that ships. `work_mem` 4 MB, `shared_buffers` 128 MB,
+`max_parallel_workers_per_gather` 2, jit on. Genre vocabulary 30 members,
+Drama 386,689 down to Adult 1; probes drawn by **rank** — low = Drama,
+median = Fantasy (30,034), high = Adult.
+
+### Both bars failed
+
+| probe | p50 | p95 | bar |
+|---|---|---|---|
+| `browse_facets()` unfiltered | 320.52 | **330.81** | 200 — FAIL |
+| — its genre arm alone | — | 204.55 | — |
+| — its year arm alone | — | 123.14 | — |
+| `browse_facets(genre=Drama)` | 328.68 | 344.62 | FAIL |
+| `browse_facets(genre=Fantasy)` | 317.79 | 324.43 | FAIL |
+| `browse_facets(genre=Adult)` — **one** title | 316.61 | 321.93 | FAIL |
+| `browse_facets(year=1999)` | 195.66 | **201.12** | FAIL, by 1.12 ms |
+| `browse_facets(genre=Fantasy, year=1999)` | 184.44 | **194.92** | **PASS** |
+| `browse(genre=Fantasy)`, pooled over 4 sorts × 2 pages | 128.59 | **139.92** | 50 — FAIL |
+| `browse(genre=Drama)` | — | 206.31 | FAIL |
+| `browse(genre=Adult)` | — | 125.74 | FAIL |
+| `browse()` unfiltered | — | **321.29** | FAIL — the slowest |
+| `browse(year=1999)`, best probe anywhere | 61.18 | 70.69 | FAIL |
+
+🔴 **The plan's own named fallback is refuted as a remedy.** *"Facets are
+served only for a predicated browse"* assumes a predicate makes them
+affordable. It does not: a genre-predicated request is 324.43 ms against an
+unfiltered 330.81, and a genre matching **one** title is 321.93. The mechanism
+is in `browse_facets`' own design — each facet is computed over the filtered
+population **minus its own predicate**, so a request whose only filter is a
+genre computes the genre facet over the whole catalog *by construction*. Only
+`year` moves the number, because the aggregate's cost is the `unnest` and
+`GROUP BY` over ~2.9M genre rows rather than the scan. **The general form: when
+a facet drops its own predicate, predicating on that facet cannot reduce its
+cost, and any fallback of the form "compute facets only when filtered" has to
+name which filter.** What shipped is opt-in (`?facets=true`) *and* predicated,
+with an explicit `computed` flag and absent maps — PRD 07's Screens row and its
+note are corrected in the same commit as these numbers.
+
+### G7's shape holds a second time, and the lossy bitmap is refuted structurally
+
+Every browse plan is the same: `Limit → Gather Merge → Sort → Parallel Seq Scan
+on titles`, ~95,000 buffers (≈79,000 read), `width=736`.
+**`Sort Method: top-N heapsort  Memory: 39–59 kB`** in every one — so the sort
+is trivial and **the cost is the scan**, which is B3's G7 refutation arriving in
+a second family. The marginal cost above a ~118 ms scan floor is rows fed to the
+heapsort: Adult keeps 0/worker at 118 ms, Fantasy 10,011 at 122, Drama ~129,000
+at 190, unfiltered 424,122 at 315.
+
+**B3's lossy-bitmap hazard cannot arise here, and the obvious fix would create
+it.** There is no GIN index on `titles.genres`, so `genres @> '{Fantasy}'` is a
+`Filter:` on a sequential scan (`Rows Removed by Filter: 414,111` per worker;
+424,122 for Adult) and there is no bitmap to be lossy. The prediction's
+*direction* held — low selectivity is worse — and its *mechanism* did not.
+A GIN index on `genres` is what would introduce the 66,188-lossy-block recheck
+B3 measured one subsystem over.
+
+### The `ORDER BY`'s spelling, not the missing index, is what makes a `name` page a sequential scan
+
+Measured **after** both bars were scored, as a diagnostic, changing one
+variable: the leading `(key IS NOT NULL) DESC` term replaced by the
+`NULLS LAST` it was written out from, nothing else moved.
+
+| sort | column NOT NULL | shipped p50 | `NULLS LAST` p50 | plan under `NULLS LAST` |
+|---|---|---|---|---|
+| `name` | **yes** | 299.21 | **0.92** | `Index Scan using ix_titles_sort_name` + Incremental Sort, **29 buffers**, 0.080 ms |
+| `year` | no | 277.13 | 235.55 | Parallel Seq Scan (no index exists) |
+| `popularity` | no | 269.96 | 229.50 | Parallel Seq Scan |
+| `vote_count` | no | 276.48 | 231.21 | Parallel Seq Scan |
+
+**317× on `name`, for a page proved byte-identical** — the two spellings were
+run side by side and matched on **0 mismatched positions over 25**.
+`titles.sort_name` is declared `NOT NULL` and `ix_titles_sort_name` already
+exists; Postgres 17 does **not** simplify `sort_name IS NOT NULL` to `true`
+even so, and an index is matched by the **sort key expression**, so the
+written-out form is unindexable while the `NULLS LAST` form that produces the
+identical row order is not.
+
+`db/repositories/title.py` writes the term out deliberately — *"the keyset
+predicate has to agree with this term for term and two spellings of one rule is
+how they stop agreeing"* — and that argument is about **correctness**, which it
+gets right. What nobody had measured is that it also costs the index.
+**The general form: `(key IS NOT NULL) DESC, key <dir>` and `key <dir> NULLS
+LAST` are the same *order* and different *sort keys*, and only one of them an
+index can serve. A legibility decision about SQL text can be a plan decision.**
+
+**The recommendation, which is bar 2's named output and is not applied here**
+— B6 owns that statement and `ix_titles_popularity` is the precedent for adding
+an index on a guess:
+
+1. Spell the `ORDER BY` as `NULLS LAST`. Free, no DDL, and it alone puts
+   `sort=name` at 0.92 ms — 51× *under* bar 2.
+2. Then, and only then, a btree per nullable sort key
+   (`(year DESC NULLS LAST, id)`, and the same for `popularity` and
+   `vote_count`) can be matched at all. Under the written-out spelling such an
+   index is unusable and would be `ix_titles_popularity` a second time.
+3. A genre predicate needs a GIN index on `titles.genres` to stop being a
+   1.27M-row scan — and that is what would create B3's lossy recheck, so it is
+   a measurement rather than a foregone conclusion.
+
+### Harness notes, all of them failures the discipline caught
+
+🔴 **The first spelling of the diagnostic's surgery did not land, and the check
+written to catch that could not fire.** The anchor was guessed as
+`ORDER BY (col IS NOT NULL) DESC, ...`; SQLAlchemy emits
+`ORDER BY titles.col IS NOT NULL DESC, ...` — no parentheses, table-qualified —
+so `str.replace` matched nothing, and the guard `"IS NOT NULL) DESC" in variant`
+was spelled against the *same absent parenthesis* and was vacuously false. The
+run timed **two copies of one statement** (299 vs 298 ms) and the write-up would
+have reported the 317× finding as refuted. Repaired to byte inequality against
+the text it was derived from — F3's landing-check repair, and the reason it
+generalises: a guard derived from the same guess as the edit fails together
+with it.
+
+**The statement measured is the shipped object, not a copy.** Timings drive
+`PostgresTitleRepository.browse`/`.browse_facets` through a **recording
+session** that keeps the SQLAlchemy statement the repository built, and the
+`EXPLAIN` is compiled from that object — so there is no second spelling of B6's
+SQL to drift. `verify_harness` re-executes each recorded statement and refuses
+the run unless it answers the same row count.
+
+**No plan-shape assertion is made anywhere**, for B3's reason: a plan-shape
+guard is vacuous below the scale at which the planner chooses that shape. Plans
+are captured verbatim and every shape named above carries the row count it was
+observed at.
+
+**Quiet, by B3's metric reused rather than re-derived** (imported from
+`measure_suggest_tiers`, one definition): foreign process census on argv tokens
+plus two-sided ±0.10 idle-sampled CPU drift. Bars run: drift **−0.0147**,
+foreign 0. Diagnostic run: **−0.0019**, foreign 0. The one-minute load average
+went **1.30 → 3.71** across the bar run and decides nothing — that is the run's
+own work, and a load-average gate would have condemned it.

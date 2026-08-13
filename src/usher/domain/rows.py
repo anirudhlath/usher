@@ -16,17 +16,35 @@ second source of truth, and a `KeyError` waiting for the first provider that
 proposes two rows under one slug -- which `FranchiseProvider`, at one row per
 franchise, is well placed to be.
 
-**There is no artwork field, and that is boundary call 3 rather than an
-oversight.** PRD 06 describes `RowCard` as carrying *"artwork refs"*. There is
-no `Image` table, no `images` column and not even a `poster_path` on `titles`;
-M9 owns all three. The choice was between an always-null field and no field,
-and M5 settled the identical question one route over for `GET /titles/{id}`'s
-absent `images` key: *"an empty list would be indistinguishable from a film
-with no cast."* A `RowCard` with `"artwork": null` on every card of every row
-is a client-side branch that never takes its other arm, and the day M9 fills
-it every client that shipped against the null already renders without it.
-`extra="forbid"` is what makes that a runtime refusal rather than a naming
-convention.
+**`artwork` is here now, and M7's boundary call 3 is what it was waiting for.**
+PRD 06 describes `RowCard` as carrying *"artwork refs"*; M7 shipped no such
+field, absent rather than null, because there was no `Image` table, no `images`
+column and not even a `poster_path` on `titles` -- *"an always-null field is a
+client-side branch that never takes its other arm, and the day M9 fills it
+every client that shipped against the null already renders without it."* M9's
+C2 built the table and the port, C3 fills it from `raw_payloads` with no second
+network call, and C4/C5 serve the bytes; so the field arrives **populated**,
+which is the condition the refusal named, and a client that shipped against its
+absence is untouched because `extra="forbid"` guards additions rather than
+readers.
+
+**One image id, chosen server-side, and each of those three words is a
+decision.** *One*, because a list puts the choice back on the client and
+ADR-0006 puts composition on the server. An *id* rather than a URL or a path,
+because a URL bakes the CDN base and the ladder rung into a screen a client
+caches, and a path is provider vocabulary -- `GET /images/{id}` is the one
+place either is decided (ADR-0032). *Server-side*, because the choice is keyed
+on the **row's** `display_hint` (a poster for `portrait`/`square`, a backdrop
+for `landscape`/`wide`) and a card cannot see its row's hint; the mapping lives
+once, on `services/rows/base.py:ARTWORK_FOR_HINT`.
+
+**`None` is a true fact and not an ADR-0014 stand-in**, which is why it is
+absent from the enumeration below. A site on that list is a field where a
+*falsy* value would be read as a measurement -- a zero runtime, a zero cosine.
+There is no UUID that means "no artwork", so nothing here is standing in for
+anything: `None` says the catalog holds no poster or backdrop for this title,
+which is the ordinary state of a title nothing has derived yet, and a client's
+branch on it is a real branch with a real other arm.
 
 **ADR-0014 -- absence is not zero -- and the enumeration of its sites, because
 nothing in this repository enumerated them and the ordinals were being
@@ -161,7 +179,9 @@ class RowCard(DomainModel):
     visible per-card score invites a client to re-sort -- which is precisely
     the composition ADR-0006 put on the server. **Not carried: `rating`.**
     `watch_states` has no rating column at all, so a rating on a card is a
-    field with no source. **Not carried: artwork** -- see the module docstring.
+    field with no source. **Carried since M9: `artwork`** -- one image id,
+    chosen against the row's hint; see the module docstring for why it is an
+    id, why there is one of it, and why its `None` is not an ADR-0014 site.
 
     The progress pair is two facts rather than one fraction. `runtime_seconds`
     is `int | None` because `WatchState.runtime_seconds` is, and a fraction of
@@ -212,6 +232,18 @@ class RowCard(DomainModel):
     # twice.
     episode_id: uuid.UUID | None = None
     episode_label: str | None = None
+    # **M9's field, and the one the module docstring is about.** An
+    # `images.id`, resolvable through `GET /images/{id}` and nothing else --
+    # never a path, never a URL, never a list. `None` means the catalog holds
+    # no image of the kind this row's hint asks for, which is the ordinary
+    # state of a title nothing has derived and is *not* an ADR-0014 site: a
+    # UUID has no zero for an absence to be mistaken for.
+    #
+    # Defaulted, because every one of the ten providers builds its cards
+    # through `BaseRow.hydrate` and a required field here would make a card
+    # unconstructible outside it -- and because a household whose catalog has
+    # never been derived is a household whose every card takes this arm.
+    artwork: uuid.UUID | None = None
 
 
 class BuiltRow(DomainModel):

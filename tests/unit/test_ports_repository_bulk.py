@@ -7,8 +7,10 @@ from abc import ABC
 import pytest
 
 from usher.ports.repository import (
+    AliasWriteResult,
     BulkCatalogRepository,
     BulkWriteResult,
+    CreditNamesFillResult,
     CrosswalkLinkResult,
     ImportRunRepository,
 )
@@ -27,6 +29,8 @@ def test_bulk_catalog_repository_surface() -> None:
             "bulk_load_window",
             "upsert_titles",
             "apply_ratings",
+            "fill_credit_names",
+            "replace_aliases",
             "upsert_tmdb_ids",
             "upsert_crosswalk",
             "link_crosswalk",
@@ -51,7 +55,13 @@ def test_bulk_load_window_is_not_a_coroutine_function() -> None:
 
 
 @pytest.mark.parametrize(
-    "result", [BulkWriteResult(inserted=0, updated=0), CrosswalkLinkResult(0, 0, 0)]
+    "result",
+    [
+        BulkWriteResult(inserted=0, updated=0),
+        CrosswalkLinkResult(0, 0, 0),
+        CreditNamesFillResult(filled=0, unmatched=0, deferred=0),
+        AliasWriteResult(written=0, unmatched=0, canonical=0, duplicate=0),
+    ],
 )
 def test_results_are_frozen(result: object) -> None:
     # is_dataclass() is a TypeGuard: without it mypy strict rejects
@@ -68,6 +78,26 @@ def test_bulk_write_result_separates_inserts_from_updates() -> None:
     Postgres cannot report the split from rowcount either -- the
     implementation reads `xmax = 0` in RETURNING to get it."""
     assert [f.name for f in dataclasses.fields(BulkWriteResult)] == ["inserted", "updated"]
+
+
+def test_alias_write_result_counts_both_filters_and_not_just_the_rows() -> None:
+    """**Three of every four rows this write is handed do not become rows**,
+    and a filter nobody can count is indistinguishable from an upstream with
+    nothing to give. Measured over a real 1,271,138-title catalog: 7,536,366
+    retained akas rows, of which **5,693,570 (75.5%) restate the title's own
+    name** and a further 9.7% of the survivors repeat a name already kept.
+
+    So `written` alone would report 1,663,364 out of 7.5M with no way to tell
+    a correct 78% loss from a comparison that had started matching everything.
+    Same argument as `CreditNamesFillResult.deferred`, which exists so the
+    two-writer partition is auditable rather than merely asserted.
+    """
+    assert [f.name for f in dataclasses.fields(AliasWriteResult)] == [
+        "written",
+        "unmatched",
+        "canonical",
+        "duplicate",
+    ]
 
 
 def test_crosswalk_link_result_reports_what_it_could_not_do() -> None:

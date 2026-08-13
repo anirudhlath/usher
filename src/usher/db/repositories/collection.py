@@ -154,9 +154,83 @@ LIMIT :limit
 """
 
 
+# `GET /collections/{id}`, and it is `_LIST_OWNED` with three deliberate
+# differences rather than the same statement with a parameter.
+#
+# 1. **No `HAVING`.** There is no `min_owned` here at all: that floor is a
+#    statement about what belongs on a *screen*, and asking for a franchise by
+#    id is a different request. Re-applying it 404s the franchise a household
+#    has barely started.
+# 2. **`LEFT JOIN members`, so a collection with no movie members still
+#    answers a row.** The port promises `None` only for a collection the
+#    catalog does not hold; an inner join would make "owned none of it" and
+#    "no such franchise" the same answer, which the route turns into two
+#    different status codes. `array_agg(...) FILTER (WHERE ... IS NOT NULL)`
+#    plus `COALESCE(..., '{}')` is what keeps the empty case an empty array
+#    rather than `{NULL}`.
+# 3. **`AND t.kind = 'movie'` is written here too.** `attach_titles` filters it
+#    on the way in, and `titles` deliberately carries no
+#    `CHECK (collection_id IS NULL OR kind = 'movie')` (see
+#    db/models/collection.py), so a series carrying a collection id is storable
+#    by anything else that writes the column. A reader that trusted the writer
+#    would put a television show on a franchise page.
+#
+# `mi.episode_id IS NULL` is spelled out for `_LIST_OWNED`'s reason, restated
+# because this is a second copy of the same predicate rather than a share of
+# it: media_items holds 999,827 episode rows on the one measured deployment,
+# collections hold only movies so no episode can match today, and that is
+# exactly why its absence has to be distinguishable from having forgotten it.
+#
+# `ix_titles_collection_id` is the driving index.
+_GET_COLLECTION = """
+WITH members AS (
+    SELECT t.id AS title_id, t.release_date, t.year
+    FROM titles t
+    WHERE t.collection_id = CAST(:collection_id AS uuid)
+      AND t.kind = 'movie'
+), owned AS (
+    SELECT DISTINCT m.title_id
+    FROM members m
+    JOIN media_items mi
+      ON mi.title_id = m.title_id AND mi.episode_id IS NULL AND mi.available
+)
+SELECT c.id AS collection_id, c.name AS name,
+       COALESCE(
+           array_agg(m.title_id ORDER BY m.release_date NULLS LAST, m.year NULLS LAST, m.title_id)
+               FILTER (WHERE m.title_id IS NOT NULL),
+           '{}'
+       ) AS title_ids,
+       COALESCE(
+           array_agg(m.title_id) FILTER (WHERE o.title_id IS NOT NULL),
+           '{}'
+       ) AS owned_title_ids
+FROM collections c
+LEFT JOIN members m ON true
+LEFT JOIN owned o ON o.title_id = m.title_id
+WHERE c.id = CAST(:collection_id AS uuid)
+GROUP BY c.id, c.name
+"""
+
+
 class PostgresCollectionRepository(CollectionRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get(self, collection_id: uuid.UUID) -> OwnedCollection | None:
+        with self._session.no_autoflush:
+            row = (
+                await self._session.execute(text(_GET_COLLECTION), {"collection_id": collection_id})
+            ).one_or_none()
+        if row is None:
+            return None
+        return OwnedCollection(
+            collection_id=row.collection_id,
+            name=row.name,
+            # Two lists, never two counts: `len()` is what makes "you own 1 of
+            # 4" a pair of numbers that cannot disagree with each other.
+            title_ids=tuple(row.title_ids),
+            owned_title_ids=frozenset(row.owned_title_ids),
+        )
 
     async def upsert_many(self, collections: Sequence[Collection]) -> BulkWriteResult:
         if not collections:

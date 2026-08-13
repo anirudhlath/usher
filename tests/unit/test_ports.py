@@ -23,6 +23,7 @@ from usher.ports.errors import (
     UsherPortError,
 )
 from usher.ports.events import EventPublisher
+from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
 from usher.ports.llm import LLMClient, LLMPurpose, LLMUsage
 from usher.ports.metadata import MetadataCandidate, MetadataProvider
@@ -33,11 +34,14 @@ from usher.ports.repository import (
     CuratedRowRepository,
     EpisodeRepository,
     GenomeRepository,
+    ImageRepository,
     ImportRunRepository,
     LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
+    RowProviderSettingsRepository,
+    SearchQueryRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -71,6 +75,8 @@ ALL_PORTS: list[type[ABC]] = [
     SuggestIndex,
     Embedder,
     LLMClient,
+    ImageFetcher,
+    ImageBlobStore,
     BulkDataset,
     EventPublisher,
     JobQueue,
@@ -80,11 +86,14 @@ ALL_PORTS: list[type[ABC]] = [
     CuratedRowRepository,
     EpisodeRepository,
     GenomeRepository,
+    ImageRepository,
     ImportRunRepository,
     LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
+    RowProviderSettingsRepository,
+    SearchQueryRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -146,9 +155,16 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
 @pytest.mark.parametrize(
     "port,methods",
     [
+        # `get` is here as of M9's `GET /people/{id}`, which is the caller
+        # Task 6 said the absence was waiting for -- "nothing in M7 reads one
+        # person by id and `GET /people/{id}` is M9's". So the deliberate gap
+        # closes because its route arrived, not because a fake wanted a
+        # read-back: the suite still reads a stored person through
+        # `PersonHistorySeeder.stored`, which is what keeps that seam off the
+        # shipped surface.
         (
             PersonRepository,
-            {"upsert_many", "resolve_tmdb_ids", "list_recurring_for_user", "count"},
+            {"get", "upsert_many", "resolve_tmdb_ids", "list_recurring_for_user", "count"},
         ),
         (
             CreditRepository,
@@ -159,9 +175,15 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
                 "count_titles_with_credits",
             },
         ),
+        # `get` is here as of M9's `GET /collections/{id}`, the second of Task
+        # 6's four absences to close and for the same reason as
+        # `PersonRepository.get`: the route arrived. It is not `list_owned`
+        # with a filter -- it carries **no `min_owned`**, which is the whole
+        # difference between "what belongs on a screen" and "the franchise the
+        # client asked for by id".
         (
             CollectionRepository,
-            {"upsert_many", "resolve_tmdb_ids", "attach_titles", "list_owned", "count"},
+            {"get", "upsert_many", "resolve_tmdb_ids", "attach_titles", "list_owned", "count"},
         ),
         # Not one of Task 6's three, and added here by M7's Task 35 because
         # this is exactly the list that catches what that task did: it grew
@@ -215,6 +237,12 @@ def test_the_new_repository_ports_declare_exactly_these_abstract_methods(
     deliberately-absent ones -- `PersonRepository.get`,
     `CollectionRepository.get`, `list_members`, and any `rebuild` -- cannot
     be added without this list moving and someone reading the reason.
+    **Two of those four are now present** -- `PersonRepository.get` and
+    `CollectionRepository.get` -- and each arrived with the M9 route Task 6
+    named as the caller it was waiting for. `list_members` and `rebuild` are
+    still absent and still deliberate: `OwnedCollection` carries the member
+    list, so a separate members read would be a second opinion about the same
+    fact.
 
     It moved once, and this is the record of it: M7's `usher derive` report
     added `PersonRepository.count`, `CollectionRepository.count` and
@@ -249,6 +277,22 @@ def test_every_port_abc_is_registered_in_all_ports() -> None:
     passes -- the failure mode `tests/unit/test_no_third_party_data.py`
     carries the same guard against, and the one this case's own mutation
     sweep found: emptying `pkgutil.iter_modules(...)` broke nothing.
+
+    **`walk_packages`, not `iter_modules`, and M9 is what that is for.**
+    `iter_modules` does not descend into a subpackage, and the filter below
+    keeps a class only when `value.__module__ == namespace.__name__` -- so
+    the moment `ports/repository.py` became `ports/repository/`, every one
+    of its re-exported ABCs carried `usher.ports.repository.title` against a
+    namespace called `usher.ports.repository` and stopped matching.
+    Measured both ways at the split: `iter_modules` finds **13** ports and
+    `walk_packages` finds **32**, so the naive spelling dropped all
+    **nineteen** repository ports at once -- and both of this case's own
+    controls survive that, because `declared` is still full and `SearchIndex`
+    is still in it. Demonstrated rather than reasoned about: with
+    `TitleRepository` deleted from `ALL_PORTS`, the `iter_modules` spelling
+    passes and this one fails naming it. That is the cheapest false green in
+    the milestone -- a scan whose *subject* narrowed while every guard on it
+    stayed true.
     """
     import importlib
     import pkgutil
@@ -256,8 +300,8 @@ def test_every_port_abc_is_registered_in_all_ports() -> None:
     import usher.ports
 
     declared: set[type[ABC]] = set()
-    for module in pkgutil.iter_modules(usher.ports.__path__):
-        namespace = importlib.import_module(f"usher.ports.{module.name}")
+    for module in pkgutil.walk_packages(usher.ports.__path__, prefix="usher.ports."):
+        namespace = importlib.import_module(module.name)
         for value in vars(namespace).values():
             if (
                 isinstance(value, type)

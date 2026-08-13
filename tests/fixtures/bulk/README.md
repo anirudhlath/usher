@@ -4,9 +4,15 @@ Read [`../README.md`](../README.md) first: it states the licensing rule, the
 reserved identifier bands, and the fact that these files previously carried
 real IMDb rows under a note claiming they did not.
 
-**Every value in these four files is invented.** No id, title, year, runtime,
-rating or vote count here describes a real work. What is preserved is the
-*format* — and each row exists to pin one thing about it.
+**Every value in these seven files is invented.** No id, title, alias, name,
+year, runtime, rating or vote count here describes a real work or a real
+person. What is preserved is the *format* — and each row exists to pin one
+thing about it.
+
+*(It said "four" until M9 added `title.akas.slice.tsv`, and "five" until the
+same milestone added `name.basics.slice.tsv` and
+`title.principals.slice.tsv`. The count is in this sentence rather than left
+implicit precisely so that adding a file has to touch it.)*
 
 ## `title.basics.slice.tsv`
 
@@ -53,6 +59,86 @@ exercised. Ratings are on IMDb's own 0–10 scale because
 `Title.community_rating` is `Field(ge=0, le=10)` and the schema mirrors that
 as a CHECK — the scale is the contract, the numbers are invented.
 
+## `title.akas.slice.tsv`
+
+Ten lines: a header and nine data rows, six of which survive the filter. No
+trailing newline, matching `title.basics.slice.tsv` and the shape the adapter
+reads. Eight columns — `titleId ordering title region language types
+attributes isOriginalTitle` — which is the header the real file carries at the
+pinned snapshot `"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`, not IMDb's published
+schema.
+
+| Line | Row | Pins |
+|---|---|---|
+| 0 | header | `parse_akas_row` returns `None` for it rather than raising |
+| 1 | `tt99000020`, `isOriginalTitle=1` | dropped — IMDb's own claim that the row *is* the original title, and `SearchNameKind` has no `primary` member |
+| 2 | a French alias | `region`/`language` are both kept |
+| 3 | `"A Quoted Synthetic Alias"` | **the same reason this project does not use `csv`**, re-confirmed on this file — see below |
+| 4 | a `\N` title | dropped — `ck_title_search_names_name_not_empty` is `name <> ''` |
+| 5 | `tt99000030`, `isOriginalTitle=1` | dropped, as line 1 |
+| 6 | a Brazilian alias (`BR`/`pt`) | with line 7, the whole argument for `region` and `language` existing as columns |
+| 7 | a French alias (`FR`/`fr`) | two aliases of one title that are only distinguishable by those two columns |
+| 8 | a `working` title | no row is filtered on its `types` |
+| 9 | a two-valued `types`, `imdbDisplay`+`festival` | **the inner separator is `\x02`, not a tab** — a parser that assumed otherwise would call this row nine-column and malformed |
+
+**The quoted row is load-bearing here for the same reason it is in
+`title.basics.slice.tsv`, and the real file makes the case more strongly than
+that one does.** Measured over all 58,906,368 data rows of the pinned
+`title.akas.tsv.gz`: **39,880 titles contain a literal `"` and 6,344 of them
+open with one**, so a `csv.reader` with its default `QUOTE_MINIMAL` would
+silently rewrite 6,344 alias names. The invented row keeps that exact shape —
+opening *and* closing quote — because a title with only *interior* quotes
+survives both parsers and pins nothing.
+
+**Line 9's `\x02` is a real control character in the file, deliberately.**
+`types` and `attributes` are multi-valued inside one tab-delimited column and
+ASCII STX is what separates them; 429 of the 58,906,368 real rows carry a
+two-valued `types`. A fixture that spelled the separator as a comma or a space
+would agree with the parser while disagreeing with IMDb.
+
+Neither `types` nor `attributes` is parsed into anything — they exist in the
+slice to hold the column count honest and to document the separator.
+
+## `name.basics.slice.tsv` / `title.principals.slice.tsv`
+
+The two halves of one join, and they are only meaningful together:
+`title.principals` says which `nconst` is credited on which `tconst`, and only
+`name.basics` says what an `nconst` is called. `IMDbCreditNamesDataset` reads
+both and emits one ordered, deduplicated name list per title, which is what
+fills `titles.credit_names`. Six columns each, taken from the real headers at
+the pinned snapshot — `nconst primaryName birthYear deathYear
+primaryProfession knownForTitles` and `tconst ordering nconst category job
+characters`. No trailing newline on either.
+
+`name.basics.slice.tsv` — header plus five people:
+
+| Line | Row | Pins |
+|---|---|---|
+| 0 | header | `parse_names_row` returns `None` for it rather than raising |
+| 1 | an ordinary person | the ordinary path |
+| 2 | `"Bo Synthetic"` | **the csv trap again, on a third file** — 138 real names carry a `"` and 7 open with one |
+| 3 | a person credited twice on one title | with principals lines 3–4, the deduplication |
+| 4 | a `\N` `primaryName` | dropped — 89 such rows in the real file, and the empty string would be a *searchable* empty lexeme |
+| 5 | an ordinary person | the second title's only resolvable credit |
+
+`title.principals.slice.tsv` — header plus nine credits over three titles:
+
+| Line | Row | Pins |
+|---|---|---|
+| 0 | header | filtered, not parsed |
+| 1–2 | `tt99000020` orderings 1–2 | the ordinary path, and the ranking |
+| 3–4 | one person, director then writer | one name, not two |
+| 5 | a person whose `primaryName` is `\N` | unresolvable, so dropped |
+| 6–7 | `tt99000030` ordering **2 then 1** | **deliberately out of order, and the real file is not** — it is the only way to observe that the parser sorts on `ordering` |
+| 8 | an `nconst` in no `name.basics` row | a dangling credit; 3,734 such ids in the real pair, because the seven dumps are not one snapshot |
+| 9 | `tt99000040`, its only credit dangling | a title that yields **no record at all** rather than an empty one — an empty `names` would blank a `credit_names` another source filled |
+
+**Line 6–7's disorder is the one place these slices deliberately disagree with
+the real file**, which ascends within every one of its 11,491,032 titles. A
+sort that is unobservable against production data is a sort no production
+fixture can pin, so the fixture supplies the disagreement and the case asserts
+that premise before asserting the order.
+
 ## `movie_ids.slice.jsonl` / `tv_series_ids.slice.jsonl`
 
 TMDb's *public daily id export* format: one JSON object per line, no wrapping
@@ -74,6 +160,8 @@ To change one, edit it and run
 
 ```bash
 uv run pytest tests/unit/test_adapters_bulk_imdb.py \
+              tests/unit/test_adapters_bulk_imdb_akas.py \
+              tests/unit/test_adapters_bulk_imdb_credit_names.py \
               tests/unit/test_adapters_bulk_tmdb_ids.py \
               tests/integration/test_bootstrap_end_to_end.py
 ```

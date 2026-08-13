@@ -18,9 +18,20 @@ name a row that exists, for an implementation with foreign keys.
 property that the two never disagree is assertable only against raw SQL on one
 side and a fake's private dict on the other -- two assertions about two
 implementations rather than one about the contract.
+
+`search_names` is a `SearchNameProbe`, and it is a *test-side* surface rather
+than a third repository fixture on purpose. `replace_for_titles` writes the
+`person` half of `title_search_names` as its third destination, and **no port
+reads that table**: the two-tier suggest reads it through `SuggestIndex`, and a
+`CreditRepository` read added here for the contract's benefit would be exactly
+the *"port method whose only test is its own test"* `PersonRepository`'s
+docstring refuses. So each arm supplies the read its own storage allows -- raw
+SQL against the real table, a dict for the fake -- and the contract states the
+property once over both.
 """
 
 import uuid
+from abc import ABC, abstractmethod
 
 from usher.domain.ids import new_id
 from usher.domain.people import Credit, CreditKind
@@ -55,6 +66,36 @@ def credit(
             **changes,
         }
     )
+
+
+class SearchNameProbe(ABC):
+    """`title_search_names` as a case can see it, supplied by each arm.
+
+    Three methods and not one, because the two writers that land in this table
+    inside M9 must not delete each other's rows: the credited-person half is
+    `CreditRepository.replace_for_titles`' and the `alias` half is the
+    `title.akas` loader's, so a case about the delete's `kind` scope needs to
+    put an alias row there *by hand* and read it back afterwards.
+
+    **`person_names` answers in the order the names were written**, which the
+    table carries no column for: `m09a` gives it `(id, title_id, name, kind,
+    region, language)` and no rank, so the Postgres arm recovers the order from
+    the UUIDv7 primary key -- ids minted in one pass, in the order the caller's
+    `credit_names` sequence gave. Stated here because it is the one thing the
+    two arms recover differently and the ordering assertions rest on it.
+    """
+
+    @abstractmethod
+    async def person_names(self, title_id: uuid.UUID) -> tuple[str, ...]:
+        """The `person` rows for one title, in the order they were written."""
+
+    @abstractmethod
+    async def alias_names(self, title_id: uuid.UUID) -> tuple[str, ...]:
+        """The `alias` rows for one title -- the other writer's half."""
+
+    @abstractmethod
+    async def seed_alias(self, title_id: uuid.UUID, name: str) -> None:
+        """Write an `alias` row directly, standing in for group T's loader."""
 
 
 class CreditRepositoryContract:
@@ -537,3 +578,225 @@ class CreditRepositoryContract:
             "Alpha Kemp",
             "Marlow Iris",
         )
+
+    async def test_replacing_a_titles_credits_replaces_its_searchable_person_names(
+        self,
+        repository: CreditRepository,
+        search_names: SearchNameProbe,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        lead_person: uuid.UUID,
+        second_person: uuid.UUID,
+    ) -> None:
+        """`title_search_names`' credited-person half, written by the call that
+        already writes `credit_names` -- the third spelling of one fact.
+
+        The wrong implementation this kills is the obvious one: a second pass
+        over the same payloads, a nightly job, or a backfill command. Split the
+        write off from this call and the two diverge, and the symptom is a
+        *suggest* hit on a name `credits` no longer holds -- a type-ahead row
+        that is populated, correctly ranked, and about a person who is not in
+        the film. It is `credit_names`' own argument arriving at a third table.
+
+        A second title is seeded and left out of the second call's scope, for
+        `test_replacing_one_title_does_not_touch_another`'s reason: a delete
+        with no `WHERE`, or one scoped to the whole table, empties the catalog's
+        searchable names on the first page of the first derivation pass.
+        """
+        first = ("Vera Lund", "Osric Ffion")
+        assert list(first) != sorted(first), (
+            "the premise: the names must be in an order no sort would produce"
+        )
+
+        await repository.replace_for_titles(
+            [title_id, other_title_id],
+            [
+                credit(title_id, lead_person, billing_order=0),
+                credit(other_title_id, second_person, billing_order=0),
+            ],
+            credit_names={title_id: list(first), other_title_id: ["Mabel Truett"]},
+        )
+        assert await search_names.person_names(title_id) == first
+        assert await search_names.person_names(other_title_id) == ("Mabel Truett",)
+
+        # The refreshed payload credits somebody else. The other title is not
+        # in scope at all and must not move.
+        await repository.replace_for_titles(
+            [title_id],
+            [credit(title_id, second_person, billing_order=0)],
+            credit_names={title_id: ["Osric Ffion"]},
+        )
+        assert await search_names.person_names(title_id) == ("Osric Ffion",)
+        assert await search_names.person_names(other_title_id) == ("Mabel Truett",)
+
+    async def test_a_title_in_scope_with_no_credit_names_has_its_search_names_emptied(
+        self,
+        repository: CreditRepository,
+        search_names: SearchNameProbe,
+        title_id: uuid.UUID,
+        lead_person: uuid.UUID,
+    ) -> None:
+        """The `title_ids`-scope argument, arriving at a third table.
+
+        `replace_for_titles` and `TitleNeighborRepository.replace` both already
+        make it: a title whose credits all disappeared upstream contributes no
+        rows at all, so an implementation deriving the delete's scope from the
+        `credit_names` mapping -- or from `credits` -- deletes nothing for it
+        and leaves its stale searchable names in place through every future
+        derivation. This case seeds exactly that title.
+        """
+        await repository.replace_for_titles(
+            [title_id],
+            [credit(title_id, lead_person)],
+            credit_names={title_id: ["Vera Lund"]},
+        )
+        assert await search_names.person_names(title_id) == ("Vera Lund",)
+
+        await repository.replace_for_titles([title_id], [], credit_names={})
+
+        assert await search_names.person_names(title_id) == ()
+
+    async def test_the_search_names_and_the_credit_names_array_never_disagree(
+        self,
+        repository: CreditRepository,
+        titles: TitleRepository,
+        search_names: SearchNameProbe,
+        title_id: uuid.UUID,
+        lead_person: uuid.UUID,
+    ) -> None:
+        """Two destinations, one mapping, read back through both.
+
+        The wrong implementation this kills is the search names built from the
+        `credits` **sequence** rather than from the `credit_names` **mapping**.
+        The two are not the same list and were never meant to be:
+        `services/derive._credit_names` truncates the cast at
+        `_CREDIT_NAME_CAST_LIMIT = 10` and then appends every stored crew name,
+        while `credits` holds up to `mapping._CAST_LIMIT = 50` of them in
+        provider order. An implementation projecting the rows would produce a
+        plausible, populated, differently-ordered list, and nothing outside
+        this case would see it -- so the fixture credits **one** person and
+        names **three**, which no projection of the rows can produce.
+
+        The order is `credit_names`' order and that order is the ranking:
+        top-billed first, which is what makes the lexemes a viewer searches for
+        the ones weight class B ranks on.
+        """
+        given = ["Zeta Vance", "Alpha Kemp", "Marlow Iris"]
+        assert given != sorted(given), (
+            "the premise: the names must be in an order no sort would produce"
+        )
+
+        await repository.replace_for_titles(
+            [title_id], [credit(title_id, lead_person)], credit_names={title_id: given}
+        )
+
+        stored = (await titles.credit_names_for([title_id]))[title_id]
+        assert stored == tuple(given)
+        assert await search_names.person_names(title_id) == stored
+
+    async def test_one_name_credited_twice_keeps_one_searchable_row(
+        self,
+        repository: CreditRepository,
+        titles: TitleRepository,
+        search_names: SearchNameProbe,
+        title_id: uuid.UUID,
+        lead_person: uuid.UUID,
+    ) -> None:
+        """The tolerance `replace_for_titles` already grants an in-batch
+        duplicate `tmdb_credit_id`, arriving at `(title_id, name)`.
+
+        A name really does arrive twice: one person credited as both cast and
+        crew on the same film is ordinary in TMDb's payloads, and two people
+        who share a name are two rows in `people` by design (ADR-0003) and one
+        string here. The derivation must not fail for it, and the table must
+        not hold the row twice -- a duplicate is one extra btree entry per
+        occurrence for a `LIKE 'pre%'` probe that would then answer the same
+        title twice.
+
+        **The two spellings are deliberately allowed to differ here**, which is
+        the one place they do: `titles.credit_names` is weight class B's input
+        and a repeated lexeme is a `ts_rank` contribution, so the array keeps
+        both. The searchable table is a name index and keeps one. Asserted
+        together so neither can be "tidied" into the other.
+        """
+        written = await repository.replace_for_titles(
+            [title_id],
+            [
+                credit(title_id, lead_person, kind=CreditKind.CAST, billing_order=0),
+                credit(title_id, lead_person, kind=CreditKind.CREW, job="Director"),
+            ],
+            credit_names={title_id: ["Vera Lund", "Vera Lund"]},
+        )
+
+        assert written == 2
+        assert (await titles.credit_names_for([title_id]))[title_id] == ("Vera Lund", "Vera Lund")
+        assert await search_names.person_names(title_id) == ("Vera Lund",)
+
+    async def test_a_title_named_twice_in_one_scope_is_written_once(
+        self,
+        repository: CreditRepository,
+        search_names: SearchNameProbe,
+        title_id: uuid.UUID,
+        lead_person: uuid.UUID,
+    ) -> None:
+        """`title_ids` is a `Sequence`, and the shipped caller really does
+        repeat one.
+
+        `DeriveService._resolve` extends its list **once per payload** --
+        `resolved.extend((title_id, payload) for payload in payloads)` -- so a
+        title `raw_payloads` holds two payloads for arrives at this port twice
+        in one `title_ids`. Every other destination absorbs that: the deletes
+        are `= ANY(...)`, the credits insert dedupes on the natural key, and
+        `credit_names` is a mapping with one entry per title whose `UPDATE`
+        touches the row once. The searchable names are the one write that is
+        per *(title, name)* and would store every credited name twice, so a
+        `LIKE 'pre%'` probe would answer the same title as many times as the
+        cache happens to hold payloads for it.
+
+        Found by the task's own sweep as a survivor and closed rather than
+        reported: iterating `title_ids` instead of `dict.fromkeys(title_ids)`
+        passed the whole suite until this case existed.
+        """
+        written = await repository.replace_for_titles(
+            [title_id, title_id],
+            [credit(title_id, lead_person)],
+            credit_names={title_id: ["Vera Lund"]},
+        )
+
+        assert written == 1
+        assert await search_names.person_names(title_id) == ("Vera Lund",)
+
+    async def test_an_alias_row_for_the_same_title_survives_a_credit_replacement(
+        self,
+        repository: CreditRepository,
+        search_names: SearchNameProbe,
+        title_id: uuid.UUID,
+        lead_person: uuid.UUID,
+    ) -> None:
+        """Two writers, one table, and neither may delete the other's rows.
+
+        The `alias` half is group T's `title.akas` loader and it is scoped by
+        `(title_id, kind)` for the same reason this one is. A `credits`-shaped
+        delete on `title_id` alone makes the two mutually destructive:
+        whichever runs second erases the other's rows, and the catalog's
+        aliases quietly disappear on the next `usher derive` with nothing
+        raised and nothing logged. `TitleSearchNameRow`'s docstring states the
+        scope so a loader does not have to discover it; this is what checks it.
+        """
+        await search_names.seed_alias(title_id, "Le Film Inventé")
+
+        await repository.replace_for_titles(
+            [title_id],
+            [credit(title_id, lead_person)],
+            credit_names={title_id: ["Vera Lund"]},
+        )
+
+        assert await search_names.person_names(title_id) == ("Vera Lund",)
+        assert await search_names.alias_names(title_id) == ("Le Film Inventé",)
+
+        # ...and the emptied-scope path, which is the delete running with
+        # nothing to insert behind it, is where an unscoped delete is loudest.
+        await repository.replace_for_titles([title_id], [], credit_names={})
+
+        assert await search_names.person_names(title_id) == ()
+        assert await search_names.alias_names(title_id) == ("Le Film Inventé",)

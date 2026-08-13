@@ -11,25 +11,33 @@ import uuid
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, cast
+from urllib.parse import quote
 
-from fastapi import Depends, Request
+from cryptography.fernet import Fernet
+from fastapi import Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.lanes import LaneSupervisor
-from usher.composition import adapter_factory
+from usher.composition import adapter_factory, build_image_proxy_service, build_search_service
 from usher.config import Settings
+from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
+from usher.db.repositories.genome import PostgresGenomeRepository
+from usher.db.repositories.image import PostgresImageRepository
+from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
+from usher.db.repositories.row_provider_settings import PostgresRowProviderSettingsRepository
 from usher.db.repositories.search import (
     PostgresTitleEmbeddingRepository,
     PostgresTitleNeighborRepository,
 )
+from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
 from usher.db.repositories.taste import PostgresTasteRepository
@@ -38,16 +46,21 @@ from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import default_user, ensure_default_user
 from usher.domain.taste import GenreAffinity
 from usher.domain.watch import User
+from usher.ports.credentials import CredentialStore
 from usher.ports.events import EventPublisher
+from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import (
     CollectionRepository,
     CreditRepository,
     CuratedRowRepository,
     EpisodeRepository,
+    ImageRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
+    RowProviderSettingsRepository,
+    SearchQueryRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -59,16 +72,24 @@ from usher.ports.repository import (
 )
 from usher.ports.rows import RowContext
 from usher.ports.source import SourceAdapterFactory
+from usher.services.bootstrap import BootstrapReport, bootstrap_report
 from usher.services.events import InMemoryEventBus
 from usher.services.home import HomeService
+from usher.services.images import ImageProxyService
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
+from usher.services.playback import PlaybackService
+from usher.services.playback_ticket import build_ticket_cipher, mint
 from usher.services.reconcile import ReconcileService
-from usher.services.rows.cache import RowCache
+from usher.services.rows import enabled_row_providers, row_provider_settings
+from usher.services.rows.cache import RefreshQueue, RowCache
+from usher.services.search import SearchService
+from usher.services.similar import SimilarityService
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
 from usher.services.titles import TitleReadService
 from usher.services.watch_sync import WatchStateSyncService
+from usher.services.watch_write import WatchWriteService
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -265,6 +286,13 @@ def get_source_repository(session: SessionDep) -> SourceRepository:
     return PostgresSourceRepository(session)
 
 
+# `POST /admin/sources/{id}/sync` (M9's E3) reads through this and never
+# through `SourceServiceDep` below -- `SourceService.status` builds an
+# adapter and calls `verify()`, and a lookup that dials the upstream is not
+# a lookup a 404 refusal should be paying for.
+SourceRepositoryDep = Annotated[SourceRepository, Depends(get_source_repository)]
+
+
 def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
     """The composition root's adapter registry.
 
@@ -276,10 +304,27 @@ def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
     return adapter_factory(settings)
 
 
+def get_credential_store(session: SessionDep, settings: SettingsDep) -> CredentialStore:
+    """The encrypted credential store, on this request's session.
+
+    Its own provider rather than being constructed inside
+    `get_source_service`, for the reason `get_source_adapter_factory`'s
+    docstring already gives about a second caller -- and `get_playback_service`
+    is that second caller. Two sites each building their own would be two
+    chances for one of them to drift onto a different session and quietly
+    leave the request's transaction.
+
+    The return type is the **port**, so a caller written against this
+    annotation cannot reach a method `CredentialStore` does not have -- and
+    `settings.secret_key` is handed over as the `SecretStr` it is, unwrapped
+    only inside `PostgresCredentialStore`'s own key derivation.
+    """
+    return PostgresCredentialStore(session, settings.secret_key)
+
+
 def get_source_service(
-    session: SessionDep,
-    settings: SettingsDep,
     sources: Annotated[SourceRepository, Depends(get_source_repository)],
+    credentials: Annotated[CredentialStore, Depends(get_credential_store)],
     adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
     lanes: LaneSupervisorDep,
 ) -> SourceService:
@@ -292,12 +337,7 @@ def get_source_service(
     answer is the one an operator reads. `None` when no lane is running for
     that source, which is "not probed" rather than "push is broken".
     """
-    return SourceService(
-        sources,
-        PostgresCredentialStore(session, settings.secret_key),
-        adapters,
-        lanes.push_available,
-    )
+    return SourceService(sources, credentials, adapters, lanes.push_available)
 
 
 SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
@@ -359,9 +399,39 @@ def get_job_queue(session: SessionDep, settings: SettingsDep) -> JobQueue:
     )
 
 
+async def get_bootstrap_report(session: SessionDep) -> BootstrapReport:
+    """The report `usher bootstrap-status` prints, for the route to serialise.
+
+    Assembled here rather than in the router for a structural reason rather
+    than a stylistic one: `tests/unit/test_api_bootstrap.py` asserts that
+    `api/routers/bootstrap.py` names no `usher.services.bootstrap` and no
+    `usher.composition`, because the module holding a *trigger* for a
+    multi-minute download must not be able to spell one. Building the value
+    here and handing it over as `BootstrapReportDep` leaves the router with a
+    dependency alias and a DTO, and leaves this module — the API's composition
+    root, which already reaches `usher.db` on purpose — holding the three
+    repositories.
+
+    ⚠️ Two aggregate reads, ~0.33 s on a real 1.27M-title catalog;
+    `BootstrapReport`'s docstring carries the measurement and the reason there
+    is no cache. An admin screen, never a client path.
+    """
+    return await bootstrap_report(
+        PostgresImportRunRepository(session),
+        PostgresBulkCatalogRepository(session),
+        PostgresGenomeRepository(session),
+    )
+
+
 MediaItemRepositoryDep = Annotated[MediaItemRepository, Depends(get_media_item_repository)]
 SyncRunRepositoryDep = Annotated[SyncRunRepository, Depends(get_sync_run_repository)]
 JobQueueDep = Annotated[JobQueue, Depends(get_job_queue)]
+BootstrapReportDep = Annotated[BootstrapReport, Depends(get_bootstrap_report)]
+# The two `/play` routes resolve existence before resolving playability --
+# `PlaybackService` reads `media_items`, which is silent about the difference
+# between "no such title" and "no copy of it".
+TitleRepositoryDep = Annotated[TitleRepository, Depends(get_title_repository)]
+EpisodeRepositoryDep = Annotated[EpisodeRepository, Depends(get_episode_repository)]
 
 
 def get_match_service(
@@ -466,14 +536,44 @@ WatchStateSyncServiceDep = Annotated[WatchStateSyncService, Depends(get_watch_st
 # ---------------------------------------------------------------------------
 
 
+# Declared here rather than beside the other M7 repositories below, because
+# this is now its first user -- `Depends(...)` is evaluated when the `def`
+# under it executes, so a provider appended after its consumer is a
+# `NameError` at import of this module. `get_row_context` is its second.
+def get_credit_repository(session: SessionDep) -> CreditRepository:
+    return PostgresCreditRepository(session)
+
+
+# Declared here rather than in the M7 block below, because this is its first
+# user in the request graph -- `Depends(...)` is evaluated when the `def` under
+# it executes, so a provider appended after its consumer is a `NameError` at
+# import of this module. `get_row_context` is its second: C6's shelf artwork
+# and C7's `images` key read the same port, and this is the one provider.
+def get_image_repository(session: SessionDep) -> ImageRepository:
+    """Artwork references for the request that is rendering them.
+
+    The read half only, on `get_curated_row_repository`'s terms and for the
+    same reason: `replace_for_titles` is a *derivation* -- a scoped delete plus
+    an upsert over a title's whole artwork set -- and it belongs to
+    `usher derive` under `JobKind.DERIVE`. The port is handed over whole
+    because splitting a repository in two to express which half a caller uses
+    is a second port for one table; what keeps the write off this path is that
+    the two callers are `BaseRow.hydrate`, which calls `primary_for_titles`,
+    and `TitleReadService.detail`, which calls `list_for_title`.
+    """
+    return PostgresImageRepository(session)
+
+
 def get_title_read_service(
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
     media_items: MediaItemRepositoryDep,
     sources: Annotated[SourceRepository, Depends(get_source_repository)],
     watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
     queue: JobQueueDep,
+    credits: Annotated[CreditRepository, Depends(get_credit_repository)],
+    images: Annotated[ImageRepository, Depends(get_image_repository)],
 ) -> TitleReadService:
-    """Four repositories and the queue, and deliberately no adapter factory.
+    """Six repositories and the queue, and deliberately no adapter factory.
 
     The absence is the design (PRD 08: "a degraded subsystem narrows
     functionality; it never fails a request local state can answer"), not an
@@ -482,8 +582,22 @@ def get_title_read_service(
     and therefore no 503 for M5 to invent an error `code` for.
     `tests/unit/test_services_titles.py` asserts it on the service's own
     imports so that adding one here would fail rather than pass review.
+
+    **`CreditRepository` and `ImageRepository` are the fifth and sixth and
+    neither weakens that.** Both read tables `usher derive` fills from
+    `raw_payloads` with no second network call, so neither adds a way for this
+    route to depend on anything being up. It was four repositories until M9's
+    `credits` key and five until its `images` key.
+
+    ⚠️ **`ImageRepository` in particular is not the image proxy.**
+    `GET /images/{id}` fetches bytes from a CDN and can fail because that CDN
+    is down; this route reads *rows*, which is why an unreachable CDN narrows
+    a client's screen to a missing picture and cannot touch this response's
+    status code. The two are a separate route with a separate failure mode by
+    construction, not by a caught exception -- `usher.ports.images` is not in
+    this function's graph at all.
     """
-    return TitleReadService(titles, media_items, sources, watch_states, queue)
+    return TitleReadService(titles, media_items, sources, watch_states, queue, credits, images)
 
 
 TitleReadServiceDep = Annotated[TitleReadService, Depends(get_title_read_service)]
@@ -513,12 +627,21 @@ def get_person_repository(session: SessionDep) -> PersonRepository:
     return PostgresPersonRepository(session)
 
 
-def get_credit_repository(session: SessionDep) -> CreditRepository:
-    return PostgresCreditRepository(session)
-
-
 def get_collection_repository(session: SessionDep) -> CollectionRepository:
     return PostgresCollectionRepository(session)
+
+
+# M9's `GET /people/{id}` reads the first two directly rather than through a
+# service (`api/routers/people.py` says why), so the two repositories that were
+# `RowContext` fields only now have route-facing annotations as well. Declared
+# here beside their providers rather than at the bottom of the module: the
+# aliases are what a router imports, and a reader following `PersonRepositoryDep`
+# lands on the function that builds it.
+PersonRepositoryDep = Annotated[PersonRepository, Depends(get_person_repository)]
+CreditRepositoryDep = Annotated[CreditRepository, Depends(get_credit_repository)]
+# And `GET /collections/{id}`, on the same terms: one port read plus a
+# `TitleRepository.list_by_ids` hydration, with no service between them.
+CollectionRepositoryDep = Annotated[CollectionRepository, Depends(get_collection_repository)]
 
 
 def get_taste_repository(session: SessionDep) -> TasteRepository:
@@ -539,6 +662,22 @@ def get_curated_row_repository(session: SessionDep) -> CuratedRowRepository:
     and it calls `list_for_user`.
     """
     return PostgresCuratedRowRepository(session)
+
+
+def get_row_provider_settings_repository(session: SessionDep) -> RowProviderSettingsRepository:
+    """The overrides table `GET`/`PUT /admin/rows/providers` renders and writes,
+    and that `get_home_service` below filters the registry against.
+
+    Request-scoped like every other repository here, and **not** cached on
+    `app.state`: the whole point of the toggle is that the next request sees
+    the stored value, and a process-lifetime read would make it a restart.
+    """
+    return PostgresRowProviderSettingsRepository(session)
+
+
+RowProviderSettingsRepositoryDep = Annotated[
+    RowProviderSettingsRepository, Depends(get_row_provider_settings_repository)
+]
 
 
 async def get_default_user(session: SessionDep) -> User:
@@ -571,11 +710,23 @@ def get_taste_service(
     What that costs, stated rather than hidden: `TasteService.centroid` returns
     `None` when there is no embedder, so `RowContext.taste` is `None` on every
     request. **No provider registered in M7 reads that field**, so nothing on
-    the screen changes -- but a deployment whose worker *did* compute a centroid
-    cannot serve it from here, and closing that is a change to `centroid`'s own
-    contract rather than to this wiring. `genre_affinity` is unaffected: it is
-    counts over `titles.genres` and needs no model at all, which is the whole
-    reason M7 declined PRD 06's "taste centroid concentrated in a genre".
+    the screen changes. `genre_affinity` is unaffected: it is counts over
+    `titles.genres` and needs no model at all, which is the whole reason M7
+    declined PRD 06's "taste centroid concentrated in a genre".
+
+    ⚠️ **This docstring used to end "a deployment whose worker *did* compute a
+    centroid cannot serve it from here". That is closed, and not here.**
+    `centroid`'s contract is unchanged -- it still checks the embedder first,
+    still refuses without one, and still writes its refusals -- because the
+    thing a request needs is not a *computation* under a model it does not
+    have. It is a **read**: `TasteRepository.latest(user_id)` answers the
+    stored row whatever model wrote it, and `SearchService` uses it for PRD
+    05's taste-centroid ranking term (`composition.build_search_service` wires
+    it). So the gap is closed by a second port method rather than by giving
+    this dependency an embedder, and `RowContext.taste` staying `None` is now a
+    statement about the *row providers*, which read no centroid, rather than
+    about what a request can reach. A provider that wanted one would take
+    `latest` too.
     """
     return TasteService(
         watch_states=watch_states,
@@ -640,9 +791,10 @@ async def get_row_context(
     credits: Annotated[CreditRepository, Depends(get_credit_repository)],
     collections: Annotated[CollectionRepository, Depends(get_collection_repository)],
     curated: Annotated[CuratedRowRepository, Depends(get_curated_row_repository)],
+    images: Annotated[ImageRepository, Depends(get_image_repository)],
     taste: Annotated[TasteService, Depends(get_taste_service)],
 ) -> RowContext:
-    """The twelve values a row may reach, for one request, for one user.
+    """The thirteen values a row may reach, for one request, for one user.
 
     **`affinities` is a value the composer hands over, not a service a
     provider reaches.** A provider may import only `domain/` and `ports/`, so
@@ -672,6 +824,15 @@ async def get_row_context(
     `USHER_LLM_ENABLED=false` reads an empty table and gets a home screen with
     fewer rows -- the same shape as a deployment with no embedder.
 
+    **`images` is M9's, and it is the one field here whose reader is
+    `BaseRow.hydrate` rather than a named provider.** A card's artwork is
+    chosen against the *row's* `display_hint`, so the poster/backdrop decision
+    belongs to the shelf and the read is one statement per shelf
+    (`ImageRepository.primary_for_titles` takes a sequence precisely so the
+    per-card shape cannot be expressed). It is the read half only, on
+    `curated`'s terms: `replace_for_titles` is `usher derive`'s, and nothing on
+    this path writes artwork.
+
     **No `AsyncSession` here either**, which is the structural half of trap 4:
     a row holding repositories has no session to share, so there is nothing for
     a `gather` to interleave. That the repositories underneath share one is the
@@ -693,6 +854,7 @@ async def get_row_context(
         collections=collections,
         affinities=_Affinities(taste, user.id),
         curated=curated,
+        images=images,
     )
 
 
@@ -718,18 +880,422 @@ def get_row_cache(request: Request) -> RowCache:
     return cache
 
 
-def get_home_service(cache: Annotated[RowCache, Depends(get_row_cache)]) -> HomeService:
-    """The composer, over the registry `services/rows/__init__.py` owns.
+def get_refresh_queue(request: Request) -> RefreshQueue:
+    """The process's one stale-key queue, off `app.state`.
 
-    The provider list is **not** assembled here: a list a composition root
-    builds by hand is a list the tenth provider is forgotten from, which is dead
-    code that looks exactly like a provider with nothing to say (boundary call
-    9). `HomeService`'s own default is `ROW_PROVIDERS`.
+    Same lifetime and same defensive shape as `get_row_cache` above, and for a
+    sharper version of the same reason: a request-scoped queue would
+    deduplicate nothing (every request its own `pending` set) and would be
+    drained by nobody, so serve-stale would degrade to serving stale forever
+    -- silently, since the request still gets a screen.
+    """
+    queue = getattr(request.app.state, "row_refreshes", None)
+    if not isinstance(queue, RefreshQueue):
+        raise RuntimeError(
+            "app.state.row_refreshes is not set -- this app was not built by "
+            "create_app, or its lifespan has not run."
+        )
+    return queue
+
+
+RowCacheDep = Annotated[RowCache, Depends(get_row_cache)]
+
+
+async def get_home_service(
+    cache: RowCacheDep,
+    refreshes: Annotated[RefreshQueue, Depends(get_refresh_queue)],
+    provider_settings: RowProviderSettingsRepositoryDep,
+) -> HomeService:
+    """The composer, over the registry `services/rows/__init__.py` owns, minus
+    what an operator has switched off.
+
+    **The provider list is still not *assembled* here, and the distinction is
+    the one M9's E2 must not blur.** Boundary call 9's argument -- *"a list a
+    composition root builds by hand is a list the tenth provider is forgotten
+    from"* -- is against **enumeration**, and this root names no provider: it
+    hands `enabled_row_providers` the whole registry and removes the ones a
+    stored row disables. An eleventh provider composes here with no edit,
+    which is the property that argument protects.
+
+    **The read is unconditional and precedes the screen-cache check, which is
+    a cost stated rather than discovered.** `get_home_service` is a FastAPI
+    dependency, so it resolves before the handler runs -- the same shape
+    `RowContext.affinities` was made lazy to escape (`.claude/rules/
+    rows-and-genome.md`: a 30 s cache hit was paying `list_recent(50)` plus a
+    library-wide genre aggregate over 1.27M titles). It is left eager here
+    because the two are not comparable: this is one `SELECT slug_prefix,
+    enabled FROM row_provider_settings` over a table the registry bounds at
+    **ten rows**, usually zero. Deferring it would mean a `HomeService` that
+    took its providers as a callable -- a lazy field on the composer, for a
+    read a sequential scan of ten rows answers -- and the cache hit it would
+    save is a hit the toggle has already invalidated.
 
     **And no embedder**, on the terms `get_taste_service` states: every
     similarity input this route reads is a precomputed artefact.
+
+    **`refresh=queue.schedule` is what opens the grace window.** `HomeService`
+    serves stale only when it has somewhere to hand the key, so this one
+    argument is the difference between PRD 06's "served stale while
+    refreshing" and "served stale". A bound method rather than a lambda so the
+    thing being injected has a name, a docstring and a `__qualname__` a
+    traceback can print -- and it is *synchronous*, which is the whole of "the
+    screen never waits on it": there is nothing here for a handler to await.
     """
-    return HomeService(cache=cache)
+    return HomeService(
+        enabled_row_providers(row_provider_settings(await provider_settings.overrides())),
+        cache=cache,
+        refresh=refreshes.schedule,
+    )
 
 
 HomeServiceDep = Annotated[HomeService, Depends(get_home_service)]
+
+
+# ---------------------------------------------------------------------------
+# Similarity (M9). `GET /titles/{id}/similar` is a thin read over
+# `SimilarityService` and the `title_neighbors` artefact M6 built and shipped
+# no route for (boundary call 1).
+# ---------------------------------------------------------------------------
+
+
+def get_similarity_service(
+    session: SessionDep,
+    embeddings: Annotated[TitleEmbeddingRepository, Depends(get_title_embedding_repository)],
+    neighbors: Annotated[TitleNeighborRepository, Depends(get_title_neighbor_repository)],
+    titles: Annotated[TitleRepository, Depends(get_title_repository)],
+) -> SimilarityService:
+    """`commit` is `session.commit`, the same callable `get_session` calls at
+    the end of a successful request -- and `SimilarityService.rebuild` is the
+    only method that ever calls it. **The route built over this provider only
+    reads** (`neighbors_of`, `computed_at`, `stale_neighbors`), so nothing on
+    this path commits; the wiring exists because the service's fourth
+    constructor argument is not optional, not because a write is reachable
+    here. `usher similar --rebuild` is `rebuild`'s only caller, and nothing
+    schedules it -- it is an operator's command or a cron entry.
+    """
+    return SimilarityService(embeddings, neighbors, titles, session.commit)
+
+
+SimilarityServiceDep = Annotated[SimilarityService, Depends(get_similarity_service)]
+
+
+# ---------------------------------------------------------------------------
+# Playback (M9). `POST /titles/{id}/play`, `POST /episodes/{id}/play` and
+# `GET /stream/{ticket}` -- the first routes in this API that hold a
+# `SourceAdapter`, and therefore the first that can answer 503.
+# ---------------------------------------------------------------------------
+
+
+def get_ticket_cipher(settings: SettingsDep) -> Fernet:
+    """This deployment's playback-ticket cipher.
+
+    Its own provider so that the two sides of the ticket -- the mint below and
+    `GET /stream/{ticket}`'s redeem -- derive their key through **one** call,
+    and so that `settings.secret_key` is unwrapped in exactly one place on
+    this path (inside `build_ticket_cipher`, which never binds the plaintext
+    to a name).
+
+    Per request rather than per process, deliberately. `build_ticket_cipher`
+    is one HKDF-SHA256 expansion over a 32-byte input -- a single HMAC -- and
+    caching it on `app.state` would mean an app that keeps minting valid
+    tickets under a key the running `Settings` no longer names.
+    """
+    return build_ticket_cipher(settings.secret_key)
+
+
+TicketCipherDep = Annotated[Fernet, Depends(get_ticket_cipher)]
+
+
+def get_playback_service(
+    request: Request,
+    cipher: TicketCipherDep,
+    media_items: MediaItemRepositoryDep,
+    sources: Annotated[SourceRepository, Depends(get_source_repository)],
+    credentials: Annotated[CredentialStore, Depends(get_credential_store)],
+    adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
+) -> PlaybackService:
+    """`PlaybackService`, with the mint closure this request's URL implies.
+
+    **The mint returns a whole URL, not a token, and that is the seam
+    `services/playback.py` was shaped for.** Its `mint` is
+    `Callable[[str], str]` whose answer is substituted verbatim -- so a deep
+    link wraps whatever comes back, and the service needs to know nothing
+    about ciphers, TTLs or the redeem route's path.
+
+    **`quote(ticket, safe="=")`, and the `safe` is measured rather than
+    idiomatic.** A Fernet token's alphabet is url-safe base64 *plus* the `=`
+    padding, and `=` is an RFC 3986 sub-delim and hence a legal `pchar`. D1
+    measured that `quote(ticket, safe="")` -- the reflexive spelling -- is a
+    no-op for only 192 of the 599 plaintext lengths 1-599, because it
+    re-encodes `=` to `%3D`; `safe="="` is a no-op at every length tested.
+    Starlette's own `url_path_for` substitutes the value raw, so if this line
+    does not encode, nothing does.
+
+    **`request.url_for`, not a hand-built string**, so the path can only ever
+    be the redeem route's real path. ⚠️ It builds an absolute URL from the
+    request's own `Host`, so **behind a reverse proxy that does not send
+    `X-Forwarded-Proto`/`-Host` the ticket URL names the internal address.**
+    That is an operator setting (`uvicorn --proxy-headers`, or
+    `ProxyHeadersMiddleware`) rather than a code fix here -- naming it because
+    the failure is a client following a URL it cannot reach, which looks like
+    a playback bug.
+    """
+
+    def mint_ticket_url(url: str) -> str:
+        ticket = mint(cipher, url, minted_at=datetime.now(UTC))
+        return str(request.url_for("redeem_playback_ticket", ticket=quote(ticket, safe="=")))
+
+    return PlaybackService(media_items, sources, credentials, adapters, mint_ticket_url)
+
+
+PlaybackServiceDep = Annotated[PlaybackService, Depends(get_playback_service)]
+
+
+# ---------------------------------------------------------------------------
+# Search (M9). `GET /search` -- the first route over the retrieval M6 built and
+# delivered through `usher search` alone.
+# ---------------------------------------------------------------------------
+
+
+def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchService:
+    """PRD 05's read path, request-scoped.
+
+    **Reached through `usher.composition` rather than assembled here**, and
+    that is a contract rather than a preference: contract 7 ("no concrete
+    search, embedding or LLM implementation escapes its package") lists
+    `usher.api` whole among its sources, so this module may not name
+    `PostgresSearchIndex` even though it is a composition root and names
+    `Postgres*` repositories on every other line. `allow_indirect_imports =
+    true` is what sanctions the chain `usher.api.deps -> usher.composition ->
+    usher.adapters.search.postgres` while leaving a direct import BROKEN.
+
+    **Deliberately `build_search_service` and not `build_pipeline`.** The
+    latter constructs the whole ingest graph -- matcher, reconciler,
+    watch-state sync, similarity, ten row providers, the curation pool -- to
+    reach one of its fields, once per request.
+
+    **One dependency serves two routes and three indexes.** `GET /search` and
+    `GET /search/suggest` share this provider, and the suggest half is two
+    `SuggestIndex` implementations rather than one (ADR-0031): the btree prefix
+    probe and the trigram path, selected per request by `?tier=`. Both are
+    built inside `build_search_service` and neither is conditional, so there is
+    no deployment on which `?tier=prefix` has no honest answer. A second
+    provider for the suggest route would be a second wiring of the same
+    session-scoped objects -- and, worse, one that could disagree with this one
+    about which index is which while both returned a working `SearchService`.
+
+    **No embedder, and it is the same call `get_taste_service` and
+    `get_home_service` make.** `create_app`'s lifespan builds a model only
+    when `worker_enabled` and does not put it on `app.state`, so a dependency
+    reaching for one would work in development and 500 in exactly the
+    push-only deployment PRD 08 describes; it is also a once-per-process 65 MB
+    resource this module already argues about for the TMDb token bucket.
+
+    What that costs is visible on the wire rather than hidden, which is the
+    difference from the two routes above: `?mode=semantic` answers a problem
+    document naming the missing capability, and `?mode=fused` is served as
+    full text with `requested_mode` and `mode` disagreeing so a client can say
+    so. Closing it is a new capability (expose the lifespan's model, or build
+    one per API process) rather than a change to this wiring.
+
+    **And no expander**, on stricter terms than the embedder: an expansion is
+    a paid completion in front of an embed, and with no embedder there is no
+    embed for one to sit in front of. `SearchService` buys a completion only
+    inside the `else` of its `embedder is None` branch, so this is not a
+    saving that has to be argued -- there is no reachable call site.
+
+    **The household is not wired here, and looking for it here is the mistake
+    this paragraph exists to prevent.** `SearchService.search` takes a
+    `user_id` per call, so the route reads `DefaultUserIdDep` beside this
+    dependency and passes it in; what `build_search_service` wires is the
+    `WatchStateRepository` the term reads *through*. A service built around one
+    household would be a per-request object cached per session, and the two
+    would disagree the first time a request carried an identity.
+
+    **`search_queries` is written from here too, and the commit inside the
+    service is not a duplicate of `get_session`'s.** `build_search_service`
+    hands `SearchService` a `SearchAnalytics` over this session and this
+    session's `commit`, so `GET /search` writes PRD 10's analytics row and
+    makes it durable before the handler returns (F2). The reason the service
+    commits rather than leaning on `get_session` is the *other* root:
+    `cli._session_for` yields a session and disposes its engine without ever
+    committing, so a row left for the caller would be lost on `usher search`
+    and nothing would say so.
+
+    **What it costs on this root is one property, stated rather than
+    discovered**: the commit ends the request's transaction, so any read after
+    the search begins a new one. `GET /search` has none -- the write is the
+    last thing `SearchService.search` does and the route returns the DTO -- and
+    a route that grew a second read after it would be reading in a second
+    transaction. `get_reconcile_service` and `get_similarity_service` already
+    take the same `session.commit` for the same reason.
+
+    **`GET /search/suggest` writes nothing, on either tier**, and it shares
+    this dependency: the absence is a property of `SearchService.suggest`
+    rather than of the wiring, argued in that method's docstring and in PRD 10.
+    A keystroke path that wrote a row would out-number the searches by an order
+    of magnitude, and a `SuggestTier` is not a `SearchMode`.
+
+    **The taste term is served here despite the missing model, and that is a
+    read rather than an exception to the paragraph above.** PRD 05's sixth
+    ranking term needs a *centroid*, not an *embedder*:
+    `build_search_service` wires a `TasteRepository` and a
+    `TitleEmbeddingRepository`, and `SearchService` reads the household's
+    stored row through `latest` and scopes its vector read by the model that
+    row names. So a deployment whose worker computed a centroid serves it from
+    this route with no model in this process -- which is the gap
+    `get_taste_service` above spent a milestone describing.
+    """
+    return build_search_service(session, settings)
+
+
+SearchServiceDep = Annotated[SearchService, Depends(get_search_service)]
+
+
+def get_search_query_repository(session: SessionDep) -> SearchQueryRepository:
+    """`search_queries`' outcome half, for the routes a client reports one to.
+
+    Separate from `get_search_service` above, which owns the *retrieval* half
+    and reaches the same table through a `SearchAnalytics` pair carrying its
+    own `commit`. The three routes here need neither: they write inside a
+    request `get_session` already commits, and they hold no `SearchService`
+    at all -- `GET /titles/{id}` and the two `/play` routes have no query to
+    run. A dependency of their own is what keeps them from acquiring a search
+    service in order to reach one `UPDATE`.
+    """
+    return PostgresSearchQueryRepository(session)
+
+
+SearchQueryRepositoryDep = Annotated[SearchQueryRepository, Depends(get_search_query_repository)]
+
+
+def get_search_id(
+    search_id: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Opaque `search_id` from a `GET /search` response, attributing this request "
+                "to the search it came from. Optional; a value that is not one is ignored."
+            )
+        ),
+    ] = None,
+) -> uuid.UUID | None:
+    """The `?search_id=` a client attached, parsed, or `None`.
+
+    **Typed `str` and parsed here rather than annotated `uuid.UUID | None` on
+    the route, and the difference is a status code.** FastAPI would answer
+    `422 validation_failed` for a malformed value -- so a client that
+    truncated, re-encoded or invented a `search_id` would be refused *the
+    title*, over a piece of optional telemetry attached to a resource that
+    exists and that the request is otherwise entitled to. Analytics may not
+    decide whether a resource is served.
+
+    So a malformed value is collapsed into the same `None` an absent one
+    produces, and the route cannot tell them apart. That is deliberate: there
+    is no behaviour to differentiate, and one layer further down an id that
+    *is* a UUID but names no row is already indistinguishable from both. The
+    three cases -- absent, unparseable, unknown -- are one case, and it is
+    "nothing to attribute".
+
+    One dependency shared by all three attributing routes, so `?search_id=` is
+    described once in `/openapi.json` instead of three times in three
+    wordings.
+    """
+    if search_id is None:
+        return None
+    try:
+        return uuid.UUID(search_id)
+    except ValueError:
+        return None
+
+
+SearchIdDep = Annotated[uuid.UUID | None, Depends(get_search_id)]
+# The watch-write actions (M9). `PUT /watch/titles/{id}`,
+# `PUT /watch/episodes/{id}` and the two `/played` routes -- the first routes
+# in this API that write a `watch_states` row, and therefore the first writer
+# of `origin = api`.
+# ---------------------------------------------------------------------------
+
+
+def get_watch_write_service(
+    session: SessionDep,
+    watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
+    media_items: MediaItemRepositoryDep,
+    queue: JobQueueDep,
+    events: EventPublisherDep,
+    cache: Annotated[RowCache, Depends(get_row_cache)],
+) -> WatchWriteService:
+    """`WatchWriteService`, holding no source adapter and no factory.
+
+    **`commit` is `session.commit`, and unlike `get_reconcile_service`'s it is
+    the whole point rather than a shared-wiring accident.** ADR-0033: an event
+    is a statement about *committed* state. This service commits its own write
+    before it publishes, so a subscriber told a position landed and refetching
+    through a second connection finds it -- which is exactly what a route that
+    left the commit to `get_session` could not promise. `get_session` still
+    commits when the handler returns, and that second commit is what carries
+    the enqueued write-back job.
+
+    **The cache is the app's one `RowCache`, never a request-scoped one.** A
+    request-scoped cache caches nothing, and an invalidation against one would
+    drop entries nobody could ever have read -- leaving the household's real
+    screen warm and stale, which is the subtle half of the bug
+    `RowCache.invalidate` documents.
+    """
+    return WatchWriteService(
+        watch_states=watch_states,
+        media_items=media_items,
+        queue=queue,
+        events=events,
+        commit=session.commit,
+        cache=cache,
+    )
+
+
+WatchWriteServiceDep = Annotated[WatchWriteService, Depends(get_watch_write_service)]
+
+
+# The image proxy (M9). One dependency function, deliberately: `app.py` and
+# this module are the milestone's worst collision pair, and every other
+# consumer of `images` -- `RowCard.artwork`, `GET /titles/{id}`'s `images` key
+# -- reads the repository rather than this service, so a shared
+# `get_image_repository` would be a second claimant on one line for no caller.
+# ---------------------------------------------------------------------------
+
+
+def get_image_proxy_service(request: Request, session: SessionDep) -> ImageProxyService:
+    """`GET /images/{id}`'s service: this request's repository over the
+    process's fetcher and store.
+
+    **The asymmetry is the design, not an inconsistency.** The repository is
+    session-scoped because a row read belongs to the request's unit of work;
+    the fetcher and the store are process-scoped because the fetcher owns an
+    `httpx.AsyncClient` and a client per request is a connection pool per
+    request. `composition.image_proxy` builds both halves together in
+    `create_app`'s lifespan, so a deployment cannot end up with a cache
+    directory the fetcher's byte ceiling was never told about.
+
+    **The repository, not the `Pipeline`.** `composition.build_image_proxy_
+    service` says why: this route reads one row and needs none of the other
+    twenty-odd fields, and a route handed the whole pipeline could reach the
+    job queue from a request path.
+
+    Same defensive `getattr`/`cast` shape as `get_session_factory`, and for
+    the same reason -- `app.state` is typed `Any`.
+    """
+    fetcher = getattr(request.app.state, "image_fetcher", None)
+    store = getattr(request.app.state, "image_store", None)
+    if fetcher is None or store is None:
+        raise RuntimeError(
+            "app.state.image_fetcher/image_store is not set -- create_app's lifespan "
+            "has not run. If this is a test using a bare ASGI transport, wrap the app "
+            "in asgi_lifespan.LifespanManager first."
+        )
+    return build_image_proxy_service(
+        PostgresImageRepository(session),
+        cast(ImageFetcher, fetcher),
+        cast(ImageBlobStore, store),
+    )
+
+
+ImageProxyServiceDep = Annotated[ImageProxyService, Depends(get_image_proxy_service)]
