@@ -43,6 +43,15 @@ force: http.server.duration is absent and the scope emitted
 ['http.server.active_requests', 'http.server.request.duration',
 'http.server.response.body.size'] at units ['By', 's', '{request}']"*.
 
+**The cheaper way to show a fixture ate something, worth reaching for first:**
+a throwaway case that prints its own view of the environment. With
+`OTEL_SEMCONV_STABILITY_OPT_IN=http` genuinely set in the parent shell, one
+that printed `os.environ.get(...)` and
+`_OpenTelemetrySemanticConventionStability._initialized` reported `None` and
+`False`. Non-invasive, no plant to restore, and it distinguishes *"the
+variable never arrived"* from *"it arrived and had no effect"* -- which a
+plant into the fixture cannot.
+
 Read the consequence precisely: **inside pytest this assertion is held by
 `clean_environment`, so it does not pin the deployment's environment.** What it
 does pin, and what it is worth keeping for, is the *other* way the name moves
@@ -80,12 +89,17 @@ _PRD_10 = _REPO_ROOT / "docs" / "prd" / "10-telemetry-and-dashboards.md"
 # *factory* name and never on a `usher.` prefix is deliberate and measured: a
 # naive walk for any attribute starting with `create_` finds 120 call sites in
 # `src/usher/`, of which 79 are Alembic's `op.create_table`/`create_index`/
-# `create_foreign_key` under `db/migrations/versions/` and six are
-# `asyncio.create_task`. **Four of those tasks carry a `name=`, and three are
-# spelled `usher.*`** -- `usher.lane.worker`, `usher.lane.refresh` and
-# `usher.lane.rows.refresh` (`api/lanes.py:204-208`), plus
-# `usher.jobs.heartbeat` (`services/jobs.py:317`). A prefix filter would put
-# those three into the comparison looking exactly like undocumented metrics.
+# `create_foreign_key` under `db/migrations/versions/`, one is
+# `sa_asyncio.create_async_engine` (`db/base.py:110`) and six are
+# `asyncio.create_task` -- 79 + 34 + 1 + 6 = 120, with no overlap.
+# **All six tasks carry a `name=`, and every one of them renders `usher.*`.**
+# Four are string literals: `usher.lane.worker`, `usher.lane.refresh`,
+# `usher.lane.rows.refresh` (`api/lanes.py:204-208`) and `usher.jobs.heartbeat`
+# (`services/jobs.py:317`). Two more are f-strings a literal-only scan does not
+# see at all -- `f"usher.lane.push.{source.name}"` (`api/lanes.py:358`) and
+# `f"usher.job.{job.kind.value}"` (`services/jobs.py:340`). So a prefix filter
+# would drag **six** task names into the comparison looking exactly like six
+# undocumented metrics, not the three an earlier draft of this comment claimed.
 _INSTRUMENT_FACTORIES = frozenset(
     {
         "create_counter",
@@ -115,6 +129,12 @@ def _declared_instrument_names() -> set[str]:
     at runtime -- would be invisible here, so the walk records `None` and the
     caller's premise guard on the anchor is what would notice a wholesale move
     to that spelling.
+
+    ⚠️ **The `name=` branch is dead code today**: all 34 sites pass the name
+    positionally, so 0 of 34 exercise it. It is here because `Meter`'s
+    signatures accept the keyword and one future call site spelling it that way
+    would otherwise vanish from the comparison silently -- but do not read its
+    presence as evidence that anything covers it.
     """
     found: set[str] = set()
     for path in sorted(_SOURCE.rglob("*.py")):
@@ -269,6 +289,7 @@ async def test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue(
     assert emitted[_INHERITED] == "ms"
 
     points = _fastapi_points(meter_reader, _INHERITED)
+    assert points, "the name is emitted but carries no data points"
     assert points[0]["http.target"] == "/health"
     assert points[0]["http.status_code"] == "200"
 

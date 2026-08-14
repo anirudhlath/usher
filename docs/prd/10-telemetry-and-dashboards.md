@@ -178,25 +178,25 @@ rows: 34 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
 
 **`http.server.duration` is a correction, not an addition, and carries no
 `usher.` prefix on purpose.** M9 re-measured through a real `create_app()` and
-real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor`
-(wired in `create_app`, `api/app.py:168`) already emits this histogram on
-every request — unit `ms`, scope `opentelemetry.instrumentation.fastapi` —
-with `http.target` set to the **route template**
-(`/titles/{title_id}`, not the raw path, so two distinct title ids collapse
-into one series) and `http.status_code`. ⚠️ **On a path that matched no route
-`http.target` is absent rather than empty** — measured 2026-08-14,
-`GET /no-such-route` records the point with `http.status_code` 404 and no
-`http.target` key at all — so `group by (http.target)` silently drops every
-unrouted 404. The row names what ships rather than asking for a second
-histogram over the same measurement: that would double the export for one
-relabelled series, the two-vocabularies hazard warned about for `provider`.
+real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor` (wired
+in `create_app`, `api/app.py:168`) already emits this histogram on every
+request — unit `ms`, scope `opentelemetry.instrumentation.fastapi` — with
+`http.target` set to the **route template** (`/titles/{title_id}`, not the raw
+path, so two distinct title ids collapse into one series) and
+`http.status_code`. That is exactly what this row asked for, under
+OpenTelemetry's own semantic-convention name rather than ours, so the row now
+names what ships instead of asking for a second histogram over the same
+measurement — recording `usher.http.server.duration` alongside it would double
+the export for one relabelled series, the same two-vocabularies-under-one-name
+hazard this document already warns about for `provider` below.
 **The semconv opt-in is a named hazard.** Measured 2026-08-14 on sdk 1.44.0 /
 instrumentation 0.65b0: `OTEL_SEMCONV_STABILITY_OPT_IN=http` *replaces* this
 metric with `http.server.request.duration`, unit `s` not `ms`, `http.route`
 not `http.target` — the old name is gone rather than renamed, so a panel on it
 empties silently. It cannot be set from `.env`, `.env.example` or
 `compose.yml` without failing a test or every entry point; only the launching
-process's own environment reaches it. `http/dup` emits both names.
+process's own environment does. **An unrouted path carries no `http.target` at
+all**, so `group by (http.target)` drops those 404s.
 
 **`mode`'s vocabulary is `full_text` / `semantic` / `fused`** — `SearchMode`'s
 own values, lower-case, and written down here because a label whose vocabulary

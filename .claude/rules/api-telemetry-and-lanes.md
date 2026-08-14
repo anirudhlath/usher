@@ -1006,52 +1006,13 @@ rather than discovered from a dashboard that under-counts. Pinned by
 whose routed control fires first — "the key is missing" is also what a build
 that never recorded the attribute at all would produce.
 
-### Where the opt-in can be set, measured — and there is no such place in anything this repository ships
-
-Stronger than PRD 10:198's old *"Nothing in this project's config sets that
-variable"*, which is a statement about today's values; this is a statement
-about the shape of the configuration.
-
-- **As a line in `.env`** → `ValidationError: otel_semconv_stability_opt_in —
-  Extra inputs are not permitted`, from **every** entry point, because they all
-  build `Settings`. `Settings.model_config` is `extra="forbid"`
-  (`config.py:144-149`) and pydantic-settings' dotenv source hands an unmatched
-  key back under its full lowercased name. Measured directly by planting the
-  line, not reasoned. ⚠️ **The precise mechanism is narrower than "`.env` refuses
-  `OTEL_*`", and getting that wrong would make the rule look false**: `Settings`
-  declares `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` as *aliased
-  fields* (`config.py:757-758`), and both are accepted from `.env` today. What
-  is refused is every **un-declared** key — probed one at a time:
-  `OTEL_SEMCONV_STABILITY_OPT_IN`, `OTEL_TOTALLY_MADE_UP`, `ZZZ_RANDOM_KEY` and
-  `USHER_MADE_UP` all rejected; the two aliased ones accepted.
-- **In `compose.yml`'s `environment:` block** →
-  `tests/unit/test_deployment_config.py:337` asserts that block's key set
-  **equals** the five names in `_TOPOLOGY_OWNED` (`:89-97`).
-- **In `.env.example`** → `tests/unit/test_deployment_config.py:282` asserts
-  `.env.example`'s key set **equals** the `Settings` field set.
-- **As a process environment variable** → **works.** `Settings` builds normally
-  (measured), because the variable never reaches pydantic at all. This is the
-  only door, and it is outside everything the repository ships.
-
-So the convention in force is held by three tests and a validation error rather
-than by a comment — which is the point of writing it down this way.
-
-⚠️ **And the suite cannot observe the opt-in at all, which is a trap for
-whoever writes the next case about it.** `tests/conftest.py`'s autouse
-`clean_environment` deletes every `USHER_*`/`OTEL_*` variable from
-`os.environ`, and `_OpenTelemetrySemanticConventionStability._initialize()`
-runs inside `create_app()` (`fastapi/__init__.py:271`, `asgi/__init__.py:597`)
-— i.e. **after** the scrub. So `OTEL_SEMCONV_STABILITY_OPT_IN=http uv run
-pytest …` is **green**, and reads exactly like a case that checked the hazard
-and found it absent. It was demonstrated red only by planting one `continue`
-into that fixture's scrub loop. Read the consequence precisely: inside pytest
-the "default conventions are in force" assertion is held by `clean_environment`,
-so it pins a **dependency upgrade** that changes the default — the drift the
-catalogue is actually written against — and not the deployment's environment.
-The environment half is pinned by the four bullets above instead.
-`_initialize()` is also `_initialized`-guarded, i.e. once per process, which is
-why any future demonstration has to be a separate process and never a
-`monkeypatch.setenv`.
+**Where the opt-in can and cannot be set is recorded in**
+`.claude/rules/config-cli-and-deployment.md` — its subject is `config.py`,
+`compose.yml` and `.env.example`, and *this* file does not load on any of
+those paths, so the finding would never have reached the person adding an
+`OTEL_*` key. In one line: the only door is the launching process's own
+environment; `.env`, `.env.example` and `compose.yml` each fail a test or
+every entry point.
 
 ### 34 and 35 are both right, about different things, and the M10 spec collapsed them
 
@@ -1073,12 +1034,21 @@ filter is the factory name — never the prefix.** Re-measured 2026-08-14 at
 call, `create_async_engine`). **79** are Alembic's `op.create_table` /
 `create_index` / `create_foreign_key` under `db/migrations/versions/`, 34 are
 the instrument factories, six are `asyncio.create_task` and one is
-`sa_asyncio.create_async_engine`. **Four of the tasks carry a `name=`, and
-three of those are spelled `usher.*`** — `usher.lane.worker`,
-`usher.lane.refresh`, `usher.lane.rows.refresh` (`api/lanes.py:204-208`) and
-`usher.jobs.heartbeat` (`services/jobs.py:317`). A prefix filter puts three
-task names into a catalogue comparison looking exactly like three undocumented
-metrics.
+`sa_asyncio.create_async_engine` (`db/base.py:110`). **All six tasks carry a
+`name=`, and every one of them renders `usher.*`** — four string literals
+(`usher.lane.worker`, `usher.lane.refresh`, `usher.lane.rows.refresh` at
+`api/lanes.py:204-208`, and `usher.jobs.heartbeat` at `services/jobs.py:317`)
+plus two f-strings a literal-only scan cannot see at all:
+`f"usher.lane.push.{source.name}"` (`api/lanes.py:358`) and
+`f"usher.job.{job.kind.value}"` (`services/jobs.py:340`). A prefix filter puts
+**six** task names into a catalogue comparison looking exactly like six
+undocumented metrics.
+
+⚠️ *An earlier draft of this entry — and of the comment in the test file —
+said "four carry a `name=`, three of those are `usher.*`", then listed four.
+It was inherited from the M10 plan's prose and nobody re-counted, which is the
+same failure as the plan's 117/83 one layer in. **The trap is worse than it was
+documented as, which makes the factory-name filter more justified, not less.***
 
 *The M10 plan states 117 sites and 83 Alembic ones, measured 2026-08-13. Both
 differ from the above and the plan's own arithmetic does not close (117 − 83 −
