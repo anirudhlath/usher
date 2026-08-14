@@ -179,7 +179,7 @@ is maintained rather than aspirational.
 **`http.server.duration` is a correction, not an addition, and carries no
 `usher.` prefix on purpose.** M9 re-measured through a real `create_app()` and
 real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor`
-(wired in `create_app`, `api/app.py:127`) already emits this histogram on
+(wired in `create_app`, `api/app.py:168`) already emits this histogram on
 every request — unit `ms`, scope `opentelemetry.instrumentation.fastapi` —
 with `http.target` set to the **route template**
 (`/titles/{title_id}`, not the raw path, so two distinct title ids collapse
@@ -216,8 +216,14 @@ dashboard query has to know:
   ([ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)), and M6
   emits nothing for it — a gap named here rather than left to be discovered
   from an empty panel, and one **the gate's measured latency makes worth
-  closing rather than merely worth noting**: the shipped suggest path measures
-  p50 33.6 ms / p95 211 ms / max 730 ms at 1.27M names, against the 50 ms
+  closing rather than merely worth noting**. ⚠️ **The figures that used to stand
+  here belong to a tier the route does not default to.**
+  [ADR-0031](decisions/0031-the-two-tier-suggest.md)`:304` states that
+  p50 33.6 / p95 211 / max 730 ms are **tier 2 whole-name** figures; the shipped
+  route defaults to **tier 1**, whose union p95 is **2,707 ms at one character**
+  and 112 ms at the four-character minimum (`:193`). A series for this path must
+  therefore carry a `tier` label rather than being one histogram, measured
+  against the 50 ms
   as-you-type budget [ADR-0002](decisions/0002-postgres-first-search.md) was
   gated on. A path that misses its budget by 4× at p95 and has no series is a
   regression nobody would see.
@@ -877,8 +883,17 @@ under a request shows only that request's.
 LLM spend per day and month by model and purpose · tokens in/out · **cost per
 curated row** and **cost per play attributed to an LLM row** — the honest answer
 to whether the LLM earns its keep · embedding compute time · TMDb quota
-headroom · **oldest `enriched_at` against the 6-month TMDb cache ceiling**, a
-licensing-compliance panel given [ADR-0005](decisions/0005-bulk-bootstrap.md) ·
+headroom · **the oldest cached TMDb payload against the 6-month cache ceiling**, a
+licensing-compliance panel given [ADR-0005](decisions/0005-bulk-bootstrap.md).
+⚠️ **This panel used to name `titles.enriched_at`, which is the wrong column
+and in the wrong direction:** that records when *Usher* enriched a title, not
+when the *payload* was cached, and the two diverge exactly when a title is
+enriched from an already-cached payload — the case the ceiling exists for. The
+series is `raw_payloads.fetched_at` (`ix_raw_payloads_fetched_at`,
+`db/models/sync.py:104-115`); `provider_cache_meta`, which an earlier draft of
+M10's spec reached for, does not exist and
+[ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)`:26`
+refused it by name ·
 data freshness (age of last IMDb import and TMDb changes sync) · Postgres size
 by table with a disk-exhaustion projection.
 

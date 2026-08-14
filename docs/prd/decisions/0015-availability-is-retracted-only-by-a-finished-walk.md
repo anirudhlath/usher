@@ -41,8 +41,12 @@ invisible waiting for a sweep to notice.
 **The guard measures what this run would change, not how much of the source
 is already unavailable.** Otherwise an operator who accepted one mass
 retraction gets a refusal every night afterwards, forever — which is worse
-than having no guard, because a refused sweep fails the sync run and the
-*upsert* half of the next walk never commits either.
+than having no guard, because a refused sweep fails the sync run. ⚠️ **The
+clause that used to follow — *"and the upsert half of the next walk never
+commits either"* — is false against the code:** `services/reconcile.py` flushes
+**one commit per batch** (*"One commit per batch, exactly like
+BootstrapService: a crash costs"* one batch), so a later refusal does not
+unwind the upserts a walk already landed.
 
 ## Consequences
 

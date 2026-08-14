@@ -230,7 +230,11 @@ Rules:
   would add is the credential
   ([ADR-0026](decisions/0026-the-cli-boundary-names-families.md)).
 - Rotating `USHER_SECRET_KEY` re-encrypts on next write; a documented rotation
-  command handles the bulk case. **Until that write happens the old rows are
+  command handles the bulk case. ⚠️ **"On next write" is not a mechanism that
+  keeps a deployment limping — there is no such path.** `PostgresCredentialStore.put`
+  encrypts with whatever cipher it was built with, so the only "next write" that
+  re-encrypts anything is *a credential an operator re-types*. Until the rotation
+  command exists (M10), rotating the key strands every stored credential. **Until that write happens the old rows are
   unreadable, and that state is rendered rather than raised**: Fernet's
   authentication tag makes a wrong key a diagnosable `PortDataMalformed`, and
   `GET /admin/sources/{id}/status` reports it as an unreachable,
@@ -627,8 +631,12 @@ that is a property of M7 rather than of backup.** `RowContext.taste` was
 specified and deleted — every provider turned out to be a predicate over a
 repository rather than a retrieval, and on the request path the centroid is
 `None` unconditionally anyway, because it needs an embedder the route
-deliberately holds none of. So `TasteService.centroid` has no caller in `src/`
-and the table stays empty on a default deployment; what `TasteService` *is*
+deliberately holds none of. ⚠️ **The sentence that used to stand here — *"So
+`TasteService.centroid` has no caller in `src/`"* — was the true claim above it
+escalated one hop into a false absolute, and has been false since M8:
+`services/curation_pool.py:173` calls it, and the guard immediately above that
+call exists *because* it writes.** What survives is the narrow claim: no writer
+on the **request path**, so the table stays empty on a default deployment; what `TasteService` *is*
 called for is `genre_affinity`, which needs no embedder and no centroid. The
 table, its fingerprint and its written refusal are all built and tested;
 the consumer is M9's, with the ranking terms
@@ -663,9 +671,9 @@ MB)**, at `m09c`, with 130,647 embeddings, 3,266,225 `title_neighbors`,
 | Postgres, + the IMDb people/credits load | **+3.4 GB** — 12,637,249 credits over 3,215,476 people, measured after `VACUUM FULL` ([ADR-0036](decisions/0036-the-imdb-tmdb-provenance-rule.md)). Not loaded by default. |
 | **Running the `m09d` migration** | **+637 MB transient on `credits`, and 50 s**, at 2,877,486 credits: `UPDATE credits SET source = 'tmdb'` leaves a dead tuple per live one (794 MB → 1,431 MB), and `SET NOT NULL` then scans the table. `VACUUM FULL` settles it at **740 MB, 54 MB *below* baseline** — but the migration does not run one, so **budget the peak**. Both scale with the enriched tier. |
 | Postgres, + `titles.credit_names` | **+624 MB settled, +1,368 MB transient** before a vacuum — the peak is what an operator's disk sees |
-| **Running the `m09e` migration** | 🔶 The only entry here that *frees* space, and the only one whose settled figure is unknown. It deletes every row of `title_embeddings` (130,673, in a 278 MB relation), `user_taste` and `title_neighbors` (3,266,175) and rebuilds the HNSW index empty. It runs no `VACUUM`, so the dead tuples are still on disk when it returns, and the catalog then re-grows: measured 2026-08-13, the backfill of 130,720 titles took **105.9 minutes** and settled at **707 MB** of relation and **340 MB** of index. 🔴 **`usher similar --rebuild` is the expensive half and its cost changed by more than the width did: 594.7 ms/seed against 36.50 at `halfvec(384)`, i.e. a full 130,720-seed walk of 21.6 hours against 80 minutes.** `nearest_for` runs under `enable_indexscan = off` by design, so it is an exact scan whose working set now exceeds both `shared_buffers` and this host's L3. Plan the rebuild as an overnight job, not a follow-on step ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)). |
+| **Running the `m09e` migration** | 🔶 The only entry here that *frees* space, and the only one whose settled figure is unknown. It deletes every row of `title_embeddings` (130,673, in a 278 MB relation), `user_taste` and `title_neighbors` (3,266,175) and rebuilds the HNSW index empty. It runs no `VACUUM`, so the dead tuples are still on disk when it returns, and the catalog then re-grows: measured 2026-08-13, the backfill of 130,720 titles took **105.9 minutes** and settled at **707 MB** of relation and **340 MB** of index. 🔴 **`usher similar --rebuild` is the expensive half and its cost changed by more than the width did: 594.7 ms/seed against 36.50 at `halfvec(384)`, i.e. a full 130,720-seed walk of 21.6 hours against 80 minutes.** ⚠️ **Both figures are `m09e`'s and `m09f` repaired them** — moving every `halfvec` column to `PLAIN` storage took the exact scan back to **91.7 ms/seed**, so the completed walk measured **130,720 seeds in 11,981 s = 3.33 hours**, not 21.6. The overnight-job conclusion below survives; the number that motivated it does not. `nearest_for` runs under `enable_indexscan = off` by design, so it is an exact scan whose working set now exceeds both `shared_buffers` and this host's L3. Plan the rebuild as an overnight job, not a follow-on step ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)). |
 | HNSW (`halfvec`) | 🔶 **~1.5 GB at full embedding coverage was projected at `halfvec(384)` and is now a floor.** Measured immediately before `m09e` on 2026-08-13: **146 MB** of `ix_title_embeddings_hnsw` over **130,673** embeddings, inside a **278 MB** `title_embeddings` total relation. `m09e` widened the lane count to 1024 — 2,048 bytes a vector against 768 — and the rebuilt figures, measured 2026-08-13 after 130,720 titles re-embedded through `bge-m3`, are **340 MB** of index inside a **707 MB** relation: **2.33× and 2.54×**, both under the 2.67× the lane count alone predicts, so the graph and the row headers amortise a little. Extrapolating the old ~1.5 GB projection by the same 2.33× gives ~3.5 GB at full catalog coverage — an extrapolation, and labelled as one. |
-| Image cache | Grows with use; capped by a configurable LRU ceiling |
+| Image cache | Grows with use, **without bound**. ⚠️ *"capped by a configurable LRU ceiling"* was wrong from the day it was written: there is **no eviction** (`services/images.py:7` says so in as many words) and no ceiling setting. `image_max_bytes` is a **per-image** 5 MiB refusal, not a cache ceiling. Nothing reclaims this directory. |
 | Usher process | ~500 MB–1 GB, plus ~200 MB for the embedding model — **the model half applies to the `fastembed:` runtime only**, and was measured for `bge-small-en-v1.5`. Under `openai:` no model is loaded in this process at all; the memory is the inference server's. |
 | Embedding model | 🔶 **~130 MB on disk was `bge-small-en-v1.5`'s measured download.** The shipped default is now `fastembed:BAAI/bge-large-en-v1.5`, which fastembed 0.8.0 declares at **1.2 GB** against bge-small's 0.07 — the price of the 1024-wide column, and the reason this row is called out rather than quietly edited ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)). Its download has not been re-measured, and it is **0 on the `openai:` runtime**. |
 

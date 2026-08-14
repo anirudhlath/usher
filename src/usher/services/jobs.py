@@ -155,7 +155,11 @@ HEARTBEAT_FRACTION: Final = 3.0
 #:   the caller's session** -- the one documented exception on that port -- and
 #:   asks for a session carrying no unrelated pending work. Two phases at once
 #:   also write the same destination tables from two staging copies.
-#: - **`DERIVE` = 4.** ⚠️ **The one number here that is not measured**, and the
+#: - **`DERIVE` = 4.** ⚠️ **Not measured — and not the only one: the
+#:   `MATCH`/`WATCH_HISTORY`/`WATCH_WRITEBACK` bullet above says in as many
+#:   words that this repository has never measured a household server under
+#:   concurrent load, so four of the nine entries here are unmeasured, not
+#:   one.** The
 #:   honest statement is that it is derived from a *budget* rather than from a
 #:   throughput: derivation is pure Postgres (a JSONB read and three writes, no
 #:   network, no model), so its ceiling is what the connection pool can serve

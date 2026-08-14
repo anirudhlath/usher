@@ -439,15 +439,18 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     landed on top -- the failure this case had on the first run after that,
     and a good illustration of why a step count is the wrong pin.
 
-    **Head is `m09c` and the `-1` half is re-pointed at its artefacts.** The
+    **Head is `m09f` and the `-1` half is re-pointed at its artefacts.** ⚠️ This
+    docstring said `m09c` and "seventh" until 2026-08-14 while the body below
+    said `m09f` and "tenth" — three heads updated the inline comment and not the
+    prose above it, which is the half a reader reads first. The
     previous spelling asserted `m09a`'s four primary keys were *absent*, which
     held because `-1`-from-`m09a` ran `m09a.downgrade()` and dropped its four
     tables. `-1`-from-`m09c` runs `m09c.downgrade()` instead and stops at the
     `m09a` state, where all four are present -- so the inherited assertion
     **failed, loudly and immediately**, and it was run and watched to fail
     before it was touched (`AssertionError: assert 'pk_images' not in {...}`).
-    That is the **seventh** landing in a row to do so (`ffa`, `ffb`, `ffc`,
-    `m08a`, `m08b`, `m09a`, `m09c`).
+    That is the **tenth** landing in a row to do so (`ffa`, `ffb`, `ffc`,
+    `m08a`, `m08b`, `m09a`, `m09c`, `m09d`, `m09e`, `m09f`).
 
     `m09c` creates no table. It does three things and needs an assertion per
     artefact *kind*, which is the "one per table" rule generalised to a head
