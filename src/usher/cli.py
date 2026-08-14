@@ -45,7 +45,7 @@ from usher.composition import (
     selected_sources,
     unit_of_work,
 )
-from usher.config import Settings, get_settings
+from usher.config import Settings, get_settings, settings_rejection
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.genome import PostgresGenomeRepository
@@ -173,9 +173,6 @@ OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     # apply, so the honest answer at a terminal is the sentence and exit 1.
     PortRateLimited,
 )
-# Shorter than this and a rejected value is not a credential, and scrubbing
-# it would mangle the message it appears in ("not 4" -> "not <redacted>").
-_SHORTEST_REDACTABLE = 4
 # 128 + SIGINT, the shell's convention, so a wrapping script can tell an
 # operator's Ctrl-C from a command that failed.
 _INTERRUPTED_EXIT_CODE = 130
@@ -1836,25 +1833,16 @@ def _settings_problem(command: str, exc: ValidationError) -> str:
     reader that unwrapped them, and it did it on the surface an operator is
     most likely to paste into an issue.
 
-    Same control, and same trade, as `usher.api.errors` makes for a 422:
-    `loc` and `msg` survive -- so the operator still learns which setting was
-    wrong and what it should have been -- and the value never does.
-
-    `msg` is scrubbed as well as `input` dropped. No validator in `Settings`
-    interpolates the value into its own message today, and none of pydantic's
-    built-in messages do either; the scrub is there so that writing one does
-    not quietly reopen this.
+    **The rendering moved to `usher.config.settings_rejection` on 2026-08-13
+    and this is now the CLI's name for it.** It had to move because
+    `alembic upgrade head` was leaking the same way and an import-linter
+    contract forbids anything importing `usher.cli` -- so the control could
+    not be reached from the second entry point that needed it. The evidence,
+    the failure it prevents and why `msg` is scrubbed as well as `input`
+    dropped all live on that function now; this wrapper exists so the CLI's
+    prefix stays `usher <command>:` and so every caller here keeps one name.
     """
-    lines = [f"usher {command}: the settings were rejected"]
-    for error in exc.errors():
-        where = ".".join(str(part) for part in error["loc"]) or "(settings)"
-        message = error["msg"]
-        rejected = str(error.get("input", ""))
-        if len(rejected) >= _SHORTEST_REDACTABLE and rejected in message:
-            message = message.replace(rejected, "<redacted>")
-        lines.append(f"  {where}: {message}")
-    lines.append("(values are not shown -- any setting may be a credential)")
-    return "\n".join(lines)
+    return settings_rejection(exc, entry_point=f"usher {command}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:

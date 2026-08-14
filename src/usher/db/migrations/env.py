@@ -20,11 +20,12 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
+from pydantic import ValidationError
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from usher.config import get_settings
+from usher.config import get_settings, settings_rejection
 from usher.db import models  # noqa: F401  — registers all tables
 from usher.db.base import Base
 
@@ -48,8 +49,34 @@ target_metadata = Base.metadata
 def _database_url() -> str:
     """The literal DSN from settings, unwrapped once, here, and handed
     straight to SQLAlchemy — never stored in a variable that outlives this
-    call, never logged, and never passed through `alembic.config.Config`."""
-    return get_settings().database_url.get_secret_value()
+    call, never logged, and never passed through `alembic.config.Config`.
+
+    **The `except` is a security control and this file had none until
+    2026-08-13.** `get_settings()` raises `pydantic.ValidationError` for a
+    missing or malformed setting, and that exception renders `input_value={…}`
+    — so `uv run alembic upgrade head` with `USHER_DATABASE_URL` unset printed
+    a traceback carrying `USHER_SECRET_KEY`. `usher.cli` has had a boundary
+    for exactly this since M7; alembic is a *second* entry point at which the
+    same settings are read, and it did not.
+
+    It is the worse of the two sites, for two reasons that are properties of
+    where it sits rather than of how it renders. The CLI leaked the value it
+    *rejected*; this leaked **every field pydantic echoes**, so the setting an
+    operator got wrong was not the one exposed. And the container's `CMD` is
+    `alembic upgrade head && exec python -m usher`, so this traceback is the
+    **first thing in the log** of a misconfigured deployment — before the
+    application that would have scrubbed it ever starts.
+
+    `from None`, not `from exc`: chaining re-prints the original
+    `ValidationError` under a *"The above exception was the direct cause"*
+    header, which puts back the whole thing this exists to remove. And
+    `SystemExit` rather than a bare `print` so `alembic` exits non-zero and a
+    `&&` in the container's `CMD` still stops.
+    """
+    try:
+        return get_settings().database_url.get_secret_value()
+    except ValidationError as exc:
+        raise SystemExit(settings_rejection(exc, entry_point="alembic")) from None
 
 
 def run_migrations_offline() -> None:

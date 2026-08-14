@@ -5,8 +5,65 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: Below this length a rejected value is too short to be worth redacting out of
+#: a message and too likely to collide with ordinary words in it -- `"1"` would
+#: rewrite half the sentence. Four is the shortest thing this project treats as
+#: a secret.
+_SHORTEST_REDACTABLE = 4
+
+
+def settings_rejection(exc: ValidationError, *, entry_point: str) -> str:
+    """pydantic's diagnosis with every rejected value stripped out.
+
+    **This is a security control, not formatting**, and it lives here rather
+    than beside its first caller because it has two. A pydantic v2
+    `ValidationError` renders as
+
+        ... [type=value_error, input_value='mysql://admin:hunter2@db/usher', ...]
+
+    so a `USHER_DATABASE_URL` with the wrong driver prints the whole DSN and a
+    short `USHER_SECRET_KEY` prints the key. Every credential in `Settings` is
+    a `SecretStr` precisely so it cannot reach a log line; a `ValidationError`
+    is the one path that renders the *input* rather than the field.
+
+    **It was in `usher.cli` and `alembic` was leaking through the gap** --
+    found 2026-08-13. `usher.db.migrations.env` calls `get_settings()` with no
+    boundary of its own, so `uv run alembic upgrade head` with
+    `USHER_DATABASE_URL` absent printed the raw traceback, `input_value={...}`
+    and a truncated `secret_key` included. Two things made it worse than the
+    original defect rather than a smaller copy of it. The CLI's version leaked
+    a *rejected* value; this one leaked **every field pydantic echoes**, so a
+    missing DSN exposed the secret key. And the container's `CMD` is
+    `alembic upgrade head && exec python -m usher`, which makes that traceback
+    the **first thing in the log** of a misconfigured deployment.
+
+    An import-linter contract forbids anything importing `usher.cli`, so the
+    repair could not be a call into it. This is the same collapse
+    `services/llm_ledger.py` and `db/repositories/_errors.py` were: one
+    definition, because two copies of a measured control are two chances to
+    lose one.
+
+    Same trade as `usher.api.errors` makes for a 422: `loc` and `msg` survive,
+    so an operator still learns which setting was wrong and what it should have
+    been, and the value never does. **`msg` is scrubbed as well as `input`
+    dropped** -- no validator in `Settings` interpolates the value into its own
+    message today and none of pydantic's built-ins do, so the scrub exists so
+    that writing one does not quietly reopen this.
+    """
+    lines = [f"{entry_point}: the settings were rejected"]
+    for error in exc.errors():
+        where = ".".join(str(part) for part in error["loc"]) or "(settings)"
+        message = error["msg"]
+        rejected = str(error.get("input", ""))
+        if len(rejected) >= _SHORTEST_REDACTABLE and rejected in message:
+            message = message.replace(rejected, "<redacted>")
+        lines.append(f"  {where}: {message}")
+    lines.append("(values are not shown -- any setting may be a credential)")
+    return "\n".join(lines)
+
 
 # A local OpenAI-compatible server, because this project's reference
 # deployment is self-hosted. Declared here rather than in
