@@ -642,9 +642,9 @@ two are counter-intuitive enough that the "no-ops" phrasing hid them:
 **This file already had it right**, in the Group F paragraph above
 (*"install a real `TracerProvider`/`MeterProvider` unconditionally … nothing
 gRPC-related is ever constructed"*), which is why the correction below is to
-the PRD and the spec rather than to anything here. The wrong phrasing survives
-in five places outside this file; the four still standing are listed at the end
-of this entry.
+the five documents that disagreed with it rather than to anything here. All
+five are listed at the end of this entry, along with why a grep found only one
+of them.
 
 Corrected in `docs/prd/10-telemetry-and-dashboards.md` in the same commit. **The
 edit was sized to keep that paragraph's line count fixed**, because
@@ -722,6 +722,14 @@ counters and both of these are histograms. `service.name` becomes the `job`
 label and `service.instance.id` becomes `instance`; the collector also adds
 `otel_scope_name`/`otel_scope_version`.
 
+**This is a correction to the M10 plan's own prediction, and it is written down
+because the next task is built on that prediction.** The plan predicted *"dots
+become underscores, and a monotonic counter gains `_total`"*. Measured, both
+halves miss: the transformation also **appends the unit**, which is the part
+that actually breaks a guessed query, and **`_total` never appears here at all**
+because neither instrument is a counter. Anyone deriving a metric name from the
+prediction rather than from the table above gets a name that returns nothing.
+
 **The negative control, run rather than assumed:** querying the un-suffixed
 names `usher_search_duration` and `http_server_duration` returns **no series at
 all** — not an error, not a zero. A dashboard panel written against the name a
@@ -759,13 +767,35 @@ that is enforced rather than preferred: `tests/unit/test_deployment_config.py`
 asserts its key set *equals* the `Settings` field set and that every value equals
 that field's **default**, so the endpoint line has to stay blank there.
 
-### What this task deliberately did not fix
+### The same false claim stood in five places, and a grep found one
 
-The false "no-op" phrasing has **three more live copies**, all outside O2's
-files and none of them the sentence O2 was scoped to: `src/usher/telemetry.py:4`
-and `src/usher/config.py:913` (both docstrings, the latter on
-`telemetry_enabled` itself), and `docs/prd/decisions/0007-telemetry-architecture.md:55`.
-`.env.example:289` carries it as a comment and cannot be touched for the reason
-above. They are recorded here rather than corrected because each belongs to a
-file this task had no mandate over — but the claim is wrong in all four, and the
-correction is the first section of this entry.
+`docs/prd/10-telemetry-and-dashboards.md:936` was the occurrence this task was
+scoped to, and a search for the spec's own wording — *"no-op exporter"*,
+*"exporters become no-ops"* — reported it as the **only** live one. It was not.
+Four more were standing, in wordings that pattern does not match:
+
+| file | the wording that hid from the grep |
+|---|---|
+| `src/usher/telemetry.py:4` | *"the exporters are no-ops"* |
+| `src/usher/config.py:913` | *"exporters are no-ops"* — on `telemetry_enabled` itself, the very property the claim describes |
+| `docs/prd/decisions/0007-telemetry-architecture.md` | *"the exporters are no-ops"* |
+| `.env.example:289` | *"exporters become no-ops when unset"*, a comment |
+
+**A literal-string search is a scan, and a scan that globs the wrong pattern
+reports a clean result exactly like a scan that found nothing to report.** Same
+family as this repository's standing *"a run that did not run is not a pass"*.
+The search that would have worked looked for the *concept* — `no-op` within a
+line or two of `export` — rather than for the sentence; that is the one to run
+when retiring a claim, and it is how these four were found.
+
+All five are corrected in the same commit. **Three of those edits are strictly
+line-count-neutral by construction**, verified with `git diff --numstat`
+returning equal adds and deletes: `src/usher/telemetry.py` is cited by line in
+**25** distinct places across this repository and `src/usher/config.py` in
+**29** — this file among them — so a docstring that grew by one line would have
+silently invalidated every one of them.
+`docs/prd/decisions/0007-telemetry-architecture.md` gets **ADR treatment rather
+than a reword**, per `.claude/rules/prd-maintenance.md`: its `Status` is
+annotated and the measurement is added as its own `## Evidence` section, because
+an ADR left silently contradicting the PRD is exactly what that rule exists to
+prevent.

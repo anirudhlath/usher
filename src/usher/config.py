@@ -910,7 +910,7 @@ class Settings(BaseSettings):
 
     @property
     def telemetry_enabled(self) -> bool:
-        """Telemetry is optional: with no endpoint configured, exporters are no-ops."""
+        """Telemetry is optional: with no endpoint configured no exporter is constructed."""
         return bool(self.otlp_endpoint)
 
 
