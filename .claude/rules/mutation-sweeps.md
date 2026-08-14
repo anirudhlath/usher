@@ -4946,16 +4946,32 @@ thing. **The general form: when a plant's subject is a *document*, the blast
 radius is the number of parsers pointed at it, and that number is not knowable
 from the file the plant's own test lives in.**
 
-**The controls, each measured against every gate step separately**, because "the
-gate holds it" and "the suite holds it" are different claims — and because a
-harness inside the tree makes every one of these read FAIL, which is the failure
-V1's entry exists to prevent and the reason this one lives in `/var/tmp`:
+**The controls, each measured against six of the seven gate steps separately**,
+because "the gate holds it" and "the suite holds it" are different claims — and
+because a harness inside the tree makes every one of these read FAIL, which is
+the failure V1's entry exists to prevent and the reason this one lives in
+`/var/tmp`:
 
-| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
-|---|---|---|---|---|---|
-| C1 `configure_tracing`'s `SQLAlchemyInstrumentor().instrument()` and `HTTPXClientInstrumentor().instrument()` swapped | PASS | PASS | PASS | PASS (10/0) | PASS (4,072) |
-| C2 one sentence of `configure_metrics`' docstring reworded | PASS | PASS | PASS | PASS (10/0) | PASS (4,072) |
-| C3 two adjacent catalogue rows of PRD 10 swapped | PASS | PASS | PASS | PASS (10/0) | PASS (4,072) |
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` | PRD link check |
+|---|---|---|---|---|---|---|
+| C1 `configure_tracing`'s `SQLAlchemyInstrumentor().instrument()` and `HTTPXClientInstrumentor().instrument()` swapped | PASS | PASS | PASS | PASS (10/0) | PASS (4,072) | PASS (`OK`) |
+| C2 one sentence of `configure_metrics`' docstring reworded | PASS | PASS | PASS | PASS (10/0) | PASS (4,072) | PASS (`OK`) |
+| C3 two adjacent catalogue rows of PRD 10 swapped | PASS | PASS | PASS | PASS (10/0) | PASS (4,072) | PASS (`OK`) |
+
+**Six, and the two that are missing are named rather than rounded up.**
+`pytest tests/integration` is **excluded by choice**, for B2's reason given
+above — it holds an intermittent case, and a sweep scored on "did the run fail"
+cannot run against a suite that fails on its own. That is a limitation, not a
+lapse, and it is stated so a reader does not read this table as the whole gate.
+The **PRD link check** was a different thing and worth recording as a small
+instance of this file's own standing error: the first version of this entry
+claimed "every gate step" when it had measured five, and it had **silently
+skipped the one step most obviously relevant to C3** — a control that mutates a
+PRD file. Closed by measurement rather than by argument
+(`/var/tmp/m10-O4/controls_vs_linkcheck.py`): all three controls return `OK`,
+each restore `md5`-verified against its pre-plant digest. **"Every" is a
+quantifier that has to be counted, and five reported as seven is the same error
+as a green over a list nobody checked the length of — one notch smaller.**
 
 C1 and C3 are facts about the *code* rather than about what the tools look at.
 Both instrumentors are process-wide singletons with their own built-in
@@ -4993,11 +5009,23 @@ building the same `create_app()` and reading an `InMemoryMetricReader`, all thre
 exiting 0 with `singleton initialized = true` — the diagnostic that separates
 *"never arrived"* from *"arrived and did nothing"*:
 
-| `OTEL_SEMCONV_STABILITY_OPT_IN` | `http.server.duration` | `http.server.request.duration` |
-|---|---|---|
-| unset | **`ms`** | **absent** |
-| `http` | **absent entirely** | **`s`** |
-| `http/dup` | **`ms`** | **`s`** |
+| `OTEL_SEMCONV_STABILITY_OPT_IN` | `http.server.duration` | `http.server.request.duration` | `http.server.response.size` | `http.server.response.body.size` |
+|---|---|---|---|---|
+| unset | **`ms`** | absent | **`By`** | absent |
+| `http` | **absent entirely** | **`s`** | **absent entirely** | **`By`** |
+| `http/dup` | **`ms`** | **`s`** | **`By`** | **`By`** |
+
+**The variable renames two metrics, not one, and the second is the one a
+reader of this table would otherwise miss.** `http.server.response.size` →
+`http.server.response.body.size` is the same hazard with the same shape: the
+old name is *gone* rather than renamed alongside, so a Phase 2 panel written
+against it plots nothing and nothing anywhere raises. It was found as a side
+observation of the duration probe and is recorded here at equal standing
+deliberately — a hazard paragraph whose whole subject is "a renamed metric
+empties a panel with no error anywhere" is exactly the place a **second**
+instance of that hazard must not be filed as an aside. Both are now in PRD 10's
+opt-in hazard paragraph. `http/dup` emits both spellings of both metrics, which
+is what makes it the migration path rather than merely a third mode.
 
 **A demonstration that cannot fail is not a demonstration**, and the original
 spelling of this gate was an instance of exactly the shape this file calls "a

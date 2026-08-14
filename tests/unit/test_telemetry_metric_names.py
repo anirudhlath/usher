@@ -117,6 +117,16 @@ _INSTRUMENT_FACTORIES = frozenset(
 _INHERITED = "http.server.duration"
 
 # `| Metric | Type | Labels | Emitted |`, and the header that anchors it.
+#
+# ⚠️ **This table has a second reader**, and the two are deliberately not
+# merged: `tests/unit/test_telemetry_search.py:_ROW` parses the same rows with
+# its own regex, capturing the *type* and *milestone* columns to assert M6's
+# "documented as a histogram, not a counter" claim, while this one captures
+# only the name for the 34-vs-35 census. Merging them would collapse two
+# different questions into one and destroy the independence — measured, in M10
+# O4's sweep: deleting one catalogue row kills a case in *both* files, and that
+# second cover is only visible to a sweep run over the whole of `tests/unit`.
+# Change the table's shape and both regexes need checking.
 _TABLE_HEADER = "| Metric |"
 _ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|")
 

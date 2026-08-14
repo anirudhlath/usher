@@ -193,10 +193,17 @@ hazard this document already warns about for `provider` below.
 instrumentation 0.65b0: `OTEL_SEMCONV_STABILITY_OPT_IN=http` *replaces* this
 metric with `http.server.request.duration`, unit `s` not `ms`, `http.route`
 not `http.target` — the old name is gone rather than renamed, so a panel on it
-empties silently. It cannot be set from `.env`, `.env.example` or
-`compose.yml` without failing a test or every entry point; only the launching
-process's own environment does. **An unrouted path carries no `http.target` at
-all**, so `group by (http.target)` drops those 404s.
+empties silently. **It renames a second metric the same way, and that one is
+easy to miss because nothing in this table's duration row mentions it**:
+`http.server.response.size` becomes `http.server.response.body.size` (both
+`By`). Two panels empty silently under one variable, not one — re-measured
+2026-08-14 in M10 O4's three-child probe, which is also where the third mode
+was confirmed: under `http/dup` **both** spellings of **both** metrics are
+emitted, which is what makes it the migration path. It cannot be set from
+`.env`, `.env.example` or `compose.yml` without failing a test or every entry
+point; only the launching process's own environment does. **An unrouted path
+carries no `http.target` at all**, so `group by (http.target)` drops those
+404s.
 
 **`mode`'s vocabulary is `full_text` / `semantic` / `fused`** — `SearchMode`'s
 own values, lower-case, and written down here because a label whose vocabulary
