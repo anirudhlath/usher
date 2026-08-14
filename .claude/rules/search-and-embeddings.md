@@ -1237,12 +1237,20 @@ and rewrites. What it bought, on the shipped `nearest_for`:
 | EXTERNAL, as `m09e` left it | 594.7 |
 | PLAIN | **95.7** |
 
-**6.2× on the component. 4.4× on the job**, and the difference between those two
-numbers is the part worth carrying: the whole `rebuild` walk went **561 →
-128 ms/seed** (20.4 h → 4.7 h), because with the scan fixed the *other* per-seed
-work — the genome pairs, the tag reads, the blend, the write — is what is left.
-**Quote 4.4× for the rebuild and 6.2× for the query; a component speedup is not
-a job speedup and this one differs by 40%.**
+**6.2× on the component and 6.1× on the whole job, measured on the completed
+walk.** `usher similar --rebuild` ran 2026-08-13 18:31:26Z → 21:51:07Z:
+**130,720 seeds, 3,268,000 rows, 11,981 s — 3.33 h at 91.7 ms/seed**, against
+561 ms/seed before the revision.
+
+⚠️ **This entry said "4.4× on the job" for the first three hours of that run and
+that number was an artefact of when it was taken.** It came from the first 128
+seconds — 1,000 seeds at 128 ms/seed — and was written up with a conclusion
+attached: *"a component speedup is not a job speedup and this one differs by
+40%."* The completed walk refutes it. Steady state is 91.7 ms/seed, the job
+speedup equals the component speedup to within 2%, and the per-seed work the
+scan was supposedly hiding is ~4 ms rather than ~32. **A rate taken from the
+first two minutes of a three-hour job is a measurement of its start-up**, and
+the reasoning built on top of it was the confident part.
 
 Two more things fell out of it.
 
@@ -1260,6 +1268,32 @@ out-of-line storage outright, so a value that will not fit in an 8 kB page makes
 the *insert fail* rather than spill. That caps `EMBEDDING_DIMENSIONS` at roughly
 **4,000 lanes**. Recorded on the constant. A wider model needs `MAIN`, which was
 **not measured**.
+
+### What the rebuilt neighbours actually look like, and the one title that fails both lanes
+
+Spot-checked on the completed table, 25 neighbours per title over all 130,720:
+
+| seed | its first five neighbours |
+|---|---|
+| The Matrix | Robot Apocalypse, Matrix Resurrections, Matrix Revolutions, Matrix Reloaded, The Code Conspiracy |
+| WALL·E | The Clockwork Girl, My Robot Friend, A.R.C.H.I.E., Eve of Destruction, Wired to Kill |
+| **Groundhog Day** | **Return to Yesterday, Snowy with a Chance of Christmas, Moving Day, Derby Day, Homesdale** |
+
+Two of three are good — sequels plus genuine thematic matches, and every one of
+WALL·E's five is a robot film. **The third is the same title that collapsed from
+64th to 416th on its plot query, and the mechanism is the same one.** Its raw
+embedding nearest neighbours, blend excluded, are *Perfect Day*, *Day of the
+Outlaw*, *The Last Day of Summer*, *Gideon's Day*, *Martin's Day* — **seven of
+eight carry "Day" in the title**. So this is not the blend and not
+`title_neighbors`; it is the composed document's name segment dominating, on a
+title whose name is two common words.
+
+**State it narrowly, because the first reading of that one row was "the
+neighbours are bad" and two more seeds refuted it.** The similarity lane is
+good in general and degrades for titles whose names are ordinary vocabulary —
+which is a *selection* effect on which titles are affected, not a defect in all
+of them. It is the same finding as the credits ablation from the other
+direction: what dominates one of these documents is not its plot.
 
 ⚠️ **A rate measured over a window is wrong when the writes are batched, and
 this one produced 2.78, 8.33 and 21.85 seeds/s for the same run.**
