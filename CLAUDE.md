@@ -28,7 +28,7 @@ read before trusting the playback and write-back paths end to end:
 | **M8** | LLM curation end to end — `OpenAICompatibleClient` (litellm declined), `curated_rows` + `llm_calls`, the candidate pool, `CurationService` and its validator, `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate`, `usher curate`, the genome tag vocabulary, query expansion | a local vLLM serving `gemma-4-26b-a4b` over a real 1,271,138-title catalog |
 | **M9** | the whole HTTP surface — PRD 07's Screens, Resources, Actions, Admin and Meta tables behind one RFC 9457 envelope over a closed seven-member `code` vocabulary; keyset cursors; search, the two-tier suggest, browse, similarity, the series hierarchy; the image proxy (`images` + `GET /images/{id}`) and artwork on `RowCard`; `POST /titles|episodes/{id}/play` with the playback ticket and outbound watch write-back; the admin completion (sync, unmatched, bootstrap status + trigger, row-provider toggles, `bootstrap.progress`); `search_queries` whole; `GET /meta/attribution`. **Track 2:** `append_to_response=season/N`, the IMDb akas and credit-names bulk expansion, the priority-tier TMDb crawl | the **live TMDb v3 API** (S3: 130,334 requests over 1.98 h, 130,647 titles enriched; T2/T3 against the real IMDb dumps) **and a real Emby 4.9.5.0** — H4/H5 ran 2026-08-12 in 23 bounded requests with no walk: `/play` → ticket → `302` → a real **206** with `video/x-matroska` bytes, the play body leaking nothing with its positive control fired first, and the watch write-back read back *from Emby* and restored **byte-for-byte**. ⚠️ They ran **after** the milestone closed, because M9 recorded "no Emby credentials on this host" having checked `~/code/usher/.env` and nowhere else |
 
-**Post-M9 follow-up work is on branches off `main` and changes things the table
+**Post-M9 follow-up work is merged into `main` and changes things the table
 above describes.** The one to know about before touching search: **the embedding
 subsystem has a second runtime and a wider column since 2026-08-13.**
 `USHER_EMBEDDING_MODEL` now carries a runtime prefix that selects between
@@ -44,6 +44,15 @@ within one width**, and the service-free default is now
 [ADR-0038](docs/prd/decisions/0038-the-embedding-width-is-deployment-wide-ddl.md).
 Nothing restores the deleted rows on its own: `usher index --backfill`, then
 `usher work`, then `usher similar --rebuild`.
+
+**`m09f` is the one to read before changing a vector column's width again**,
+and it is the more surprising of the two. 1024 lanes is 2,052 bytes against
+`TOAST_TUPLE_THRESHOLD`'s 2,032, so `m09e` did not make vectors 2.67× dearer to
+scan — it pushed every one of them out of the heap into TOAST, and an exact
+scan went **36.5 → 594.7 ms/seed**. Every `halfvec` column now stores `PLAIN`
+(`title_embeddings`, `user_taste`, and `genome_scores`, which had been TOASTed
+since `ffa`), which brings that back to **95.7** and caps
+`EMBEDDING_DIMENSIONS` at ~4,000 lanes, because `PLAIN` cannot spill.
 
 Task breakdowns are in `docs/plans/`, one file per milestone.
 [PRD 09](docs/prd/09-roadmap.md) is what's next. **Do not invent commands for

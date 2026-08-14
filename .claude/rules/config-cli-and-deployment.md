@@ -28,25 +28,44 @@ future validator that interpolates it cannot quietly reopen this.
 **`--traceback` deliberately does not reopen it**: a settings failure's stack is
 six pydantic frames that diagnose nothing, so re-raising would add only the
 credential.
-🔴 **And `alembic` is a second entry point that bypasses the scrub entirely —
-found 2026-08-13, not fixed.** `usher.db.migrations.env` calls `get_settings()`
-directly, with no boundary of its own, so `uv run alembic upgrade head` with
-`USHER_DATABASE_URL` absent prints pydantic's raw `ValidationError` — including
-`input_value={…}` with a truncated `secret_key` in it. Reproduced by running it.
-The defect is the same one `cli._settings_problem` was written for, in the one
-command the README and `CLAUDE.md` both tell an operator to run *before* the
-CLI works, on a host where the settings are most likely to be wrong. **Two
-things make it worse than the original rather than a smaller copy of it.** The
-CLI's version leaked on a *rejected* value; this one leaks every field
-pydantic echoes on any validation failure, so a missing `USHER_DATABASE_URL`
-exposes `USHER_SECRET_KEY`. And this is not an interactive command only: the
-image's `CMD` is `sh -c "alembic upgrade head && exec python -m usher"`, so on
-a misconfigured container the **first thing in the log** is a pydantic
-traceback echoing the settings it was handed. The fix is a boundary in `env.py`
-that renders `loc` + `msg` the way
-`cli._settings_problem` does — the shape exists and is one import away, and the
-reason it is recorded rather than applied is that it was found while doing
-something else and a settings boundary deserves its own case.
+✅ **And `alembic` was a second entry point that bypassed the scrub entirely —
+found 2026-08-13, fixed the same day.** `usher.db.migrations.env` called
+`get_settings()` with no boundary of its own, so `uv run alembic upgrade head`
+with a bad `USHER_DATABASE_URL` printed pydantic's raw `ValidationError` —
+`input_value={…}`, a truncated `secret_key` in it, under a full traceback.
+Reproduced by running it.
+
+**Two things made it worse than the original rather than a smaller copy.** The
+CLI's version leaked a *rejected* value; this leaked every field pydantic
+echoes, so a wrong DSN exposed `USHER_SECRET_KEY` — the setting the operator
+did **not** get wrong. And the image's `CMD` is
+`alembic upgrade head && exec python -m usher`, so on a misconfigured container
+that traceback is the **first thing in the log**, emitted before the
+application whose boundary would have caught it ever starts.
+
+**The repair could not be a call into `cli._settings_problem`**: an
+import-linter contract forbids anything importing `usher.cli`, which is what
+had kept the control stranded at one of the two entry points that needed it.
+The rendering moved to `usher.config.settings_rejection` — one definition, the
+`db/repositories/_errors.py` collapse again — and `env.py`'s `_database_url`
+raises `SystemExit(settings_rejection(exc, entry_point="alembic"))` from it.
+`from None` and not `from exc`, because chaining re-prints the original under a
+*"direct cause"* header and puts back the whole thing being removed;
+`SystemExit` and not a `print` so the `&&` in that `CMD` still stops.
+
+**Pinned by a subprocess, which is the only spelling that tests what the
+container runs.** `env.py` touches `alembic.context` at import and cannot be
+imported by a unit test, so the rest of its file is structural; this case runs
+`python -m alembic upgrade head` with `USHER_DATABASE_URL` set to a
+wrong-driver DSN carrying a canary password. **The environment variable is
+load-bearing rather than convenient**: a developer checkout has a real `.env`
+supplying a valid DSN, so a case that merely *unset* the variable would pass
+locally for the wrong reason and only ever fail in CI. Three absences (the
+password, `input_value`, `Traceback`) and one presence (`database_url`, so the
+assertions are not satisfied by a command that printed nothing) plus the
+non-zero exit. Planted and watched to fail before it was believed: with the
+`except` removed the case reports `'hunter2xyzzy' is contained here:
+l://admin:hunter2xyzzy@db:5432/usher', input_type=str]`.
 **A refused Postgres connection reaches the CLI as a bare `ConnectionRefusedError`,
 not as a SQLAlchemy error.** asyncpg lets the `OSError` out unwrapped during
 connect, so `except SQLAlchemyError` — the obvious spelling for a database error
