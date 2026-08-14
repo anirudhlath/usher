@@ -269,11 +269,52 @@ class Settings(BaseSettings):
     # `title_embeddings.model_name`, so changing it invalidates every stored
     # vector through the stale predicate -- which is the fingerprint scheme
     # doing the work a migration would otherwise have to.
-    embedding_model: str = Field(default="fastembed:BAAI/bge-small-en-v1.5", min_length=1)
+    #
+    # **Two runtimes since `m09e`, and the prefix is what picks one.**
+    # `fastembed:<checkpoint>` loads the model in-process; `openai:<checkpoint>`
+    # calls `POST {embedding_base_url}/embeddings` on an OpenAI-compatible
+    # server. `composition._load_embedder` dispatches on it, and an unknown
+    # prefix is an error rather than a silent fallback -- a typo that fell back
+    # would embed 1.27M titles with the wrong model and record the right name.
+    #
+    # **The default moved off `bge-small-en-v1.5`, and not because anything is
+    # wrong with it.** `m09e` widened the column to 1024 for `BAAI/bge-m3`, and
+    # `EMBEDDING_DIMENSIONS` is deployment-wide rather than per-model, so a
+    # 384-wide checkpoint can no longer be stored at all. Of the 1024-wide
+    # models `fastembed` 0.8.0 actually ships -- enumerated, not assumed --
+    # `BAAI/bge-large-en-v1.5` is the only well-measured English one, so it is
+    # what a deployment with no inference server gets. It is **1.2 GB against
+    # bge-small's 0.07**, which is a real regression in the service-free
+    # install and is the price of the width, paid here rather than hidden.
+    #
+    # **`fastembed` cannot serve `bge-m3` at all**, which is why the second
+    # runtime exists rather than being a preference: enumerating
+    # `TextEmbedding`, `SparseTextEmbedding`, `LateInteractionTextEmbedding`,
+    # `ImageEmbedding` and `LateInteractionMultimodalEmbedding` on
+    # `fastembed` 0.8.0 returns no `bge-m3` in any of the five (2026-08-13).
+    embedding_model: str = Field(default="fastembed:BAAI/bge-large-en-v1.5", min_length=1)
     # Measured on CPU: best throughput at 16, flat from 16 to 64, degrading
     # at 128. `le=512` because the ceiling here is memory, and the cost of
     # being wrong is an OOM inside a worker pass rather than a slow one.
     embedding_batch_size: int = Field(default=16, ge=1, le=512)
+    # Read only by the `openai:` runtime, and deliberately **not** reusing
+    # `llm_base_url`. They are one endpoint on many hosted providers and two
+    # processes here -- vLLM serves one model per process, so this deployment
+    # runs `gemma-4-26b-a4b` on :8000 and `bge-m3` on :8001. Collapsing them
+    # would make "point the embedder somewhere else" impossible without moving
+    # curation too.
+    embedding_base_url: str = Field(default="http://localhost:8001/v1", min_length=1)
+    # `SecretStr` per CLAUDE.md, and empty by default because the common case
+    # is a local server that wants no key. Empty means no `Authorization`
+    # header at all rather than an empty bearer token: a server that ignores
+    # the header and one that rejects a blank one are both served correctly by
+    # omitting it, and only one of them by sending it.
+    embedding_api_key: SecretStr = SecretStr("")
+    # A whole batch, not a token. `embedding_batch_size` texts of up to 512
+    # tokens each is one request, and a cold model behind a proxy can take
+    # seconds to answer the first. Bounded above because an embedder that
+    # hangs holds a worker slot, and `JobWorker` has no timeout of its own.
+    embedding_timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     # Sets `HF_HUB_OFFLINE` before the model library is imported, and it is
     # not a hardening flag. Measured: with a warm cache, no network and the
     # variable unset, the load *fails* with `RuntimeError: Cannot send a

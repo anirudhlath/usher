@@ -338,7 +338,20 @@ obvious hoist. Measured over a full 200-candidate pool at 384 dimensions
 (medians of 30 runs): **5.97 ms → 4.29 ms**, i.e. 1.7 ms once per household in
 a nightly job, bought with a third parameter that can disagree with the first.
 Declined, with the number written into `_cosine`'s docstring so the next reader
-does not re-derive it. **A performance finding with no measurement behind it is
+does not re-derive it.
+
+**And the number moved, which is the half worth carrying.** `m09e` widened the
+stored vector from 384 lanes to 1024, so every figure above describes a vector
+this project no longer holds. Re-measured 2026-08-13, same host, same shape:
+the whole call is **6.14 ms at 384 and 16.10 ms at 1024**, and the redundant
+work alone — 200 recomputations of the centroid's norm, exactly what the hoist
+removes — is **1.69 ms at 384 and 4.44 ms at 1024**. The 384 arm reproducing
+the original to 0.01 ms is the control that makes the 1024 arm comparable
+rather than merely newer. The decline stands and its margin is **2.6× smaller**.
+**The general form: a declined optimisation is a decision resting on a
+measurement, so a change that moves the measurement's inputs re-opens it — and
+nothing in a repository links the two. When a constant a benchmark was taken at
+moves, grep for benchmarks taken at it.** **A performance finding with no measurement behind it is
 a design change with no argument behind it**, and the cheap move is to measure
 it once and record the result in the place that invites the question.
 

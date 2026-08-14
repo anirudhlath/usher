@@ -9,4 +9,4 @@ def test_code_head_revision_matches_the_head_migration_on_disk() -> None:
     fails loudly here instead of silently changing what "the" expected head
     means.
     """
-    assert code_head_revision() == "m09d"
+    assert code_head_revision() == "m09f"

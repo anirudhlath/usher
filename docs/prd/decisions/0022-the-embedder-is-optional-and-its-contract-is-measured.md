@@ -2,6 +2,11 @@
 
 **Status:** Accepted. Implemented in M6 — settles a provisional marker in
 [PRD 05](../05-search-and-similarity.md) and corrects two of its statements.
+⚠️ **Narrowed 2026-08-13 by
+[ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md) in two places
+marked below**: `fastembed` is no longer the only runtime, and this ADR's
+closing *"with no migration to write"* holds only for a swap at one width.
+Everything measured here stands.
 **Date:** 2026-08-02
 
 ## Context
@@ -39,6 +44,17 @@ packages, **167 MiB installed** (29× smaller), **1.2 s** cold install, **no
 torch**, a 65 MB model artefact, **252.9 texts/s against 229.5** on identical
 input (+10%), peak RSS 1,067 MiB against 1,381 MiB. The checkpoint is
 unchanged (`BAAI/bge-small-en-v1.5`); only the runtime moved.
+
+⚠️ **`fastembed` stopped being the only runtime on 2026-08-13, and the reason
+is a gap in its catalogue rather than a reversal of anything above.** It does
+not ship `BAAI/bge-m3` in any of its five model classes, so
+`OpenAICompatEmbedder` was added beside `FastEmbedEmbedder` — a second
+implementation selected by a prefix, not a replacement. Every number in this
+part is still the reason `sentence-transformers` is not a dependency, and it is
+still what a deployment with no inference server runs. The shipped checkpoint,
+however, **has** moved: `BAAI/bge-large-en-v1.5`, at 1.2 GB against
+bge-small's 0.07, because the storage width is deployment-wide.
+[ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md).
 
 **And the dependency is behind an extra.** `uv sync --extra embedding`
 installs it; `USHER_EMBEDDING_ENABLED` is **off by default**;
@@ -146,6 +162,16 @@ than in a comment.**
    [ADR-0020](0020-derived-state-carries-its-fingerprint.md)'s stale
    predicate automatically, with no migration to write.
 
+   ⚠️ **"With no migration to write" is true at one width and stops there** —
+   narrowed 2026-08-13, and this is the sentence
+   [ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md) exists to
+   correct. `EMBEDDING_DIMENSIONS` is `halfvec`'s typmod and a typmod is DDL,
+   so a swap that changes the vector's width needs a migration after all;
+   `m09e` is the first, 384 → 1024 for `BAAI/bge-m3`, and it deletes every
+   stored vector because there is no honest conversion. Within a width the
+   mechanism is exactly as described above and has been exercised. Across
+   widths there was never a claim here — only the absence of a counterexample.
+
 **Also — offline behaviour is a trap, and it is configured rather than
 assumed.** A warm cache is **not** sufficient. With the cache populated, no
 network, and `HF_HUB_OFFLINE` unset, the load **fails** with
@@ -168,7 +194,11 @@ blobs.
 image.** It triples the image for a capability the "catalog lookup" tier does
 not need, and it makes a first `docker compose up` depend on a 65 MB
 third-party artefact download for a search box that would have worked without
-it.
+it. ⚠️ **The arithmetic moved against this option rather than for it**: the
+shipped default is now `BAAI/bge-large-en-v1.5` at 1.2 GB
+([ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md)), so "triples
+the image" understates it by an order of magnitude and the rejection is
+stronger than when it was written.
 
 ## Evidence
 
@@ -228,3 +258,14 @@ test asserting semantic relevance against it is a defect in the test. The
 only relevance evidence M6 has is
 [ADR-0002](0002-postgres-first-search.md)'s gate on the *trigram* path, which
 measures a different lane.
+
+⚠️ **It has been measured since, and it is the reason the checkpoint moved.**
+Over this catalog with this ADR's own `fastembed:BAAI/bge-small-en-v1.5`, a
+plot-description query lands the correct title in the top **0.05–0.3%** and
+usually **outside the top 20**, while a query naming a title's subject matter
+lands it 1st or 4th. The figures and the caveats are in
+[PRD 05](../05-search-and-similarity.md)'s `### Semantic` and in
+[ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md)'s *Uncertainty*.
+This paragraph's warning stands for the *suite*: nothing automated distinguishes
+a working semantic lane from a broken one, and that observation was made by
+hand.

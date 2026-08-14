@@ -67,6 +67,8 @@ from usher.adapters.bulk.imdb import (
 from usher.adapters.bulk.movielens import GENOME_BATCH_SIZE, MovieLensGenomeDataset
 from usher.adapters.bulk.tmdb_ids import TMDbIdDataset
 from usher.adapters.bulk.wikidata import WikidataCrosswalkDataset
+from usher.adapters.embedding.fastembed import RUNTIME as FASTEMBED_RUNTIME
+from usher.adapters.embedding.openai_compat import RUNTIME as OPENAI_RUNTIME
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
 from usher.adapters.images import DiskImageBlobStore, ProviderCdnImageFetcher
 from usher.adapters.llm import OpenAICompatibleClient
@@ -74,6 +76,7 @@ from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestI
 from usher.adapters.search.prefix import PostgresPrefixSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
 from usher.config import Settings
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
@@ -1260,6 +1263,33 @@ async def embedder(
                 "embedding model unavailable; index jobs will not be claimed: {e}", e=exc
             )
         return None, nothing
+    if built.dimension != EMBEDDING_DIMENSIONS:
+        # **The check `db/models/search.py` says nothing can make structural.**
+        # It is right that nothing makes it structural -- this is a runtime
+        # comparison of two numbers, and a `halfvec` typmod is not something
+        # the type system can reach. What it buys is *where* the mismatch is
+        # reported: without it, a deployment configured with a 384-wide
+        # checkpoint against `m09e`'s 1024-wide column discovers the problem
+        # one failed `index` job at a time, in a worker log, with the width
+        # named by neither side -- asyncpg's error is about a vector.
+        #
+        # **Narrowed rather than fatal, matching the branch above.** A wrong
+        # width is a misconfiguration and not an absent capability, which
+        # argues for a raise; the deciding fact is that the *consequence* is
+        # identical -- no model, index jobs unclaimed, nine of ten row
+        # providers and the whole catalog-lookup tier unaffected. Refusing to
+        # boot would take a working deployment down over a setting only the
+        # index lane reads.
+        await built.aclose()
+        if report:
+            logger.warning(
+                "embedding model {m} is {got} wide and this schema stores "
+                "{want}; index jobs will not be claimed",
+                m=built.model_name,
+                got=built.dimension,
+                want=EMBEDDING_DIMENSIONS,
+            )
+        return None, nothing
     return built, built.aclose
 
 
@@ -1396,14 +1426,68 @@ def build_image_proxy_service(
 
 
 def _load_embedder(settings: Settings) -> Embedder:
-    """The one line that touches `fastembed`, isolated so a test can replace it.
+    """The one place a runtime prefix becomes an `Embedder`, isolated so a test
+    can replace it.
 
     Absolute import, so the sibling-named module
     `usher.adapters.embedding.fastembed` does not shadow the third-party
     `fastembed` -- Python 3 absolute imports make that correct, and the
     adapter's own docstring records that it was *verified* rather than
     assumed.
+
+    **Both class imports stay local, and as of `m09e` that buys less than it
+    reads as buying.** The reason on record is `embedder`'s -- this module is
+    imported by every entry point including `usher bootstrap-status`, and
+    `fastembed` lives behind an extra. But the dispatch below needs each
+    runtime's `RUNTIME` string, and those are imported at module scope, so
+    both adapter *modules* are already loaded by the time anything calls this.
+    Measured 2026-08-13: importing `usher.adapters.embedding.fastembed` pulls
+    in **none** of `fastembed`, `huggingface_hub`, `onnxruntime`, `torch` or
+    `tokenizers` -- the third-party import is inside `FastEmbedEmbedder.
+    __init__`, which is what the deferral was really protecting and what still
+    protects it. So these two lines are now a convention rather than a saving,
+    and the `HF_HUB_OFFLINE`-before-import ordering `embedder` documents is
+    untouched: nothing reads that variable until a model is constructed.
+
+    **Two runtimes since `m09e`, and an unknown prefix raises.** The
+    alternative -- fall back to `fastembed` -- is the worst available
+    behaviour: `USHER_EMBEDDING_MODEL=openia:BAAI/bge-m3` would embed the
+    catalog with whatever `fastembed` made of the string and write
+    `openia:BAAI/bge-m3` into `title_embeddings.model_name`, so the
+    fingerprint would record a model that never ran and the stale predicate
+    would report the deployment as current. A typo has to be loud here
+    precisely *because* the fingerprint is trusted everywhere else.
+
+    A bare checkpoint with no recognised prefix is **not** an unknown runtime
+    -- it is `fastembed`, matching `checkpoint_of`'s own leniency in both
+    adapters, so an operator who wrote `BAAI/bge-large-en-v1.5` gets the model
+    rather than a startup failure.
     """
+    runtime, separator, _ = settings.embedding_model.partition(":")
+    if separator and runtime == OPENAI_RUNTIME:
+        from usher.adapters.embedding.openai_compat import OpenAICompatEmbedder
+
+        key = settings.embedding_api_key.get_secret_value()
+        return OpenAICompatEmbedder(
+            settings.embedding_model,
+            base_url=settings.embedding_base_url,
+            # Unwrapped at the point of use and handed straight over, never
+            # into a local that outlives the call -- CLAUDE.md's SecretStr
+            # rule. Empty means "send no Authorization header", which is the
+            # local-server case, so it is normalised to `None` here rather
+            # than inside the adapter: the adapter should not have to know
+            # that this project spells "absent" as an empty `SecretStr`.
+            api_key=key or None,
+            dimension=EMBEDDING_DIMENSIONS,
+            batch_size=settings.embedding_batch_size,
+            timeout=settings.embedding_timeout_seconds,
+        )
+    if separator and runtime != FASTEMBED_RUNTIME:
+        raise ValueError(
+            f"unknown embedding runtime {runtime!r}; "
+            f"expected {FASTEMBED_RUNTIME!r} or {OPENAI_RUNTIME!r}"
+        )
+
     from usher.adapters.embedding.fastembed import FastEmbedEmbedder
 
     return FastEmbedEmbedder(settings.embedding_model, batch_size=settings.embedding_batch_size)

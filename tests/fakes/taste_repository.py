@@ -142,7 +142,7 @@ def stored_taste(
     user_id: uuid.UUID,
     *,
     centroid: tuple[float, ...] | None = None,
-    model_name: str = "fake:test-384",
+    model_name: str = "fake:test-embedding",
     source_watermark: AwareDatetime | None = None,
     title_count: int = 0,
     computed_at: AwareDatetime | None = None,

@@ -73,7 +73,36 @@ SEARCH_NAME_MAX_CHARS = 512
 #: a model swap that silently changes width writes vectors this column
 #: rejects, which is the loud failure, or (worse) a model that keeps the
 #: width and changes the space, which only `model_name` catches.
-EMBEDDING_DIMENSIONS = 384
+#:
+#: **384 -> 1024 in `m09e`, and the interesting part is what it cost.** The
+#: `model_name` fingerprint was designed so that a model swap needs no
+#: migration: change the string, every stored vector goes stale, the backfill
+#: re-claims it. That holds for any swap **at one width** and stops holding at
+#: the first swap that changes the width, because this number is `halfvec`'s
+#: typmod and a typmod is DDL. So the fingerprint scheme's reach is exactly
+#: "the same-width swap", which is a narrower promise than the one
+#: `Embedder.model_name`'s docstring made until this revision.
+#:
+#: **And it is a deployment-wide constant, not a per-model one**, which is the
+#: consequence that actually bites: with the column at 1024 the shipped
+#: service-free default cannot be `fastembed:BAAI/bge-small-en-v1.5` any more
+#: -- 384 wide, and every write would be refused. `config.py`'s
+#: `embedding_model` carries the replacement and the reasoning.
+#:
+#: **There is now a ceiling on this number and it is ~4,000 lanes, from
+#: `m09f`.** A `halfvec` is `8 + 2 * dim` bytes and that revision moved every
+#: vector column to `PLAIN` storage, which forbids out-of-line storage
+#: outright -- so a value that does not fit in an 8 kB page makes the *insert
+#: fail* rather than spill to TOAST. At 1024 lanes a row is ~2,082 bytes and
+#: three fit a page; at ~4,000 one barely does.
+#:
+#: That ceiling is deliberately preferred to the alternative, because
+#: `m09f` measured what the alternative costs: at 1024 lanes the value crosses
+#: `TOAST_TUPLE_THRESHOLD` (2,032 bytes), and with the vectors out-of-line an
+#: exact-scan neighbour walk runs at **598 ms/seed against 110** -- 5.4x, on
+#: top of the 2.67x the width itself costs. A model wider than ~4,000 needs
+#: `MAIN` rather than `PLAIN` and should re-measure both.
+EMBEDDING_DIMENSIONS = 1024
 
 
 class TitleEmbeddingRow(Base):

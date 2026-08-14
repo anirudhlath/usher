@@ -8,10 +8,17 @@ check on the code. It exists for *plumbing*: order, dimension,
 normalisation, determinism, and the fingerprinting the backfill drains on.
 Relevance is asserted only where a real model runs.
 
-**Its non-vacuity is measured, not assumed.** Over 15,996,000 off-diagonal
-pairs: cosine mean -0.00001, **sd 0.05102 against a theoretical
-1/sqrt(384) = 0.05103** (ratio 1.000), max +0.2549, and **zero pairs above
-0.5**. Near-identical inputs stay orthogonal -- "The Quiet Vacuum" against
+**Its non-vacuity is measured, not assumed -- at 384, which is no longer the
+default.** Over 15,996,000 off-diagonal pairs at `dimension=384`: cosine mean
+-0.00001, **sd 0.05102 against a theoretical 1/sqrt(384) = 0.05103** (ratio
+1.000), max +0.2549, and **zero pairs above 0.5**. `m09e` moved the default to
+`EMBEDDING_DIMENSIONS` (1024) and **that run was not repeated**, so read the
+numbers as a property of the construction rather than of today's default: the
+mechanism is dimension-independent and a wider vector can only concentrate the
+off-diagonal distribution further (theoretical sd 1/sqrt(1024) = 0.03125), so
+the measured claim is conservative at the new width rather than unverified in
+the direction that would matter. Re-run it before quoting a number.
+Near-identical inputs stay orthogonal -- "The Quiet Vacuum" against
 the same string with a trailing space is -0.033. Norm error 1.11e-16. A
 hashing-trick TF-IDF fake was built and **rejected on this evidence**: its
 off-diagonal cosine floor is **+0.723** and it collapses case and
@@ -42,9 +49,20 @@ import hashlib
 import math
 from collections.abc import Sequence
 
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.ports.embedding import Embedder
 
-_DIMENSION = 384
+#: **Tracks the column rather than restating it, since `m09e`.** This was a
+#: literal `384` while the storage width was also a literal 384, and the two
+#: agreed for as long as neither moved. `composition.embedder` now narrows a
+#: deployment whose embedder is the wrong width -- so a fake left at 384 does
+#: not merely store badly, it makes every case that builds a real `embedder()`
+#: get `None` back and assert against a deployment with no model. That is how
+#: this line was found: two unit cases, both about `HF_HUB_OFFLINE`.
+#:
+#: A test that wants a *mismatched* width still passes `dimension=` explicitly,
+#: which is the affordance the constructor already had.
+_DIMENSION = EMBEDDING_DIMENSIONS
 _DIGEST_BYTES = 64
 _WORDS_PER_DIGEST = _DIGEST_BYTES // 8
 

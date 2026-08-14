@@ -372,7 +372,12 @@ Agreement over 205 documents: **min cosine 0.99999619, top-1 identical
 ST↔fastembed difference (max pairwise-similarity delta **1.41e-03**) is **6×
 the halfvec quantisation error**, so the two are not interchangeable without
 a re-embed — which is why `model_name` records the runtime
-(`fastembed:BAAI/bge-small-en-v1.5`).
+(`fastembed:BAAI/bge-small-en-v1.5`). **Since 2026-08-13 the prefix is a
+dispatch key as well**: `fastembed:` and `openai:` select two different
+`Embedder` implementations, an unrecognised prefix raises at startup rather
+than falling back, and the shipped default checkpoint is
+`BAAI/bge-large-en-v1.5`. Nothing measured in this paragraph changed; see the
+`m09e` section at the end of this file.
 **Throughput is linear in *tokens*, not texts — quote the invariant, never
 the rate.** CPU holds ~8,000–10,700 tokens/s across the range: 412.7 texts/s
 at 19 tokens, 83.5 at 100, 18.7 at 516. A realistic `name + overview + genres
@@ -484,7 +489,7 @@ evidence for this choice; the measurements are. And
 `fastupdate = off`'s real argument is the read side: a 1.6 MB pending list
 cost **231 buffers against 30, 7.7× read amplification**, invisible in
 `EXPLAIN` unless you look at buffers.
-**`halfvec(384)` is correct and effectively free, and numpy `float16` is
+**`halfvec` is correct and effectively free, and numpy `float16` is
 not.** Round-trip error over 1,000 vectors: max cosine error **1.21e-04**,
 mean 3.03e-05 — three orders of magnitude below the useful signal, with top-1
 and top-5 ordering identical in 42/42 queries. Storage at 1,271,138 titles:
@@ -493,10 +498,29 @@ Postgres against 0.088 ms in numpy `float32`** — PRD 05's "sub-millisecond"
 was a numpy figure — and numpy `float16` is **140× slower than `float32`**
 (12.275 ms), because there is no SIMD GEMM path for half precision. Store
 `halfvec`; convert to `float32` before any numpy dot product.
+**Every number in this paragraph was taken at `halfvec(384)`, which stopped
+being the width on 2026-08-13** (`m09e`, 1024). The *conclusions* are
+width-independent — quantisation error is per lane, and `float16`'s missing
+GEMM path is not about length — but the two **storage** figures are not: 1.83
+GiB → 0.92 GiB is a 384-lane count, and 1.820 ms was measured over 384-lane
+vectors. Re-measure before quoting either at 1024. See the `m09e` section at the
+end of this file.
 **The deterministic `FakeEmbedder` is `blake2b → Box-Muller → L2-normalise`,
-and its non-vacuity is measured.** Over 15,996,000 off-diagonal pairs: cosine
+and its non-vacuity is measured — at 384, which is no longer its width.** Over
+15,996,000 off-diagonal pairs at `dimension=384`: cosine
 mean −0.00001, **sd 0.05102 against a theoretical 1/√384 = 0.05103** (ratio
-1.000), max +0.2549, **zero pairs above 0.5**. **Use `hashlib`, never
+1.000), max +0.2549, **zero pairs above 0.5**. `m09e` moved `_DIMENSION` to
+`EMBEDDING_DIMENSIONS` (1024) and **that run was not repeated**, so read the
+numbers as a property of the construction rather than of today's default: the
+mechanism is dimension-independent and a wider vector can only concentrate the
+off-diagonal distribution further (theoretical sd 1/√1024 = 0.03125), which
+makes the measured claim conservative at the new width rather than unverified
+in the direction that would matter. **Re-run it before quoting a number.** The
+fake tracking the constant is not cosmetic: `composition.embedder` now returns
+`None` on a width mismatch, so a fake left at 384 would make every case
+building a real `embedder()` assert against a deployment with no model — which
+is how the stale literal was found, through two unit cases about
+`HF_HUB_OFFLINE`. **Use `hashlib`, never
 `hash()`** — `np.random.default_rng(abs(hash(text)))` passes *every* contract
 check and fails only across processes, because `str.__hash__` is
 `PYTHONHASHSEED`-salted, so the cross-process case must be pinned. A
@@ -905,3 +929,401 @@ container with `fsync=on` and an empty table, on an otherwise-idle host, with
 one connection and one prepared statement — so this is the steady-state cost of
 a warm path and not a first-call or a contended one, and the INSERT figure is a
 property of a table with no secondary index that a later index would move.
+
+## `bge-m3` over HTTP, the width move, and two vLLM flags that each cost a run (2026-08-13, `m09e`)
+
+The design argument is
+[ADR-0038](../../docs/prd/decisions/0038-the-embedding-width-is-deployment-wide-ddl.md);
+this is the evidence and the deployment facts, including the ones that are about
+somebody else's process and therefore have nowhere else to live.
+
+**`fastembed` does not ship `BAAI/bge-m3`, and this was enumerated rather than
+assumed.** All five model classes on fastembed 0.8.0 — `TextEmbedding`,
+`SparseTextEmbedding`, `LateInteractionTextEmbedding`, `ImageEmbedding`,
+`LateInteractionMultimodalEmbedding` — listed and searched; no `bge-m3` in any.
+That is the whole reason a second `Embedder` exists. It is not a judgement about
+in-process versus remote, and anyone re-opening the question should re-run the
+enumeration against the current fastembed before assuming it still holds.
+
+**The served model's norm is exactly 1.0.** Checked live against the reference
+endpoint, so `_NORM_TOLERANCE = 1e-4` carries the same four orders of magnitude
+of headroom here as it does for `fastembed` against the 8.99–9.46 a missing
+`Normalize` module produces. `EmbedderContract` covers this *less* well for the
+remote runtime than for the local one: the served model is the one thing about
+`OpenAICompatEmbedder` that can change while the process lives.
+
+### The serving topology — two vLLM engines on one 4090, and why the big one survives
+
+The host now runs both models at once: `cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit` at
+`--gpu-memory-utilization 0.76` on **:8000** (`USHER_LLM_BASE_URL`) and
+`BAAI/bge-m3` at **0.11** on **:8001** (`USHER_EMBEDDING_BASE_URL`). Measured
+weights **16.01
+GiB** and **2.11 GiB** against **24,564 MiB** total, with **~2,135 MiB** held by
+the desktop session.
+
+**The 26B fits beside an embedding model because of its attention shape, not
+because of slack.** It is 30 layers of which only **5 are full-attention** — the
+other 25 are sliding-window at 1024 — so one 16K-token sequence costs **435 MiB
+of KV**, not gigabytes. vLLM's own report at that utilisation: *Available KV
+cache memory* **0.77 GiB**, *GPU KV cache size* **6,688 tokens**, *Maximum
+concurrency for 16,384 tokens per request* **1.19x**. That last figure is the
+one to read before adding a third tenant: the chat engine has room for
+approximately one full-length request at a time and no more.
+
+### `--load-format pt` is a trap for this checkpoint, and it fails silently
+
+`BAAI/bge-m3` ships `pytorch_model.bin` and **no safetensors**, which looks
+exactly like a model that needs `--load-format pt`. It is not.
+`LoadFormat.PT` globs `["*.pt"]`, so on this repository it matched only
+`colbert_linear.pt` and `sparse_linear.pt` — two auxiliary heads — and loaded a
+model with **391 uninitialised weights**. The default `auto` globs
+`["*.safetensors", "*.bin"]` and is the correct setting. **Nothing raises**: the
+server starts, answers, and returns vectors off a randomly-initialised backbone,
+which is `ADR-0022` Part 3's failure family (a plausible ranking that is wrong
+everywhere) arriving through a loader flag instead of a missing module. The
+operator's vLLM compose file carries the explanation at the flag —
+`~/anirudhlath/vllm/docker/compose.yml`, **not a file in this repository; do not
+edit it**.
+
+### `--served-model-name` must be the checkpoint, and the taxonomy was right while the message was useless
+
+With `--served-model-name bge-m3`, **every `index` job parked** on
+`PortDataMalformed: the embedding endpoint rejected the request with HTTP 404`.
+Usher sends `checkpoint_of(model_name)` — `BAAI/bge-m3` — and vLLM answers 404
+for a model it does not serve under that name. So the alias has to be the
+checkpoint, because the request body is derived from the same string the
+fingerprint stores and the two cannot be decoupled without decoupling the
+fingerprint from the model.
+
+**Two things worth separating in that outcome.** The error taxonomy behaved
+*correctly*: a non-429 4xx is permanent, retrying it cannot help, so parking
+rather than retrying is the right call and it is what happened. But
+`_ENDPOINT` is a constant precisely so no message carries a URL or a credential
+(`ports-and-error-taxonomy.md`'s rule, and `OpenAICompatibleClient`'s
+precedent), which means the message named **neither the model nor the URL** and
+the diagnosis came entirely from the server's own logs. That is the accepted
+cost of the redaction rule and not a defect — but it means **a 404 from this
+adapter is a signal to go read the inference server**, and that is worth
+knowing before spending time on the client.
+
+### `alembic upgrade head` bypasses the settings scrub
+
+Found here, recorded in `config-cli-and-deployment.md` because it is a config
+finding rather than a search one: with `USHER_DATABASE_URL` absent, alembic
+prints pydantic's raw `ValidationError` — `input_value={…}` and a truncated
+`secret_key` with it. `cli._settings_problem` exists to scrub exactly that and
+alembic's `env.py` never reaches it. **Found, not fixed.**
+
+### The live database, immediately before and after `m09e`
+
+| | before (`m09d`) | after (`m09e`) |
+|---|---|---|
+| `title_embeddings.embedding`, `user_taste.centroid` | `halfvec(384)` | `halfvec(1024)` |
+| `title_embeddings` rows | **130,673** | 0 |
+| `ix_title_embeddings_hnsw` | **146 MB** | recreated empty |
+| `title_embeddings` total relation | **278 MB** | — |
+| `title_neighbors` rows | **3,266,175** | 0 |
+
+The index is rebuilt at the **same** `m = 16, ef_construction = 64` and the same
+`WHERE embedding IS NOT NULL` predicate, so nothing about the graph's shape is a
+variable in whatever the new size turns out to be — only the lane count, which
+doubled.
+
+### The ranking baseline, and three measurements that are owed rather than unknown
+
+**What the 384-lane default actually delivered, measured over this catalog with
+`fastembed:BAAI/bge-small-en-v1.5`.** A plot-description query lands the correct
+title in the top **0.05–0.3%** and **usually outside the top 20** — *"a man
+relives the same day over and over"* ranked Groundhog Day **64th**, Shawshank
+**208th**, The Matrix **262nd**, WALL-E **338th** — while a query naming a
+title's subject matter directly ranked Jurassic Park **1st** and a Harry Potter
+query **4th**. **The percentages are of the embedded population** — the enriched
+tier, ~130k rows, not the 1.27M catalog — which is what makes them damning
+rather than impressive: read the shape rather than any single rank, **topic
+retrieval works and plot retrieval does not**, and a rank of 64 is a lane that
+is functioning and is nowhere near a five-row box. This is the first
+relevance evidence this project has for the semantic lane; ADR-0022's *"relevance
+is not measured at all"* is annotated accordingly.
+
+### The run finished, 2026-08-13, and the model is not what was wrong
+
+130,720 titles re-embedded through `openai:BAAI/bge-m3`, 0 refused, 08:15:32Z →
+10:01:27Z. The three numbers that were owed above, plus two nobody asked for and
+one that changes an operator's day.
+
+**Throughput: 105.9 minutes, 20.6 rows/s — and the GPU bought the backfill
+nothing.** S4 measured the *CPU, in-process* fastembed backfill at 23.8 rows/s
+aggregate. Moving the model onto a 4090 and reaching it over HTTP made the
+backfill **slower**, and the reason was visible the whole time: sampled
+mid-run, **GPU utilisation 6% and `usher-postgres-1` at 56% CPU**. S4 had
+already priced the per-title work — a claim, three reads, a staged `COPY`
+through a temp table, and a commit — and said the queue runs at ~15% of the
+model's own rate. It still does; the model just got faster at the part that was
+never the bottleneck. **Do not quote a GPU embedder as a backfill improvement.**
+
+**Where the GPU does pay is the query, which is the workload that has a user
+waiting.** Single-text embed against the running endpoint, 30 calls, measured
+*while the backfill was saturating it*: **p50 5.7 ms, p95 9.9 ms, max 13.2 ms**.
+For scale, `/search` was 13.9 ms end to end in M9's live demo, so a 568M
+multilingual model adds about 40% to a search and not a multiple.
+
+**Storage at 1024 lanes, against the same table at 384 the day before:**
+
+| | 384 (130,673 rows) | 1024 (130,720 rows) | ratio |
+|---|---|---|---|
+| `ix_title_embeddings_hnsw` | 146 MB | **340 MB** | 2.33× |
+| `title_embeddings` total | 278 MB | **707 MB** | 2.54× |
+
+Both below the 2.67× the lane count alone would predict, so the graph and the
+row headers amortise a little. Same `m=16, ef_construction=64`, same partial
+predicate.
+
+### Ranking: four of six improved, one collapsed, and the diagnosis is the document
+
+Same six queries as the baseline, same SQL, only the embedder moved. Ranks are
+positions in the 130,720-row embedded population.
+
+| case | 384 | 1024 | |
+|---|---|---|---|
+| WALL-E | 338 | **20** | +318 |
+| The Matrix | 262 | **50** | +212 |
+| Shawshank | 208 | **187** | +21 |
+| Jurassic Park | 1 | **1** | held |
+| Potter | 4 | **3** | +1 |
+| Groundhog Day | 64 | **416** | **−352** |
+
+⚠️ **Six queries is not a relevance measurement and this table must not be
+quoted as one.** It is a before/after on a fixed case set that was written
+before `bge-m3` was under consideration — so it is at least not selected to
+flatter the new model — and that is the whole of its authority. It is the same
+thinness the query-expansion run above carries, and the same rule applies.
+
+🔴 **The Groundhog Day collapse was chased and it is not a model defect. The
+composed document is.** Its top 10 under the new model is noise (`Bad (2025)`,
+`There is a Monster (2024)`, `The Old Barber (2006)`) in a band of 0.54–0.58
+while the right answer sits at 0.4778. Then, embedding the *segments* rather
+than the document:
+
+| what was embedded | cosine |
+|---|---|
+| the shipped composed document | **0.4779** ← reproduces the stored vector to 1e-4 |
+| its overview alone | **0.5936** ← would rank **1st** |
+| name + overview | 0.5825 |
+
+The composer's own fingerprint (`546e12c2161166b2f04a707aefbbecfa`) was
+reproduced before any of this was believed, so the 0.4779 is the shipped path
+and not a reconstruction of it.
+
+**And the segment responsible is `credits`, on every case, without exception.**
+Re-composing each gold title with `credits=()` and changing nothing else:
+
+| case | shipped | no credits | delta |
+|---|---|---|---|
+| Potter | 0.5360 | 0.6302 | **+0.094** |
+| Groundhog Day | 0.4779 | 0.5498 | **+0.072** |
+| The Matrix | 0.5238 | 0.5839 | +0.060 |
+| WALL-E | 0.5187 | 0.5762 | +0.058 |
+| Shawshank | 0.4799 | 0.5284 | +0.049 |
+| Jurassic Park | 0.5935 | 0.6161 | +0.023 |
+
+**6 of 6, and that consistency is worth more than the six-query rank table
+above** — a mixed result across cases is a draw, a unanimous one across the
+same cases is a direction. Twelve actor names, third of seven segments and
+sitting *between* the title and the plot summary, are dead weight for a plot
+query and drag the whole vector toward a region full of thin, generic titles.
+
+**The limit of that table, stated because it is easy to over-read:** only the
+*gold* title was re-composed, so the cosines are compared against a corpus that
+still has credits in every other document. Re-embedding all 130,720 without
+credits would lift the whole distribution, so it predicts a **direction**, not a
+rank. So the population was rebuilt and the ranks measured.
+
+### The whole tier re-embedded without credits, and the answer is "do not"
+
+`title_embeddings_nocredits`, all 130,720 rows, same model, same
+`compose_document` with `credits=()`, built and dropped the same afternoon.
+
+| case | 384, credits | 1024, credits | 1024, no credits |
+|---|---|---|---|
+| Groundhog Day | 64 | 416 | **87** |
+| Shawshank | 208 | 187 | **61** |
+| The Matrix | 262 | 50 | **46** |
+| WALL-E | 338 | 20 | **3** |
+| Jurassic Park | 1 | 1 | **1** |
+| Potter | 4 | 3 | **1** |
+
+On plot queries it is exactly what the cosine deltas predicted: five improve,
+one is already at the ceiling, none regresses. Rank sum **677 → 199**, worst
+case **416 → 87**.
+
+🔴 **And then the counter-case, which is the whole finding.** Credits are in the
+document so a person query has a semantic lane, and that was tested rather than
+assumed:
+
+| query | gold title | with credits | without |
+|---|---|---|---|
+| *"a Bill Murray comedy"* | Groundhog Day | **14** | **34,077** |
+| *"a film starring Keanu Reeves"* | The Matrix | **17** | **46,302** |
+| *"directed by Steven Spielberg"* | Jurassic Park | 4,629 | **91,419** |
+
+Three orders of magnitude. **The credits segment is load-bearing for person
+retrieval and actively harmful for plot retrieval, and no single document can be
+both.** `compose_document` is not carrying a mistake; it is carrying a
+compromise nobody had priced, and both sides of it are now priced.
+
+🔴 **The escape hatch this file proposed one paragraph earlier is refuted, by
+the measurement it asked for.** The argument was: removing credits is safe
+*because* `search_document` carries `credit_names` at weight class B (0.396), so
+the lexical lane answers person queries and RRF fuses the two. It does not.
+`websearch_to_tsquery('english', 'Bill Murray')` over the shipped
+`search_document` matches 122 titles and its top three by `ts_rank_cd` are
+**The Bill Murray Stories**, **Biography: Bill Murray** and **Saving Bill
+Murray** — documentaries *about* him, none of them films he is in. The mechanism
+is the weighting the class B measurement already records: name is **0.991** and
+`credit_names` is **0.396**, so a title with the person's name in its *title*
+outranks every film they acted in. Same shape for Keanu Reeves.
+
+**So neither lane answers "films with Bill Murray" without the credits segment
+in the embedding**, and the plausible-sounding division of labour — lexical does
+people, semantic does plots — is false in this schema. It was written into this
+file as *"an argument, not a measurement"*; it is now a measurement, and the
+argument was wrong.
+
+**What this leaves, and it is a design question rather than a fix:** the two
+retrieval modes want different documents, which is what a second vector per
+title, a query router, or an intra-document weighting exists for. None is built
+and none should be guessed at from six queries. What is settled is that
+`compose_document` stays exactly as it is until one of them is, and that the
+next person to notice plot retrieval is mediocre should read this section before
+deleting the credits line.
+
+🔴 **And one number an operator has to know before running anything:
+`usher similar --rebuild` went from 80 minutes to 21.6 hours.** The shipped
+`TitleEmbeddingRepository.nearest_for` deliberately runs under
+`_EXACT_SCAN_OFF` — `enable_indexscan = off`, `enable_bitmapscan = off` — so it
+is an exact scan of the whole table per seed and the HNSW index is not involved.
+Measured on three consecutive warm pages of 50 seeds: **592.7 / 600.4 / 594.7
+ms/seed**, median **594.7**, against S4's **36.50** at 384. That is **16.3× for a
+2.67× wider vector**, which is superlinear and is the interesting part: the
+exact scan's working set went 278 MB → 707 MB, past both `shared_buffers`
+(128 MB) and this host's 96 MB L3, so the walk stopped being arithmetic-bound and
+became memory-bound. At 130,720 seeds the full walk is **21.6 hours**.
+
+⚠️ **The first attempt at that number was wrong by 16× and the error is worth
+recording.** A hand-written `ORDER BY embedding <=> … LIMIT 200` measured
+**3.20 ms/seed** and was very nearly reported as an 11× *speedup*. It was not
+the same query: with no GUCs set, Postgres served it from the HNSW index, while
+the shipped call forces an exact scan. **A per-seed price taken from a query you
+wrote yourself is a price for a query nobody runs** — drive the repository
+method, exactly as S4 did.
+
+### And 6.1× of that 16.3× was TOAST, not the width (`m09f`, same day)
+
+The superlinearity was the tell and it had a cause. `EXPLAIN (ANALYZE, BUFFERS)`
+over ten seeds read **10,061,071 buffers against a 90,000-page table** — 11×
+amplification — because `pgvector` declares `halfvec` storage **EXTERNAL** and a
+1024-lane value is **2,052 bytes** against `TOAST_TUPLE_THRESHOLD`'s **2,032**.
+At 384 lanes a vector was 772 bytes and sat inline; at 1024 every one moved
+out-of-line. Measured on the live table: `title_embeddings` was **17 MB of heap
+pointing at 340 MB of TOAST**.
+
+**So the width did not make the vectors 2.67× more expensive to scan; it pushed
+them over a threshold and made each one a TOAST index descent plus a heap
+fetch, per row, per seed.** `m09f` sets `PLAIN` on all three `halfvec` columns
+and rewrites. What it bought, on the shipped `nearest_for`:
+
+| | ms/seed |
+|---|---|
+| EXTERNAL, as `m09e` left it | 594.7 |
+| PLAIN | **95.7** |
+
+**6.2× on the component and 6.1× on the whole job, measured on the completed
+walk.** `usher similar --rebuild` ran 2026-08-13 18:31:26Z → 21:51:07Z:
+**130,720 seeds, 3,268,000 rows, 11,981 s — 3.33 h at 91.7 ms/seed**, against
+561 ms/seed before the revision.
+
+⚠️ **This entry said "4.4× on the job" for the first three hours of that run and
+that number was an artefact of when it was taken.** It came from the first 128
+seconds — 1,000 seeds at 128 ms/seed — and was written up with a conclusion
+attached: *"a component speedup is not a job speedup and this one differs by
+40%."* The completed walk refutes it. Steady state is 91.7 ms/seed, the job
+speedup equals the component speedup to within 2%, and the per-seed work the
+scan was supposedly hiding is ~4 ms rather than ~32. **A rate taken from the
+first two minutes of a three-hour job is a measurement of its start-up**, and
+the reasoning built on top of it was the confident part.
+
+Two more things fell out of it.
+
+🔴 **`genome_scores.relevance` is `halfvec(1128)` = 2,260 bytes and has been
+TOASTed since `ffa` shipped it** — 1,544 kB of heap against **41 MB** of TOAST.
+Every genome-similarity number this project has ever taken was taken through a
+TOAST fetch. Nothing is known to be wrong with them; they were simply never
+taken any other way. `db/models/taste.py` records the value's size (*"1,128
+halfvec lanes is 2,256 bytes plus a header"*) without drawing the conclusion,
+which is how a measured fact sits next to its own consequence for two
+milestones.
+
+**And `PLAIN` introduces a ceiling that `EXTERNAL` did not have**: it forbids
+out-of-line storage outright, so a value that will not fit in an 8 kB page makes
+the *insert fail* rather than spill. That caps `EMBEDDING_DIMENSIONS` at roughly
+**4,000 lanes**. Recorded on the constant. A wider model needs `MAIN`, which was
+**not measured**.
+
+### What the rebuilt neighbours actually look like, and the one title that fails both lanes
+
+Spot-checked on the completed table, 25 neighbours per title over all 130,720:
+
+| seed | its first five neighbours |
+|---|---|
+| The Matrix | Robot Apocalypse, Matrix Resurrections, Matrix Revolutions, Matrix Reloaded, The Code Conspiracy |
+| WALL·E | The Clockwork Girl, My Robot Friend, A.R.C.H.I.E., Eve of Destruction, Wired to Kill |
+| **Groundhog Day** | **Return to Yesterday, Snowy with a Chance of Christmas, Moving Day, Derby Day, Homesdale** |
+
+Two of three are good — sequels plus genuine thematic matches, and every one of
+WALL·E's five is a robot film. **The third is the same title that collapsed from
+64th to 416th on its plot query, and the mechanism is the same one.** Its raw
+embedding nearest neighbours, blend excluded, are *Perfect Day*, *Day of the
+Outlaw*, *The Last Day of Summer*, *Gideon's Day*, *Martin's Day* — **seven of
+eight carry "Day" in the title**. So this is not the blend and not
+`title_neighbors`; it is the composed document's name segment dominating, on a
+title whose name is two common words.
+
+**State it narrowly, because the first reading of that one row was "the
+neighbours are bad" and two more seeds refuted it.** The similarity lane is
+good in general and degrades for titles whose names are ordinary vocabulary —
+which is a *selection* effect on which titles are affected, not a defect in all
+of them. It is the same finding as the credits ablation from the other
+direction: what dominates one of these documents is not its plot.
+
+⚠️ **A rate measured over a window is wrong when the writes are batched, and
+this one produced 2.78, 8.33 and 21.85 seeds/s for the same run.**
+`title_neighbors.computed_at` is `now()`, frozen per transaction, so all 500
+rows of a page share one timestamp: a short window catches a whole batch or none
+of it, and `count(distinct seed) / window` counts work done *before* the window
+opened. `max(computed_at) - min(computed_at)` over N batches spans **N−1**
+intervals, not N. Anchor the rate to the run's own start instead — 1,000 seeds
+128 s after launch is 128 ms/seed and does not depend on where the window falls.
+
+### The follow-up this change identified and did not make
+
+**`blend_fingerprint()` does not cover the embedding model, so a model swap
+leaves every `title_neighbors` row reading as current.** It hashes `_WEIGHTS`,
+`_NEIGHBORS_PER_TITLE` and `_CANDIDATE_POOL` — what a score *means* in the
+blend's terms — and the model that produced the vectors underneath is not one of
+its inputs. So after a swap every row is in `[0, 1]`, carries a plausible
+`rank`, and was derived from a model the deployment no longer runs, with
+`usher.similarity.neighbors.stale` reading **zero** throughout. This is exactly
+the failure `blend_fingerprint` was added to close, arriving through the one
+input it does not hash.
+
+`m09e` empties the table, which fixes **the instance**. **The class fix is to
+feed the embedder's `model_name` into `blend_fingerprint()`** — which changes
+its signature and all three of its consumers (`usher similar <title id>`'s
+per-title report, the `usher.similarity.neighbors.stale` gauge, and
+`usher similar --rebuild`). It is **not done**. It was kept out of a width
+migration deliberately: a signature change to a fingerprint function is a change
+to what every stored row *means*, and burying it inside DDL is how the next
+person fails to find it. Whoever takes it should note that it also makes the
+model swap a *third* cause of neighbour staleness in ADR-0020's terms, beside
+the blend change (closed) and *some other title was embedded since* (still
+undecidable per row).

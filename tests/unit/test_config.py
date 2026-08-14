@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from usher.adapters.emby.push import DEFAULT_POLL_SECONDS, DEFAULT_STALE_AFTER_SECONDS
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.domain.jobs import JobKind
 from usher.services.jobs import KIND_CONCURRENCY
 
@@ -554,7 +555,24 @@ def test_the_search_and_embedding_settings_have_the_measured_defaults(
         settings.embedding_model,
         settings.embedding_batch_size,
         settings.embedding_offline,
-    ) == (False, "fastembed:BAAI/bge-small-en-v1.5", 16, True)
+    ) == (False, "fastembed:BAAI/bge-large-en-v1.5", 16, True)
+    # The three `m09e` added, in the same place for the same reason. The
+    # api key is `SecretStr("")` and is compared through
+    # `get_secret_value()`, because `SecretStr("") == ""` is False and an
+    # assertion that quietly cannot fail is the thing this file is for.
+    assert (
+        settings.embedding_base_url,
+        settings.embedding_api_key.get_secret_value(),
+        settings.embedding_timeout_seconds,
+    ) == ("http://localhost:8001/v1", "", 30.0)
+    # **The default checkpoint has to be as wide as the column**, which is
+    # the invariant `m09e` made breakable: `EMBEDDING_DIMENSIONS` is a
+    # deployment-wide `halfvec` typmod, so a default narrower than it ships
+    # a deployment whose `USHER_EMBEDDING_ENABLED=true` claims nothing but
+    # unclaimed index jobs. Asserted against the constant rather than
+    # against `1024`, so the two cannot drift apart in a passing suite.
+    assert EMBEDDING_DIMENSIONS == 1024
+    assert settings.embedding_model.endswith("bge-large-en-v1.5")
     assert (
         settings.search_result_limit,
         settings.search_rrf_k,

@@ -55,6 +55,7 @@ from usher.adapters.search.postgres import (
     _predicates,
 )
 from usher.db.base import build_engine, build_session_factory
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.db.repositories.search import PostgresTitleEmbeddingRepository
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
@@ -71,7 +72,7 @@ from usher.ports.search import (
 # every vector here is that wide. Zero-padding a two-component arrangement
 # leaves every dot product and every cosine exactly as it was -- the same
 # move, for the same reason, as `_vector` in the shared contract file.
-_VECTOR_DIMENSIONS = 384
+_VECTOR_DIMENSIONS = EMBEDDING_DIMENSIONS
 
 
 def _vec(*components: float) -> tuple[float, ...]:
@@ -806,7 +807,33 @@ async def test_vote_count_orders_the_box_when_every_popularity_is_null(
 # request for 10 comes back with 5-6.
 #
 # Measured cost: ~2.8 s to seed, which is what buys a case that can fail.
-_EMBEDDED_ROWS = 10_000
+#
+# **Derived from the width since `m09e`, because it always depended on it and
+# the literal `10_000` hid that.** Widening the column to 1024 broke
+# `test_the_default_guc_is_what_makes_that_fail` on its own premise guard --
+# `assert 100 < 100`, "this fixture is not reaching the HNSW index at all" --
+# with nothing else in this file touched, which is the guard doing exactly the
+# job it was written for.
+#
+# The mechanism, and it is arithmetic rather than a property of pgvector.
+# `_seed_embedded_catalog` gives row `n` two non-zero lanes, at `n % width` and
+# `(n * 7) % width`, and `_probe_vectors` queries with a **basis vector**. So
+# the only rows at any distance below 1.0 from a probe are the ones carrying a
+# non-zero lane at that exact position -- `2 * rows / width` of them, every
+# other row tying at exactly 1.0. That population has to exceed `_EF_SEARCH`
+# for the graph to be *forced* to choose, and it is what the 2%-selective
+# `series` filter then starves. At 384 lanes and 10,000 rows it was 52 against
+# 40; at 1024 lanes the same 10,000 rows give **20**, which is under the
+# ceiling, so the scan stopped truncating and both GUC settings returned full
+# pages.
+#
+# Bisected on the real container rather than solved on paper: 15,000 still
+# fails, 20,000 passes, 40,000 passes. 20,000 is 39 against 40 and is
+# therefore *on* the boundary, which is not a fixture size to ship. `26 *`
+# reproduces the original 52-against-40 ratio at any width and gives 9,984 at
+# 384 -- i.e. it is the number that was always meant, spelled so the next
+# width change cannot silently un-mean it.
+_EMBEDDED_ROWS = 26 * _VECTOR_DIMENSIONS
 _ONE_SERIES_EVERY = 50
 
 # pgvector's own default, and the value the whole finding is stated at. **At

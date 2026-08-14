@@ -31,18 +31,19 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.ports.repository import StoredTaste, TasteRepository
 
 EARLIER = datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
 LATER = EARLIER + timedelta(days=3)
 COMPUTED_AT = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
-MODEL = "fake:test-384"
+MODEL = "fake:test-embedding"
 
 # 384 lanes, because that is what `halfvec(384)` accepts and a shorter vector
 # would have to be padded by one arm's seeder and not the other's -- the
 # padding would then be the suite's behaviour rather than the port's. Group F
 # hit the identical constraint on `halfvec(1128)`.
-_DIMENSION = 384
+_DIMENSION = EMBEDDING_DIMENSIONS
 
 
 def _vector(lead: float) -> tuple[float, ...]:

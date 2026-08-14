@@ -49,7 +49,15 @@ _SEPARATOR = ":"
 # float noise and cannot be passed by the failure it exists to catch.
 _NORM_TOLERANCE = 1e-4
 
-_DIMENSION = 384
+# **`_DIMENSION = 384` was here until `m09e` and is deliberately not replaced
+# by `_DIMENSION = 1024`.** A literal was defensible while this adapter served
+# one checkpoint; the moment the storage width is a thing a deployment chooses,
+# a literal here is a *second* declaration of it that agrees with the column by
+# coincidence. `composition.embedder` now compares `Embedder.dimension` against
+# `EMBEDDING_DIMENSIONS` and narrows the deployment when they disagree, and
+# that check is worth nothing if this property answers with the number it is
+# being checked against instead of with the model's own. `TextEmbedding`
+# exposes `embedding_size`, so the honest answer is free.
 
 
 def checkpoint_of(model_name: str) -> str:
@@ -95,6 +103,11 @@ class FastEmbedEmbedder(Embedder):
         self._model: Any = TextEmbedding(
             model_name=checkpoint_of(model_name), batch_size=batch_size
         )
+        # Read off the loaded model rather than declared, so a checkpoint whose
+        # width does not match this schema's column is refused by
+        # `composition.embedder` at startup instead of by asyncpg, one failed
+        # `index` job at a time, in a message about a vector.
+        self._dimension = int(self._model.embedding_size)
         # One check, on the first batch, for the reason `embed` gives. A
         # per-batch check would cost a square root per vector on a hot path
         # to re-answer a question about the checkpoint that cannot change
@@ -107,7 +120,7 @@ class FastEmbedEmbedder(Embedder):
 
     @property
     def dimension(self) -> int:
-        return _DIMENSION
+        return self._dimension
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:

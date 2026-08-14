@@ -87,7 +87,7 @@ def _service(session: AsyncSession) -> SearchService:
     )
 
 
-_TASTE_MODEL = "fake:test-384"
+_TASTE_MODEL = "fake:test-embedding"
 
 
 def _dot(left: Sequence[float], right: Sequence[float]) -> float:

@@ -35,6 +35,7 @@ from tests.contract.taste_repository_contract import (
     TasteRepositoryContract,
     _vector,
 )
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.db.repositories.taste import PostgresTasteRepository
 from usher.domain.ids import new_id
 from usher.ports.repository import StoredTaste
@@ -189,7 +190,7 @@ async def test_a_stored_vector_survives_the_halfvec_round_trip_to_a_thousandth(
     """
     await _seed_users(session)
     repository = PostgresTasteRepository(session)
-    lanes = tuple(0.001 * lane for lane in range(384))
+    lanes = tuple(0.001 * lane for lane in range(EMBEDDING_DIMENSIONS))
     await repository.put(
         StoredTaste(
             user_id=USER,
@@ -209,7 +210,7 @@ async def test_a_stored_vector_survives_the_halfvec_round_trip_to_a_thousandth(
     # `HALFVEC.result_processor` returns the former, so code written for
     # `.to_list()` is an `AttributeError` at the first read. Group F hit this
     # on `genome_scores` and it is recorded there.
-    assert len(found.centroid) == 384
+    assert len(found.centroid) == EMBEDDING_DIMENSIONS
     for expected, actual in zip(lanes, found.centroid, strict=True):
         assert actual == pytest.approx(expected, abs=1e-3)
 

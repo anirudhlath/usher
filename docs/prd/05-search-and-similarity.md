@@ -9,9 +9,14 @@ Conflating these inflates the difficulty of the whole problem:
 | **Catalog lookup** | ~1.3M skeleton titles | "Find the half-remembered title" | Fast typo-tolerant prefix match on names and people, plus facets |
 | **Library experience** | ~2k–10k owned titles | Taste, similarity, curation | Rich blending — and at this scale *every* technique is cheap |
 
-The second is where the interesting UX lives, and 10k × 384 float32 is 15 MB —
+The second is where the interesting UX lives, and 10k × 1024 float32 is 41 MB —
 brute-force exact cosine in numpy, sub-millisecond. **No ANN index is required
-for the tier that matters most.**
+for the tier that matters most.** *(This read "10k × 384 … 15 MB" until
+2026-08-13. The width moved to 1024 with `m09e`
+([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)); the
+conclusion is unchanged, the number is 2.7× larger, and the "sub-millisecond"
+claim carries its own correction under `### Semantic` — it is a numpy figure
+and Postgres measures 1.820 ms.)*
 
 ## Postgres-first
 
@@ -404,12 +409,51 @@ not a recall figure.
 
 ### Semantic
 
-`halfvec(384)` embeddings from a local `fastembed` model
-(`bge-small-en-v1.5`) over name + original name + overview + tagline + genres +
-keywords, HNSW indexed.
+`halfvec(1024)` embeddings over name + original name + overview + tagline +
+genres + keywords, HNSW indexed, from **either** of two `Embedder` runtimes
+chosen by a prefix on `USHER_EMBEDDING_MODEL`:
+`fastembed:<checkpoint>` loads the model in-process behind
+`uv sync --extra embedding`, and `openai:<checkpoint>` calls
+`POST {USHER_EMBEDDING_BASE_URL}/embeddings` on any OpenAI-compatible server.
 
-**The runtime is `fastembed`, not sentence-transformers, and this sentence is a
-correction rather than a preference.** Measured 2026-08-02: sentence-transformers
+**The width is 1024 because `BAAI/bge-m3` is, and that made it a migration
+rather than a setting.** `m09e` moved `title_embeddings.embedding` and
+`user_taste.centroid` from `halfvec(384)`, deleting every stored vector,
+centroid and neighbour row on the way: the width is `halfvec`'s typmod, a
+typmod is DDL, and there is no honest conversion from 384 lanes to 1024. **It is
+also deployment-wide rather than per-model**, so the service-free default had to
+move off `bge-small-en-v1.5` (384) and is now `fastembed:BAAI/bge-large-en-v1.5`
+— **1.2 GB against bge-small's 0.07**, a real regression in the install with no
+inference server and the price of the width. The whole argument, including why
+`fastembed` could not simply be pointed at `bge-m3` (it does not ship it, in any
+of its five model classes), is in
+[ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md).
+
+🔴 **What motivated the change is a relevance observation, and it is the first
+this project has: at 384 the semantic lane retrieves *topic* well and *plot*
+badly.** Over this catalog with `fastembed:BAAI/bge-small-en-v1.5`, a
+plot-description query puts the correct title in the top **0.05–0.3%** and
+usually **outside the top 20** — *"a man relives the same day over and over"*
+ranked Groundhog Day **64th**, Shawshank **208th**, The Matrix **262nd**,
+WALL-E **338th** — while queries naming a title's subject matter directly put
+Jurassic Park **1st** and a Harry Potter query **4th**. Those percentages are
+of the *embedded* population — the enriched tier, ~130k rows, not the 1.27M
+catalog — so a rank of 64 is a lane that is genuinely working and is still
+nowhere near a five-row box. **`bge-m3` is a bet on exactly that gap and nothing
+has yet measured whether it pays** — the re-embed is in flight and the
+comparison is owed.
+
+**A checkpoint of the wrong width narrows the deployment rather than breaking
+it.** `composition.embedder` compares the `Embedder`'s own reported width
+against the column's, logs once and builds no embedder — so `INDEX` jobs go
+unclaimed and the catalog-lookup tier is untouched, exactly as a deployment with
+no model behaves. The comparison is only worth something because
+`Embedder.dimension` reports *the model's* width and never the schema's.
+
+**The *in-process* runtime is `fastembed`, not sentence-transformers, and this
+sentence is a correction rather than a preference.** (It was the only runtime
+until `m09e`; everything below is still why a deployment that loads a model
+loads it through `fastembed`.) Measured 2026-08-02: sentence-transformers
 is 59 packages and **4.8 GiB installed**, ~4.5 GiB of which is GPU runtime
 pulled unconditionally on a host that may never have a GPU, against a `usher`
 image of 332 MB. `fastembed` is 28 packages and **167 MiB**, has no torch, and
@@ -470,9 +514,21 @@ sound while bounding it by a `list_embedded` prefix is not — those ids are
 UUIDv7 minted in IMDb `tconst` order, so a prefix is ordered by registration
 era. Full evidence in `.claude/rules/search-and-embeddings.md`.
 
+🔶 **Every throughput and sizing figure in the four paragraphs above was taken
+with `fastembed:BAAI/bge-small-en-v1.5` at 384 lanes on CPU, and none of it has
+been re-taken since `m09e`.** The document-length figures (mean 125.4 tokens,
+p95 197) are a property of the catalog and survive; the tokens/s invariant, the
+2,988 tokens/s backfill rate, the 80-minute pool walk and every extrapolation
+from them describe a narrower vector produced by a different model on a
+different device. The re-embed through `bge-m3` that would replace them is
+running as this is written and **its numbers are owed rather than estimated**
+— they land in `.claude/rules/search-and-embeddings.md` beside the figures they
+supersede, and nothing here guesses a direction for them.
+
 **Freshness is a predicate, never an inference.** `title_embeddings` records
 `model_name` (the runtime *and* the checkpoint, e.g.
-`fastembed:BAAI/bge-small-en-v1.5`) and a `source_fingerprint` — the `md5` of
+`fastembed:BAAI/bge-large-en-v1.5` or `openai:BAAI/bge-m3`) and a
+`source_fingerprint` — the `md5` of
 the exact text embedded — so "is this stale?" is one SQL query with three
 consumers: the backfill's cursor, the `usher.search.embeddings.stale` gauge,
 and the test that proves the enqueue-on-enrichment path closes. Editing a
@@ -483,6 +539,16 @@ writes nothing; `usher index --backfill` enqueues one job per stale title,
 keyset-paged on `titles.id` and re-runnable at zero write cost.
 [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md) carries
 the argument and the costs.
+
+⚠️ **"The scheme replacing a migration" is true within one vector width and
+stops there** — corrected 2026-08-13. `EMBEDDING_DIMENSIONS` is `halfvec`'s
+typmod, so a swap that changes the width is DDL: `m09e` is the first, and it
+deleted every stored vector rather than converting one. **And the fingerprint
+reaches `title_embeddings` but not `title_neighbors`**, whose
+`blend_fingerprint` hashes the blend's constants and not the model — so a model
+swap leaves every neighbour row reading as current, and `m09e` empties the
+table to fix that instance rather than the class.
+[ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md).
 
 **A title whose composed document is degenerate is refused, and the refusal is
 written.** Measured: every whitespace-only input embeds to the *identical*
@@ -840,6 +906,14 @@ evidence there is, against a claim that until now rested on the literature's
 authority alone, so the default follows it. M9's `search_queries` is where a
 real evaluation set — real typed queries, a full catalog, more than one model —
 comes from, and it is what would reverse this back.
+
+⚠️ **A third clause was added to that caveat on 2026-08-13: one *embedding*
+model, and it is no longer the one that ships.** The diagnosis above — generic
+critic prose collapsing toward the corpus centroid — is a claim about
+`bge-small-en-v1.5`'s space, which `m09e` replaced
+([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)).
+Nothing has re-run it. The default stays off, because a measurement is not
+reversed by a change that did not repeat it.
 
 ✅ **Built in M8, off by default, and reported rather than substituted.**
 M6 declined it deliberately — `ports/llm.py` declared `LLMClient` and

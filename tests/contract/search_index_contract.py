@@ -33,6 +33,7 @@ from typing import Any
 
 import pytest
 
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.domain.enums import TitleKind
 from usher.domain.ids import new_id
 from usher.ports.search import (
@@ -59,7 +60,7 @@ from usher.ports.search import (
 # `usher.db.models.search`: a port-level contract that reached into `db/` to
 # learn how wide a vector is would be the contract knowing about one
 # backend, which is the thing this file exists not to do.
-_VECTOR_DIMENSIONS = 384
+_VECTOR_DIMENSIONS = EMBEDDING_DIMENSIONS
 
 
 def _vector(*components: float) -> tuple[float, ...]:

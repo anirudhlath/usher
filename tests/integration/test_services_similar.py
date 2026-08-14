@@ -47,7 +47,7 @@ from usher.services.similar import SimilarityService
 _FP = "arranged-by-a-test"
 
 
-_MODEL = "fake:test-384"
+_MODEL = "fake:test-embedding"
 
 
 def _service(session: AsyncSession) -> SimilarityService:

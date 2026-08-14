@@ -3,6 +3,7 @@ paths:
   - "src/usher/config.py"
   - "src/usher/cli.py"
   - "src/usher/__main__.py"
+  - "src/usher/db/migrations/env.py"
   - "compose.yml"
   - "Dockerfile"
   - ".env.example"
@@ -27,6 +28,25 @@ future validator that interpolates it cannot quietly reopen this.
 **`--traceback` deliberately does not reopen it**: a settings failure's stack is
 six pydantic frames that diagnose nothing, so re-raising would add only the
 credential.
+🔴 **And `alembic` is a second entry point that bypasses the scrub entirely —
+found 2026-08-13, not fixed.** `usher.db.migrations.env` calls `get_settings()`
+directly, with no boundary of its own, so `uv run alembic upgrade head` with
+`USHER_DATABASE_URL` absent prints pydantic's raw `ValidationError` — including
+`input_value={…}` with a truncated `secret_key` in it. Reproduced by running it.
+The defect is the same one `cli._settings_problem` was written for, in the one
+command the README and `CLAUDE.md` both tell an operator to run *before* the
+CLI works, on a host where the settings are most likely to be wrong. **Two
+things make it worse than the original rather than a smaller copy of it.** The
+CLI's version leaked on a *rejected* value; this one leaks every field
+pydantic echoes on any validation failure, so a missing `USHER_DATABASE_URL`
+exposes `USHER_SECRET_KEY`. And this is not an interactive command only: the
+image's `CMD` is `sh -c "alembic upgrade head && exec python -m usher"`, so on
+a misconfigured container the **first thing in the log** is a pydantic
+traceback echoing the settings it was handed. The fix is a boundary in `env.py`
+that renders `loc` + `msg` the way
+`cli._settings_problem` does — the shape exists and is one import away, and the
+reason it is recorded rather than applied is that it was found while doing
+something else and a settings boundary deserves its own case.
 **A refused Postgres connection reaches the CLI as a bare `ConnectionRefusedError`,
 not as a SQLAlchemy error.** asyncpg lets the `OSError` out unwrapped during
 connect, so `except SQLAlchemyError` — the obvious spelling for a database error

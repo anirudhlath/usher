@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.domain.ids import new_id
 
 _VECTOR = "[" + ",".join(["0.05"] * 384) + "]"
@@ -36,7 +37,7 @@ async def _embed(session: AsyncSession, title_id: uuid.UUID, *, vector: str | No
             "(title_id, embedding, model_name, source_fingerprint) "
             "VALUES (:id, CAST(:v AS halfvec), :m, :f)"
         ),
-        {"id": title_id, "v": vector, "m": "fake:test-384", "f": "0" * 32},
+        {"id": title_id, "v": vector, "m": "fake:test-embedding", "f": "0" * 32},
     )
 
 
@@ -66,20 +67,20 @@ async def test_a_refused_embedding_is_a_written_row_with_a_null_vector(
     )
     is_null, model_name = stored.one()
     assert is_null is True
-    assert model_name == "fake:test-384"
+    assert model_name == "fake:test-embedding"
 
 
 async def test_a_halfvec_column_refuses_the_wrong_width(session: AsyncSession) -> None:
-    """`halfvec(384)` is a declared width, not a hint.
+    """`halfvec(1024)` is a declared width, not a hint.
 
     The wrong implementation this fails: a bare `halfvec` with no dimension,
     or a `jsonb`/`double precision[]` column standing in for one -- both
-    accept a 383-wide vector from a model swap and then answer every
+    accept a 1023-wide vector from a model swap and then answer every
     similarity query with a type error at read time instead of a write error
     at write time.
 
     `DBAPIError`, not `IntegrityError`: pgvector reports a width mismatch as
-    `DataError` (`expected 384 dimensions, not 3`), which is a sibling of
+    `DataError` (`expected 1024 dimensions, not 3`), which is a sibling of
     `IntegrityError` rather than a subclass. The plan's draft named the
     narrower one and would not have caught the write it exists to forbid.
     """
@@ -89,11 +90,15 @@ async def test_a_halfvec_column_refuses_the_wrong_width(session: AsyncSession) -
             text(
                 "INSERT INTO title_embeddings "
                 "(title_id, embedding, model_name, source_fingerprint) "
-                "VALUES (:id, CAST(:v AS halfvec), 'fake:test-384', :f)"
+                "VALUES (:id, CAST(:v AS halfvec), 'fake:test-embedding', :f)"
             ),
             {"id": title_id, "v": "[0.1,0.2,0.3]", "f": "0" * 32},
         )
-    assert "384" in str(raised.value)
+    # Against the constant, never the literal: `m09e` moved this width once
+    # and the assertion that survived it unchanged is the one that would
+    # have gone on passing against a column of any width containing the
+    # digits it names.
+    assert f"expected {EMBEDDING_DIMENSIONS} dimensions" in str(raised.value)
 
 
 async def test_the_hnsw_index_is_partial_on_a_present_vector(
@@ -257,3 +262,57 @@ async def test_the_new_foreign_keys_carry_the_delete_rules_they_were_given(
         "fk_title_neighbors_title_id_titles": "c",
         "fk_title_neighbors_neighbor_id_titles": "c",
     }
+
+
+async def test_every_halfvec_column_stores_inline(session: AsyncSession) -> None:
+    """No vector in this schema may live in a TOAST relation.
+
+    **This is a performance property asserted as a schema property, because it
+    is invisible as either one on its own.** A `halfvec` is `8 + 2 * dim`
+    bytes; pgvector declares the type `EXTERNAL`, so a value moves out-of-line
+    once the tuple passes `TOAST_TUPLE_THRESHOLD` (2,032 bytes). That is 384
+    lanes inline and 1024 lanes out, which is a **threshold** the width crossed
+    in `m09e` and not a slope anybody would have projected.
+
+    Measured before `m09f` fixed it, on 130,720 real rows: `title_embeddings`
+    was 17 MB of heap pointing at 340 MB of TOAST, an exact-scan neighbour
+    query read **11x** the table's pages per seed, and
+    `SimilarityService.rebuild` went from 80 minutes to 21.6 hours -- of which
+    only 2.67x is the width. With the vectors inline the same query is
+    **110 ms/seed against 598**.
+
+    **The case is written over `pg_type` rather than over a list of columns**,
+    so a fourth vector column added without a `SET STORAGE` fails here rather
+    than silently costing 5x on a walk nobody re-times. That is the shape
+    `ports-and-error-taxonomy.md` records for two constants that must move
+    together: the migration's `_VECTOR_COLUMNS` is one of them and this scan is
+    the other, and only the scan can notice an omission.
+
+    `p` is PLAIN. `e` (EXTERNAL) is what pgvector declares and what
+    `m09f.downgrade()` restores.
+    """
+    result = await session.execute(
+        text(
+            "SELECT c.relname, a.attname, CAST(a.attstorage AS text) "
+            "FROM pg_class c "
+            "JOIN pg_attribute a ON a.attrelid = c.oid "
+            "JOIN pg_type t ON t.oid = a.atttypid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind = 'r' "
+            "AND t.typname IN ('halfvec', 'vector') "
+            "AND a.attnum > 0 AND NOT a.attisdropped"
+        )
+    )
+    columns = {(table, column): storage for table, column, storage in result.all()}
+
+    # The premise, and it is not decoration: a scan that matched nothing would
+    # satisfy every assertion below. `ffa` and `m09e` between them put three
+    # vector columns in this schema.
+    assert len(columns) >= 3, f"the premise: this scan found vector columns, got {columns}"
+    assert ("title_embeddings", "embedding") in columns
+    assert ("genome_scores", "relevance") in columns
+
+    out_of_line = {key for key, storage in columns.items() if storage != "p"}
+    assert not out_of_line, (
+        f"these vector columns would be TOASTed and cost ~5x on every exact scan: {out_of_line}"
+    )

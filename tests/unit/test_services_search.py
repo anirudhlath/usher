@@ -148,7 +148,7 @@ _CATALOG: dict[uuid.UUID, tuple[str, float | None]] = {
 # under another is the ST<->fastembed divergence -- max pairwise-similarity
 # delta 1.41e-03, 6x the halfvec quantisation error -- arriving as a confident
 # cosine rather than as an error.
-_TASTE_MODEL = "fake:test-384"
+_TASTE_MODEL = "fake:test-embedding"
 _OTHER_MODEL = "fake:other-checkpoint-384"
 
 # Release years, defaulting to the 2019 every case above was written against.

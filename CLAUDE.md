@@ -28,6 +28,23 @@ read before trusting the playback and write-back paths end to end:
 | **M8** | LLM curation end to end — `OpenAICompatibleClient` (litellm declined), `curated_rows` + `llm_calls`, the candidate pool, `CurationService` and its validator, `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate`, `usher curate`, the genome tag vocabulary, query expansion | a local vLLM serving `gemma-4-26b-a4b` over a real 1,271,138-title catalog |
 | **M9** | the whole HTTP surface — PRD 07's Screens, Resources, Actions, Admin and Meta tables behind one RFC 9457 envelope over a closed seven-member `code` vocabulary; keyset cursors; search, the two-tier suggest, browse, similarity, the series hierarchy; the image proxy (`images` + `GET /images/{id}`) and artwork on `RowCard`; `POST /titles|episodes/{id}/play` with the playback ticket and outbound watch write-back; the admin completion (sync, unmatched, bootstrap status + trigger, row-provider toggles, `bootstrap.progress`); `search_queries` whole; `GET /meta/attribution`. **Track 2:** `append_to_response=season/N`, the IMDb akas and credit-names bulk expansion, the priority-tier TMDb crawl | the **live TMDb v3 API** (S3: 130,334 requests over 1.98 h, 130,647 titles enriched; T2/T3 against the real IMDb dumps) **and a real Emby 4.9.5.0** — H4/H5 ran 2026-08-12 in 23 bounded requests with no walk: `/play` → ticket → `302` → a real **206** with `video/x-matroska` bytes, the play body leaking nothing with its positive control fired first, and the watch write-back read back *from Emby* and restored **byte-for-byte**. ⚠️ They ran **after** the milestone closed, because M9 recorded "no Emby credentials on this host" having checked `~/code/usher/.env` and nowhere else |
 
+**Post-M9 follow-up work is on branches off `main` and changes things the table
+above describes.** The one to know about before touching search: **the embedding
+subsystem has a second runtime and a wider column since 2026-08-13.**
+`USHER_EMBEDDING_MODEL` now carries a runtime prefix that selects between
+`fastembed:` (in-process, behind the extra) and `openai:` (any
+OpenAI-compatible endpoint — this deployment's is a second local vLLM serving
+`BAAI/bge-m3`), and migration **`m09e`** widened
+`title_embeddings.embedding` and `user_taste.centroid` from `halfvec(384)` to
+`halfvec(1024)`, **deleting every embedding, centroid and neighbour row** —
+there is no honest conversion between widths. The consequence for anyone
+reading this: **`model_name`'s "a model swap needs no migration" is true only
+within one width**, and the service-free default is now
+`fastembed:BAAI/bge-large-en-v1.5` at 1.2 GB against bge-small's 0.07.
+[ADR-0038](docs/prd/decisions/0038-the-embedding-width-is-deployment-wide-ddl.md).
+Nothing restores the deleted rows on its own: `usher index --backfill`, then
+`usher work`, then `usher similar --rebuild`.
+
 Task breakdowns are in `docs/plans/`, one file per milestone.
 [PRD 09](docs/prd/09-roadmap.md) is what's next. **Do not invent commands for
 tooling that does not exist yet** — check the Commands section below first.
@@ -157,7 +174,7 @@ so a session pays only for what it touches.
 | `db-and-sql.md` | `src/usher/db/**` | `ON CONFLICT` traps, `now()` vs `clock_timestamp()`, triggers that own a column, staging-table locks, generated columns, the migration id convention, `test_migrations.py`'s two halves |
 | `emby-push-and-ingest.md` | `adapters/emby/**`, the pipeline services | M3/M4/M5's live runs against a real Emby 4.9.5.0 — the wrong write-back route, `UserData` divergence, the websocket's real cadence, the match ladder's measured yield |
 | `tmdb-and-enrichment.md` | `adapters/tmdb/**`, `services/enrich.py` | the 712-request live run, the 4xx taxonomy, `append_to_response=season/N`, movie/TV divergence across three API layers |
-| `search-and-embeddings.md` | `adapters/search/**`, `adapters/embedding/**` | the typo-tolerance gate that failed, GIN vs GiST, RRF's five traps, `fastembed` vs `sentence-transformers`, `halfvec`, `hnsw.iterative_scan` |
+| `search-and-embeddings.md` | `adapters/search/**`, `adapters/embedding/**` | the typo-tolerance gate that failed, GIN vs GiST, RRF's five traps, `fastembed` vs `sentence-transformers`, `halfvec`, `hnsw.iterative_scan`, the two embedding runtimes and the two vLLM flags that each cost a run |
 | `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py`, `similar.py` | the sequential build's two very different p95s, the genome's real coverage and its denominators, and why M9 removed the genome from the similarity blend |
 | `curation-and-llm.md` | `adapters/llm/**`, `services/curation*.py`, `query_expansion.py` | M8's live run — the 88% genre-heading finding, the real per-candidate token cost, the pool ceiling the reference endpoint cannot serve, why the coercion is the primary path, and query expansion measuring worse |
 | `bootstrap-and-datasets.md` | `adapters/bulk/**` | IMDb TSV parsing, MovieLens archive selection, Wikidata timing, the cache-key finding |

@@ -685,7 +685,7 @@ Hard rules encoded in the project:
 |---|---|
 | Download | ~2.2 GiB |
 | Disk after import | ~8–12 GB with indexes |
-| Embeddings (189k × 384, halfvec) | ~290 MB |
+| Embeddings | 🔶 `~290 MB` was a projection at **189k × halfvec(384)** and both halves have moved. Measured 2026-08-13 immediately before migration `m09e`: **130,673 embeddings in a 278 MB `title_embeddings` relation**, 146 MB of it the HNSW index — so the projection was already optimistic per row. `m09e` widened the column to `halfvec(1024)` and deleted every row; **the figure at the new width is owed rather than extrapolated**, because a per-row HNSW graph cost is not linear in the vector's bytes ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)) |
 | Full bootstrap wall-clock | ~3–5 h, mostly the TMDb crawl |
 
 Bootstrap runs unattended and is resumable. A source can be connected and

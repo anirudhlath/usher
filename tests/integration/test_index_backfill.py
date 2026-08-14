@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from usher.cli import _index
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.db.repositories.search import STALE_EMBEDDING, PostgresTitleEmbeddingRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
@@ -38,7 +39,7 @@ from usher.services.search import compose_document
 
 _MARK = "index-backfill-case"
 _MODEL = "fastembed:BAAI/bge-small-en-v1.5"
-_VECTOR = tuple([0.05] * 384)
+_VECTOR = tuple([0.05] * EMBEDDING_DIMENSIONS)
 
 # The only interpolation is `STALE_EMBEDDING` itself, which is a module
 # constant built from module constants; both values a caller supplies cross as

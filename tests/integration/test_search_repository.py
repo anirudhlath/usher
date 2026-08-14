@@ -19,6 +19,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.embedding import FakeEmbedder
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.db.repositories.search import _FINGERPRINT_SQL, PostgresTitleEmbeddingRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
@@ -39,8 +40,8 @@ async def _no_commit() -> None:
     return None
 
 
-_MODEL = "fake:test-384"
-_VECTOR = tuple([0.05] * 384)
+_MODEL = "fake:test-embedding"
+_VECTOR = tuple([0.05] * EMBEDDING_DIMENSIONS)
 
 
 async def _enriched(session: AsyncSession, name: str, **columns: object) -> uuid.UUID:
@@ -184,7 +185,7 @@ async def test_a_model_change_makes_every_row_stale_again(session: AsyncSession)
     )
 
     assert await repository.count_stale(_MODEL) == 0
-    assert await repository.count_stale("fake:other-384") == 1
+    assert await repository.count_stale("fake:other-embedding") == 1
 
 
 async def test_editing_a_title_makes_it_stale_without_anything_being_told(
@@ -259,8 +260,8 @@ async def test_a_refused_title_is_counted_as_refused_and_not_as_stale(
 
     # ...and the partition holds under a model change: now it is stale, and
     # it is no longer counted as refused.
-    assert await repository.count_stale("fake:other-384") == 1
-    assert await repository.count_refused("fake:other-384") == 0
+    assert await repository.count_stale("fake:other-embedding") == 1
+    assert await repository.count_refused("fake:other-embedding") == 0
 
 
 async def test_the_cursor_drains_and_never_repeats_a_title(
@@ -353,7 +354,7 @@ async def test_a_vector_survives_the_halfvec_round_trip(session: AsyncSession) -
     """
     repository = PostgresTitleEmbeddingRepository(session)
     title_id = await _enriched(session, "The Slow Aperture")
-    vector = tuple(round(0.001 * i, 4) for i in range(384))
+    vector = tuple(round(0.001 * i, 4) for i in range(EMBEDDING_DIMENSIONS))
     await repository.upsert_many(
         [
             TitleEmbeddingUpsert(
