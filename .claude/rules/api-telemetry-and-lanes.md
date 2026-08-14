@@ -942,3 +942,200 @@ edit is only line-count-safe if the append is at the end**; an import block is
 at the top, and the top is above everything anybody cites. The later commits
 checked citations before editing and this one did not, which is the whole
 difference.
+
+## The HTTP semantic convention in force is the **default** one, pinned by version (2026-08-14, M10 O3)
+
+O2's section above is about what happens to a name *after* it leaves the
+process — the collector's storage rename. This one is about what the name **is
+on the wire**, which is a different mechanism with a different trigger, and the
+two compose: a Phase 2 panel is wrong if either is guessed.
+
+**The convention, by name and version.** The **default** HTTP semantic
+conventions, under `opentelemetry-sdk` **1.44.0** and
+`opentelemetry-instrumentation-fastapi`/`-asgi` **0.65b0**
+(`opentelemetry-semantic-conventions` is also 0.65b0). `uv.lock` pins all of
+those; `pyproject.toml:26-31` asks only for `>=1.28` / `>=0.49b0`, so **the
+convention in force is a property of the lock file, not of the manifest**, and
+`uv lock --upgrade` is enough to move it with no source change anywhere.
+
+**The two rows, driven through a real `create_app()` into an
+`InMemoryMetricReader`, one request each, in two separate processes:**
+
+| | metric name | unit | attributes on the point |
+|---|---|---|---|
+| default (nothing set) | `http.server.duration` | `ms` | `http.scheme`, `http.host`, `http.flavor`, `http.method`, `http.server_name`, `http.status_code`, `http.target` |
+| `OTEL_SEMCONV_STABILITY_OPT_IN=http` | `http.server.request.duration` | `s` | `url.scheme`, `http.request.method`, `http.route`, `http.response.status_code`, `network.protocol.version` |
+
+**Under the opt-in `http.server.duration` is absent entirely — not renamed
+alongside, gone.** That is the clause worth reading twice: a panel written
+against it does not start plotting a differently-named series, it plots
+nothing, and nothing anywhere raises. (The M10 plan's version of this table
+omits `network.protocol.version` from the opt-in row; it is on the point.)
+
+**The mechanism is two predicates in the installed contrib package**, and
+knowing them is what makes the third mode predictable rather than surprising.
+`_semconv.py:196-201` defines `_report_new(mode)` as `mode != DEFAULT` and
+`_report_old(mode)` as `mode not in (HTTP, DATABASE)`. `asgi/__init__.py:622-635`
+then builds `duration_histogram_old` (`ms`) behind `_report_old` and
+`duration_histogram_new` (`s`, with second-scaled bucket advice) behind
+`_report_new`. So:
+
+- `DEFAULT` satisfies only `_report_old` → the `ms` histogram only.
+- `http` satisfies only `_report_new` → the `s` histogram only.
+- **`http/dup` satisfies both and emits both histograms.** Observed: one request
+  under it recorded `http.server.duration` at `ms` *and*
+  `http.server.request.duration` at `s`, plus both response-size spellings.
+  **It is the migration path, and the only setting under which a panel written
+  against either name keeps working.**
+
+### `http.target` is absent on an unrouted path, and that is the finding a panel needs
+
+`http.target` is `route.path_format` — `_collect_target_attribute`,
+`asgi/__init__.py:528-551`, which reads `path_format` off the ASGI scope's
+`route` and **returns `None` when nothing matched**. The ASGI middleware omits
+a `None` attribute rather than recording an empty one. Measured:
+`GET /no-such-route` records an `http.server.duration` point whose attributes
+are exactly `{http.scheme, http.host, http.flavor, http.method,
+http.server_name, http.status_code: 404}` — the key is **absent**, not empty.
+
+**So a panel that groups by `http.target` silently drops every 404 on an
+unrouted path**, which is the one class of request an operator most wants to
+see, and it drops them the same way an empty panel looks healthy. Recorded here
+rather than discovered from a dashboard that under-counts. Pinned by
+`tests/unit/test_telemetry_metric_names.py::test_a_path_that_matched_no_route_carries_no_http_target_at_all`,
+whose routed control fires first — "the key is missing" is also what a build
+that never recorded the attribute at all would produce.
+
+### Where the opt-in can be set, measured — and there is no such place in anything this repository ships
+
+Stronger than PRD 10:198's old *"Nothing in this project's config sets that
+variable"*, which is a statement about today's values; this is a statement
+about the shape of the configuration.
+
+- **As a line in `.env`** → `ValidationError: otel_semconv_stability_opt_in —
+  Extra inputs are not permitted`, from **every** entry point, because they all
+  build `Settings`. `Settings.model_config` is `extra="forbid"`
+  (`config.py:144-149`) and pydantic-settings' dotenv source hands an unmatched
+  key back under its full lowercased name. Measured directly by planting the
+  line, not reasoned. ⚠️ **The precise mechanism is narrower than "`.env` refuses
+  `OTEL_*`", and getting that wrong would make the rule look false**: `Settings`
+  declares `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` as *aliased
+  fields* (`config.py:757-758`), and both are accepted from `.env` today. What
+  is refused is every **un-declared** key — probed one at a time:
+  `OTEL_SEMCONV_STABILITY_OPT_IN`, `OTEL_TOTALLY_MADE_UP`, `ZZZ_RANDOM_KEY` and
+  `USHER_MADE_UP` all rejected; the two aliased ones accepted.
+- **In `compose.yml`'s `environment:` block** →
+  `tests/unit/test_deployment_config.py:337` asserts that block's key set
+  **equals** the five names in `_TOPOLOGY_OWNED` (`:89-97`).
+- **In `.env.example`** → `tests/unit/test_deployment_config.py:282` asserts
+  `.env.example`'s key set **equals** the `Settings` field set.
+- **As a process environment variable** → **works.** `Settings` builds normally
+  (measured), because the variable never reaches pydantic at all. This is the
+  only door, and it is outside everything the repository ships.
+
+So the convention in force is held by three tests and a validation error rather
+than by a comment — which is the point of writing it down this way.
+
+⚠️ **And the suite cannot observe the opt-in at all, which is a trap for
+whoever writes the next case about it.** `tests/conftest.py`'s autouse
+`clean_environment` deletes every `USHER_*`/`OTEL_*` variable from
+`os.environ`, and `_OpenTelemetrySemanticConventionStability._initialize()`
+runs inside `create_app()` (`fastapi/__init__.py:271`, `asgi/__init__.py:597`)
+— i.e. **after** the scrub. So `OTEL_SEMCONV_STABILITY_OPT_IN=http uv run
+pytest …` is **green**, and reads exactly like a case that checked the hazard
+and found it absent. It was demonstrated red only by planting one `continue`
+into that fixture's scrub loop. Read the consequence precisely: inside pytest
+the "default conventions are in force" assertion is held by `clean_environment`,
+so it pins a **dependency upgrade** that changes the default — the drift the
+catalogue is actually written against — and not the deployment's environment.
+The environment half is pinned by the four bullets above instead.
+`_initialize()` is also `_initialized`-guarded, i.e. once per process, which is
+why any future demonstration has to be a separate process and never a
+`monkeypatch.setenv`.
+
+### 34 and 35 are both right, about different things, and the M10 spec collapsed them
+
+The M10 design spec `:32-33` says the catalogue is *"34 rows and every one is
+✅"*. **The catalogue (`10-telemetry-and-dashboards.md:143-177`) is 35 rows, 35
+distinct names, and all 35 carry ✅** — counted; there is no unticked row. 34 is
+a real measurement of something else: an AST scan of `src/usher/` for the seven
+`Meter.create_*` instrument factories finds **exactly 34 declared instrument
+names**, and their set is the catalogue **minus `http.server.duration`** — the
+one row Usher does not declare, because `FastAPIInstrumentor` emits it. The
+honest sentence is **34 instruments Usher declares plus one it inherits,
+against 35 documented rows**, and PRD 10's preamble now carries it so the next
+reader counts the right thing.
+
+**The scan has a trap that manufactures plausible missing metrics, and the
+filter is the factory name — never the prefix.** Re-measured 2026-08-14 at
+`fe4becd`: a naive walk over `src/usher/` for calls whose attribute name
+`startswith("create_")` finds **120** sites (121 counting the one bare-name
+call, `create_async_engine`). **79** are Alembic's `op.create_table` /
+`create_index` / `create_foreign_key` under `db/migrations/versions/`, 34 are
+the instrument factories, six are `asyncio.create_task` and one is
+`sa_asyncio.create_async_engine`. **Four of the tasks carry a `name=`, and
+three of those are spelled `usher.*`** — `usher.lane.worker`,
+`usher.lane.refresh`, `usher.lane.rows.refresh` (`api/lanes.py:204-208`) and
+`usher.jobs.heartbeat` (`services/jobs.py:317`). A prefix filter puts three
+task names into a catalogue comparison looking exactly like three undocumented
+metrics.
+
+*The M10 plan states 117 sites and 83 Alembic ones, measured 2026-08-13. Both
+differ from the above and the plan's own arithmetic does not close (117 − 83 −
+4 = 30, against 34 instruments that must also be in the total); 120 = 79 + 34 +
+6 + 1 does. Treat 120/79 as the figures and re-derive rather than trusting
+either, since both move with every migration.*
+
+Pinned by
+`tests/unit/test_telemetry_metric_names.py::test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue`,
+which asserts `declared == catalogue - {"http.server.duration"}` — 34 == 34.
+**Both halves of it are scans, so both carry premise guards placed before the
+value they protect**: the walk must find something and must find
+`usher.jobs.queued`; the table parse must find 35 rows, which is the premise a
+Markdown regex loses the moment the table is reformatted. Demonstrated red two
+ways on the declared side — a **deleted** row (the 35-row guard fires) and a
+**renamed** row at a preserved count of 35 (the set comparison fires, which is
+what proves the guard is not the only live assertion).
+
+### Three stored series names, observed under Usher's own instruments rather than derived
+
+O2's seven-clause naming rule above is the mechanism and is **not restated
+here**; this is a status change to three of the names it produced. O2 marked
+Usher's counters and observable gauges as *derived* — the rule applied to
+declarations read from source, never seen under their real names. Two of the
+three are now **observed**:
+
+| catalogue name | kind, unit (from source) | stored series | status |
+|---|---|---|---|
+| `usher.search.duration` | histogram, `s` (`services/search.py:106-107`) | `usher_search_duration_seconds_{bucket,count,sum}` | **observed** — O2's live `GET /search`, re-confirmed |
+| `usher.ingest.items` | counter, `1` (`services/ingest.py:55-56`) | `usher_ingest_items_total` | **observed** 2026-08-14, was derived |
+| `usher.jobs.queued` | observable gauge, `1` (`telemetry.py:299`) | `usher_jobs_queued_ratio` | **observed** 2026-08-14, was derived |
+
+Observed by importing Usher's **own** instrument objects — `_items_counter`
+from `services/ingest.py`, `_search_duration` from `services/search.py`, and
+the gauge via `telemetry.register_queue_gauges` — installing a real
+`MeterProvider` with an OTLP reader against the collector, and reading the
+names back out of Prometheus. Nothing was re-declared, so the name, unit and
+instrument kind all came from shipped source. `usher_jobs_parked_ratio` came
+free from the same registration and is observed too. The emitting resource
+carried `service.name="o3nameprobe"` so the series are attributable and are not
+mistaken for a real Usher run; the storage rename is computed by the
+collector's `prometheusremotewrite` exporter from `(name, unit, kind)` alone
+and is independent of every resource attribute, which is what makes that
+substitution sound.
+
+**`usher_jobs_queued_ratio` is the one to carry.** A queue-depth gauge stored
+under `_ratio` looks like a mistake and is not — it is O2's rule 5 (`unit="1"`
+becomes `_ratio` on a gauge) meeting the fact that **every Usher observable
+gauge declares `unit="1"`**. The same applies to `usher_jobs_parked_ratio`,
+`usher_source_push_connected_ratio`, `usher_search_embeddings_stale_ratio` and
+`usher_similarity_neighbors_stale_ratio`, which remain derived.
+
+**O2's own evidence was re-verified rather than assumed**, and one thing about
+how to look at it is worth keeping: all seven `probe_*` series are still in the
+shared dev Prometheus under `job="namingprobe"`, and `usher_search_duration_*`
+under `job="usher"`. But an **instant** query for any of them returns *no
+series at all*, because Prometheus's instant lookback is ~5 minutes and those
+samples are a day old — indistinguishable, at a glance, from data that was
+never written. Query `/api/v1/series` over an explicit range before concluding
+that a recorded series is gone.

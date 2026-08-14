@@ -133,10 +133,10 @@ attributes, so "why did the title I just opened take 45 seconds" is one query.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-Emitted today (✅) or owned by a later milestone (the milestone is named).
-A documented metric nothing emits is a dashboard panel that is permanently
-empty, and nothing distinguishes that from a healthy zero — so this column
-is maintained rather than aspirational.
+Emitted today (✅) or owned by a later milestone (named). A documented metric
+nothing emits is a permanently empty panel that nothing distinguishes from a
+healthy zero, so this column is maintained rather than aspirational. **35
+rows: 34 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
 |---|---|---|---|
@@ -183,20 +183,20 @@ real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor`
 every request — unit `ms`, scope `opentelemetry.instrumentation.fastapi` —
 with `http.target` set to the **route template**
 (`/titles/{title_id}`, not the raw path, so two distinct title ids collapse
-into one series) and `http.status_code`. That is exactly what this row asked
-for, under OpenTelemetry's own semantic-convention name rather than ours, so
-the row now names what ships instead of asking for a second histogram over
-the same measurement — recording `usher.http.server.duration` alongside it
-would double the export for one relabelled series, the same
-two-vocabularies-under-one-name hazard this document already warns about for
-`provider` below.
-**The semconv opt-in is a named hazard, not a footnote**: setting
-`OTEL_SEMCONV_STABILITY_OPT_IN=http` renames this metric to
-`http.server.request.duration`, changes its unit from `ms` to seconds, and
-swaps `http.target` for `http.route` — any one of which empties a dashboard
-panel built against the names above, silently, with no error anywhere.
-Nothing in this project's config sets that variable; it is recorded here so
-the day someone does, the panel that goes quiet is not a mystery.
+into one series) and `http.status_code`. ⚠️ **On a path that matched no route
+`http.target` is absent rather than empty** — measured 2026-08-14,
+`GET /no-such-route` records the point with `http.status_code` 404 and no
+`http.target` key at all — so `group by (http.target)` silently drops every
+unrouted 404. The row names what ships rather than asking for a second
+histogram over the same measurement: that would double the export for one
+relabelled series, the two-vocabularies hazard warned about for `provider`.
+**The semconv opt-in is a named hazard.** Measured 2026-08-14 on sdk 1.44.0 /
+instrumentation 0.65b0: `OTEL_SEMCONV_STABILITY_OPT_IN=http` *replaces* this
+metric with `http.server.request.duration`, unit `s` not `ms`, `http.route`
+not `http.target` — the old name is gone rather than renamed, so a panel on it
+empties silently. It cannot be set from `.env`, `.env.example` or
+`compose.yml` without failing a test or every entry point; only the launching
+process's own environment reaches it. `http/dup` emits both names.
 
 **`mode`'s vocabulary is `full_text` / `semantic` / `fused`** — `SearchMode`'s
 own values, lower-case, and written down here because a label whose vocabulary
