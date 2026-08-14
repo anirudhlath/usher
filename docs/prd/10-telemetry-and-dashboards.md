@@ -932,9 +932,9 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4317
 OTEL_SERVICE_NAME=usher
 ```
 
-**Telemetry is never required.** With no endpoint configured, Usher runs
-normally — exporters become no-ops. The dashboards are an asset of this
-repository; the stack that renders them is infrastructure.
+**Telemetry is never required.** With no endpoint configured Usher runs
+normally and constructs no exporter at all. The dashboards are an asset of
+this repository; the stack that renders them is infrastructure.
 
 ## Alerts
 

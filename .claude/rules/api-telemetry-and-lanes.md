@@ -616,3 +616,156 @@ lease is what changed — so `USHER_WORKER_ENABLED=false` on a server beside a
 one. What two processes still do is spend the same upstream budget twice:
 `USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` are both per
 process, against a rate limit that is per client.
+
+## Phase 0's live run — the first telemetry this project has ever exported (2026-08-14, M10 O2)
+
+**"Telemetry has exported to no-op exporters for nine milestones" is false, and
+the true claim is stronger: no exporter object is constructed at all.**
+`telemetry.py:191-197` installs a real SDK `TracerProvider` **unconditionally**
+and adds `BatchSpanProcessor(OTLPSpanExporter(...))` only inside
+`if settings.telemetry_enabled`; `:222-232` mirrors it with
+`metric_readers=readers`, where `readers` is the empty list when telemetry is
+disabled. The suite has pinned that from both sides since M1, by monkeypatching
+each exporter class to raise if constructed. Three consequences, and the first
+two are counter-intuitive enough that the "no-ops" phrasing hid them:
+
+- **Spans have always had real, valid ids.** The provider is a real
+  `TracerProvider`, not the API's no-op default, so `inject_trace_context`
+  (`telemetry.py:63-67`) has been firing all along and **every JSON log line in
+  every deployment already carries `trace_id` and `span_id`**. Observed on this
+  run *before* any endpoint mattered: the `GET /health` line carried both.
+- **Metric points were recorded into a provider with no reader**, so they were
+  aggregated in memory and never collected.
+- **Nothing has ever left the process** — which is what to say, rather than that
+  the exporters were no-ops.
+
+**This file already had it right**, in the Group F paragraph above
+(*"install a real `TracerProvider`/`MeterProvider` unconditionally … nothing
+gRPC-related is ever constructed"*), which is why the correction below is to
+the PRD and the spec rather than to anything here. The wrong phrasing survives
+in five places outside this file; the four still standing are listed at the end
+of this entry.
+
+Corrected in `docs/prd/10-telemetry-and-dashboards.md` in the same commit. **The
+edit was sized to keep that paragraph's line count fixed**, because
+`~/code/observability/README.md` cites `:936-937` for the *next* sentence; the
+file stayed at 951 lines and the citation was re-checked after the edit rather
+than assumed.
+
+**The endpoint's scheme is load-bearing and the wrong spelling fails silently.**
+Measured in the installed `opentelemetry-exporter-otlp-proto-grpc` **1.44.0**,
+`exporter.py:316-323`: with no `insecure=` argument and
+`OTEL_EXPORTER_OTLP_INSECURE` unset — exactly how `telemetry.py:195` and `:224`
+call it, passing `endpoint=` and nothing else — `insecure` defaults to
+`parsed_url.scheme == "http"`. So the spelling a person types,
+`OTEL_EXPORTER_OTLP_ENDPOINT=127.0.0.1:4317`, builds a **TLS** channel against a
+plaintext collector and every export fails inside the SDK's own retry loop,
+which logs a warning and **does not raise**; `http://127.0.0.1:4317` builds an
+insecure one. `:325-326` then discards the scheme and keeps the netloc, so
+**both spellings store the identical endpoint** and the flag is the only
+observable difference — verified directly (`_insecure` `True` vs `False`,
+`_endpoint` `127.0.0.1:4317` in both). Pinned by
+`test_an_endpoint_without_a_scheme_builds_a_secure_channel_against_a_plaintext_collector`,
+which asserts the flag *differs between the two spellings* rather than that one
+is `False`, so a future normalisation that prepends a scheme is caught.
+
+**"The app started" is not evidence the export works**, for the same reason: the
+retry loop is quiet. Only the three observations below are evidence.
+
+### The three signals, from one `GET /search?q=Blade+Runner&limit=5` over the live 1,272,401-title catalog
+
+Queried through Grafana's datasource proxy, because Prometheus, Loki and Tempo
+are not published to the host.
+
+1. **The trace.** Tempo, TraceQL `{name="GET /search"}` → one trace,
+   `2fa839a2eb19612d9aeb7c3fca9b441e`, root `GET /search` from scope
+   `opentelemetry.instrumentation.fastapi`, **73.95 ms, 13 spans**. Beneath the
+   root: **six `SELECT` spans plus `SAVEPOINT`, `INSERT` and `RELEASE`** from
+   `opentelemetry.instrumentation.sqlalchemy`, and one `connect`. This is the
+   live confirmation of the instrumentor finding recorded earlier in this file —
+   the fix that made `build_engine` call `sa_asyncio.create_async_engine`
+   *through the module* is still holding, and a `connect` span is not what was
+   accepted here.
+2. **The correlated log line**, found in the direction that proves correlation:
+   the 32-hex id was read **off the Tempo trace** and then grepped for in Loki,
+   not the reverse. Loki,
+   `{service_name="usher"} |= "2fa839a2eb19612d9aeb7c3fca9b441e"` → **exactly one
+   line**, `... - "GET /search?q=Blade%20Runner&limit=5 HTTP/1.1" 200`, carrying
+   `trace_id=2fa839a2eb19612d9aeb7c3fca9b441e` and
+   `span_id=35dad4c7b4bc6de1`. Finding *a* line with *a* `trace_id` would have
+   proved only that the patcher runs, which — per the first section above — it
+   always has.
+3. **The two metric samples**, one Usher's own instrument and one the
+   framework's, because they travel different code paths:
+   - `usher_search_duration_seconds_count{job="usher",mode="full_text"}` → **1**;
+     `_sum` → **0.05405643954873085** (seconds).
+   - `http_server_duration_milliseconds_count{job="usher",http_target="/search",http_status_code="200"}`
+     → **1**; `_sum` → **118** (ms, and the client measured 118.8 ms).
+
+### The stored series name is not the OTLP name, and the transformation includes the *unit*
+
+The half most likely to be guessed wrong, so it is written out. Measured against
+the collector's `prometheusremotewrite` exporter, 2026-08-14:
+
+| instrument, as Usher declares it | unit | stored series |
+|---|---|---|
+| `usher.search.duration` | `s` | `usher_search_duration_seconds_{bucket,count,sum}` |
+| `usher.search.results` | `1` | `usher_search_results_{bucket,count,sum}` |
+| `http.server.duration` (FastAPI instrumentor) | `ms` | `http_server_duration_milliseconds_{bucket,count,sum}` |
+
+So the rule is **dots to underscores, then the unit appended in expanded form**
+— `s` → `_seconds`, `ms` → `_milliseconds` — then the histogram's own
+`_bucket`/`_count`/`_sum`. The dimensionless unit `1` contributes **no** suffix,
+which is why `usher.search.results` is the one that looks like a plain
+translation. Neither of the two gains `_total`: that suffix belongs to monotonic
+counters and both of these are histograms. `service.name` becomes the `job`
+label and `service.instance.id` becomes `instance`; the collector also adds
+`otel_scope_name`/`otel_scope_version`.
+
+**The negative control, run rather than assumed:** querying the un-suffixed
+names `usher_search_duration` and `http_server_duration` returns **no series at
+all** — not an error, not a zero. A dashboard panel written against the name a
+person would guess is permanently empty and nothing distinguishes it from a
+healthy zero, which is the same failure `services/search.py` already warns about
+for near-miss instrument names, one layer further out. **`http.server.duration`
+is not Usher's name to choose** — it is whatever the instrumentor emits, so a
+panel plotting it is coupled to that package's version.
+
+### Three traps in running this against the live catalog, each measured
+
+1. **`docker compose up` from an M10 worktree starts a second, empty Postgres.**
+   `compose.yml`'s bind mount is `./data/postgres`, so a different worktree is a
+   different compose project with its own empty volume, and the "live catalog"
+   observation would be over **zero** titles. The 1.27M-row database belongs to
+   the project rooted at the main checkout. Phase 0's run is therefore a **host
+   process** pointed at the existing container over its compose network, which
+   publishes no host port.
+2. **`sources` holds one row and it is enabled**, so the shipped lanes would
+   start a push lane and, on reconnect, a gap-closing `DELTA` reconcile against
+   a real Emby — an unbounded walk. **`USHER_PUSH_ENABLED=false` and
+   `USHER_WORKER_ENABLED=false` are mandatory for this run, not advisory**, and
+   they are what makes the request budget against the live Emby statable at
+   **zero**. Confirmed two ways: no lane log line was emitted, and the trace
+   contains **no `httpx` client span** — `HTTPXClientInstrumentor` is
+   instrumented *unconditionally* (`telemetry.py:199`), so any outbound call
+   would have produced one. An absence claim with a positive control behind it.
+3. **Port 8000 is already taken on this host** by an unrelated service. The run
+   used **8100**, which is `USHER_COMPOSE_HOST_PORT`'s own default in
+   `compose.yml`.
+
+The endpoint itself goes in `.env`, which `.gitignore` already covers and
+`compose.yml` hands to the container whole. **`.env.example` is not edited**, and
+that is enforced rather than preferred: `tests/unit/test_deployment_config.py`
+asserts its key set *equals* the `Settings` field set and that every value equals
+that field's **default**, so the endpoint line has to stay blank there.
+
+### What this task deliberately did not fix
+
+The false "no-op" phrasing has **three more live copies**, all outside O2's
+files and none of them the sentence O2 was scoped to: `src/usher/telemetry.py:4`
+and `src/usher/config.py:913` (both docstrings, the latter on
+`telemetry_enabled` itself), and `docs/prd/decisions/0007-telemetry-architecture.md:55`.
+`.env.example:289` carries it as a comment and cannot be touched for the reason
+above. They are recorded here rather than corrected because each belongs to a
+file this task had no mandate over — but the claim is wrong in all four, and the
+correction is the first section of this entry.
