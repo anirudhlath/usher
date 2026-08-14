@@ -518,7 +518,15 @@ def build_pipeline(
         # starts in 0.13 s rather than paying a 4.84 s cold model load --
         # and why a deployment with no embedding extra can still read and
         # rebuild neighbours for whatever the worker did index.
-        similar=SimilarityService(embeddings, neighbors, titles, session.commit),
+        similar=SimilarityService(
+            embeddings,
+            neighbors,
+            titles,
+            session.commit,
+            # The *name*, never an `Embedder`: this service reads stored
+            # vectors and the name is what `blend_fingerprint` hashes.
+            embedding_model=settings.embedding_model,
+        ),
         # **The embedder is passed and may be `None`, which is the shipped
         # default.** `TasteService.centroid` then returns `None` rather than a
         # zero vector, every consumer drops the signal (ADR-0014), and
@@ -1747,7 +1755,13 @@ class SearchGauges:
             # current" -- and `blend_fingerprint()` is resolved here rather
             # than passed in so there is exactly one definition of the running
             # blend, which is the whole of ADR-0020's argument.
-            neighbors_stale=await neighbors.count_stale(blend_fingerprint=blend_fingerprint()),
+            neighbors_stale=await neighbors.count_stale(
+                # `model_name` is already this method's argument, three
+                # lines up: the embedding backlog and the neighbour
+                # backlog are counted against the same checkpoint, which
+                # is what makes the two gauges answer one question.
+                blend_fingerprint=blend_fingerprint(embedding_model=model_name),
+            ),
         )
 
 

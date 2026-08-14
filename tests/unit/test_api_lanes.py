@@ -104,6 +104,8 @@ from usher.services.similar import SimilarityService
 from usher.services.taste import TasteService
 from usher.services.watch_sync import WatchStateSyncService
 
+_EMBEDDING_MODEL = "fake:test-embedding"
+
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
 USER_ID = new_id()
 
@@ -339,7 +341,9 @@ def _pipeline(
             embeddings,
             result_limit=settings.search_result_limit,
         ),
-        similar=SimilarityService(embeddings, neighbors, titles, commit),
+        similar=SimilarityService(
+            embeddings, neighbors, titles, commit, embedding_model=_EMBEDDING_MODEL
+        ),
         # The real registry unless a case says otherwise. The `rows.refresh`
         # lane composes a whole screen, so its cases substitute a fake
         # provider they can gate and count -- running ten real providers

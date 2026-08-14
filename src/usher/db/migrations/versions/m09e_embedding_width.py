@@ -43,11 +43,12 @@ throughout.
 
 That is the same defect ADR-0020 and the `blend_fingerprint` column were
 introduced to close one milestone earlier, arriving through a door nobody
-checked. **This revision fixes the instance and not the class.** The class
-fix is to feed the embedder's `model_name` into `blend_fingerprint()`, which
-changes its signature and all three of its consumers; it is recorded in
-`.claude/rules/search-and-embeddings.md` as the follow-up rather than smuggled
-into a width migration.
+checked. **This revision fixed the instance and not the class** -- and the
+class was closed separately on the same day, by feeding `embedding_model` into
+`blend_fingerprint()`. Read that as the reason this paragraph is still here
+rather than deleted: emptying the table was the right thing for *this*
+revision to do and would have been the wrong thing to rely on, because it
+worked only because the width changed too.
 
 ## What has to run afterwards
 

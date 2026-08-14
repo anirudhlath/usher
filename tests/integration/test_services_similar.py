@@ -63,6 +63,7 @@ def _service(session: AsyncSession) -> SimilarityService:
         PostgresTitleNeighborRepository(session),
         PostgresTitleRepository(session),
         commit,
+        embedding_model=_MODEL,
     )
 
 

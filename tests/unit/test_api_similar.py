@@ -40,6 +40,8 @@ from usher.domain.title import Title
 from usher.ports.repository import ScoredNeighbor
 from usher.services.similar import SimilarityService, blend_fingerprint
 
+_EMBEDDING_MODEL = "fake:test-embedding"
+
 # Rank 0, the lower score -- the correct "stored order" answer.
 _LOW_SCORE_NEIGHBOR = uuid.UUID(int=0x2)
 # Rank 1, the higher score *and* the smaller id -- a route that re-sorted on
@@ -79,7 +81,9 @@ def similarity(
     neighbors: FakeTitleNeighborRepository,
     titles: FakeTitleRepository,
 ) -> SimilarityService:
-    return SimilarityService(embeddings, neighbors, titles, _commit)
+    return SimilarityService(
+        embeddings, neighbors, titles, _commit, embedding_model=_EMBEDDING_MODEL
+    )
 
 
 @pytest.fixture
@@ -126,7 +130,7 @@ async def test_a_seed_whose_rows_predate_the_running_blend_is_reported_stale(
     await neighbors.replace(
         [fresh_seed.id],
         [ScoredNeighbor(title_id=fresh_seed.id, neighbor_title_id=neighbor.id, score=0.5, rank=0)],
-        blend_fingerprint=blend_fingerprint(),
+        blend_fingerprint=blend_fingerprint(embedding_model=_EMBEDDING_MODEL),
     )
 
     stale_body = (await client.get(f"/titles/{stale_seed.id}/similar")).json()
@@ -157,7 +161,7 @@ async def test_stale_reads_count_stale_scoped_to_this_seed_not_the_whole_table(
     await neighbors.replace(
         [fresh_seed.id],
         [ScoredNeighbor(title_id=fresh_seed.id, neighbor_title_id=neighbor.id, score=0.5, rank=0)],
-        blend_fingerprint=blend_fingerprint(),
+        blend_fingerprint=blend_fingerprint(embedding_model=_EMBEDDING_MODEL),
     )
 
     fresh_body = (await client.get(f"/titles/{fresh_seed.id}/similar")).json()
@@ -193,7 +197,7 @@ async def test_neighbors_render_in_stored_rank_order_never_resorted_on_score(
                 title_id=seed.id, neighbor_title_id=_HIGH_SCORE_NEIGHBOR, score=0.9, rank=1
             ),
         ],
-        blend_fingerprint=blend_fingerprint(),
+        blend_fingerprint=blend_fingerprint(embedding_model=_EMBEDDING_MODEL),
     )
     assert 0.9 > 0.2, "score order must disagree with rank order"
 
@@ -231,7 +235,7 @@ async def test_computed_at_null_and_an_empty_neighbor_list_are_distinguishable(
                 title_id=built_seed.id, neighbor_title_id=its_neighbor.id, score=0.5, rank=0
             )
         ],
-        blend_fingerprint=blend_fingerprint(),
+        blend_fingerprint=blend_fingerprint(embedding_model=_EMBEDDING_MODEL),
     )
 
     lonely_body = (await client.get(f"/titles/{lonely.id}/similar")).json()

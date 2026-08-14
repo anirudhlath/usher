@@ -1304,7 +1304,7 @@ opened. `max(computed_at) - min(computed_at)` over N batches spans **N−1**
 intervals, not N. Anchor the rate to the run's own start instead — 1,000 seeds
 128 s after launch is 128 ms/seed and does not depend on where the window falls.
 
-### The follow-up this change identified and did not make
+### The follow-up this change identified — closed 2026-08-13
 
 **`blend_fingerprint()` does not cover the embedding model, so a model swap
 leaves every `title_neighbors` row reading as current.** It hashes `_WEIGHTS`,
@@ -1315,6 +1315,41 @@ its inputs. So after a swap every row is in `[0, 1]`, carries a plausible
 `usher.similarity.neighbors.stale` reading **zero** throughout. This is exactly
 the failure `blend_fingerprint` was added to close, arriving through the one
 input it does not hash.
+
+✅ **Closed the same day.** `blend_fingerprint(*, embedding_model: str)` hashes
+the model alongside the three constants; `SimilarityService` takes the *name*
+rather than an `Embedder`, because it reads stored vectors and a request must
+never load a model. Two guards, both planted and watched to fail with the key
+removed from the payload: two different checkpoints must not agree, and
+`fastembed:X` must not agree with `openai:X` — the runtime is in the string for
+the same reason `model_name` records it, a measured 1.41e-03 max pairwise delta
+between two runtimes of one checkpoint, 6x the halfvec quantisation error.
+
+⚠️ **The licensing case for M7's `78900b2b…` digest could no longer call the
+function, and that is a shape worth recognising.** It used to monkeypatch
+`_WEIGHTS` and assert the function reproduced the literal; adding a key changed
+the payload's *shape*, so no arguments can produce a three-key digest any more.
+It now reconstructs the historical payload explicitly and asserts the current
+function does **not** answer it — which says in code that the superseded digest
+came from a serialisation this project no longer performs. **When a digest gains
+an input, every test that licenses an older digest by calling the current
+function silently becomes unsatisfiable rather than wrong.**
+
+**Applied to the live catalog without a rebuild, because the preconditions were
+provable.** Adding an input moves the digest —
+`78f3ecd20e654c0f6aa4bdf646ec099b` → `a7013154c014e0ff1b60ef5d8534a115` — so
+every stored row is stale on merge, which is the mechanism working. These rows
+did not need recomputing: `title_embeddings` held exactly **one** `model_name`
+(`openai:BAAI/bge-m3`) and `title_neighbors` exactly **one** fingerprint, so all
+3,268,000 provably came from that model at this blend and were re-stamped in
+place. **Only ever do that with both counts checked** — a mixed table has no
+single honest label and owes the 3.3-hour walk.
+
+⚠️ **And the verdict carries its control, which this file demanded in advance:**
+`count_stale` under the running blend is **0** *and* the same call with a bogus
+fingerprint answers **3,268,000**. Zero stale is also what an empty table
+reports, and an empty table is what every catalog on this host held for most of
+this project's life.
 
 `m09e` empties the table, which fixes **the instance**. **The class fix is to
 feed the embedder's `model_name` into `blend_fingerprint()`** — which changes

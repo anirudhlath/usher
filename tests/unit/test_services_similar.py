@@ -19,7 +19,9 @@ scans this file.
 """
 
 import ast
+import hashlib
 import inspect
+import json
 import math
 import uuid
 from collections.abc import Callable, Sequence
@@ -43,6 +45,8 @@ from usher.services.similar import (
     _neighbors_for,
     blend_fingerprint,
 )
+
+_EMBEDDING_MODEL = "fake:test-embedding"
 
 # M7's four-signal blend, and the digest `title_neighbors.blend_fingerprint`
 # carries on every row any deployment holds today. Kept here rather than in
@@ -106,7 +110,11 @@ def _service(
     async def commit() -> None:
         return None
 
-    return SimilarityService(embeddings, neighbors, catalog, commit), embeddings, neighbors
+    return (
+        SimilarityService(embeddings, neighbors, catalog, commit, embedding_model=_EMBEDDING_MODEL),
+        embeddings,
+        neighbors,
+    )
 
 
 def _candidate(
@@ -673,12 +681,42 @@ def test_the_four_signal_fingerprint_this_file_pins_is_the_one_m7_and_m8_stamped
     A literal is the only spelling that can pin a *previous* blend -- deriving
     it would mean keeping the superseded weights in `src/`, which is the thing
     S7 removes. This case is what stops the literal drifting into a number
-    nothing produced: it asserts the digest is what `blend_fingerprint()`
-    answers for M7's four weights at today's `_NEIGHBORS_PER_TITLE` and
-    `_CANDIDATE_POOL`, so it would also notice if either of those moved.
+    nothing produced.
+
+    ⚠️ **It can no longer be licensed by calling `blend_fingerprint`, and that
+    is the finding rather than an inconvenience.** Until 2026-08-13 this case
+    monkeypatched `_WEIGHTS` to M7's four and asserted the function reproduced
+    the literal. Then `embedding_model` joined the hashed payload, so the
+    *shape* changed: no arguments to the current function can produce a
+    three-key digest. Reconstructing the historical payload explicitly is the
+    honest licence -- it says in code that the superseded digest came from a
+    serialisation this project no longer performs, which a `monkeypatch` of one
+    input cannot say.
+
+    The reconstruction is spelled out rather than imported, mirroring what
+    `blend_fingerprint` did at M7 (`sort_keys`, the compact separators,
+    `usedforsecurity=False`). If a future edit changes the *encoding* rather
+    than the inputs, this keeps pinning what M7 really stamped instead of
+    silently following the new spelling.
     """
     monkeypatch.setattr("usher.services.similar._WEIGHTS", _M7_FOUR_SIGNAL_WEIGHTS)
-    assert blend_fingerprint() == _M7_FOUR_SIGNAL_FINGERPRINT
+    historical_payload = json.dumps(
+        {
+            "weights": dict(sorted(_M7_FOUR_SIGNAL_WEIGHTS.items())),
+            "neighbors_per_title": _NEIGHBORS_PER_TITLE,
+            "candidate_pool": _CANDIDATE_POOL,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert (
+        hashlib.md5(historical_payload.encode("utf-8"), usedforsecurity=False).hexdigest()
+        == _M7_FOUR_SIGNAL_FINGERPRINT
+    )
+    # The half that makes this a licence rather than a restatement: today's
+    # function, handed M7's own weights, does *not* answer it. A reader finding
+    # the literal must not conclude the running code can still mint it.
+    assert blend_fingerprint(embedding_model=_EMBEDDING_MODEL) != _M7_FOUR_SIGNAL_FINGERPRINT
 
 
 async def test_every_row_written_under_the_four_signal_blend_reads_as_stale() -> None:
@@ -694,7 +732,7 @@ async def test_every_row_written_under_the_four_signal_blend_reads_as_stale() ->
     change: while the running blend *is* the four-signal one, a re-stamped row
     is not stale and this case cannot say anything.
     """
-    assert blend_fingerprint() != _M7_FOUR_SIGNAL_FINGERPRINT, (
+    assert blend_fingerprint(embedding_model=_EMBEDDING_MODEL) != _M7_FOUR_SIGNAL_FINGERPRINT, (
         "the premise: the running blend is no longer the four-signal one"
     )
     service, embeddings, neighbors = _service()
@@ -762,12 +800,12 @@ def test_a_zero_weight_signal_is_arithmetically_identical_to_an_absent_one(
     zeroed = {**_M7_FOUR_SIGNAL_WEIGHTS, "tags": 0.0}
     monkeypatch.setattr("usher.services.similar._WEIGHTS", zeroed)
     assert _blend(**signals, tags=0.95) == _blend(**signals, tags=None)
-    zeroed_fingerprint = blend_fingerprint()
+    zeroed_fingerprint = blend_fingerprint(embedding_model=_EMBEDDING_MODEL)
 
     monkeypatch.setattr(
         "usher.services.similar._WEIGHTS", {k: v for k, v in zeroed.items() if k != "tags"}
     )
-    assert blend_fingerprint() != zeroed_fingerprint
+    assert blend_fingerprint(embedding_model=_EMBEDDING_MODEL) != zeroed_fingerprint
 
 
 def test_every_signal_the_blend_is_handed_has_a_weight_and_no_weight_is_zero() -> None:
@@ -854,9 +892,9 @@ def test_the_blend_fingerprint_moves_when_any_of_the_three_constants_moves(
     A fingerprint blind to either reports a table as current across exactly
     the changes that make it wrong without making it look wrong.
     """
-    before = blend_fingerprint()
+    before = blend_fingerprint(embedding_model=_EMBEDDING_MODEL)
     monkeypatch.setattr(f"usher.services.similar.{attribute}", value)
-    assert blend_fingerprint() != before
+    assert blend_fingerprint(embedding_model=_EMBEDDING_MODEL) != before
 
 
 def test_reordering_the_weights_without_changing_one_leaves_the_fingerprint(
@@ -886,9 +924,9 @@ def test_reordering_the_weights_without_changing_one_leaves_the_fingerprint(
     assert list(reordered) != list(_WEIGHTS), "the premise: the order really moved"
     assert reordered == _WEIGHTS, "the premise: only the order moved"
 
-    before = blend_fingerprint()
+    before = blend_fingerprint(embedding_model=_EMBEDDING_MODEL)
     monkeypatch.setattr("usher.services.similar._WEIGHTS", reordered)
-    assert blend_fingerprint() == before
+    assert blend_fingerprint(embedding_model=_EMBEDDING_MODEL) == before
 
 
 async def test_a_rebuild_stamps_the_running_fingerprint_so_nothing_reads_stale() -> None:
@@ -925,3 +963,58 @@ async def test_rows_written_under_a_previous_blend_read_as_stale() -> None:
     assert await service.stale_neighbors(title_id=_SEED) == 1
     assert await service.stale_neighbors(title_id=_OTHER) == 0
     assert await service.stale_neighbors() == 1
+
+
+def test_swapping_the_embedding_model_makes_every_stored_neighbour_stale() -> None:
+    """The gap this fingerprint had for three milestones, as a case.
+
+    `cosine` is **0.45 of every score** and it is the cosine of two embeddings,
+    so the model that produced them decides what a stored row means. Until
+    2026-08-13 `blend_fingerprint` hashed only `_WEIGHTS`,
+    `_NEIGHBORS_PER_TITLE` and `_CANDIDATE_POOL` -- so swapping the model left
+    the digest untouched, every `title_neighbors` row read as current, and
+    `usher.similarity.neighbors.stale` reported zero while the vectors
+    underneath had been replaced.
+
+    **That was not hypothetical when it was found.** `m09e` had just re-embedded
+    130,720 titles from `fastembed:BAAI/bge-small-en-v1.5` to
+    `openai:BAAI/bge-m3`; the 3,268,000 stored rows were saved only because the
+    width change deleted them outright, which is luck rather than mechanism. A
+    same-width swap -- bge-m3 for any other 1024-lane model -- would have left a
+    silently stale similarity graph.
+
+    Asserted on the two real model strings for the shape rather than for
+    sentiment: the failure is that two *different* checkpoints agree, so the
+    case has to hand it two.
+    """
+    small = blend_fingerprint(embedding_model="fastembed:BAAI/bge-small-en-v1.5")
+    m3 = blend_fingerprint(embedding_model="openai:BAAI/bge-m3")
+
+    assert small != m3, (
+        "a model swap left the fingerprint unmoved, so every stored neighbour "
+        "row reads as current and the stale gauge reports zero"
+    )
+    # The control, and it is not decoration: an implementation that hashed the
+    # argument and nothing else would satisfy the assertion above while having
+    # thrown away the blend. Same model twice must still agree, or the
+    # fingerprint is a random number and every row is permanently stale.
+    assert m3 == blend_fingerprint(embedding_model="openai:BAAI/bge-m3")
+
+
+def test_the_runtime_prefix_is_part_of_the_fingerprint_not_just_the_checkpoint() -> None:
+    """`fastembed:X` and `openai:X` are different vectors and must be different
+    digests.
+
+    `Embedder.model_name` records the runtime *and* the checkpoint because the
+    same weights served two ways do not agree: the measured max pairwise
+    similarity delta between `fastembed` and `sentence-transformers` on one
+    checkpoint is **1.41e-03**, which is 6x the halfvec quantisation error. A
+    fingerprint that hashed only the checkpoint would call those two the same
+    and leave the rows from one reading as current under the other.
+
+    This is the whole reason the argument is the full `model_name` string
+    rather than `checkpoint_of(...)` of it.
+    """
+    assert blend_fingerprint(embedding_model="fastembed:BAAI/bge-m3") != blend_fingerprint(
+        embedding_model="openai:BAAI/bge-m3"
+    )

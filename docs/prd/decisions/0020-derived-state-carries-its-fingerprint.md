@@ -277,17 +277,34 @@ causes, one closed, and saying which is the difference between an improvement
 and a claim. A freshness predicate that looked like the others and did not mean
 the same thing would still be worse than an honest gap.
 
-⚠️ **There is a third cause, found 2026-08-13, and unlike the second it is
-decidable — it is simply not decided.** `blend_fingerprint()` hashes
-`_WEIGHTS`, `_NEIGHBORS_PER_TITLE` and `_CANDIDATE_POOL` and **not the
-embedding model**, so swapping the model leaves every neighbour row reading as
-current, in `[0, 1]`, with a plausible `rank`, derived from a model the
-deployment no longer runs — and `usher.similarity.neighbors.stale` reading zero
-throughout. That is this ADR's own failure mode arriving in the artefact it had
-already been applied to. `m09e` empties the table, which fixes the instance;
-**the class fix — feeding `model_name` into `blend_fingerprint()`, changing its
-signature and all three consumers — is not done**, and is recorded as the
-follow-up in `.claude/rules/search-and-embeddings.md`.
+✅ **There was a third cause, found and closed on 2026-08-13.**
+`blend_fingerprint()` hashed `_WEIGHTS`, `_NEIGHBORS_PER_TITLE` and
+`_CANDIDATE_POOL` and **not the embedding model** — so swapping the model left
+every neighbour row reading as current, in `[0, 1]`, with a plausible `rank`,
+derived from a model the deployment no longer ran, and
+`usher.similarity.neighbors.stale` reporting zero throughout. **This ADR's own
+failure mode, arriving in the artefact it had already been applied to**, and
+through the one input the function did not hash.
+
+The mechanism is worth stating in one line, because it is what makes the
+omission a *defect* rather than a judgement call: `cosine` is **0.45 of every
+score** and it is the cosine of two embeddings, so the model is not an input to
+the blend in the way the weights are — it is what the largest term is *made
+of*.
+
+**The class fix is applied**: `blend_fingerprint(*, embedding_model: str)`,
+required and keyword-only, hashed alongside the three constants.
+`SimilarityService` takes the name (never an `Embedder` — it reads stored
+vectors and must not put a 4.84 s cold load in front of `usher similar <id>`),
+and the three consumers pass it: the rebuild, the CLI's staleness line, and the
+gauge, which already had `model_name` in scope for the *embedding* backlog and
+now counts both backlogs against one checkpoint.
+
+**It is not free and the cost is the mechanism working as designed.** Adding an
+input changes the digest, so every stored row is stale on merge. The rows in
+this deployment were provably computed under `openai:BAAI/bge-m3` at the
+current blend, so they were re-stamped rather than recomputed; any deployment
+that cannot prove that pays a rebuild, which is exactly what the column is for.
 [ADR-0038](0038-the-embedding-width-is-deployment-wide-ddl.md).
 
 **This is also the milestone that made this ADR's own Uncertainty section

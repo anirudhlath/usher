@@ -38,6 +38,8 @@ from usher.services.similar import (
     SimilarityService,
 )
 
+_EMBEDDING_MODEL = "fake:test-embedding"
+
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "measure_pair_rates.py"
 
 
@@ -118,7 +120,11 @@ async def _population(
             keywords=(f"kw-{number % 5}",),
             genome=(1.0, float(number % 7) / 7.0, 0.5) if number % genome_every == 0 else None,
         )
-    return SimilarityService(embeddings, neighbors, catalog, commit), embeddings, neighbors
+    return (
+        SimilarityService(embeddings, neighbors, catalog, commit, embedding_model=_EMBEDDING_MODEL),
+        embeddings,
+        neighbors,
+    )
 
 
 async def test_the_genome_pair_rate_is_the_one_the_shipped_rebuild_reports() -> None:
