@@ -97,11 +97,13 @@ class Embedder(ABC):
         and has been exercised; across widths there was never a claim, only
         the absence of a counterexample.
 
-        **One thing the fingerprint still does not reach, recorded because
-        `m09e` had to work around it:** `title_neighbors` rows are derived
-        from these vectors and their `blend_fingerprint` hashes the blend's
-        constants only, so a model swap leaves every neighbour row reading as
-        current. See that revision's docstring.
+        **`title_neighbors` used to be reachable through this gap and no
+        longer is.** Those rows are derived from these vectors, and their
+        `blend_fingerprint` hashed the blend's constants only -- so a model
+        swap left every neighbour row reading as current. Closed 2026-08-13:
+        `blend_fingerprint` takes `embedding_model` and a swap now stales the
+        table it should. `m09e`'s docstring records the instance it had to work
+        around before that.
         """
 
     @property

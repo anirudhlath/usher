@@ -67,6 +67,8 @@ from usher.telemetry import (
     register_search_gauges,
 )
 
+_EMBEDDING_MODEL = "fake:test-embedding"
+
 _PRD_10 = Path(__file__).resolve().parents[2] / "docs" / "prd" / "10-telemetry-and-dashboards.md"
 
 # `| \`usher.search.duration\` | histogram | mode | M6 |` -- name, type and
@@ -580,7 +582,9 @@ async def test_the_gauges_hold_the_last_complete_re_read(
     assert gauges.read() == SearchSnapshot(
         stale=await embeddings.count_stale("fastembed:BAAI/bge-small-en-v1.5"),
         refused=await embeddings.count_refused("fastembed:BAAI/bge-small-en-v1.5"),
-        neighbors_stale=await neighbors.count_stale(blend_fingerprint=blend_fingerprint()),
+        neighbors_stale=await neighbors.count_stale(
+            blend_fingerprint=blend_fingerprint(embedding_model=_EMBEDDING_MODEL)
+        ),
     )
 
 

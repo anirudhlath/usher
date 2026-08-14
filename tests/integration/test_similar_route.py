@@ -35,6 +35,13 @@ from usher.domain.title import Title
 from usher.ports.repository import ScoredNeighbor
 from usher.services.similar import blend_fingerprint
 
+# **Read off `Settings` rather than invented, and that changed on 2026-08-13.**
+# A literal was harmless while `blend_fingerprint` ignored the model; now the
+# app under test builds `SimilarityService` from `settings.embedding_model`, so
+# a fake name here makes every "fresh" row read stale through the real wiring —
+# which is the mechanism working, and would be a test asserting against it.
+# `Settings()` here is the same default the `settings` fixture above inherits;
+# neither overrides `embedding_model`.
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 # Every title this file writes carries it, so teardown removes exactly what
 # this file created -- `test_titles_route.py`'s convention, for the same
@@ -142,7 +149,7 @@ async def _given_neighbors(
 
 
 async def test_the_route_resolves_through_the_real_wiring_and_reports_staleness(
-    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
     """The end-to-end check `tests/unit/test_api_similar.py` cannot make:
     `api/deps.py`'s `get_similarity_service` actually resolves against a real
@@ -159,7 +166,12 @@ async def test_the_route_resolves_through_the_real_wiring_and_reports_staleness(
     neighbor = await _given_title(sessions, "A Neighbour")
 
     await _given_neighbors(sessions, stale_seed, neighbor, fingerprint="an-old-blend")
-    await _given_neighbors(sessions, fresh_seed, neighbor, fingerprint=blend_fingerprint())
+    await _given_neighbors(
+        sessions,
+        fresh_seed,
+        neighbor,
+        fingerprint=blend_fingerprint(embedding_model=settings.embedding_model),
+    )
 
     stale_body = (await client.get(f"/titles/{stale_seed.id}/similar")).json()
     fresh_body = (await client.get(f"/titles/{fresh_seed.id}/similar")).json()
@@ -192,6 +204,7 @@ async def test_the_route_issues_no_write_statement(
     client: AsyncClient,
     sessions: async_sessionmaker[AsyncSession],
     statement_counter: list[str],
+    settings: Settings,
 ) -> None:
     """B8's own risk, checked against real SQL rather than argued in a
     docstring: `SimilarityService`'s fourth constructor argument is
@@ -200,7 +213,12 @@ async def test_the_route_issues_no_write_statement(
     wiring meant for `usher similar --rebuild` leaked onto a `GET`."""
     seed = await _given_title(sessions, "A Read Only Seed")
     neighbor = await _given_title(sessions, "Its Neighbour")
-    await _given_neighbors(sessions, seed, neighbor, fingerprint=blend_fingerprint())
+    await _given_neighbors(
+        sessions,
+        seed,
+        neighbor,
+        fingerprint=blend_fingerprint(embedding_model=settings.embedding_model),
+    )
 
     statement_counter.clear()
     response = await client.get(f"/titles/{seed.id}/similar")

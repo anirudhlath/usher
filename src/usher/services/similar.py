@@ -197,7 +197,7 @@ _NEIGHBORS_PER_TITLE = 25
 _CANDIDATE_POOL = 100
 
 
-def blend_fingerprint() -> str:
+def blend_fingerprint(*, embedding_model: str) -> str:
     """What a stored `title_neighbors.score` *means*, as 32 hex characters.
 
     **The one definition, with three consumers**: the rebuild stamps it,
@@ -206,17 +206,40 @@ def blend_fingerprint() -> str:
     is [ADR-0020](../../../docs/prd/decisions/0020-derived-state-carries-its-fingerprint.md)'s
     argument in one function -- staleness is a *query*, not an inference.
 
-    **The three constants are exactly the ones that decide a score, and no
-    others.** `_WEIGHTS` is what each signal is worth; `_NEIGHBORS_PER_TITLE`
-    is how many rows survive, so moving it changes which pairs are *stored*
-    even though it changes no score; `_CANDIDATE_POOL` decides which pairs were
-    ever *considered*, so a smaller pool can silently exclude the true nearest
+    **Four inputs, and `embedding_model` was missing for three milestones.**
+    `_WEIGHTS` is what each signal is worth; `_NEIGHBORS_PER_TITLE` is how many
+    rows survive, so moving it changes which pairs are *stored* even though it
+    changes no score; `_CANDIDATE_POOL` decides which pairs were ever
+    *considered*, so a smaller pool can silently exclude the true nearest
     neighbour. A row written under any different combination is not comparable
     with one written under this, and before this column existed nothing could
     tell them apart -- both are in `[0, 1]`, both carry a plausible `rank`.
 
+    🔴 **And the fourth is the one the largest weight is computed from.**
+    `cosine` is 0.45 of every score and it is the cosine of two *embeddings*, so
+    a model swap changes the meaning of every stored row -- and until 2026-08-13
+    this function could not see it. Demonstrated rather than argued: with only
+    the three constants hashed, changing `USHER_EMBEDDING_MODEL` from
+    `fastembed:BAAI/bge-small-en-v1.5` to `openai:BAAI/bge-m3` left the digest
+    at `78f3ecd20e654c0f6aa4bdf646ec099b`, so 3,268,000 rows derived from
+    vectors the deployment no longer held read as current and
+    `usher.similarity.neighbors.stale` reported **zero** throughout. That is
+    precisely the failure this column was added to close, arriving through the
+    one input it did not hash.
+
+    **It takes the *configured* model rather than reading the stored one**, and
+    that is a real choice with a cost. `nearest_for` does not filter by
+    `model_name` -- it reads whatever vectors exist -- so mid-swap a rebuild
+    genuinely draws pools from a mixture, and no single string is a true label
+    for those rows. What this records is what the deployment was *configured*
+    with, which is the same string `title_embeddings.model_name` is written
+    from, so the two agree everywhere except during a backfill. A mixed-model
+    rebuild is mislabelled by exactly the window it takes to drain, and the
+    honest fix for that is not a different fingerprint input, it is a rebuild
+    that refuses to run against a mixed table -- which is not built.
+
     **`sort_keys` on both levels is load-bearing.** `_WEIGHTS` is a `dict`, and
-    Python preserves insertion order, so reordering the four entries without
+    Python preserves insertion order, so reordering the entries without
     changing a single number would otherwise mint a new fingerprint and declare
     the whole table stale for a no-op edit.
 
@@ -231,6 +254,7 @@ def blend_fingerprint() -> str:
             "weights": dict(sorted(_WEIGHTS.items())),
             "neighbors_per_title": _NEIGHBORS_PER_TITLE,
             "candidate_pool": _CANDIDATE_POOL,
+            "embedding_model": embedding_model,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -287,6 +311,8 @@ class SimilarityService:
         neighbors: TitleNeighborRepository,
         titles: TitleRepository,
         commit: Callable[[], Awaitable[None]],
+        *,
+        embedding_model: str,
     ) -> None:
         self._embeddings = embeddings
         self._neighbors = neighbors
@@ -294,6 +320,18 @@ class SimilarityService:
         # Injected because `services/` may depend only on `domain/` and
         # `ports/` (ADR-0009), and a session is neither.
         self._commit = commit
+        # **Not an `Embedder`, and the difference is the whole reason this
+        # service starts in 0.13 s.** It reads stored vectors and never embeds
+        # anything, so it needs the model's *name* -- for `blend_fingerprint`
+        # -- and not the model. Taking an `Embedder` here would put a 4.84 s
+        # cold load in front of `usher similar <id>`, and would make the
+        # fingerprint unavailable on exactly the deployments that have
+        # neighbours to read and no embedding extra installed.
+        #
+        # Required and keyword-only, following the port's own rule for
+        # `blend_fingerprint`: a caller that cannot say which model the scores
+        # came from is a caller that cannot honestly stamp or count them.
+        self._embedding_model = embedding_model
 
     async def neighbors_of(
         self, title_id: uuid.UUID, *, limit: int = 10
@@ -356,7 +394,7 @@ class SimilarityService:
             # Resolved once per rebuild, not per page: the constants cannot
             # move mid-run, and a per-page call would let a table be stamped
             # with two fingerprints if they somehow could.
-            fingerprint = blend_fingerprint()
+            fingerprint = blend_fingerprint(embedding_model=self._embedding_model)
             while True:
                 page = await self._embeddings.list_embedded(after=after, limit=page_size)
                 if not page:
@@ -415,7 +453,8 @@ class SimilarityService:
         degradation rule -- narrowed, not broken.
         """
         return await self._neighbors.count_stale(
-            blend_fingerprint=blend_fingerprint(), title_id=title_id
+            blend_fingerprint=blend_fingerprint(embedding_model=self._embedding_model),
+            title_id=title_id,
         )
 
 

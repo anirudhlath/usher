@@ -960,6 +960,7 @@ HomeServiceDep = Annotated[HomeService, Depends(get_home_service)]
 
 def get_similarity_service(
     session: SessionDep,
+    settings: SettingsDep,
     embeddings: Annotated[TitleEmbeddingRepository, Depends(get_title_embedding_repository)],
     neighbors: Annotated[TitleNeighborRepository, Depends(get_title_neighbor_repository)],
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
@@ -972,8 +973,23 @@ def get_similarity_service(
     constructor argument is not optional, not because a write is reachable
     here. `usher similar --rebuild` is `rebuild`'s only caller, and nothing
     schedules it -- it is an operator's command or a cron entry.
+
+    **`settings` is here for `embedding_model` and for nothing else**, and it
+    is a *setting* rather than an `Embedder` on purpose. `stale_neighbors` is
+    one of the three reads this route does make, and it cannot answer without
+    knowing which checkpoint the stored scores were computed under -- while a
+    request has no model and must never load one (`create_app`'s lifespan
+    builds one only under `worker_enabled`). Taking the name keeps the read
+    answerable on every deployment, including one with no embedding extra
+    installed at all.
     """
-    return SimilarityService(embeddings, neighbors, titles, session.commit)
+    return SimilarityService(
+        embeddings,
+        neighbors,
+        titles,
+        session.commit,
+        embedding_model=settings.embedding_model,
+    )
 
 
 SimilarityServiceDep = Annotated[SimilarityService, Depends(get_similarity_service)]
