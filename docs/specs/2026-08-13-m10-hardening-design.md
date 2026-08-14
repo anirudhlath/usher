@@ -1,7 +1,9 @@
 # M10 — Hardening — Design Spec
 
-**Date:** 2026-08-13
-**Status:** Awaiting review
+**Date:** 2026-08-13 (revised the same day, after the parallel drafting pass)
+**Status:** Approved. **Fifteen claims in the first version were wrong and are
+corrected below** — the plan's `## Corrections this plan carries` holds the
+evidence for each.
 **PRD:** [`docs/prd/`](../prd/README.md) — authoritative for *what and why*.
 This spec is the point-in-time design for M10, scoped for an implementation
 plan.
@@ -29,7 +31,7 @@ The original design predicted this shape:
 `docs/specs/2026-07-28-usher-v1-design.md:165` — *"M10 assembles the dashboards
 over data that is already flowing, rather than retrofitting instrumentation at
 the end."* That prediction held. [10](../prd/10-telemetry-and-dashboards.md)'s
-metric catalogue (`:136–177`) is **34 rows and every one is ✅**, each shipped by
+metric catalogue (`:136–177`) is **35 rows and every one is ✅**, each shipped by
 the milestone that owned it, and M2's plan restates three times (`:5389`,
 `:5678`, `:5918`) that instrumentation was deliberately not deferred here.
 
@@ -47,8 +49,9 @@ deliberately not a service in Usher's `compose.yml`. That directory is absent,
 no Grafana/Prometheus/Loki/Tempo container runs on this host, and
 `.env.example:290` ships `OTEL_EXPORTER_OTLP_ENDPOINT` **empty** — the service
 name beside it at `:291` is set, which is the detail that makes this easy to
-miss. **Usher's telemetry has exported to no-op exporters for nine
-milestones.** Nothing downstream can be verified until this is fixed,
+miss. **Usher's telemetry has never left the process** — and the mechanism is not
+a no-op exporter but *no exporter object at all* (`telemetry.py:191`), which is
+why spans have always carried valid ids and every log line a `trace_id`. Nothing downstream can be verified until this is fixed,
 and issue #13 cannot be honestly closed at all.
 
 **The repository is already public.** It was created public on 2026-08-02
@@ -83,7 +86,7 @@ by anything.
   `OTEL_SEMCONV_STABILITY_OPT_IN=http` silently renames and re-units
   `http.server.duration`. Nothing sets it today. Phase 0 records which
   convention is in force and asserts the names Usher emits against the
-  catalogue's 34 rows, so no panel in Phase 2 is authored against a name that
+  catalogue's 35 rows, so no panel in Phase 2 is authored against a name that
   is not on the wire.
 
 ### Phase 1 — In
@@ -93,10 +96,10 @@ bounded requests with no walk — the discipline M9's H4/H5 used.
 
 | Issue | Surface | Shape |
 |---|---|---|
-| **#19** no outbound rate limiting | `src/usher/adapters/http.py` (207 lines) | The module's own docstring claims "rate-limit handling", and what it has is **reactive**: `port_error_for` (`:144`) turns a 429 into `PortRateLimited` and `retry_after_seconds` (`:71`) parses the header. Nothing is **proactive**. Phase 1 adds a per-source limiter so Usher does not earn the 429. The deployment target is a shared Emby owned by someone else at ~1–3 s/request, and W1's concurrency 4 is the first real parallelism aimed at it. |
+| **#19** no outbound rate limiting | `src/usher/adapters/http.py` (207 lines) | The module's own docstring claims "rate-limit handling", and what it has is **reactive**: `port_error_for` (`:144`) turns a 429 into `PortRateLimited` and `retry_after_seconds` (`:71`) parses the header. Nothing is **proactive**. Phase 1 adds a per-source limiter so Usher does not earn the 429. ⚠️ **The "~1–5 s/request" this repository repeats 21 times is unmeasured** — it entered in the first PRD commit, two days before an Emby adapter existed, and the only live readings are H4/H5's ~0.14 s. S1 measures it before any limiter chooses a number. |
 | **#9** unbounded startup delta walk | `src/usher/api/lanes.py:401 _close_gap` | PRD 03's reconnect delta walks with no ceiling and nothing warns the operator. Gains a bound and an operator-visible signal. Found by M9's H4/H5. |
-| **#13** concurrency are bounds, not measurements | `src/usher/services/jobs.py:166 KIND_CONCURRENCY`, resolved at `src/usher/composition.py:833` | Two entries from W1 are bounds presented as numbers. **Measured** against Phase 0's stack at the real source latency, and written with its denominator. |
-| **#20** retraction guard assumes an owned library | `src/usher/config.py:217 sync_max_retract_fraction`, guard at `src/usher/ports/repository/media_item.py:136` | ADR-0015's 0.25 default assumes you control the library. Validated against a shared server, where a library you do not control may legitimately shed items. |
+| **#13** concurrency are bounds, not measurements | `src/usher/services/jobs.py:166 KIND_CONCURRENCY`, resolved at `src/usher/composition.py:841` | **Four** entries (`MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK`, `DERIVE`) are bounds presented as numbers, under two justification bullets. **Measured** against Phase 0's stack at the real source latency, and written with its denominator. |
+| **#20** retraction guard assumes an owned library | `src/usher/config.py:217 sync_max_retract_fraction`, guard at `src/usher/db/repositories/media_item.py:482-485` (the port file holds only the docstring) | ADR-0015's 0.25 default assumes you control the library. Validated against a shared server, where a library you do not control may legitimately shed items. |
 
 **#13 is why Phase 0 precedes Phase 1.** This project's named recurring failure
 mode is a bounded measurement restated as an absolute one hop up the document
@@ -118,8 +121,9 @@ an empty panel at the gate.
 
 - **No metric series exists for the suggest path at all**
   (`10-telemetry-and-dashboards.md:213–222`) — a gap named there rather than
-  left to be discovered from an empty panel. The gate measured p50 33.6 ms,
-  p95 211 ms, max 730 ms.
+  left to be discovered from an empty panel. ⚠️ ADR-0031's p50 33.6 / p95 211 /
+  max 730 ms are **tier 2 whole-name** figures; the route defaults to **tier 1**,
+  whose p95 is 2,707 ms at one character. The series carries a `tier` label.
 - **No `propose` span** (`:113–117`), which D4's home-composition panel wants.
 - **`llm_calls` has no read method and no index beyond its primary key.** M8
   withheld both deliberately until a reader existed
@@ -152,7 +156,7 @@ has no caller.
 
 **Failure-mode gaps.**
 
-- **The `supports_push = false` degradation never fires**
+- **The `supports_push` degradation does fire — that claim is refuted**, and what survives is one row down: `LaneSupervisor.refresh` never pops a finished lane
   (`08-operations.md:298`): the counter resets on *delivery*, not on
   *connection*, so a documented degradation path is unreachable.
 - **Orphaned claims produce nothing in `/health/ready`.** W1 shipped the lease,
@@ -161,8 +165,10 @@ has no caller.
   (`:301`).
 
 **The scheduler — the one genuinely new component.** Issue #17 needs something
-to run `usher similar --rebuild`, and **nothing in `src/` schedules anything**.
-The rebuild costs 594.7 ms/seed, a **21.6-hour** full walk at `halfvec(1024)`,
+to run `usher similar --rebuild`, and **nothing in `src/` runs a named job on a
+period** (two bare periodic loops exist at `api/lanes.py:325` and `:595`; neither
+has a name, a declared period, or a resumption story).
+The rebuild costs **91.7 ms/seed, a 3.33-hour full walk** (594.7 ms/seed was `m09e`'s cost and `m09f` repaired it; `08-operations.md:666` is stale),
 so this is an overnight job with a resumption story, not a cron line. It has a
 second customer immediately — the retention above — so it ships as one bounded
 component with two registered jobs.
@@ -196,8 +202,9 @@ None exist; there is no `docs/runbooks/` and no `docs/ops/`.
 ### Phase 3 — In
 
 - **Version wiring.** `pyproject.toml:3` reads `version = "0.1.0"` and
-  **nothing consumes it** — no `__version__`, no `--version`, nothing in the API
-  surface. Wired through and surfaced on `/health` so a running instance can be
+  `__version__` **does** exist (`src/usher/__init__.py:6`) and reaches Emby in a
+  request header via `adapters/emby/session.py:166`; what is missing is
+  `--version` and the API surface. Wired through and surfaced on `/health` so a running instance can be
   identified.
 - **Release machinery.** `CHANGELOG.md`, a stated semver policy, **the first git
   tag** (`v0.1.0`; there are none today), and a tag-triggered CI job that builds
@@ -253,6 +260,40 @@ that nothing reads them, no host enforces them and no policy derives from them.
 M9's Track 2 misused it as a budget and withdrew a design (ADR-0036). M10 does
 not repeat that: no cgroup limits are added to `compose.yml` on the strength of
 that table.
+
+## Corrections to the first version of this spec
+
+Seven drafters verified this document's claims against the code rather than
+inheriting them, and **fifteen were wrong**. They are corrected in place above;
+the plan's `## Corrections this plan carries` holds the file:line evidence and
+names the owning task for each.
+
+**The pattern matters more than the list.** Nine of the fifteen are *a bounded
+measurement restated as an absolute*, or *a number that was true at one head and
+quoted at another* — this project's named recurring failure mode, now with a
+fifteen-case sample drawn in a single afternoon. Two deserve naming here because
+they changed a decision's justification rather than a detail:
+
+- **The rebuild is 3.33 hours, not 21.6.** `594.7 ms/seed` was `m09e`'s cost and
+  **`m09f` repaired it — the same commit this spec cites for the TOAST
+  finding.** The overnight-task conclusion survives; the number that motivated
+  it does not, and `08-operations.md:666` still carries the stale figure.
+- **The source-latency premise under the whole safety cluster is unmeasured.**
+  "~1–5 s/request" entered in commit `0c823e0`, the first PRD commit, **two days
+  before an Emby adapter existed**. It is cited 21 times and **11 of those call
+  it "measured"**. The only live readings this repository holds are ~0.14 s. S1
+  measures it before any limiter chooses a number.
+
+**One refutation, not a correction:** the `supports_push = false` degradation
+*does* fire. `08-operations.md:298`'s sentence is a counterfactual about a design
+not taken, and this spec read the premise as the conclusion. What survives is a
+different and real defect one row down — `LaneSupervisor.refresh` never pops a
+finished lane, leaking an `EmbyAdapter` that keeps feeding the very series PRD
+10's *Push down* alert reads.
+
+**Two claims re-measured and found correct**, recorded because a correction list
+nobody can trust in the negative direction is half a list: `.env.example`'s
+endpoint/service-name asymmetry, and `ci.yml`'s length.
 
 ## Architecture
 
@@ -324,7 +365,9 @@ README `:10`'s **"Pre-release."** becomes **"Beta."**
 One migration, `m10a`: two columns on `search_queries` (`surface`, `tier`) with
 a backfill default for existing rows, and the index on `at` that retention
 needs. Plus the two `llm_calls` indexes named in `m08a`'s docstring, which ship
-with the read method and the panel that reads it.
+in `m10a`; the read method and its panel **depend on** that migration rather than
+carrying it, because a reader task authoring DDL is the cross-group serial spine
+one-migration-per-milestone exists to refuse.
 
 No other schema change. In particular, **backup and restore add no tables** —
 the manifest is code, and the classification test reads the live schema.
@@ -365,8 +408,10 @@ copy.
 - Grafana renders five dashboards from provisioned JSON in this repository, and
   every panel was observed with real data before its commit.
 - Seven alert rules exist and each has been fired at least once, deliberately.
-- `usher backup` produces an artifact that `usher restore` loads into an empty
-  database, verified in a scratch container.
+- `usher backup` produces an artifact that `usher restore` loads into a **rebuilt
+  catalog** — not an empty database, which `watch_states.title_id`'s `ON DELETE
+  RESTRICT` makes impossible (ADR-0010). PRD 08:586's own words: *a short restore
+  plus a background rebuild*. Verified in a scratch container.
 - A test fails if any table in the schema is unclassified by the backup
   manifest.
 - `usher` has a documented secret-rotation command with a caller and a test.
@@ -416,11 +461,11 @@ declined (boundary call 8). The candidate fix — declaring staging columns wide
 (`bigint`, `text`) so refusal moves to the `INSERT … SELECT` — is a design, not
 a patch, and the plan must scope it before an implementer sees it.
 
-**The similar rebuild is 21.6 hours.** The scheduler's first registered job
+**The similar rebuild is 3.33 hours.** The scheduler's first registered job
 cannot be exercised end to end inside a normal task. It is verified against a
 bounded seed subset with the full walk run once, overnight, as its own task.
 
-**TMDb's cache ceiling has no panel.** `provider_cache_meta` tracks a live
+**TMDb's cache ceiling has no panel.** ⚠️ `provider_cache_meta` **does not exist** — ADR-0016 refused it by name; the series is `raw_payloads.fetched_at`. It is a live
 ≤ 6-month compliance obligation, and PRD 10 `:880` specifies the panel for it.
 That panel is inside D5's scope and must not be dropped if D5 is trimmed.
 
@@ -443,7 +488,8 @@ counts — `tt0111161 9.3 2900000` — which the fix commit itself identifies as
 the most licence-restricted part of that dataset. The repository was created
 public on 2026-08-02, after the fix, but the history went with it.
 
-**The decision is to document rather than rewrite.** Two fixture rows are de
+**The decision is to document rather than rewrite.** Four rows across three
+files and 113 commits are de
 minimis against IMDb's non-commercial clause, while this project's engineering
 record — 678 commits of measured findings, ADRs and plans, cross-referenced by
 hash — is one of its most valuable artifacts. Rewriting every hash to remove two
