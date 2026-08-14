@@ -642,9 +642,9 @@ two are counter-intuitive enough that the "no-ops" phrasing hid them:
 **This file already had it right**, in the Group F paragraph above
 (*"install a real `TracerProvider`/`MeterProvider` unconditionally … nothing
 gRPC-related is ever constructed"*), which is why the correction below is to
-the five documents that disagreed with it rather than to anything here. All
-five are listed at the end of this entry, along with why a grep found only one
-of them.
+the six documents that disagreed with it rather than to anything here. All six
+are listed at the end of this entry, along with why it took three searches of
+increasing shape — not increasing wording — to find them all.
 
 Corrected in `docs/prd/10-telemetry-and-dashboards.md` in the same commit. **The
 edit was sized to keep that paragraph's line count fixed**, because
@@ -767,33 +767,84 @@ that is enforced rather than preferred: `tests/unit/test_deployment_config.py`
 asserts its key set *equals* the `Settings` field set and that every value equals
 that field's **default**, so the endpoint line has to stay blank there.
 
-### The same false claim stood in five places, and a grep found one
+### The same false claim stood in six places, and three greps each found fewer than the last
 
-`docs/prd/10-telemetry-and-dashboards.md:936` was the occurrence this task was
-scoped to, and a search for the spec's own wording — *"no-op exporter"*,
-*"exporters become no-ops"* — reported it as the **only** live one. It was not.
-Four more were standing, in wordings that pattern does not match:
+The progression is the finding, not an embarrassment, and it converged only
+when the *shape* of the search changed rather than its wording:
 
-| file | the wording that hid from the grep |
+| search | found |
 |---|---|
+| two literal strings — *"no-op exporter"*, *"exporters become no-ops"* | 1 of 6 |
+| the concept, one line at a time — `no-op` **and** `export` on the same line | 5 of 6 |
+| the concept, **across line breaks** | 6 of 6 |
+
+**The sixth hid behind a line break, and no line-oriented grep can ever find
+it.** `docs/prd/08-operations.md:448-449` wrapped the sentence mid-claim:
+
+```
+448: Telemetry is optional: with no OTLP endpoint configured the exporters are
+449: no-ops and Usher runs normally.
+```
+
+Line 448 contains `exporters` and no `no-op`; line 449 contains `no-ops` and no
+`export`. A per-line filter requires both tokens in one line, so it is
+*structurally* blind here — not unlucky, blind. **Prose wraps at about 80
+columns, so any claim longer than a few words is a coin flip to straddle a
+newline**, and `grep`, `rg` without `-U`, and every `| grep` pipeline are all
+line-oriented by default.
+
+**The pattern that finds all six**, and the one to run when retiring a claim —
+`\s+` and `[\s\S]` are what make it newline-blind in the right direction:
+
+```python
+# tight: the claim itself, wherever it wraps
+re.compile(r"exporters?\s+(?:are|become|becomes|degrade\s+to|to\s+be)\s+no-?ops?", re.I)
+# loose: the concept -- `no-op` within ~120 chars of `export`, newlines included
+re.compile(r"(?:export\w*[\s\S]{0,120}?no-?ops?|no-?ops?[\s\S]{0,120}?export\w*)", re.I)
+```
+
+Run over `src/`, `docs/`, `tests/`, `.claude/` and `.env.example`, the tight
+pattern returns 10 hits and the loose one 28; both are supersets of the six.
+**The loose pattern found no seventh**, which is the only reason to believe the
+list is now complete. Its extra hits are all correct as they stand and a future
+run must not "fix" them:
+
+- `docs/plans/2026-07-28-m1-foundation.md` (3 hits) — a historical plan, which
+  `.claude/rules/prd-maintenance.md` forbids retro-editing.
+- This entry, `docs/prd/decisions/0007-telemetry-architecture.md`'s `## Evidence`
+  section, the M10 plan and spec — all quoting the false claim in order to
+  refute it.
+- `src/usher/telemetry.py:208` — *"the API's **no-op default**"*, which is true:
+  the OTel **API**'s default provider genuinely is a no-op, and that is exactly
+  the contrast the correction turns on.
+- `src/usher/services/rows/curated.py:445` — a different subject entirely
+  (`set_attribute` outside a span).
+- `tests/unit/test_telemetry.py:96` — quoting the old requirement prose as
+  history.
+
+The six false copies, all corrected:
+
+| file | the wording it hid behind |
+|---|---|
+| `docs/prd/10-telemetry-and-dashboards.md:936` | *"exporters become no-ops"* — the only one the first search matched |
 | `src/usher/telemetry.py:4` | *"the exporters are no-ops"* |
 | `src/usher/config.py:913` | *"exporters are no-ops"* — on `telemetry_enabled` itself, the very property the claim describes |
-| `docs/prd/decisions/0007-telemetry-architecture.md` | *"the exporters are no-ops"* |
+| `docs/prd/decisions/0007-telemetry-architecture.md:55` | *"the exporters are no-ops"* |
 | `.env.example:289` | *"exporters become no-ops when unset"*, a comment |
+| `docs/prd/08-operations.md:448-449` | split across the line break, three lines below its own pointer to PRD 10 |
 
 **A literal-string search is a scan, and a scan that globs the wrong pattern
-reports a clean result exactly like a scan that found nothing to report.** Same
-family as this repository's standing *"a run that did not run is not a pass"*.
-The search that would have worked looked for the *concept* — `no-op` within a
-line or two of `export` — rather than for the sentence; that is the one to run
-when retiring a claim, and it is how these four were found.
+reports a clean result exactly like a scan that found nothing to report** — the
+same family as this repository's standing *"a run that did not run is not a
+pass"*.
 
-All five are corrected in the same commit. **Three of those edits are strictly
-line-count-neutral by construction**, verified with `git diff --numstat`
-returning equal adds and deletes: `src/usher/telemetry.py` is cited by line in
-**25** distinct places across this repository and `src/usher/config.py` in
-**29** — this file among them — so a docstring that grew by one line would have
-silently invalidated every one of them.
+**Four of the edits are strictly line-count-neutral by construction**, verified
+with `git diff --numstat` returning equal adds and deletes, because these files
+are cited by line from elsewhere: `src/usher/telemetry.py` in **25** distinct
+places in this repository, `src/usher/config.py` in **29**, and
+`docs/prd/08-operations.md` in **36** — including `:447`, immediately above the
+edit. `~/code/observability` cites `src/usher/telemetry.py:16-17` and `:105-114`
+across the repository boundary; both were re-read afterwards and neither moved.
 `docs/prd/decisions/0007-telemetry-architecture.md` gets **ADR treatment rather
 than a reword**, per `.claude/rules/prd-maintenance.md`: its `Status` is
 annotated and the measurement is added as its own `## Evidence` section, because

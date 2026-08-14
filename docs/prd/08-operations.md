@@ -445,8 +445,8 @@ loguru for logs, OpenTelemetry for metrics and traces, and Grafana over three
 datasources. Instrumentation, metric catalogue, dashboards, and alerts are
 specified in [10](10-telemetry-and-dashboards.md).
 
-Telemetry is optional: with no OTLP endpoint configured the exporters are
-no-ops and Usher runs normally.
+Telemetry is optional: with no OTLP endpoint configured no exporter object
+is constructed at all and Usher runs normally.
 
 `GET /health` is liveness; `GET /health/ready` reports Postgres and
 migration state — and **gates its status code on those two alone**. Lane
