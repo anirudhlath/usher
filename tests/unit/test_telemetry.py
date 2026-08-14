@@ -251,6 +251,28 @@ def test_no_metric_exporter_constructed_when_telemetry_disabled(
     configure_metrics(settings)
 
 
+# **A port nothing listens on, deliberately, and not the collector's 4317.**
+# The two cases below assert on what the exporter *constructs* — the channel's
+# `_insecure` flag, and whether a processor was attached — and never on whether
+# anything answers. Pointing them at the live collector this host happens to run
+# would make an environment-independent suite (`tests/unit`: "no Docker, no
+# network") pass partly *because* of the environment.
+#
+# Nothing would in fact be sent even then, and the mechanism is worth stating so
+# the choice does not rest on the observation: `grpc.insecure_channel()` connects
+# **lazily**, so no I/O happens at construction, and these cases record no span
+# and no measurement, so the `shutdown()` at the end flushes an empty queue and
+# issues no RPC. That is a property of what these cases happen not to do — add
+# one recorded span and it stops holding. A dead port makes it structural
+# instead, which is the difference between a suite that is isolated and one that
+# is isolated today.
+#
+# **Do not "fix" this back to 4317.** The real endpoint belongs in `.env` and in
+# `.claude/rules/api-telemetry-and-lanes.md`, which records the live run that
+# used it. Loopback, so that even a connection attempt cannot leave the host.
+_DEAD_OTLP_HOST_PORT = "127.0.0.1:1"
+
+
 def _settings_with_endpoint(endpoint: str) -> Settings:
     return Settings(
         database_url="postgresql+asyncpg://u:p@localhost:5432/usher",
@@ -298,7 +320,7 @@ def test_a_configured_endpoint_builds_one_real_exporter_over_an_insecure_channel
     lies. `_metric_readers` is the per-provider list (1, 2 and 0 for the
     three providers above).
     """
-    settings = _settings_with_endpoint("http://127.0.0.1:4317")
+    settings = _settings_with_endpoint(f"http://{_DEAD_OTLP_HOST_PORT}")
     assert settings.telemetry_enabled is True, "the premise: this endpoint enables telemetry"
 
     configure_tracing(settings)
@@ -340,7 +362,7 @@ def test_an_endpoint_without_a_scheme_builds_a_secure_channel_against_a_plaintex
     `OTEL_EXPORTER_OTLP_INSECURE` unset -- which is exactly how
     `telemetry.py:195` and `:224` call it, passing `endpoint=` and nothing
     else -- `insecure` defaults to `parsed_url.scheme == "http"`. So
-    `127.0.0.1:4317`, the spelling a person types, parses to an empty
+    a bare `host:port`, the spelling a person types, parses to an empty
     scheme, builds a **TLS** channel against a plaintext collector, and
     every export fails inside the SDK's own retry loop, which logs a
     warning and does not raise. `:325-326` then discards the scheme and
@@ -352,7 +374,7 @@ def test_an_endpoint_without_a_scheme_builds_a_secure_channel_against_a_plaintex
     prepends `http://` to a bare endpoint would make the two agree, which
     is the change this case is here to notice.
     """
-    settings = _settings_with_endpoint("127.0.0.1:4317")
+    settings = _settings_with_endpoint(_DEAD_OTLP_HOST_PORT)
     assert settings.telemetry_enabled is True, "the premise: this endpoint enables telemetry"
 
     configure_tracing(settings)
@@ -368,7 +390,7 @@ def test_an_endpoint_without_a_scheme_builds_a_secure_channel_against_a_plaintex
         without_scheme = processor.span_exporter
         assert isinstance(without_scheme, OTLPSpanExporter)
 
-        with_scheme = OTLPSpanExporter(endpoint="http://127.0.0.1:4317")
+        with_scheme = OTLPSpanExporter(endpoint=f"http://{_DEAD_OTLP_HOST_PORT}")
         try:
             assert without_scheme._endpoint == with_scheme._endpoint, (
                 "the premise: the scheme is discarded, so both spellings target the same netloc "

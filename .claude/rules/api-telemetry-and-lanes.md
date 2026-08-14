@@ -669,6 +669,16 @@ observable difference — verified directly (`_insecure` `True` vs `False`,
 which asserts the flag *differs between the two spellings* rather than that one
 is `False`, so a future normalisation that prepends a scheme is caught.
 
+**That case and its sibling point at `127.0.0.1:1`, not at the collector**, and
+the reason belongs here because this file is where the real endpoint is
+recorded. They assert on what the exporter *constructs*, never on what answers,
+so aiming them at the live collector this host runs would let an
+environment-independent suite (`tests/unit`: "no Docker, no network") pass partly
+because of the environment. Nothing would be sent either way — gRPC channels
+connect lazily and those cases record nothing, so `shutdown()` flushes an empty
+queue — but that is a property of what they happen not to do, and one recorded
+span would end it. A dead loopback port makes the isolation structural.
+
 **"The app started" is not evidence the export works**, for the same reason: the
 retry loop is quiet. Only the three observations below are evidence.
 
@@ -704,33 +714,92 @@ are not published to the host.
 
 ### The stored series name is not the OTLP name, and the transformation includes the *unit*
 
-The half most likely to be guessed wrong, so it is written out. Measured against
-the collector's `prometheusremotewrite` exporter, 2026-08-14:
+The half most likely to be guessed wrong, so it is written out — and **the first
+version of this entry generalised a rule from a sample that could not exhibit
+its own counter-examples**, which is the mistake to read before the table.
+Measured against the collector's `prometheusremotewrite` exporter, whose
+`add_metric_suffixes` is left at its default `true`
+(`~/code/observability/otel-collector/config.yaml`), 2026-08-14.
 
-| instrument, as Usher declares it | unit | stored series |
-|---|---|---|
-| `usher.search.duration` | `s` | `usher_search_duration_seconds_{bucket,count,sum}` |
-| `usher.search.results` | `1` | `usher_search_results_{bucket,count,sum}` |
-| `http.server.duration` (FastAPI instrumentor) | `ms` | `http_server_duration_milliseconds_{bucket,count,sum}` |
+**What one `GET /search` could and could not show.** It exported sixteen series,
+and every one of them was a histogram, a gauge or `target_info`: **not a single
+counter fired**. So that run measured unit handling and was structurally
+incapable of measuring `_total` — and both of its `unit="1"` examples happened
+to be histograms, so it was equally incapable of showing what `1` does on a
+gauge. Two rules were written from it that the sample could not support.
 
-So the rule is **dots to underscores, then the unit appended in expanded form**
-— `s` → `_seconds`, `ms` → `_milliseconds` — then the histogram's own
-`_bucket`/`_count`/`_sum`. The dimensionless unit `1` contributes **no** suffix,
-which is why `usher.search.results` is the one that looks like a plain
-translation. Neither of the two gains `_total`: that suffix belongs to monotonic
-counters and both of these are histograms. `service.name` becomes the `job`
-label and `service.instance.id` becomes `instance`; the collector also adds
-`otel_scope_name`/`otel_scope_version`.
+**Observed in the live run:**
 
-**This is a correction to the M10 plan's own prediction, and it is written down
-because the next task is built on that prediction.** The plan predicted *"dots
-become underscores, and a monotonic counter gains `_total`"*. Measured, both
-halves miss: the transformation also **appends the unit**, which is the part
-that actually breaks a guessed query, and **`_total` never appears here at all**
-because neither instrument is a counter. Anyone deriving a metric name from the
-prediction rather than from the table above gets a name that returns nothing.
+| instrument | unit | kind | stored series |
+|---|---|---|---|
+| `usher.search.duration` | `s` | histogram | `usher_search_duration_seconds_{bucket,count,sum}` |
+| `usher.search.results` | `1` | histogram | `usher_search_results_{bucket,count,sum}` |
+| `http.server.duration` | `ms` | histogram | `http_server_duration_milliseconds_{bucket,count,sum}` |
+| `http.server.response.size` | `By` | histogram | `http_server_response_size_bytes_{bucket,count,sum}` |
+| `http.server.active_requests` | `{request}` | up-down counter | `http_server_active_requests` |
+| `db.client.connections.usage` | `connections` | up-down counter | `db_client_connections_usage` |
+| **`usher.sse.connections`** | **`1`** | **observable gauge** | **`usher_sse_connections_ratio`** |
 
-**The negative control, run rather than assumed:** querying the un-suffixed
+**Measured by a probe**, because the shapes Usher declares most of and this run
+never exercised are exactly the ones the table above cannot reach. One
+instrument per rule, emitted 2026-08-14 under `service.name="namingprobe"`, each
+mirroring a real Usher declaration:
+
+| probe instrument | unit | kind | stored | mirrors |
+|---|---|---|---|---|
+| `probe.items` | `1` | counter | `probe_items_total` | `usher.ingest.items` and eight more |
+| `probe.cachehits` | *(none)* | counter | `probe_cachehits_total` | `usher.cache.hits`/`.misses` |
+| `probe.wait` | `s` | counter | `probe_wait_seconds_total` | unit **and** `_total` together |
+| `probe.queued` | `1` | observable gauge | `probe_queued_ratio` | `usher.jobs.queued` and five more |
+| `probe.connections.usage` | `connections` | up-down counter | `probe_connections_usage` | the `db.client` row above |
+| `probe.things` | `{things}` | up-down counter | `probe_things` | the `active_requests` row above |
+| `probe.payload` | `By` | histogram | `probe_payload_bytes_{…}` | `http.server.response.size` |
+
+**The rule, one clause per measurement:**
+
+1. **Dots become underscores.** Every row.
+2. **The unit is expanded and appended** — `s`→`_seconds`, `ms`→`_milliseconds`,
+   `By`→`_bytes`. This is the genuinely valuable finding and the part no
+   prediction had.
+3. **A brace annotation unit is dropped entirely** — `{request}`, `{things}`.
+4. **A unit already contained in the name is not appended.**
+   `db.client.connections.usage` with unit `connections` stores unsuffixed,
+   while `By` is appended to a name containing no "bytes". So *"the unit is
+   always appended"* is itself too strong.
+5. **Unit `1` depends on the instrument kind.** Dropped for a histogram
+   (`usher.search.results`) and for a counter (`probe.items`); it becomes
+   **`_ratio` for a gauge** (`usher.sse.connections`, `probe.queued`).
+6. **`_total` is for monotonic counters only.** Both up-down counters above get
+   nothing.
+7. `service.name` becomes `job`, `service.instance.id` becomes `instance`, and
+   the collector adds `otel_scope_name`/`otel_scope_version`.
+
+**What that means for Usher's own catalogue, and it is not what anyone would
+guess.** Every one of Usher's roughly ten counters declares `unit="1"`, so by
+rules 5 and 6 they store as `usher_ingest_items_total`,
+`usher_provider_requests_total`, `usher_curation_rows_total` and so on — the
+unit vanishes and `_total` arrives. **And every one of Usher's observable gauges
+also declares `unit="1"`, so they all take `_ratio`**: `usher_jobs_queued_ratio`,
+`usher_jobs_parked_ratio`, `usher_source_push_connected_ratio`,
+`usher_search_embeddings_stale_ratio`, `usher_similarity_neighbors_stale_ratio`.
+A queue-depth gauge stored under `_ratio` looks like a mistake and is not.
+**These are derived by applying the measured rule to declarations read from
+source, not observed under their real names** — only `usher.sse.connections` and
+the two `usher.search.*` histograms have been seen end to end. Treat the derived
+names as strong predictions with a known mechanism, and confirm the first one a
+dashboard actually needs.
+
+**The correction to the M10 plan's prediction, scoped to what was measured.**
+The plan predicted *"dots become underscores, and a monotonic counter gains
+`_total`"*. **Both halves hold** — `_total` is confirmed by the probe above and
+independently by O1's smoke test, whose `observability.smoke.events` stores as
+`observability_smoke_events_total`. What the prediction *omits* is unit handling
+entirely, and that is where every wrong guess will come from: four of the seven
+rules above are about the unit. An earlier version of this entry claimed the
+prediction's `_total` half was refuted; it was not refuted, it was **untested**,
+and saying so was the same error in the opposite direction.
+
+**The negative controls, run rather than assumed:** querying the un-suffixed
 names `usher_search_duration` and `http_server_duration` returns **no series at
 all** — not an error, not a zero. A dashboard panel written against the name a
 person would guess is permanently empty and nothing distinguishes it from a
@@ -803,11 +872,12 @@ re.compile(r"exporters?\s+(?:are|become|becomes|degrade\s+to|to\s+be)\s+no-?ops?
 re.compile(r"(?:export\w*[\s\S]{0,120}?no-?ops?|no-?ops?[\s\S]{0,120}?export\w*)", re.I)
 ```
 
-Run over `src/`, `docs/`, `tests/`, `.claude/` and `.env.example`, the tight
-pattern returns 10 hits and the loose one 28; both are supersets of the six.
-**The loose pattern found no seventh**, which is the only reason to believe the
-list is now complete. Its extra hits are all correct as they stand and a future
-run must not "fix" them:
+Run over `src/`, `docs/`, `tests/`, `.claude/` and `.env.example` **but
+excluding this file**, the tight pattern returns **4** hits and the loose one
+**17**; both are supersets of the six corrected copies. **The loose pattern
+found no seventh**, which is the only reason to believe the list is now
+complete. Its extra hits are all correct as they stand and a future run must not
+"fix" them:
 
 - `docs/plans/2026-07-28-m1-foundation.md` (3 hits) — a historical plan, which
   `.claude/rules/prd-maintenance.md` forbids retro-editing.
@@ -821,6 +891,17 @@ run must not "fix" them:
   (`set_attribute` outside a span).
 - `tests/unit/test_telemetry.py:96` — quoting the old requirement prose as
   history.
+
+**Why this file is excluded from its own count, which is a trap worth naming.**
+The first version of this entry quoted *"tight 10, loose 28"*. Both were correct
+when measured and the loose one was stale one commit later — at **32** — because
+*writing the search down* added the six-wordings table and the two regexes to
+the very corpus the search scans. **A hit count over a corpus that includes the
+document stating the count is self-referential, and it moves every time the
+document is edited.** Excluding this file makes the number reproducible and
+stable under documentation edits; quoting it with the commit it was measured at
+would be the alternative. The same applies to any "N occurrences remain" claim
+in any rules file here.
 
 The six false copies, all corrected:
 
@@ -850,3 +931,14 @@ than a reword**, per `.claude/rules/prd-maintenance.md`: its `Status` is
 annotated and the measurement is added as its own `## Evidence` section, because
 an ADR left silently contradicting the PRD is exactly what that rule exists to
 prevent.
+
+**And this task broke two citations itself, which is the honest version of the
+lesson.** O2's *first* commit added two import lines at the top of
+`tests/unit/test_telemetry.py` — additive, touching no existing case, and
+therefore easy to wave through — and thereby shifted every line below by two,
+including the two the M10 plan cites for the pair of negative cases
+(`:94`→`:96`, `:231`→`:233`). Repaired in the same series. **An "append-only"
+edit is only line-count-safe if the append is at the end**; an import block is
+at the top, and the top is above everything anybody cites. The later commits
+checked citations before editing and this one did not, which is the whole
+difference.

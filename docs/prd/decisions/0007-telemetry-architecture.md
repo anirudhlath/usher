@@ -75,8 +75,11 @@ can only answer in aggregate.
 
 **M10 (O2), 2026-08-14 — "the exporters are no-ops" was false, and what is
 actually true is stronger.** This ADR, [PRD 10](../10-telemetry-and-dashboards.md),
-`src/usher/telemetry.py`, `src/usher/config.py` and `.env.example` all carried
-some spelling of it; all five are corrected in the commit that records this.
+[PRD 08](../08-operations.md), `src/usher/telemetry.py`, `src/usher/config.py`
+and `.env.example` all carried some spelling of it; **all six are corrected**.
+PRD 08's copy was found last and is the instructive one: it wraps mid-claim
+across lines 448-449, so every line-oriented search missed it — see
+`.claude/rules/api-telemetry-and-lanes.md` for the pattern that does not.
 There are no no-op exporters because **there is no exporter object at all**:
 `telemetry.py:191-197` installs a real `TracerProvider` *unconditionally* and
 adds `BatchSpanProcessor(OTLPSpanExporter(...))` only inside
