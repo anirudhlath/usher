@@ -4881,3 +4881,133 @@ asserted clean after every one of the 21 plants and every restore
 (594 files), `mypy` over **578** files, `lint-imports` **10 kept / 0 broken**,
 **3,997 unit / 4 skipped** and **1,224 integration / 22 skipped**, PRD link
 check `OK`.
+
+## M10 Phase 0's gate sweep — three plants over a code surface of three files (2026-08-14, O4)
+
+**6 plants — 3 behavioural targets, all KILLED; 3 equivalent-mutant controls,
+all SURVIVED and all passing every gate step separately; 0 unintended
+survivors, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0
+DID-NOT-RUN, 0 HUNG.** The three-way split is the one that says something:
+"3 killed" alone would not distinguish *the suite caught it* from *the suite
+was designed not to catch it*. **Every verdict matched its pre-registered
+expectation except one blast radius, which is the round's only refutation and
+is written up below.**
+
+The sweep is small because Phase 0's code surface is small — it added no
+module and no contract — and each of the three targets is named in O2's or
+O3's acceptance rather than invented here. Harness at `/var/tmp/m10-O4/sweep.py`,
+**outside the working tree** for V1's reason, and under `/var/tmp` rather than
+`/tmp`, which is tmpfs on this host (measured: `/var/tmp` is btrfs). Plant list
+and expected verdicts written to `/var/tmp/m10-gate/phase0/BAR.md`
+(`sha256 51a51b34932d7e75c4dd213befdab0ac67911f5efcc24b54fc19fc2669e0cc3e`)
+before the first run. Tree committed at `e8b1451` first, so `git status` is the
+verification — clean after every plant, and both mutated files `md5sum`-verified
+byte-identical to `git show HEAD:` afterwards.
+
+Defences: `PYTHONDONTWRITEBYTECODE=1`; `__pycache__` swept under **both** `src/`
+and `tests/` before every run; `compile()` rather than `ast.parse` as the dry
+run; an exact anchor count (`count(old) == 1`) asserted before each plant; the
+landing check spelled as **byte equality with the intended mutant**
+(`path.read_text() == planted`, plus `planted != source`), which is F3's repair
+adopted rather than re-derived — this round has a **deletion** plant (P3) and a
+**two-hunk swap** (C1, C3), and B6's substring form `old not in landed and new
+in landed` is wrong for both; the landing assertion **inside** the `try`; `cp`
+backups with an `md5sum`-verified restore; and no second `-q`.
+
+**Selection: the whole `tests/unit`** (4,072 cases, ~41 s a run), green before
+and after. Whole rather than scoped because two of the three targets are read by
+test files in different directories than the obvious one — which P3 then
+demonstrated. `tests/integration` is deliberately out, for B2's reason:
+`test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_own`
+is intermittent on this tree and **a sweep scored on "did the run fail" cannot
+run against a suite holding a flaky case**.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the OTLP exporter constructed but **never attached** (`add_span_processor` dropped, the `BatchSpanProcessor(...)` left as a bare expression) | KILLED | 2 — `test_a_configured_endpoint_builds_one_real_exporter_over_an_insecure_channel` and `test_an_endpoint_without_a_scheme_builds_a_secure_channel_against_a_plaintext_collector`, i.e. both `assert processors` sites |
+| P2 the scheme predicate short-circuited — `OTLPSpanExporter(..., insecure=True)` passed explicitly, so both spellings agree | KILLED | 1 — the differs-assertion, exactly the case written for it |
+| **P3 one catalogue row deleted from PRD 10 (`usher.search.results`)** | **KILLED — but 2 cases, not the 1 predicted** | `test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue` **and** `test_the_result_series_is_a_histogram_and_not_a_counter` |
+
+**The one refuted prediction is P3's blast radius, and the reason is worth more
+than the number.** The bar said one case — the O3 census, whose declared half is
+`declared == set(catalogue) - {"http.server.duration"}` with
+`assert len(catalogue) == 35` firing first. It kills two, and the second is in a
+different file: `tests/unit/test_telemetry_search.py` **independently parses the
+same table**, with its own regex
+(`^\|\s*`(usher\.[a-z0-9._]+)`\s*\|\s*(\w+)\s*\|…`) keyed on the *kind* column,
+to assert that `usher.search.results` is documented as a histogram and not a
+counter. So the catalogue row is held by **two readers with two different
+regexes written a milestone apart**, and neither knows about the other. That is
+a stronger result than the prediction rather than a weaker one, and it is the
+kind of thing only a whole-`tests/unit` selection can see: a sweep scoped to
+`test_telemetry_metric_names.py` — the obvious scope, since that is the file O3
+added — would have reported one case and been quietly right about the wrong
+thing. **The general form: when a plant's subject is a *document*, the blast
+radius is the number of parsers pointed at it, and that number is not knowable
+from the file the plant's own test lives in.**
+
+**The controls, each measured against every gate step separately**, because "the
+gate holds it" and "the suite holds it" are different claims — and because a
+harness inside the tree makes every one of these read FAIL, which is the failure
+V1's entry exists to prevent and the reason this one lives in `/var/tmp`:
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| C1 `configure_tracing`'s `SQLAlchemyInstrumentor().instrument()` and `HTTPXClientInstrumentor().instrument()` swapped | PASS | PASS | PASS | PASS (10/0) | PASS (4,072) |
+| C2 one sentence of `configure_metrics`' docstring reworded | PASS | PASS | PASS | PASS (10/0) | PASS (4,072) |
+| C3 two adjacent catalogue rows of PRD 10 swapped | PASS | PASS | PASS | PASS (10/0) | PASS (4,072) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at.
+Both instrumentors are process-wide singletons with their own built-in
+re-instrumentation guard (`configure_tracing`'s own docstring records that
+verification), they instrument disjoint libraries, and neither can observe the
+other — so the call order is unreachable from any assertion. And
+`_catalogue_names()` returns a list read only through `len()`, `len(set(...))`
+and `set(catalogue) - {…}`, so **every consumer is order-blind by
+construction**; C3 is the assertion from the other side that P3's kill is about
+the row's *presence* and not about where it sits. Neither is an `__all__`
+reorder, which `RUF022` rejects, and neither is a reorder of a *positional*
+call, which A5's entry is the reason for checking rather than assuming.
+
+C2 was checked **first**, not after it survived:
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/` finds **30** files
+that scan source, and **none of them reads `src/usher/telemetry.py`'s prose**.
+The one scan that walks all of `src/usher/` is O3's own
+`_declared_instrument_names()`, which harvests the first string literal or
+`name=` keyword handed to one of the seven `Meter` instrument factories — a
+docstring is not an `ast.Call`, so it is outside that walk by construction.
+
+**And the round's own positive control is the thing the phase is about, which
+is why it is recorded here rather than only in the gate write-up.** Phase 0's
+demonstration that the semantic convention is *pinned* rather than merely
+*current* is a **subprocess**, not an environment variable draped over pytest:
+`tests/conftest.py:37-38`'s autouse `clean_environment` deletes every `OTEL_*`
+variable before any test body runs, and
+`_OpenTelemetrySemanticConventionStability._initialize()` latches from inside
+`create_app()` — after the scrub. Re-measured here rather than inherited:
+`OTEL_SEMCONV_STABILITY_OPT_IN=http uv run pytest tests/unit/test_telemetry_metric_names.py`
+is **3 passed**, byte-identical to the run with it unset. The variable is set,
+the run runs, the test passes, and what it measured is a fixture. Driven through
+three real child processes instead (`/var/tmp/m10-O4/semconv_probe.py`), each
+building the same `create_app()` and reading an `InMemoryMetricReader`, all three
+exiting 0 with `singleton initialized = true` — the diagnostic that separates
+*"never arrived"* from *"arrived and did nothing"*:
+
+| `OTEL_SEMCONV_STABILITY_OPT_IN` | `http.server.duration` | `http.server.request.duration` |
+|---|---|---|
+| unset | **`ms`** | **absent** |
+| `http` | **absent entirely** | **`s`** |
+| `http/dup` | **`ms`** | **`s`** |
+
+**A demonstration that cannot fail is not a demonstration**, and the original
+spelling of this gate was an instance of exactly the shape this file calls "a
+run that did not run is not a pass" — arriving at an environment variable
+instead of a harness. It took executing it to find out, which is the argument
+for the plant list being written before the run rather than after it.
+
+Gate green before and after on the fully restored tree (`git status --porcelain`
+empty, both mutated files `md5sum`-verified against `git show HEAD:`):
+`ruff check`, `ruff format --check` (**603 files**), `mypy` over **585 files**,
+`lint-imports` **10 kept / 0 broken**, **4,072 unit / 4 skipped**, **1,232
+integration / 22 skipped**, **5,304 whole-suite / 26 skipped**, PRD link check
+`OK`.
