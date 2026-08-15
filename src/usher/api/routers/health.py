@@ -126,10 +126,16 @@ async def ready(
     # are deliberately not in this expression -- see `LaneReport`. PRD 08
     # said readiness "reports Postgres, migration state, and per-source
     # connectivity"; the third is corrected to reported-in-the-body, never
-    # in the status code, because probing there is one upstream request per
-    # 2 s Docker poll against a server measured at 1-5 s per request, and
-    # because a 503 for an unreachable Emby takes this process out of a load
-    # balancer for a reason restarting it cannot fix.
+    # in the status code, because a 503 for an unreachable Emby takes this
+    # process out of a load balancer for a reason restarting it cannot fix.
+    # ⚠️ That is now the *whole* argument. This comment used to lead with
+    # "one upstream request per 2 s Docker poll against a server measured
+    # at 1-5 s per request" -- a figure nobody had ever taken. M10 S1 puts
+    # the probe at **0.1253 s**
+    # (2026-08-15, `.claude/rules/emby-push-and-ingest.md`) -- 6% of the poll
+    # interval per source, which is a cost and not an argument. The
+    # load-balancer half was always the load-bearing one and is left standing
+    # alone rather than propped up by a number nobody had taken.
     #
     # Free to report and therefore worth reporting: `running_sources()` and
     # `worker_running()` read task state off an in-memory supervisor, so

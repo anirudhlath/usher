@@ -62,10 +62,13 @@ live channel raised `PortUnavailable` out of the iterator rather than
 hanging or ending quietly, and the supervisor reconnected.
 
 **Rejected:** probing on every `GET /admin/sources/{id}/status`. A dashboard
-polling that route would open a socket per poll against a server
-[PRD 01](../01-architecture.md) measures at 1–5 s per request, and would
-still be answering a question about a socket that is not the one doing the
-work.
+polling that route would open a **socket** per poll, and would still be
+answering a question about a socket that is not the one doing the work.
+⚠️ This paragraph used to lean on a source-latency figure from
+[PRD 01](../01-architecture.md) that nobody had ever taken; M10's S1
+(2026-08-15) puts the cheapest upstream probe at **0.1253 s**, so the price
+argument was never the strong one. The socket, and the fact that a handshake
+is not delivery, are — and they were always sufficient.
 
 ## Evidence
 

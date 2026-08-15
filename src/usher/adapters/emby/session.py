@@ -30,9 +30,10 @@ tested:
 2. **Negative caching.** If `AuthenticateByName` itself is rejected, a
    monotonic deadline is recorded and every call raises `PortAuthFailed`
    without a network request until it passes. Without it a wrong password
-   doubles every request forever, against an upstream PRD 01 measures at
-   1-5 s per call. The clock is injected so the *expiry* is testable
-   without sleeping.
+   doubles every request forever, against an upstream measured at
+   0.1649 s mean for a single-item read and 6.04 s mean for a 200-item
+   page (M10 S1, 2026-08-15 -- `.claude/rules/emby-push-and-ingest.md`).
+   The clock is injected so the *expiry* is testable without sleeping.
 
 The injected clock also times `usher.source.request.duration` (PRD 10's
 catalogue entry for M3). Deliberately the same one: two clocks would be a
@@ -212,8 +213,9 @@ class EmbySession:
         translation governs what crosses the port when a send *fails*; this
         governs the send never happening at all -- and when the client was
         *injected* it is not closed, so nothing but this flag stands
-        between a closed adapter and a working request against an upstream
-        PRD 01 measures at 1-5 s per call.
+        between a closed adapter and a working request against somebody
+        else's media server (measured 0.1649 s mean for a single-item read,
+        6.04 s for a page -- M10 S1, `.claude/rules/emby-push-and-ingest.md`).
         """
         if self._closed:
             raise PortUnavailable("this source adapter has been closed")

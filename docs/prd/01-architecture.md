@@ -311,10 +311,37 @@ measured tail (p95 HTTP 0.4267 s plus ~0.033 s of per-job bookkeeping, so
 
 ⚠️ **The `match`/`watch_history`/`watch_writeback` row is the one number here
 that is a *bound* rather than a measurement.** The old table guessed 4 for
-"source sync workers" against *"Emby is slow (~1–5 s/request observed)"*; this
-repository still has no measurement of a household media server under
-concurrent load, so 4 survives as a deliberately conservative cap on an
-unmeasured upstream. It is written down as unmeasured rather than dressed up.
+"source sync workers" against a source-latency string this document had been
+quoting from an earlier revision of itself; this repository still has no
+measurement of a household media server under **concurrent** load, so 4
+survives as a deliberately conservative cap. It is written down as unmeasured
+rather than dressed up.
+
+🔴 **That string has now been measured, and it was never about a request.**
+M10's S1 (2026-08-15, 52 bounded read-only requests against the live Emby
+4.9.5.0 — full table and method in
+`.claude/rules/emby-push-and-ingest.md`) prices this deployment's source at:
+
+| op | median | mean | p95 | max | n |
+|---|---|---|---|---|---|
+| `verify` — `GET /System/Info/Public` | 0.1253 s | 0.1543 s | 0.4721 s | 0.4721 s | 12 |
+| `get_item` — one item, full `Fields` | 0.1495 s | 0.1649 s | 0.3587 s | 0.3587 s | 12 |
+| `list` — a 200-item page | 5.0954 s | 6.0369 s | 9.1713 s | 9.6805 s | 24 |
+
+One household, one evening, one Emby build, **sequential** — not a constant.
+Three consequences for the numbers on this page:
+
+- **A single-item read is ~34× cheaper than a page.** The three job kinds
+  capped at 4 all make single-item reads, so the upstream they are capped
+  against runs at ~6 rps from one coroutine, not at one request per 1–5 s.
+- **A page is dearer than the old string, not cheaper.** A full walk of the
+  1,134,919-item library is 5,675 pages, i.e. **7.3–11.8 h** against the
+  1.6–7.8 h the old figure implied.
+- **The old figure was never a measurement.** It entered the repository in
+  `0c823e0` on 2026-07-28, the first PRD commit, two days before an Emby
+  adapter existed; it was cited 21 times and called *measured* 11 times, and
+  the paragraph above used to attribute it to "the old table" — i.e. to an
+  earlier revision of this document.
 
 **Every job in flight holds an `AsyncSession`**, which is why
 `USHER_DB_POOL_SIZE` exists and why `Settings` refuses a `job_concurrency` the

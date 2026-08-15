@@ -143,8 +143,10 @@ class SourceService:
             )
         if credentials is None:
             # Answered without building an adapter: there is nothing to
-            # authenticate with, so a probe could only spend a 1-5 s upstream
-            # round trip to learn what local state already knows.
+            # authenticate with, so a probe could only spend an upstream
+            # round trip (0.1253 s for the cheapest one measured -- M10 S1,
+            # `.claude/rules/emby-push-and-ingest.md`) to learn what local
+            # state already knows.
             return SourceStatus(
                 reachable=False,
                 authenticated=False,

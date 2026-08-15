@@ -39,7 +39,8 @@ refresh-token flow; this pattern *is* the refresh mechanism.
   collapse into one `AuthenticateByName` — and exactly one retry is attempted
   per request. A credential that is genuinely *wrong* is remembered for a
   cooldown, so a bad password cannot turn every call into two requests against
-  a source measured at 1–5 s per request. That matters beyond this section,
+  a source measured at 0.1495 s per single-item read and 6.04 s per 200-item
+  page ([01](01-architecture.md), M10 S1, 2026-08-15). That matters beyond this section,
   because a direct-play URL carries this token
   ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)).
 - Credentials live behind `credentials_ref` indirection: an opaque, random
@@ -296,9 +297,11 @@ paragraph above and
 ledger rather than from a probe**
 ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). `verify()`
 opens no socket at all — a status
-screen a dashboard polls must not cost a socket per poll against a server
-measured at 1–5 s per request, and it would still be answering a question about
-a socket that is not the one doing the work. It reports `null` ("not probed")
+screen a dashboard polls must not cost a **socket** per poll, and it would
+still be answering a question about a socket that is not the one doing the
+work. (The two HTTP probes `verify()` *does* make are cheap and now measured:
+0.1253 s for `/System/Info/Public` — [01](01-architecture.md), M10 S1. The
+socket is what the objection was ever about.) It reports `null` ("not probed")
 for an adapter that has never had a channel, and the live answer — a connection
 *and* at least one received message *and* a recent one — for the adapter a push
 lane is running. `GET /admin/sources/{id}/status` reads the lane's, injected by

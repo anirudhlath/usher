@@ -467,8 +467,10 @@ the body, which is what a dashboard does and what Kubernetes, Docker
 Lane state is free to report — `lanes.push` is the set of running lane
 *tasks*, and `push_available` is an in-memory ledger of messages received,
 not a probe — so readiness makes **no upstream request at all**. The shipped
-compose healthcheck polls this endpoint every 2 s against a source
-[01](01-architecture.md) measures at 1–5 s per request. The on-demand probe
+compose healthcheck polls this endpoint every 2 s; the reason that matters is
+the 503-takes-the-process-out-of-a-load-balancer argument above, not the price
+of a probe, which [01](01-architecture.md) now measures at 0.1253 s rather
+than at the 1–5 s this sentence used to cite. The on-demand probe
 that *does* open a socket is `usher push --probe`, and it reports what
 arrived rather than that the handshake succeeded
 ([ADR-0004](decisions/0004-push-over-polling.md)).

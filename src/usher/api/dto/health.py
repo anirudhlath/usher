@@ -46,8 +46,13 @@ class LaneReport(BaseModel):
     grounded in a message ledger and is reported by
     `GET /admin/sources/{id}/status`'s `push_available`, because a
     readiness endpoint Docker polls every 2 s must not answer a question
-    that costs an upstream request against a server PRD 01 measures at
-    1-5 s per request.
+    that costs an upstream **socket** per poll. ⚠️ The *latency* half of
+    that argument is weaker than it used to read. What this used to cite as
+    "1-5 s per request" was never a number anybody took; the cheapest
+    upstream probe is 0.1253 s (M10 S1, 2026-08-15 --
+    `.claude/rules/emby-push-and-ingest.md`). What carries the decision is
+    ADR-0018 -- a handshake is not delivery, so the honest answer to "is
+    push healthy" is a ledger and not a probe, at any price.
     """
 
     push: list[str]

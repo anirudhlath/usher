@@ -15,8 +15,12 @@ and enqueues a `WATCH_HISTORY` job for every played item whose count it
 could not, at background priority. That predicate is what keeps the
 recovery bounded: `played` is the household's watched items -- thousands --
 rather than the source's 1,126,674, and one upstream request per item at
-the 1-5 s PRD 01 measures is a week for the library and an afternoon for
-the household.
+the **0.1649 s mean measured 2026-08-15** (M10 S1 --
+`.claude/rules/emby-push-and-ingest.md`) is **two days** for the library
+against **a quarter of an hour** for the household. The ratio is what the
+predicate buys and it is unchanged; the absolute numbers now come from four
+minutes against a real server rather than from the seven-milestone-old
+"1-5 s" guess this sentence used to cite, which was ~20x too slow here.
 
 **There is no sweep.** `ReconcileService` retracts availability after a walk
 that provably finished; nothing here ever retracts anything. PRD 08 lists
@@ -230,8 +234,10 @@ class WatchStateSyncService:
         `WATCH_HISTORY` job. Returns whether anything was merged.
 
         Resolves the target *before* asking the source: an unmatched item
-        has nowhere for the answer to land, and PRD 01 measures a
-        single-item request at 1-5 s against one indexed read here.
+        has nowhere for the answer to land, and a single-item request is
+        measured at 0.1495 s median (M10 S1, 2026-08-15 --
+        `.claude/rules/emby-push-and-ingest.md`) against one indexed read
+        here.
 
         Quiet on both misses. `get_watch_state` answering `None` means the
         source no longer has the item -- which is the reconcile lane's

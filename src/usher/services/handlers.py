@@ -31,8 +31,9 @@ that string, and it does so through an injected `SourceResolver` rather than
 by holding one source: a household with two servers has two adapters, and
 binding a worker to one of them would silently drop the other's jobs. The
 resolver is a local lookup against `media_items`, not a network call, so its
-cost is one indexed read per job against an upstream measured at 1-5 s per
-request.
+cost is one indexed read per job against an upstream measured at **0.1495 s
+median / 0.1649 s mean** for the single-item read these three kinds make
+(M10 S1, 2026-08-15 -- `.claude/rules/emby-push-and-ingest.md`).
 
 **A job for work that has since become impossible completes rather than
 parks.** An item the source no longer has, or one no configured source

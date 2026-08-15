@@ -131,11 +131,18 @@ HEARTBEAT_FRACTION: Final = 3.0
 #:   0.0637 s mean HTTP) is a p95 job of ~0.46 s, so holding ADR-0005's ~25 rps
 #:   takes ~11.5 jobs in flight. `Settings.job_concurrency` defaults to 12.
 #: - **`MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK`.** A *household* media
-#:   server, not a CDN-backed public API, and **this repository has never
+#:   server, not a CDN-backed public API, and **this repository still has never
 #:   measured one under concurrent load** -- so the number is deliberately a
-#:   small constant rather than the global, and it says so. `handlers.py` prices
-#:   the upstream at 1-5 s per request; four in flight is up to four concurrent
-#:   requests against a machine somebody is also watching television on.
+#:   small constant rather than the global, and it says so. What *is* measured
+#:   since 2026-08-15 is the sequential cost of the single-item read all three
+#:   of these kinds make: **0.1495 s median, 0.1649 s mean** (M10 S1 --
+#:   `.claude/rules/emby-push-and-ingest.md`), i.e. ~6 rps from one coroutine,
+#:   so four in flight aims for ~24 rps at a machine somebody is also watching
+#:   television on. That is the number to hold this cap against; it is **not**
+#:   Little's law, because the term Little's law needs -- what the latency does
+#:   as concurrency rises -- is exactly the thing still unmeasured. The
+#:   seven-milestone-old "1-5 s per request" this comment used to cite was
+#:   never a measurement at all and was ~20x too slow for these kinds.
 #: - **`INDEX` = 1.** CPU-bound through `fastembed`, and measured:
 #:   `.claude/rules/search-and-embeddings.md` records ~8,000-10,700 tokens/s
 #:   held **flat across the whole size range**, with the best batch at 16 and

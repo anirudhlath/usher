@@ -31,8 +31,10 @@ the facts would invite a UI to render them twice.
 for transcode negotiation, which Usher explicitly does not do, and
 everything the direct URL needs -- container, `MediaSourceId`, resume
 position -- is already on the item. One fewer endpoint to have guessed
-wrong, and one fewer round trip against an upstream PRD 01 measures at
-1-5 s per request.
+wrong, and one fewer round trip against an upstream whose single-item reads
+are measured at **0.1495 s median / 0.1649 s mean** (M10 S1, 2026-08-15 --
+`.claude/rules/emby-push-and-ingest.md`), on the request path a person is
+waiting on.
 
 **The direct URL carries the source's access token**, because without it
 the bytes are not fetchable and Usher does not proxy them -- measured, not

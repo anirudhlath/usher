@@ -43,8 +43,12 @@ disagree; targets are concatenated in copy order, each copy's own ranking
 `finally`** -- the exact path `SourceService.status` takes, whose comment is
 the reason verbatim: *"one adapter is one connection pool, and a status
 endpoint a dashboard polls would otherwise leak one per call"*. That costs one
-`AuthenticateByName` per copy per play against an upstream PRD 01 measures at
-1-5 s per request. Accepted, because it is the shape
+`AuthenticateByName` per copy per play. ⚠️ **What that costs is still
+unmeasured**, and the number this sentence used to cite was never a
+measurement: M10 S1 priced `get_item` at 0.1495 s and a 200-item page at
+6.04 s on 2026-08-15, but the operator's secrets hold a token rather than a
+password, so no run in this repository has ever exercised
+`AuthenticateByName` at all. Accepted, because it is the shape
 `GET /admin/sources/{id}/status` already ships; `SourceRegistry`
 (`composition.py`) already caches adapters for a registry's life and already
 has `rebind`, but hoisting it onto `app.state` would couple a client route to
@@ -310,8 +314,10 @@ class PlaybackService:
             if credentials is None:
                 # Answered without building an adapter, exactly as
                 # `SourceService.status` does: there is nothing to
-                # authenticate with, so a probe could only spend a 1-5 s
-                # round trip to learn what local state already knows.
+                # authenticate with, so a probe could only spend an upstream
+                # round trip (0.1253 s for the cheapest one measured -- M10
+                # S1, `.claude/rules/emby-push-and-ingest.md`) to learn what
+                # local state already knows.
                 logger.warning(
                     "playback: source {source_id} has no stored credentials", source_id=source.id
                 )

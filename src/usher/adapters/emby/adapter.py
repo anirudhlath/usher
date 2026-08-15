@@ -356,10 +356,14 @@ class EmbyAdapter(SourceAdapter):
                 reachable=True,
                 authenticated=True,
                 # **`verify()` opens no socket.** A status screen a
-                # dashboard polls must not cost a socket per poll against a
-                # server PRD 01 measures at 1-5 s per request -- and it
+                # dashboard polls must not cost a socket per poll -- and it
                 # would still be answering a question about a socket that is
-                # not the one doing the work. This reports the health of the
+                # not the one doing the work. (What the two probes it *does*
+                # make cost is now measured rather than guessed:
+                # `/System/Info/Public` at 0.1253 s median, M10 S1
+                # 2026-08-15, `.claude/rules/emby-push-and-ingest.md`. The
+                # socket is the expensive thing here, not the request.)
+                # This reports the health of the
                 # channel *actually running*, if this adapter is the one a
                 # push lane is running.
                 #

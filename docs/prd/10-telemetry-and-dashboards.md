@@ -176,6 +176,22 @@ rows: 34 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
 | `usher.bootstrap.phase.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.failures` | counter | dataset, kind | ✅ M2 |
 
+🔴 **Every seconds-unit histogram above is currently unreadable below five
+seconds, and this was found the first time one of them was read.** M10's S1
+exported `usher.source.request.duration` into a real Prometheus on 2026-08-15
+— **nine milestones after M3 emitted it and the first time anybody had** — and
+`configure_metrics` installs no `View`, so the SDK's default explicit bucket
+boundaries apply: `(0.0, 5.0, 10.0, 25.0, 50.0, …)`, in **seconds**. Every
+observation under five seconds falls in one bucket. Measured against the same
+48 timings, `histogram_quantile(0.5, …)` answered **2.5000 s for a `verify`
+whose true median is 0.1253 s and 2.5000 s for a `get_item` whose true median
+is 0.1495 s** — 20× and 16.7× wrong, and *identical*, which is what a panel
+built on this would have shown for every sub-5-second operation forever. A
+dashboard built on it would look like it worked. The fix is per-instrument
+bucket boundaries in `configure_metrics`; it is **not** yet done, and nothing
+in this document's dashboard section should be built before it is. Method and
+the full table: `.claude/rules/emby-push-and-ingest.md`.
+
 **`http.server.duration` is a correction, not an addition, and carries no
 `usher.` prefix on purpose.** M9 re-measured through a real `create_app()` and
 real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor` (wired

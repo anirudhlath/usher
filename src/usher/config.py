@@ -659,9 +659,11 @@ class Settings(BaseSettings):
     push_max_consecutive_failures: int = Field(default=5, ge=1)
     # How many items one push event may name before the lane stops resolving
     # them one at a time and asks for a delta walk instead. Emby emits
-    # `LibraryChanged` during a library scan and it can name thousands;
-    # against 1,126,789 items at 1-5 s per request, a request per changed
-    # item is a design defect rather than a slow path. Bounded above at 500,
+    # `LibraryChanged` during a library scan and it can name thousands; at
+    # `get_item`'s measured 0.1649 s mean (M10 S1, 2026-08-15 -- see
+    # `.claude/rules/emby-push-and-ingest.md`) a thousand named items is
+    # nearly three minutes of serial upstream, so a request per changed item
+    # is a design defect rather than a slow path. Bounded above at 500,
     # because a value an operator could set to 100,000 turns the guard off
     # while looking configured.
     push_max_items_per_event: int = Field(default=50, ge=1, le=500)
