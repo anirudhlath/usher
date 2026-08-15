@@ -14,6 +14,155 @@ Verified facts, loaded when working in this subsystem. Measured or observed,
 never assumed — each entry carries its date, its sample and what it refuted.
 The always-on conventions live in `CLAUDE.md`; this file is the evidence.
 
+## What a request to this Emby costs, measured 2026-08-15 — and *"~1–5 s/request"* was never about a request
+
+**M10 S1.** `scripts/measure_source_latency.py`, **52 live requests** in
+`02:42:26Z → 02:45:11Z` against the same real Emby **4.9.5.0**, sequential, all
+`GET`, nothing written, no iterator anywhere in the run. Bar
+`/var/tmp/m10-gate/BAR-S1.md`,
+`sha256 b0ff82ac4a85db58fd04b1636500427e97ef122bc5b647c3d6b4807ec2f9c23b`,
+written before the harness existed. **One household, one evening, one network
+path, one Emby build.** Every number here is a snapshot with a date on it, not
+a constant.
+
+🔴 **The string this repository has cited 21 times and called *measured* 11
+times was never measured.** *"Emby is slow (~1–5 s/request observed)"* enters in
+`0c823e0` on 2026-07-28 — the **first PRD commit**, two days before
+`src/usher/adapters/emby/` existed and before any request had been sent to any
+Emby from this project. `git log -S "1–5 s/request observed" --all -- docs/`
+returns exactly that one commit. PRD 01:314 attributed it to *"the old table"*,
+i.e. to an earlier revision of itself.
+
+### The table
+
+Wall clock around `EmbySession.request`, n = 12 per class, warm-up discarded.
+
+| class | n | median | mean | p95 | max | median body |
+|---|---|---|---|---|---|---|
+| `verify` (`GET /System/Info/Public`) | 12 | **0.1253 s** | 0.1543 s | 0.4721 s | 0.4721 s | 138 B |
+| `get_item` (`GET /Users/{u}/Items/{id}`) | 12 | **0.1495 s** | 0.1649 s | 0.3587 s | 0.3587 s | 13,975 B |
+| `list` @ `StartIndex=0` | 12 | **4.5356 s** | 4.6067 s | 4.8355 s | 4.8355 s | 945,131 B |
+| `list` @ scattered `StartIndex` | 12 | **7.4155 s** | 7.4670 s | 9.6805 s | 9.6805 s | 819,964 B |
+| `list`, both pooled (`op="list"`) | 24 | 5.0954 s | **6.0369 s** | 9.1713 s | 9.6805 s | — |
+
+**The mean is beside the median because the distribution is right-tailed on
+every class** (M9 S2's finding): any `Σ` over pages wants the mean.
+
+### What it refutes, and the confirmations after
+
+- 🔴 **"1–5 s" is not about a request, and where it *is* about something it
+  **understates** it.** A 200-item page carrying the full `Fields` set costs
+  **4.54 s at depth 0 and 7.42 s deep** — the pre-registered prediction was
+  `median(list) ∈ [1, 5]` and 5.0954 s falls outside it. The max was predicted
+  under 5 s and is **9.68 s**.
+- 🔴 **A single-item read is 34× cheaper than a page**, not "1–5 s".
+  `median(list)/median(get_item)` = **34.1** (predicted ≥ 5). M9's H5 read
+  0.141/0.142/0.143 s as an *upper* bound on a `get_item`; this measures the
+  request itself at **0.1495 s median / 0.1649 s mean**, so H5's figure was
+  essentially the request and not the worker pass around it.
+- ✅ **The distribution is bimodal by op class**, which is the hypothesis the
+  run was written against and declared in the bar rather than after.
+- ✅ **`verify` is the cheapest class** — 0.1253 s median, a 138-byte body, and
+  it is unauthenticated, so a status screen's cost is a tenth of a second and
+  not a fifth of a minute.
+- ✅ **Depth costs.** Scattered over depth-0 is **1.63×** (predicted ≥ 1.20).
+  ⚠️ **Confounded by design and named in the bar**: `list@0` asks for the same
+  page twelve times and is cacheable, `list@scattered` never repeats a
+  `StartIndex`. It is depth *and* cacheability at once, so read it as "a real
+  walk's pages cost more than its first page" rather than as a clean depth
+  coefficient.
+- ✅ **Right-tailed everywhere**: mean > median on all three ops.
+
+### The numbers Phase 1 actually needs, derived from the mean
+
+Library **1,134,919 items** on 2026-08-15 (up from 1,126,789 on 2026-08-02 and
+1,126,674 on 2026-07-31 — it moves), i.e. **5,675 pages** at the shipped
+`page_size=200`.
+
+- **A full walk is 7.3–11.8 hours**, ~9.5 h at the pooled mean, and ~4.9 GB of
+  JSON off the wire. The old *"5,634 pages at 1–5 s each"* gave 1.6–7.8 h, so
+  this repository has been assuming a walk about **twice as cheap** as it is.
+- **The source yields 33 items/s.** `scripts/measure_ingest.py` measured the
+  local pipeline at **1,933–2,135 items/s**, so **the ingest side is ~60×
+  faster than the source can feed it** — the walk is entirely upstream-bound,
+  and any local optimisation of it is optimising the 1.7%.
+- **Single-item ops run at ~6 rps sequentially** (1/0.1649). That is the number
+  a source-side rate limiter's default has to be chosen against, not "1–5 s".
+- **M5 measured a real `ItemsUpdated` batch at 42 ids**; applied inline at
+  `get_item`'s mean that is **6.9 s**, i.e. about one page.
+- ⚠️ **A rate limiter on `list` cannot bind.** One page at a time is already
+  0.17 rps. Anything that limits the *source* below ~6 rps is a limit on the
+  single-item ops alone.
+
+### Two instruments, and the second one caught a defect in the first's reporting
+
+`usher.source.request.duration` — the histogram `EmbySession._send` has
+recorded in a `finally` since M3, and which **nine milestones emitted and
+nobody ever read** — was exported over OTLP into Phase 0's Prometheus and
+compared against the harness's own `time.monotonic()`.
+
+| op | median agreement | mean agreement |
+|---|---|---|
+| `get_item` | **0.13%** | 0.67% |
+| `list` | **1.17%** | 0.92% |
+| `verify` | **1.05%** | 18.11% ⚠️ |
+
+🔴 **The 18.11% is real and it is the harness's fault, not the pipeline's.**
+`_send` records in a `finally` on **every** request, including the four the
+harness discards from its own statistics — so the histogram held 52
+observations against the wall clock's 48, and one extra observation moves a
+12-sample mean and barely moves its median. Proven arithmetically rather than
+argued: the same 48 timings replayed under a second `service.name` reproduce
+the wall-clock mean to **0.001%–0.027%**, and subtracting that series from the
+live one leaves exactly **4 observations totalling 14.1825 s** — the warm-up,
+whose `verify` leg is 0.5175 s because it is the first request of the run and
+carries the TCP and TLS connect. The harness now compares over `warmups +
+timings`. **The general form: a discard is a property of the analysis, not of
+the instrument, and an instrument in a `finally` cannot be told about it.**
+
+Also worth having: the histogram's own `_count` was **13 / 13 / 26 = 52**,
+exactly the budget the harness reported spending. A metric nobody reads is also
+an audit of the run that produced it.
+
+### 🔴 The shipped telemetry cannot express any of the above, and this is the finding with the widest blast radius
+
+`configure_metrics` (`src/usher/telemetry.py`) installs **no `View`**, so
+`usher.source.request.duration` takes the OTel Python SDK's default explicit
+bucket boundaries — `(0.0, 5.0, 10.0, 25.0, 50.0, …)` **in seconds**. Every
+observation below five seconds falls in one bucket. Measured, by replaying the
+identical 48 timings through a provider configured exactly as ship does and
+querying Prometheus:
+
+| op | `histogram_quantile(0.5, …)` as shipped | true median | wrong by |
+|---|---|---|---|
+| `verify` | **2.5000 s** | 0.1253 s | **20×** |
+| `get_item` | **2.5000 s** | 0.1495 s | **16.7×** |
+| `list` | 5.0000 s | 5.0954 s | 1.9% (coincidence — the true median sits on a boundary) |
+
+So PRD 10 lists this metric ✅ M3 and any dashboard built on it would have
+plotted **2.5 s for every sub-5-second operation this project performs**,
+identically, forever — and would have read as a working panel. The same applies
+to every seconds-unit histogram in the catalogue. Fixing it is a `View` in
+`configure_metrics`, is *not* S1's task (S1 is a prose diff over 13 files and
+must not be bundled with a mechanism), and is recorded here so whoever builds
+Phase 2's dashboards does not build them on this.
+
+### Still unverified, named rather than implied
+
+- **This server under sustained concurrency** — every request here was
+  sequential, one in flight. That is **S7**, and nothing in this section
+  licenses a concurrency figure.
+- **Any other Emby build**, and any other network path. One household.
+- **`op="watch_history"`** — the same route and payload shape as `get_item`
+  (`_fetch(external_id, op=…)`), differing only in its telemetry label, but not
+  one of the four classes the budget bought.
+- **A cold server.** Nothing here flushed Emby's caches, and `list@0`'s
+  twelve identical requests are the arm most likely to have been served warm.
+- **`POST /Users/AuthenticateByName`**, still never exercised by this project —
+  the run installed the operator's existing token.
+- **Whether `page_size` trades linearly.** Only 200 was measured, so "halve the
+  page and halve the latency" is a guess.
+
 ## M9's live verification — it ran on 2026-08-12, and the reason it had not is the first finding
 
 **Both halves passed against the same real Emby 4.9.5.0, and H5 is the first
@@ -815,7 +964,13 @@ bounded by **new titles** (94,438 movies + 32,409 series), never by items —
 an episode never walks the ladder, so the other 999,827 items cost nothing
 there — and a second walk creates none. Batch-level cost is 772 statements,
 0.0154 per item. Throughput is against a local database with no network in
-the way; a real walk is bounded by Emby's 5,634 pages at 1–5 s each.
+the way; a real walk is bounded by Emby's pages, **measured 2026-08-15 at
+4.61 s for the first page and 7.47 s deep** (M10 S1, at the top of this file) —
+5,675 pages of a 1,134,919-item library, i.e. **7.3–11.8 h**. The "1–5 s each"
+this sentence used to carry was never measured and was about half the truth.
+That is 33 items/s off the wire against 1,933–2,135 items/s through the
+pipeline below, so **the walk is upstream-bound by a factor of ~60** and every
+statement count on this page is 1.7% of the wall clock.
 **Four scale risks, planned against the statement the repository actually
 issued** (`scripts/measure_ingest.py --scale 1126674`; captured off
 `before_cursor_execute`, never transcribed — a hand-copied lookalike drifts
