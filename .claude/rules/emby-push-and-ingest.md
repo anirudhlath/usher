@@ -16,26 +16,71 @@ The always-on conventions live in `CLAUDE.md`; this file is the evidence.
 
 ## What a request to this Emby costs, measured 2026-08-15 — and *"~1–5 s/request"* was never about a request
 
-**M10 S1.** `scripts/measure_source_latency.py`, **52 live requests** in
-`02:42:26Z → 02:45:11Z` against the same real Emby **4.9.5.0**, sequential, all
-`GET`, nothing written, no iterator anywhere in the run. Bar
+**M10 S1.** `scripts/measure_source_latency.py`, **52 live requests**, sequential,
+all `GET`, nothing written, no iterator anywhere in the run. Bar
 `/var/tmp/m10-gate/BAR-S1.md`,
 `sha256 b0ff82ac4a85db58fd04b1636500427e97ef122bc5b647c3d6b4807ec2f9c23b`,
-written before the harness existed. **One household, one evening, one network
-path, one Emby build.** Every number here is a snapshot with a date on it, not
-a constant.
+written 02:35:16Z — before the harness existed and seven minutes before the
+first request. **One household, one evening, one network path, one Emby
+build.** Every number here is a snapshot with a date on it, not a constant.
 
-🔴 **The string this repository has cited 21 times and called *measured* 11
+**The window, quoted from the artifact rather than around it.** The harness
+printed `02:42:42Z -> 02:45:11Z`, which is the **48 reps**; the four warm-ups
+came before it and that version of the harness did not timestamp them (it does
+now, and prints both windows). **Nothing was sent to the source after
+02:45:11Z by this process** — the client was closed on the last response and
+everything after it is a local Prometheus read. That is the claim available;
+*"the server was idle"* is not, because this run has no visibility into what
+else the household was asking of it and no right to assert one.
+
+⚠️ **The version of the harness that produced these numbers is not the
+committed one, and the difference is in the reporting rather than the
+measurement.** The run was made by the file at `02:41:01Z`
+(`/var/tmp/m10-gate/measure_source_latency.py.bak`); the committed harness
+adds the warm-up-inclusive two-instrument comparison the 18.11% below made
+necessary, prints the warm-up timings and the wider window, persists raw
+observations under `--timings-out`, and moves the `--budget 0` guard ahead of
+the client. **So re-running the committed script does not reproduce the 18.11%
+line** — it reproduces the corrected comparison. The probe plan, the timing
+call site and the export are unchanged.
+
+⚠️ **"Emby 4.9.5.0" is carried over from M9's H4/H5 and was not measured
+here.** This run never read `/System/Info`; the `verify` probe is
+`/System/Info/Public`, whose body was recorded only as a byte count. Same
+household, same server, thirty-six hours later — but the version string is an
+inheritance, not an observation.
+
+🔴 **The string this repository has cited 22 times and called *measured* 11
 times was never measured.** *"Emby is slow (~1–5 s/request observed)"* enters in
 `0c823e0` on 2026-07-28 — the **first PRD commit**, two days before
 `src/usher/adapters/emby/` existed and before any request had been sent to any
-Emby from this project. `git log -S "1–5 s/request observed" --all -- docs/`
-returns exactly that one commit. PRD 01:314 attributed it to *"the old table"*,
-i.e. to an earlier revision of itself.
+Emby from this project. PRD 01:314 attributed it to *"the old table"*, i.e. to
+an earlier revision of itself.
+
+**The grep behind that, scoped and pinned, because the plan's version of it is
+false:** `git log -S "1–5 s/request observed" 45398c2 -- docs/prd/` returns
+**exactly one** commit, `0c823e0`. The M10 plan states it as `--all -- docs/`,
+which returns **two** at `45398c2` (the second being `71c44e5`, the plan itself,
+under `docs/plans/`) and **four** across the repo at HEAD. It was already false
+in the commit that wrote it, and it was copied here verbatim before being run.
+**A grep-checkable claim that nobody re-ran is a claim, and promoting one from
+a plan into a rules file means running it first.**
+
+**And the census is 22, not 21.** The plan says 21 — 16 in `src/` across 13
+files, 5 in `docs/prd/`. There are **6** in `docs/prd/`: the sixth is
+`docs/prd/README.md`'s own M10 row, which quotes the string while describing
+this task. *"Called measured 11 times"* survives scrutiny: 12 lines match
+`grep measur` beside the string, and the twelfth is that same README row
+**denying** it was ever measured, which is not a citation calling it measured.
 
 ### The table
 
 Wall clock around `EmbySession.request`, n = 12 per class, warm-up discarded.
+⚠️ One exception, because the durable record should carry it rather than only
+the module docstring: **`verify` is timed around `anonymous_json`**, which is
+what the shipped `verify()` calls and which includes `decode_json` of a
+138-byte body — microseconds against 125 ms, and the *only* class whose wall
+clock and histogram do not bracket the identical span.
 
 | class | n | median | mean | p95 | max | median body |
 |---|---|---|---|---|---|---|
@@ -54,7 +99,12 @@ every class** (M9 S2's finding): any `Σ` over pages wants the mean.
   **understates** it.** A 200-item page carrying the full `Fields` set costs
   **4.54 s at depth 0 and 7.42 s deep** — the pre-registered prediction was
   `median(list) ∈ [1, 5]` and 5.0954 s falls outside it. The max was predicted
-  under 5 s and is **9.68 s**.
+  under 5 s and is **9.68 s**, and **12 of the 24 `list` reps exceeded 5 s** —
+  every scattered page and no depth-0 one, which follows from the table (max
+  `list@0` is 4.8355 and the pooled median 5.0954 forces min `list@scattered`
+  to 5.3553) and is confirmed in Prometheus, where the replayed reps read
+  `le="5"` = 12 against `le="10"` = 24. *An earlier version of this entry said
+  nine; nine was a guess dressed as a count.*
 - 🔴 **A single-item read is 34× cheaper than a page**, not "1–5 s".
   `median(list)/median(get_item)` = **34.1** (predicted ≥ 5). M9's H5 read
   0.141/0.142/0.143 s as an *upper* bound on a `get_item`; this measures the
@@ -79,9 +129,15 @@ Library **1,134,919 items** on 2026-08-15 (up from 1,126,789 on 2026-08-02 and
 1,126,674 on 2026-07-31 — it moves), i.e. **5,675 pages** at the shipped
 `page_size=200`.
 
-- **A full walk is 7.3–11.8 hours**, ~9.5 h at the pooled mean, and ~4.9 GB of
-  JSON off the wire. The old *"5,634 pages at 1–5 s each"* gave 1.6–7.8 h, so
-  this repository has been assuming a walk about **twice as cheap** as it is.
+- **A full walk is 7.3–11.8 hours**, ~9.5 h at the pooled mean. The old
+  *"5,634 pages at 1–5 s each"* gave 1.6–7.8 h, so this repository has been
+  assuming a walk about **twice as cheap** as it is.
+- **4.7–5.4 GB of JSON off the wire**, ~5.0 GB at the mean of the two median
+  bodies. The arithmetic, written out because an earlier version of this entry
+  said "~4.9 GB" and that reproduces from nothing: 5,675 × 819,964 B =
+  **4.65 GB**, 5,675 × 945,131 B = **5.36 GB**, and 5,675 × 882,547 B =
+  **5.01 GB** (4.66 GiB — which is where 4.9 came from, a GiB/GB slip).
+  Decimal GB throughout.
 - **The source yields 33 items/s.** `scripts/measure_ingest.py` measured the
   local pipeline at **1,933–2,135 items/s**, so **the ingest side is ~60×
   faster than the source can feed it** — the walk is entirely upstream-bound,
@@ -124,6 +180,18 @@ Also worth having: the histogram's own `_count` was **13 / 13 / 26 = 52**,
 exactly the budget the harness reported spending. A metric nobody reads is also
 an audit of the run that produced it.
 
+⚠️ **The 48 raw observations were not persisted** — that harness printed a
+4-dp table and nothing else, so `p95` and `max` in the table above rest on that
+print. What Prometheus *can* corroborate, because the fine boundaries are 5%
+wide, is each observation localised to one bucket: the largest `get_item` falls
+in `(0.352224, 0.369835]` against a printed max of 0.3587, the largest `list`
+in `(9.257674, 9.720557]` against 9.6805, and the largest `verify` in
+`(0.495614, 0.520395]` — which is the **warm-up** at 0.5175 s, reached
+independently by the subtraction above and by the bucket, two routes to one
+number. The harness now takes `--timings-out` and writes every observation as
+JSON; this run predates it, and no further live request was spent to recover
+them.
+
 ### 🔴 The shipped telemetry cannot express any of the above, and this is the finding with the widest blast radius
 
 `configure_metrics` (`src/usher/telemetry.py`) installs **no `View`**, so
@@ -147,6 +215,48 @@ to every seconds-unit histogram in the catalogue. Fixing it is a `View` in
 must not be bundled with a mechanism), and is recorded here so whoever builds
 Phase 2's dashboards does not build them on this.
 
+### Where the run deviated from its own bar
+
+**The bar is not edited to match the run — that is the one property a
+pre-registered bar has.** These are recorded here instead, which is where a
+deviation belongs.
+
+- **The bar says the page is priced by calling `EmbySession.json_body`
+  directly; the harness calls `EmbySession.request`.** Same wire request, same
+  parameters, deliberate: `json_body` is `request` plus `ok()`'s status check
+  plus `decode_json`, and decoding a 945 KB page is tens of milliseconds that
+  belong to neither instrument. Keeping the decode outside the timed window is
+  what lets the wall clock and `_send`'s `finally` bracket as nearly the same
+  span as two instruments can — which is the acceptance criterion the bar
+  itself sets two paragraphs later. The status check and the decode still
+  happen, immediately after the clock stops.
+- **The bar's own `View` deviation, declared in it before the run** and
+  restated here because it is the reason the numbers are readable at all: the
+  harness installs fine geometric bucket boundaries for its export because the
+  shipped configuration cannot resolve a sub-5-second median. See the section
+  above.
+- **`verify` is timed around `anonymous_json`, not `request`** — noted at the
+  table.
+
+🔴 **And one correction to how the reconciliation was described, which is a
+finding rather than a footnote.** S1's citation diff was reported as *"prose
+only, no behaviour"*, proven by every changed `src/` module being AST-identical
+with docstrings stripped. **The AST claim is true and "no behaviour" was
+false.** `LaneReport` (`src/usher/api/dto/health.py`) is a **pydantic model**,
+so pydantic emits its class docstring as the JSON-Schema `description` and
+FastAPI publishes it at `/openapi.json` — the edit put a `.claude/rules/…`
+path, a `⚠️` glyph and an internal task id into the public API contract.
+Repaired by moving the correction into a comment; the published description
+now differs from `45398c2` in exactly one schema and the difference is the
+**removal** of the false "1–5 s per request" claim, verified by regenerating
+`openapi.json` from a `git archive` of `45398c2` and diffing the whole
+document. **The general form: a `src/` docstring is not automatically prose —
+on a pydantic model, a route handler or a `Field(description=…)` it is a wire
+artifact, and an AST comparison cannot see the difference.** (Three other DTO
+descriptions already published a `.claude/rules/…` path before S1 touched
+anything — `BootstrapPhase`, `SeasonResponse`, `SuggestResponse` — so this is a
+standing hygiene gap, not one this task created.)
+
 ### Still unverified, named rather than implied
 
 - **This server under sustained concurrency** — every request here was
@@ -162,6 +272,12 @@ Phase 2's dashboards does not build them on this.
   the run installed the operator's existing token.
 - **Whether `page_size` trades linearly.** Only 200 was measured, so "halve the
   page and halve the latency" is a guess.
+- **This server's version.** Not read in this run — see the note above the
+  table. `4.9.5.0` is M9's observation, thirty-six hours old.
+- **Whether the server was idle.** The claim available is that *this process*
+  sent nothing after 02:45:11Z. What else the household asked of that server
+  during the run is unobserved, which also means the `list` spread is not
+  cleanly attributable to depth alone.
 
 ## M9's live verification — it ran on 2026-08-12, and the reason it had not is the first finding
 

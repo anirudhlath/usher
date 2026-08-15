@@ -46,15 +46,27 @@ class LaneReport(BaseModel):
     grounded in a message ledger and is reported by
     `GET /admin/sources/{id}/status`'s `push_available`, because a
     readiness endpoint Docker polls every 2 s must not answer a question
-    that costs an upstream **socket** per poll. ⚠️ The *latency* half of
-    that argument is weaker than it used to read. What this used to cite as
-    "1-5 s per request" was never a number anybody took; the cheapest
-    upstream probe is 0.1253 s (M10 S1, 2026-08-15 --
-    `.claude/rules/emby-push-and-ingest.md`). What carries the decision is
-    ADR-0018 -- a handshake is not delivery, so the honest answer to "is
+    that costs an upstream **socket** per poll -- and because ADR-0018's
+    rule is that a handshake is not delivery, so the honest answer to "is
     push healthy" is a ledger and not a probe, at any price.
     """
 
+    # ⚠️ **A comment, not the docstring, and that placement is the finding.**
+    # `LaneReport` is a pydantic model, so pydantic emits its class docstring
+    # as the JSON-Schema `description` and FastAPI publishes it at
+    # `/openapi.json`. A first draft of this correction put the sentences
+    # below into the docstring and thereby shipped an internal agent-rules
+    # path, a `⚠️` glyph and an internal task id into the public API
+    # contract -- measured on `LaneReport.model_json_schema()["description"]`.
+    # **A `src/` docstring is not automatically prose: on a model, on a route
+    # handler and on a `Field(description=...)` it is a wire artifact.**
+    #
+    # The correction itself: the paragraph above used to argue that readiness
+    # must not probe because a probe costs "1-5 s per request", a figure
+    # nobody had ever taken. It is 0.1253 s -- M10 S1, 2026-08-15,
+    # `.claude/rules/emby-push-and-ingest.md`. So the price was never the
+    # strong half of the argument; the socket and ADR-0018 are, and they are
+    # what the docstring now says on its own.
     push: list[str]
     worker: bool
 

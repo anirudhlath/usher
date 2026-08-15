@@ -15,7 +15,7 @@ writes nothing: every probe is a `GET`, nothing is sent to `/PlayedItems` or
 `"Emby is slow (~1-5 s/request observed)"` entered this repository in `0c823e0`
 on 2026-07-28 -- the first PRD commit, two days before `src/usher/adapters/emby/`
 existed and before any request had been sent to any Emby from this project. It
-is cited 21 times and called *measured* 11 times. No run stood behind it, and
+is cited 22 times and called *measured* 11 times. No run stood behind it, and
 the one live reading the repository did hold contradicted it by an order of
 magnitude (M9's H5: 0.141 / 0.142 / 0.143 s for an item read back).
 
@@ -92,7 +92,7 @@ import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -641,7 +641,29 @@ async def _item_ids(database_url: str, limit: int) -> list[str]:
         await engine.dispose()
 
 
-async def _run(args: argparse.Namespace, secrets: Mapping[str, str]) -> int:
+async def _run(
+    args: argparse.Namespace,
+    secrets: Mapping[str, str],
+    *,
+    client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
+    provider_factory: Callable[..., MeterProvider] = build_meter_provider,
+) -> int:
+    """The whole run. **Two seams, and the first one exists because a review
+    found the guard it protects to be unpinned.**
+
+    `--budget 0` is enforced *here*, not in `run_probes`: by the time
+    `run_probes` is reached the four warm-ups have already gone to the
+    operator's server, so `run_probes`' own zero-guard is unreachable in
+    production and a test that drives it proves nothing about a dry run. The
+    defect that spelling cannot see -- this early return moved below the
+    warm-ups, so `--budget 0` puts four requests on somebody's Emby -- passes
+    `ruff` and passed the whole suite. `client_factory` is what lets a test
+    drive *this* function against a stub transport and assert on the wire.
+
+    `provider_factory` is the same idea for the exporter: a test must be able
+    to run the real loop without a `PeriodicExportingMetricReader` opening a
+    gRPC channel and leaving a daemon thread behind.
+    """
     from scripts.measure_suggest_tiers import (
         _CPU_DRIFT_LIMIT,
         _CPU_SETTLE_SECONDS,
@@ -667,7 +689,7 @@ async def _run(args: argparse.Namespace, secrets: Mapping[str, str]) -> int:
         print("DRY RUN (--budget 0): no request issued, no exporter started")
         return 0
 
-    provider = build_meter_provider(
+    provider = provider_factory(
         endpoint=args.otlp_endpoint,
         service_name=args.service_name,
         boundaries=FINE_BOUNDARIES,
@@ -677,7 +699,7 @@ async def _run(args: argparse.Namespace, secrets: Mapping[str, str]) -> int:
     budget = Budget(args.budget)
     timings: list[Timing] = []
     warmups: list[Timing] = []
-    client = httpx.AsyncClient(base_url=secrets["emby_server"], timeout=httpx.Timeout(args.timeout))
+    client = client_factory(base_url=secrets["emby_server"], timeout=httpx.Timeout(args.timeout))
     session = build_session(
         client,
         credentials=SourceCredentials(username="unused", password=SecretStr("unused")),
@@ -733,11 +755,46 @@ async def _run(args: argparse.Namespace, secrets: Mapping[str, str]) -> int:
     finally:
         await client.aclose()
 
-    window = f"{_iso(timings[0].started_at)} -> {_iso(timings[-1].ended_at)}"
-    print(f"\nrequests issued: {budget.spent} (budget {budget.limit}); window {window}")
+    # **Two windows, and the wide one first, because the first spelling of
+    # this printed only the narrow one and the write-up then quoted a
+    # different instant than the artifact held.** `timings` excludes the
+    # warm-up; every request in `warmups` went to the same server and belongs
+    # in "when did this harness touch it".
+    every = [*warmups, *timings]
+    window = f"{_iso(every[0].started_at)} -> {_iso(every[-1].ended_at)}"
+    reps_window = f"{_iso(timings[0].started_at)} -> {_iso(timings[-1].ended_at)}"
+    print(
+        f"\nrequests issued: {budget.spent} (budget {budget.limit}); "
+        f"window (all {len(every)}) {window}; window (the {len(timings)} reps) {reps_window}"
+    )
+    print(f"nothing was sent to the source after {_iso(every[-1].ended_at)} by this process")
     print(_table("per probe class (harness wall clock)", summarise(timings, "probe")))
     by_op = summarise(timings, "op")
     print(_table("per op (the label the shipped adapter emits)", by_op))
+    if args.timings_out:
+        # **Every observation, not just the summary.** The first run persisted
+        # only the 4-dp printed table, so a reviewer could reconstruct sums,
+        # counts and medians from Prometheus and nothing else -- p95 and max
+        # rested on a rounded print. 52 rows of JSON is not a cost.
+        Path(args.timings_out).write_text(
+            json.dumps(
+                [
+                    {
+                        "probe": one.probe,
+                        "op": one.op,
+                        "seconds": one.seconds,
+                        "started_at": one.started_at,
+                        "ended_at": one.ended_at,
+                        "payload_bytes": one.payload_bytes,
+                        "warmup": index < len(warmups),
+                    }
+                    for index, one in enumerate(every)
+                ],
+                indent=1,
+            ),
+            encoding="utf-8",
+        )
+        print(f"wrote {len(every)} raw timings to {args.timings_out} (no credential in it)")
 
     provider.force_flush()
     provider.shutdown()
@@ -801,7 +858,12 @@ async def _run(args: argparse.Namespace, secrets: Mapping[str, str]) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Separate from `main` so a test can build the *real* `Namespace`.
+
+    A test that hand-rolls a `Namespace` drifts the moment an option is added
+    and then exercises a shape production never has.
+    """
     parser = argparse.ArgumentParser(description="Price one Emby request, per op class.")
     parser.add_argument(
         "--secrets",
@@ -822,7 +884,16 @@ def main() -> int:
     parser.add_argument("--shipped-bucket-service", default="usher-m10-s1-shipped-buckets")
     parser.add_argument("--prometheus-container", default=None)
     parser.add_argument("--prometheus-wait", type=float, default=20.0)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--timings-out",
+        default=None,
+        help="write every raw observation here as JSON; holds no credential",
+    )
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     print(f"bar: {BAR} sha256={_sha256(BAR) if BAR.exists() else 'MISSING'}")
     if not args.secrets:

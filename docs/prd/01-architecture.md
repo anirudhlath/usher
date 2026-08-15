@@ -339,7 +339,7 @@ Three consequences for the numbers on this page:
   1.6–7.8 h the old figure implied.
 - **The old figure was never a measurement.** It entered the repository in
   `0c823e0` on 2026-07-28, the first PRD commit, two days before an Emby
-  adapter existed; it was cited 21 times and called *measured* 11 times, and
+  adapter existed; it was cited **22** times and called *measured* 11 times, and
   the paragraph above used to attribute it to "the old table" — i.e. to an
   earlier revision of this document.
 
