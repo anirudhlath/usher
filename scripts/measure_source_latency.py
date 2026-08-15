@@ -654,11 +654,19 @@ async def _run(
     `--budget 0` is enforced *here*, not in `run_probes`: by the time
     `run_probes` is reached the four warm-ups have already gone to the
     operator's server, so `run_probes`' own zero-guard is unreachable in
-    production and a test that drives it proves nothing about a dry run. The
-    defect that spelling cannot see -- this early return moved below the
-    warm-ups, so `--budget 0` puts four requests on somebody's Emby -- passes
-    `ruff` and passed the whole suite. `client_factory` is what lets a test
-    drive *this* function against a stub transport and assert on the wire.
+    production and a test that drives it proves nothing about a dry run.
+    `client_factory` is what lets a test drive *this* function against a stub
+    transport and assert on the wire.
+
+    **Two spellings of the defect, and they do different things -- measured,
+    because the first write-up of this docstring asserted the second one's
+    behaviour for both and was wrong.** Moving this early return below the
+    warm-ups *alone* puts **zero** requests on the wire: `Budget(0)` still
+    refuses the first spend, so the dry run dies with `BudgetExceeded` having
+    built an HTTP client and a meter provider. Add the "0 means unlimited"
+    idiom to `Budget.spend` as well and it puts **four** requests on somebody
+    else's Emby. Both pass `ruff`; both passed the whole suite before
+    `test_a_dry_run_is_enforced_where_the_guard_actually_lives` existed.
 
     `provider_factory` is the same idea for the exporter: a test must be able
     to run the real loop without a `PeriodicExportingMetricReader` opening a

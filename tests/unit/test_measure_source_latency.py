@@ -20,15 +20,29 @@ like a pass.
 the finding this file now carries.** It drove `run_probes`' zero-guard — but by
 the time `run_probes` is reached the four warm-ups have already gone to the
 operator's server, so in production that guard is **unreachable** and the real
-one is the early return in `_run`. A review planted exactly that (`_run`'s
-guard moved below the warm-ups, so `--budget 0` puts four requests on somebody
-else's Emby), and got `ruff check` clean and `3 passed`. The sentence two
-paragraphs up was in this file at the time and describes the defect precisely.
+one is the early return in `_run`. A review planted exactly that and got
+`ruff check` clean and `3 passed`. The sentence two paragraphs up was in this
+file at the time and describes the defect precisely.
 `test_a_dry_run_is_enforced_where_the_guard_actually_lives` drives `_run`
 itself through an injected client factory and is the case that sees it.
 **The general form: a guard has one reachable spelling and a test that drives a
 different one is a test of dead code — find where the production path enters
 before choosing what to drive.**
+
+**Two spellings of that defect, measured rather than described**, because the
+first write-up of this paragraph asserted the second one's behaviour for both
+and was wrong — *the same failure the finding above is about, committed inside
+the fix for it*:
+
+- **`_run`'s guard moved below the warm-ups, alone → 0 requests on the wire.**
+  `Budget(0)` still refuses the first spend, so the dry run dies with
+  `BudgetExceeded` having built an HTTP client and a meter provider.
+- **The same, plus `Budget.spend`'s `if self.limit and …` idiom → 4 requests**
+  on somebody else's Emby, and it returns 0 while doing it.
+
+Both pass `ruff`. The case below sees each of them, and it sees the first one
+through `built == []` and `code == 0` rather than through the request count —
+which is why those two assertions are there and are not decoration.
 
 **The import mechanism is `test_scripts_measure_pair_rates.py`'s, for its
 reasons**: `scripts/` has no `__init__.py`, `[tool.mypy] files = ["src",
@@ -183,6 +197,19 @@ def test_the_harness_refuses_to_issue_more_requests_than_its_declared_budget() -
     # `test_a_dry_run_is_enforced_where_the_guard_actually_lives` below, which
     # is the case that sees the defect this one cannot.
 
+    # **The second layer, pinned rather than assumed.** `Budget(0).spend` is
+    # what stops the guard-moved-below-the-warm-ups defect from reaching the
+    # wire at all, and until this line nothing anywhere asserted it: both
+    # zero-guards return before a `Budget` is ever spent against, so the "0
+    # means unlimited" idiom passed `ruff` and the whole file. **A redundancy
+    # nothing checks is not a redundancy** -- either pin it or stop counting
+    # it, and it is cheap enough to pin.
+    with pytest.raises(_BUDGET_EXCEEDED) as refused:
+        _BUDGET(0).spend("a probe nobody may issue")
+    assert "0" in str(refused.value), (
+        f"the refusal must name the budget it is enforcing; it said {refused.value!r}"
+    )
+
 
 # -- the dry run, where the guard actually lives ------------------------------
 
@@ -269,8 +296,15 @@ def test_a_dry_run_is_enforced_where_the_guard_actually_lives(
     By the time `run_probes` is called the four warm-ups have already gone to
     the operator's server, so `run_probes`' own zero-guard is unreachable in
     production and a case that drives it is a case about dead code. A review
-    planted `_run`'s return moved below the warm-ups -- `--budget 0` then puts
-    four requests on somebody else's Emby -- and the suite stayed green.
+    planted `_run`'s return moved below the warm-ups and the suite stayed
+    green.
+
+    **That plant alone puts zero requests on the wire** -- `Budget(0)` refuses
+    the first spend, so the dry run dies with `BudgetExceeded` having built an
+    HTTP client and a meter provider. It takes `Budget.spend`'s "0 means
+    unlimited" idiom *as well* to reach four requests. Hence three assertions
+    below and not one: the wire, the client, and the return code. See the
+    module docstring's table for both spellings measured.
     """
     # **The positive control fires first**, and it is a strong one: it pins
     # that four warm-up requests *do* leave through this seam, which is

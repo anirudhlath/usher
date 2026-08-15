@@ -134,10 +134,14 @@ Library **1,134,919 items** on 2026-08-15 (up from 1,126,789 on 2026-08-02 and
   assuming a walk about **twice as cheap** as it is.
 - **4.7–5.4 GB of JSON off the wire**, ~5.0 GB at the mean of the two median
   bodies. The arithmetic, written out because an earlier version of this entry
-  said "~4.9 GB" and that reproduces from nothing: 5,675 × 819,964 B =
-  **4.65 GB**, 5,675 × 945,131 B = **5.36 GB**, and 5,675 × 882,547 B =
-  **5.01 GB** (4.66 GiB — which is where 4.9 came from, a GiB/GB slip).
-  Decimal GB throughout.
+  said "~4.9 GB": 5,675 × 819,964 B = **4.65 GB**, 5,675 × 945,131 B =
+  **5.36 GB**, and 5,675 × 882,547 B = **5.01 GB**. Decimal GB throughout.
+  **"~4.9 GB" reproduces from nothing** — it needs 863,436 B/page in GB or
+  927,107 B/page in GiB, and neither is a body this run measured. That is the
+  whole finding; a second attempt at this entry offered "a GiB/GB slip on
+  5.01 GB" as its origin and 5.01 GB is 4.66 GiB, so the story was itself
+  unreproducible. **Inventing a derivation for a superseded number is the same
+  error one register down: stop at "it reproduces from nothing".**
 - **The source yields 33 items/s.** `scripts/measure_ingest.py` measured the
   local pipeline at **1,933–2,135 items/s**, so **the ingest side is ~60×
   faster than the source can feed it** — the walk is entirely upstream-bound,
@@ -247,15 +251,19 @@ so pydantic emits its class docstring as the JSON-Schema `description` and
 FastAPI publishes it at `/openapi.json` — the edit put a `.claude/rules/…`
 path, a `⚠️` glyph and an internal task id into the public API contract.
 Repaired by moving the correction into a comment; the published description
-now differs from `45398c2` in exactly one schema and the difference is the
-**removal** of the false "1–5 s per request" claim, verified by regenerating
-`openapi.json` from a `git archive` of `45398c2` and diffing the whole
-document. **The general form: a `src/` docstring is not automatically prose —
-on a pydantic model, a route handler or a `Field(description=…)` it is a wire
-artifact, and an AST comparison cannot see the difference.** (Three other DTO
-descriptions already published a `.claude/rules/…` path before S1 touched
-anything — `BootstrapPhase`, `SeasonResponse`, `SuggestResponse` — so this is a
-standing hygiene gap, not one this task created.)
+now differs from `45398c2` in exactly one of 1,691 leaf nodes and the
+difference is the **removal** of the false "1–5 s per request" claim, verified
+by regenerating `openapi.json` from a `git archive` of `45398c2` and diffing
+the whole document.
+
+**The general form — a `src/` docstring is not automatically prose; on a
+pydantic model, a route handler or a `Field(description=…)` it is a wire
+artifact, and an AST comparison cannot see the difference — is recorded in
+`.claude/rules/api-telemetry-and-lanes.md`, not here.** This file's trigger is
+`adapters/emby/**` and five `services/*.py`; that one's is `src/usher/api/**`,
+which is where the finding fires. It is cross-referenced rather than duplicated
+so the two cannot drift, and the three standing DTO leaks it names are recorded
+there too.
 
 ### Still unverified, named rather than implied
 
@@ -275,9 +283,19 @@ standing hygiene gap, not one this task created.)
 - **This server's version.** Not read in this run — see the note above the
   table. `4.9.5.0` is M9's observation, thirty-six hours old.
 - **Whether the server was idle.** The claim available is that *this process*
-  sent nothing after 02:45:11Z. What else the household asked of that server
-  during the run is unobserved, which also means the `list` spread is not
-  cleanly attributable to depth alone.
+  sent nothing after 02:45:11Z; what else the household asked of that server
+  during the run is unobserved.
+
+  ⚠️ **Two caveats on the `list` spread, and this is the weaker of them.** The
+  declared confound is **cacheability** — `list@0` repeats one page and
+  `list@scattered` never repeats a `StartIndex` — and it is in the bar, before
+  the run. Unobserved household load is a second and lesser one, and the run
+  was built against it: `plan_probes` is **round-robin**, so the two `list`
+  arms alternate across the whole 2:29 window rather than occupying separate
+  stretches of it, and a drift in what the server was doing lands on both
+  roughly equally. What it cannot rule out is a burst that happened to fall on
+  scattered requests; what it does rule out is a monotonic drift being read as
+  a depth effect.
 
 ## M9's live verification — it ran on 2026-08-12, and the reason it had not is the first finding
 

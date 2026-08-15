@@ -11,6 +11,60 @@ Verified facts, loaded when working in this subsystem. Measured or observed,
 never assumed — each entry carries its date, its sample and what it refuted.
 The always-on conventions live in `CLAUDE.md`; this file is the evidence.
 
+## 🔴 A `src/` docstring is not automatically prose — under `api/` it is often a wire artifact
+
+**Found 2026-08-15 by M10's S1, in review, after the change had already been
+reported as "prose only, no behaviour" and the claim proven by an AST
+comparison.** Filed here rather than beside the measurement that produced it
+because *here* is the trigger that fires for the paths it is about —
+`.claude/rules/emby-push-and-ingest.md` loads on `adapters/emby/**` and five
+`services/*.py`, so a person editing `api/dto/` would never have seen it.
+(Precedent: `b737105`, *"file the config finding where it fires"*.)
+
+**The mechanism.** `LaneReport` (`src/usher/api/dto/health.py`) is a pydantic
+model, so pydantic emits its **class docstring** as the JSON-Schema
+`description` and FastAPI publishes it at `/openapi.json`. A comment
+correcting a stale claim was written into that docstring and thereby shipped a
+`.claude/rules/…` path, a `⚠️` glyph and an internal task id into the public
+API contract — measured on `LaneReport.model_json_schema()["description"]`.
+
+**Why the usual proof did not catch it.** Stripping docstrings and comparing
+the AST of every changed module is a genuine proof of *no code change*, and it
+is exactly blind to this: the docstring **is** the artifact. `mypy`, `ruff`,
+`lint-imports` and the whole suite are equally blind, because the contract is
+not asserted anywhere.
+
+**The three places it applies**, none of which a reader distinguishes from
+ordinary prose by looking at them:
+
+- a **pydantic model's class docstring** → the schema's `description`;
+- a **route handler's docstring** → the operation's `description`;
+- a **`Field(description=…)`** → the property's `description`.
+
+**The check that settles it, and it is cheap.** Regenerate the document from a
+`git archive` of the base commit and diff the whole thing:
+
+```bash
+git archive <base-sha> | tar -x -C /var/tmp/basetree
+# then, in each tree:
+python -c "import json,sys; sys.path.insert(0,'src'); from usher.api.app import create_app; \
+print(json.dumps(create_app().openapi(), indent=1, sort_keys=True))" > openapi.json
+diff -u /var/tmp/basetree/openapi.json openapi.json
+```
+
+S1's repair moved the correction into a comment; the resulting document
+differs from `45398c2` in **exactly one** of 1,691 leaf nodes, and the
+difference is the **removal** of a false *"1–5 s per request"* claim that had
+been published since M1.
+
+⚠️ **Three descriptions already publish a `.claude/rules/…` path and still
+do** — `BootstrapPhase`, `SeasonResponse`, `SuggestResponse`. Measured 3
+before S1 and 3 after, so S1 added one and removed it and did not add to the
+standing gap. Left alone deliberately: **editing a published `description` is
+itself a wire change**, so fixing them inside a task whose claim was "no wire
+diff" would have traded a recorded gap for an unreviewed OpenAPI diff. They
+are a task of their own, and this paragraph is the record that they are known.
+
 **`httpx.ASGITransport` buffers the whole response and therefore cannot test
 SSE at all.** Its `handle_async_request` runs `await self.app(scope, receive,
 send)` to *completion*, collects every `http.response.body` into a list, and
