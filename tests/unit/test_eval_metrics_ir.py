@@ -76,8 +76,14 @@ def test_a_total_wipeout_scores_zero_rather_than_crashing() -> None:
 
 
 def test_the_sentinel_cannot_be_mistaken_for_a_title() -> None:
-    """Every real document id is a UUID string. The sentinel is not one, so
-    it can never accidentally satisfy a judgement.
+    """Every real document id is a UUID string, and the sentinel is not one.
+
+    **That is a fact about the sentinel and it was never the guarantee it was
+    read as**, which is the correction of 2026-08-19: this case says the
+    sentinel cannot *be* a title id, not that the ids arriving in `relevant`
+    are title ids -- `score`'s signature is `Mapping[str, str]` and nothing in
+    it says otherwise. `test_a_judgement_naming_the_empty_result_sentinel_is_
+    refused` below is what closes that, and it carries the 1.0 the gap scored.
 
     The pattern is a raw string because the `|` is a real alternation and
     `ruff`'s RUF043 refuses the plain spelling -- CPython has worded this
@@ -108,8 +114,9 @@ def test_a_judged_query_with_no_ranking_at_all_is_refused() -> None:
 
 
 def test_two_rankings_for_one_query_are_refused_rather_than_overwriting() -> None:
-    """The third refusal, and the only one whose damage is a *number* rather
-    than a crash.
+    """The third refusal, and the first of the two whose damage is a *number*
+    rather than a crash -- the sentinel guard below is the other, and it is the
+    worse of the pair because its number is a perfect one.
 
     ranx never sees this one: the two mismatch guards above both pass, because
     a duplicate leaves the key sets equal. The last write into `by_query`
@@ -122,8 +129,59 @@ def test_two_rankings_for_one_query_are_refused_rather_than_overwriting() -> Non
         score(_RELEVANT, (*_RANKINGS, Ranking("q1", ())), ["recall@5"])
 
 
+def test_a_judgement_naming_the_empty_result_sentinel_is_refused() -> None:
+    """The fourth refusal, and the only one whose damage is a **perfect score**.
+
+    `NO_RESULT` lives in the same namespace as real document ids. Until
+    2026-08-19 its only defence was a property of *callers* -- the comment
+    beside it said it is "deliberately not a UUID, so it can never collide" --
+    and nothing asserted it. `test_the_sentinel_cannot_be_mistaken_for_a_title`
+    above asserts the sentinel is not a valid UUID; it does not assert that the
+    ids reaching `score` are, and neither does the signature, which is a plain
+    `Mapping[str, str]`.
+
+    **What the failure looks like without this guard**, measured 2026-08-19 by
+    running exactly this input against `score` before the guard existed:
+
+        relevant = {"q1": NO_RESULT}, q1's ranking empty
+        -> {'recall@5': 1.0, 'mrr': 1.0}
+
+    A query that returned nothing scores a **perfect hit** -- because `score`
+    substitutes `NO_RESULT` into the run for an empty result, and the judgement
+    then names precisely the document that substitution invented. That is the
+    score rising as the system gets worse, which is the one failure mode
+    `score`'s own docstring pays for three other guards to prevent. It is also
+    quiet: 1.0 is a number somebody writes down. Diluted it is worse rather than
+    better, because it stops being conspicuous -- one sentinel judgement beside
+    one genuine miss reads **0.5**, measured the same way.
+
+    Not reachable from today's callers, which have no way to mint that string
+    into a judgement. Neither is the duplicate document id the case below
+    refuses, and the argument is the same one: this module already pays for
+    three guards against caller mistakes of exactly this shape, and this one is
+    O(len(relevant)) on a path that already walks `relevant` twice.
+    """
+    with pytest.raises(EvalRefused) as caught:
+        score({"q1": NO_RESULT}, (Ranking("q1", ()),), ["recall@5", "mrr"])
+
+    assert "q1" in str(caught.value), (
+        f"the refusal names no query, so a traceback cannot say which judgement "
+        f"produced it: {caught.value}"
+    )
+    assert NO_RESULT in str(caught.value), (
+        f"the refusal does not name the sentinel, so a caller has nothing to "
+        f"grep the goldens for: {caught.value}"
+    )
+
+    # The control that says the guard is about the *sentinel* and not about an
+    # empty ranking: the identical call with a real relevant id is scored, and
+    # scored as the total miss it is.
+    scored = score({"q1": "t1"}, (Ranking("q1", ()),), ["recall@5", "mrr"])
+    assert scored == {"recall@5": 0.0, "mrr": 0.0}
+
+
 def test_a_document_id_repeated_inside_one_ranking_is_refused_at_construction() -> None:
-    """The fourth refusal, and the only one raised by a **DTO** rather than by
+    """The fifth refusal, and the only one raised by a **DTO** rather than by
     `score`.
 
     It was pinned as a *description* until 2026-08-19 -- the demotion below was
@@ -137,7 +195,7 @@ def test_a_document_id_repeated_inside_one_ranking_is_refused_at_construction() 
     weakest possible check on a refusal and it is the one everybody writes:
 
     * **`EvalRefused`, not `ValueError`.** It is the same event as `score`'s
-      three guards -- a harness invariant violated -- so it stays in one
+      four guards -- a harness invariant violated -- so it stays in one
       taxonomy and `runner.py` keeps a single `except`. A bare `ValueError`
       would be caught by nothing that catches its siblings.
     * **The message names the query and the offending id**, because a traceback
@@ -218,7 +276,7 @@ def test_the_demotion_the_guard_prevents_is_still_reachable_with_the_guard_suspe
     """
     one = {"q1": "t1"}
 
-    def unguarded(ranked: tuple[str, ...]) -> Ranking:
+    def _unguarded(ranked: tuple[str, ...]) -> Ranking:
         raw = Ranking.__new__(Ranking)
         object.__setattr__(raw, "query_id", "q1")
         object.__setattr__(raw, "ranked_ids", ranked)
@@ -229,7 +287,7 @@ def test_the_demotion_the_guard_prevents_is_still_reachable_with_the_guard_suspe
     # own line, per the standing rule that a guard nothing can falsify is a
     # deleted guard: `ranked_ids=ranked[::-1]` inside the helper fails here
     # rather than four assertions later.
-    assert unguarded(("t1", "a", "b")) == Ranking("q1", ("t1", "a", "b")), (
+    assert _unguarded(("t1", "a", "b")) == Ranking("q1", ("t1", "a", "b")), (
         "the premise: on input the guard permits, the bypass and the "
         "constructor build the same object. Without it a helper that dropped, "
         "reordered or re-typed `ranked_ids` would produce every number below "
@@ -237,10 +295,10 @@ def test_the_demotion_the_guard_prevents_is_still_reachable_with_the_guard_suspe
     )
 
     def mrr(ranked: tuple[str, ...]) -> float:
-        return score(one, (unguarded(ranked),), ["mrr"])["mrr"]
+        return score(one, (_unguarded(ranked),), ["mrr"])["mrr"]
 
     def recall(ranked: tuple[str, ...]) -> float:
-        return score(one, (unguarded(ranked),), ["recall@5"])["recall@5"]
+        return score(one, (_unguarded(ranked),), ["recall@5"])["recall@5"]
 
     assert mrr(("t1", "a", "b")) == 1.0
     assert mrr(("t1", "a", "t1")) == 0.5

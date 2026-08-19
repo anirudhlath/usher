@@ -22,14 +22,42 @@ jobs:
         with:
           enable-cache: true
 
-      # --extra eval pulls in ranx (37 packages / 520 MiB) so that the Tests
-      # step below can actually collect tests/unit/test_eval_metrics_ir.py --
-      # without it, usher/eval/metrics/ir.py raises EvalDependencyMissing at
-      # import and pytest errors at collection instead of running the suite.
-      # This is a test-only concession: usher.eval ships in no image (it's a
-      # leaf nothing may import -- pyproject.toml's eleventh import-linter
-      # contract enforces that), and this job never builds or publishes an
-      # image, so the extra never reaches a release artefact. Don't drop it
+      # --extra eval pulls in ranx so the Tests step below can collect and run
+      # tests/unit/test_eval_metrics_ir.py, which otherwise takes the whole
+      # file out at collection. Measured 2026-08-19 against a venv synced
+      # without the extra, because the mechanism matters more than the outcome:
+      #
+      #     tests/unit/test_eval_metrics_ir.py:21: in <module>
+      #         import ranx
+      #     E   ModuleNotFoundError: No module named 'ranx'
+      #     Interrupted: 1 error during collection
+      #
+      # This comment said "usher/eval/metrics/ir.py raises EvalDependencyMissing
+      # at import" until 2026-08-19. The outcome was right and the mechanism was
+      # not, and the difference is load-bearing: as written it invites the
+      # repair of wrapping ir.py's import in a try/except skip and calling the
+      # extra optional again, which would change nothing here. The test file
+      # imports ranx *itself*, in isort's third-party block, above the
+      # `from usher.eval.metrics.ir import ...` below it -- so the bare import
+      # always resolves first and ir.py's guard never runs in CI. That guard is
+      # real and separately confirmed (a no-extra venv answers
+      # `EvalDependencyMissing: the eval harness needs 'ranx' ...` on
+      # `import usher.eval.metrics.ir`); it just is not what CI hits.
+      #
+      # The cost belongs next to the flag: ~26 packages and ~507 MiB per run
+      # against a plain `uv sync --frozen` (110 distributions / 687 MiB against
+      # 84 / 180 MiB), measured out of tree the same day. pyproject.toml's
+      # `eval` extra carries the full argument for paying it; the short version
+      # is that a run that did not run is not a pass.
+      #
+      # What it does not reach is a release artefact. This job never builds or
+      # publishes an image, and Dockerfile's two syncs (l.31, l.42) are
+      # `--no-dev` with no `--extra`, so no image installs ranx. `usher.eval`
+      # itself *is* copied into the image -- `COPY src/ ./src/` takes the whole
+      # source tree -- so "usher.eval ships in no image", which this comment
+      # also used to say, is false. The true and operative claim is that no
+      # shipped code path imports it, which pyproject.toml's eleventh
+      # import-linter contract enforces rather than assumes. Don't drop this
       # as bloat.
       - name: Install dependencies
         run: uv sync --frozen --extra eval

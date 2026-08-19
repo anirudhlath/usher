@@ -24,6 +24,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import grimp
+
 import usher
 import usher.eval
 
@@ -45,6 +47,20 @@ _THE_PACKAGE_ITSELF = {"usher.eval"}
 # is exempted from *both* walks by subtraction -- `usher.eval` drops out of the
 # top-level walk because its children are enumerated instead.
 _MAY_IMPORT_RANX = "usher.eval.metrics"
+
+# The fifth contract, found by what it forbids rather than by its name, for the
+# reason every list in this module is derived rather than written down. It is
+# the contract the eleventh's `allow_indirect_imports` leans on -- see
+# `test_the_eval_package_is_named_by_an_import_contract`.
+_THE_COMPOSITION_ROOT = "usher.cli"
+
+# The one source the eleventh contract lists that nothing in the fifth
+# contract's six can reach -- which is what makes it the documented exception to
+# that contract's safety argument. It is the *only* thing named here: the case
+# below derives the unreachable set from the graph and asserts it equals exactly
+# this, rather than looping over the three modules that are reachable, which
+# would be a second copy of a fact a reader has to trust somebody enumerated.
+_REACHED_BY_NOTHING = "usher.__main__"
 
 
 def _top_level_names() -> set[str]:
@@ -117,6 +133,18 @@ def test_the_eval_package_is_named_by_an_import_contract() -> None:
     kept, 0 broken* while unlisted) and then fails the set equality below,
     pointing the reader further from the repair. A one-token deletion that
     re-arms a trap is exactly the shape a configuration test exists for.
+
+    **And the flag's *safety* argument is pinned too, which until 2026-08-19 it
+    was not.** The flag is defensible because the fifth contract still reports a
+    chain through `usher.cli` for every source that can reach it -- a measured
+    graph fact (`usher.config`, `usher.composition` and `usher.telemetry` had
+    3, 3 and 12 direct importers inside that contract's six on the day it was
+    written) with nothing checking it, next to four things about the same flag
+    that *were* checked. A refactor leaving one of those three unimported from
+    within the six would reopen the hole with the gate still at 12 kept and
+    every existing assertion here green, so the last block below derives the
+    reachability from `grimp` instead, and derives `usher.__main__` as the
+    single exception rather than repeating the prose.
     """
     naming = [one for one in _contracts() if "usher.eval" in one.get("forbidden_modules", [])]
     assert len(naming) == 1, (
@@ -162,6 +190,70 @@ def test_the_eval_package_is_named_by_an_import_contract() -> None:
         f"unlisted (free to import usher.eval): "
         f"{sorted(walked - _EXEMPT - _THE_PACKAGE_ITSELF - set(contract['source_modules']))}; "
         f"listed but gone: {sorted(set(contract['source_modules']) - walked)}"
+    )
+
+    # **The safety argument for `allow_indirect_imports`, which until now rested
+    # on a measured graph fact that nothing checked.** What the flag gives up is
+    # a chain through `usher.cli`; what makes that acceptable is that the fifth
+    # contract ("cli is a composition root, nothing depends on it") carries no
+    # such flag, so any source it *can reach* still gets the chain reported
+    # there. `usher.__main__` is the documented exception -- nothing imports it,
+    # which is exactly what it is for -- and the rest of the argument is a
+    # property of the graph that a refactor could quietly falsify with the gate
+    # still reporting 12 kept.
+    #
+    # So the exception is **derived** rather than asserted in prose: every
+    # source the eleventh contract lists and the fifth does not is checked for
+    # reachability, and the set that comes back unreached must be exactly
+    # `usher.__main__`. A refactor that left `usher.telemetry` unimported from
+    # within those six fails here by name.
+    guarding = [
+        one for one in _contracts() if one.get("forbidden_modules") == [_THE_COMPOSITION_ROOT]
+    ]
+    assert len(guarding) == 1, (
+        "expected exactly one contract forbidding usher.cli -- the assertion "
+        "below reads its source list, so two of them would silently check the "
+        f"wrong one: {guarding!r}"
+    )
+    (composition_root,) = guarding
+    watched = set(composition_root["source_modules"])
+    assert len(watched) >= 6 and "usher.services" in watched, (
+        "the composition-root contract's source list is not the six this "
+        "argument rests on, so every reachability answer below is about some "
+        f"other question: {sorted(watched)}"
+    )
+
+    graph = grimp.build_graph("usher")
+    assert "usher.domain" in graph.modules and len(graph.modules) >= 100, (
+        f"grimp built a graph of {len(graph.modules)} modules with no "
+        "usher.domain in it, so it is reading something other than src/usher "
+        "-- and a graph that found nothing answers False to every chain query, "
+        "which would read as 'nothing is reachable' rather than as a broken "
+        "premise"
+    )
+
+    beyond = set(contract["source_modules"]) - watched
+    assert _REACHED_BY_NOTHING in beyond, (
+        f"{_REACHED_BY_NOTHING} is the exception this assertion derives, so it "
+        "has to be one of the sources the fifth contract does not already "
+        f"watch: listed beyond the six are {sorted(beyond)}"
+    )
+    unreached = {
+        one
+        for one in beyond
+        if not any(
+            graph.chain_exists(importer=source, imported=one, as_packages=True)
+            for source in watched
+        )
+    }
+    assert unreached == {_REACHED_BY_NOTHING}, (
+        "the eleventh contract's allow_indirect_imports is safe only because "
+        "every source it lists beyond the fifth contract's six is reachable "
+        "from one of those six, so a chain through usher.cli is still reported "
+        f"there. Now unreachable, and therefore silently exempt from both: "
+        f"{sorted(unreached - {_REACHED_BY_NOTHING})}; newly reachable, so the "
+        "documented exception has moved and this comment with it: "
+        f"{sorted({_REACHED_BY_NOTHING} - unreached)}"
     )
 
 

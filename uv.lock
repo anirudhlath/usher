@@ -2621,6 +2621,7 @@ eval = [
 [package.dev-dependencies]
 dev = [
     { name = "asgi-lifespan" },
+    { name = "grimp" },
     { name = "import-linter" },
     { name = "mypy" },
     { name = "pytest" },
@@ -2660,6 +2661,7 @@ provides-extras = ["embedding", "eval"]
 [package.metadata.requires-dev]
 dev = [
     { name = "asgi-lifespan", specifier = ">=2.1.0" },
+    { name = "grimp", specifier = ">=3.15" },
     { name = "import-linter", specifier = ">=2.1" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "pytest", specifier = ">=8.3" },

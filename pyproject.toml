@@ -63,14 +63,49 @@ embedding = ["fastembed>=0.8"]
 # the version drift since 2026-08-02. The `du` figure and the closure agree
 # independently, the venv holding exactly 37 `.dist-info` directories.
 #
-# **So the argument is not that this is small. It is 3x the embedding extra
-# and nothing ships it.** CI installs with a bare `uv sync --frozen` and
-# never passes `--extra eval` (`.github/workflows/ci.yml`), so the production
-# image and the five-step gate each pay zero -- `usher.eval` is imported by no
-# shipped code path, which the eleventh import contract enforces rather than
-# assumes. On a developer machine that already ran a plain `uv sync`, 31 of
-# the 37 are new; the six already present are `requests` with its four
-# transitives (certifi, charset-normalizer, idna, urllib3) and `packaging`.
+# **So the argument is not that this is small. It is 3x the embedding extra,
+# and since `706f207` something does pay for it every run.** That commit
+# changed CI's Install step to `uv sync --frozen --extra eval`
+# (`.github/workflows/ci.yml`), which falsified the sentence that stood here --
+# *"CI installs with a bare `uv sync --frozen` and never passes `--extra eval`,
+# so the production image and the five-step gate each pay zero"*. That
+# paragraph was the whole argument for accepting this extra, so both halves are
+# re-measured rather than reworded (2026-08-19, `UV_PROJECT_ENVIRONMENT`
+# pointed at a venv out of tree, `du -sm .../site-packages`):
+#
+#   **the production image still pays zero, by construction rather than by
+#   care.** `Dockerfile` syncs twice -- `uv sync --frozen --no-install-project
+#   --no-dev` (l.31) and `uv sync --frozen --no-dev` (l.42) -- and neither
+#   passes `--extra` anything, so `ranx` reaches neither stage; the runtime
+#   stage then copies that finished venv wholesale (`COPY --from=builder ...
+#   /app/.venv`, l.58) and installs nothing of its own. Note what this is *not*
+#   a claim about: `COPY src/ ./src/` (l.40) copies `src/usher/eval/` into the
+#   image along with everything else, so "`usher.eval` ships in no image" is
+#   false. What is true is that **no shipped code path imports it** -- the
+#   eleventh contract below enforces that -- and that no image installs the
+#   library it would need.
+#
+#   **CI now pays ~26 packages and ~507 MiB per run**: `uv sync --frozen` gives
+#   84 distributions / 180 MiB, `uv sync --frozen --extra eval` gives 110 / 687
+#   MiB -- counting `.dist-info` directories in `site-packages`, `usher`'s own
+#   editable install included on both sides so the delta is unaffected by it.
+#   It is bought deliberately, for the standing rule that a run that did
+#   not run is not a pass: `tests/unit/test_eval_metrics_ir.py` has to
+#   *execute*, and without the extra it does not even skip -- its own
+#   third-party `import ranx` errors the whole file out at collection.
+#   `ci.yml`'s comment on that step carries the measured traceback and names
+#   the failing line, because the mechanism is not the one an obvious repair
+#   would target.
+#
+# **26 of the 37 are new, not 31**, and the already-present list was short by
+# five. Corrected 2026-08-19, measured by normalised distribution name against
+# a plain `uv sync --frozen` -- the dev environment, which is what CI and a
+# developer machine both have. The **eleven** already there are `requests` with
+# its four transitives (`certifi`, `charset-normalizer`, `idna`, `urllib3`),
+# `packaging`, `rich` with `markdown-it-py`, `mdurl` and `pygments`, and
+# `pyyaml`. The five it missed were all pre-existing rather than introduced by
+# this task, but this is the number `ci.yml` now leans on, so it is the one
+# that has to be right.
 #
 # `ranx` is confined to `usher/eval/metrics/ir.py`. `ir_measures` (4 packages)
 # is the one-file swap if numba ever blocks a CPython upgrade, which is the
@@ -93,6 +128,14 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "import-linter>=2.1",
+    # import-linter's own graph engine, and already installed as its transitive
+    # -- declared anyway, because `tests/unit/test_eval_contract.py` imports it
+    # directly to pin the reachability fact the eleventh contract's
+    # `allow_indirect_imports` rests on. An undeclared transitive is a
+    # dependency nobody can install on purpose and one that a repackaging of
+    # import-linter can remove without warning, which would turn a
+    # gate-blocking test into a collection error.
+    "grimp>=3.15",
     "testcontainers[postgres]>=4.9",
     "asgi-lifespan>=2.1.0",
     "pyyaml>=6.0",
@@ -556,6 +599,19 @@ modules = [
 # the loop is closed for all of them. **The exception is `usher.__main__`,
 # which nothing imports** -- and that is precisely the intended path, since it
 # exists to run the CLI.
+#
+# **That last paragraph is a graph fact, and as of 2026-08-19 a test holds it
+# rather than this comment.** Measured direct importers inside the fifth
+# contract's six: `usher.config` 3, `usher.composition` 3 (all six of those in
+# `usher.api`), `usher.telemetry` 12, `usher.__main__` **0**. Nothing checked
+# it, while `test_eval_contract.py` already pinned the flag, the forbidden
+# module, the `usher.cli` exemption and the full source list -- so a refactor
+# unhooking one of the three would have opened a real hole with the gate still
+# green. Verified by planting exactly that (the three `from usher.composition
+# import` statements in `usher/api/` rewritten away, out of tree): the gate
+# reported **12 kept, 0 broken** with `usher.composition` silently exempt from
+# both contracts, and `test_the_eval_package_is_named_by_an_import_contract`
+# failed on its own line naming it. Restored, green.
 #
 # **Every *direct* import of `usher.eval` is still caught in every listed
 # source, with the flag on**, which is the claim this contract is really

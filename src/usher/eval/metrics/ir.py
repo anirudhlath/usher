@@ -35,7 +35,12 @@ except ImportError as exc:  # pragma: no cover - exercised by the CLI preflight
 # empty dict in the mixed case: 0.5 either way over the same two queries.
 #
 # It is deliberately not a UUID, so it can never collide with a real title id
-# and satisfy a judgement by accident.
+# and satisfy a judgement by accident. **That was a property of callers until
+# 2026-08-19 and `score` now refuses it instead**, because the string lives in
+# the same namespace as real document ids and the signature (`Mapping[str,
+# str]`) says nothing about UUIDs. Measured before the guard existed, a
+# judgement naming this sentinel scored a query that returned *nothing* at
+# **1.0** -- the guard and the case that pins it carry the numbers.
 NO_RESULT = "__no_result__"
 
 
@@ -65,7 +70,7 @@ class Ranking:
 
     **`EvalRefused` rather than `ValueError`**, so it stays in one taxonomy
     with its siblings and `runner.py` keeps a single `except`. It is the same
-    event as `score`'s three guards -- a harness invariant violated, per
+    event as `score`'s four guards -- a harness invariant violated, per
     `errors.py` -- and the message names the query and the ids so a traceback
     points at the surface with the dedupe bug rather than at the scorer.
 
@@ -122,6 +127,12 @@ def score(
     are refused rather than repaired, because the tempting repair for the
     second one -- dropping the judgement instead of adding an empty ranking --
     makes recall *rise* as the system gets worse.
+
+    **Four guards, and the fourth is the same failure mode arriving through the
+    judgements rather than through the rankings**: a judgement naming
+    `NO_RESULT` is satisfied by the substitution this function makes for an
+    empty ranking, so the query that returned nothing scores 1.0. Refused, with
+    the measurement on the guard itself.
     """
     by_query = {ranking.query_id: ranking for ranking in rankings}
     if len(by_query) != len(rankings):
@@ -138,6 +149,25 @@ def score(
             f"{len(unanswered)} judged quer(y/ies) have no ranking at all, e.g. "
             f"{sorted(unanswered)[0]!r} -- add an empty ranking; do not drop the "
             "judgement, which would raise the score by shrinking the denominator"
+        )
+    # The fourth guard, and the one whose damage is a *perfect* score rather
+    # than a wrong one. `NO_RESULT` is substituted into the run below for an
+    # empty result, so a judgement naming it is satisfied by the substitution
+    # itself: measured 2026-08-19, `relevant = {"q1": NO_RESULT}` with an empty
+    # ranking for `q1` answered `{'recall@5': 1.0, 'mrr': 1.0}` -- a query that
+    # returned nothing scoring a perfect hit, which is the failure mode this
+    # function's docstring names arriving through the one door the three guards
+    # above leave open. The sentinel's stated defence ("not a UUID") was a
+    # property of callers and nothing asserted it, which is exactly what the
+    # other three guards exist not to rely on. O(len(relevant)) on a path that
+    # already walks `relevant` twice.
+    sentinel = sorted(query for query, document in relevant.items() if document == NO_RESULT)
+    if sentinel:
+        raise EvalRefused(
+            f"{len(sentinel)} judgement(s) name the empty-result sentinel "
+            f"{NO_RESULT!r} as the relevant document, e.g. {sentinel[0]!r}: {sentinel} -- "
+            "an empty ranking is scored against that same sentinel, so the query "
+            "that returned nothing would score a perfect hit"
         )
 
     qrels = Qrels.from_dict({query: {document: 1} for query, document in relevant.items()})
