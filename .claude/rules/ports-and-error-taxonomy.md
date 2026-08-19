@@ -136,8 +136,31 @@ only ever handles, and the trouble is not that the reasoning is wrong: the code
 is right, the tests are green, and **the branch has never once executed against
 the thing it models.**
 
-`PortRateLimited` is the specimen. Six `raise` sites across four adapter modules
-construct it; since M9's D9 exactly one thing in `src/` reads its `retry_after`
+`PortRateLimited` is the specimen. **Six sites across four adapter modules**
+construct it — `adapters/bulk/wikidata.py`, `adapters/bulk/download.py`,
+`adapters/emby/session.py` (three) and `adapters/http.py` — of which **five are
+a `raise` and the sixth is a `return`**: `port_error_for` hands the error back
+for its caller to raise. Re-measured 2026-08-19 by an `ast` walk over `src/`
+for calls named `PortRateLimited`, and **both halves of that sentence are
+corrections to text this file and PRD 09 shipped in the same commit.** This
+entry originally read *"six raise sites"*, which counts the `return` as a
+raise; PRD 09's carried-debt bullet read *"seven raise sites across five
+modules"*, a figure M9's D9 plan had already measured wrong (*"an earlier draft
+said 'seven sites across five modules'; measured, it is six across four"*) and
+which was carried forward anyway.
+
+🔴 **The transferable half is not the number, it is that one commit shipped two
+different counts of one thing.** `e30b894` wrote the corrected census into this
+file while the stale one sat inside the very bullet the same commit rewrote,
+four lines above the new prose. A census is a grep-checkable claim, and
+`testing-discipline.md`'s standing rule applies to the document being *added
+to* as well as to the one being edited: **amending a document means grepping it
+— and the code, and every neighbour that states the same count — for the claim
+being amended.** Four places state this one (`db/repositories/jobs.py`'s module
+docstring, PRD 08, `emby-push-and-ingest.md`, and this entry); the two that were
+wrong are the two a reader is most likely to arrive at first.
+
+Since M9's D9 exactly one thing in `src/` reads its `retry_after`
 (`JobWorker._fail`), and M10's S4 drives that chain end to end — an HTTP 429 in,
 `jobs.run_after` on real Postgres out, over both of RFC 9110's `Retry-After`
 forms. Every one of those facts is a statement about code this project wrote.

@@ -351,6 +351,17 @@ class FakeEmbyServer:
         body** for the same reason: the adapter never reads one, and inventing
         a shape nobody has seen is the failure this module's own docstring is
         about.
+
+        **Both halves of that placement are pinned, and the second one only
+        since 2026-08-19.** `tests/unit/test_fakes_emby_server.py` holds them:
+        `test_a_refused_request_does_not_consume_an_armed_rate_limit` kills a
+        limiter moved above the identity gate, and
+        `test_a_rate_limited_handshake_reaches_the_session_as_a_rate_limit`
+        kills one moved below the `AuthenticateByName` route arm. Until the
+        second existed, that move -- the precise negation of the sentence
+        above -- left the whole suite green, because no case anywhere armed
+        the authenticating call and `_authenticate_locked`'s 429 arm is
+        reachable no other way.
         """
         self._rate_limits.append((path, retry_after))
 

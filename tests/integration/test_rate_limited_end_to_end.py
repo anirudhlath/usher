@@ -94,7 +94,10 @@ RETRY_AFTER_SECONDS = 120.0
 #: its first failure is `BACKOFF_SECONDS * power(2, 0) * (0.5 + random() / 2)`,
 #: i.e. a uniform draw from **[15, 30) s** -- so a hinted backoff lands in
 #: [135, 150) and an unhinted one in [15, 30), and the two populations cannot
-#: overlap.
+#: overlap. The unhinted half of that is **asserted** rather than merely
+#: stated here, on `_Row.drawn`: until it was, a queue giving an unhinted
+#: failure no backoff at all satisfied every assertion in this file, because
+#: "sooner than the hinted one" is also what zero is.
 BACKOFF_SECONDS = 30.0
 MAX_ATTEMPTS = 5
 
@@ -162,19 +165,43 @@ def _retry_after(form: str) -> tuple[str, float, float]:
 @dataclass(frozen=True, slots=True)
 class _Row:
     """One `jobs` row as this file reads it, with `run_after` already resolved
-    against the database's own clock.
+    against the database's own clock -- twice, because the two resolutions
+    answer two different questions.
 
     The interval is computed in SQL rather than in Python: `run_after` is a
     `timestamptz` Postgres wrote from `clock_timestamp()`, and subtracting it
     from a Python `datetime.now()` would compare two clocks -- one of which is
     inside a container -- instead of measuring the interval the statement
     actually chose.
+
+    `seconds` is `run_after - clock_timestamp()`, i.e. **what is left** of the
+    backoff when this file reads the row: the same comparison `_CLAIM` makes,
+    so it is the number that decides when the job is re-claimable. `drawn` is
+    `run_after - updated_at`, i.e. **what `_FAIL` chose**, and it is readable
+    only because that statement writes both columns from `clock_timestamp()`
+    in one pass and `jobs` is deliberately **not** one of the seven tables
+    carrying a `set_updated_at` trigger -- a fact
+    `test_migrations.py::test_migration_creates_the_updated_at_triggers`
+    pins by name, and one that would otherwise put an unrelated `now()` on
+    the second column.
+
+    Two fields rather than one because a bound on the *draw* cannot be spelled
+    against `seconds` without going intermittent. The jittered draw's own
+    minimum **is** `BACKOFF_SECONDS / 2`, so `BACKOFF_SECONDS / 2 <=
+    row.seconds` is falsified by *any* elapsed time at all: the gap between
+    `_FAIL` and this read measured **4.0 ms** directly (`drawn - seconds` on
+    one run) and is bounded at **< 0.42 s** by six earlier ones, which is the
+    most those six can say -- and 0.42 s is the bottom 2.8% of [15, 30), i.e.
+    that share of correct queues failing. `drawn` subtracts two instants
+    Postgres wrote microseconds apart inside one statement and has no such
+    slack.
     """
 
     status: str
     attempts: int
     last_error: str
     seconds: float
+    drawn: float
 
 
 async def _rows(sessions: async_sessionmaker[AsyncSession]) -> dict[str, _Row]:
@@ -182,7 +209,8 @@ async def _rows(sessions: async_sessionmaker[AsyncSession]) -> dict[str, _Row]:
         result = await session.execute(
             text(
                 "SELECT key, status, attempts, last_error, "
-                "EXTRACT(EPOCH FROM (run_after - clock_timestamp())) AS seconds FROM jobs"
+                "EXTRACT(EPOCH FROM (run_after - clock_timestamp())) AS seconds, "
+                "EXTRACT(EPOCH FROM (run_after - updated_at)) AS drawn FROM jobs"
             )
         )
         return {
@@ -191,6 +219,7 @@ async def _rows(sessions: async_sessionmaker[AsyncSession]) -> dict[str, _Row]:
                 attempts=row.attempts,
                 last_error=row.last_error,
                 seconds=float(row.seconds),
+                drawn=float(row.drawn),
             )
             for row in result
         }
@@ -413,16 +442,31 @@ async def test_a_429_from_a_source_defers_the_job_by_the_interval_the_upstream_a
     # The probes consumed both arms; re-arm for the run under test.
     emby.rate_limit(hinted_path, retry_after=header)
     emby.rate_limit(plain_path)
+    # Everything appended to `emby.requests` from here on is the worker's. The
+    # slice is what makes the assertion below a statement about the worker at
+    # all: `handle` records `f"{method} {path}"` for every request including
+    # the two probes above, which sent those exact two lines -- so the same
+    # assertion spelled over the whole list is satisfied before the worker
+    # exists.
+    before = len(emby.requests)
 
     await _enqueue(sessions, (HINTED_KEY, PLAIN_KEY))
     assert await _worker(sessions, _resolver(source, adapter), batch_size=2).run_once() == 2
 
     # The worker's own reads were the ones rate-limited, not the handshake in
-    # front of them: an armed path the adapter never asks for would leave both
-    # jobs completing rather than failing.
-    assert f"GET {hinted_path}" in emby.requests
-    assert f"GET {plain_path}" in emby.requests
+    # front of them. A limit armed on `/Users/AuthenticateByName` instead
+    # satisfies every other assertion in this case: `_authenticate_locked`
+    # translates a 429 through the same `retry_after_seconds`, so both jobs
+    # fail with the same hint and the same `run_after` -- and never reach the
+    # read the case is about.
+    worker_requests = emby.requests[before:]
+    assert f"GET {hinted_path}" in worker_requests, worker_requests
+    assert f"GET {plain_path}" in worker_requests, worker_requests
 
+    # And the other half of that: an armed path the adapter never asks for
+    # fires no 429 at all, which leaves both jobs completing rather than
+    # failing -- `PostgresJobQueue.complete` is a `DELETE`, so a completed job
+    # leaves no row for this to find.
     rows = await _rows(sessions)
     assert set(rows) == {HINTED_KEY, PLAIN_KEY}, (
         f"both jobs must still be on the queue, backed off rather than completed: {sorted(rows)}"
@@ -449,4 +493,16 @@ async def test_a_429_from_a_source_defers_the_job_by_the_interval_the_upstream_a
     assert plain.seconds < hinted.seconds, (
         "the 429 that carried no hint has to land strictly sooner, or the hint is not what "
         f"moved run_after: hinted={hinted.seconds}s plain={plain.seconds}s"
+    )
+    # The control arm's *own* schedule, not merely "sooner than the hinted
+    # one". Without a lower bound the whole file is green against a queue that
+    # gives an unhinted failure no backoff at all -- measured: dividing
+    # `_FAIL`'s jitter term by ten puts a job retrying a broken upstream at
+    # ~2 s instead of ~20 s, the rationed hot loop the jitter exists to
+    # prevent, and every other assertion above passes. This is the module
+    # comment on `BACKOFF_SECONDS` spelled as a check rather than as prose,
+    # and it is asserted on `drawn` rather than on `seconds` for the reason
+    # `_Row` gives.
+    assert BACKOFF_SECONDS / 2 <= plain.drawn < BACKOFF_SECONDS, (
+        f"the unhinted 429 has to land on the ordinary [15, 30) draw: {plain.drawn}s"
     )

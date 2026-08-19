@@ -5639,11 +5639,26 @@ passed) and clean again after every restore, with every restore verified by
 planted files were re-verified byte-identical to `git show HEAD:` after the
 round. `PYTHONDONTWRITEBYTECODE=1`; `__pycache__` swept under **both** `src/`
 and `tests/` before every run; `compile()` rather than `ast.parse` as the dry
-run, scoped to `.py`; an exact `count(old) == 1` per anchor, checked for all 13
-anchors before the round started; the landing check spelled **byte equality with
-the intended mutant**; `cp` backups and never `git checkout --`; and — new here,
-because of what happened to round 1 — **SIGTERM/SIGINT/SIGHUP handlers that
-restore the live plant before exiting**.
+run, scoped to `.py`; an exact `count(old) == 1` per anchor, over 13 anchors;
+the landing check spelled **byte equality with the intended mutant**; `cp`
+backups and never `git checkout --`; and — new here, because of what happened
+to round 1 — **SIGTERM/SIGINT/SIGHUP handlers that restore the live plant
+before exiting**.
+
+⚠️ **Corrected 2026-08-19 in review: the anchor check is per plant, not per
+round, and this entry claimed the stronger method.** It read *"checked for all
+13 anchors before the round started"*. `sweep2.py` has no pre-round pass —
+`apply()` counts the anchor inside the per-plant loop, immediately before
+writing that plant's file — and there is no artefact of one either: `sweep2.log`
+goes straight from `=== round 2 start … tree clean ===` into `[T1] planted`.
+The **outcome** (0 BAD-ANCHOR across 13 anchors) is genuine, because every
+anchor really was counted before its own plant landed; what was overstated is
+*when*. The difference is not cosmetic — a pre-round pass fails the whole round
+on a stale anchor before any suite time is spent, and a per-plant check reports
+it eleven plants in. Same register as S3's finding one down: **a ledger that
+describes a better method than its harness has is the sweep-evidence failure
+this file exists to catch, arriving in the methods paragraph rather than in a
+results table.**
 
 **Selection: the whole suite**, `tests/unit` (4,112 collected) and
 `tests/integration` together. Deliberately whole rather than scoped, and the
@@ -5785,3 +5800,89 @@ planted files `sha256`-verified byte-identical to `git show HEAD:`:
 formatted**, `mypy src tests` **588 source files**, `lint-imports` **10 kept, 0
 broken**, `pytest` **5,342 passed / 26 skipped** with `tests/unit` collecting
 **4,112**, PRD link check **OK**.
+
+### The review round, 2026-08-19 — three plants, and a second reported flake that does not reproduce
+
+Run by hand rather than through `sweep2.py`, deliberately: every one of these
+plants is paired with a **second run that removes one assertion**, which is a
+coverage measurement rather than a mutation and is not what that harness
+scores. Each plant `cp`-backed up under `/var/tmp/m10-s4-fix/backups/`, each
+restore verified by `sha256` **and** by reading the file back, `git status`
+checked after every one, and `src/` re-verified unmodified at the end.
+
+| plant | what it is | verdict |
+|---|---|---|
+| **P1** the re-arm before the worker run moved to `/Users/AuthenticateByName` — the 429 lands on the handshake instead of on the read the case is about | **KILLED** by the repaired assertion, both arms, on `worker_requests == ['POST /Users/AuthenticateByName', 'POST /Users/AuthenticateByName']`. **The shipped spelling passes it**: with `assert f"GET {hinted_path}" in emby.requests` restored over the same plant, **2 passed** |
+| **P2** `handle`'s limiter block moved **below** the `AuthenticateByName` route arm — the precise negation of `rate_limit`'s documented placement | **KILLED**, whole suite, **1 failed / 5,342 passed / 26 skipped**, and the one failure is the new `test_a_rate_limited_handshake_reaches_the_session_as_a_rate_limit`. Its blast radius outside that one case is therefore **zero**, which is the reviewer's finding measured from the other side in a single run |
+| **P3** `_FAIL`'s jitter term divided by ten — a job retrying a broken upstream at ~2 s instead of ~20 | **KILLED** by the new lower bound, both arms, at `drawn = 1.959881 s`. **With that one assertion removed and the plant still live: 2 passed**, which is the state the file shipped in |
+
+**P1 is the sharper of the three, because the assertion it repairs was not weak
+— it was already satisfied.** `FakeEmbyServer.handle` appends
+`f"{method} {path}"` for *every* request including the two probes the case
+issues before the worker exists, and those probes send the identical two lines
+— so `assert f"GET {hinted_path}" in emby.requests` was true several statements
+before the thing it claims to be about had happened. The repair is one binding
+(`before = len(emby.requests)`) and a slice. **The general form: when a case
+asserts on a recorder that its own setup also writes to, the assertion is about
+the setup unless it is scoped to a window** — the sequence twin of
+`testing-discipline.md`'s "a premise stated *after* the assertion it is a
+premise for cannot report".
+
+**And P3 is why that case now reads two intervals off one row.** The obvious
+lower bound, `BACKOFF_SECONDS / 2 <= plain.seconds`, is spelled against
+`run_after - clock_timestamp()` — and the jittered draw's own **minimum is
+exactly `BACKOFF_SECONDS / 2`**, so any elapsed time at all puts a share of
+correct runs under it. Measured two ways: the read lands **4.0 ms** after
+`_FAIL` directly (`seconds = 1.955861` against `drawn = 1.959881`, under P3),
+and six earlier runs bound the same gap at **< 0.42 s** — the most a sample of
+`run_after - clock_timestamp()` alone can say, its largest being 29.585 against
+a ceiling of 30 — which is the bottom 2.8% of the draw. The
+bound is asserted on `run_after - updated_at` instead, two instants Postgres
+wrote microseconds apart inside one statement, which has no such slack —
+readable only because `jobs` is deliberately not one of the seven tables with a
+`set_updated_at` trigger. **A reviewer's one-line repair can be right about the
+gap and wrong about the spelling, and the check is whether the bound's value is
+also the distribution's boundary.**
+
+### 🔴 A second intermittent integration group was reported, and ten runs here do not reproduce it
+
+**Reported in review:** `tests/integration/test_adapters_search_postgres.py`
+run alone gave **1 / 0 / 3 failures over three consecutive runs** on a frozen
+copy verified byte-identical to `139a37c`, always the same three RRF-fusion
+cases — `test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found`,
+`test_a_row_only_one_lane_found_is_still_returned`, and
+`test_a_title_deep_in_both_lanes_still_reaches_the_first_page`. One reviewer's
+C1 control run reported exactly those three.
+
+**Re-measured 2026-08-19 on this host: ten consecutive solo runs, `38 passed /
+1 skipped` every time, zero failures**, over 74.16 / 74.88 / 82.05 / 79.30 /
+80.49 / 77.67 / 75.05 / 74.99 / 67.04 / 71.19 s. Neither obvious explanation
+survives. **It is not the tree** — S4 changed no file under `src/` and neither
+did this review round, so the whole search path is byte-identical to `139a37c`
+in both measurements. **And it is not an idle box** — `uptime` read a load
+average of **9.59 on 16 cores** across those ten runs, which is the condition
+the `test_rows_refresh.py` entry above suspects and does not establish.
+
+**So what is recorded is the report and both measurements, not a rate.** Four
+failures in three runs and zero in ten do not average into anything: they are
+either two different environments or one very low rate that got unlucky, and
+this round has no way to tell them apart. Naming a number here would be the
+error `emby-push-and-ingest.md` records one register up — *a claim that
+reproduces from nothing*.
+
+**Two things stand regardless, and they are why the report is written down at
+all.**
+
+- **C1's SURVIVED verdict is unaffected either way.** C1's plant is a JSON body
+  on the Emby fake's 429 and cannot reach Postgres search fusion, so a fusion
+  failure inside a C1 run is not C1's — the verdict rests on the plant's reach,
+  not on the run being clean. Worth stating explicitly because a flaking
+  *control* reads as *"the equivalence claim was wrong"*, which is the inverse
+  of the failure mode this file already records for a control dying on a linter.
+- **S11 runs a phase-wide sweep scored on "did the run fail"**, which is
+  precisely the scoring an intermittent case makes unsound. The harness note
+  above already requires the `test_rows_refresh.py` deselection for that reason;
+  if this group reproduces for whoever runs S11, it needs the same treatment and
+  a plant whose only kill is one of these three is a false kill until re-run.
+  **Do not chase the root cause from here** — that is nobody's task yet, and a
+  rate measured on one host on one evening is not the diagnosis.

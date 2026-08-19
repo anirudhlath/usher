@@ -51,7 +51,7 @@ from usher.adapters.emby.push import to_source_events
 from usher.adapters.emby.session import EmbySession
 from usher.domain.enums import HdrFormat
 from usher.ports.credentials import SourceCredentials
-from usher.ports.errors import PortUnavailable
+from usher.ports.errors import PortRateLimited, PortUnavailable
 from usher.ports.source import SourceEventKind, SourceItem, SourceItemKind, SourceWatchState
 
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
@@ -651,6 +651,40 @@ def test_a_refused_request_does_not_consume_an_armed_rate_limit() -> None:
     fired = server.handle(httpx.Request("GET", url, headers={"Authorization": identity}))
     assert fired.status_code == 429
     assert fired.headers["Retry-After"] == "120"
+
+
+async def test_a_rate_limited_handshake_reaches_the_session_as_a_rate_limit(
+    driver: _Driver,
+) -> None:
+    """The limiter sits behind the identity gate and **in front of
+    authentication**, and this is the half of that claim nothing else pins.
+
+    The case above pins the first half -- a limiter moved *above* the identity
+    gate dies there. The second half was prose until this one existed: moving
+    the limiter block *below* the `AuthenticateByName` route arm, which is the
+    precise negation of what `rate_limit`'s docstring claims, left the whole
+    suite at **5,342 passed / 26 skipped**, because every other arming in this
+    repository is on `/System/Info/Public` or an item path and **nothing had
+    ever armed the authenticating call**.
+
+    It is also the first exercise `EmbySession._authenticate_locked`'s own 429
+    arm has ever had, and that arm is reachable no other way: the 429 check in
+    `EmbySession.request` sits after its 401 arm, on a call that by then
+    already holds a token. So a limit armed here is the only route to it, and
+    the item read never leaving the process is what says the *handshake* was
+    what got limited rather than the read behind it.
+    """
+    driver.server.add_item(MOVIE, T0)
+    driver.server.rate_limit("/Users/AuthenticateByName", retry_after="120")
+
+    with pytest.raises(PortRateLimited) as caught:
+        await driver.payload("movie-1")
+
+    assert caught.value.retry_after == 120.0
+    assert "POST /Users/AuthenticateByName" in driver.server.requests
+    assert f"GET /Users/{USER_ID}/Items/movie-1" not in driver.server.requests, (
+        "the read went out, so the 429 the session translated was not the handshake's"
+    )
 
 
 async def test_an_unrouted_path_is_a_404_not_a_cheerful_200(driver: _Driver) -> None:

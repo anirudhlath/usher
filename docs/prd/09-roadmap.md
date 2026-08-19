@@ -1003,8 +1003,21 @@ suspicion.
   The candidate is unchanged: declare staging columns wide (`bigint`, `text`) so
   the refusal moves to the `INSERT … SELECT`.
 - **`PortRateLimited.retry_after` reaches no consumer** — an M4 gap found by M8.
-  Seven raise sites across five modules produce it; `git grep retry_after src/`
-  finds **zero** consumers. `JobWorker._fail` passes only `retryable=True`, and
+  **Six sites across four adapter modules** construct it — `adapters/bulk/
+  wikidata.py`, `adapters/bulk/download.py`, `adapters/emby/session.py` (three)
+  and `adapters/http.py` — and `git grep retry_after src/`
+  finds **zero** consumers.
+  ⚠️ *This bullet read "seven raise sites across five modules" until 2026-08-19,
+  and both halves were wrong. Re-measured by an `ast` walk for
+  `PortRateLimited(...)` calls under `src/`: **six across four**, of which
+  **five are `raise` and one is a `return`** — `adapters/http.py`'s
+  `port_error_for` hands the error back for its caller to raise, so "six raise
+  sites" is a shade off in the other direction. M9's D9 plan had already
+  measured the same six ("an earlier draft said 'seven sites across five
+  modules'; measured, it is six across four") and this bullet kept the draft;
+  `db/repositories/jobs.py`'s module docstring, PRD 08 and
+  `.claude/rules/emby-push-and-ingest.md` all state the corrected census.*
+  `JobWorker._fail` passes only `retryable=True`, and
   the backoff is computed from attempt count alone, so a 429 telling us exactly
   when to return is answered with a jittered guess and the hint survives only as
   prose in `jobs.last_error`. Affects every job kind. **M9-sized** — it needs a
@@ -1104,6 +1117,28 @@ suspicion.
   began after the request's ended"*, observed through a session log rather than
   forced. Not to deselect it in CI: a case deselected in CI is a feature nobody
   checks.
+- ⚠️ **A second intermittent integration group is *reported* and did not
+  reproduce, and this list is where the report belongs rather than a rate.**
+  Raised 2026-08-19 reviewing M10's S4:
+  `tests/integration/test_adapters_search_postgres.py` run alone gave **1 / 0 /
+  3 failures over three consecutive runs** on a copy verified byte-identical to
+  `139a37c`, always the same three RRF-fusion cases
+  (`test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found`,
+  `test_a_row_only_one_lane_found_is_still_returned`,
+  `test_a_title_deep_in_both_lanes_still_reaches_the_first_page`).
+  **Re-measured the same day: ten consecutive solo runs, `38 passed / 1
+  skipped` every time, zero failures** — and neither obvious explanation
+  survives, because S4 changed no file under `src/` (so the search path is
+  byte-identical in both measurements) and the ten runs were taken at a load
+  average of **9.59 on 16 cores** rather than on an idle box. Four failures in
+  three runs and zero in ten do not average into a rate: they are two
+  environments or one very low rate, and nothing here can tell them apart. It
+  is recorded because **Phase 1's S11 runs a phase-wide mutation sweep scored
+  on "did the run fail"**, which an intermittent case makes unsound in exactly
+  the way the entry above describes — a plant whose only kill is one of these
+  three would be a false kill. `.claude/rules/mutation-sweeps.md` carries the
+  full measurement and the reason the affected sweep control's verdict stands
+  either way. Chasing the mechanism is nobody's task yet, deliberately.
 - ✅ **`test_sse_end_to_end.py::test_opening_a_stub_promotes_it…` was flaky and
   is closed — do not inherit the deselection.** `.claude/rules/mutation-sweeps.md`
   names it **four** times: one attribution note and **two deselections**, then

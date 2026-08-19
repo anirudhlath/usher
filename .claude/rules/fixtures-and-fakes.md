@@ -135,6 +135,39 @@ pins the `csv.reader` trap if the invented title **opens and closes** with
 so a title with *interior* quotes survives both parsers and tests nothing.
 Verified both ways before committing.
 
+**A third provenance category, which the two-word rule cannot express: a
+response with no observation behind it at all.** Added 2026-08-19 by M10's S4.
+*Shape-recorded and value-synthetic* presumes a recording exists to take the
+shape from. `FakeEmbyServer.rate_limit` arms a **429**, and no run this project
+has ever made has seen one from any upstream — M9's H4/H5 in 23 live Emby
+requests, M9's T2 in 393 live TMDb requests, M9's S3 in 130,334 with no
+`Retry-After` on any of its 193 non-200s. So there is no observed status body,
+no observed header and no observed position relative to authentication to
+transcribe, and each of those three is a **choice the fake makes**. The
+requirement that follows is not about content but about legibility: the
+licensing rule above governs what a fixture may *contain*, and this governs
+what a reader may *conclude*. A fake that invents a shape silently is
+indistinguishable from one that recorded it, which is precisely the distinction
+this file's split exists to keep visible — so such a response says so in its own
+docstring rather than reading like the transcriptions around it.
+
+**And two obligations it does not discharge by admitting to itself.** First,
+**an invented choice still has to be pinned**, or the docstring is the only
+thing holding it. `rate_limit`'s placement is two claims — behind the identity
+gate, *and* in front of authentication — and only the first was pinned when it
+shipped: moving the limiter below the `AuthenticateByName` route arm, the exact
+negation of the second, left the whole suite green at 5,342 passed, because
+nothing anywhere armed the authenticating call.
+`test_a_rate_limited_handshake_reaches_the_session_as_a_rate_limit` closes it.
+**Ask of a fake's stated design choice which half of it a case can see** — the
+half that is easy to arm is the half that gets a case. Second, a closing note
+resting on such a fake has to say which of *"the mechanism is verified"* and
+*"the upstream behaviour is verified"* the reader is getting, because a stub
+buys only the first. That second half generalises past fakes and is recorded in
+`.claude/rules/ports-and-error-taxonomy.md`, whose trigger is
+`src/usher/adapters/**` — not a path a fake's author opens — which is why it is
+cross-referenced from here rather than restated, so the two cannot drift.
+
 **`tests/unit/test_no_third_party_data.py` is the control, because a
 convention nothing checks is not one.** Three checks over `src/` and
 `tests/` — every IMDb id in a reserved `tt99`/`nm99` band; every id inside
