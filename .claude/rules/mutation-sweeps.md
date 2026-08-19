@@ -6266,3 +6266,176 @@ phase-wide sweep scored on "did the run fail", and that scoring is unsound
 against any of these five: carry all five deselections, name them, and treat a
 plant whose only kill is one of them as a false kill until re-run.** Do not
 chase the root cause from here; two single observations are not a rate.
+
+## M10 Task S6 — the gap-closing delta's ceiling, and a harness that overwrote its own backup (2026-08-19)
+
+**9 plants over `src/usher/services/reconcile.py`, `src/usher/api/lanes.py` and
+`src/usher/services/watch_sync.py` — 7 behavioural targets, all KILLED; 2
+equivalent-mutant controls, both SURVIVED all five gate steps; 0 unintended
+survivors, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0
+DID-NOT-RUN, 0 HUNG.** Every verdict matched its pre-registration — **including
+the pre-registration's own prediction that the *plan's* prediction would be
+refuted**, which is the round's headline and is written up below.
+
+Harness at `/var/tmp/m10-s6/sweep.py`, **outside the working tree** for V1's
+reason and under `/var/tmp` rather than `/tmp`, which is tmpfs on this host.
+Plant list and expected verdicts at `/var/tmp/m10-s6/PLANTS.md`,
+`sha256 2744eb6e69e72ce96a46834ecbb1fbdf2bfd189ee4766dafc956d1b61317f5a7`,
+mtime 13:15:41 — before the round opened at 13:18:58.
+
+⚠️ **The sidecar `PLANTS.md.sha256` in that directory is stale and does not
+match, and it is left in place rather than quietly refreshed.** It records
+`1deddb6c…`, written 07:31 against an *earlier* draft of the plant list; the
+file was rewritten at 13:15:41 and is `2744eb6e…`. Both facts are recorded
+because S3's ledger above recorded a token that was never any digest of its
+file, and the lesson there was that a reader cannot tell *stale* from
+*fabricated* without a second measurement. Here the mtimes separate them: the
+sidecar predates the file it names. **A digest sidecar that is not rewritten
+with the file it names is a stale token, and a stale token is indistinguishable
+from a fabricated one at read time — re-hash at write time, and if the two
+disagree, say which one the round actually ran under.**
+
+Tree committed at `434a05d` first, so `git status` is the verification: clean
+before the round, **non-empty while each plant was live** (asserted by the
+harness), and clean after every restore. All three planted files
+`diff`- and `sha256`-verified byte-identical to `git show "434a05d:<path>"`
+afterwards — the ref quoted, per the S5 finding that in zsh `git show
+$rev:path` applies a history modifier and prints the commit.
+`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under **both** `src/` and
+`tests/` before every run, `compile()` as the dry run scoped to `.py`, an exact
+anchor count (`count(old) == 1`) per hunk, the landing check spelled **byte
+equality with the intended mutant**, `cp` backups and never `git checkout --`.
+
+**Selection: the whole suite minus six node ids, named rather than silent** —
+the five intermittent cases the S5 entry above lists, plus the sixth from the
+same `test_adapters_search_postgres.py` family. A verdict scored on *"did the
+run fail"* is unsound in both directions against a flaky case. Baseline green
+on that selection first: **5,348 passed / 26 skipped / 6 deselected in
+191.61 s**.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the ceiling recorded `COMPLETED` instead of `FAILED` | KILLED | **7** |
+| P2 the ceiling compared `>=` instead of `>` (off by one batch) | KILLED | 6 |
+| P3 the ceiling applied to the **watch** lane as well as the item lane | KILLED | 3 |
+| P4 the disabled-ceiling guard removed (`if max_items and pulled > max_items:` → `if pulled > max_items:`) | KILLED | **43** |
+| P5 the operator WARNING downgraded to DEBUG | KILLED | **1** |
+| P6 the `error` string collapsed away from `CEILING_ERROR_CODE` | KILLED | 3 |
+| P7 the ceiling read from the wrong setting (`push_max_items_per_event`) | KILLED | 3 |
+| C1 **control** — the two `span.set_attribute` calls in `reconcile` swapped | SURVIVED all five | — |
+| C2 **control** — `delta_cursor`'s comprehension rewritten as its explicit loop | SURVIVED all five | — |
+
+🔴 **The plan's own prediction about P1 is refuted, and this is the measurement
+S6's acceptance asked for.** That acceptance says the `COMPLETED` mutation
+*"fails **only** the third arm above — which is the measurement that says that
+arm is carrying the task"*. It fails **7 cases**. The integration case's arm 2
+(`truncated.status is SyncRunStatus.FAILED`) fires *before* arm 3 ever runs, and
+five unit cases in `test_services_reconcile.py` assert the FAILED/no-cursor-advance
+behaviour independently. So the second-delta re-request arm is **not** the only
+thing that can tell the two implementations apart, and the sentence claiming it
+is has been corrected rather than repeated. What survives of the plan's argument
+is the part that matters: arm 3 is the only assertion that pins *why* `FAILED`
+is required (the cursor must not advance), and it remains the one a reader
+should not delete. **The general form, and this file now holds it three times
+over: a claim that one assertion is load-bearing is a claim about every *other*
+assertion too, and it is only true if nothing else happens to fire first —
+which is a measurement, not a reading.**
+
+**P4's blast radius is a property of the selection and the pre-registration's
+estimate was taken against the wrong one.** The plant list predicted *"~23 unit
+cases"*, from an out-of-sweep measurement over `tests/unit` alone; whole-suite
+it is **43**, the extra twenty being `tests/integration/test_ingest_end_to_end.py`,
+`test_services_reconcile.py`, `test_admin_sources.py` and `test_pipeline_spans.py`
+— every integration case that walks a source at all, because with the
+`max_items and` guard gone the default `max_items=0` truncates every unbounded
+walk at its first item (`pulled=1 > 0`). **This is the plant the interrupted
+round left live in the tree**, and it is worth knowing that it reads as
+perfectly ordinary code: a bare `>` comparison against a ceiling, with the
+disabling sentinel silently dropped.
+
+**P7 is over-determined and the second cover was not predicted.** Reading
+`push_max_items_per_event` instead of `push_gap_max_items` fails the two
+`test_api_lanes.py` cases the plant list named **and**
+`tests/unit/test_config.py::test_every_setting_is_read_by_something` — because
+the swap leaves `push_gap_max_items` read by nothing in `src/`. So the
+settings-readership guard catches a *wrong-setting* defect from a direction
+nobody aimed it: it exists to stop a knob being added and never wired, and it
+also stops a wired knob being silently unwired. Recorded because a reader
+pruning that guard as bookkeeping would take this cover with it.
+
+**P5 is the narrowest kill in the round and that is the result rather than a
+disappointment.** The operator's WARNING is held by exactly **one** case in
+5,348, `test_a_walk_stopped_at_the_gap_ceiling_tells_the_operator_what_to_run`,
+whose sink is filtered at `WARNING` so a downgrade to DEBUG captures nothing.
+One case is the whole cover for the only line an operator ever sees when this
+ceiling fires — which is worth knowing before anyone rewrites that case's sink.
+
+**The controls, measured against every gate step separately**, because "the gate
+holds it" and "the suite holds it" are different claims — and the harness is
+outside the tree, so the four whole-repository steps are not measuring the
+harness itself:
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 the two `span.set_attribute` calls swapped | PASS | PASS (607 files) | PASS (588 files) | PASS (10/0) | PASS (5,348 / 26 skipped) |
+| C2 `delta_cursor`'s comprehension as its explicit loop | PASS | PASS (607 files) | PASS (588 files) | PASS (10/0) | PASS (5,348 / 26 skipped) |
+
+C1 is the control S6's acceptance names, and its equivalence is a fact about the
+*code* rather than about what the tools look at: an OTel span's attributes are a
+map, and both right-hand sides (`source.name`, `kind.value`) are side-effect-free
+reads, so nothing below the span can observe the order. **C2 is the
+behaviour-adjacent control S5's round three argued for in preference to a
+docstring reword**: the comprehension and its desugaring issue the same awaits in
+the same order and bind the same list, and — unlike a docstring — every plant in
+this round proves the suite *reaches* that code, so C2's survival says the suite
+runs the line and genuinely cannot tell the two spellings apart. Neither control
+is an `__all__` reorder (`RUF022` rejects those) nor a reorder of a positional
+call (A5's reason for checking rather than assuming).
+
+### 🔴 The harness overwrote its own backup on a multi-hunk plant, and left the plant in the tree
+
+**Round one died at P3 with `AssertionError: P3 restore failed: NO-BACKUP
+src/usher/services/watch_sync.py`, forty minutes before anybody looked.** P3 is
+a five-edit plant, **four of whose hunks are in one file**. Both halves of the
+backup machinery were wrong for that shape, in opposite directions:
+
+- `apply_edits` took its `cp` backup **per hunk** — `bak = BACKUPS /
+  f"{Path(rel).name}.bak"; shutil.copyfile(dst, bak)` — so hunk 2 copied the
+  *already-mutated* file over the pristine copy. After hunk 2 the backup was no
+  longer a backup of anything.
+- `restore_edits` iterated **per hunk** and did `_LIVE.pop(rel)` after the first
+  one, so the second hunk naming the same file found no entry and returned
+  `NO-BACKUP`, aborting the restore **half-done** — with the plant still live.
+
+So the file was restored from a corrupted backup and then the round asserted
+out, and the tree sat carrying a watch-lane ceiling that reads exactly like an
+intended feature. Recovered by writing the committed blobs back and verifying
+byte-identical against `git show "434a05d:<path>"` — never `git checkout`, per
+`CLAUDE.md`. Fixed by taking **one pristine backup per file, before that file's
+first hunk**, and restoring **once per file**; re-run under the fix, P3
+reproduced its round-one verdict exactly (**3 failed / 5,345 passed**, same three
+cases), which is what says the original measurement was sound and only the
+restore was broken.
+
+**This is a new spelling of a family this file already holds, and none of the
+existing entries covers it.** The recorded members are *a sweep killed by a
+signal* (M6, M9's A6, S4's round one) — an **external** interruption skipping a
+`finally`. This one is **internal**: no signal, no crash in the code under test,
+a harness that destroyed its own recovery material as a *deliberate* step and
+then correctly noticed it could not recover. The `cp`-backup rule is stated in
+this file as though taking a backup were atomic with planting; on a multi-hunk
+plant it is not, and **the rule has to be "one backup per file, taken before the
+file is first touched", not "a backup per edit"**. The tell, for anyone reading
+a dead sweep: a `NO-BACKUP` or `RESTORE-MISMATCH` naming a file that plainly has
+a `.bak` beside it means the backup was overwritten, not missing — and the tree
+is mutated whatever the log's last verdict says. **Check `git status` after every
+interrupted round, and diff against the commit rather than against the backup.**
+
+Gate green before and after on the fully restored tree (`git status --porcelain`
+empty, all three planted files `diff`- and `sha256`-verified against
+`git show "434a05d:<path>"`): `ruff check` **All checks passed!**, `ruff format
+--check` **607 files already formatted**, `mypy src tests` **588 source files**,
+`lint-imports` **10 kept, 0 broken**, and `pytest` **5,354 passed / 26 skipped**
+— the gate run carries **no** deselections, and 5,354 is exactly the sweep
+selection's 5,348 plus the six node ids it deselected, which is the arithmetic
+that says the deselection cost the round nothing but the flake.
