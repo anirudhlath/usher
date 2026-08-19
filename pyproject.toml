@@ -169,7 +169,18 @@ plugins = ["pydantic.mypy"]
 # is not installed in the environment mypy runs in -- the annotation on
 # `FastEmbedEmbedder._model` is `Any` for exactly that reason, stated
 # there rather than implied here.
-module = ["uuid6", "testcontainers.*", "yaml", "fastembed"]
+#
+# `ranx` is here for exactly `fastembed`'s reason and the entry is load-bearing
+# in *both* environments, which is why a per-line ignore cannot do this job:
+# measured 2026-08-18 against a CI-identical venv (`UV_PROJECT_ENVIRONMENT=...
+# uv sync --frozen`, no `--extra eval`), the two states raise two different
+# error codes over the same line -- `import-untyped` when the extra is synced
+# and the package is installed without `py.typed`, `import-not-found` when it
+# is not. A `# type: ignore[import-untyped]` is therefore green locally and
+# **red in CI on two counts**, the unmatched code plus `unused-ignore` under
+# `strict`. Nothing outside `usher/eval/metrics/ir.py` may import `ranx` -- the
+# eleventh contract below is what makes that true rather than conventional.
+module = ["uuid6", "testcontainers.*", "yaml", "fastembed", "ranx"]
 ignore_missing_imports = true
 
 [tool.importlinter]
