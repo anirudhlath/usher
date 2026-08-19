@@ -171,20 +171,46 @@ plugins = ["pydantic.mypy"]
 # there rather than implied here.
 #
 # `ranx` is here for exactly `fastembed`'s reason and the entry is load-bearing
-# in *both* environments, which is why a per-line ignore cannot do this job:
-# measured 2026-08-18 against a CI-identical venv (`UV_PROJECT_ENVIRONMENT=...
-# uv sync --frozen`, no `--extra eval`), the two states raise two different
-# error codes over the same line -- `import-untyped` when the extra is synced
-# and the package is installed without `py.typed`, `import-not-found` when it
-# is not. A `# type: ignore[import-untyped]` is therefore green locally and
-# **red in CI on two counts**, the unmatched code plus `unused-ignore` under
-# `strict`. Nothing outside `usher/eval/metrics/ir.py` may import `ranx` -- the
-# eleventh contract below is what makes that true rather than conventional.
+# in *both* environments: measured 2026-08-18 against a CI-identical venv
+# (`UV_PROJECT_ENVIRONMENT=... uv sync --frozen`, no `--extra eval`), the two
+# states raise two different error codes over the same line --
+# `import-untyped` when the extra is synced and the package is installed
+# without `py.typed`, `import-not-found` when it is not. So a
+# `# type: ignore[import-untyped]` is green locally and **red in CI on two
+# counts**, the unmatched code plus `unused-ignore` under `strict`, and
+# `# type: ignore[import-not-found]` is red the other way round.
+#
+# **That argument was overstated until 2026-08-19 and the correction is
+# narrower on two axes.** The claim was that *no* ignore comment is green in
+# both; measured, a **bare** `# type: ignore` is clean in both, and ruff would
+# not object either -- `PGH003` is not in `[tool.ruff.lint] select`. What is
+# true is that no **code-scoped** per-line ignore can be green in both, because
+# the code differs between the two environments; and that a bare ignore on
+# `ir.py`'s import alone still leaves `tests/unit/test_eval_metrics_ir.py`'s own
+# `import ranx` red in **both** environments (`import-untyped` installed,
+# `import-not-found` absent), so the blanket form would have to be repeated at
+# every import site and would silently swallow the next, unrelated error on
+# each of those lines. One override entry covers both sites, is checked by
+# neither environment's accident, and is the shipped choice for that reason
+# rather than for the one written here before.
+#
+# Nothing outside `usher/eval/metrics/` may import `ranx` -- **the twelfth
+# contract below** is what makes that true rather than conventional, and the
+# eleventh, which this comment used to name, does not: it forbids importing
+# `usher.eval`, which is a different claim about a different module. Measured,
+# with the correction recorded on the twelfth contract itself.
 module = ["uuid6", "testcontainers.*", "yaml", "fastembed", "ranx"]
 ignore_missing_imports = true
 
 [tool.importlinter]
 root_packages = ["usher"]
+# Without this, `ranx` is not a node in the graph at all and the twelfth
+# contract below cannot be stated -- see its comment for the measurement that
+# forced it, and for what the wider graph costs. It is a top-level setting
+# rather than a per-contract one, so all twelve contracts are checked against
+# the wider graph; import-linter refuses to start without it when any contract
+# names an external module, which is a loud failure rather than a quiet pass.
+include_external_packages = true
 
 # An allowlist, not a denylist: every top-level package's place is defined by
 # where it sits (or that it's named at all), so a new package can't silently
@@ -537,3 +563,103 @@ source_modules = [
     "usher.__main__",
 ]
 forbidden_modules = ["usher.eval"]
+
+# **The twelfth contract, which turns `metrics/__init__.py`'s sentence into a
+# check.** That docstring says `ir.py` is the only module in this project that
+# imports `ranx`, and the mypy override above claimed the *eleventh* contract
+# was what made that true rather than conventional. It was not, and the
+# correction is measured rather than argued (2026-08-19): `ranx` was not a node
+# in the graph at all -- `root_packages = ["usher"]` with no
+# `include_external_packages`, so `'ranx' in graph.modules` is `False` -- and
+# the eleventh contract's `forbidden_modules` is `["usher.eval"]`, a statement
+# about who may reach the *harness*, not about who may reach the *library*.
+# A **used**, ruff-clean `import ranx` planted in its isort position with a
+# `_PLANT = ranx.__name__` beside it, in **both** `usher/adapters/http.py` and
+# `usher/eval/errors.py` at once, reported **11 kept, 0 broken**; the positive
+# control on the same out-of-tree copy (`from usher.eval import errors` in
+# `usher/__main__.py`) reported **10 kept, 1 broken**, which is what proves the
+# probe was reading that copy rather than something else.
+#
+# The confinement is not housekeeping. It is the whole mitigation for the risk
+# `metrics/__init__.py` records: `numba`/`llvmlite` pin an LLVM ABI and have
+# historically lagged new CPython, so a 3.14 move could block the `eval` extra,
+# and the escape -- swapping to `ir_measures`, 4 packages and no numba -- is
+# only "one file" for as long as it is genuinely one file. An unenforced
+# boundary is one import away from not existing.
+#
+# **What `include_external_packages` costs**, measured on this host rather than
+# guessed, because a wider graph is a real trade and belongs in the open. The
+# graph goes from *228 files, 906 dependencies* to *279 files, 1,741
+# dependencies*. Ten interleaved A/B pairs of `uv run lint-imports`, medians:
+# **206 ms -> 219 ms** warm, **250 ms -> 269 ms** with `.import_linter_cache`
+# removed before each run. That is +13 ms and +19 ms, i.e. not material, and it
+# is stated here so nobody re-derives it.
+#
+# **`allow_indirect_imports` is load-bearing and is not a loosening**, the same
+# call the sixth, seventh and eighth contracts make and for the same reason.
+# The claim being enforced is *nothing outside `usher.eval.metrics` may **name**
+# `ranx`*; reaching `score()` through the module that does name it is the design,
+# not a violation. Measured with the future state planted -- a ruff-clean
+# `from usher.eval.metrics import ir` in `usher/cli.py`, which is what the
+# `usher eval` subcommand will be: **without** the flag this contract is BROKEN
+# on `usher.cli -> usher.eval.metrics.ir -> ranx`, the reverse of what it is
+# for; **with** it, KEPT, while a direct `import ranx` anywhere in the source
+# list is still BROKEN. Nothing else can reach `ranx` indirectly either, because
+# the only usher module that imports it is inside `usher.eval.metrics` and the
+# eleventh contract governs who may reach `usher.eval` at all.
+#
+# **The exemption is the package `usher.eval.metrics`, not the module `ir`**,
+# and that is a limit of the contract type rather than a choice: a `forbidden`
+# contract's `source_modules` cover a module *and all its descendants*, so
+# `usher.eval.metrics` cannot be a source with `ir` carved out of it. A second
+# `metrics` module importing `ranx` would therefore be KEPT here. That last
+# inch is held by a scan --
+# `test_eval_contract.py::test_only_the_ir_module_inside_the_metrics_package_names_ranx`
+# -- for the reason M8 Task 17 recorded: a graph property covers every module
+# rather than the one a scan is pointed at, and a scan sees what a list has
+# forgotten, so neither check subsumes the other and both are kept.
+#
+# **The list is the contract**, exactly as the eleventh and tenth say of their
+# own, so `test_eval_contract.py::test_the_ranx_contract_names_every_module_that_
+# may_not_import_it` derives it from two `pkgutil` walks -- top level minus
+# `usher.eval`, plus `usher.eval`'s children minus `metrics` -- and carries a
+# premise guard, because a walk that globs nothing passes exactly like a walk
+# that passes. `usher.cli` is a source here and is *not* exempt as it is in the
+# eleventh: it is the eval harness's composition root, which is a reason to let
+# it import `usher.eval`, and no reason at all to let it import `ranx`.
+#
+# Two more measurements a future reader will want and should not have to take.
+# **The contract does not need the extra installed**: grimp reads the name out
+# of the source, so a venv synced without `--extra eval` (where `import ranx`
+# fails at runtime) still reports 12 kept, 0 broken. And **it goes vacuous
+# rather than loud** the day the swap happens: with `ir.py` no longer importing
+# `ranx`, `ranx` leaves the graph and this contract reports KEPT with nothing
+# to check, so whoever moves to `ir_measures` has to re-point it here rather
+# than being told to by a red gate.
+#
+# Verified in both directions with the careful spelling, out of tree, restored
+# from `cp` backups and read back -- never `git checkout <path>`. Both plants
+# together: **11 kept, 1 broken**, naming
+# `usher.adapters.http -> ranx (l.29)` and `usher.eval.errors -> ranx (l.8)`.
+# Restored: **12 kept, 0 broken**.
+[[tool.importlinter.contracts]]
+name = "only the IR metrics package imports ranx"
+type = "forbidden"
+source_modules = [
+    "usher.domain",
+    "usher.ports",
+    "usher.services",
+    "usher.adapters",
+    "usher.db",
+    "usher.api",
+    "usher.config",
+    "usher.composition",
+    "usher.telemetry",
+    "usher.cli",
+    "usher.__main__",
+    "usher.eval.errors",
+    "usher.eval.goldens",
+    "usher.eval.surfaces",
+]
+forbidden_modules = ["ranx"]
+allow_indirect_imports = true

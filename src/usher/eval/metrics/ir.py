@@ -89,12 +89,32 @@ def score(
 
     qrels = Qrels.from_dict({query: {document: 1} for query, document in relevant.items()})
     # The descending score is what carries the ranking. Measured 2026-08-18 and
-    # recorded because the code invites the question: a *constant* score scores
-    # identically today, because 0.3.21 breaks ties in insertion order and this
-    # dict is built in rank order -- so no assertion in this repository can hold
-    # the two apart, and the ordering would be riding on a library internal
-    # rather than on anything stated. An *ascending* score, which is the defect
-    # an author actually writes, moves MRR to 0.233 and is pinned.
+    # recorded because the code invites the question: **on duplicate-free input**
+    # a *constant* score scores identically, because 0.3.21 breaks ties in
+    # insertion order and this dict is built in rank order -- confirmed over 400
+    # randomised trials across nine metrics with zero differing cases. So on the
+    # input this harness is built for, the ordering would be riding on a library
+    # internal rather than on anything stated. An *ascending* score, which is the
+    # defect an author actually writes, moves MRR to 0.233 and is pinned.
+    #
+    # **"No assertion in this repository can hold the two apart" was too strong,
+    # corrected 2026-08-19 by measurement.** A **duplicate id inside one
+    # ranking's `ranked_ids`** separates them, because in this comprehension the
+    # last write wins: `("t1", "a", "t1")` builds `{"t1": 1.0, "a": 2.0}`, so a
+    # repeated document is scored by its **worst** position and demoted below
+    # everything that outranked the later occurrence -- MRR 0.5 here against a
+    # constant score's 1.0, and 1.0 against 0.5 for the mirror
+    # `("a", "t1", "a")`, with `("t1", "a", "b")` identical as the control.
+    #
+    # That demotion is this function's behaviour and not a curiosity: with six
+    # other documents in the list, one repeat of the *right* answer takes
+    # `recall@5` -- the gate's own hit rate -- from **1.0 to 0.0**. It is
+    # described and pinned by
+    # `test_a_document_id_repeated_inside_one_ranking_is_scored_by_its_worst_position`,
+    # deliberately as a description rather than a design. Note the asymmetry the
+    # guards above make: duplicate *query* ids across rankings are refused, and
+    # duplicate *document* ids within one ranking are not. Whether `Ranking`
+    # should refuse them at construction is open and is not decided here.
     run = Run.from_dict(
         {
             query: (

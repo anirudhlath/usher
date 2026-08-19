@@ -122,6 +122,58 @@ def test_two_rankings_for_one_query_are_refused_rather_than_overwriting() -> Non
         score(_RELEVANT, (*_RANKINGS, Ranking("q1", ())), ["recall@5"])
 
 
+def test_a_document_id_repeated_inside_one_ranking_is_scored_by_its_worst_position() -> None:
+    """The unguarded neighbour of the case above, pinned as a **description**
+    rather than as a design.
+
+    The guard above refuses duplicate *query* ids across rankings. Duplicate
+    *document* ids inside one ranking's `ranked_ids` are not refused, and they
+    are not inert: `score` builds its run as a descending-score dict
+    comprehension, so a repeated id's **last** write wins and the document is
+    scored by its **worst** position. `("t1", "a", "t1")` becomes
+    `{"t1": 1.0, "a": 2.0}` -- the document listed first is ranked second.
+
+    Measured 2026-08-19, which also refuted this module's own claim that no
+    assertion here could tell a descending score from a constant one: a
+    constant score answers **1.0** to the first arm's 0.5 and **0.5** to the
+    second's 1.0, because a constant score cannot be overwritten into a
+    different order. On duplicate-free input the two really are
+    indistinguishable, over 400 randomised trials across nine metrics.
+
+    **Every arm carries its own duplicate-free control**, and they are the
+    point rather than padding: without them each assertion is satisfied by a
+    `score` that mishandles the *length* of the ranking, or the metric, or the
+    single-query shape. The pairs differ in exactly one position.
+
+    The third pair is the damage rather than the mechanism. Six other documents
+    and one repeat of the right answer at the end puts the relevant title at
+    rank 7 of 7, and `recall@5` -- the gate's own hit rate, the number E1 exists
+    to compare against 2026-08-03's -- reads **0.0** for a ranking that opened
+    with the correct answer.
+
+    Note the second pair: the repeat *raises* the score, because what gets
+    demoted is an irrelevant document. So this is not "duplicates lower the
+    number"; it is "a repeat is scored by its worst position", and only a pair
+    that moves the number in both directions says so.
+    """
+    one = {"q1": "t1"}
+
+    def mrr(ranked: tuple[str, ...]) -> float:
+        return score(one, (Ranking("q1", ranked),), ["mrr"])["mrr"]
+
+    def recall(ranked: tuple[str, ...]) -> float:
+        return score(one, (Ranking("q1", ranked),), ["recall@5"])["recall@5"]
+
+    assert mrr(("t1", "a", "b")) == 1.0
+    assert mrr(("t1", "a", "t1")) == 0.5
+
+    assert mrr(("a", "t1", "b")) == 0.5
+    assert mrr(("a", "t1", "a")) == 1.0
+
+    assert recall(("t1", "a", "b", "c", "d", "e", "f")) == 1.0
+    assert recall(("t1", "a", "b", "c", "d", "e", "t1")) == 0.0
+
+
 def test_the_one_metric_branch_is_keyed_by_what_was_asked_for_and_casts_it() -> None:
     """Two claims about behaviour 2's branch that the recall@5 case cannot
     make, both measured 2026-08-18 as survivors of it.
