@@ -350,6 +350,19 @@ def adapter_factory(settings: Settings, gates: SourceGateRegistry) -> SourceAdap
     fresh gate per pipeline and the multiplication ADR-0039 §4 records would
     come straight back. There is no spelling of this call that silently
     re-introduces it.
+
+    **It is *this* call that is enforced and not the chain below it, which is
+    worth stating because the flattering reading is available.**
+    `ConfiguredSourceAdapterFactory(gates=None)`, `EmbySession(limiter=None)`
+    and `EmbyAdapter(limiter=None)` are all defaulted, deliberately: each means
+    "nobody configured this" and gets a private registry at the unlimited rate,
+    which is what lets a test build one directly (ADR-0039's Consequences say
+    so). The cost of tightening the first of the three is small and measured --
+    **2 edits**, `tests/unit/test_adapters_factory.py`'s two bare
+    constructions, out of four sites there of which two already pass `gates=` --
+    and it is still declined, because a required argument at that layer buys
+    nothing this layer does not already hold: every path that reaches an adapter
+    in a running process comes through here.
     """
     return ConfiguredSourceAdapterFactory(
         page_size=settings.source_page_size,

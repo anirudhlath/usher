@@ -5360,3 +5360,155 @@ outright and reproduces the `5 send(s) reached Emby without passing the gate`
 string the first ledger attributed to T6, with `assert 0 == 5`. That is how the
 misquote was pinned to a specific other mutation rather than merely called
 wrong.
+
+## M10 Task S3 — the code-quality round, and the verb list that was hiding a live call site (2026-08-19)
+
+**8 plants over `src/usher/cli.py`, `adapters/bulk/wikidata.py`,
+`docs/prd/01-architecture.md`, a new `adapters/jellyfin/adapter.py` and
+`tests/unit/test_outbound_call_sites.py` — 6 behavioural targets, all KILLED;
+2 equivalent-mutant controls, both SURVIVED all five gate steps.
+0 BAD-ANCHOR, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG; 1 BROKEN-MUTATION
+that was the harness's fault and is written up below.** Every verdict matched
+its pre-registration.
+
+Harness at `/var/tmp/m10-s3-quality/sweep.py` (+ `sweep2.py` for the two
+re-runs), **outside the working tree**; plant list at
+`/var/tmp/m10-s3-quality/PLANTS.md`
+(`sha256 11604a689228e3b5aef78dae8c1ff6f61a282a568faf27db87c7c91e07c61058`,
+re-hashed against the file after the round — the check the first S3 round's
+token failed), addendum at `PLANTS-addendum.md`
+(`sha256 36a178848468dcb2b0048123dbd1f11740e0eb26ea6dc0b6d064c36f095dfd1b`,
+written before its two re-runs landed). Tree committed at `942b7a6` first, so
+`git status` is the verification — asserted clean before the round, asserted
+**non-empty** while each plant was live (a plant that did not land looks exactly
+like a check that passed) and asserted clean again after every restore, with
+every restore verified by `sha256` *and* by reading the file back against its
+`cp` backup. `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under **both**
+`src/` and `tests/` before every run, `compile()` as the dry run, an exact
+`count(old) == 1` per anchor, and the landing check spelled byte-equality with
+the intended mutant. Baseline green on the selection first and restored after:
+**324 passed in 4.52 s** / **324 passed in 4.53 s**.
+
+**Selection:** `test_composition.py`, `test_outbound_call_sites.py`,
+`test_adapters_factory.py`, `test_adapters_emby_session.py`,
+`test_adapters_emby_adapter.py`, `test_adapters_http.py`,
+`test_adapters_bulk_download.py`, `test_adapters_bulk_wikidata.py`,
+`test_cli.py`, `test_docs_currency.py`. **The selection is a claim about
+coverage** (the generalisation the S3 review round wrote), so it was diffed
+against the finding list first: every file this round's fixes touch is in it,
+plus `test_cli.py` and `test_docs_currency.py`, which are the two files that
+would have to notice a CLI root or a documentation table moving and neither of
+which does.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 `cli._work`'s `work = unit_of_work(...)` replaced by an `@asynccontextmanager`-wrapped `work()` — a fresh `SourceGateRegistry` per claim and per job | KILLED | **1** — `test_the_cli_roots_compose_once_rather_than_per_scope` |
+| P2 `await self._client.delete("/purge")` added to `bulk/wikidata.py` | KILLED | 22 — of which 3 are the table's |
+| P3 the same call behind a one-line alias, `c = self._client` then `await c.get("/ping")` | KILLED | 22 — the same 3 |
+| P4 the same behind a renamed attribute, `self._http = self._client` then `await self._http.post(...)` | KILLED | 22 — the same 3 |
+| P5 a new `adapters/jellyfin/adapter.py` importing httpx, calling `.put(...)` on `_POOL[self._source_id]` — no client-named receiver anywhere | KILLED | **1** — `test_every_module_that_imports_httpx_is_recorded_or_exempt` |
+| P6 PRD 01's `**Nine modules**` → `**Ten modules**` | KILLED | **1** — `test_prd_01_prints_the_census_this_table_computes` |
+| C1 `_client_spellings`' `while changed:` fixed point reduced to one pass | SURVIVED all five | — |
+| C2 `_imports_httpx`'s `ast.ImportFrom` arm deleted | SURVIVED all five | — |
+
+🔴 **The round's real yield is not a plant: expanding `_OUTBOUND_METHODS` to
+httpx's full eleven verbs found a live, unrecorded outbound call.**
+`bulk/download.py`'s `CachedDatasetFile.revision` has issued
+`self._client.head(self._url, follow_redirects=True)` since M2 — one real `HEAD`
+per dataset per bootstrap — and the scan enumerated six methods, omitting `put`,
+`delete`, `patch`, `head` and `options`. So *"fifteen call sites"* was wrong in
+this file's docstring, in `test_the_module_census_is_the_one_the_records_quote`,
+and in PRD 01, and had been since S3 shipped. It is sixteen.
+**The generalisation: when a scan filters on a member of a closed vocabulary
+somebody else owns — an HTTP verb set, a status class, an enum from a
+dependency — the list is a coverage claim and it needs to be the *whole*
+vocabulary or to say in writing why not.** A shortlist drawn from "what this
+tree uses today" is a scan that cannot see tomorrow's adapter, which is the only
+thing it exists for.
+
+**P2/P3/P4 are one finding in three spellings, and the second and third were
+silent passes before this commit.** P2 is the verb list. P3 and P4 are the
+receiver test reading the text before the dot: `c.get` and `self._http.post`
+contain no `client`, so the walk found nothing and all four cases stayed green —
+and P4's shape was *half-acknowledged in `_call_sites`' own docstring* as
+something that *"would need a row in this docstring rather than a silent pass"*,
+which it then was. `_client_spellings` resolves aliases to a fixed point from
+three seeds anchored on **httpx**, and the anchoring is the measured part: the
+wide version (seed from any expression mentioning a client) makes
+`payload = await self._client.get(...)` a client through its callee, makes
+`self._session = EmbySession(client=...)` one, and — through
+`websockets.asyncio.client.ClientConnection` — turns `emby/push.py`'s socket
+into **four bogus call sites**, in the one module whose entire decline is *"a
+socket held open is not a request"*. Measured on the shipped tree: 20 sites
+under the wide rule, 16 under the anchored one, and the four extra are exactly
+those.
+
+**P5 is the plant the spelling scan structurally cannot catch, which is why the
+complement guard is not redundant with it.** `_POOL[self._source_id].put(...)`
+has no client-named receiver and no alias to resolve — the dict is bound by an
+`AnnAssign` whose value is `{}`. What catches it is the other question: **a
+module cannot make an httpx call without importing httpx.** Twelve modules under
+`adapters/` import it, seven hold a row in `_DECISIONS`, five are exempt with a
+sentence each, and `tmdb/provider.py` sits on the other side of the equality
+(six call sites, no httpx import — its `self._client` is a `TmdbClient`). All
+three sets were re-measured rather than taken from the review.
+
+**P1 is the S3 defect one root over, and it survives for the reason the request
+arm did.** The four-roots case's rows 4 and 5 call `unit_of_work(...)` and
+`build_pipeline(...)` *in the test*, so they assert the wiring the test file
+writes rather than the wiring `cli.py` has — the identical re-derivation the
+spec round found and fixed for row 3, in a case whose own header promises *"a
+**real** composition root, spelled the way its own module spells it"*. The
+repair is a source scan rather than a drive, and the choice is measurable rather
+than aesthetic: lifting the construction into a helper the case could call moves
+the boundary instead of closing it, because the plant then simply goes in
+`_work`'s body one level above the helper. What separates the correct spelling
+from the defect is **structural** — the builder is called in the root's own
+body, not inside a closure that runs per scope — and `_calls_of` splits the
+calls exactly that way.
+
+**A count is deliberately *not* asserted for `usher sync`, and that is the
+review's Minor 6 measured out.** `cli._sync`'s docstring claimed *"a second
+`build_pipeline` here would be a second registry and twice the rate"*. Doubling
+one source's rate takes **two** things — two registries *and* two adapters built
+against them — and `_sync` has one of each, so either alone is sufficient and
+both spellings of the claimed defect are equivalent mutants. The load-bearing
+property is the **adapter** count, and it is asserted as itself
+(`_open_adapter` exactly once) rather than through a proxy that would kill a
+mutant nothing is wrong with.
+
+**The two controls, measured against every gate step separately:**
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| C1 the alias fixed point reduced to one pass | PASS | PASS | PASS | PASS (10/0) | PASS (4,104 / 4 skipped) |
+| C2 `_imports_httpx`'s `ImportFrom` arm deleted | PASS | PASS | PASS | PASS (10/0) | PASS (4,104 / 4 skipped) |
+
+Each rests on a fact about the tree rather than on what the tools look at. C1:
+no module under `adapters/` binds an alias *of* an alias, so one pass reaches
+the same fixed point — the loop is there for the spelling nobody has written
+yet, which is the same reason `SourceKind`'s unreachable `raise` is kept. C2:
+all twelve importers spell it `import httpx` and no `from httpx import ...`
+exists under `adapters/`, so the deleted arm has nothing to match today.
+
+🔴 **Two harness findings, and both are old rules landing in new places.**
+
+- **`compile()` is the right dry run for Python and the wrong one for
+  Markdown.** P6 edits `docs/prd/01-architecture.md`, and the harness ran
+  `compile()` over it and scored **BROKEN-MUTATION** on `invalid character '│'
+  (U+2502)` — a box-drawing character in that document's repo-layout fence. The
+  plant was fine; the dry run was being asked a question about the wrong
+  language. Re-run with the dry run scoped to `.py`, P6 is **KILLED**. This is
+  `mutation-sweeps.md`'s own *"a run that did not run is not a pass"* wearing
+  the other face: a plant that was never scored is not a survivor, and a
+  BROKEN-MUTATION verdict on a **documentation** plant should be read as a
+  harness bug first, because there is nothing in a Markdown file for a Python
+  compiler to be right about.
+- **C1's first spelling was the careless one and it never reached the suite.**
+  `while changed:` → `for _ in range(1):` fails `ruff check`, so the control
+  measured a lint error rather than an equivalence. Re-spelled `if changed:` —
+  lint-clean, and SURVIVED all five. Third instance in this repository of
+  `CLAUDE.md`'s careless/careful rule, and the first where the careless
+  spelling was in a **control** rather than in a behavioural plant: a control
+  that dies on a linter reads as "the equivalence claim was wrong", which is the
+  opposite of what happened.
