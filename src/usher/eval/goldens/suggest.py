@@ -12,15 +12,35 @@ typo classes at a uniformly random position, `random.Random(20260803)`.
 **2,993 rather than 3,000 because seven two-character names admit no
 deletion.**
 
+**And the source's own stated limitation, lifted verbatim rather than
+paraphrased.** The reassuring half of that header -- the frame is verified,
+the five pool sizes reproduce to the row -- travelled into this port on its
+first commit and this half did not, in the one module whose whole thesis is
+comparability with a recorded run. Without it a reader concludes E1's cases
+*are* the gate's cases:
+
+    What is *not* claimed: that the 750 sampled names are the same 750. The
+    gate's draw order was not recorded, only its procedure and its pool
+    sizes, so a different-but-equivalent draw is possible and every number
+    here carries that caveat.
+
 The generator is split in two on purpose. `build_typo_cases` is pure -- pools
 in, cases out -- so it is unit-tested against a hand-built pool with no
 database. `read_pools` and `read_frame` are the catalog reads.
+
+**Owed by whichever task builds the runner: `GATE_CASES` as a runtime guard.**
+`scripts/measure_suggest_tiers.py` prints `typo cases regenerated: N (gate:
+2993)` beside every run and warns when the two disagree, which is how an
+operator learns the catalog moved under them rather than reading a quietly
+smaller number as if it were the gate's. The port carries the constant and
+not the guard, because there is no runner here yet to print it from.
 """
 
 import random
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,21 +58,34 @@ GATE_BANDS: tuple[tuple[str, int, int], ...] = (
     ("20+", 20, 10_000),
 )
 GATE_DRAW_PER_BAND = 150
-GATE_POOLS: Mapping[str, int] = {
-    "2-4": 432,
-    "5-7": 2532,
-    "8-11": 7178,
-    "12-19": 20520,
-    "20+": 17887,
-}
+# `MappingProxyType` rather than a bare dict, because `Mapping[str, int]` is
+# documentation and this is the constant the whole comparability story rests
+# on: `GATE_POOLS["2-4"] = 433` on a plain dict is one line, silent, and
+# process-wide, and it moves the number `check_frame` refuses against.
+GATE_POOLS: Mapping[str, int] = MappingProxyType(
+    {
+        "2-4": 432,
+        "5-7": 2532,
+        "8-11": 7178,
+        "12-19": 20520,
+        "20+": 17887,
+    }
+)
 GATE_SHARED_LOWER_NAMES = 81_054
 GATE_CASES = 2_993
 TYPO_CLASSES: tuple[str, ...] = ("substitution", "deletion", "transposition", "doubled")
 
 # One statement, two readers. `read_pools` selects from it and `read_frame`
-# counts it, so the frame that is checked is provably the frame that is drawn
-# from -- spelled twice they would answer identically today and drift the first
-# time either was edited.
+# counts it, so the two can never disagree about *the predicate* -- spelled
+# twice they would answer identically today and drift the first time either was
+# edited.
+#
+# **What it does not buy is that the checked frame is the drawn frame.** They
+# are two statements and under READ COMMITTED each takes its own snapshot, so a
+# write landing between them makes the count a count of a population the draw
+# never saw. Closing that is the caller's job and costs one repeatable-read
+# transaction spanning both reads; nothing here can do it, because neither
+# function opens the session it is handed.
 _ELIGIBLE = """
     SELECT t.id, t.name FROM titles t
     WHERE t.kind = 'movie' AND t.vote_count >= 500
@@ -88,7 +121,13 @@ class TypoCase:
 
 @dataclass(frozen=True, slots=True)
 class Frame:
-    """The sampling frame, as observed."""
+    """The sampling frame, as observed.
+
+    Frozen, and **not hashable** -- `pools` is a `Mapping`, and a `dict` or a
+    `mappingproxy` in a field makes the generated `__hash__` raise
+    `TypeError`. Stated because this repository has been bitten by "frozen
+    therefore hashable" before; nothing here needs the hash.
+    """
 
     shared_lower_names: int
     pools: Mapping[str, int]
@@ -105,9 +144,12 @@ def mutate(name: str, typo_class: str, chooser: random.Random) -> str | None:
     2,993 -- 29 short, all names holding a doubled letter at the drawn
     position. The gate's arithmetic is `3000 - 7`, and the seven are the
     two-character names that admit no deletion, so its transposition arm
-    declined nothing. Emitting the unmutated name is the other way to reach
+    declined nothing. Emitting the unmutated name is another way to reach
     3,000 and is worse: a guaranteed hit for any index, which would make the
-    2-4 band's measured 0.0% arithmetically impossible.
+    2-4 band's measured 0.0% arithmetically impossible. Rejection sampling --
+    redraw until the two characters differ -- reaches 2,993 too and emits no
+    unmutated name, so this is the *simplest* reading that produces both
+    numbers rather than the only one.
     """
     length = len(name)
     if typo_class == "substitution":
@@ -190,17 +232,38 @@ def check_frame(observed: Frame) -> Frame:
     numbers *are* what a suggest run depends on, so a frame that reproduces
     is a baseline that is comparable -- which is why `fingerprint.py` digests
     them rather than inventing a second notion of catalog drift.
+
+    **The refusal names the number that moved.** An operator meets this in CI
+    as `baseline-invalid`, and the first spelling dumped two five-entry dicts
+    and two scalars beside each other and left them to diff six numbers by
+    eye -- for a check whose entire thesis is *one row out*. Reporting the
+    drift alone also distinguishes an **absent** band, which arrives as a
+    `None` in the observed slot rather than folding into a dict inequality
+    that says only "these are not equal".
     """
     expected = Frame(shared_lower_names=GATE_SHARED_LOWER_NAMES, pools=dict(GATE_POOLS))
-    if observed.shared_lower_names != expected.shared_lower_names or dict(observed.pools) != dict(
-        expected.pools
-    ):
+    observed_pools = dict(observed.pools)
+    checked: tuple[tuple[str, int | None, int | None], ...] = (
+        ("shared_lower_names", expected.shared_lower_names, observed.shared_lower_names),
+        *((band, count, observed_pools.get(band)) for band, count in expected.pools.items()),
+        # A band the gate never had. Unreachable through `read_frame`, which
+        # only ever writes `GATE_BANDS`' keys -- but the equality this replaced
+        # would have caught it, and a rewrite that quietly drops a check is how
+        # a check stops existing.
+        *(
+            (band, None, observed_pools[band])
+            for band in observed_pools
+            if band not in expected.pools
+        ),
+    )
+    drift = {label: (want, got) for label, want, got in checked if want != got}
+    if drift:
         raise EvalRefused(
-            "the sampling frame does not reproduce the gate's -- expected "
-            f"{expected.shared_lower_names} shared lower-cased names and pools "
-            f"{dict(expected.pools)}, observed {observed.shared_lower_names} and "
-            f"{dict(observed.pools)}. Every recall number would be over a different "
-            "population."
+            "the sampling frame does not reproduce the gate's -- "
+            + ", ".join(
+                f"{label}: expected {want}, observed {got}" for label, (want, got) in drift.items()
+            )
+            + ". Every recall number would be over a different population."
         )
     return observed
 
