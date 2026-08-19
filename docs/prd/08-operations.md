@@ -561,12 +561,18 @@ unreachable.
   answering an unreachable database with sixty lines of asyncpg and greenlet
   frames whose only operator-facing content was the last one. `main` has a
   single `try` around the whole dispatch which names the families an operator
-  can act on — `OSError`, `SQLAlchemyError`, `httpx.HTTPError`,
+  can act on — `OSError`, `DBAPIError`, `httpx.HTTPError`,
   `ValidationError`, and since M8 the port taxonomy's transport half
   (`PortUnavailable`, `PortAuthFailed`, `PortRateLimited`) — and answers each
   with one line and exit 1; `usher --traceback <command>` re-raises.
   **`Exception` is deliberately not among them**, so a bug still gets its full
-  traceback, and Ctrl-C exits 130 rather than printing one. Neither is
+  traceback — and **`DBAPIError` reads `SQLAlchemyError` in every version of
+  this document before 2026-08-19**, which was the same mistake one family
+  narrower: `SQLAlchemyError` is also the base of `InvalidRequestError`, so the
+  boundary answered `MissingGreenlet`, `PendingRollbackError` and
+  `ObjectDeletedError` — bugs, all of them — with one line and no stack. It
+  cost the diagnosis of the crash in issue #8 for a week. Ctrl-C exits 130
+  rather than printing one. Neither is
   `UsherPortError` itself: an adapter translates its transport's failures
   before they cross, so `httpx.HTTPError` is unreachable behind a port and the
   three transport members had to be named — but `RepositoryConflict`,

@@ -1020,3 +1020,112 @@ The old `pool_size=10, max_overflow=5` could not hold the worker alone.
 getting slower until it starts parking jobs, which is a configuration mistake
 wearing an upstream's clothes. `Settings` refuses that arithmetic at startup
 instead.
+
+## A caught `RepositoryConflict` leaves an expired row behind, and touching it synchronously is `MissingGreenlet` (2026-08-19, issue #8)
+
+**What was investigated:** issue #8 — one of three `usher work` daemons died
+78 minutes and ~92,000 jobs into M9's S3 crawl on an unhandled
+`MissingGreenlet`, with the crash's last two log records both on the
+`ix_titles_imdb_id` conflict path, 19 ms and 24 ms before death.
+
+### The stack was not missing; it was discarded, and this file's own subsystem is where
+
+**The dead worker's log survived** (`/tmp/m9-exec/S3/w1.log`, pid 2348601,
+last record `2026-08-11 18:26:32.053-05:00` = `23:26:32Z`). Its final two
+lines are:
+
+```
+usher work: MissingGreenlet: greenlet_spawn has not been called; can't call await_only() here. ...
+(the stack is one flag away: `usher --traceback work`)
+```
+
+That is `cli._operator_problem`. **`MissingGreenlet` → `InvalidRequestError`
+→ `SQLAlchemyError`, and `SQLAlchemyError` was a member of
+`cli.OPERATOR_ERRORS`** — so the CLI's error boundary classified a programming
+error as an operator error and replaced the traceback with one line. 🔴 The
+issue's own premise (*"the run used bare `usher work`, so no stack was
+recorded"*) is **refuted**: `--traceback` would have helped, but nothing the
+operator did or failed to do is why there is no stack. Narrowed to
+`DBAPIError`, which is what that member's comment already claimed to admit;
+ADR-0026 carries the argument and PRD 08's own copy of the family list is
+corrected in the same commit.
+
+### The mechanism the conflict path really does create, reproduced
+
+Measured on `pgvector/pgvector:pg17` through the shipped
+`PostgresTitleRepository`:
+
+**A caught `IntegrityError` inside `begin_nested()` leaves the conflicted
+`TitleRow` in the session's identity map, `state.expired is True`, every one
+of its 33 attributes unloaded.** `SessionTransaction._restore_snapshot`
+expires every dirty state in the identity map when a SAVEPOINT rolls back, and
+`expire_on_commit=False` does nothing about it — this is a *rollback*-driven
+expiry, not a commit-driven one. In an async session an expired attribute is a
+**lazy load**, so a synchronous frame reading one — an f-string, a `__repr__`,
+a pydantic validator, a log line, `_to_domain`'s `getattr` loop — raises
+exactly `MissingGreenlet: greenlet_spawn has not been called`. Demonstrated
+accidentally on the first probe: the diagnostic that printed the identity
+map's contents crashed on its own `r.name`.
+
+**The row is reachable only through a reference cycle** (`state.dict` *is*
+`obj.__dict__`, which holds `_sa_instance_state`), so it survives until
+CPython's **cyclic** collector runs — `gc.collect()` empties the map. That is
+the only nondeterminism in the loop, and it is the right shape for a fault
+that fired once in 92,000 jobs while ~30 earlier conflicts on the same process
+did not.
+
+Pinned by `tests/integration/test_title_repository.py::
+test_a_caught_conflict_leaves_an_expired_row_and_every_read_refreshes_it`,
+which asserts the premise (the row is there and expired) before asserting the
+hazard, then asserts the closure. Teeth verified by planting a
+`session.refresh(poisoned)` after the premise guard: the case fails.
+
+### 🔴 Refuted: that mechanism reaching a shipped read
+
+**Every read `PostgresTitleRepository` ships refreshes the expired row inside
+its own `await`** — `get`, `get_by_tmdb_id`, `get_by_imdb_id`, `list_by_ids`,
+`count_by_state` all answer normally against a poisoned session.
+`Session.get()` calls `state._load_expired` from inside `greenlet_spawn`, and
+the ORM loader repopulates an expired instance from a result row. So the
+hazard is **live and currently unreached**, not the crash's proven cause.
+
+Two reproduction runs, both on ONE `AsyncSession` (the pre-W1 shape), the real
+`EnrichService` and the real repositories against real Postgres:
+
+| run | jobs | conflicts | outcome |
+|---|---|---|---|
+| every job conflicts | 399 | 399 | survived; 6–17 expired rows held at a time |
+| 1-in-8 conflicts, successes running the staged `enqueue` COPY | 1,199 | 149 | survived; expired-in-map 0 at every sample |
+
+So **"did not reproduce" is again not "cannot happen"**, and the honest
+statement is the one S3 already made: what a single-session worker was doing
+that needed IO outside a greenlet is still not named. What *is* now named is
+the family, the artefact it leaves in the identity map, and the fact that the
+next occurrence self-reports.
+
+### What the next occurrence records without anyone remembering a flag
+
+- `cli.OPERATOR_ERRORS` no longer swallows it: the process dies with a real
+  traceback on stderr.
+- `JobWorker._run` logs `logger.opt(exception=True).error(...)` naming the
+  job's kind and key **before** re-raising. Property 3 (a bug propagates) is
+  unchanged; what is added is that the log holds the two facts a stack cannot
+  supply once the process is gone. S3 had neither — its last records name a
+  job that failed *cleanly*, and the job that died appears nowhere.
+- This also covers `usher serve`, whose `api/lanes.py::_run_worker` catches
+  `Exception` and logs `str(exc)` with no stack, deliberately (a database
+  outage must slow the lane, not end it). It is left alone: the crash now
+  arrives at that handler already written down with its traceback.
+
+### The refuted shared-session premise, re-checked against today's `main`
+
+**The refutation holds; the premise it rested on does not.** Issue #8 says
+`usher work` *"holds one `AsyncSession` and runs one job at a time, and
+`asyncio.run` creates no tasks"*. Since W1 that is false on all three counts:
+`JobWorker` runs up to `USHER_JOB_CONCURRENCY` (12) jobs at once, `run_once`
+spawns an `asyncio.create_task` per job plus a heartbeat task, and `_pass`
+claims continuously. What still holds is the conclusion — `composition.
+unit_of_work` opens a **fresh session per scope**, and `_claim`, `_heartbeat`
+and each `_run_in_scope` take one each, so no `AsyncSession` is reachable from
+two coroutines. Anyone re-deriving this must check the scope factory, not the
+sentence.

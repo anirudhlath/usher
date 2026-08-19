@@ -1110,3 +1110,21 @@ baseline attempt was discarded**, and the gate is why: it reported two foreign
 suite on this shared box. The load average at the time was 7.04 against 2.04 on
 the run that was kept. That is the census earning its keep on the failure mode
 it was built for.
+
+### ⟲ Correction (2026-08-19, issue #8): the stack was discarded, not un-captured
+
+The entry above says *"the driver did not set `usher --traceback work`, so no
+stack was captured"* and **that reads the cause backwards**. `w1.log` survived
+and its last two lines are `cli._operator_problem`'s: `MissingGreenlet` is an
+`InvalidRequestError` is a `SQLAlchemyError`, which was a member of
+`cli.OPERATOR_ERRORS`, so the CLI's own boundary caught a programming error and
+replaced its traceback with one line. The flag would have re-raised it; not
+passing the flag is not why it is missing. Narrowed to `DBAPIError`, and
+`JobWorker._run` now logs the crashing job's kind and key with its traceback
+before re-raising, so the next occurrence records itself in both deployment
+shapes. The two candidate mechanisms this section names are still not
+distinguished — but one of them now has a measured artefact behind it: a caught
+`RepositoryConflict` leaves a fully **expired** `TitleRow` in the session's
+identity map, alive until the cyclic GC runs, and a synchronous read of it is
+exactly this error. Every shipped read refreshes it, and 1,598 jobs of
+reproduction across two runs did not fire it. `.claude/rules/db-and-sql.md`.
