@@ -137,6 +137,16 @@ _SPELLINGS_OF: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
 )
 
 
+#: Both tables keyed by `casefold()`, built once, so a hand-typed `?genre=`
+#: resolves without the client knowing a source's capitalisation. Keyed on the
+#: fold rather than lower-cased in place because the *values* stay in the
+#: sources' own casing — they are compared against `titles.genres` verbatim.
+_FOLDED: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
+    {label.casefold(): targets for label, targets in GENRE_ALIASES.items()}
+    | {canonical.casefold(): (canonical,) for canonical in CANONICAL_GENRES}
+)
+
+
 def canonical_genres(label: str) -> tuple[str, ...]:
     """The concepts `label` names, in Usher's vocabulary.
 
@@ -145,8 +155,19 @@ def canonical_genres(label: str) -> tuple[str, ...]:
     *column* is open even though the vocabulary is not, and a third source (or
     a TMDb genre minted after this table was written) has to keep filtering
     exactly as it did rather than vanishing from every answer.
+
+    **Case-insensitive on the way in, exact on the way out.** `?genre=` is a
+    URL an operator edits by hand, and the vocabulary exists precisely so a
+    client need not know how a source spells a concept — requiring its
+    capitalisation hands that back: `?genre=sci-fi` returned an empty page
+    with no way to tell "no such genre" from "no titles". The fold applies
+    only to the *lookup*. An unmapped label is returned exactly as it
+    arrived, never folded, because it is about to be compared against the
+    column verbatim and lower-casing it would stop it matching anything at
+    all — that is the invariant this function's second case has always
+    carried, and the one a fold applied a line earlier would quietly break.
     """
-    return GENRE_ALIASES.get(label, (label,))
+    return _FOLDED.get(label.casefold(), (label,))
 
 
 def genre_spellings(label: str) -> tuple[str, ...]:
