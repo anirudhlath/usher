@@ -32,8 +32,34 @@ class FilterNotSupported(UsherPortError):
 
 @dataclass(frozen=True, slots=True)
 class SearchHit:
+    """One candidate, its backend's own score, and whether the query *is* this
+    title's name.
+
+    **`exact_name` is a retrieval fact and not a second score**, which is why
+    it is a `bool` beside `score` rather than a bonus folded into it. A backend
+    cannot add an exact-name bonus to its own score without knowing how large
+    that score can get -- `ts_rank_cd` is unbounded above and grows with the
+    number of matched terms -- so any constant is either too small to decide or
+    large enough to swamp the ranking it was meant to break a tie in.
+    `SearchService._dense_ranks` reads it as the leading key instead, which
+    needs no scale at all (issue #25).
+
+    **Ordering is part of the contract**: an implementation returns every hit
+    carrying this flag *before* every hit that does not. `_dense_ranks` walks
+    the hits in the order the index gave them, so a backend that flagged the
+    right row and returned it fourth would leave it at dense rank 3, where the
+    other five signals are free to bury it again.
+
+    **`False` is the honest default and not merely a convenient one.** It is
+    what a lane with no notion of the typed string answers -- the vector lane
+    matches an embedding, not a name -- and it is what `SuggestIndex`
+    implementations answer, whose hits are already an all-prefix set ordered by
+    popularity and are never re-ranked (`SearchService.suggest`).
+    """
+
     title_id: uuid.UUID
     score: float
+    exact_name: bool = False
 
 
 class SearchMode(StrEnum):

@@ -100,6 +100,39 @@ _WEIGHTS_SQL = "CAST(ARRAY[" + ",".join(str(weight) for weight in _WEIGHTS) + "]
 # is asked about, so the backfill re-claims the row exactly once.
 _UNVERIFIED = "unverified"
 
+# Issue #25's signal: the typed string **is** this title's name.
+#
+# **`lower(t.name)`, which is `prefix.py`'s own spelling and deliberately not a
+# second one.** Tier-1 suggest already computes "the typed text against
+# `lower(titles.name)`" and already answers this query correctly -- `GET
+# /search/suggest?q=The Matrix&tier=prefix` returns the 1999 film first while
+# `GET /search` returned it fifth -- so what is carried over is that tier's
+# rule, at the one strength this lane can defend.
+#
+# **Equality and not tier 1's `LIKE 'prefix%'`, and the argument is the
+# defect's own shape.** The three video essays that outranked *The Matrix* are
+# themselves prefix matches: *"The Matrix for Realists (aka Reviewing The
+# Matrix in Terms of One Cypher)"* starts with the whole query. A prefix key
+# would flag all four rows alike and separate none of them, so it cannot fix
+# this defect -- while it *would* cost something real, promoting every "Matrix
+# Warrior" over "The Matrix" on the query `Matrix`. Nothing measured says a
+# prefix match deserves that, and tier 1 does not say it either: there the
+# whole candidate set is prefix matches, so the key is a filter and the
+# *ordering* is popularity's. Here the set is mixed. Exact equality is the part
+# of the rule that transfers.
+#
+# `btrim` because `websearch_to_tsquery` ignores surrounding whitespace and an
+# equality test does not: without it a trailing space silently turns the signal
+# off, which is invisible from the result set. Only the ends -- interior
+# spacing is part of a name.
+#
+# **No `title_search_names` arm**, though tier 1 unions one. That table holds
+# aliases and 10.9M person rows; an equality join against it in the lexical
+# lane is a second scan on the one statement with a latency figure to keep, and
+# "the query is the exact name of a *person*" is a different claim from this
+# one. It is the obvious next measurement, not an omission with no reason.
+_EXACT_NAME = "lower(t.name) = lower(btrim(:query))"
+
 # `ts_rank_cd` rather than `ts_rank`: cover density rewards terms that occur
 # close together, which is what makes a two-word title beat a title whose
 # overview happens to mention both words a paragraph apart. It reads
@@ -110,16 +143,24 @@ _UNVERIFIED = "unverified"
 # than erroring.
 _FULL_TEXT = f"""
 SELECT t.id,
-       ts_rank_cd({_WEIGHTS_SQL}, t.search_document, q.query) AS score
+       ts_rank_cd({_WEIGHTS_SQL}, t.search_document, q.query) AS score,
+       {_EXACT_NAME} AS exact_name
 FROM titles AS t,
      websearch_to_tsquery('english', :query) AS q(query)
 WHERE t.search_document @@ q.query
   {{predicates}}
+-- **An exact name match leads, and it leads the LIMIT as well as the sort.**
+-- That is issue #25: the row a viewer means was 5th and the blend cannot
+-- reach past dense rank 0 to fetch it back. Ordering it here rather than in
+-- the blend also puts it inside the window at all -- a title whose name is a
+-- common phrase can otherwise fall outside the LIMIT and never reach the
+-- ranker, which no re-weighting can fix.
+--
 -- The id tiebreak is not decoration. ts_rank_cd ties are common on short
 -- documents, and without a total order two identical searches can answer
 -- differently the moment a row is rewritten and heap order stops agreeing
 -- with id order.
-ORDER BY score DESC, t.id
+ORDER BY exact_name DESC, score DESC, t.id
 LIMIT :limit
 """  # noqa: S608 - every interpolated fragment is a module constant
 
@@ -310,15 +351,17 @@ async def _force_exact_scan(session: AsyncSession) -> None:
 # over at most `lane_limit` rows.
 _FUSED = f"""
 WITH lexical AS MATERIALIZED (
-    SELECT top.id, row_number() OVER (ORDER BY top.score DESC, top.id) AS rnk
+    SELECT top.id, top.exact_name,
+           row_number() OVER (ORDER BY top.exact_name DESC, top.score DESC, top.id) AS rnk
     FROM (
         SELECT t.id,
-               ts_rank_cd({_WEIGHTS_SQL}, t.search_document, q.query) AS score
+               ts_rank_cd({_WEIGHTS_SQL}, t.search_document, q.query) AS score,
+               {_EXACT_NAME} AS exact_name
         FROM titles AS t,
              websearch_to_tsquery('english', :query) AS q(query)
         WHERE t.search_document @@ q.query
           {{predicates}}
-        ORDER BY score DESC, t.id
+        ORDER BY exact_name DESC, score DESC, t.id
         LIMIT :lane_limit
     ) AS top
 ),
@@ -335,10 +378,21 @@ vec AS MATERIALIZED (
     ) AS top
 )
 SELECT COALESCE(lexical.id, vec.id) AS id,
+       -- A vector-only row has no lexical arm to have compared a name in, and
+       -- NULL sorts first under DESC -- trap 1 in the list above, arriving
+       -- through a new column. false is the honest value and it is also the
+       -- one the vector lane answers on its own.
+       COALESCE(lexical.exact_name, false) AS exact_name,
        COALESCE(1.0 / (:rrf_k + lexical.rnk), 0.0)
      + COALESCE(1.0 / (:rrf_k + vec.rnk), 0.0) AS score
 FROM lexical FULL OUTER JOIN vec ON lexical.id = vec.id
-ORDER BY score DESC, id
+-- Ahead of the fused score, matching the lexical lane one CTE up: RRF fuses
+-- two *rankings* and neither lane knows that the query is a title's whole
+-- name, so a hit that is 1st lexically and absent from the vector lane can
+-- still be fused below one that placed in both. `_dense_ranks` reads the order
+-- it is given, so an exact match arriving third would take dense rank 2 and be
+-- displaceable again (issue #25).
+ORDER BY exact_name DESC, score DESC, id
 LIMIT :limit
 """  # noqa: S608 - every interpolated fragment is a module constant
 
@@ -549,7 +603,10 @@ class PostgresSearchIndex(SearchIndex):
         # reporting coverage for a lane that did not run invites a caller to
         # read it as a fact about the catalog.
         return SearchOutcome(
-            hits=tuple(SearchHit(title_id=row.id, score=float(row.score)) for row in rows),
+            hits=tuple(
+                SearchHit(title_id=row.id, score=float(row.score), exact_name=bool(row.exact_name))
+                for row in rows
+            ),
             semantic_coverage=0.0,
         )
 
@@ -575,6 +632,13 @@ class PostgresSearchIndex(SearchIndex):
         # two lanes' scores at least point the same way. They are still not
         # on the same *scale* as a ts_rank_cd, which is why Task 19 fuses by
         # rank and never by adding these numbers together.
+        #
+        # **No `exact_name`, and the omission is the lane's own boundary.**
+        # This statement is handed a vector and no text; a `lower(name) =`
+        # predicate here would be a lexical signal smuggled into the lane that
+        # exists not to have one, and `fused` is where the two are supposed to
+        # meet. The consequence is stated rather than hidden: `mode=semantic`
+        # ranks exactly as it did before issue #25.
         return tuple(SearchHit(title_id=row.id, score=1.0 - float(row.distance)) for row in rows)
 
     async def _fused(
@@ -601,7 +665,10 @@ class PostgresSearchIndex(SearchIndex):
         # 1.0 on a request the vector lane happened to dominate -- neither of
         # which answers "can the semantic lane see this catalog yet".
         return SearchOutcome(
-            hits=tuple(SearchHit(title_id=row.id, score=float(row.score)) for row in rows),
+            hits=tuple(
+                SearchHit(title_id=row.id, score=float(row.score), exact_name=bool(row.exact_name))
+                for row in rows
+            ),
             semantic_coverage=await self._coverage(predicates, parameters),
         )
 

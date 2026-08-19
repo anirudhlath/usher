@@ -846,6 +846,131 @@ and k ≥ 25 at a realistic 0.2. Where it decides is where the other five have
 tied — which `_dense_ranks` makes ordinary rather than rare, because equal
 index scores share a rank and the relevance term then cancels exactly.
 
+🔴 **The ceiling survives issue #25 unchanged, and the section below is what it
+was protecting the wrong row from.** Nothing in the table above moved: the
+bound is still `0.70` against `0.35 + 0.15 + 0.15 + 0.02 + 0.02 + w`, the
+margin is still **0.009615** over all five non-relevance signals, `w` is still
+0.005, and `test_no_combination_of_the_other_five_can_displace_an_exact_match`
+is unedited. What changed is *which* hit occupies dense rank 0 — see the next
+section — which is the one thing this bound never said anything about. **Read
+those two sections together before touching either**: capping the relevance
+decay, the obvious alternative fix, is exactly the change that would have
+invalidated this table, and it was declined for that reason among others.
+
+## An exact name match now leads the lexical lane, and 29.3% of the catalog could not be found by its own name (2026-08-19, issue #25)
+
+**The defect, reproduced byte for byte through the live API** at 1,272,866
+titles: `GET /search?q=The Matrix` put the 1999 film **5th** at
+`0.35007068764143234`, behind three 2018 video essays at `0.8032` that carry no
+popularity at all. Both scores reproduce from the shipped constants, and
+popularity was *applied and helped* — dropping it scores the film 0.2729. The
+mechanism is rank-0 dominance, which is the section above working as designed
+over a lexical lane that had the wrong row at rank 0: `ts_rank_cd` rewards a
+document that repeats the query and cannot know that the query **is** a title's
+whole name.
+
+**It generalises, and this is the number that says so.** The issue itself named
+the sampleable version — *"how often a title's exact name is outscored by a
+longer document repeating it"* — and it had never been run. 800 titles drawn
+from the live catalog (400 `skeleton`, 400 `enriched`, frozen to a file so both
+arms are paired), each queried by its own name through the shipped path at
+`mode=full_text, limit=20` with the singleton household:
+
+| | before | after |
+|---|---|---|
+| **miss rate, pooled (n=800)** | **38.4%** (307) | **20.8%** (166) |
+| skeleton (n=400) | 29.5% (118) | 15.8% (63) |
+| enriched (n=400) | 47.3% (189) | 25.8% (103) |
+| — of which **outranked** (retrievable, uniquely named, lost anyway) | **234** | **0** |
+| — of which **namesake** (rank 1 carries the identical name) | 62 | 155 |
+| — of which **not retrieved** (own name does not match own document) | 11 | 11 |
+
+Transitions, per title: `hit → hit` **493**, `outranked → hit` **141**,
+`outranked → namesake` **93**, `namesake → namesake` 62, `not_retrieved →
+not_retrieved` 11. **Zero regressions** — no title that was rank 1 stopped
+being rank 1 — and `outranked → outranked` is empty. Bar written first at
+`/var/tmp/usher-i25-bar/BAR.md`, `sha256
+4729d7eb2c7491b94e9029ee554b8e92ec0cfde7753cc92687f106f92d28d21f`; sample
+`sha256 3a03cfeeea65de38f4c7134c6734694b60a76d5b1259216fe5a6191736036d73`;
+harness `scripts/measure_exact_name_rank.py`, read-only through
+`postgresql_readonly=True` and assembled with no `SearchAnalytics` so a
+measurement writes no `search_queries` row.
+
+**The enriched tier is the *worse* half, which inverts the intuition.** 47.3%
+against skeleton's 29.5% before, 25.8% against 15.8% after — enriched titles
+carry overviews, taglines, keywords and credit names, so there is far more
+document for a query to match twice, and far more competition from other
+enriched rows. A fix aimed only at the long tail would have missed the tier
+where the miss rate is highest.
+
+**Why candidate 1 and not the other two**, in the issue's own numbering. (2)
+Capping the relevance decay converts rank-0 dominance from exact to
+contestable, which invalidates the taste-weight ceiling above — a bound argued
+to four decimal places, in exchange for making *every* strong match
+displaceable by popularity, which is the failure this project already refused
+when it kept popularity a hard key above `vote_count` in the suggest statement.
+(3) Breaking ties inside the lexical lane is narrower than the defect: the
+essays do not tie *The Matrix*, they **outscore** it, so a tiebreak never runs.
+
+**Two halves, and each kills a different failure.** The SQL key (`lower(t.name)
+= lower(btrim(:query))`, ordered ahead of `score` in `_FULL_TEXT` and in
+`_FUSED`'s lexical CTE) is what gets the row into the candidate window at all —
+it is ahead of the `LIMIT`, and no re-weighting can rank a row the lane never
+returned. The service key (`_dense_ranks` grouping on `(exact_name, score)`) is
+what makes rank 0 a group of **one**: `ts_rank_cd` ties are pervasive — the
+tie-group-of-498 figure this file already carried — and a shared rank 0 cancels
+the relevance term and hands the decision straight back to popularity, which is
+the same defect wearing a different hat. Shipping either half alone leaves a
+measurable hole.
+
+**The prefix half of tier 1's signal was declined, and the argument is the
+defect's own shape.** Tier-1 suggest computes `lower(name) LIKE 'typed%'` and
+already ranked this query correctly, which is what identified the signal — but
+the three essays are *themselves* prefix matches of `The Matrix`, so a prefix
+key flags all four rows alike and separates none. It also costs something real
+in the other direction (every `Matrix Warrior` above `The Matrix` on the query
+`Matrix`) with nothing measured behind it. On tier 1 the whole candidate set is
+prefix matches, so the key is a filter and popularity does the ordering; in the
+search lane the set is mixed. Equality is the part of the rule that transfers.
+`title_search_names` is not joined either — 10.9M person rows and an alias
+table, a second scan on the one statement with a latency figure to keep — and
+that is the obvious next measurement rather than an omission.
+
+**Latency: the paired measurement is the honest one, and the arm-against-arm
+number failed the bar.** Scored as written (after p95 ≤ 1.25 × before p95 over
+the two whole-service arms) it is 19.31 → 24.42 ms = **1.265×**, a fail by
+0.28 ms — and the two arms ran twenty minutes apart on a box running fourteen
+containers. Running the **two statements** back to back over the same 800
+names, alternating which goes first: old p50 0.596 / p95 13.42 ms, new p50
+0.627 / p95 14.84 ms = **1.106×**, paired delta p50 **+0.013 ms**, mean +0.099
+ms, and the new statement is *faster* on 357 of 800 queries. `EXPLAIN` confirms
+there is no plan change to explain — Bitmap Index Scan → Bitmap Heap Scan →
+Sort → Limit on both, differing by one sort key. **A p95 taken from two runs
+minutes apart on a shared box measures the box as much as the change**; an
+interleaved pair is what the difference is small enough to need.
+
+### Two ways a title cannot be found by its own name, both unfixed and neither a ranking problem
+
+The 11 `not_retrieved` misses are the same 11 before and after, and they split
+into two shapes worth knowing before anyone reads the residual rate as ranking
+quality:
+
+- **`websearch_to_tsquery` reads ` - ` as negation.** `Regret - Cherie Laurent`
+  compiles to `'regret' & !'cheri' & 'laurent'` — the title's own name excludes
+  the title. `Die 90er - Jahrzehnt der Chancen` → `'die' & '90er' &
+  !'jahrzehnt' & 'der' & 'chancen'`. A hyphen surrounded by spaces is ordinary
+  punctuation in a film title and a **NOT operator** in the websearch grammar,
+  and 8 of the 11 are this. It is the reason to be careful about `plainto_` vs
+  `websearch_to_` rather than a defect in either.
+- **A name of nothing but stop words** produces an empty tsquery and a `NOTICE:
+  text-search query contains only stop words`. `In Between` is a real title in
+  this catalog and matches nothing, including itself.
+
+Both are **retrieval** failures — the row is not a candidate, so no ranking
+change reaches them — and both would be answered by the same thing: a name
+arm that does not go through the English text-search parser at all. Not built
+here; the bar declared them out of reach before the run rather than after.
+
 ## The two-tier suggest reached a request boundary, and the boundary is where the keystroke defect is answered (2026-08-12, M9 B5)
 
 B3's curve above is the measurement; this is what was done with it, so that a
