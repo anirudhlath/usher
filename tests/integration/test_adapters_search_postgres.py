@@ -170,6 +170,13 @@ async def _insert_title(
     )
 
 
+async def _ctids(session: AsyncSession) -> dict[uuid.UUID, str]:
+    """Every visible title's physical location, so a rewrite can be shown to
+    have actually moved one."""
+    rows = await session.execute(text("SELECT id, ctid::text FROM titles"))
+    return {uuid.UUID(str(title_id)): str(ctid) for title_id, ctid in rows}
+
+
 async def _own(session: AsyncSession, title_id: uuid.UUID, *, copies: int = 1) -> None:
     """`copies` `media_items` rows pointing at one title, which is what makes
     `owned_only` a real question.
@@ -893,6 +900,15 @@ async def _seed_embedded_catalog(session: AsyncSession, rows: int) -> None:
     relations off an empty `pg_class` and picks the nested loop whatever the
     real row count is, so the HNSW index is never chosen and the case under
     test becomes vacuous.
+
+    **And the `ANALYZE` outlives the transaction that ran it, which is why the
+    last caller below takes `restores_the_statistics_this_seed_leaks`.**
+    `reltuples`/`relpages` are written in place rather than as a new catalog
+    row, so `session`'s rollback takes the 26,624 rows away and leaves
+    `pg_class` describing them -- for every later test in the session. That is
+    issue #26, and that fixture's docstring is where it is measured, including
+    why the cleanup runs after the last of these three seeds rather than after
+    each.
     """
     await session.execute(
         text(
@@ -922,6 +938,124 @@ async def _seed_embedded_catalog(session: AsyncSession, rows: int) -> None:
     )
     await session.execute(text("ANALYZE titles"))
     await session.execute(text("ANALYZE title_embeddings"))
+
+
+@pytest_asyncio.fixture
+async def restores_the_statistics_this_seed_leaks(postgres_url: str) -> AsyncIterator[None]:
+    """Put `pg_class` back after a large seed, because the rollback does not.
+
+    **`ANALYZE` writes `reltuples` and `relpages` with an in-place catalog
+    update, so they survive the transaction that produced them.** Measured on
+    `pgvector/pgvector:pg17` on 2026-08-19, in collection order in one pytest
+    process: a test that calls `_seed_embedded_catalog` and is then rolled
+    back by the `session` fixture leaves the *next* test reading `pg_class` at
+    **26,624 rows / 8,875 pages** for `title_embeddings` and 26,624 / 701 for
+    `titles`, while `SELECT count(*)` on both answers **0**. The rows are gone.
+    The statistics describing them, the dead heap tuples, and the HNSW index
+    entries pointing at them are not.
+
+    **That is issue #26's mechanism, and it is one test changing the planner
+    for the whole session.** With those statistics in place the semantic lane
+    plans as `Index Scan using ix_title_embeddings_hnsw` -> `Nested Loop` ->
+    `Incremental Sort` instead of `Hash Join` -> `Seq Scan` -> `Sort` --
+    measured, both plans read off `EXPLAIN` in the same file. The first is
+    *approximate* (`hnsw.iterative_scan = relaxed_order`, `hnsw.ef_search =
+    40`) over a graph still physically holding the seed's 26,624 dead entries,
+    so a case seeding three vectors is asking an approximate index for an exact
+    answer.
+
+    **That is issue #26's three cases, measured on both sides.** The same
+    six-case selection, twelve runs each on 2026-08-19 under concurrent load:
+    without this fixture **3 runs of 12 failed**, and the losers are exactly
+    the three the issue could not name --
+    `test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found`,
+    `test_a_row_only_one_lane_found_is_still_returned` and
+    `test_a_title_deep_in_both_lanes_still_reaches_the_first_page`. In the worst
+    of them the semantic lane returned **nothing at all** (`assert [] == [3
+    items]`); in another it lost `Salt Flats`, the row at distance **0.0**.
+    Every one of the three reported it as a *fusion* defect -- a missing
+    `COALESCE`, an `INNER JOIN` -- and none of them was one. With this fixture:
+    **0 of 12**.
+
+    **The link is still not closed all the way, which is stated because #7
+    records this project relaying a load theory as settled twice before.** A
+    directed probe that left the statistics leaked and re-ran the deep case's
+    fixture 25 times got the correct three rows **25 of 25**, so the plan flip
+    is a necessary condition and is not shown to be a sufficient one; the
+    remaining variable, most plausibly autovacuum pruning the seed's dead HNSW
+    entries under a live scan, was not isolated.
+
+    `VACUUM (ANALYZE)` puts it back: measured, both tables return to 0 rows /
+    0 pages and the plan returns to the exact one. On a connection of its own
+    because `VACUUM` cannot run inside a transaction block, and *after*
+    `session` has rolled back or the tuples are not yet dead -- which is what
+    the page check is for, since a `VACUUM` that ran too early looks exactly
+    like one that worked. Declare this fixture **before** `session` in the
+    signature; the assertion is what stops that from being a silent
+    convention.
+
+    **It is on the *last* of the three seeding cases and deliberately not on
+    the first two, and that is a measurement rather than a preference.** Put on
+    all three, it makes `test_the_default_guc_is_what_makes_that_fail` fire its
+    own vacuity guard -- `assert 100 < 100`, *"this fixture is not reaching the
+    HNSW index at all"* -- in **2 runs of 12** where the unrepaired file failed
+    it in **0 of 12**. That control case's non-vacuity is partly *borrowed from
+    the leak*: it seeds into a table the previous case has already left 26,624
+    dead tuples and 26,624 dead HNSW entries in, and a graph that dense is what
+    exhausts `ef_search = 40` when the GUC is off. Cleaning up between the two
+    takes that away. So the cleanup runs once, after the last seed, which is
+    the point where every remaining case in the file needs the truth and no
+    seeding case is relying on the lie.
+    """
+    tables = ("titles", "title_embeddings")
+    engine = build_engine(postgres_url)
+
+    async def pages() -> dict[str, int]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                text("SELECT relname, relpages FROM pg_class WHERE relname = ANY(:names)"),
+                {"names": list(tables)},
+            )
+            return {str(name): int(count) for name, count in rows}
+
+    async def described() -> dict[str, tuple[int, int]]:
+        """Each table's `reltuples` beside what it actually holds."""
+        async with engine.connect() as conn:
+            answer: dict[str, tuple[int, int]] = {}
+            for table in tables:
+                estimate = await conn.execute(
+                    text("SELECT reltuples::bigint FROM pg_class WHERE relname = :name"),
+                    {"name": table},
+                )
+                live = await conn.execute(text(f"SELECT count(*) FROM {table}"))  # noqa: S608
+                answer[table] = (int(estimate.scalar_one()), int(live.scalar_one()))
+            return answer
+
+    try:
+        before = await pages()
+        yield
+        async with engine.connect() as conn:
+            autocommit = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await autocommit.execute(text(f"VACUUM (ANALYZE) {', '.join(tables)}"))
+        after = await pages()
+        restored = await described()
+    finally:
+        await engine.dispose()
+    grew = {name: (before[name], size) for name, size in after.items() if size > before[name]}
+    assert not grew, (
+        "the seed's pages are still there after VACUUM, so it ran before the test's "
+        f"transaction had rolled back and the statistics are still wrong: {grew}"
+    )
+    # And the property the whole fixture exists for, stated rather than
+    # assumed: `pg_class` describes this database. Checked every time rather
+    # than once in a case of its own, because a case asserting it would be
+    # vacuous when run alone -- the statistics are already right until a seed
+    # runs.
+    lying = {name: pair for name, pair in restored.items() if pair[0] != pair[1]}
+    assert not lying, (
+        "pg_class still describes rows this database does not have, so the next test in "
+        f"the session plans against the seed rather than against itself: {lying}"
+    )
 
 
 def _series_request(query_vector: tuple[float, ...]) -> SearchRequest:
@@ -971,7 +1105,9 @@ async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
 
 
 @pytest.mark.integration
-async def test_the_default_guc_is_what_makes_that_fail(session: AsyncSession) -> None:
+async def test_the_default_guc_is_what_makes_that_fail(
+    session: AsyncSession,
+) -> None:
     """The control, and the reason the case above is evidence rather than an
     assertion that happens to pass.
 
@@ -1017,7 +1153,10 @@ async def test_the_default_guc_is_what_makes_that_fail(session: AsyncSession) ->
 
 
 @pytest.mark.integration
-async def test_the_owned_path_does_not_use_the_ann_index(session: AsyncSession) -> None:
+async def test_the_owned_path_does_not_use_the_ann_index(
+    restores_the_statistics_this_seed_leaks: None,
+    session: AsyncSession,
+) -> None:
     """Boundary call 4's exact half, asserted on the plan.
 
     PRD 05 says owned titles skip ANN entirely, and that is only affordable
@@ -1229,6 +1368,26 @@ async def test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found(
     index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     await index.index_many([shared, vector_leader])
 
+    # **The two lane rankings the paragraph above does arithmetic on, read
+    # back rather than assumed.** Issue #26: "1/62 + 1/62 against 1/61" is a
+    # claim about where each row sits in each lane, and nothing here used to
+    # check it -- so a lane that came back short or reordered failed the
+    # *fusion* assertion instead, under a message blaming a missing COALESCE.
+    # The premise and the check now fail in different places, with different
+    # words.
+    lexical = await index.search(SearchRequest(query="vacuum", limit=10))
+    assert [hit.title_id for hit in lexical.hits] == [lexical_leader.title_id, shared.title_id], (
+        "the lexical lane is not the one the RRF arithmetic below assumes"
+    )
+    semantic = await index.search(
+        SearchRequest(
+            query="vacuum", mode=SearchMode.SEMANTIC, query_vector=_vec(1.0, 0.0), limit=10
+        )
+    )
+    assert [hit.title_id for hit in semantic.hits] == [vector_leader.title_id, shared.title_id], (
+        "the vector lane is not the one the RRF arithmetic below assumes"
+    )
+
     fused = await index.search(
         SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=_vec(1.0, 0.0), limit=10)
     )
@@ -1238,6 +1397,12 @@ async def test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found(
         "COALESCE and Postgres sorting NULLS FIRST under ORDER BY ... DESC"
     )
     assert ranked[-1] != shared.title_id
+    # And the 2x margin itself, which is the whole reason this case does not
+    # rest on float noise. Stated as arithmetic over `_RRF_K` so a change to
+    # the constant cannot leave a literal behind.
+    scores = {hit.title_id: hit.score for hit in fused.hits}
+    assert scores[shared.title_id] == pytest.approx(2 / (_RRF_K + 2))
+    assert scores[lexical_leader.title_id] == pytest.approx(1 / (_RRF_K + 1))
 
 
 @pytest.mark.integration
@@ -1263,6 +1428,31 @@ async def test_a_row_only_one_lane_found_is_still_returned(session: AsyncSession
         await _insert_title(session, document)
     index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     await index.index_many(vectors)
+
+    # **"No overlap at all" is the premise, and it is a claim about the two
+    # lanes rather than about the fixture.** Issue #26: this case was seen
+    # failing on the fused set, one row short, under a message saying fusion
+    # was an INNER JOIN -- when what had happened was that the vector lane
+    # returned one of its two rows. A lane that loses a row and a join that
+    # drops one produce the same short set here, so the lanes are read first.
+    lexical_hits = await index.search(SearchRequest(query="vacuum", limit=10))
+    semantic_hits = await index.search(
+        SearchRequest(
+            query="vacuum", mode=SearchMode.SEMANTIC, query_vector=_vec(1.0, 0.0), limit=10
+        )
+    )
+    found_lexically = {hit.title_id for hit in lexical_hits.hits}
+    found_semantically = {hit.title_id for hit in semantic_hits.hits}
+    assert found_lexically == {document.title_id for document in lexical}, (
+        "the lexical lane did not return the rows this fixture seeded for it"
+    )
+    assert found_semantically == {document.title_id for document in vectors}, (
+        "the vector lane did not return the rows this fixture seeded for it"
+    )
+    assert found_lexically.isdisjoint(found_semantically), (
+        "the two lanes overlap, so an INNER JOIN would answer this case correctly "
+        "and the assertion below proves nothing"
+    )
 
     fused = await index.search(
         SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=_vec(1.0, 0.0), limit=10)
@@ -1324,11 +1514,23 @@ async def test_tied_scores_are_broken_deterministically_and_survive_a_rewrite(
         "no two fused scores tied, so this fixture cannot see a missing tiebreak at all"
     )
 
+    # **The plant, and whether it landed.** The docstring's whole argument is
+    # that this `UPDATE` is non-HOT and therefore moves the rows in the heap;
+    # a HOT update leaves every `ctid` where it was and the rewrite silently
+    # does nothing, which reads exactly like a tiebreak that held. So the
+    # `ctid`s are read on both sides and required to have moved.
+    before_ctids = await _ctids(session)
     for document in sorted((*lexical, *vectors), key=lambda one: one.title_id.bytes, reverse=True):
         await session.execute(
             text("UPDATE titles SET sort_name = sort_name || ' rewritten' WHERE id = :id"),
             {"id": document.title_id},
         )
+    after_ctids = await _ctids(session)
+    assert before_ctids.keys() == after_ctids.keys()
+    assert all(before_ctids[key] != after_ctids[key] for key in before_ctids), (
+        "the rewrite was HOT, so heap order never moved and this case cannot see a "
+        f"missing tiebreak at all: {before_ctids} then {after_ctids}"
+    )
 
     after = await index.search(request)
     assert [hit.title_id for hit in after.hits] == [hit.title_id for hit in before.hits], (
@@ -1396,6 +1598,14 @@ async def test_fusion_against_a_catalog_with_no_embeddings_degrades_and_says_so(
             limit=10,
         )
     )
+    # The premise, because an equality between two lists is satisfied by two
+    # empty ones: a `websearch_to_tsquery` that matched nothing would make the
+    # comparison below vacuous and leave `semantic_coverage` carrying the
+    # whole case.
+    assert [hit.title_id for hit in lexical.hits] == [loud.title_id, quiet.title_id], (
+        "the lexical lane did not rank both seeded titles, so the comparison below is "
+        "not about fusion"
+    )
     assert [hit.title_id for hit in fused.hits] == [hit.title_id for hit in lexical.hits]
     assert fused.semantic_coverage == 0.0
 
@@ -1428,12 +1638,20 @@ async def test_a_title_deep_in_both_lanes_still_reaches_the_first_page(
     index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     await index.index_many([wanted, near, nearer])
 
+    # These two are the case's premises rather than its subject, and they are
+    # the ones that lose: issue #26's reproduction on 2026-08-19 failed here,
+    # on the semantic lane, missing `Salt Flats` -- the row at distance 0.0.
+    # A lane short of a row is an approximate ANN scan rather than anything
+    # about fusion, and the condition that puts this lane on one is a previous
+    # test's `ANALYZE` outliving its own rollback: see
+    # `restores_the_statistics_this_seed_leaks`, which also records what that
+    # measurement did *not* establish.
     lexical = await index.search(SearchRequest(query="vacuum", limit=10))
     assert [hit.title_id for hit in lexical.hits] == [
         first.title_id,
         second.title_id,
         wanted.title_id,
-    ]
+    ], "the lexical lane is not the one the RRF arithmetic below assumes"
     semantic = await index.search(
         SearchRequest(
             query="vacuum", mode=SearchMode.SEMANTIC, query_vector=_vec(1.0, 0.0), limit=10
@@ -1443,7 +1661,10 @@ async def test_a_title_deep_in_both_lanes_still_reaches_the_first_page(
         near.title_id,
         nearer.title_id,
         wanted.title_id,
-    ]
+    ], (
+        "the vector lane is not the one the RRF arithmetic below assumes; a lane short "
+        "of a row here is an approximate ANN scan, not a fusion defect"
+    )
 
     fused = await index.search(
         SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=_vec(1.0, 0.0), limit=2)
