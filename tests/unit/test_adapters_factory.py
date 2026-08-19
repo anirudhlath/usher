@@ -14,6 +14,7 @@ from pydantic import SecretStr
 
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
+from usher.adapters.http import SourceGateRegistry
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
@@ -62,11 +63,12 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
     for any of the three, and inventing one purely so a test could read it
     would be a wider API for a narrower reason.
     """
+    gates = SourceGateRegistry(1.25)
     factory = ConfiguredSourceAdapterFactory(
         page_size=17,
         timeout_seconds=3.5,
         reauth_cooldown_seconds=7.25,
-        requests_per_second=1.25,
+        gates=gates,
         push_stale_after_seconds=11.5,
         push_poll_seconds=0.75,
     )
@@ -76,10 +78,16 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
         assert adapter._page_size == 17
         assert adapter._client.timeout.read == 3.5
         assert adapter._session._reauth_cooldown == 7.25
-        # The outbound gate's rate reaches the session it lives on (ADR-0039).
-        # A factory that dropped it would build an adapter that never paces a
-        # call, and the `usher.source.throttle.wait` panel would be empty not
-        # because the limiter never binds but because it was never wired.
+        # The outbound gate reaches the session that sends through it
+        # (ADR-0039). A factory that dropped it would build an adapter that
+        # never paces a call, and the `usher.source.throttle.wait` panel would
+        # be empty not because the limiter never binds but because it was never
+        # wired. **The registry's gate, not a gate built from a rate**: that is
+        # M10's S3, and it is asserted by identity below rather than by reading
+        # `_rate` alone, because a session that minted its own gate at the same
+        # rate is indistinguishable from one that shares the registry's by
+        # every value assertion available.
+        assert adapter._session._limiter is gates.gate(SOURCE.id, SOURCE.name)
         assert adapter._session._limiter._rate == 1.25
         # The two push knobs, and this is the whole of what makes
         # `USHER_PUSH_STALE_AFTER_SECONDS` a setting rather than a field
@@ -93,15 +101,29 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
         await adapter.aclose()
 
 
-async def test_each_call_builds_a_new_adapter() -> None:
+async def test_each_call_builds_a_new_adapter_and_every_one_shares_the_sources_gate() -> None:
     """`SourceAdapterFactory.build`'s docstring: "the caller owns it and must
     `aclose()` it". A factory that cached one instance would hand a closed
-    adapter to the next caller."""
-    factory = ConfiguredSourceAdapterFactory()
+    adapter to the next caller.
+
+    **And the one thing that must *not* be per adapter, asserted in the same
+    place because the two rules pull opposite ways.** An adapter is a
+    connection pool and a message ledger, so a fresh one per call is correct;
+    the outbound rate gate is a *ceiling on a server somebody else owns*, so a
+    fresh one per call multiplies the configured rate by the number of
+    adapters open. Two adapters for one source, one gate (ADR-0039 §4).
+    """
+    factory = ConfiguredSourceAdapterFactory(gates=SourceGateRegistry(0.4))
     first = factory.build(SOURCE, CREDENTIALS)
     second = factory.build(SOURCE, CREDENTIALS)
     try:
         assert first is not second
+        assert isinstance(first, EmbyAdapter)
+        assert isinstance(second, EmbyAdapter)
+        assert first._session._limiter is second._session._limiter, (
+            "two adapters for one source paced independently, so this deployment "
+            "spends 2 x USHER_SOURCE_REQUESTS_PER_SECOND against that server"
+        )
     finally:
         await first.aclose()
         await second.aclose()

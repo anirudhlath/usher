@@ -171,7 +171,7 @@ class EmbySession:
         device_id: str,
         app_version: str = __version__,
         reauth_cooldown_seconds: float = 60.0,
-        requests_per_second: float = 0.0,
+        limiter: _MinInterval | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
@@ -181,12 +181,24 @@ class EmbySession:
         self._app_version = app_version
         self._reauth_cooldown = reauth_cooldown_seconds
         self._clock = clock
-        # The proactive outbound gate (ADR-0039). Keyed by this source's name so
-        # its `usher.source.throttle.wait` series is per source; defaulted to
-        # unlimited so a session built directly in a test is unthrottled, and
-        # given the real rate only at the composition root. Shares this
-        # session's clock -- one time source, as the duration histogram does.
-        self._limiter = _MinInterval(requests_per_second, source=source_name, clock=clock)
+        # The proactive outbound gate (ADR-0039), **handed in rather than
+        # minted**. It used to be constructed here from a `requests_per_second`
+        # scalar, which made it per *session* -- i.e. per adapter, i.e. per
+        # pipeline, i.e. per request -- so one server process running both lanes
+        # held >=2 gates for one source and ran it at twice the configured rate.
+        # `SourceGateRegistry` (`usher.adapters.http`) owns it now, keyed by
+        # `source.id` at the composition root, so every adapter for one source
+        # shares one gate however many pipelines exist (M10 S3; ADR-0039 §4).
+        #
+        # `None` is an unthrottled session, which is what a test that builds one
+        # directly wants -- and a session built without a registry has nothing
+        # to share with anyway. It gets this session's clock, one time source as
+        # the duration histogram does; a gate that *came* from a registry
+        # carries the registry's, because a gate shared by N sessions cannot
+        # take one of their clocks.
+        self._limiter = (
+            limiter if limiter is not None else _MinInterval(0.0, source=source_name, clock=clock)
+        )
         self._lock = asyncio.Lock()
         self._token: str | None = None
         self._user_id: str | None = None

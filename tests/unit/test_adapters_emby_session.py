@@ -19,7 +19,13 @@ from pydantic import SecretStr
 from tests.fakes.emby_server import SERVER_VERSION, USER_ID, FakeEmbyServer
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby import session as session_module
-from usher.adapters.emby.session import PUBLIC_INFO_PATH, SYSTEM_INFO_PATH, EmbySession
+from usher.adapters.emby.session import (
+    AUTHENTICATE_PATH,
+    PUBLIC_INFO_PATH,
+    SYSTEM_INFO_PATH,
+    EmbySession,
+)
+from usher.adapters.http import _MinInterval
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
     PortAuthFailed,
@@ -933,3 +939,111 @@ async def test_a_failed_request_is_timed_too(monkeypatch: pytest.MonkeyPatch) ->
     finally:
         await client.aclose()
     assert [attributes["op"] for _, attributes in recorder.records] == ["authenticate"]
+
+
+class _GateClock:
+    """A monotonic clock whose `sleep` is the only thing that moves it.
+
+    Injected into the gate rather than into the session: after M10's S3 the
+    limiter is **handed in** by the composition root rather than minted from a
+    rate inside `EmbySession`, so a case that wants a non-zero rate builds its
+    own `_MinInterval` and gives it a clock it can drive. Before S3 the session
+    threaded `clock` into the gate and *not* `sleep`, which made a non-zero-rate
+    session test call the real `asyncio.sleep` -- latent only because every Emby
+    case used the `rate=0` default.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+class _CountingGate(_MinInterval):
+    """A gate that counts acquisitions, so *"which sends were paced"* is a
+    number rather than an inference from a wall clock."""
+
+    def __init__(self, rate: float, *, source: str, clock: _GateClock) -> None:
+        super().__init__(rate, source=source, clock=clock, sleep=clock.sleep)
+        self.takes = 0
+
+    async def take(self) -> None:
+        self.takes += 1
+        await super().take()
+
+
+async def test_every_send_passes_the_gate_including_the_authenticating_one() -> None:
+    """`_send` is the whole of the Emby surface, and this counts rather than
+    assumes it.
+
+    All four public entry points -- `request`, `ok`, `json_body`,
+    `anonymous_json` -- and `_authenticate_locked` reach the wire through
+    `_send`, and `_send` is the only place `self._client` is touched. So the
+    gate sits immediately above `build_request` and **every** send pays it.
+
+    🔴 **`_authenticate_locked` is the one that is easy to miss**, because it
+    is the only send that is not reached from a public method's own body: it
+    hangs off `_session()`/`_refresh()`, so a gate placed in `request()` --
+    the obvious spelling -- would let it and `anonymous_json` through
+    unthrottled. It is also the send a *wrong* password turns into one extra
+    request per call until the re-auth cooldown catches it
+    (`Settings.source_reauth_cooldown_seconds`), i.e. exactly the traffic a
+    courtesy limiter exists to space.
+
+    The assertion is `takes == requests`, not `takes > 0`: a count that only
+    has to be positive is satisfied by a gate on one send in five.
+    """
+    server = FakeEmbyServer()
+    clock = _GateClock()
+    gate = _CountingGate(2.0, source="Living Room Emby", clock=clock)
+    client = httpx.AsyncClient(transport=server.transport(), base_url="https://emby.invalid")
+    session = EmbySession(
+        client,
+        CREDENTIALS,
+        source_name="Living Room Emby",
+        device_id=DEVICE_ID,
+        app_version="0.1.0",
+        reauth_cooldown_seconds=60.0,
+        limiter=gate,
+        clock=_Clock(),
+    )
+    try:
+        # A fresh session, so this one call is the authenticating send plus
+        # the caller's own -- the two that a gate on `request()` would count
+        # as one.
+        await session.request("GET", SYSTEM_INFO_PATH, op="info")
+        await session.ok("GET", SYSTEM_INFO_PATH, op="info")
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+        await session.anonymous_json(PUBLIC_INFO_PATH, op="verify")
+        # Neither of these sends anything -- the session is authenticated by
+        # now -- and that is the point: they are entry points too, so a
+        # version of this case that called them first would be counting a
+        # different five.
+        assert await session.user_id() == USER_ID
+        assert await session.access_token()
+    finally:
+        await client.aclose()
+
+    assert f"POST {AUTHENTICATE_PATH}" in server.requests, (
+        "the premise: the authenticating send happened, and it is the one this case is about"
+    )
+    assert len(server.requests) == 5, (
+        f"the premise: five sends reached the wire -- {server.requests}"
+    )
+    assert gate.takes == len(server.requests), (
+        f"{len(server.requests) - gate.takes} send(s) reached Emby without passing the gate: "
+        f"{server.requests}"
+    )
+    # And the rate is real: 2 rps is one send every 0.5 s, and the first goes
+    # immediately because the gate seeds `_next` to now rather than to the
+    # past. A gate that never slept would be a knob that reads config and
+    # paces nothing.
+    assert clock.slept == [0.5, 0.5, 0.5, 0.5], (
+        f"five sends at 2 rps is four half-second waits, not {clock.slept}"
+    )

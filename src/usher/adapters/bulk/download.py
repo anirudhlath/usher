@@ -17,6 +17,19 @@ inheriting the download half.
 under `data/`, which `.gitignore` already excludes wholesale, so a downloaded
 dump cannot reach a commit by accident. Tests never call `ensure_local`
 against a real host -- they drive it through an httpx `MockTransport`.
+
+**Upstream: `datasets.imdbws.com`, `files.tmdb.org` and `files.grouplens.org`.
+Deliberately unthrottled, and this is the reason rather than an omission**
+(M10's S3; the enumeration is `tests/unit/test_outbound_call_sites.py`).
+`ensure_local` issues **one streamed GET per dataset** -- a `HEAD`-shaped
+revision probe and then a single `Range`-resumable transfer of a
+multi-hundred-megabyte file -- so there is no request *stream* for a
+requests-per-second gate to space. `USHER_SOURCE_REQUESTS_PER_SECOND`'s gate
+(ADR-0039) exists because a media source is a machine somebody is watching
+television on; a public dataset mirror serving one file is not that, the
+transfer is bounded by the wire, and a courtesy limit over three requests an
+install expresses no policy anybody asked for. What *is* limited here is the
+bytes, by `_CHUNK_BYTES` and by resume.
 """
 
 import gzip

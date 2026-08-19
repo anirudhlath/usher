@@ -209,10 +209,14 @@ class Settings(BaseSettings):
     # The proactive outbound ceiling: calls to one source are spaced at least
     # `1/rate` seconds apart (ADR-0039). `0` is unlimited -- the `ge=0` shape
     # `push_gap_min_interval_seconds` uses, not the `ge=1` a size takes --
-    # because "off" is a value an operator sets. The gate lives on each
-    # `EmbySession` (one per adapter instance), so a server process running both
-    # the push and worker lanes already holds >=2 gates per source; S3 is what
-    # makes it one gate per source per process (ADR-0039 s4).
+    # because "off" is a value an operator sets. The gate is owned by a
+    # `SourceGateRegistry` built once at each composition root and keyed by
+    # `source.id`, so this is **one gate per source per process** -- the push
+    # lane, the worker lane and every request in a server process all pace
+    # against the same one (ADR-0039 s4). A second process is a second
+    # registry, so two `usher work` containers against one server spend
+    # `2 x rate`: a capacity decision an operator makes, exactly as
+    # `USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` already are.
     #
     # The default is derived from S1, not chosen. S1 measured (2026-08-15,
     # `.claude/rules/emby-push-and-ingest.md`, one household one evening) a

@@ -40,6 +40,7 @@ from usher.composition import (
     llm_client,
     metadata_provider,
     nothing,
+    source_gates,
     unit_of_work,
 )
 from usher.config import Settings, get_settings
@@ -62,6 +63,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         session_factory = build_session_factory(engine)
         app.state.session_factory = session_factory
+        # The outbound rate gates, and the one place they can live (ADR-0039
+        # §4). Same argument as the TMDb token bucket below, one upstream over
+        # and with the multiplier already measured rather than predicted: this
+        # process runs a push lane and a worker lane, each with its own adapter
+        # cache, and `api/deps.py` builds an adapter factory *per request* --
+        # so a gate owned anywhere below this line is a gate per lane and per
+        # request, and the configured 0.4 rps becomes 0.4 x however many are
+        # open. Built once here, handed to the lanes' unit of work and left on
+        # `app.state` for `get_source_adapter_factory`, so every adapter this
+        # process opens for one source paces against one gate. Unconditional,
+        # like the image proxy: an adapter is reachable from a request path in
+        # every deployment, so there is no switch and nothing to be missing.
+        gates = source_gates(settings)
+        app.state.source_gates = gates
         # The TMDb provider, and the one place its token bucket can live:
         # `api/deps.py` says why it cannot be request-scoped ("N in-flight
         # requests get N x 30 rps"), and the worker lane is the only thing
@@ -99,7 +114,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.image_store = image_store
         lanes = LaneSupervisor(
             settings,
-            unit_of_work(session_factory, settings, events=bus, provider=provider),
+            unit_of_work(session_factory, settings, events=bus, provider=provider, gates=gates),
             bus,
             user_id=DefaultUserId(session_factory),
             provider=provider,

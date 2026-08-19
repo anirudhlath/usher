@@ -64,9 +64,15 @@ refresh-token flow; this pattern *is* the refresh mechanism.
   spaces every outbound call at least `1/rate` seconds apart, where `rate` is
   `USHER_SOURCE_REQUESTS_PER_SECOND` (0 disables it) — the proactive half of PRD
   [01](01-architecture.md)'s rate-limit promise and the answer to issue #19's
-  operator flood. The gate lives on each `EmbySession`, so a server process
-  running both lanes already holds ≥2 per source — 🔶 S3 makes it one per source
-  per process. The default **0.4 rps** is derived from S1, not chosen: a 200-item
+  operator flood. **It is one gate per source per process**: a
+  `SourceGateRegistry` keyed by `source.id` is built once at each composition
+  root and handed into the adapter factory, so a server process's push lane, its
+  worker lane and every request pace against the same gate, and so do all of one
+  `usher work` daemon's job scopes. A **second process is a second gate** — two
+  `usher work` containers against one server spend `2 × rate`, which is a
+  capacity decision an operator makes, exactly as `USHER_JOB_CONCURRENCY` and
+  `USHER_TMDB_REQUESTS_PER_SECOND` already are. The default **0.4 rps** is
+  derived from S1, not chosen: a 200-item
   page at **mean 6.0369 s / p95 9.1713 s** and the Emby concurrency (4) give an
   expected concurrent-walk rate `4/6.0369 = 0.66` rps and a conservative p95
   ceiling `4/9.1713 = 0.436` rps, with 0.4 below both. It is inert on a sequential

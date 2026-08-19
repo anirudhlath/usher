@@ -138,6 +138,7 @@ from usher.adapters.emby.session import (
     EmbySession,
     decode_json,
 )
+from usher.adapters.http import _MinInterval
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
@@ -251,7 +252,7 @@ class EmbyAdapter(SourceAdapter):
         max_pages: int = MAX_PAGES,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,
-        requests_per_second: float = 0.0,
+        limiter: _MinInterval | None = None,
         push_connect: PushConnector = connect_websocket,
         push_stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
         push_poll_seconds: float = DEFAULT_POLL_SECONDS,
@@ -274,7 +275,12 @@ class EmbyAdapter(SourceAdapter):
             source_name=source.name,
             device_id=source.device_id,
             reauth_cooldown_seconds=reauth_cooldown_seconds,
-            requests_per_second=requests_per_second,
+            # Passed through, never built here: the outbound gate is owned by
+            # the composition root's `SourceGateRegistry` so that every adapter
+            # this deployment opens for one source paces against one gate
+            # (ADR-0039 §4). `None` -- a directly-constructed adapter -- is
+            # unthrottled.
+            limiter=limiter,
         )
         self._clock = clock
         # One ledger for the adapter's whole life, handed to every channel

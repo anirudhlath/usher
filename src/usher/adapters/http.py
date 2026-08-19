@@ -25,6 +25,7 @@ import asyncio
 import datetime as dt
 import email.utils
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -251,6 +252,19 @@ class _MinInterval:
     the one path that records nothing, because "off" and "on and never binding"
     are two different readings.
 
+    **Two rates outside `Settings`' `ge=0` shape, spelled out because this class
+    is package-public and takes a bare float from anywhere.** A *negative* rate
+    is treated as disabled, exactly like `0` -- the guard is `<= 0.0` -- so a
+    caller that computed one gets no gate rather than a negative interval;
+    `Settings.source_requests_per_second` cannot produce one, and every other
+    construction site is in this package. And `float("inf")` is **accepted** by
+    a pydantic `ge=0` field (measured: `nan` and `-1` are both refused, `inf` is
+    not), where it means "enabled and never binding" rather than "off":
+    `interval` is `0.0`, nothing ever waits, and `usher.source.throttle.wait`
+    carries a real series of zeros. That is an honest reading of the two states
+    this class keeps apart, so `inf` is documented rather than rejected -- an
+    operator who means "off" writes `0`, which is the value that emits nothing.
+
     The lock is held across the wait for the reason `_TokenBucket`'s is
     (`usher.adapters.tmdb.client`): N coroutines that each read the next slot
     and then sleep independently all decide the same slot is free, which is the
@@ -293,3 +307,83 @@ class _MinInterval:
             # so an idle gate resets to now + interval and cannot bank the gap.
             self._next = self._clock() + interval
         _throttle_wait.record(wait, {"source": self._source})
+
+
+class SourceGateRegistry:
+    """One `_MinInterval` per source, for the life of one composition root.
+
+    🔴 **The finding this class exists for, and the obvious placement is
+    wrong.** A gate held on an `EmbySession` is per **adapter**, and a gate
+    held on `ConfiguredSourceAdapterFactory` is per **factory** -- and
+    `usher.composition.adapter_factory` is called from `build_pipeline`, i.e.
+    **once per unit of work**. The server opens a pipeline per lane task,
+    `usher work`'s worker opens a scope per claim and per job, and
+    `usher.api.deps.get_source_adapter_factory` builds one per request. So a
+    bucket on either is a bucket per request, which is `api/deps.py`'s own
+    recorded defect verbatim -- *"a request-scoped `TmdbClient` gives every
+    concurrent request a fresh bucket, so N in-flight requests get N x 30
+    rps"*. Measured before this class existed: a single server process held
+    **two** gates for one source, because the push lane caches adapters in
+    `LaneSupervisor._open_adapters` and the worker lane builds its own
+    `SourceRegistry` with a separate cache, and both lanes default on inside
+    one `create_app` lifespan -- 0.4 rps x 2 lanes = 0.8 rps.
+
+    So the gate is owned **here**, built once at each composition root
+    (`create_app`'s lifespan, `usher work`, `usher sync`) and handed *into*
+    `adapter_factory`, which is the shape `api/app.py` already uses for
+    `TmdbClient`'s token bucket. Every adapter for one source then shares one
+    gate however many pipelines exist.
+
+    **Keyed by `source.id`, labelled by `source.name`, and the two are
+    different jobs.** The id is the identity Usher owns -- `SourceRegistry`
+    keys its adapter cache on it for the same reason -- and it survives a
+    rename, which a name does not. The name is only the `source` label on
+    `usher.source.throttle.wait`, matching `usher.source.request.duration`'s
+    existing label rather than minting a second per-source identity in
+    telemetry (ADR-0039 §2). A renamed source therefore keeps its gate and
+    changes its series, which is the right way round.
+
+    **The rate is one value for every source**, deliberately: issue #19 asks
+    whether the ceiling belongs per source and ADR-0039 answers *"yes for the
+    key and no for the value in Phase 1"* -- `Source` carries no tuning field
+    and adding one is DDL this phase does not open.
+
+    **No lock, unlike `SourceRegistry._adapter_for`, and the difference is an
+    `await`.** That one builds an adapter, which suspends, so two jobs can both
+    miss and both build. `gate` never awaits, so no two coroutines can
+    interleave inside it and the "check, build, store" sequence is atomic
+    against every other caller.
+
+    **A second process is a second registry.** That is a capacity decision an
+    operator makes -- two `usher work` containers against one Emby run at
+    2 x `rate` -- and not a correctness one; nothing here can or should reach
+    across a process boundary.
+    """
+
+    def __init__(
+        self,
+        requests_per_second: float = 0.0,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._rate = requests_per_second
+        self._clock = clock
+        self._sleep = sleep
+        self._gates: dict[uuid.UUID, _MinInterval] = {}
+
+    def gate(self, source_id: uuid.UUID, source_name: str) -> _MinInterval:
+        """This source's gate, minted on first ask and remembered after.
+
+        Lazy rather than seeded from the source table: nothing in
+        `adapters/` may read a repository, and a source registered while the
+        process is running (`POST /admin/sources`) must get a gate without a
+        restart.
+        """
+        gate = self._gates.get(source_id)
+        if gate is None:
+            gate = _MinInterval(
+                self._rate, source=source_name, clock=self._clock, sleep=self._sleep
+            )
+            self._gates[source_id] = gate
+        return gate

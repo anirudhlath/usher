@@ -63,6 +63,19 @@ Unlike `TmdbClient`, this class **owns** its `httpx.AsyncClient`, because
 `LLMClient.aclose` promises to "release the underlying HTTP connection pool"
 and a port cannot promise that about a client somebody else built. Tests
 inject a `transport` rather than a client, so ownership is never ambiguous.
+
+**Upstream: whatever `USHER_LLM_BASE_URL` names. Deliberately unthrottled, and
+that is a decision rather than an omission** (M10's S3; the enumeration is
+`tests/unit/test_outbound_call_sites.py`). Unlike `TmdbClient`, which carries a
+token bucket because ADR-0005 measured a published ~40 rps ceiling, this
+endpoint has **no rate this project has measured and no ceiling it publishes** --
+it is a local vLLM on this deployment and an arbitrary provider on another. What
+bounds the traffic instead is the concurrency table: `KIND_CONCURRENCY` caps
+`curate` at **1 in flight** (the reference endpoint has 56 tokens of context
+spare, PRD 01), and PRD 06 budgets **one modest completion per household per
+day**. A requests-per-second gate over one serialised call a day is a knob that
+could never fire, which is exactly the defect `push_max_items_per_event`'s
+bound was written against.
 """
 
 import json

@@ -120,6 +120,36 @@ Practical consequence: a shared `BaseHTTPAdapter` carries the httpx client
 lifecycle, retry/backoff, and rate-limit handling that the Emby and TMDb
 adapters both need, instead of each reimplementing it.
 
+**How much of that has actually been built, and which upstreams are
+deliberately not throttled.** `src/usher/adapters/http.py` is the piece that
+exists — `retry_after_seconds`, `decode_json`, `port_error_for`,
+`UNTRANSLATED_FAILURES`, and since M10 the outbound gate `_MinInterval` with
+its per-process `SourceGateRegistry`. The client *lifecycle* is still
+per-adapter, because `CachedDatasetFile` is handed a client it does not own
+while `EmbyAdapter` owns one per source. M10's S3 enumerated every outbound
+call site under `adapters/` by grep rather than by memory — **nine upstreams,
+fifteen call sites across eight modules** — and recorded a limiter decision for
+each:
+
+| upstream | limiter |
+|---|---|
+| the configured media source (`emby/session.py`) | the per-source minimum-interval gate, `USHER_SOURCE_REQUESTS_PER_SECOND` ([ADR-0039](decisions/0039-the-outbound-limiter-is-per-source-and-spaces-requests.md)) |
+| `api.themoviedb.org` (`tmdb/client.py`, and `tmdb/provider.py` through it) | `_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` ([ADR-0005](decisions/0005-bulk-bootstrap.md)) |
+| `/embywebsocket` (`emby/push.py`) | **none** — a socket held open is not a request; the reconnect *backoff* is its limiter |
+| `image.tmdb.org` (`images/provider.py`) | **none** — the CDN publishes no limit and the cache is the bound ([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)) |
+| the IMDb/TMDb/MovieLens dataset hosts (`bulk/download.py`) | **none** — one streamed file per dataset, not a request stream |
+| `query.wikidata.org` (`bulk/wikidata.py`) | **none** — a bootstrap phase run by hand, chunked and sequential, not a lane |
+| `USHER_LLM_BASE_URL` (`llm/openai_compatible.py`) | **none** — `curate` is capped at 1 in flight and [06](06-rows-and-recommendations.md) budgets one completion per household per day |
+| `USHER_EMBEDDING_MODEL`'s endpoint (`embedding/openai_compat.py`) | **none** — `index` is capped at 1 in flight |
+
+**Five of the nine get nothing, and every one of the five has a stated reason
+rather than an omission** — that is as much the deliverable as the wiring is,
+because `.claude/rules/ports-and-error-taxonomy.md` records what happens when a
+decision about an upstream is left implicit. Each reason is written beside the
+code, and `tests/unit/test_outbound_call_sites.py` holds the same table closed
+against an AST scan, so **a new adapter with a new outbound call is a red rather
+than a discovery**.
+
 ```python
 class SourceAdapter(ABC):
     """A backend that holds playable media."""

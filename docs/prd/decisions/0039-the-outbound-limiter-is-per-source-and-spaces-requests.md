@@ -3,7 +3,11 @@
 **Status:** Accepted — adds the proactive half of [01](../01-architecture.md)'s
 *"retry/backoff, and rate-limit handling"* promise that
 `src/usher/adapters/http.py` never had, and records what its default is derived
-from ([03](../03-sources-and-sync.md), [10](../10-telemetry-and-dashboards.md))
+from ([03](../03-sources-and-sync.md), [10](../10-telemetry-and-dashboards.md)).
+**Amended 2026-08-18 by M10's S3**: §4 was written as known-provisional and is
+now the shipped design (one gate per source per process, owned by the
+composition root), and §2's *"the gate does not key on `source.id` at all"* is
+corrected in place.
 
 ## Context
 
@@ -71,10 +75,16 @@ with the column named, not left to be rediscovered. Addressing a source by
 (`src/usher/composition.py:1631,1668`) — **not** M9's S3, which is the TMDb
 priority-tier enrichment run (130,334 requests,
 `.claude/rules/tmdb-and-enrichment.md`) and settled nothing about source
-addressing. And the gate does not key on `source.id` at all: it keys on
-`source.name` (`src/usher/adapters/emby/session.py:189`; the metric records
-`{"source": source_name}`), matching the existing `usher.source.request.duration`
-label rather than minting a second per-source identity.
+addressing. ⚠️ **Amended 2026-08-18 by S3, and the sentence that stood here is corrected
+where it stood rather than only in §4.** It read *"the gate does not key on
+`source.id` at all: it keys on `source.name`"*, which was true of S2's
+per-session gate and is now false of half of it. The gate is **keyed by
+`source.id`** — `SourceGateRegistry`'s dict, §4 — and **labelled by
+`source.name`**, because the metric still records `{"source": source_name}` to
+match the existing `usher.source.request.duration` label rather than minting a
+second per-source identity in telemetry. A rename therefore keeps the gate and
+changes the series. What is unchanged is this section's actual decision: the
+**value** is one setting and not a per-source column.
 
 The setting is named `source_*` and **not** `emby_*` deliberately — `config.py`
 is not an adapter, and a setting named for one media server would be the first
@@ -142,42 +152,90 @@ earlier draft of this section asserted it anyway. The `api/deps.py` parallel
 (*"a rate limiter that limits nothing"*) holds only in the sequential regime; in
 the concurrent regime the honest statement is that the question is open.
 
-### 4. Where the gate lives today — per adapter instance, and known-provisional pending S3
+### 4. Where the gate lives — one per source per process, owned by the composition root
 
-`.claude/rules/api-telemetry-and-lanes.md`'s W1 entry records that
-*"`USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` are both per
-process, against a rate limit that is per client"*.
-`USHER_SOURCE_REQUESTS_PER_SECOND` is **not yet even that** at this head, and
-this section says so plainly rather than claiming the property S3 will add.
+**Amended 2026-08-18 by M10's S3.** What this section said until then is kept
+under its own heading below, because it is the measurement that decided this
+design rather than merely a superseded draft.
 
-The gate is constructed **inside each `EmbySession`**
-(`src/usher/adapters/emby/session.py:189`), and every
-`ConfiguredSourceAdapterFactory.build()` mints a fresh session and therefore a
-fresh `_MinInterval`. So the gate is **per adapter instance, not per process.**
-The measured consequence: the push lane (`src/usher/api/lanes.py:179`,
+The gate is owned by **`SourceGateRegistry`** (`src/usher/adapters/http.py`), a
+`dict[uuid.UUID, _MinInterval]` keyed by `source.id`, built **once at each
+composition root** and handed *into* `composition.adapter_factory`:
+
+| root | builds it | who reaches it |
+|---|---|---|
+| the server process | `create_app`'s lifespan, on `app.state.source_gates` | the push lane and the worker lane, through the one `UnitOfWork` the lifespan hands `LaneSupervisor`; every request, through `api/deps.get_source_gates` |
+| `usher work` | `unit_of_work`, once for the daemon | every job scope |
+| `usher sync` | `build_pipeline`, once for the command | the item walk and the watch lane, for every source |
+| `usher lanes` | `unit_of_work`, once for the process | both lanes |
+
+So **one source has one gate per process**, however many pipelines, lanes,
+adapters or in-flight requests exist. `adapter_factory(settings, gates)` takes
+the registry as a **required** argument, which puts the type checker rather than
+a convention behind the property: there is no spelling of that call that
+silently mints a per-pipeline gate.
+
+**Keyed by `source.id`, labelled by `source.name`, and the split is deliberate.**
+§2 above says the gate *"does not key on `source.id` at all"* — that was true of
+S2's per-session gate and is no longer. The **key** is now the id, because that
+is the identity Usher owns and it survives a rename (`SourceRegistry` keys its
+adapter cache the same way); the **label** on
+`usher.source.throttle.wait` is still the name, matching
+`usher.source.request.duration` rather than minting a second per-source identity
+in telemetry. A renamed source therefore keeps its gate and changes its series,
+which is the right way round. §2's decision — *"yes for the key and no for the
+value"* — is unchanged: the **rate** is still one setting and not a column.
+
+**A second process is a second registry, and that is deliberate.** Two
+`usher work` containers against one Emby spend `2 × rate`. Nothing in a process
+can reach across a process boundary, so this is a **capacity decision an
+operator makes** — the same statement
+`.claude/rules/api-telemetry-and-lanes.md`'s W1 entry already makes about
+`USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` — and not a
+correctness one. `USHER_SOURCE_REQUESTS_PER_SECOND` is now exactly as
+per-process as those two, which is the property §4 previously said it did
+**not** have.
+
+**Pinned rather than asserted, and the positive control is the half that
+matters.**
+`tests/unit/test_composition.py::test_two_adapters_for_one_source_share_one_gate_and_two_sources_do_not`
+builds two pipelines from one composition root and requires the same gate
+object — **and** requires a second source's to be a *different* one. An
+implementation returning one global gate passes the first assertion and halves
+the configured rate for every source after the first, so a case carrying only
+the first would ratify it.
+`test_every_composition_root_that_dials_a_source_reaches_one_gate_per_source`
+drives all four roots in the table above, the server's through a real
+`create_app` lifespan, and
+`tests/unit/test_adapters_emby_session.py::test_every_send_passes_the_gate_including_the_authenticating_one`
+counts gate acquisitions against sends so that `_authenticate_locked` — the one
+send not reached from a public method's own body — cannot slip past.
+
+#### What this section said before S3, kept because it is the measurement
+
+The gate was constructed **inside each `EmbySession`**, and every
+`ConfiguredSourceAdapterFactory.build()` minted a fresh session and therefore a
+fresh `_MinInterval`. So it was **per adapter instance, not per process.** The
+measured consequence: the push lane (`src/usher/api/lanes.py:179`,
 `_open_adapters`) and the worker (`SourceRegistry._adapters`,
 `src/usher/composition.py:1631`) keep **separate** adapter caches, and
 `create_app` runs **both lanes in one process** (both settings-gated, both
-default on). So a single server process *already* holds **≥2 gates for the same
-source**, each pacing independently — a source given a 0.4 rps gate on each of
-two lanes sees up to 0.8 rps — plus a transient gate per admin
-connection-test and per `usher sync`. **The rate is already multiplied by the
-lane count within one process**; a second `usher work` container multiplies it
-again, but the doubling does not wait for a second container.
+default on). So a single server process held **≥2 gates for the same source**,
+each pacing independently — a source given a 0.4 rps gate on each of two lanes
+saw up to 0.8 rps — plus a transient gate per admin connection-test and per
+`usher sync`. **The rate was multiplied by the lane count within one process**;
+a second `usher work` container multiplied it again, but the doubling did not
+wait for a second container.
 
-**This placement is known-provisional and anticipates S3.** S3 (*"the limiter
-reaches every adapter that dials out"*) is the task that makes *"one gate per
-source per process"* true, and it is an **extend/rework, not a tear-out**:
+S3 was an **extend/rework, not a tear-out**, exactly as that section predicted:
 `_MinInterval`, the `take()` call, the `usher.source.throttle.wait` metric and
-the `source_requests_per_second` config field all survive — what S3 reworks is
-the factory→adapter→session **scalar threading** that today hands the rate down
-into a per-session gate. `composition.py`, `factory.py` and the two `emby/`
-modules are S3's Files list, not S2's; S2's own minimum was the single reader
-`tests/unit/test_config.py::test_every_setting_is_read_by_something` demands —
-the one `.source_requests_per_second` line in `src/` (`composition.py:326`) —
-and it is placed early rather than left dead, because a knob that reads config
-and paces nothing is worse than a live gate in a provisional place. The wiring
-is not ripped out; it is described here as what it is.
+the `source_requests_per_second` config field all survive unchanged. What was
+reworked is the factory→adapter→session **scalar threading** — a
+`requests_per_second: float` copied down three constructors — replaced by the
+registry above handing one `_MinInterval` *object* down the same three. S2 placed
+the gate early rather than leaving the field dead, because a knob that reads
+config and paces nothing is worse than a live gate in a provisional place; that
+judgement stands, and the provisional placement lasted one task.
 
 ## Consequences
 
@@ -196,12 +254,19 @@ is not ripped out; it is described here as what it is.
 - **The limiter lives in `usher.adapters.http` and imports no adapter and no
   config.** The tenth import contract's neighbour — *"the shared http helpers
   import no concrete adapter"* — already covers it, and it takes its `rate` as
-  a constructor argument rather than reading `Settings`, so `EmbySession`
-  passes it down from the composition root.
+  a constructor argument rather than reading `Settings`. Since S3 that is true
+  of `SourceGateRegistry` beside it: it takes a float, and
+  `composition.source_gates` is the one place `Settings` is read. **`usher.
+  adapters.factory` gains no import of `usher.config`** — it takes the registry
+  as an object, per its own docstring's "the settings it carries come from
+  `usher.config.Settings` at the composition root".
 - **No behavioural change at the default.** `EmbySession` defaults the gate to
   unlimited; only `composition.adapter_factory` sets the real rate, and every
   request-making test either builds the adapter directly or overrides
   `get_source_adapter_factory`, so no existing test acquires the 0.4 rps gate.
+  Still true after S3: a session or a factory built with no registry gets a
+  private one at the unlimited default, so `limiter=None` and `gates=None` are
+  the same "nobody configured this" the scalar's `0.0` was.
 
 ## Evidence
 

@@ -332,6 +332,15 @@ async def _sync(
     first -- `WatchStateSyncService` resolves each state against a
     `MediaItem`, so a watch lane that ran before the items existed would
     count every state unmatched and merge nothing.
+
+    **One pipeline for the whole command, which is also one outbound gate per
+    source for the whole command** (ADR-0039 §4). `build_pipeline` builds a
+    `SourceGateRegistry` when nobody hands it one, and this command opens
+    exactly one pipeline and loops the sources inside it -- so the walk and the
+    watch lane below share a gate per source, and two sources get two. A second
+    `build_pipeline` here would be a second registry and twice the rate, which
+    is the reason this is stated rather than left to be inferred from the
+    indentation.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(
@@ -446,6 +455,17 @@ async def _work(settings: Settings, *, once: bool) -> None:
     bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
     the client. A client per job would give every job its own budget, which
     is a rate limiter that limits nothing.
+
+    **The same argument, one upstream over, and it is why `unit_of_work` is
+    built once here rather than per job.** The daemon below opens a scope per
+    claim and per job, so anything that lives on a `Pipeline` lives for one
+    job -- including, before M10's S3, the outbound gate on every source
+    adapter. `unit_of_work` now resolves a `SourceGateRegistry` once and closes
+    over it, so this process paces one source at
+    `USHER_SOURCE_REQUESTS_PER_SECOND` however many jobs are in flight
+    (ADR-0039 §4). **A second `usher work` container is a second registry and
+    therefore twice the rate** -- a capacity decision an operator makes, and one
+    nothing in a process can make for them.
 
     **Publishes to `NullEventPublisher`, and that is a stated consequence
     rather than an oversight.** `usher work` is a separate process and M5's

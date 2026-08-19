@@ -29,6 +29,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from asgi_lifespan import LifespanManager
 from loguru import logger
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -55,11 +56,14 @@ from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
+from usher.adapters.emby.adapter import EmbyAdapter
+from usher.api.app import create_app
 from usher.composition import (
     Pipeline,
     SourceRegistry,
     UnitOfWork,
     _worker_handlers,
+    adapter_factory,
     build_curation_service,
     build_enrich_service,
     build_pipeline,
@@ -69,10 +73,12 @@ from usher.composition import (
     llm_client,
     metadata_provider,
     run_bootstrap,
+    unit_of_work,
     worker_concurrency,
     worker_kinds,
 )
 from usher.config import Settings
+from usher.db.base import build_session_factory
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.domain.bootstrap import BootstrapPhase, ImportRun
 from usher.domain.curation import LLMPurpose
@@ -81,6 +87,7 @@ from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.domain.source import Source
 from usher.domain.title import Title
+from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
 from usher.ports.errors import PortUnavailable
 from usher.ports.events import ClientEvent, EventPublisher, NullEventPublisher
@@ -94,7 +101,7 @@ from usher.ports.repository import (
     TitleRepository,
     WatchStateRepository,
 )
-from usher.ports.source import SourceItem, SourceItemKind
+from usher.ports.source import SourceAdapter, SourceItem, SourceItemKind
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import ITEM_IDS_KEY, REASON_KEY, ROWS_KEY, TITLE_KEY
 from usher.services.events import DeferredEventPublisher
@@ -1881,3 +1888,203 @@ def test_the_concurrency_table_covers_exactly_the_kinds_a_build_claims() -> None
     assert max(pinched.values()) == 2, (
         f"a per-kind constant outran the configured global: {pinched}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The outbound gate's owner (M10 S3; ADR-0039 §4)
+
+
+_GATED = Source(
+    id=new_id(),
+    kind=SourceKind.EMBY,
+    name="Living Room Emby",
+    base_url="https://emby.invalid",
+    credentials_ref="ref-1",
+    device_id=str(new_id()),
+)
+_SECOND_SERVER = Source(
+    id=new_id(),
+    kind=SourceKind.EMBY,
+    name="Bedroom Emby",
+    base_url="https://bedroom.invalid",
+    credentials_ref="ref-2",
+    device_id=str(new_id()),
+)
+_GATE_CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
+
+
+def _gate_of(adapter: SourceAdapter) -> object:
+    """The `_MinInterval` one adapter paces its outbound calls through.
+
+    Reached through two private attributes because there is no public
+    accessor and inventing one purely so a test could read it would be a
+    wider API for a narrower reason -- the argument
+    `test_the_deployment_tuning_reaches_the_adapter` already makes one
+    module over. Returned as `object` because every assertion about it here
+    is an **identity** assertion.
+    """
+    assert isinstance(adapter, EmbyAdapter), "the premise: the factory built an Emby adapter"
+    return adapter._session._limiter
+
+
+async def test_two_adapters_for_one_source_share_one_gate_and_two_sources_do_not() -> None:
+    """🔴 **The finding S3 exists for: the obvious placement is per request.**
+
+    `adapter_factory` is called from `build_pipeline`, i.e. **once per unit of
+    work** -- the server opens a pipeline per lane task, `usher work`'s worker
+    opens a scope per claim and per job, and `api/deps.py` builds one per
+    request. So a gate held on the `EmbySession` (per adapter) or on the
+    `ConfiguredSourceAdapterFactory` (per factory) is a gate per *request*,
+    which is `api/deps.py`'s own recorded defect verbatim: *"a request-scoped
+    `TmdbClient` gives every concurrent request a fresh bucket, so N in-flight
+    requests get N x 30 rps"*. The gate is therefore owned by the composition
+    root and keyed by `source.id`, and every pipeline that root opens hands
+    out the same one.
+
+    **The second assertion is the positive control and it is not decoration.**
+    An implementation that returned one *global* gate satisfies the first
+    assertion and halves the configured rate for every source after the
+    first -- a two-server household would run at `rate/2` each with nothing
+    saying so. A case carrying only the first assertion would ratify it.
+
+    A real `AsyncSession` factory over a real engine, for the reason
+    `test_the_candidate_pool_reads_the_pipelines_own_taste_service` gives:
+    `create_async_engine` does not connect and nothing here issues a
+    statement, so a wiring assertion stays in the unit suite.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        work = unit_of_work(build_session_factory(engine), _settings(), events=NullEventPublisher())
+        async with work() as first:
+            one = first.adapters.build(_GATED, _GATE_CREDENTIALS)
+        async with work() as second:
+            two = second.adapters.build(_GATED, _GATE_CREDENTIALS)
+            elsewhere = second.adapters.build(_SECOND_SERVER, _GATE_CREDENTIALS)
+        try:
+            assert one is not two, (
+                "the premise: two pipelines really did build two adapters -- "
+                "`SourceAdapterFactory.build`'s contract is that the caller owns each one"
+            )
+            gate_a, gate_b, gate_c = _gate_of(one), _gate_of(two), _gate_of(elsewhere)
+
+            assert gate_a is gate_b, (
+                "two pipelines from one composition root gave one source two gates, "
+                "so the configured rate is multiplied by however many pipelines are open"
+            )
+            assert gate_a is not gate_c, (
+                "two sources sharing one gate is a limiter that halves itself per source"
+            )
+        finally:
+            await one.aclose()
+            await two.aclose()
+            await elsewhere.aclose()
+    finally:
+        await engine.dispose()
+
+
+async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_source(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The four roots, driven rather than argued (M10 S3's acceptance).
+
+    Each arm is a **real** composition root, spelled the way its own module
+    spells it:
+
+    | root | how it composes | arm below |
+    |---|---|---|
+    | the server's push lane | `LaneSupervisor` reads `create_app`'s one `UnitOfWork` | 1 + 2 |
+    | the server's worker lane | the same `UnitOfWork`, a scope per claim and per job | 1 + 2 |
+    | an HTTP request | `get_source_adapter_factory`, off `app.state.source_gates` | 1 |
+    | `usher work` | `unit_of_work(...)`, a scope per job | 2 |
+    | `usher sync` | one `build_pipeline`, sources looped inside it | 3 |
+
+    **What "one process" means here, stated plainly because the flattering
+    reading is available.** Within one process, one source has one gate however
+    many pipelines, lanes, adapters or requests exist -- that is what these
+    arms assert. `usher work` and `usher sync` are *separate processes* from the
+    server, so their registries are separate from its by construction, and a
+    second `usher work` container is a second registry and therefore twice the
+    configured rate. That is a capacity decision an operator makes; nothing in a
+    process can reach across to another one, and this case does not pretend
+    otherwise.
+    """
+    settings = _settings(
+        push_enabled=False,
+        worker_enabled=False,
+        image_cache_dir=tmp_path / "images",
+        source_requests_per_second=0.4,
+    )
+
+    # -- 1. the server: the lanes' unit of work and the request path -------
+    app = create_app(settings)
+    async with LifespanManager(app):
+        gates = app.state.source_gates
+        # The request path, through the real dependency rather than a
+        # re-derivation of it: `get_source_adapter_factory` takes the registry
+        # `get_source_gates` reads off `app.state`.
+        through_a_request = adapter_factory(settings, gates).build(_GATED, _GATE_CREDENTIALS)
+        # The lanes, through the supervisor's own unit of work -- the object
+        # `_start_lane` (push) and `_run_worker` both open their pipelines
+        # from. Two scopes, because the two lanes never share one.
+        async with app.state.lanes._work() as push_scope:
+            through_the_push_lane = push_scope.adapters.build(_GATED, _GATE_CREDENTIALS)
+        async with app.state.lanes._work() as worker_scope:
+            through_the_worker_lane = worker_scope.adapters.build(_GATED, _GATE_CREDENTIALS)
+        try:
+            server_gate = _gate_of(through_a_request)
+            assert _gate_of(through_the_push_lane) is server_gate, (
+                "the push lane paces independently of the request path, so an admin "
+                "status probe and a reconnect gap-closer spend two budgets"
+            )
+            assert _gate_of(through_the_worker_lane) is server_gate, (
+                "the worker lane paces independently of the push lane -- the >=2 gates "
+                "per source ADR-0039 §4 measured before S3"
+            )
+            assert server_gate is gates.gate(_GATED.id, _GATED.name)
+            assert server_gate._rate == 0.4, (
+                "the premise: these gates carry the configured rate, so the identity "
+                "above is not three unthrottled defaults agreeing by accident"
+            )
+        finally:
+            await through_a_request.aclose()
+            await through_the_push_lane.aclose()
+            await through_the_worker_lane.aclose()
+
+    # -- 2. `usher work`: one registry for the daemon, a scope per job -----
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        work = unit_of_work(build_session_factory(engine), settings, events=NullEventPublisher())
+        async with work() as one_job:
+            first = one_job.adapters.build(_GATED, _GATE_CREDENTIALS)
+        async with work() as another_job:
+            second = another_job.adapters.build(_GATED, _GATE_CREDENTIALS)
+        try:
+            assert _gate_of(first) is _gate_of(second)
+            assert _gate_of(first) is not server_gate, (
+                "the premise, and the honest half of the claim: a second process is a "
+                "second registry -- these two roots are only ever in one process here "
+                "because a test is a process that runs everything"
+            )
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+        # -- 3. `usher sync`: one pipeline, the sources looped inside it ----
+        sync = build_pipeline(AsyncSession(engine), settings)
+        walking = sync.adapters.build(_GATED, _GATE_CREDENTIALS)
+        watching = sync.adapters.build(_GATED, _GATE_CREDENTIALS)
+        elsewhere = sync.adapters.build(_SECOND_SERVER, _GATE_CREDENTIALS)
+        try:
+            assert _gate_of(walking) is _gate_of(watching), (
+                "`usher sync` walks items and then watch state through one pipeline; "
+                "two gates there is one command spending twice its own ceiling"
+            )
+            assert _gate_of(walking) is not _gate_of(elsewhere), (
+                "two sources sharing one gate is a limiter that halves itself per source"
+            )
+        finally:
+            await walking.aclose()
+            await watching.aclose()
+            await elsewhere.aclose()
+    finally:
+        await engine.dispose()
