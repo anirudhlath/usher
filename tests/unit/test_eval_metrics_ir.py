@@ -122,47 +122,125 @@ def test_two_rankings_for_one_query_are_refused_rather_than_overwriting() -> Non
         score(_RELEVANT, (*_RANKINGS, Ranking("q1", ())), ["recall@5"])
 
 
-def test_a_document_id_repeated_inside_one_ranking_is_scored_by_its_worst_position() -> None:
-    """The unguarded neighbour of the case above, pinned as a **description**
-    rather than as a design.
+def test_a_document_id_repeated_inside_one_ranking_is_refused_at_construction() -> None:
+    """The fourth refusal, and the only one raised by a **DTO** rather than by
+    `score`.
 
-    The guard above refuses duplicate *query* ids across rankings. Duplicate
-    *document* ids inside one ranking's `ranked_ids` are not refused, and they
-    are not inert: `score` builds its run as a descending-score dict
-    comprehension, so a repeated id's **last** write wins and the document is
-    scored by its **worst** position. `("t1", "a", "t1")` becomes
-    `{"t1": 1.0, "a": 2.0}` -- the document listed first is ranked second.
+    It was pinned as a *description* until 2026-08-19 -- the demotion below was
+    this function's measured behaviour and nothing refused it -- and the case
+    below is what that description has become. `Ranking.__post_init__` now
+    refuses it, following `SearchRequest.__post_init__`'s precedent one port
+    over: a DTO buildable in a state no implementation can serve pushes the
+    failure onto whoever notices first, and here that was nobody.
+
+    Three things asserted rather than one, because *that it raised* is the
+    weakest possible check on a refusal and it is the one everybody writes:
+
+    * **`EvalRefused`, not `ValueError`.** It is the same event as `score`'s
+      three guards -- a harness invariant violated -- so it stays in one
+      taxonomy and `runner.py` keeps a single `except`. A bare `ValueError`
+      would be caught by nothing that catches its siblings.
+    * **The message names the query and the offending id**, because a traceback
+      has to point at the surface with the dedupe bug rather than at the
+      scorer. `pytest.raises(EvalRefused)` alone is satisfied by a message
+      naming neither.
+    * **The refusal is at construction, not at scoring.** The `with` block
+      wraps `Ranking(...)` and nothing else, so a guard moved into `score`
+      would fail here -- which matters because `score`'s duplicate-*query*-id
+      guard stays exactly where it is. The two are different events (the
+      collection, versus one ranking's contents) and merging them blurs both.
+    """
+    with pytest.raises(EvalRefused) as caught:
+        Ranking("q1", ("t1", "a", "t1"))
+
+    assert "q1" in str(caught.value), (
+        f"the refusal names no query, so a traceback cannot say which surface "
+        f"produced it: {caught.value}"
+    )
+    assert "t1" in str(caught.value), (
+        f"the refusal names no repeated id, so a caller with a long ranking "
+        f"has nothing to grep for: {caught.value}"
+    )
+
+    # The control that says the guard is about repetition and not about
+    # `ranked_ids` at all: the same length, the same ids minus the repeat.
+    assert Ranking("q1", ("t1", "a", "b")).ranked_ids == ("t1", "a", "b")
+
+
+def test_the_demotion_the_guard_prevents_is_still_reachable_with_the_guard_suspended() -> None:
+    """The evidence for the refusal above, kept rather than deleted with the
+    behaviour it describes.
+
+    A guard is only demonstrably load-bearing where something suspends it --
+    the reason this repository's `llm_calls` CHECK is proved by
+    `model_construct` cases rather than by ordinary ones. `_unguarded` is that
+    suspension: `Ranking.__new__` plus `object.__setattr__` skips
+    `__post_init__` on a frozen, slotted dataclass, so the scoring path the
+    guard defends is still reachable and still measurable.
+
+    `score` builds its run as a descending-score dict comprehension in rank
+    order, so a repeated id's **last** write wins and the document is scored by
+    its **worst** position: `("t1", "a", "t1")` becomes `{"t1": 1.0, "a": 2.0}`
+    and the document listed first is ranked second.
+
+    **Every arm carries its own duplicate-free control**, and they are the
+    point rather than padding: without them each assertion is satisfied by a
+    `score` that mishandles the *length* of the ranking, or the metric, or the
+    single-query shape. The pairs differ in exactly one position, which is why
+    both arms go through `_unguarded` -- routing the control through the real
+    constructor would make each pair differ in two things at once.
+
+    The third pair is the damage rather than the mechanism, and it is what
+    bought the guard. Six other documents and one repeat of the right answer at
+    the end puts the relevant title at rank 7 of 7, and `recall@5` -- the gate's
+    own hit rate, the number E1 exists to compare against 2026-08-03's -- reads
+    **0.0** for a ranking that opened with the correct answer. It is a total
+    miss reported for a system that found the title first, so the error
+    *depresses* the harness's own headline.
+
+    Note the second pair: the repeat *raises* the score, because what gets
+    demoted is an irrelevant document. So this is not "duplicates lower the
+    number"; it is "a repeat is scored by its worst position", and only a pair
+    that moves the number in both directions says so. Over 200 randomised
+    trials permitting duplicates (`random.Random(20260819)`, lists of 3-10
+    drawn with replacement from 12 documents, each against its own
+    first-occurrence-wins control over nine metrics) **79 differed**.
 
     Measured 2026-08-19, which also refuted this module's own claim that no
     assertion here could tell a descending score from a constant one: a
     constant score answers **1.0** to the first arm's 0.5 and **0.5** to the
     second's 1.0, because a constant score cannot be overwritten into a
-    different order. On duplicate-free input the two really are
-    indistinguishable, over 400 randomised trials across nine metrics.
-
-    **Every arm carries its own duplicate-free control**, and they are the
-    point rather than padding: without them each assertion is satisfied by a
-    `score` that mishandles the *length* of the ranking, or the metric, or the
-    single-query shape. The pairs differ in exactly one position.
-
-    The third pair is the damage rather than the mechanism. Six other documents
-    and one repeat of the right answer at the end puts the relevant title at
-    rank 7 of 7, and `recall@5` -- the gate's own hit rate, the number E1 exists
-    to compare against 2026-08-03's -- reads **0.0** for a ranking that opened
-    with the correct answer.
-
-    Note the second pair: the repeat *raises* the score, because what gets
-    demoted is an irrelevant document. So this is not "duplicates lower the
-    number"; it is "a repeat is scored by its worst position", and only a pair
-    that moves the number in both directions says so.
+    different order. That refutation is now historical -- the guard makes every
+    input `score` can be *handed* duplicate-free, so through the public path the
+    two are indistinguishable again (400 randomised duplicate-free trials across
+    nine metrics, zero differing). The **ascending** spelling, which is the
+    defect an author actually writes, is still separated at MRR 0.233.
     """
     one = {"q1": "t1"}
 
+    def unguarded(ranked: tuple[str, ...]) -> Ranking:
+        raw = Ranking.__new__(Ranking)
+        object.__setattr__(raw, "query_id", "q1")
+        object.__setattr__(raw, "ranked_ids", ranked)
+        return raw
+
+    # The premise, and it is what makes the numbers below statements about
+    # `score` rather than about the bypass. Planted and watched to fail on its
+    # own line, per the standing rule that a guard nothing can falsify is a
+    # deleted guard: `ranked_ids=ranked[::-1]` inside the helper fails here
+    # rather than four assertions later.
+    assert unguarded(("t1", "a", "b")) == Ranking("q1", ("t1", "a", "b")), (
+        "the premise: on input the guard permits, the bypass and the "
+        "constructor build the same object. Without it a helper that dropped, "
+        "reordered or re-typed `ranked_ids` would produce every number below "
+        "for a reason that has nothing to do with the demotion"
+    )
+
     def mrr(ranked: tuple[str, ...]) -> float:
-        return score(one, (Ranking("q1", ranked),), ["mrr"])["mrr"]
+        return score(one, (unguarded(ranked),), ["mrr"])["mrr"]
 
     def recall(ranked: tuple[str, ...]) -> float:
-        return score(one, (Ranking("q1", ranked),), ["recall@5"])["recall@5"]
+        return score(one, (unguarded(ranked),), ["recall@5"])["recall@5"]
 
     assert mrr(("t1", "a", "b")) == 1.0
     assert mrr(("t1", "a", "t1")) == 0.5

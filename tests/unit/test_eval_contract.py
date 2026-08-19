@@ -99,6 +99,24 @@ def test_the_eval_package_is_named_by_an_import_contract() -> None:
     so the two agree by construction instead of by someone remembering. A
     hand-written subset -- four layers checked in a loop, as this case began --
     passes just as happily against a list missing five.
+
+    **`allow_indirect_imports` is asserted here too, and it is the same kind of
+    claim: the configuration *is* the contract.** Measured 2026-08-19 -- with
+    the flag deleted and the `usher eval` subcommand planted (a used,
+    ruff-clean `from usher.eval.metrics import ir` in `usher/cli.py`), this
+    contract reports **11 kept, 1 broken** on
+    `usher.__main__ -> usher.cli -> usher.eval.metrics.ir`, because a
+    `forbidden` contract reports indirect chains by default and the container
+    entrypoint imports the CLI. So the `usher.cli` exemption does not hold for
+    the one case it exists for, and the flag is what makes it hold.
+
+    **The assertion is here because the repair somebody will reach for is the
+    wrong one.** The red names `usher.__main__`, so the obvious fix is to drop
+    it from `source_modules` -- which unpicks the measured hole recorded above
+    (a used `from usher.eval import goldens` in `__main__.py` reported *11
+    kept, 0 broken* while unlisted) and then fails the set equality below,
+    pointing the reader further from the repair. A one-token deletion that
+    re-arms a trap is exactly the shape a configuration test exists for.
     """
     naming = [one for one in _contracts() if "usher.eval" in one.get("forbidden_modules", [])]
     assert len(naming) == 1, (
@@ -127,6 +145,16 @@ def test_the_eval_package_is_named_by_an_import_contract() -> None:
     )
     assert "usher.cli" not in contract["source_modules"], (
         "usher.cli is the eval package's composition root and must stay exempt"
+    )
+    assert contract.get("allow_indirect_imports") is True, (
+        "without this the contract breaks on usher.__main__ -> usher.cli -> "
+        "usher.eval the day `usher eval` lands, which is the subcommand the "
+        "usher.cli exemption exists for -- and the repair the red invites is "
+        "to delete usher.__main__ from source_modules, which reopens a "
+        "measured hole. Every *direct* import of usher.eval is still caught in "
+        "every source listed; what the flag gives up is a chain through "
+        "usher.cli, which the fifth contract still reports for every source "
+        "but usher.__main__"
     )
 
     assert set(contract["source_modules"]) == walked - _EXEMPT - _THE_PACKAGE_ITSELF, (
