@@ -1362,3 +1362,144 @@ person fails to find it. Whoever takes it should note that it also makes the
 model swap a *third* cause of neighbour staleness in ADR-0020's terms, beside
 the blend change (closed) and *some other title was embedded since* (still
 undecidable per row).
+
+## RRF's absent-lane `COALESCE` costs the typed title its own top row, and the bar written to refute it CONFIRMED it (2026-08-19, issue #21)
+
+**Issue #21 is CONFIRMED and not refuted, by a bar written to be capable of
+refuting it.** The bar is `/var/tmp/usher-i21-bar/BAR.md`,
+`sha256 0687983a9ec4d41f275c7b6b273b29d734ab44e5eef51f269654631bf348bc62`,
+written 2026-08-19T01:52:51-05:00 — **before the first query was issued** — and
+its digest was re-read at run time and matched. Harness
+`scripts/measure_fusion_coverage_bias.py`; frozen results
+`/var/tmp/usher-i21-bar/run-full.json`
+(`sha256 e4323414ca5fd3bc8c1c317af75ca8b4a189a2726e6f733c366d35939414a3e4`).
+Live catalog: **1,272,866 titles, 132,409 `title_embeddings`**, alembic `m09f`,
+`openai:BAAI/bge-m3`, shipped `rrf_k = 60`, `limit = 20`, `lane_limit = 100`.
+`skeleton` and *has no `title_embeddings` row* were **verified to coincide
+exactly** (0 skeletons carry a vector) rather than assumed, so the frame is the
+population the issue names.
+
+**The sample.** Exact-name known-item queries, deterministic draw
+(`ORDER BY md5(id::text || '20260819-i21')`). **Stratum A, n = 1,000**, uniform
+over the 1,140,433-row skeleton frame — the honest population and the one the
+bars score. **Stratum B, n = 300**, uniform over the 98,467 skeletons whose
+`lower(name)` is also borne by an embedded title — the adversarial stratum. Two
+arms per query on one query vector: the **index arm** (`PostgresSearchIndex`
+alone, isolating `_FUSED`) and the **service arm** (through
+`SearchService._blend`, i.e. what a viewer sees). Denominators are stated on
+every number; **999 of 1,000 stratum-A names produce a non-empty
+`websearch_to_tsquery`**, so the answerable subset moves nothing.
+
+| stratum A, n = 1,000 | recall@1 `full_text` | recall@1 `fused` | delta |
+|---|---|---|---|
+| index arm (`_FUSED` alone) | **72.2%** | **20.1%** | **−52.1 points** |
+| service arm (through `_blend`) | **71.8%** | **54.8%** | **−17.0 points** |
+| index arm, *name*-level rank 1 | 79.4% | 26.5% | −52.9 points |
+| service arm, *name*-level rank 1 | 78.5% | 61.9% | −16.6 points |
+
+**Bar 1 fails by 51 points against a 1-point tolerance. Bar 2 fails at
+`p = 1.5e-157`** (index) and `2.9e-35` (service), and the discordant pairs are
+one-sided to a degree no sampling story survives: **521 queries lose a rank-1
+`full_text` hit to an *embedded* row under `fused`, 0 lose one to another
+skeleton, and 0 queries go the other way** — in 1,000 tries the semantic lane
+never once rescued a query the lexical lane got wrong. Bar 3 fails too (stratum
+B, −5.0 points index / −7.0 service, `p = 3.1e-05` / `1.0e-05`). **The power
+control is satisfied and it is what licenses reading a null as a refutation had
+one appeared**: all 300 stratum-B fused results contain at least one embedded
+title, against a floor of 100.
+
+**The displacement is the issue's own arithmetic, to the row. 521 of 521
+index-arm displacements had the typed title as the *uncapped* #1 lexical
+match** — the `1/61` ceiling in the issue's table, exactly — and **88.5% landed
+it at fused rank 2**, one place below the enriched near-match. `Grandma's Tea`
+→ *Grandma's Boy*; `The 17 Year Feast` → *17 Again*; `Choinka strachu` →
+*Curse of Chucky*; `Dendy Memories` → *Dear Wendy*; `Jallad No. 1` → *Jallaad*.
+The predicted failure — *"a viewer types an obscure title exactly, and an
+enriched near-match takes the top row"* — is the observed one.
+
+**Miss split, in the recorded idiom** (below the floor / truncated / dropped /
+out-ranked, against the shipped suggest row's `82.8 / 0.0 / 0.0 / 17.2`). The
+search path's analogues are stage for stage: *below the floor* = no
+`search_document @@ websearch_to_tsquery` match, so the row is in no lane at all
+(a skeleton has no vector, so the lexical predicate is its only candidacy);
+*truncated* = matched, but its uncapped lexical rank exceeds the mode's cap
+(20 for `full_text`, `lane_limit = 100` for `fused`); *dropped* = inside the cap
+and absent from the answer, i.e. **the fusion lost it**; *out-ranked* =
+returned, below rank 1.
+
+| stratum A, service arm | below the floor | truncated | dropped | out-ranked | misses |
+|---|---|---|---|---|---|
+| `full_text` | 8.2 | 28.4 | **0.0** | 63.5 | 282 |
+| `fused` | 5.1 | 9.7 | **14.8** | 70.4 | 452 |
+
+**`dropped` is 0.0 for `full_text` structurally and 14.8% for `fused`, and that
+column is the finding.** Every one of those is a title the lexical lane had
+inside its 100-row window and the fusion pushed out of a 20-row answer. It is
+the first non-zero `dropped` this file has ever recorded — the suggest path's
+`levenshtein` re-rank scores 0.0% in *every* configuration measured. **The
+competitor stratification is equally one-sided**: of 452 service-arm fused
+misses, **402 were out-ranked by an embedded row and 50 by a skeleton**; the
+`full_text` arm's 282 misses split 68 / 192 the other way.
+
+**`coverage_t` is ~0.10 and the issue's null holds — which makes the bonus
+worse, not better.** `semantic_coverage`, which the CLI prints, **is not this
+quantity**: `_COVERAGE` counts `embedded / total` over
+`enrichment_state <> 'skeleton'`, the enriched tier's own embedding
+completeness, and it reads **1.000** on every query here while the number that
+matters is a tenth of that. Four estimators, each with its denominator:
+**uniform 132,409/1,272,866 = 0.1040**; **`vote_count`-weighted
+26,382,667/246,921,814 = 0.1068** (a named *proxy* for demand — `search_queries`
+has no typed workload to average over); **exact-name relevant sets over stratum
+A, pooled 216/2,359 = 0.0916**, or 216/1,359 = 0.1589 with the drawn target
+excluded from its own relevant set, and **791 of 1,000 queries have no relevant
+document in the enriched tier at all**; and of the embedded relevant documents
+that exist, the lexical lane already finds **44.9% (97/216)** in its own top 20.
+
+⚠️ **REFUTED, and it is the issue's own supporting claim: enrichment on this
+catalog is not a popularity proxy — it is anti-correlated with votes.** #21
+argues the bias is *"a second popularity bias, stacked on the declared one"*
+because the enriched tier was selected by vote count. Measured: embedded titles
+average **199** votes against **541** for the rest, median **15** against
+**29**, and by vote decile the coverage curve runs **23.9% in the top decile,
+14.2% in the middle, 72.3% in the bottom**. So lane membership is not a proxy
+for anything a viewer wants; it is an arbitrary tenth of the catalog carrying a
+rank bonus. That makes the defect *worse* than #21 states it, not milder.
+
+**The trade, both signs, because the effect has both.** *Not pre-registered* —
+stratum C was drawn after the verdict above was computed and frozen, enters no
+bar, and exists because half a trade is not a number. **Stratum C, n = 300,
+drawn from the embedded tier**: `fused` **beats** `full_text` 68.3% against
+59.0% (service arm), +9.3 points, 49 queries gained against 21 lost. The same
+`COALESCE` that costs 17 points when the typed title is a skeleton buys 9 when
+it is enriched — and lane membership carries no information about which case a
+query is. At the catalog's own 89.6/10.4 composition that is
+`0.896 × −17.0 + 0.104 × +9.3` = **−14.3 points net** on known-item lookup.
+This is also why a single spot check proves nothing about the sign: `The Matrix`
+under `fused` correctly promotes the 1999 film over three 2018 video essays,
+and it is the 10.4% case.
+
+⚠️ **The fused ordering is limit-dependent, and a wider request can give a worse
+first row.** `lane_limit = limit * _LANE_MULTIPLIER`, so the semantic candidate
+pool grows with the request. `usher search "The Lost Pass" --mode fused` returns
+the typed title at **rank 1 at `--limit 3` and rank 2 at `--limit 20`**, behind
+*The Forward Pass* (1929). Any spot check of this defect must state its limit;
+`--limit 3` hides it.
+
+**Two controls, because a harness that agrees with nothing is not evidence.**
+(1) The shipped CLI reproduces the service arm at the same limit — `Choinka
+strachu` and `Jallad No. 1` are displaced through `python -m usher search` at
+`--limit 20` exactly as recorded. (2) **The harness wrote nothing, proven by
+arithmetic rather than asserted**: `search_queries` went 47 → 67 across the
+whole session and 20 is exactly the number of *CLI control* invocations, so the
+3,200 index-and-service searches the harness itself issued (it passes
+`user_id=None`) left zero rows.
+
+**Not settled by this run, named rather than implied.** Only exact-name
+known-item queries were scored — mood, discovery and partial-title queries are
+untouched, and the semantic lane is likelier to earn its keep there. Only
+recall@1; nDCG and recall@5 are unmeasured. `hnsw.iterative_scan`'s interaction
+with the bias is unmeasured, so the semantic lane's row count remains
+configuration-dependent. And **no fix is measured here**: convex fusion is
+#21's proposal, it replaces a parameter-free rule with one that must be tuned,
+and this run establishes only that the change is warranted — not what its
+weights should be.
