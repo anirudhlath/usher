@@ -268,6 +268,14 @@ class TestPostgresSearchIndex(SearchIndexContract):
 
     @pytest_asyncio.fixture
     async def index(self, session: AsyncSession) -> AsyncIterator[PostgresSearchIndex]:
+        # **100 is no longer `Settings.search_hnsw_ef_search`, which moved to
+        # 200 on 2026-08-19, and the divergence is stated rather than left to
+        # be inferred** -- the same shape as `_TRIGRAM_THRESHOLD` one module
+        # over. Nothing here can tell the two apart: the fixture holds 26
+        # embedded rows, and any `ef_search` at or above the row count makes
+        # this an exact scan wearing an index's name. The value that *is*
+        # load-bearing in this file is `_EF_SEARCH = 40`, pgvector's own
+        # default, which the iterative-scan cases are stated at.
         yield PostgresSearchIndex(session, ef_search=100, rrf_k=_RRF_K)
 
     @pytest.fixture(autouse=True)

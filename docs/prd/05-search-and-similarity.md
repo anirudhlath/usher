@@ -566,6 +566,22 @@ a 0.4751 cross-title mean.
 - `hnsw.iterative_scan = relaxed_order` **must be set explicitly** — it is off
   by default, and without it filtered vector queries suffer severe recall
   collapse.
+- **`hnsw.ef_search` is 200, and 2026-08-19 is the first time this project
+  priced it against a real index.** Over 132,409 real 1024-lane vectors and 12
+  typed plot queries, recall@10 against an exact scan of the whole embedded
+  population is **0.858 at the previous default of 100 and 0.917 at 200**, for
+  a p50 of 4.77 ms against 10.59 ms and a p95 of 7.30 against 16.18 — beside a
+  recorded query embed of p50 5.7 ms. It keeps buying recall (0.967 at 400,
+  0.992 at 1000) and stops being affordable: 400 costs a p50 of 20.13 ms. The
+  curve is **monotone at every one of the 12 queries**, which is what the
+  change rests on rather than the single missing film that prompted it. Under
+  a 4.8%-selectivity genre filter the same move buys 0.783 → 0.808 only, so
+  **this is an unfiltered-path fix**; on the filtered path the lever is
+  over-fetch and re-rank (0.783 → 0.892 at `ef_search` 100, fetching 5× and
+  cutting back), which is measured and not built. The full evidence, including
+  the two controls that say why an "exact re-score" of an over-fetched
+  candidate set is arithmetically a no-op, is in
+  `.claude/rules/search-and-embeddings.md`.
 - Owned titles skip ANN entirely; exact brute-force cosine is faster and exact
   at that scale. **The claim above that this is "sub-millisecond" is true in
   numpy and false in Postgres**: measured at 10k vectors, 1.820 ms in
