@@ -14,6 +14,7 @@ change moved recall@5 from .82 to .79.
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -92,22 +93,29 @@ async def ensure_schema(session: AsyncSession) -> None:
     await driver.execute(_SCHEMA_SQL.read_text(encoding="utf-8"))
 
 
-async def write_postgres(session: AsyncSession, record: RunRecord) -> uuid.UUID:
+async def write_postgres(
+    session: AsyncSession, record: RunRecord, *, started_at: datetime
+) -> uuid.UUID:
     """One run row and its score rows, in the caller's transaction.
 
     The caller commits. A ledger that committed on its own would make a run
     that failed *after* scoring leave a half-record, and a half-record in a
     trend table is worse than no record: it plots.
+
+    `started_at` is bound rather than left to the column's `DEFAULT now()`,
+    which fires at write time -- minutes after a real run began. `finished_at`
+    stays `now()`, so the row's own duration is `finished_at - started_at`
+    rather than a near-zero delta between two write-time clock reads.
     """
     run_id = new_id()
     await session.execute(
         text(
             """
             INSERT INTO eval.runs (
-                id, finished_at, surface, mode, verdict, reason,
+                id, started_at, finished_at, surface, mode, verdict, reason,
                 inputs_digest, inputs, provenance, bars_sha256, case_count
             ) VALUES (
-                :id, now(), :surface, :mode, :verdict, :reason,
+                :id, :started_at, now(), :surface, :mode, :verdict, :reason,
                 :inputs_digest, CAST(:inputs AS jsonb), CAST(:provenance AS jsonb),
                 :bars_sha256, :case_count
             )
@@ -115,6 +123,7 @@ async def write_postgres(session: AsyncSession, record: RunRecord) -> uuid.UUID:
         ),
         {
             "id": run_id,
+            "started_at": started_at,
             "surface": record.surface,
             "mode": record.mode,
             "verdict": record.verdict,

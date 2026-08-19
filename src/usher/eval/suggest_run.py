@@ -60,6 +60,10 @@ async def run_suggest(
     catalog is `skipped-with-reason`, never a run of zeros, because a zero and
     an absence are different facts and only one of them is a regression.
     """
+    # Stamped before the preflight, so a recorded run's `started_at` reflects
+    # the true beginning rather than the finish of a minutes-long tier loop --
+    # and an early SKIPPED/BASELINE_INVALID return costs nothing.
+    started_at = datetime.now(UTC)
     titles = (await session.execute(text("SELECT count(*) FROM titles"))).scalar_one()
     if not titles:
         return Report(Verdict.SKIPPED, ("suggest: skipped -- the catalog is empty",))
@@ -73,7 +77,6 @@ async def run_suggest(
 
     frame = await read_frame(session)
     lines: list[str] = []
-    comparable = True
     if full:
         try:
             check_frame(frame)
@@ -82,8 +85,6 @@ async def run_suggest(
             # comparable with the baseline, and blaming a diff for it is how
             # the CI job gets disabled.
             return Report(Verdict.BASELINE_INVALID, (f"suggest: baseline-invalid -- {refusal}",))
-    else:
-        comparable = frame.shared_lower_names > 0
 
     cases = build_typo_cases(pools, seed=seed)
     if not full:
@@ -114,7 +115,6 @@ async def run_suggest(
         lines.append("  (quick: no bar enforced, nothing recorded -- use --full)")
         return Report(verdict, tuple(lines))
 
-    started_at = datetime.now(UTC).isoformat()
     # Named `run_record` rather than `record`: the scoring loop above binds
     # `record` to a `ScoreRecord`, and reusing it for the `RunRecord` is an
     # incompatible reassignment mypy strict refuses.
@@ -122,15 +122,15 @@ async def run_suggest(
         surface="suggest",
         mode="full",
         verdict=str(verdict),
-        reason=None if comparable else "frame not checked",
+        reason=None,  # a recorded full run passed check_frame by construction; nothing else records
         fingerprint=fingerprint,
         bars_sha256=bars.sha256,
         case_count=len(cases),
         scores=tuple(records),
     )
     await ensure_schema(session)
-    await write_postgres(session, run_record)
+    await write_postgres(session, run_record, started_at=started_at)
     await session.commit()
-    append_jsonl(LEDGER_PATH, run_record, started_at=started_at)
+    append_jsonl(LEDGER_PATH, run_record, started_at=started_at.isoformat())
     lines.append(f"  recorded: eval.runs + {LEDGER_PATH.relative_to(_REPO)}")
     return Report(verdict, tuple(lines))
