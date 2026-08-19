@@ -973,7 +973,20 @@ async def test_the_first_gap_after_an_outage_is_never_skipped(lane: _Lane) -> No
     """The other half of the rate limit, and the half a lone counter
     assertion cannot see: `gate.at` is `None` until one has run, so the
     expensive walk after a real outage happens however recently the clock
-    says something did."""
+    says something did.
+
+    **Which is also the half that makes `push_gap_min_interval_seconds` a
+    correct guard against the wrong hazard**, and this case is where a
+    reader will look for the other one. It bounds *cadence* -- how often a
+    flapping socket may trigger a delta -- and says nothing about how large
+    any one delta is. The first gap after a fresh deployment is never
+    skipped by construction, and against a source with no cursor that first
+    gap is a walk of the entire library. Bounding the *size* is not
+    expressible here at all: this supervisor has no repository and cannot
+    know whether a cursor exists. `LaneSupervisor._close_gap` is where that
+    is refused, and `tests/unit/test_api_lanes.py::
+    test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator_is_told`
+    is the case."""
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
     supervisor = _supervisor(
         lane, clock=lambda: 0.0, max_consecutive_failures=1, gap_min_interval_seconds=1e9

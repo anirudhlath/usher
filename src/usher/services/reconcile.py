@@ -185,27 +185,45 @@ class ReconcileService:
         )
         return run
 
-    async def _cursor_for(self, source: Source, kind: SyncRunKind) -> AwareDatetime | None:
-        """`None` for a full walk; the newest completed item-lane run's start
-        instant for a delta.
-
-        A full walk must ignore every cursor: one that inherited a `since`
-        would return only what changed and then sweep, which is the exact
-        combination ADR-0015 exists to make unreachable.
+    async def delta_cursor(self, source: Source) -> AwareDatetime | None:
+        """The instant a delta walk of `source` would resume from, or `None`
+        when this source has no completed item-lane run to resume from.
 
         A delta reads *both* item lanes and takes the later. Only completed
         runs count -- resuming from a run that failed halfway skips
         everything it never reached, and does it silently -- which is why
         `latest_completed_cursor` is the method rather than "the newest run".
+
+        **Public because `None` is a question this service must not answer,
+        and its two callers answer it differently.** A delta with no cursor
+        walks `list_items(since=None)`, i.e. the whole library, and whether
+        that is right depends entirely on who asked. `usher sync --kind
+        delta` against a fresh source is an operator asking for exactly that
+        and gets it -- `reconcile` below passes the `None` straight through.
+        `LaneSupervisor._close_gap` refuses it, because a push lane starts
+        itself for every enabled source and nobody typed anything. Deciding
+        here would take the operator's command away to protect the lane; the
+        refusal therefore lives at the caller that needs it, and this method
+        is what stops the two of them holding two different ideas of what a
+        delta's cursor is.
         """
-        if kind is not SyncRunKind.DELTA:
-            return None
         cursors = [
             cursor
             for lane in _ITEM_LANES
             if (cursor := await self._runs.latest_completed_cursor(source.id, lane)) is not None
         ]
         return max(cursors) if cursors else None
+
+    async def _cursor_for(self, source: Source, kind: SyncRunKind) -> AwareDatetime | None:
+        """`None` for a full walk; `delta_cursor` for a delta.
+
+        A full walk must ignore every cursor: one that inherited a `since`
+        would return only what changed and then sweep, which is the exact
+        combination ADR-0015 exists to make unreachable.
+        """
+        if kind is not SyncRunKind.DELTA:
+            return None
+        return await self.delta_cursor(source)
 
     async def _walk(
         self,

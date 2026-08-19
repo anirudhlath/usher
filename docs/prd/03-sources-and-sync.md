@@ -358,7 +358,7 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 | Lane | Trigger | Work |
 |---|---|---|
 | **Push** | WebSocket event | **Apply it inline when it is small; defer to a delta when it is large.** A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk instead, because a request per item against a 1,126,789-item library is a design defect rather than a slow path |
-| **Reconnect delta** | Socket re-established | Items changed since the last cursor. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds |
+| **Reconnect delta** | Socket re-established | Items changed since the last cursor — and **refused outright when there is no cursor**, because a source with no completed item-lane run has none and the "delta" is then a walk of the whole library that nobody asked for (M10 S5; the lane starts itself for every enabled source, so on a fresh deployment that walk is the first thing the server does). The lane logs a WARNING naming the source and `usher sync --kind full`, and keeps the socket up. `usher sync --kind delta` on such a source still walks: the refusal is the *lane's*, not `ReconcileService`'s. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds — but that limit is a bound on *cadence* only, and the first gap after a restart is never skipped |
 | **Full reconcile** | Nightly, or an operator's `POST /admin/sources/{id}/sync` (M9) | Walk the source; upsert everything; mark unseen items `available = false` |
 
 Polling is the backstop, not the design.
@@ -380,7 +380,19 @@ the design is safe against it by construction rather than by coincidence.**
 The Reconnect-delta row above — `LaneSupervisor._close_gap` — runs the
 identical pair (`reconcile.reconcile(source, DELTA, adapter)`, then
 `watch.sync(...)`) on its own adapter whenever a source's push socket comes
-back, entirely independently of the job queue; and `usher sync` has always
+back, entirely independently of the job queue — **except when that source has
+no cursor, which is the one thing it will not do.** It is the only caller of
+`reconcile()` that no operator triggered: a push lane is started for every
+enabled source by the refresher before its first sleep, so a source that has
+never completed an item-lane run would otherwise get a full walk under a
+delta's name as the first act of a freshly started server. The gap-closer
+reads `ReconcileService.delta_cursor(source)` and returns on `None`, logging
+one WARNING that names the source and the command that fixes it. The socket
+stays up and the push lane keeps delivering, which is the point of the lane;
+the walk is the operator's to schedule. **The refusal is deliberately not in
+`ReconcileService`**, because `usher sync --kind delta` against a fresh source
+is an operator asking for precisely that walk, and it still gets one. And
+`usher sync` has always
 been a third way to trigger the same pair, from a second process. So a
 triggered `sync` job can genuinely run concurrently with the push lane's own
 gap-closer, or with an operator's cron — this route adds a caller, not a new

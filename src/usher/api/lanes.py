@@ -405,8 +405,54 @@ class LaneSupervisor:
         order: `WatchStateSyncService` resolves each state against a
         `MediaItem`, so a watch walk that ran first would count every state
         unmatched and merge nothing.
+
+        **A delta with no cursor is not a delta, and this is where it is
+        refused.** `ReconcileService.delta_cursor` answers `None` for a
+        source with no completed item-lane run, and a delta started from it
+        walks `list_items(since=None)` -- the whole library, measured at
+        1,134,919 items over 5,675 pages on the one household this project
+        has, i.e. 7.3-11.8 hours at that run's 6.04 s pooled mean per page
+        (M10 S1, 2026-08-15; `.claude/rules/emby-push-and-ingest.md`).
+
+        **This is the one caller of `reconcile` nobody typed a command
+        for**, which is the whole reason the refusal is here.
+        `_start_lane` runs for every enabled source before the refresher's
+        first sleep and `PushSupervisor.run` closes the gap immediately
+        after every successful connection, so on a fresh deployment the
+        first thing `uvicorn usher.api.app:create_app --factory` does with
+        default settings is this walk, against every source at once.
+        `push_gap_min_interval_seconds` bounds *cadence* and nothing else --
+        `_Gate.at` is `None` until a gap has run, so the first one is never
+        skipped (`services/push.py`).
+
+        **`usher sync --kind delta` on a fresh source keeps working**, and
+        that is not an accident of where the check sits: an operator asking
+        for a walk of everything is asking for exactly this, so
+        `ReconcileService` is deliberately left able to do it.
+
+        Refusing returns rather than raising and leaves the socket up: the
+        push lane goes on delivering, which is the point of the lane. What
+        the operator has to run is in the line, because a refusal that does
+        not say what to do is a dead end.
         """
         async with self._work() as pipeline:
+            # Bound rather than tested inline: the value is what a *bound* on
+            # a delta that does have a cursor would be computed from, and
+            # there is no second read of `sync_runs` in that shape.
+            cursor = await pipeline.reconcile.delta_cursor(source)
+            if cursor is None:
+                # The source's **name**, never its base URL and never
+                # anything from its credential row -- PRD 08's
+                # credentials-are-never-logged rule, and
+                # `ReconcileService`'s own failure line is the local
+                # precedent for spelling it this way.
+                logger.warning(
+                    "not closing {source}'s gap: it has no completed item-lane sync run, so a "
+                    "delta has no cursor and would walk the whole library. Run "
+                    "`usher sync --kind full` for it once; push stays connected meanwhile",
+                    source=source.name,
+                )
+                return
             await pipeline.reconcile.reconcile(source, SyncRunKind.DELTA, adapter)
             await pipeline.watch.sync(source, adapter, user_id=await self._user_id())
 
