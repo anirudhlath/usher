@@ -6439,3 +6439,150 @@ empty, all three planted files `diff`- and `sha256`-verified against
 — the gate run carries **no** deselections, and 5,354 is exactly the sweep
 selection's 5,348 plus the six node ids it deselected, which is the arithmetic
 that says the deselection cost the round nothing but the flake.
+
+## M10 Task S7 — four constants nothing pinned, and a weakening plant that broke the statement instead of weakening it (2026-08-19)
+
+**Two rounds. Round 1: 9 plants — 5 behavioural targets all KILLED, 1
+weakening plant KILLED against a SURVIVED prediction (**mis-spelled**, see
+below), 1 weakening plant KILLED as predicted, 2 equivalent-mutant controls
+SURVIVED. Round 2, after the re-spelling: 3 plants, **all three matching their
+pre-registered verdicts**, plus both controls measured against the four static
+gate steps. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0
+DID-NOT-RUN, 0 HUNG in either round.**
+
+Harness at `/var/tmp/m10-s7/sweep.py` and `sweep2.py`, **outside the working
+tree** for V1's reason. Plant list and expected verdicts at
+`/var/tmp/m10-s7/PLANTS.md`,
+`sha256 3c633551b4df7e17e921fc1e67468b217bbb68d32cffaef2a766e98538a95b9f`,
+written 16:01:08 before the first plant and **re-hashed against the file after
+both rounds** — the check S3's ledger failed. Tree committed at `22ff199`
+first, so `git status` is the verification: asserted clean before each round,
+asserted **non-empty while every plant was live**, and clean after every
+restore, with both mutated files `diff`-verified byte-identical to
+`git show "22ff199:<path>"` at the end.
+
+Defences: `PYTHONDONTWRITEBYTECODE=1`; `__pycache__` swept under **both**
+`src/` and `tests/` before every run; `compile()` as the dry run; an exact
+anchor count per hunk; the landing check spelled **byte equality with the
+intended mutant** (F3's repair — this round has multi-hunk *and* multi-file
+plants and a deletion, and B6's substring form is wrong for all three); **one
+`cp` backup per file taken before that file's first hunk** (S6's repair);
+every restore verified by content comparison against the committed blob rather
+than by the suite going green.
+
+**Selection: the whole suite minus six node ids**, named rather than silent —
+the five intermittent cases S5's entry lists plus the sixth from the same
+`test_adapters_search_postgres.py` family. Baseline **5,349 passed / 26
+skipped / 6 deselected in 195.86 s**, and 5,349 + 6 is exactly the gate run's
+5,355, which is the arithmetic that says the deselection cost the round nothing
+but the flake.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 `KIND_CONCURRENCY[MATCH]` 4 → 2 | KILLED | 1 |
+| P2 `[WATCH_HISTORY]` 4 → 2 | KILLED | 1 |
+| P3 `[WATCH_WRITEBACK]` 4 → 2 | KILLED | 1 |
+| P4 `[DERIVE]` 4 → 8 | KILLED | 1 |
+| P5 `[SYNC]` 1 → 2 | KILLED | 1 |
+| W2 the three-way `==` chain deleted **and** `[WATCH_HISTORY]` 4 → 2 | KILLED | 1 |
+| C1 `MATCH` and `WATCH_HISTORY` entries swapped in written order | SURVIVED, all 5 gate steps | — |
+| C2 one sentence of the `#:` comment above the table reworded | SURVIVED, all 5 gate steps | — |
+
+**Every one of the five targets fails exactly one case — the new pinning case —
+and that is the round's point rather than a thin result.** Before this task
+those five entries were pinned by **nothing**: `MATCH` set to 7 and `DERIVE` to
+9 passed all **4,119** unit cases, measured directly before the case was
+written. This is D4's `TICKET_TTL_SECONDS`, B9's `CAST_LIMIT` and M9 S7's
+`_WEIGHTS` a fourth time, in the weakest form the family has produced — not
+pinned by a derived assertion, **not pinned at all** — and the tell was the same
+as every prior instance: the neighbouring case
+`test_the_worker_concurrency_settings_have_the_measured_defaults` is *named* for
+measurements and pins four entries by value while asserting nothing whatever
+about the five the issue is actually about.
+
+### 🔴 The mis-spelled weakening plant, and why it is written up rather than replaced
+
+W1 was registered as *"the case's five literals replaced by reads of
+`KIND_CONCURRENCY` itself, **and** `MATCH` 4 → 7"*, expected **SURVIVED** — the
+whole claim being that a derived case cannot see a value change. It came back
+**KILLED**.
+
+The plant was wrong, not the claim. The "derived" spelling compared
+`WATCH_HISTORY`, `WATCH_WRITEBACK` and `DERIVE` **to `MATCH`**, so moving
+`MATCH` alone falsified three cross-entry comparisons and the case died at
+`4 == 7` — a failure with nothing to do with derivation. *A mutation must be
+the change the plan names, not a change that happens to break the statement*,
+verbatim, in a new position: previous instances of that rule in this file are
+about a plant that breaks a **statement** (a duplicate SQL `SET`, an untypable
+bind, a `NameError` in an `except`); this one breaks an **assertion the plant
+itself wrote**, which is a hazard unique to weakening plants, because a
+weakening plant edits the test and the source in one go and the two halves can
+contradict each other.
+
+**Round 2 re-spelled it three ways, and the correction turned one prediction
+into three questions worth more than the original.** Every entry's comparison
+made genuinely vacuous (each read compared to itself):
+
+| plant | verdict | what it says |
+|---|---|---|
+| W1a self-comparisons, the `==` chain **kept**, `MATCH` 4 → 7 | **KILLED** (predicted) | with the literals gone the three-way chain still catches a change to **one** of the three |
+| W1b self-comparisons, chain **removed**, `MATCH` 4 → 7 | **SURVIVED** (predicted) | the claim, confirmed: a fully derived case cannot see a value change |
+| W1c self-comparisons, chain kept, **all three** Emby kinds 4 → 7 | **SURVIVED** (predicted) | **the defect an author would actually ship** |
+
+**W1c is the one to carry.** The three Emby-facing kinds share one number
+because they make the same read against the same server, so anybody "tuning"
+them moves all three together — and against a case written without literals
+that change is **invisible**, chain and all, across 5,349 cases. The chain
+catches only the *inconsistent* edit; the literals are the only thing that
+catches the consistent one.
+
+**And W2 measures the chain from the other side: it is redundant.** With the
+chain deleted and `WATCH_HISTORY` moved to 2, the case still dies — on the
+literal above it. So the `==` chain catches nothing the five literals do not
+already catch, and it is kept for what it *says* (these three are one decision)
+rather than for what it catches. **The general form, which this file does not
+yet hold: when a case carries both literal and relational assertions over the
+same constants, the relational one is almost always documentation — measure it
+by deleting it beside a defect, and say which it is, because a reader pruning
+"redundant" assertions has no way to tell a redundant one from the only one
+with teeth.**
+
+### The controls
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `MATCH`/`WATCH_HISTORY` entries swapped in written order | PASS | PASS | PASS | PASS | PASS (5,349) |
+| C2 one sentence of the `#:` comment reworded | PASS | PASS | PASS | PASS | PASS (5,349) |
+
+C1's equivalence is a fact about the *code* rather than about what the tools
+look at: `KIND_CONCURRENCY` is a `MappingProxyType` over a dict literal with
+distinct independent keys, read only by `KIND_CONCURRENCY[kind]` and compared
+as a **set** (`set(KIND_CONCURRENCY) == set(JobKind)`), so insertion order is
+unreachable from any assertion — the `_CODE_FOR_STATUS` / `_PLAY_FAILURES` /
+`ARTWORK_FOR_HINT` precedent. It is deliberately **not** an `__all__` reorder,
+which `RUF022` rejects, and not a positional-argument reorder, which A5's entry
+is the reason for checking rather than assuming. C1 is the behaviour-adjacent
+control S5's round three argued for; C2 is the cheap round-level one kept
+beside it, and it was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/` — the scans it
+finds read `ports/`, `services/curation*`, `services/jobs.py`'s
+**`JobWorker.registered_kinds` docstring** (`test_composition.py`) and several
+`api/` modules, and a `#:` comment above a module constant is not a docstring,
+so it is outside every one of them.
+
+⚠️ **The two rounds' pytest verdicts were scored against the selection, and the
+four static steps were measured only for the controls.** That is the standing
+shape in this file and it is stated rather than implied: a target's verdict here
+says the *suite* caught it, and says nothing about the gate.
+
+### One plan-drift correction
+
+S7's acceptance says the new case *"at HEAD fails on the first entry, because
+nothing pins it — which is the point, and the red is the discovery rather than
+a regression."* **A case asserting `== 4` against a table that already holds 4
+cannot be red**, and this one was green the moment it was written. The red that
+the sentence is really about is the *plant*: `MATCH = 7`, `DERIVE = 9`, whole
+unit suite green, which is what demonstrates the absence of a pin. The
+discovery is real and the failing-test-first framing was not available for it —
+recorded here because the next task to inherit that sentence will otherwise try
+to make a tautology fail.
