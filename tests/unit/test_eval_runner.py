@@ -2,11 +2,17 @@
 
 import re
 import tomllib
+import uuid
 from pathlib import Path
 
 import pytest
 
+from usher.eval.bars import Judgement, load_bars
 from usher.eval.errors import EvalDependencyMissing, EvalRefused
+from usher.eval.goldens.suggest import TypoCase
+from usher.eval.metrics.ir import Ranking
+from usher.eval.runner import score_surface
+from usher.eval.surfaces.suggest import SurfaceRun
 
 # tests/unit/test_eval_runner.py -> tests/unit -> tests -> repo root. Same
 # derivation as tests/unit/test_eval_contract.py, which reads the same file
@@ -59,3 +65,64 @@ def test_a_refusal_message_survives_construction_and_stays_matchable() -> None:
     introduces a scoring-error type and has to catch the two separately."""
     with pytest.raises(EvalRefused, match="sampling frame"):
         raise EvalRefused("the sampling frame does not reproduce the gate's")
+
+
+_BARS = Path(__file__).resolve().parents[2] / "docs" / "evals" / "bars.toml"
+
+
+def _run(hit: bool) -> SurfaceRun:
+    case = TypoCase(
+        title_id=uuid.UUID(int=7),
+        name="Alien",
+        band="5-7",
+        typo_class="substitution",
+        probe="Alein",
+    )
+    found = (str(case.title_id),) if hit else ()
+    return SurfaceRun(
+        relevant={case.query_id: str(case.title_id)},
+        rankings=(Ranking(case.query_id, found),),
+        latencies_ms=(1.0,),
+        strata={case.query_id: ("all", "band=5-7", "typo_class=substitution")},
+    )
+
+
+def test_a_pending_bar_reports_the_number_and_does_not_gate() -> None:
+    """Spec 14: no bar exists for tier 2's overall recall, so the first run
+    reports it. A run that claimed PASS against a bar that does not exist has
+    claimed to face something it did not."""
+    scores = score_surface(_run(hit=True), tier="fuzzy", bars=load_bars(_BARS))
+    overall = next(s for s in scores if s.metric == "recall_at_5" and s.stratum == "all")
+    assert overall.judgement is Judgement.PENDING
+    assert overall.value == 1.0
+
+
+def test_a_window_bar_fails_a_value_outside_it() -> None:
+    """Tier 1's 1.9% is a window. This stub run scores 1.0, which is far
+    above it -- and 'a tier 1 that scores higher is not the index that was
+    measured' is exactly what the window says."""
+    scores = score_surface(_run(hit=True), tier="prefix", bars=load_bars(_BARS))
+    overall = next(s for s in scores if s.metric == "recall_at_5" and s.stratum == "all")
+    assert overall.judgement is Judgement.FAIL
+
+
+def test_every_stratum_the_run_produced_gets_a_score_row() -> None:
+    """A stratum silently absent from the ledger is a stratum nobody plots.
+    ADR-0002's 0.0% transposition finding is a stratum, not a headline."""
+    scores = score_surface(_run(hit=True), tier="fuzzy", bars=load_bars(_BARS))
+    strata = {one.stratum for one in scores if one.metric == "recall_at_5"}
+    assert strata == {"all", "band=5-7", "typo_class=substitution"}
+
+
+def test_observations_are_recorded_per_stratum() -> None:
+    """A recall of 1.0 over three cases and over three thousand are different
+    facts. Without the denominator a trend chart cannot tell them apart."""
+    scores = score_surface(_run(hit=True), tier="fuzzy", bars=load_bars(_BARS))
+    assert all(one.observations >= 1 for one in scores)
+
+
+def test_latency_is_reported_and_is_not_averaged_with_recall() -> None:
+    scores = score_surface(_run(hit=True), tier="prefix", bars=load_bars(_BARS))
+    metrics = {one.metric for one in scores}
+    assert "latency_p95_ms" in metrics
+    assert "recall_at_5" in metrics
