@@ -47,6 +47,7 @@ from usher.db.users import default_user, ensure_default_user
 from usher.domain.taste import GenreAffinity
 from usher.domain.watch import User
 from usher.ports.credentials import CredentialStore
+from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher
 from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
@@ -701,11 +702,18 @@ def get_taste_service(
 ) -> TasteService:
     """**No embedder, and that is the same call `get_home_service` makes.**
 
-    `create_app`'s lifespan builds the model only when `worker_enabled`, so a
-    request-scoped dependency that reached for one would work in development and
-    500 in exactly the push-only deployment PRD 08 describes. It is also a
-    once-per-*process* resource -- a 65 MB ONNX session and a 4.84 s cold load --
-    which `deps.py` already argues about the TMDb token bucket one section up.
+    ⚠️ **The reason changed with issue #31 and the answer did not.** This used
+    to say the lifespan builds a model only under `worker_enabled` and exposes
+    it nowhere, so reaching for one *"would work in development and 500 in
+    exactly the push-only deployment PRD 08 describes"*. There is now a model
+    on `app.state` whenever one is configured, and `get_search_service` below
+    takes it -- so availability is no longer the argument. What is: **computing
+    a centroid is a job and not a request.** `TasteService.centroid` walks the
+    household's recent watch history, reads ~50 titles' vectors and averages
+    them; the request path wants the *stored* answer, which
+    `TasteRepository.latest` gives it in one indexed probe. Handing this an
+    embedder would put a walk behind `GET /home` and would let two processes
+    write `user_taste` on different schedules.
 
     What that costs, stated rather than hidden: `TasteService.centroid` returns
     `None` when there is no embedder, so `RowContext.taste` is `None` on every
@@ -1073,7 +1081,9 @@ PlaybackServiceDep = Annotated[PlaybackService, Depends(get_playback_service)]
 # ---------------------------------------------------------------------------
 
 
-def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchService:
+def get_search_service(
+    request: Request, session: SessionDep, settings: SettingsDep
+) -> SearchService:
     """PRD 05's read path, request-scoped.
 
     **Reached through `usher.composition` rather than assembled here**, and
@@ -1100,25 +1110,46 @@ def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchServ
     session-scoped objects -- and, worse, one that could disagree with this one
     about which index is which while both returned a working `SearchService`.
 
-    **No embedder, and it is the same call `get_taste_service` and
-    `get_home_service` make.** `create_app`'s lifespan builds a model only
-    when `worker_enabled` and does not put it on `app.state`, so a dependency
-    reaching for one would work in development and 500 in exactly the
-    push-only deployment PRD 08 describes; it is also a once-per-process 65 MB
-    resource this module already argues about for the TMDb token bucket.
+    **The embedder is this process's own, read off `app.state` and never built
+    here** (issue #31). `create_app`'s lifespan builds one per process and
+    parks it there; `None` is what it parks on a deployment that configured
+    none, which is `build_search_service`'s own default for the parameter. So
+    this line is a *read* of an existing resource, and reading is what makes
+    `?mode=semantic` and the vector half of `?mode=fused` answerable from the
+    HTTP surface at all.
 
-    What that costs is visible on the wire rather than hidden, which is the
-    difference from the two routes above: `?mode=semantic` answers a problem
-    document naming the missing capability, and `?mode=fused` is served as
-    full text with `requested_mode` and `mode` disagreeing so a client can say
-    so. Closing it is a new capability (expose the lifespan's model, or build
-    one per API process) rather than a change to this wiring.
+    ⚠️ **This paragraph used to argue the opposite, on two grounds, and both
+    are recorded here rather than deleted because the second is still true of
+    something.** It said a dependency reaching for a model *"would work in
+    development and 500 in exactly the push-only deployment PRD 08
+    describes"*, and that it is *"a once-per-process 65 MB resource"*.
 
-    **And no expander**, on stricter terms than the embedder: an expansion is
-    a paid completion in front of an embed, and with no embedder there is no
-    embed for one to sit in front of. `SearchService` buys a completion only
-    inside the `else` of its `embedder is None` branch, so this is not a
-    saving that has to be argued -- there is no reachable call site.
+    - The 500 was never reachable and is now pinned as not being: no model
+      means `None`, `None` is the default, and the answer is the 422 naming
+      the missing capability -- `tests/unit/test_api_search.py::
+      test_a_deployment_with_no_embedding_model_exposes_none_rather_than_
+      nothing`. What made it *look* reachable was a lifespan that built the
+      model conditionally and parked nothing, so the attribute was absent
+      rather than `None`; the fix is to park it unconditionally.
+    - The 65 MB is **runtime-dependent, and the sentence predates the second
+      runtime.** Since 2026-08-13 `USHER_EMBEDDING_MODEL` carries a prefix:
+      `fastembed:` is an in-process ONNX session (65 MB, 4.84 s cold) and
+      `openai:` is an `httpx.AsyncClient` against an OpenAI-compatible
+      endpoint, holding no model at all. It is also an argument against
+      *building* one per API process -- the other option issue #31 names --
+      and not against reading one that this process built anyway. Nothing
+      here is conditional on the prefix, because on this path the two
+      runtimes cost the same: an attribute read.
+
+    **And no expander, on terms that are still stricter.** An expansion is a
+    paid completion in front of an embed; it needs an `LLMClient` outliving
+    the session and an `LLMCallRepository` on it, and only `build_pipeline`
+    holds both. It also ships off twice over (`USHER_LLM_ENABLED` false, and
+    `USHER_QUERY_EXPANSION_ENABLED` false even where that is true, because
+    expansion measured *worse* -- PRD 05). Since #16 `SearchService` declines
+    it for a population with no vectors as well, so wiring one here would be a
+    capability with a measurement against it; that is issue #15's to settle,
+    not this dependency's.
 
     **The household is not wired here, and looking for it here is the mistake
     this paragraph exists to prevent.** `SearchService.search` takes a
@@ -1152,17 +1183,34 @@ def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchServ
     A keystroke path that wrote a row would out-number the searches by an order
     of magnitude, and a `SuggestTier` is not a `SearchMode`.
 
-    **The taste term is served here despite the missing model, and that is a
-    read rather than an exception to the paragraph above.** PRD 05's sixth
-    ranking term needs a *centroid*, not an *embedder*:
-    `build_search_service` wires a `TasteRepository` and a
-    `TitleEmbeddingRepository`, and `SearchService` reads the household's
-    stored row through `latest` and scopes its vector read by the model that
-    row names. So a deployment whose worker computed a centroid serves it from
-    this route with no model in this process -- which is the gap
-    `get_taste_service` above spent a milestone describing.
+    **The taste term does not depend on the model above, and that is worth
+    keeping now that there is one.** PRD 05's sixth ranking term needs a
+    *centroid*, not an *embedder*: `build_search_service` wires a
+    `TasteRepository` and a `TitleEmbeddingRepository`, and `SearchService`
+    reads the household's stored row through `latest` and scopes its vector
+    read by the model that row names. So the term is served on a deployment
+    with **no** model in this process, which is what the paragraph said before
+    #31 and is still the load-bearing half -- a centroid is written by
+    whichever process computed it, and this route only ever reads one.
+
+    **The `Request` is here for one attribute, and the read is inline rather
+    than a provider of its own** -- unlike `get_row_cache` and
+    `get_row_refresh_queue`, which are the shape this otherwise copies. Those
+    two guard `app.state` with `getattr(..., None)` plus an `isinstance` and
+    raise a sentence naming a missing lifespan, because for them `None` means
+    *the lifespan did not run*. Here `None` is a **legal value** -- a
+    deployment that configured no model -- so that same guard would read a
+    missing lifespan as a missing model and answer a 422 for the wrong reason.
+    A bare attribute read keeps the two apart (an absent attribute raises), and
+    the diagnosable failure for a missing lifespan is already in front of this
+    line: `SessionDep` resolves first and `get_session_factory` raises it by
+    name.
     """
-    return build_search_service(session, settings)
+    # Annotated rather than passed straight through: `app.state` is typed
+    # `Any`, so without a name carrying the port type nothing downstream of
+    # this line is checked at all.
+    model: Embedder | None = request.app.state.embedder
+    return build_search_service(session, settings, embedder=model)
 
 
 SearchServiceDep = Annotated[SearchService, Depends(get_search_service)]

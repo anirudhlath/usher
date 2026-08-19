@@ -940,6 +940,15 @@ def _print_search_answer(answer: SearchAnswer) -> None:
         print("no match")
     # Always, not only when it is low: a number an operator sees only when
     # something is wrong is a number they have no baseline for.
+    #
+    # ⚠️ **Its denominator is the *enriched* tier, not the catalog**, so
+    # `1.000` says the backfill has drained and not that the vector lane can
+    # see everything this search matched -- skeletons are never embedded and
+    # the lexical lane searches them anyway. On the catalog this project
+    # measures the two differ by an order of magnitude. `SearchOutcome` carries
+    # the argument; the label is left as the field's own name because that is
+    # what PRD 07 and the route call it, and a second name here would be a
+    # second thing to keep in step.
     print(
         f"mode={answer.mode.value} results={len(answer.results)} "
         f"semantic_coverage={answer.semantic_coverage:.3f}"
@@ -952,9 +961,12 @@ def _print_search_answer(answer: SearchAnswer) -> None:
         )
     elif answer.mode is SearchMode.FUSED and answer.semantic_coverage == 0.0:
         # The warning names the command that fixes it, which is the difference
-        # between a diagnostic and a complaint.
+        # between a diagnostic and a complaint. "Enriched", not "filtered":
+        # that is the population `_COVERAGE` counts, and the sentence has to
+        # name the same rows the number did or an operator whose catalog is
+        # mostly skeletons reads it as a claim about the catalog.
         print(
-            "warning: no title in the filtered population has an embedding, so this "
+            "warning: no enriched title in the filtered population has an embedding, so this "
             "was full-text only -- run `usher index --backfill`"
         )
 

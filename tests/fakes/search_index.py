@@ -108,11 +108,7 @@ class FakeSearchIndex(SearchIndex):
         self._documents.pop(title_id, None)
 
     async def search(self, request: SearchRequest) -> SearchOutcome:
-        population = [
-            document
-            for document in self._documents.values()
-            if self._passes(document, request.filters)
-        ]
+        population = self._population(request.filters)
         lexical = _rank(
             (document, score)
             for document in population
@@ -140,6 +136,19 @@ class FakeSearchIndex(SearchIndex):
             case SearchMode.FUSED:
                 hits = _fuse(lexical, vectors)
         return SearchOutcome(hits=tuple(hits[: max(request.limit, 0)]), semantic_coverage=coverage)
+
+    async def semantic_coverage(self, filters: SearchFilters) -> float:
+        # `_coverage` over `_population`, exactly as `search` above -- one
+        # definition, so the probe and the answer cannot drift apart here any
+        # more than they can on Postgres. `_passes` raises `FilterNotSupported`
+        # for the two members this class cannot express, which is the port's
+        # rule and is what stops a caller reading "cannot ask" as "empty lane".
+        return _coverage(self._population(filters))
+
+    def _population(self, filters: SearchFilters) -> list[SearchDocument]:
+        return [
+            document for document in self._documents.values() if self._passes(document, filters)
+        ]
 
     def _passes(self, document: SearchDocument, filters: SearchFilters) -> bool:
         # Both refusals are honest rather than defensive: `owned_only` is a

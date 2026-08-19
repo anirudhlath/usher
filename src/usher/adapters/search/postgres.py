@@ -58,6 +58,7 @@ from usher.ports.errors import RepositoryConflict
 from usher.ports.search import (
     FilterNotSupported,
     SearchDocument,
+    SearchFilters,
     SearchHit,
     SearchIndex,
     SearchMode,
@@ -537,6 +538,26 @@ class PostgresSearchIndex(SearchIndex):
                 hits=hits, semantic_coverage=await self._coverage(predicates, parameters)
             )
         return await self._fused(request, predicates, parameters)
+
+    async def semantic_coverage(self, filters: SearchFilters) -> float:
+        """The port's pre-search probe, over `_COVERAGE` and nothing new.
+
+        **The one statement, not a second definition of coverage.** It reaches
+        `_predicates` and `_coverage` -- the same two the two vector lanes
+        above already compose -- so this method cannot come to disagree with
+        the number the same request's `SearchOutcome` reports. A fresh `SELECT`
+        here would be the shape `services/search.py`'s module docstring refuses
+        for the fingerprint: one question, two spellings, both of them
+        answering.
+
+        It costs what `_coverage` costs, which is a count over the enriched
+        tier through `ix_titles_enrichment_state` -- so it is a read a caller
+        must decide to make rather than one it makes by reflex.
+        `SearchService` makes it only where a completion is otherwise about to
+        be bought.
+        """
+        predicates, parameters = _predicates(filters)
+        return await self._coverage(predicates, parameters)
 
     async def _full_text(
         self, request: SearchRequest, predicates: str, parameters: dict[str, object]

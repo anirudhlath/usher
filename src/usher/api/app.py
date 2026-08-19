@@ -97,12 +97,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         provider, close_provider = (
             await metadata_provider(settings) if settings.worker_enabled else (None, nothing)
         )
-        # The embedding model, on the same terms and for the same reason: one
-        # per process, built only where a worker will use it. Not built at all
-        # in a push-only deployment -- a 65 MB ONNX session with no reader.
-        model, close_model = (
-            await embedder(settings) if settings.worker_enabled else (None, nothing)
-        )
+        # The embedding model. **One per process, and -- unlike the provider
+        # above and the client below -- built whatever the lane switches say
+        # (issue #31).** The other two are worker capabilities; this one has a
+        # second reader on a request path, because `api/deps.get_search_service`
+        # hands it to `SearchService` and `?mode=semantic` is unservable
+        # without it. Gated on `worker_enabled` it was absent from exactly the
+        # deployment `.claude/rules/api-telemetry-and-lanes.md` recommends -- a
+        # server beside a `usher work` container, `USHER_WORKER_ENABLED=false`
+        # on the server -- which then had a configured model, a backfilled
+        # catalog, and a 422 on every semantic search.
+        #
+        # **Nothing had to be decoupled to do it: `composition.embedder`
+        # already answers `(None, no-op)` unless `embedding_enabled`**, which
+        # is `false` by default and is an operator naming a model. So the lane
+        # switch was standing in for a setting that says the same thing more
+        # precisely, and the deployment that now pays something it did not --
+        # `embedding_enabled` on, `worker_enabled` off, the `fastembed:`
+        # runtime -- pays a 65 MB / 4.84 s load at startup for the capability
+        # it configured a model to get. On the `openai:` runtime it is an
+        # `httpx.AsyncClient`.
+        #
+        # `report=` is the lane switch's remaining job, and it is the whole of
+        # it: `embedder`'s warnings all end *"index jobs will not be claimed"*,
+        # which is true of a process running the worker lane and false of one
+        # that claims nothing. Silence is right there -- what a push-only
+        # deployment loses is legible on the wire instead, as the 422 naming
+        # the missing capability.
+        model, close_model = await embedder(settings, report=settings.worker_enabled)
+        # **Parked, and that is the line issue #31 is about.** Held only by
+        # `LaneSupervisor` it is a process resource with one reader; on
+        # `app.state` it is the one `api/deps.get_search_service` reads, which
+        # is what makes `?mode=semantic` and the vector half of `?mode=fused`
+        # reachable from the HTTP surface at all. `None` here is not an
+        # absence to be guarded against -- it is `build_search_service`'s own
+        # default for the parameter, so a deployment with no model serves
+        # exactly what it served before.
+        app.state.embedder = model
         # The completion client, on the same terms again: one per process,
         # built only where a worker will use it. `USHER_LLM_ENABLED=false` is
         # the shipped default and answers `(None, no-op)`, which is what

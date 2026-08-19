@@ -673,3 +673,49 @@ lease is what changed — so `USHER_WORKER_ENABLED=false` on a server beside a
 one. What two processes still do is spend the same upstream budget twice:
 `USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` are both per
 process, against a rate limit that is per client.
+
+## Issue #31 — a lane switch was gating a request-path resource (2026-08-19)
+
+**`create_app`'s lifespan built the embedding model under
+`settings.worker_enabled` and parked it nowhere, so `GET /search?mode=semantic`
+answered `422` on every deployment there was** — including one with a live
+`openai:BAAI/bge-m3` endpoint and 130,720 vectors, where the identical query
+through `usher search` returned coherent results at the same moment.
+`?mode=fused` narrowed to `full_text` and said so, which is the degradation
+working; what nothing said was that the narrowing was unconditional.
+
+**The lane switch was standing in for a setting that already says the same
+thing more precisely.** `composition.embedder` answers `(None, no-op)` unless
+`embedding_enabled`, which is off by default and is an operator naming a model,
+so `worker_enabled` was adding nothing except an exclusion — and it excluded
+exactly the split deployment this file recommends four entries up
+(`USHER_WORKER_ENABLED=false` on a server beside a `usher work` container).
+The model is now built whatever the lane switches say and parked on
+`app.state.embedder`, and `api/deps.get_search_service` reads it.
+`report=settings.worker_enabled` is the switch's remaining job and the whole of
+it: every warning in `embedder` ends *"index jobs will not be claimed"*, which
+is false of a process that claims none.
+
+**Two arguments in the old docstrings, and only one of them was ever true.**
+
+- *"Would work in development and 500 in exactly the push-only deployment PRD
+  08 describes."* Never reachable: no model is `None`, `None` is
+  `build_search_service`'s own default, and the answer is the 422 naming the
+  missing capability. What made it *look* reachable is that a conditionally
+  built resource parked nowhere leaves the attribute **absent** rather than
+  `None` — so the fix and the fear are the same line. Pinned by
+  `test_a_deployment_with_no_embedding_model_exposes_none_rather_than_nothing`.
+- *"A once-per-process 65 MB resource."* Real, **runtime-dependent, and an
+  argument about the wrong verb.** It is `fastembed:`'s ONNX session (65 MB,
+  4.84 s cold); `openai:` is an `httpx.AsyncClient` holding no model, and the
+  prefix has selected between them since 2026-08-13 — the sentence predates it
+  and never said which runtime it was about. It argues against *building* a
+  model per API process, which is the other option issue #31 names, and not
+  against *reading* one the process built anyway. Nothing in the fix is
+  conditional on the prefix, because reading an attribute costs the same under
+  both.
+
+**The general form: a cost sentence with no date and no runtime named is a
+measurement of one configuration wearing the grammar of a rule.** Both these
+docstrings were written when there was one runtime, and neither said so, so the
+number went on being quoted through the release that made it optional.
