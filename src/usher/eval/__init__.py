@@ -8,9 +8,14 @@ forbids, and M8's query expansion measured worse than none. Every one of
 those was found by a script written for one milestone and never run again.
 
 **Nothing outside this package may import it**, which is the eleventh
-import-linter contract rather than a convention. `usher.cli` is the single
-exception and is deliberately absent from that contract's sources, exactly
-as `usher.composition` is absent from the contracts it composes.
+import-linter contract rather than a convention. Its `source_modules` is
+every top-level name under `src/usher/` bar one: `usher.cli` is the only
+**exempt** module, deliberately, because `usher eval` is a subcommand --
+exactly as `usher.composition` is absent from the contracts it composes.
+`usher.__main__` is a source like the rest, and was quietly missing until
+2026-08-18, when a planted import there measured 11 kept and 0 broken.
+`tests/unit/test_eval_contract.py` now derives that list from the package,
+so the next top-level name cannot arrive unlisted.
 
 **It never reimplements what it measures.** Every surface drives the real
 service through the real composition root. An eval that reimplements the
