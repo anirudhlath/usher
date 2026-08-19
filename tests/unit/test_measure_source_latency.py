@@ -59,6 +59,7 @@ at import rather than as an `AttributeError` three cases deep.
 
 import asyncio
 import importlib.util
+import json
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
@@ -72,6 +73,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from pydantic import SecretStr
 
 from usher.ports.credentials import SourceCredentials
+from usher.ports.errors import PortRateLimited, PortUnavailable, UsherPortError
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "measure_source_latency.py"
 
@@ -298,20 +300,25 @@ def _drive_run(
     sent: list[httpx.Request],
     built: list[dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
+    transport: httpx.MockTransport | None = None,
+    extra_argv: Sequence[str] = (),
 ) -> int:
     """Drive `_run` -- the function `main` calls -- against a stub transport.
 
     The quiet check is stubbed out because it sleeps for seconds and is not
-    what this case is about; everything else is the production path.
+    what this case is about; everything else is the production path. `transport`
+    lets a case supply a stub that fails mid-run; by default every request is
+    answered 200 by `_run_stub`.
     """
     monkeypatch.setattr(
         _QUIET, "_load_snapshot", lambda: {"cpu_busy": 0.0, "processes": {"pytest": 0}}
     )
     monkeypatch.setattr(_QUIET, "_CPU_SETTLE_SECONDS", 0.0)
+    stub = transport if transport is not None else _run_stub(sent)
 
     def client_factory(**kwargs: Any) -> httpx.AsyncClient:
         built.append(kwargs)
-        return httpx.AsyncClient(transport=_run_stub(sent), **kwargs)
+        return httpx.AsyncClient(transport=stub, **kwargs)
 
     def provider_factory(**_: Any) -> MeterProvider:
         # A real provider so the shipped `_send` histogram binds, but with an
@@ -326,6 +333,7 @@ def _drive_run(
             f"--budget={budget}",
             f"--reps={reps}",
             "--shipped-bucket-service=",
+            *extra_argv,
         ]
     )
     return int(
@@ -394,6 +402,98 @@ def test_a_dry_run_is_enforced_where_the_guard_actually_lives(
     # dry run does not even build one.
     assert built == [], "a --budget 0 dry run constructed an HTTP client"
     assert code == 0, f"a dry run must succeed; it returned {code}"
+
+
+def _failing_at(sent: list[httpx.Request], *, nth: int, mode: str) -> httpx.MockTransport:
+    """200 for every request except the `nth`, which fails.
+
+    `mode="rate_limited"` answers the `nth` with a 429, which
+    `EmbySession.request` raises as `PortRateLimited`. `mode="unavailable"`
+    makes the transport itself raise `httpx.ConnectError`, which
+    `EmbySession._send` translates to `PortUnavailable` -- the genuine
+    "server is unreachable" path, which a 5xx on a `list`/`get_item` rep does
+    **not** exercise (that returns to the caller and becomes `ProbeFailed`).
+    `nth` is 1-based over every request on the wire -- the four warm-ups plus
+    the reps -- so `nth=10` fails during the reps with partials recorded.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        if len(sent) == nth:
+            if mode == "unavailable":
+                raise httpx.ConnectError("connection refused", request=request)
+            return httpx.Response(429, json={})
+        return httpx.Response(
+            200, json={"Items": [], "TotalRecordCount": 500_000, "Id": "stub-item"}
+        )
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize(
+    ("mode", "port_error"),
+    [("rate_limited", PortRateLimited), ("unavailable", PortUnavailable)],
+)
+def test_a_mid_run_port_error_keeps_the_partials_and_reports_the_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+    port_error: type[UsherPortError],
+) -> None:
+    """🔴 The recovery arm C2 opened and left too narrow.
+
+    `_run`'s `except` caught only `(BudgetExceeded, ProbeFailed)`, so a port
+    error of any other kind -- a 429 (`PortRateLimited`), an unreachable server
+    (`PortUnavailable`), a rejected credential -- propagated past the report and
+    past the `--timings-out` write, both of which sit after the try/finally.
+    Measured before this fix: a 429 at request 10 spent **ten real requests and
+    persisted zero rows** -- the exact "S1's entire share of the group ceiling,
+    unrecoverable, for nothing" outcome C2 exists to prevent, one arm over. A
+    429 from a household server is precisely the S4 scenario.
+
+    So the run must keep the rows it already paid for **and** surface that it
+    ended on a port error rather than completing: nine persisted rows that read
+    as a clean nine-rep run is the failure this asserts against.
+    """
+    sent: list[httpx.Request] = []
+    built: list[dict[str, Any]] = []
+    timings_out = tmp_path / "timings.json"
+    # `nth=10`: four warm-ups (1-4) plus five reps (5-9) succeed, the sixth rep
+    # (request 10) fails. So nine observations are bought before the failure.
+    transport = _failing_at(sent, nth=10, mode=mode)
+
+    code = _drive_run(
+        budget=60,
+        reps=12,
+        sent=sent,
+        built=built,
+        monkeypatch=monkeypatch,
+        transport=transport,
+        extra_argv=[f"--timings-out={timings_out}"],
+    )
+    printed = capsys.readouterr().out
+
+    # **The premise, first.** The stub really did fail mid-run, at the request
+    # this case is written around -- not before the reps, not after them.
+    assert len(sent) == 10, (
+        f"the stub failed at request {len(sent)}, not the 10th this case is about"
+    )
+
+    # The partials the requests bought are on disk, not discarded.
+    assert timings_out.exists(), "the partial run persisted no timings file at all"
+    rows = json.loads(timings_out.read_text())
+    assert len(rows) == 9, (
+        f"nine requests succeeded before the failure; {len(rows)} rows were persisted"
+    )
+    assert sum(1 for row in rows if row["warmup"]) == 4, "the four warm-ups are among the rows"
+
+    # And the run surfaces that it ended on a port error rather than completing.
+    assert "INCOMPLETE" in printed, f"a partial run did not announce itself: {printed!r}"
+    assert port_error.__name__ in printed, (
+        f"the report must name the failure class; it said {printed!r}"
+    )
+    assert code == 1, f"a run that ended on a port error must return non-zero; got {code}"
 
 
 def test_the_four_probe_classes_are_read_only_and_spend_no_discovery_request() -> None:

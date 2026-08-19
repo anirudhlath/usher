@@ -117,6 +117,7 @@ from scripts.measure_suggest_tiers import _quantile
 from usher.adapters.emby.adapter import ITEM_FIELDS, ITEM_TYPES, SORT_BY
 from usher.adapters.emby.session import PUBLIC_INFO_PATH, EmbySession
 from usher.ports.credentials import SourceCredentials
+from usher.ports.errors import UsherPortError
 
 #: S1's identities, as **defaults** rather than as module constants. A second
 #: arm of this harness (S7's concurrency run) needs its own bar, its own
@@ -762,6 +763,11 @@ def check_budget_is_sufficient(*, budget: int, reps: int) -> None:
     timings file and no flush. Sixty live requests, S1's entire share of the
     group ceiling, unrecoverable, for nothing. Arithmetic that is knowable
     before the first packet belongs before the first packet.
+
+    ⚠️ **S7 note:** the `WARMUP_REQUESTS + PROBE_CLASSES * reps` formula is
+    S1's *sequential* plan. A concurrency arm with a different probe plan needs
+    its own precondition; this one is correct only for the plan `plan_probes`
+    builds, and reusing it unchanged for S7 would silently mis-count.
     """
     if reps < 1:
         raise SystemExit(f"--reps must be at least 1; got {reps}")
@@ -888,13 +894,32 @@ async def _run(
             seed=args.seed,
         )
         await runner(session, probes, timings)
-    except (BudgetExceeded, ProbeFailed) as exc:
+    except (BudgetExceeded, ProbeFailed, UsherPortError) as exc:
         # **Caught, not propagated, so the partial run still reports.** Every
         # observation already on `timings` was paid for against a real
         # household server; discarding them because the run ended early is
         # throwing away the only thing the requests bought.
+        #
+        # 🔴 **`UsherPortError` is in this tuple because leaving it out was the
+        # same defect C2 was created to close, one arm over.** A 429
+        # (`PortRateLimited`), an unreachable server (`PortUnavailable`) or a
+        # rejected credential (`PortAuthFailed`) raised mid-run is exactly what
+        # a household server does under load -- it is the scenario S4 exists
+        # for -- and with only `(BudgetExceeded, ProbeFailed)` caught it
+        # propagated past this block, past the report and past the
+        # `--timings-out` write, so a 429 at request 10 spent ten real requests
+        # and persisted zero rows. Every port failure is a *value* here: it
+        # ended the run early, and the rows before it are still the rows the
+        # requests bought. It is **not** bare `Exception` -- a `KeyError` in
+        # this harness is a bug, not a bounded upstream failure, and must still
+        # reach `main`'s redacting handler rather than being logged as an
+        # "incomplete run".
+        #
+        # `failure is not None` makes the run return 1 and the print names the
+        # class, so a 429 that persisted nine rows says INCOMPLETE and does not
+        # read as a clean nine-rep run.
         failure = exc
-        print(f"\nINCOMPLETE -- {type(exc).__name__}: {exc}")
+        print(f"\nINCOMPLETE -- ended on {type(exc).__name__}: {exc}")
     finally:
         await client.aclose()
         provider.force_flush()
@@ -935,6 +960,12 @@ async def _run(
     # different instant than the artifact held.** `timings` excludes the
     # warm-up; every request in `warmups` went to the same server and belongs
     # in "when did this harness touch it".
+    #
+    # ⚠️ **S7 note:** `every[0]`/`every[-1]` and `timings[0]`/`timings[-1]`
+    # assume the list is in start order, which is true only because this arm
+    # issues one request at a time. Under concurrency the last-*appended* timing
+    # is not the last to *start*; a concurrency arm must take min(started_at)
+    # and max(ended_at) rather than the endpoints of the list.
     window = f"{_iso(every[0].started_at)} -> {_iso(every[-1].ended_at)}"
     reps_window = (
         f"{_iso(timings[0].started_at)} -> {_iso(timings[-1].ended_at)}" if timings else "none"
