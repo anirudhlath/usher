@@ -54,9 +54,18 @@ class Title(DomainModel):
     origin_countries: tuple[str, ...] = Field(default_factory=tuple)  # ISO 3166-1 alpha-2
     content_rating: str | None = None
 
-    community_rating: float | None = Field(default=None, ge=0, le=10)  # TMDb's 0-10 scale
-    vote_count: int | None = Field(default=None, ge=0)
-    popularity: float | None = Field(default=None, ge=0)
+    # **Five fields where there were three**, because `community_rating`,
+    # `vote_count` and `popularity` each had two writers meaning different
+    # things: IMDb's `averageRating`/`numVotes` from `adapters/bulk/imdb.py`
+    # and TMDb's `vote_average`/`vote_count` from `adapters/tmdb/mapping.py`,
+    # on scales ~50-100x apart. The ranges *overlap* among movies (40,518
+    # against 40,695 on the deployed catalog), so no reader could ever have
+    # told them apart by magnitude. Each column now names its source. ADR-0040.
+    tmdb_vote_average: float | None = Field(default=None, ge=0, le=10)  # TMDb's 0-10 scale
+    tmdb_vote_count: int | None = Field(default=None, ge=0)
+    tmdb_popularity: float | None = Field(default=None, ge=0)
+    imdb_average_rating: float | None = Field(default=None, ge=0, le=10)  # IMDb's 0-10 scale
+    imdb_num_votes: int | None = Field(default=None, ge=0)
 
     collection_id: uuid.UUID | None = None
 

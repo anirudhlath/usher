@@ -577,7 +577,8 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         #
         # The DO UPDATE list is exactly the fields IMDb supplies. It omits
         # enrichment_state, enrichment_error, enriched_at, field_provenance,
-        # overview, tagline, popularity, community_rating, vote_count,
+        # overview, tagline, tmdb_popularity, tmdb_vote_average,
+        # tmdb_vote_count, imdb_average_rating, imdb_num_votes,
         # collection_id, and created_at, so a re-import refreshes IMDb's
         # facts without downgrading an enriched title back to a skeleton.
         #
@@ -635,14 +636,20 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         # titleTypes this milestone drops, and a rating with no title is not
         # a catalog entry. The IS DISTINCT FROM guard keeps a no-op re-import
         # from firing the set_updated_at trigger on a million unchanged rows.
+        #
+        # **This IMDb writer still targets the TMDb-named columns, and the
+        # rename is what makes that legible rather than what causes it.** The
+        # dual write ADR-0040 measured is unchanged by `m10a`; redirecting it
+        # onto `imdb_average_rating`/`imdb_num_votes` is a behaviour change and
+        # is deliberately not part of the rename.
         return await self._rowcount("""
             UPDATE titles t
-            SET community_rating = s.community_rating, vote_count = s.vote_count
+            SET tmdb_vote_average = s.community_rating, tmdb_vote_count = s.vote_count
             FROM (
                 SELECT DISTINCT ON (imdb_id) * FROM stg_ratings ORDER BY imdb_id
             ) s
             WHERE t.imdb_id = s.imdb_id
-              AND (t.community_rating, t.vote_count)
+              AND (t.tmdb_vote_average, t.tmdb_vote_count)
                   IS DISTINCT FROM (s.community_rating, s.vote_count)
         """)
 
@@ -958,7 +965,7 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             )
             UPDATE titles t
             SET tmdb_id = c.tmdb_id,
-                popularity = COALESCE(m.popularity, t.popularity)
+                tmdb_popularity = COALESCE(m.popularity, t.tmdb_popularity)
             FROM candidate c
             LEFT JOIN tmdb_ids m ON m.tmdb_id = c.tmdb_id AND m.kind = c.kind
             WHERE t.id = c.title_id

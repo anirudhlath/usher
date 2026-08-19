@@ -291,8 +291,8 @@ async def catalog_facts(session: AsyncSession) -> dict[str, Any]:
                    count(*) FILTER (WHERE enrichment_state = 'basic') AS basic,
                    count(*) FILTER (WHERE enrichment_state = 'enriched') AS enriched,
                    count(*) FILTER (WHERE year IS NULL) AS year_null,
-                   count(*) FILTER (WHERE popularity IS NULL) AS popularity_null,
-                   count(*) FILTER (WHERE vote_count IS NULL) AS vote_count_null,
+                   count(*) FILTER (WHERE tmdb_popularity IS NULL) AS popularity_null,
+                   count(*) FILTER (WHERE tmdb_vote_count IS NULL) AS vote_count_null,
                    count(*) FILTER (WHERE sort_name IS NULL) AS sort_name_null,
                    count(*) FILTER (WHERE genres = '{}') AS no_genres
             FROM titles

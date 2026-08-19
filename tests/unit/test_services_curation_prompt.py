@@ -91,7 +91,7 @@ def _title(
         sort_name=name.lower(),
         year=year,
         genres=genres,
-        vote_count=1_000,
+        tmdb_vote_count=1_000,
         enrichment_state=EnrichmentState.ENRICHED,
     )
 

@@ -255,9 +255,11 @@ def title_from_payload(
         "spoken_languages": _codes(payload.get("spoken_languages"), "iso_639_1"),
         "origin_countries": _strings(payload.get("origin_country")),
         "content_rating": _content_rating(payload, kind, region),
-        "community_rating": _bounded(payload.get("vote_average"), 0.0, 10.0),
-        "vote_count": _non_negative_int(payload.get("vote_count")),
-        "popularity": _non_negative_float(payload.get("popularity")),
+        # The payload keys are TMDb's own and do not move; the `Title` fields
+        # they land in now name their source, which is the whole of ADR-0040.
+        "tmdb_vote_average": _bounded(payload.get("vote_average"), 0.0, 10.0),
+        "tmdb_vote_count": _non_negative_int(payload.get("vote_count")),
+        "tmdb_popularity": _non_negative_float(payload.get("popularity")),
         "imdb_id": _imdb_id(payload),
         "tvdb_id": _as_int(_external_ids(payload).get("tvdb_id")),
     }

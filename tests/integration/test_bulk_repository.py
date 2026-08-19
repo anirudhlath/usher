@@ -63,7 +63,7 @@ class TestPostgresBulkCatalogRepositoryContract(BulkCatalogRepositoryContract):
         # ruff config.
         assert isinstance(repo, PostgresBulkCatalogRepository)
         result = await repo._session.execute(
-            text("SELECT popularity FROM titles WHERE imdb_id = :imdb_id"),
+            text("SELECT tmdb_popularity FROM titles WHERE imdb_id = :imdb_id"),
             {"imdb_id": imdb_id},
         )
         value = result.scalar_one_or_none()

@@ -102,9 +102,9 @@ class TitleRepositoryContract:
             spoken_languages=("en",),
             origin_countries=("US", "GB"),
             content_rating="TV-MA",
-            community_rating=8.4,
-            vote_count=22000,
-            popularity=369.5,
+            tmdb_vote_average=8.4,
+            tmdb_vote_count=22000,
+            tmdb_popularity=369.5,
             collection_id=collection_id,
             enrichment_state=EnrichmentState.ENRICHED,
             enrichment_error=None,
@@ -485,8 +485,10 @@ class TitleRepositoryOwnedContract:
             sort_name=name.lower(),
             genres=genres,
             keywords=keywords,
-            popularity=popularity,
-            vote_count=vote_count,
+            # The builder's own keyword names are test-local vocabulary and
+            # stay; only the `Title` fields they feed moved. ADR-0040.
+            tmdb_popularity=popularity,
+            tmdb_vote_count=vote_count,
             enrichment_state=EnrichmentState.ENRICHED,
         )
 
@@ -764,7 +766,9 @@ class TitleRepositoryCandidateContract:
             name=name,
             sort_name=name.lower(),
             genres=genres,
-            vote_count=vote_count,
+            # The builder's own keyword names are test-local vocabulary and
+            # stay; only the `Title` fields they feed moved. ADR-0040.
+            tmdb_vote_count=vote_count,
             enrichment_state=enrichment_state,
         )
 
@@ -1225,8 +1229,10 @@ class TitleRepositoryBrowseContract:
             genres=genres,
             keywords=keywords,
             year=year,
-            popularity=popularity,
-            vote_count=vote_count,
+            # The builder's own keyword names are test-local vocabulary and
+            # stay; only the `Title` fields they feed moved. ADR-0040.
+            tmdb_popularity=popularity,
+            tmdb_vote_count=vote_count,
             enrichment_state=EnrichmentState.ENRICHED,
         )
 

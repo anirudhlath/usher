@@ -162,9 +162,11 @@ def test_title_is_not_hashable() -> None:
         ("year", -40),
         ("end_year", -1),
         ("runtime_minutes", -9),
-        ("vote_count", -1),
-        ("popularity", -1.0),
-        ("community_rating", -1.0),
+        ("tmdb_vote_count", -1),
+        ("tmdb_popularity", -1.0),
+        ("tmdb_vote_average", -1.0),
+        ("imdb_num_votes", -1),
+        ("imdb_average_rating", -1.0),
     ],
 )
 def test_negative_values_are_rejected(field: str, value: object) -> None:
@@ -172,14 +174,23 @@ def test_negative_values_are_rejected(field: str, value: object) -> None:
         Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: value})
 
 
-def test_community_rating_rejects_values_outside_the_tmdb_scale() -> None:
+@pytest.mark.parametrize("field", ["tmdb_vote_average", "imdb_average_rating"])
+def test_a_rating_rejects_values_outside_the_zero_to_ten_scale(field: str) -> None:
+    """Both sources use 0-10, which is why the dual write was silent.
+
+    ADR-0040: `community_rating` held IMDb's `averageRating` on a skeleton and
+    TMDb's `vote_average` on an enriched row, and no value was ever out of
+    range -- so the bound is a property of both columns and is asserted on
+    both rather than on whichever one the old name happened to mean.
+    """
     with pytest.raises(ValidationError):
-        Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", community_rating=99.0)
+        Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: 99.0})
 
 
-def test_community_rating_accepts_tmdb_scale_boundaries() -> None:
-    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", community_rating=0.0)
-    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", community_rating=10.0)
+@pytest.mark.parametrize("field", ["tmdb_vote_average", "imdb_average_rating"])
+def test_a_rating_accepts_the_zero_to_ten_boundaries(field: str) -> None:
+    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: 0.0})
+    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: 10.0})
 
 
 def test_empty_name_is_rejected() -> None:

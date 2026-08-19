@@ -24,14 +24,23 @@ under a named heading**, and
 `test_a_plan_named_only_in_prose_does_not_satisfy_the_table` proves the scoping
 against a document that carries both spellings.
 
-**`docs/plans/progress.md` now carries two such headings and is read as their
-union**, because the first plan that is not a milestone arrived on 2026-08-18:
-E1 is phase 1 of 4 of `docs/specs/2026-08-18-usher-quality-evals-design.md`,
-and the milestone table's heading names the *other* spec. Registering E1 there
-would have made that heading false in order to make this file green -- so the
-scope segment of `_PLAN_FILENAME` was widened from `m\\d+` to `[a-z]+\\d+`, a
-second heading was added naming its own spec, and both the widening and the
-spec exclusion it had to preserve are asserted by
+**`docs/plans/progress.md` now carries three such headings and is read as
+their union**, because the first plan that is not a milestone arrived on
+2026-08-18: E1 is phase 1 of 4 of
+`docs/specs/2026-08-18-usher-quality-evals-design.md`, and the milestone
+table's heading names the *other* spec. Registering E1 there would have made
+that heading false in order to make this file green -- so the scope segment of
+`_PLAN_FILENAME` was widened from `m\\d+` to `[a-z]+\\d+`, and a second heading
+was added naming its own spec.
+
+**The third heading arrived on 2026-08-19 and the same widening had to happen
+again, for a plan that carries no scope segment at all.** The rating-provenance
+split is a repair rather than a stage of anything, so it is neither `m9` nor
+`e1`, and `[a-z]+\\d+` could not see `2026-08-19-rating-provenance-split.md` --
+the plan was committed, unregistered, and **the check was already red at
+`2651388`**, before the task that found it changed a line. The pattern is now a
+general dated plan name with the spec exclusion carried explicitly rather than
+by narrowness. Every widening and the exclusion it preserves are asserted by
 `test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec`.
 """
 
@@ -52,19 +61,33 @@ PLAN_FILES_AT_M9_CLOSE = 9
 
 _MILESTONE_TABLE = "## Milestones (from"
 _EVAL_PHASE_TABLE = "## Quality-eval phases (from"
+_RATING_SPLIT_TABLE = "## Rating provenance (from"
 _IMPLEMENTATION_PLAN_TABLE = "## Implementation plans"
 
-# `2026-08-06-m8-curation.md`, `2026-08-18-e1-eval-skeleton-and-suggest.md`.
-# The scope segment was `m\d+` until E1, which is a *phase* and not a milestone
-# and so was invisible to a check whose whole subject is plans nobody
-# registered. Widened to `[a-z]+\d+` rather than to anything looser, because
-# the narrowness is load-bearing: both status tables name their own spec in
-# their own heading, and `docs/specs/2026-07-28-usher-v1-design.md` must not be
-# harvested as a plan. It still is not -- a spec's date is followed by `usher-`,
-# and no letters-then-digits segment follows the date in either spec name.
+# `2026-08-06-m8-curation.md`, `2026-08-18-e1-eval-skeleton-and-suggest.md`,
+# `2026-08-19-rating-provenance-split.md`.
+#
+# The scope segment was `m\d+` until E1 and `[a-z]+\d+` until the rating split,
+# and each narrowing was invisible to a check whose whole subject is plans
+# nobody registered: E1 is a *phase* rather than a milestone, and
+# `rating-provenance-split` carries **no scope segment at all** -- it is neither
+# numbered nor lettered, because it is a repair rather than a stage of
+# anything. It was on disk, unregistered, and harvested by nothing.
+#
+# **What every widening has had to keep is the spec exclusion**, because both
+# status tables name their own spec in their own heading and a PRD row links
+# one inside a table cell. The narrowness cannot carry that any more, so it is
+# now carried explicitly: every spec this project has written ends
+# `-design.md` (`2026-07-28-usher-v1-design.md`,
+# `2026-08-18-usher-quality-evals-design.md`,
+# `2026-08-19-rating-provenance-split-design.md`), and the lookahead refuses
+# exactly those. It is spelled `[a-z0-9-]*` rather than `.*` deliberately: a
+# greedy `.*` would reach a *later* `-design.md` on the same line and refuse
+# the plan named beside its own spec, which is precisely the row the rating
+# split's table carries.
 # `test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec`
-# asserts both halves.
-_PLAN_FILENAME = re.compile(r"20\d\d-\d\d-\d\d-[a-z]+\d+-[a-z0-9-]+\.md")
+# asserts every half.
+_PLAN_FILENAME = re.compile(r"20\d\d-\d\d-\d\d-(?![a-z0-9-]*-design\.md)[a-z0-9-]+\.md")
 
 
 def _section(document: str, heading: str) -> list[str]:
@@ -94,7 +117,7 @@ def _table_rows(document: str, heading: str) -> set[str]:
     }
 
 
-def test_every_plan_file_is_named_by_both_status_tables() -> None:
+def test_every_plan_file_is_named_by_every_status_table() -> None:
     """Kills adding a milestone's plan and leaving either status table behind,
     which has happened twice and was repaired by hand both times.
 
@@ -104,13 +127,14 @@ def test_every_plan_file_is_named_by_both_status_tables() -> None:
     (`.claude/rules/prd-maintenance.md` records why that exclusion is a
     correction rather than a convenience).
 
-    `docs/plans/progress.md` is read as the **union of its two tables**, one per
-    spec. The alternative -- an E1 row under a heading that says *"Milestones
-    (from docs/specs/2026-07-28-usher-v1-design.md)"* -- turns that heading into
-    a false statement to satisfy a check about documentation being true, which
-    is the trade this whole module exists to refuse. A phase of a second spec is
-    registered under a second heading naming that spec, and the union is what
-    keeps the obligation *"every plan file is named"* one obligation.
+    `docs/plans/progress.md` is read as the **union of its three tables**, one
+    per spec. The alternative -- an E1 row under a heading that says
+    *"Milestones (from docs/specs/2026-07-28-usher-v1-design.md)"* -- turns that
+    heading into a false statement to satisfy a check about documentation being
+    true, which is the trade this whole module exists to refuse. A plan of a
+    second or third spec is registered under a heading naming that spec, and the
+    union is what keeps the obligation *"every plan file is named"* one
+    obligation.
     """
     on_disk = {path.name for path in _PLANS.glob("*.md")} - {"progress.md"}
 
@@ -123,8 +147,10 @@ def test_every_plan_file_is_named_by_both_status_tables() -> None:
 
     progress = _PROGRESS.read_text()
     tables = {
-        "docs/plans/progress.md's milestone and quality-eval tables": (
-            _table_rows(progress, _MILESTONE_TABLE) | _table_rows(progress, _EVAL_PHASE_TABLE)
+        "docs/plans/progress.md's three status tables": (
+            _table_rows(progress, _MILESTONE_TABLE)
+            | _table_rows(progress, _EVAL_PHASE_TABLE)
+            | _table_rows(progress, _RATING_SPLIT_TABLE)
         ),
         "docs/prd/README.md's implementation-plan table": _table_rows(
             _PRD_README.read_text(), _IMPLEMENTATION_PLAN_TABLE
@@ -206,8 +232,25 @@ def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() 
     )
 
     assert _table_rows(specs, _EVAL_PHASE_TABLE) == set(), (
-        "a spec is not a plan, and the two headings name theirs"
+        "a spec is not a plan, and the three headings name theirs"
     )
+
+    # **The second widening, and the row that forced it.** The rating split
+    # carries no scope segment -- not `m9`, not `e1` -- so `[a-z]+\d+` was
+    # blind to it, and its own row names its spec in the same cell as the plan.
+    # A greedy `.*` in the exclusion would reach that spec and refuse the plan
+    # standing beside it, which is why the lookahead is bounded to the filename.
+    unnumbered = (
+        "## Rating provenance (from docs/specs/2026-08-19-rating-provenance-split-design.md)\n"
+        "| Task | Plan file | Spec | Status |\n"
+        "|---|---|---|---|\n"
+        "| 1 | docs/plans/2026-08-19-rating-provenance-split.md | "
+        "docs/specs/2026-08-19-rating-provenance-split-design.md | done |\n"
+    )
+
+    assert _table_rows(unnumbered, _RATING_SPLIT_TABLE) == {
+        "2026-08-19-rating-provenance-split.md"
+    }, "the plan is harvested and the spec beside it on the same line is not"
 
 
 def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> None:
@@ -234,7 +277,11 @@ def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> Non
     prose.
     """
     text = _PROGRESS.read_text()
-    tabled = set(_section(text, _MILESTONE_TABLE)) | set(_section(text, _EVAL_PHASE_TABLE))
+    tabled = (
+        set(_section(text, _MILESTONE_TABLE))
+        | set(_section(text, _EVAL_PHASE_TABLE))
+        | set(_section(text, _RATING_SPLIT_TABLE))
+    )
     outside = [
         line
         for line in text.splitlines()

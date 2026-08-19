@@ -281,7 +281,7 @@ class TitleResponse(BaseModel):
             tagline=detail.title.tagline,
             runtime_minutes=detail.title.runtime_minutes,
             genres=detail.title.genres,
-            community_rating=detail.title.community_rating,
+            community_rating=detail.title.tmdb_vote_average,
             enrichment_state=detail.title.enrichment_state,
             enrichment_error=detail.title.enrichment_error,
             availability=[

@@ -86,15 +86,15 @@ async def _given_title(
 
     A raw `INSERT` rather than `PostgresTitleRepository.add`, for the reason
     the neighbouring file gives: a `Title` has 31 fields nothing here has an
-    opinion about, and what this path reads is `name`, `popularity`,
-    `vote_count` and `id`.
+    opinion about, and what this path reads is `name`, `tmdb_popularity`,
+    `tmdb_vote_count` and `id`.
     """
     title_id = new_id()
     await session.execute(
         text(
-            "INSERT INTO titles (id, kind, name, sort_name, popularity, vote_count, "
-            "enrichment_state) VALUES (CAST(:id AS uuid), :kind, :name, :sort_name, "
-            ":popularity, :vote_count, :state)"
+            "INSERT INTO titles (id, kind, name, sort_name, tmdb_popularity, "
+            "tmdb_vote_count, enrichment_state) VALUES (CAST(:id AS uuid), :kind, :name, "
+            ":sort_name, :popularity, :vote_count, :state)"
         ),
         {
             "id": title_id,

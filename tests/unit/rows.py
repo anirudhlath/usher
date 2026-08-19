@@ -143,8 +143,10 @@ class Library:
             year=year,
             genres=tuple(genres),
             keywords=tuple(keywords),
-            popularity=popularity,
-            vote_count=vote_count,
+            # The builder's own keyword names are test-local vocabulary and
+            # stay; only the `Title` fields they feed moved. ADR-0040.
+            tmdb_popularity=popularity,
+            tmdb_vote_count=vote_count,
             runtime_minutes=runtime_minutes,
             enrichment_state=EnrichmentState.ENRICHED,
         )

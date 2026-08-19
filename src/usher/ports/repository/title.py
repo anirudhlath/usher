@@ -38,8 +38,11 @@ _ORDERS: Final[Mapping[str, tuple[str, bool]]] = MappingProxyType(
     {
         "name": ("sort_name", False),
         "year": ("year", True),
-        "popularity": ("popularity", True),
-        "vote_count": ("vote_count", True),
+        # The keys are `BrowseSort`'s values and therefore the public
+        # `?sort=` vocabulary; the values are `Title` attributes. ADR-0040
+        # moved the attributes and deliberately left the vocabulary alone.
+        "popularity": ("tmdb_popularity", True),
+        "vote_count": ("tmdb_vote_count", True),
     }
 )
 
@@ -48,8 +51,9 @@ class BrowseSort(StrEnum):
     """The closed vocabulary `browse` orders by.
 
     Four members, and three of the four keys are **nullable** —
-    `titles.year`, `titles.popularity` and `titles.vote_count` all are, and
-    `popularity` was measured NULL on all 1,271,138 rows of a bootstrap-only
+    `titles.year`, `titles.tmdb_popularity` and `titles.tmdb_vote_count` all
+    are, and the popularity column
+    was measured NULL on all 1,271,138 rows of a bootstrap-only
     catalog. That is why every order here is NULLS LAST and why the keyset
     predicate carries an `IS NOT NULL` leg: see `TitleRepository.browse`.
 

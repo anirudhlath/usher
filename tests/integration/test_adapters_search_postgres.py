@@ -136,7 +136,8 @@ async def _insert_title(
     """
     columns = (
         "id, kind, name, sort_name, original_name, overview, tagline, "
-        "genres, keywords, credit_names, year, popularity, vote_count, enrichment_state"
+        "genres, keywords, credit_names, year, tmdb_popularity, tmdb_vote_count, "
+        "enrichment_state"
     )
     values = (
         "CAST(:id AS uuid), :kind, :name, :sort_name, :original_name, :overview, "
@@ -145,6 +146,11 @@ async def _insert_title(
         ":popularity, :vote_count, :enrichment_state"
     )
     await session.execute(
+        # **The bind names are not the column names and only the columns
+        # moved.** `:popularity` is read off `SearchDocument.popularity`,
+        # which ADR-0040 deliberately did not rename; the column it lands
+        # in is `titles.tmdb_popularity`. Renaming the bind as well would
+        # have meant renaming the attribute read below with it.
         text(f"INSERT INTO titles ({columns}) VALUES ({values})"),  # noqa: S608
         {
             "id": document.title_id,

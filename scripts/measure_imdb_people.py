@@ -851,11 +851,12 @@ _TITLE_OVERLAP = """
 SELECT (SELECT count(*) FROM t3_titles) AS titles,
        (SELECT count(*) FROM t3_titles WHERE cardinality(credit_names) > 0) AS with_names,
        (SELECT count(*) FROM t3_titles WHERE enrichment_state <> 'skeleton') AS embedded,
-       (SELECT count(*) FROM t3_titles WHERE vote_count >= 100) AS tier,
+       (SELECT count(*) FROM t3_titles WHERE tmdb_vote_count >= 100) AS tier,
        (SELECT count(*) FROM t3_titles
-        WHERE vote_count >= 100 AND cardinality(credit_names) > 0) AS tier_with_names,
-       (SELECT count(*) FROM t3_titles WHERE vote_count >= 100 AND kind = 'movie') AS movie_tier,
-       (SELECT count(*) FROM t3_titles WHERE vote_count >= 100 AND kind = 'movie'
+        WHERE tmdb_vote_count >= 100 AND cardinality(credit_names) > 0) AS tier_with_names,
+       (SELECT count(*) FROM t3_titles WHERE tmdb_vote_count >= 100 AND kind = 'movie')
+         AS movie_tier,
+       (SELECT count(*) FROM t3_titles WHERE tmdb_vote_count >= 100 AND kind = 'movie'
           AND cardinality(credit_names) > 0) AS movie_tier_with_names
 """
 

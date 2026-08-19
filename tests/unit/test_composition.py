@@ -241,7 +241,7 @@ async def _candidates(titles: FakeTitleRepository, *, count: int) -> list[Title]
             name=f"Candidate {index}",
             sort_name=f"candidate {index}",
             year=2019,
-            vote_count=index,
+            tmdb_vote_count=index,
             enrichment_state=EnrichmentState.ENRICHED,
         )
         await titles.add(one)

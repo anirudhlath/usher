@@ -88,7 +88,7 @@ TYPO_CLASSES: tuple[str, ...] = ("substitution", "deletion", "transposition", "d
 # function opens the session it is handed.
 _ELIGIBLE = """
     SELECT t.id, t.name FROM titles t
-    WHERE t.kind = 'movie' AND t.vote_count >= 500
+    WHERE t.kind = 'movie' AND t.tmdb_vote_count >= 500
       AND char_length(t.name) BETWEEN :low AND :high
       AND NOT EXISTS (
           SELECT 1 FROM titles o

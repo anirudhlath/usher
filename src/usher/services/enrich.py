@@ -115,9 +115,9 @@ _ENRICHABLE: tuple[str, ...] = (
     "spoken_languages",
     "origin_countries",
     "content_rating",
-    "community_rating",
-    "vote_count",
-    "popularity",
+    "tmdb_vote_average",
+    "tmdb_vote_count",
+    "tmdb_popularity",
 )
 
 # The `kind` half of a `raw_payloads` key when a provider's id space is not

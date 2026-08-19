@@ -541,19 +541,34 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `pass`, which no other case in this suite can see -- the shared
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
-        stepped_back = await _index_set(url)
-        # `m09f`'s artefacts, re-pointed here the moment it became head — the
-        # tenth landing in a row to do this, and the second where neither
-        # `_index_set` nor `_column_set` can carry the assertion.
-        #
-        # **`m09f` changes a *storage mode*, which is the least visible thing a
-        # migration in this project has ever changed.** Nothing about the
-        # column's name, type, width, nullability, constraints or indexes
-        # moves — `_column_set`, `_column_type` and `_index_set` all answer
-        # identically on both sides of it, so every reader this file had before
-        # today is blind to the entire revision and a `downgrade()` replaced by
-        # `pass` passes all of them. What moves is `pg_attribute.attstorage`,
-        # `e` at `m09e` and `p` at head, and `_column_storage` exists for that.
+        # **`m10a`'s artefacts, re-pointed here the moment it became head** —
+        # the eleventh landing in a row to do this. `m10a` is a *renaming*
+        # head, so `_column_set` carries it in both directions at once: the
+        # new spellings are absent here and the old ones present, and a
+        # `downgrade()` that renamed only some of them fails on the half it
+        # forgot. One assertion per artefact kind — the columns via
+        # `_column_set`, the constraints via `_constraint_set`, because a
+        # rename that moved a column and left its CHECK named for the old one
+        # is invisible to the column reader.
+        at_m09f_columns = await _column_set(url, "titles")
+        for new in ("tmdb_vote_average", "tmdb_vote_count", "tmdb_popularity"):
+            assert new not in at_m09f_columns, f"{new} should not exist below m10a"
+        for old in ("community_rating", "vote_count", "popularity"):
+            assert old in at_m09f_columns, f"{old} should be back below m10a"
+        # The two added columns, asserted separately: a `downgrade()` that
+        # reversed the renames and forgot the drops satisfies every line above.
+        assert "imdb_num_votes" not in at_m09f_columns
+        assert "imdb_average_rating" not in at_m09f_columns
+
+        at_m09f_constraints = await _constraint_set(url, "titles")
+        assert "ck_titles_community_rating_range" in at_m09f_constraints
+        assert "ck_titles_tmdb_vote_average_range" not in at_m09f_constraints
+
+        # **A named stop at `m09e`, holding `m09f`'s four.** Displaced from the
+        # `-1` half the moment `m10a` became head, and displaced *because they
+        # had teeth*: `-1`-from-`m10a` lands on `m09f`'s applied state, where
+        # `attstorage` is `p` and `== "e"` is false on all three columns.
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m09e", direction="down"))
         for table, column in (
             ("title_embeddings", "embedding"),
             ("user_taste", "centroid"),
@@ -562,12 +577,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
             assert await _column_storage(url, table, column) == "e", (
                 f"{table}.{column} should be back to pgvector's EXTERNAL default here"
             )
-        # The index in the same breath, because `VACUUM FULL` rebuilds it with
-        # the table: a `downgrade()` that reset the storage and lost the graph
-        # would satisfy every assertion above and leave the semantic lane
-        # without an index, which nothing else in this suite would notice —
-        # pgvector answers the same query by sequential scan.
-        assert "ix_title_embeddings_hnsw" in stepped_back
+        assert "ix_title_embeddings_hnsw" in await _index_set(url)
 
         # **A named stop at `m09d`, holding `m09e`'s three.** Displaced from the
         # `-1` half the moment `m09f` became head, and displaced *because they

@@ -198,7 +198,7 @@ async def _seed_title(
         year=2021,
         overview="A film.",
         genres=("Drama", "Science Fiction"),
-        community_rating=7.8,
+        tmdb_vote_average=7.8,
         enrichment_state=state,
         enrichment_error=error,
     )
@@ -783,6 +783,24 @@ async def test_a_credit_carries_the_role_and_no_provider_identifier(
             "job": "Director",
         }
     ]
+
+
+async def test_the_rating_fields_keep_their_wire_names(
+    client: httpx.AsyncClient, seeded: Seeded
+) -> None:
+    """**ADR-0040 moved three columns and deliberately moved no wire field.**
+
+    `usher-web` is deployed against this body and generates its types from it,
+    so `TitleResponse.community_rating` stayed put while the column behind it
+    became `titles.tmdb_vote_average`. The sibling case built from
+    `TitleResponse.model_fields` cannot see a rename -- it derives its
+    expectation from the very thing that would have changed -- so this one
+    spells the key out, and asserts the value so a field renamed *and* left
+    unset cannot pass on an absence.
+    """
+    body = (await client.get(f"/titles/{seeded.title_id}")).json()
+
+    assert body["community_rating"] == 7.8
 
 
 async def test_the_response_carries_every_field_of_its_own_model(

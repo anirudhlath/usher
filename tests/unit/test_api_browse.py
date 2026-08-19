@@ -214,7 +214,7 @@ async def test_a_cursor_minted_under_another_sort_is_refused_rather_than_reinter
         "the premise: these two sorts share a keyset type, so only the digest can tell them apart"
     )
     for index in range(4):
-        await _seed(titles, f"Title {index:02d}", year=2000 + index, vote_count=index)
+        await _seed(titles, f"Title {index:02d}", year=2000 + index, tmdb_vote_count=index)
 
     minted = await client.get("/browse", params={"sort": "year", "limit": 2})
     cursor = minted.json()["next_cursor"]
@@ -372,8 +372,8 @@ async def test_every_sort_pages_and_every_sort_has_a_cursor_type(
             titles,
             f"Title {index:02d}",
             year=2000 + index,
-            popularity=float(index),
-            vote_count=index,
+            tmdb_popularity=float(index),
+            tmdb_vote_count=index,
         )
 
     for sort in BrowseSort:
@@ -400,9 +400,9 @@ async def test_a_page_boundary_inside_the_unkeyed_group_resumes_from_it(
     round-trip it; a route that refused it would end the walk at the first
     unkeyed row with every page it served looking full.
     """
-    await _seed(titles, "Keyed", popularity=9.0)
-    await _seed(titles, "Unkeyed One", popularity=None)
-    await _seed(titles, "Unkeyed Two", popularity=None)
+    await _seed(titles, "Keyed", tmdb_popularity=9.0)
+    await _seed(titles, "Unkeyed One", tmdb_popularity=None)
+    await _seed(titles, "Unkeyed Two", tmdb_popularity=None)
 
     first = await client.get("/browse", params={"sort": "popularity", "limit": 2})
     assert first.status_code == 200, first.text

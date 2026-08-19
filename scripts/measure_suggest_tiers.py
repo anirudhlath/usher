@@ -405,8 +405,10 @@ async def catalog_facts(session: AsyncSession) -> dict[str, Any]:
             text(
                 """
                 SELECT count(*) AS titles,
-                       count(*) FILTER (WHERE popularity IS NOT NULL) AS with_popularity,
-                       count(*) FILTER (WHERE vote_count IS NOT NULL) AS with_vote_count,
+                       count(*) FILTER (WHERE tmdb_popularity IS NOT NULL)
+                           AS with_popularity,
+                       count(*) FILTER (WHERE tmdb_vote_count IS NOT NULL)
+                           AS with_vote_count,
                        count(*) FILTER (WHERE kind = 'movie') AS movies,
                        count(*) FILTER (WHERE enrichment_state <> 'skeleton') AS enriched
                 FROM titles
@@ -463,7 +465,7 @@ async def check_frame(session: AsyncSession) -> dict[str, Any]:
             session,
             """
             SELECT count(*) FROM titles t
-            WHERE t.kind = 'movie' AND t.vote_count >= 500
+            WHERE t.kind = 'movie' AND t.tmdb_vote_count >= 500
               AND char_length(t.name) BETWEEN :low AND :high
               AND NOT EXISTS (
                   SELECT 1 FROM titles o
@@ -541,7 +543,7 @@ async def build_typo_cases(session: AsyncSession) -> list[TypoCase]:
                 text(
                     """
                     SELECT t.id, t.name FROM titles t
-                    WHERE t.kind = 'movie' AND t.vote_count >= 500
+                    WHERE t.kind = 'movie' AND t.tmdb_vote_count >= 500
                       AND char_length(t.name) BETWEEN :low AND :high
                       AND NOT EXISTS (
                           SELECT 1 FROM titles o
@@ -581,7 +583,7 @@ async def keystroke_probes(session: AsyncSession, chooser: random.Random) -> lis
     rows = (
         await session.execute(
             text(
-                "SELECT t.name FROM titles t WHERE t.kind = 'movie' AND t.vote_count >= 500 "
+                "SELECT t.name FROM titles t WHERE t.kind = 'movie' AND t.tmdb_vote_count >= 500 "
                 "AND char_length(t.name) >= 8 ORDER BY t.id"
             )
         )

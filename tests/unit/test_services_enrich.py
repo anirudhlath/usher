@@ -146,7 +146,7 @@ async def test_the_provider_fills_in_what_the_source_only_guessed_at(
     assert stored.name == "A Film"
     assert stored.year == 1988
     assert stored.genres == ("Drama", "Thriller")
-    assert stored.community_rating == 8.4
+    assert stored.tmdb_vote_average == 8.4
 
 
 async def test_field_provenance_records_which_provider_supplied_what(

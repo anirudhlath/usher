@@ -207,7 +207,7 @@ def _title(title_id: uuid.UUID) -> Title:
         name=name,
         sort_name=name.casefold(),
         year=_YEARS.get(title_id, _DEFAULT_YEAR),
-        popularity=popularity,
+        tmdb_popularity=popularity,
     )
 
 

@@ -120,7 +120,7 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
 
     result = await session.execute(
         text(
-            "SELECT imdb_id, tmdb_id, tvdb_id, popularity, community_rating, "
+            "SELECT imdb_id, tmdb_id, tvdb_id, tmdb_popularity, tmdb_vote_average, "
             "enrichment_state FROM titles WHERE imdb_id IN ('tt99000020','tt99000030') "
             "ORDER BY imdb_id"
         )

@@ -51,19 +51,19 @@ _LIKE_ESCAPE = "\\"
 _LIKE_SPECIALS = (_LIKE_ESCAPE, "%", "_")
 
 # **Both tiers order their answers the same way, minus the key tier 1 does not
-# have.** Tier 2 sorts `dist ASC, popularity DESC NULLS LAST, vote_count DESC
-# NULLS LAST, id ASC`; every row here is an exact prefix match, so there is no
-# distance to lead with and the remaining three are identical. A client that
-# paints tier 1 and then replaces it with tier 2 sees the same list rather than
-# one that jumps under the cursor.
+# have.** Tier 2 sorts `dist ASC, tmdb_popularity DESC NULLS LAST,
+# tmdb_vote_count DESC NULLS LAST, id ASC`; every row here is an exact prefix
+# match, so there is no distance to lead with and the remaining three are
+# identical. A client that paints tier 1 and then replaces it with tier 2 sees
+# the same list rather than one that jumps under the cursor.
 #
 # `NULLS LAST` on both keys because a descending sort puts NULLs first by
 # default, which would hand the box to whichever skeleton the scan reached
 # first. Measured on a `--phase all` catalog of 1,271,570 titles: **291,584
 # (22.9%) carry a popularity**, so on the other ~77% this degenerates to
-# `vote_count DESC, id ASC`, and `vote_count` -- written by the bootstrap on
-# 539,350 rows -- is what orders them. The id makes the order total, so a tie
-# cannot come back differently on two runs.
+# `tmdb_vote_count DESC, id ASC`, and that column -- written by the bootstrap
+# on 539,350 rows -- is what orders them. The id makes the order total, so a
+# tie cannot come back differently on two runs.
 #
 # **The union reads `titles` and `title_search_names` as one set, so a
 # director's name reaches their films from the first keystroke.** That is the
@@ -109,7 +109,7 @@ WITH matched AS (
 SELECT m.title_id AS id
 FROM matched AS m
 JOIN titles AS t ON t.id = m.title_id
-ORDER BY t.popularity DESC NULLS LAST, t.vote_count DESC NULLS LAST, m.title_id ASC
+ORDER BY t.tmdb_popularity DESC NULLS LAST, t.tmdb_vote_count DESC NULLS LAST, m.title_id ASC
 LIMIT :limit
 """
 

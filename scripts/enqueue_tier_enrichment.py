@@ -113,10 +113,10 @@ TIER_MIN_VOTES = 100
 # `S608` refuses -- a rule this repository keeps in `[tool.ruff.lint] select`
 # and does not `noqa` away for a statement it could parameterise instead.
 _PAGE = """
-SELECT id, kind, name, sort_name, vote_count, tmdb_id
+SELECT id, kind, name, sort_name, tmdb_vote_count, tmdb_id
 FROM titles
 WHERE kind = 'movie'
-  AND vote_count >= :min_votes
+  AND tmdb_vote_count >= :min_votes
   AND tmdb_id IS NOT NULL
   AND (CAST(:after AS uuid) IS NULL OR id > CAST(:after AS uuid))
 ORDER BY id
@@ -155,8 +155,8 @@ def is_tier_movie(title: Title) -> bool:
     """
     return (
         title.kind is TitleKind.MOVIE
-        and title.vote_count is not None
-        and title.vote_count >= TIER_MIN_VOTES
+        and title.tmdb_vote_count is not None
+        and title.tmdb_vote_count >= TIER_MIN_VOTES
         and title.tmdb_id is not None
     )
 
@@ -241,7 +241,7 @@ async def _page(session: AsyncSession, after: uuid.UUID | None, size: int) -> li
             kind=TitleKind(row["kind"]),
             name=row["name"],
             sort_name=row["sort_name"],
-            vote_count=row["vote_count"],
+            tmdb_vote_count=row["tmdb_vote_count"],
             tmdb_id=row["tmdb_id"],
         )
         for row in rows
