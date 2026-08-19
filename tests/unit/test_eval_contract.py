@@ -1,13 +1,23 @@
 """Structural guarantees about `usher.eval` that no runtime test can see.
 
 Each is an absence claim -- *nothing imports this package*, *nothing outside
-one package imports `ranx`* -- and an absence is exactly what rots silently,
-because the thing that would falsify it is a line somebody adds in a file this
-test does not name. There are three cases now: the eleventh contract's source
-list, the twelfth's, and the one inch of the twelfth's claim that a `forbidden`
-contract cannot express. A later task widens this module to a fourth, a schema
-that acquires a migration; until that task lands there are three, and a
-docstring promising four would be the same kind of rot one layer up.
+one package imports `ranx`*, *no migration has quietly acquired this schema* --
+and an absence is exactly what rots silently, because the thing that would
+falsify it is a line somebody adds in a file this test does not name.
+
+**Two groups, nine cases.** Three are about the import contracts: the
+eleventh's source list, the twelfth's, and the one inch of the twelfth's claim
+that a `forbidden` contract cannot express. The other six are Task 7's, and
+they are about the `eval` schema staying outside the alembic chain. **Four of
+those six are one claim asserted four ways, because alembic can acquire a
+schema through any of them and a guard that checks one reads exactly like a
+guard that checks all four**: a migration file naming it, a model putting a
+table in `Base.metadata`, the chain growing a second head, and `env.py`
+widening what `--autogenerate` reflects. The last two are about the DDL file
+itself -- that it ships beside the module, and that it is spelled so applying
+it twice is safe. This docstring said there were three and predicted a fourth
+until Task 7 landed; a docstring promising cases that do not exist is the same
+kind of rot one layer up, and so is one that under-counts them.
 
 **Every case here derives its expectation from a walk of the package**, which
 is the repair `test_ports_repository_package.py` makes for the same failure
@@ -20,14 +30,19 @@ passes.
 
 import ast
 import pkgutil
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
 
 import grimp
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 import usher
 import usher.eval
+from usher.db import models  # noqa: F401  — registers every table on Base.metadata
+from usher.db.base import Base
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -61,6 +76,13 @@ _THE_COMPOSITION_ROOT = "usher.cli"
 # this, rather than looping over the three modules that are reachable, which
 # would be a second copy of a fact a reader has to trust somebody enumerated.
 _REACHED_BY_NOTHING = "usher.__main__"
+
+# The second group's two paths. `schema.sql` is reached through
+# `usher.eval.__file__` rather than through `_ROOT`, deliberately: the copy
+# that matters is the one beside the installed module, which is the copy the
+# harness reads and the copy a wheel either carries or does not.
+_MIGRATIONS = _ROOT / "src" / "usher" / "db" / "migrations"
+_SCHEMA_SQL = Path(usher.eval.__file__).parent / "schema.sql"
 
 
 def _top_level_names() -> set[str]:
@@ -376,4 +398,252 @@ def test_only_the_ir_module_inside_the_metrics_package_names_ranx() -> None:
         "project that imports ranx, and the twelfth import contract cannot see "
         "inside this package. Modules here importing ranx: "
         f"{sorted(importers)}; files scanned: {scanned}"
+    )
+
+
+def _code_without_prose(source: str) -> str:
+    """A module's code with its docstrings dropped.
+
+    `ast.parse` discards comments outright and this drops the docstrings, so
+    what is left is what the module *does*. That matters here for the reason
+    `test_only_the_ir_module_inside_the_metrics_package_names_ranx` parses
+    rather than greps: three migrations in this chain already say
+    "evaluation" and "retrieval" in prose, and a migration whose comment
+    happens to end a sentence with "retrieval." would answer a `"eval." in
+    text` scan on behalf of a schema nobody created. A scan over prose has
+    both failure modes -- prose that trips it, and prose that answers it.
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        head, *rest = node.body
+        # `rest` non-empty because unparsing a body that is only a docstring
+        # would leave a definition with no body at all.
+        if (
+            rest
+            and isinstance(head, ast.Expr)
+            and isinstance(head.value, ast.Constant)
+            and isinstance(head.value.value, str)
+        ):
+            node.body = rest
+    return ast.unparse(tree)
+
+
+def _statements(sql: str) -> list[str]:
+    """`schema.sql`'s statements, with its prose removed.
+
+    Line comments are stripped rather than tolerated, for the same reason
+    `_code_without_prose` exists: the file's own header explains the
+    idempotency rule *in words*, so a scan for `IF NOT EXISTS` over the raw
+    text would be answered by the sentence promising it and would then be
+    "fixed" by deleting the explanation. No string literal in this file holds
+    a `--` or a `;`, and the case below asserts the shape it found rather than
+    trusting that sentence either.
+    """
+    without_prose = "\n".join(line.split("--")[0] for line in sql.splitlines())
+    return [one.strip() for one in without_prose.split(";") if one.strip()]
+
+
+def test_the_eval_schema_is_not_in_the_alembic_chain() -> None:
+    """ADR-0039. A migration would create these tables in every deployment,
+    for a harness those deployments cannot run because the `eval` extra is
+    not installed -- and a dev-only branch is the standard way `alembic
+    heads` stops being one head.
+
+    Asserted structurally because the failure is silent: a migration added
+    later still leaves every eval test green, and the harness's own
+    `ensure_schema` would apply a schema the chain had already built.
+    """
+    migrations = sorted(_MIGRATIONS.rglob("*.py"))
+    assert len(migrations) >= 22, (
+        f"the migration scan found {len(migrations)} files, fewer than this "
+        "chain has had since M9 -- a scan pointed at the wrong directory "
+        f"globs nothing and passes exactly like one that passes: {_MIGRATIONS}"
+    )
+    assert any(path.name == "env.py" for path in migrations), (
+        "the scan found no env.py, so it is walking something other than the "
+        f"migrations package: {[path.name for path in migrations][:5]}"
+    )
+
+    offenders = [
+        path.relative_to(_ROOT)
+        for path in migrations
+        if re.search(r"\beval\b", _code_without_prose(path.read_text(encoding="utf-8")), re.I)
+    ]
+    assert not offenders, f"the eval schema must stay out of the migration chain: {offenders}"
+
+
+def test_no_orm_model_puts_a_table_in_the_eval_schema() -> None:
+    """The second way a migration arrives, and the file scan above cannot see
+    it: `alembic revision --autogenerate` mints migrations from
+    `Base.metadata`, so a model declaring
+    `__table_args__ = {"schema": "eval"}` puts the eval schema into the chain
+    the next time anybody generates one -- with no migration file naming it
+    until that moment, and the harness's own `schema.sql` then a second,
+    diverging definition of the same tables.
+    """
+    tables = Base.metadata.tables
+    assert len(tables) >= 20, (
+        f"Base.metadata holds {len(tables)} tables, fewer than usher has had "
+        "since M4 -- an empty registry has no table in the eval schema "
+        "either, and would pass this case for the wrong reason"
+    )
+
+    claimed = sorted(name for name, table in tables.items() if table.schema == "eval")
+    assert claimed == [], (
+        "these models declare themselves in the eval schema, so the next "
+        f"--autogenerate puts the harness's own tables in the chain: {claimed}"
+    )
+
+
+def test_the_migration_chain_still_has_exactly_one_head() -> None:
+    """The third way, and the one ADR-0039 names as its second reason.
+
+    A dev-only migration branch is the standard way `alembic heads` stops
+    being one head, and a second head is not a red anywhere else: `alembic
+    upgrade head` refuses with *"Multiple head revisions are present"* only
+    when somebody runs it, which in this repository is a deployment rather
+    than a gate step. Reading the versions directory needs no database, which
+    is why this belongs beside the other structural claims rather than in
+    `tests/integration/`.
+    """
+    script = ScriptDirectory.from_config(Config(str(_ROOT / "alembic.ini")))
+    revisions = list(script.walk_revisions())
+    assert len(revisions) >= 22, (
+        f"the chain walk found {len(revisions)} revisions, fewer than this "
+        "project has had since M9 -- a ScriptDirectory pointed at an empty "
+        "versions directory reports no heads at all and would fail this case "
+        "for a reason that has nothing to do with the eval schema"
+    )
+
+    assert len(script.get_heads()) == 1, (
+        "the migration chain has more than one head, which is what a dev-only "
+        f"branch looks like: {script.get_heads()}"
+    )
+
+
+def test_the_schema_sql_ships_beside_the_module() -> None:
+    """It is read at runtime. A file that exists in the tree and not in the
+    wheel fails only on an installed copy, which is the copy CI runs.
+
+    **The path is resolved from `usher.eval.__file__` and not from the
+    repository root**, which is the only difference between this case and one
+    that cannot fail: a `_ROOT / "src" / ...` spelling is green in a checkout
+    whatever the build backend does. What that buys is bounded and worth
+    stating -- an editable install points back at `src/`, so this is a check
+    that the file sits where the module does, not a check on the wheel. The
+    wheel itself was measured once, at the build (`uv build --wheel`,
+    2026-08-19: `usher/eval/schema.sql` is present under hatchling's default
+    selection, with no `force-include`), and the measurement is recorded on
+    `pyproject.toml`'s own build block where the directive would have gone.
+    """
+    sql = _SCHEMA_SQL
+
+    assert sql.is_file(), (
+        f"{sql} is missing, so `ensure_schema` has nothing to apply -- note "
+        "this path is resolved from usher.eval.__file__, so it is the "
+        "installed copy rather than the one in src/"
+    )
+    assert "CREATE SCHEMA IF NOT EXISTS eval" in sql.read_text(encoding="utf-8")
+
+
+def test_every_statement_in_the_schema_is_idempotent_and_destroys_nothing() -> None:
+    """`ensure_schema` runs at the start of every eval run rather than once.
+
+    The behavioural halves of this are in
+    `tests/integration/test_eval_ledger_postgres.py`, which needs Docker; this
+    is the half that runs everywhere, and it is a different claim rather than
+    a cheaper copy. A second apply that raises nothing is also what
+    `DROP SCHEMA IF EXISTS eval CASCADE` produces -- so the integration case
+    asserts the *rows* survive, and this one asserts the file cannot be
+    spelled that way in the first place, including for a statement somebody
+    adds later.
+    """
+    statements = _statements(_SCHEMA_SQL.read_text(encoding="utf-8"))
+    assert len(statements) >= 4, (
+        f"the statement scan found {len(statements)} statements, fewer than "
+        "this schema's two tables, index and view -- a scan that finds "
+        f"nothing passes every assertion below: {statements}"
+    )
+    assert any("IF NOT EXISTS" in one.upper() for one in statements), (
+        "no statement is spelled IF NOT EXISTS, so that arm of the check below is vacuous"
+    )
+    assert any(one.upper().startswith("CREATE OR REPLACE") for one in statements), (
+        "no statement is spelled CREATE OR REPLACE, so that arm of the check below is vacuous"
+    )
+
+    not_idempotent = [
+        one
+        for one in statements
+        if "IF NOT EXISTS" not in one.upper() and not one.upper().startswith("CREATE OR REPLACE")
+    ]
+    assert not_idempotent == [], (
+        "every statement must be IF NOT EXISTS or OR REPLACE, because this "
+        f"file is applied at the start of every run: {not_idempotent}"
+    )
+
+    # `DELETE` is matched only as a statement's leading verb, and that is a
+    # measurement rather than caution: spelled `\bDELETE\b` this scan reports
+    # `eval.scores`, whose foreign key is `ON DELETE CASCADE` -- a clause the
+    # schema needs, in the statement the scan exists to protect. `DROP` and
+    # `TRUNCATE` have no such clause form here.
+    destructive = [
+        one
+        for one in statements
+        if re.search(r"\b(DROP|TRUNCATE)\b", one, re.I) or re.match(r"DELETE\b", one, re.I)
+    ]
+    assert destructive == [], (
+        "a DROP is the other way to make a schema file re-appliable, and it "
+        "takes every previous run's rows with it -- the trend table is the "
+        f"whole artefact: {destructive}"
+    )
+
+
+def test_the_migration_environment_does_not_reflect_non_default_schemas() -> None:
+    """The fourth way into the chain, and the only one that is a *setting*.
+
+    `env.py`'s `context.configure(...)` decides what `--autogenerate` reflects.
+    Left at its default it reflects the connection's default schema alone, so
+    `eval.runs` and `eval.scores` are invisible to it -- which is what makes an
+    out-of-chain schema safe rather than merely undeclared. With
+    `include_schemas=True` the same comparison finds two tables
+    `Base.metadata` has never heard of and proposes **dropping** them, so the
+    next migration anybody generated would delete the eval ledger and every
+    other case in this module would still be green. That half is measured
+    against a real database in
+    `tests/integration/test_eval_ledger_postgres.py::test_the_eval_schema_is_invisible_to_autogenerate_even_once_it_exists`;
+    this is the half that says the option is off, because a configuration is
+    not something a database can be asked about.
+
+    Turning it on is a legitimate thing to want one day -- a second product
+    schema would need it. What this case asks for is that the eval tables be
+    dealt with in the same commit, by an `include_object` filter or by
+    `include_schemas` being scoped, rather than by a green gate.
+    """
+    source = (_MIGRATIONS / "env.py").read_text(encoding="utf-8")
+    configured = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "configure"
+    ]
+    assert len(configured) >= 2, (
+        f"env.py has {len(configured)} configure() calls; it has had one for "
+        "offline mode and one for online mode since M1, and a scan that finds "
+        "neither passes this case without reading the option at all"
+    )
+
+    reflecting = sorted(
+        keyword.arg
+        for call in configured
+        for keyword in call.keywords
+        if keyword.arg in {"include_schemas", "include_object", "include_name"}
+    )
+    assert reflecting == [], (
+        "env.py's autogenerate reflection has been widened or filtered, and "
+        "the eval schema's safety rests on it being neither: check that "
+        "eval.runs and eval.scores are excluded before changing this case's "
+        f"expectation. Found: {reflecting}"
     )

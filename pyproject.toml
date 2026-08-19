@@ -146,6 +146,28 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
+# **`packages` already ships the non-Python files inside it, and E1 Task 7
+# measured that rather than assuming it.** `usher/eval/schema.sql` is read at
+# runtime by `ledger.ensure_schema`, so a file that exists in the tree and not
+# in the wheel is a harness that works from a checkout and fails from an
+# installed copy. Built with `uv build --wheel` on 2026-08-19, the wheel's
+# non-`.py` entries are exactly:
+#
+#     usher/db/migrations/README
+#     usher/db/migrations/script.py.mako
+#     usher/eval/schema.sql
+#
+# so hatchling's default file selection for a package directory takes every
+# file in it, and the two migration files have been shipping that way since M1.
+# The plan for this task called for a
+# `[tool.hatch.build.targets.wheel.force-include]` entry mapping
+# `src/usher/eval/schema.sql` to `usher/eval/schema.sql`; it is **not** added,
+# because the measurement above says it would restate what `packages` already
+# does, and a directive whose stated reason is false is the thing this
+# repository keeps having to correct. What holds the claim instead is
+# `tests/unit/test_eval_contract.py::test_the_schema_sql_ships_beside_the_module`,
+# which resolves the path from `usher.eval.__file__` -- the installed copy --
+# rather than from the repository root.
 packages = ["src/usher"]
 
 [tool.pytest.ini_options]
