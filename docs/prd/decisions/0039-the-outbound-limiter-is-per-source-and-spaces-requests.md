@@ -54,9 +54,10 @@ limiter that still slept is one an operator cannot turn off.
 
 ### 2. Keyed per source; the *value* is one setting, and why
 
-The gate is constructed per source (`EmbySession` builds one, keyed on the
-source name so its metric series is per source). But the **rate** is one
-setting, `USHER_SOURCE_REQUESTS_PER_SECOND`, not a per-source column.
+The gate is constructed on each `EmbySession` (keyed on the source *name* so
+its metric series is per source; §4 covers where the gate itself lives and why
+that placement is provisional). But the **rate** is one setting,
+`USHER_SOURCE_REQUESTS_PER_SECOND`, not a per-source column.
 
 Issue #19 asks whether the ceiling belongs per source — *"a self-hosted server
 on the same LAN and a shared server across the internet do not deserve the same
@@ -65,9 +66,15 @@ ceiling"* — and the answer is **yes for the key and no for the value in Phase
 kind, name, base_url, credentials_ref, device_id, enabled, supports_push,
 created_at, updated_at — ten fields, none a rate), and adding one is DDL this
 phase's data model does not open. Per-source *values* are a post-v1 candidate
-with the column named, not left to be rediscovered. And M9's S3 already
-established that a source is addressed by `source.id`; the gate keys on the same
-identity.
+with the column named, not left to be rediscovered. Addressing a source by
+`source.id` is M9's **W1** — the worker's `SourceRegistry`
+(`src/usher/composition.py:1631,1668`) — **not** M9's S3, which is the TMDb
+priority-tier enrichment run (130,334 requests,
+`.claude/rules/tmdb-and-enrichment.md`) and settled nothing about source
+addressing. And the gate does not key on `source.id` at all: it keys on
+`source.name` (`src/usher/adapters/emby/session.py:189`; the metric records
+`{"source": source_name}`), matching the existing `usher.source.request.duration`
+label rather than minting a second per-source identity.
 
 The setting is named `source_*` and **not** `emby_*` deliberately — `config.py`
 is not an adapter, and a setting named for one media server would be the first
@@ -75,47 +82,102 @@ source-specific concept to escape `adapters/`.
 
 ### 3. The default is derived from S1, and it binds a different regime than the concurrency ceiling
 
-The default is **0.4 rps**, derived in one sentence from S1. Little's law over
-the op class that dominates a walk — a 200-item page — at S1's measured p95 of
-9.1713 s, paced by the concurrency `KIND_CONCURRENCY` gives the Emby-facing
-kinds today (4): `4 / 9.1713 = 0.436` rps is the rate at which Usher already
-goes as fast as this server answers a *concurrent* walk. The default is set
-**below** it, so the setting is a courtesy margin rather than a re-statement of
-the server's own speed. S7 may lower the concurrency, which only makes this
-bind less.
+The default is **0.4 rps**, and its honest derivation needs two of S1's
+statistics rather than one silently chosen, so both are named. S1 measured this
+server on 2026-08-15 (`.claude/rules/emby-push-and-ingest.md`, one household,
+one evening, 24 pooled `list` reps and 12 `get_item`): a 200-item page has a
+**mean of 6.0369 s** and a **p95 of 9.1713 s**, and a single-item read a
+**median of 0.1495 s**. The distribution is bimodal by op class — the fact that
+makes a single rate insufficient.
 
-🔴 **The finding that decides how this is written up: at the latency PRD 01
-long claimed, a requests-per-second limiter is inert.** Four concurrent
-requests each taking two seconds is 2 rps; a ceiling of 2 rps never fires, and
-the operator has configured a limiter that does nothing while looking
-configured — the exact defect `push_max_items_per_event`'s `le=500` bound was
-written against. **At the latency S1 actually measured it is the opposite in
-one regime and the same in the other, and neither substitutes for the concurrency
-ceiling (#13/S7):**
+Little's law over the op class that dominates a walk — a 200-item page — paced
+by the concurrency `KIND_CONCURRENCY` gives the Emby-facing kinds today (**4**,
+which S7 may lower, and lowering only makes this bind less) yields *two* rates,
+because which page-latency figure you divide by is a choice this project already
+has a rule about:
 
-- **A sequential walk** is one page at a time, ~0.17 rps, and no per-source
-  limit above that ever fires on it (S1 states this directly).
-- **A concurrent page walk** is ~0.44 rps four in flight, and 0.4 is the
-  courtesy margin just under it — the concurrency ceiling is what actually
-  bounds the load, and the rate limiter is a hair below it.
-- **Single-item reads** at S1's 0.15 s run ~27 rps four in flight, and there
-  the rate limiter is what binds every call while the concurrency ceiling of 4
-  is nowhere near reached.
+- **The expected concurrent-walk rate is the mean-based one.** This project's
+  own rule is that *"any Σ over pages wants the mean"*
+  (`.claude/rules/emby-push-and-ingest.md`), and a walk is a Σ over pages, so
+  four pages in flight come off this server at `4 / 6.0369 = 0.66` rps — the
+  same figure S1 records as `N × 0.17` (its sequential `0.17 = 1 / 6.0369` rps
+  per page), i.e. **~0.68 rps** four in flight.
+- **The conservative ceiling is the p95-based one.** `4 / 9.1713 = 0.436` rps is
+  the pessimistic estimate — the rate four-in-flight would sustain if every page
+  returned at the p95 rather than the mean — and it is the right figure to set a
+  *ceiling* under precisely because it is the *lower* one: a limit below the
+  pessimistic estimate is below the expected estimate too.
+
+The shipped **0.4** is below all three readings — `4/9.1713 = 0.436`,
+`4/6.0369 = 0.663`, and S1's `0.68` — so it is a courtesy margin under every one
+of them rather than a re-statement of the server's own speed.
+
+🔴 **The regime this ADR first got wrong is the concurrent walk, and the
+correction is the point of this section.** At the latency PRD 01 long (falsely)
+claimed — *"1–5 s per request"* — a requests-per-second limiter is inert: four
+concurrent requests each taking two seconds is 2 rps, so any ceiling above 2
+never fires and the operator has a limiter that does nothing while looking
+configured, the exact defect `push_max_items_per_event`'s `le=500` bound was
+written against. At the latency S1 actually measured, 0.4 lands in **three
+regimes**, and it substitutes for the concurrency ceiling (#13/S7) in none:
+
+- **A sequential walk** is one page at a time, `1 / 6.0369 = 0.17` rps, and no
+  per-source limit above that ever fires on it (S1 states this directly).
+- **A concurrent page walk** is the contested one. Under S1's mean-based
+  expected rate of ~0.66–0.68 rps a 0.4 gate **binds** it — by roughly 41%
+  (`(0.68 − 0.4) / 0.68`), *not* "a hair below" it as this ADR first wrote.
+  Whether it binds a concurrent walk **in fact** is **unmeasured and is S7's to
+  settle**: S1 reserved exactly this — *"whether it binds a concurrent walk is
+  unmeasured and is S7's … a limiter set for courtesy could well reach it"* —
+  because every S1 request was sequential and no concurrency figure is licensed
+  here.
+- **Single-item reads** at S1's 0.1495 s median run ~27 rps four in flight, and
+  there the rate limiter binds every call while the concurrency ceiling of 4 is
+  nowhere near reached.
 
 So the rate limiter and the concurrency ceiling bound **different regimes**, and
-which regime a deployment is in is which op class dominates it — S1's table is
-the evidence, not a guess. This is the same shape as `api/deps.py`'s *"a rate
-limiter that limits nothing"*, arriving through latency instead of through
-instance count.
+which regime a deployment is in is which op class dominates it — but *"0.4 is
+inert on a concurrent walk"* is not one of the things S1's table settles, and an
+earlier draft of this section asserted it anyway. The `api/deps.py` parallel
+(*"a rate limiter that limits nothing"*) holds only in the sequential regime; in
+the concurrent regime the honest statement is that the question is open.
 
-### 4. The bound is per process, per source
+### 4. Where the gate lives today — per adapter instance, and known-provisional pending S3
 
-`.claude/rules/api-telemetry-and-lanes.md`'s W1 entry already records that
+`.claude/rules/api-telemetry-and-lanes.md`'s W1 entry records that
 *"`USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` are both per
-process, against a rate limit that is per client"*. `USHER_SOURCE_REQUESTS_PER_SECOND`
-is the same shape: the gate lives on one `EmbySession` in one process, so **a
-second `usher work` container is a second process and doubles this one too.**
-Said out loud rather than discovered.
+process, against a rate limit that is per client"*.
+`USHER_SOURCE_REQUESTS_PER_SECOND` is **not yet even that** at this head, and
+this section says so plainly rather than claiming the property S3 will add.
+
+The gate is constructed **inside each `EmbySession`**
+(`src/usher/adapters/emby/session.py:189`), and every
+`ConfiguredSourceAdapterFactory.build()` mints a fresh session and therefore a
+fresh `_MinInterval`. So the gate is **per adapter instance, not per process.**
+The measured consequence: the push lane (`src/usher/api/lanes.py:179`,
+`_open_adapters`) and the worker (`SourceRegistry._adapters`,
+`src/usher/composition.py:1631`) keep **separate** adapter caches, and
+`create_app` runs **both lanes in one process** (both settings-gated, both
+default on). So a single server process *already* holds **≥2 gates for the same
+source**, each pacing independently — a source given a 0.4 rps gate on each of
+two lanes sees up to 0.8 rps — plus a transient gate per admin
+connection-test and per `usher sync`. **The rate is already multiplied by the
+lane count within one process**; a second `usher work` container multiplies it
+again, but the doubling does not wait for a second container.
+
+**This placement is known-provisional and anticipates S3.** S3 (*"the limiter
+reaches every adapter that dials out"*) is the task that makes *"one gate per
+source per process"* true, and it is an **extend/rework, not a tear-out**:
+`_MinInterval`, the `take()` call, the `usher.source.throttle.wait` metric and
+the `source_requests_per_second` config field all survive — what S3 reworks is
+the factory→adapter→session **scalar threading** that today hands the rate down
+into a per-session gate. `composition.py`, `factory.py` and the two `emby/`
+modules are S3's Files list, not S2's; S2's own minimum was the single reader
+`tests/unit/test_config.py::test_every_setting_is_read_by_something` demands —
+the one `.source_requests_per_second` line in `src/` (`composition.py:326`) —
+and it is placed early rather than left dead, because a knob that reads config
+and paces nothing is worse than a live gate in a provisional place. The wiring
+is not ripped out; it is described here as what it is.
 
 ## Consequences
 

@@ -1068,7 +1068,7 @@ those paths, so the finding would never have reached the person adding an
 environment; `.env`, `.env.example` and `compose.yml` each fail a test or
 every entry point.
 
-### 34 and 35 are both right, about different things, and the M10 spec collapsed them
+### 34 and 35 (35 and 36 since S2, 2026-08-18) are both right, about different things, and the M10 spec collapsed them
 
 The M10 design spec `:32-33` says the catalogue is *"34 rows and every one is
 ✅"*. **The catalogue (`10-telemetry-and-dashboards.md:143-177`) is 35 rows, 35

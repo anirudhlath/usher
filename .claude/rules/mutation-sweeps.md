@@ -4931,7 +4931,9 @@ run against a suite holding a flaky case**.
 **The one refuted prediction is P3's blast radius, and the reason is worth more
 than the number.** The bar said one case — the O3 census, whose declared half is
 `declared == set(catalogue) - {"http.server.duration"}` with
-`assert len(catalogue) == 35` firing first. It kills two, and the second is in a
+`assert len(catalogue) == 35` firing first (`== 35` was the guard at this
+2026-08-14 head; M10's S2 later added `usher.source.throttle.wait` and moved it
+to `== 36`). It kills two, and the second is in a
 different file: `tests/unit/test_telemetry_search.py` **independently parses the
 same table**, with its own regex
 (`^\|\s*`(usher\.[a-z0-9._]+)`\s*\|\s*(\w+)\s*\|…`) keyed on the *kind* column,

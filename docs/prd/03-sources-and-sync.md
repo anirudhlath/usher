@@ -60,18 +60,18 @@ refresh-token flow; this pattern *is* the refresh mechanism.
   [08](08-operations.md) carries the same qualification).
 - **Outbound calls to one source are paced, not just retried politely.** The
   re-auth cooldown above stops a *bad credential* becoming a request storm; it
-  says nothing about a *good* one prefetching hard. So a per-source
-  minimum-interval gate spaces every outbound call at least `1/rate` seconds
-  apart, per process per source, where `rate` is `USHER_SOURCE_REQUESTS_PER_SECOND`
-  (0 disables it) — the proactive half of PRD [01](01-architecture.md)'s
-  rate-limit promise, and the answer to the operator flood recorded in issue
-  #19. The default **0.4 rps** is derived from S1, not chosen: Little's law over
-  a 200-item page at its p95 of 9.1713 s and the concurrency the Emby kinds run
-  at (4) gives `4/9.1713 = 0.436` rps, and the courtesy margin sits below it. It
-  binds a **different regime** than the concurrency ceiling (#13/S7)
-  and neither substitutes for the other — inert on a sequential walk (0.17 rps),
-  a hair under a concurrent page walk (~0.44 rps), and the binding constraint on
-  single-item reads (~27 rps four in flight at S1's 0.15 s). Full argument in
+  says nothing about a *good* one prefetching hard. So a minimum-interval gate
+  spaces every outbound call at least `1/rate` seconds apart, where `rate` is
+  `USHER_SOURCE_REQUESTS_PER_SECOND` (0 disables it) — the proactive half of PRD
+  [01](01-architecture.md)'s rate-limit promise and the answer to issue #19's
+  operator flood. The gate lives on each `EmbySession`, so a server process
+  running both lanes already holds ≥2 per source — 🔶 S3 makes it one per source
+  per process. The default **0.4 rps** is derived from S1, not chosen: a 200-item
+  page at **mean 6.0369 s / p95 9.1713 s** and the Emby concurrency (4) give an
+  expected concurrent-walk rate `4/6.0369 = 0.66` rps and a conservative p95
+  ceiling `4/9.1713 = 0.436` rps, with 0.4 below both. It is inert on a sequential
+  walk (0.17 rps) and binds single-item reads; whether it binds a *concurrent*
+  walk is **unmeasured and is S7's** to settle. Full argument in
   [ADR-0039](decisions/0039-the-outbound-limiter-is-per-source-and-spaces-requests.md);
   the seconds spent in the gate are the `usher.source.throttle.wait` histogram
   ([10](10-telemetry-and-dashboards.md)).

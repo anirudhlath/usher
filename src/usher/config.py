@@ -207,27 +207,27 @@ class Settings(BaseSettings):
     # re-authentication) for as long as it stays wrong.
     source_reauth_cooldown_seconds: float = Field(default=60.0, ge=0)
     # The proactive outbound ceiling: calls to one source are spaced at least
-    # `1/rate` seconds apart, per process, per source (ADR-0039). `0` is
-    # unlimited -- the `ge=0` shape `push_gap_min_interval_seconds` uses, not
-    # the `ge=1` a size takes -- because "off" is a value an operator sets.
+    # `1/rate` seconds apart (ADR-0039). `0` is unlimited -- the `ge=0` shape
+    # `push_gap_min_interval_seconds` uses, not the `ge=1` a size takes --
+    # because "off" is a value an operator sets. The gate lives on each
+    # `EmbySession` (one per adapter instance), so a server process running both
+    # the push and worker lanes already holds >=2 gates per source; S3 is what
+    # makes it one gate per source per process (ADR-0039 s4).
     #
-    # The default is derived from S1, not chosen. Little's law over the op
-    # class that dominates a walk -- a 200-item page -- at S1's measured **p95
-    # of 9.1713 s** (`.claude/rules/emby-push-and-ingest.md`, 2026-08-15, one
-    # household one evening), paced by the concurrency `KIND_CONCURRENCY` gives
-    # the Emby-facing kinds today (**4**, which S7 may lower and lowering only
-    # makes this bind less): `4 / 9.1713 = 0.436` rps is the rate at which
-    # Usher already goes as fast as this server answers a concurrent walk. The
-    # default is set **below** it, so the setting is a courtesy margin rather
-    # than a re-statement of the server's own speed.
+    # The default is derived from S1, not chosen. S1 measured (2026-08-15,
+    # `.claude/rules/emby-push-and-ingest.md`, one household one evening) a
+    # 200-item page at **mean 6.0369 s / p95 9.1713 s** and a single-item read
+    # at median 0.1495 s. Little's law over a page paced by the Emby-facing
+    # `KIND_CONCURRENCY` of **4** gives two figures: the mean-based expected
+    # concurrent-walk rate `4/6.0369 = 0.66` rps (a sum over pages wants the
+    # mean) and the conservative p95 ceiling `4/9.1713 = 0.436` rps. **0.4** is
+    # below both, a courtesy margin under either.
     #
-    # It binds a different regime than the concurrency ceiling and neither
-    # substitutes for the other (ADR-0039). A sequential walk is 0.17 rps and
-    # this never fires on it; a concurrent page walk is ~0.44 rps and this is
-    # the courtesy margin just under it; but single-item reads at S1's 0.15 s
-    # run ~27 rps four-in-flight, and there this gate is what binds every call.
-    # Which regime a deployment is in is which op class dominates it -- S1's
-    # table is the evidence, not a guess.
+    # It is inert on a sequential walk (`1/6.0369 = 0.17` rps) and binds
+    # single-item reads (~27 rps four-in-flight at S1's 0.15 s). Whether it
+    # binds a *concurrent* walk is unmeasured and is **S7's** to settle -- under
+    # S1's ~0.68 rps a 0.4 gate would bind it, not sit "just under" it -- since
+    # every S1 request was sequential. S1's table is the evidence, not a guess.
     source_requests_per_second: float = Field(default=0.4, ge=0)
 
     # The ingest pipeline (PRD 03). Same reasoning as the bulk and source
