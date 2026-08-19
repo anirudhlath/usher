@@ -762,6 +762,7 @@ source_modules = [
     "usher.telemetry",
     "usher.cli",
     "usher.__main__",
+    "usher.eval.bars",
     "usher.eval.errors",
     "usher.eval.fingerprint",
     "usher.eval.goldens",

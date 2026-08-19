@@ -1,0 +1,76 @@
+# Pre-registered bars for the quality-eval harness.
+#
+# **Every ledger row records this file's sha256.** A bar edited after seeing a
+# number is then a hash change in the record rather than a git blame nobody
+# reads.
+#
+# Three kinds:
+#   window  -- the value must stay inside [low, high]. For a number whose
+#              *movement in either direction* means the thing measured is not
+#              the thing that was measured before.
+#   floor   -- the value must be >= low. A regression floor.
+#   pending -- **no prior measurement exists.** The runner reports the value
+#              and does not gate. The first `--full` run against a reproducing
+#              frame is what fills it in, together with that run's digest.
+#              Writing a number here in advance is the exact failure the design
+#              names: a bar reverse-engineered from the number it judges is not
+#              a bar.
+
+[[bar]]
+surface = "suggest"
+tier = "prefix"
+metric = "recall_at_5"
+stratum = "all"
+kind = "window"
+low = 0.016
+high = 0.022
+source = """ADR-0031 and scripts/measure_suggest_tiers.py bar (4): tier 1 has \
+1.9% typo recall by construction -- it is the btree exact-prefix probe. A tier \
+1 that scores *higher* is not the index that was measured, so this is a window \
+in both directions rather than a floor."""
+
+[[bar]]
+surface = "suggest"
+tier = "prefix"
+metric = "latency_p95_ms"
+stratum = "all"
+kind = "floor"
+low = 0.0
+high = 10.0
+source = """ADR-0031: p50 0.6 ms, p95 1.0 ms, max 10 ms over the 2,993 typo \
+strings on 1,271,138 rows. Expressed with a ceiling because the failure \
+direction is slow, and 10x the recorded p95 rather than 1x because this is a \
+shared dev box and E1 is not a latency benchmark -- scripts/measure_suggest_tiers.py \
+owns that measurement and its quiet-check."""
+
+[[bar]]
+surface = "suggest"
+tier = "fuzzy"
+metric = "recall_at_5"
+stratum = "all"
+kind = "pending"
+source = """No prior measurement exists over all 2,993 cases at tier 2. \
+ADR-0002's gate recorded per-band figures on the *pre-ADR-0031* configuration \
+(27.8% on 2-4, 68.3% on 5-7, 95.5% on 8-11) and the shipped tier 2 carries a \
+vote tiebreak the gate's rows do not all share. The first --full run against a \
+reproducing frame sets this, with that run's inputs digest beside it."""
+
+[[bar]]
+surface = "suggest"
+tier = "fuzzy"
+metric = "recall_at_5"
+stratum = "band=2-4"
+kind = "pending"
+source = """The band ADR-0002 failed on -- 27.8% against a 0.75 bar. Not \
+written as a floor of 0.278, because that number was measured on a \
+configuration ADR-0031 replaced. Set from the first --full run."""
+
+[[bar]]
+surface = "suggest"
+tier = "fuzzy"
+metric = "recall_at_5"
+stratum = "typo_class=transposition"
+kind = "pending"
+source = """The class ADR-0002 measured at 0.0% on short names. Tracked as its \
+own stratum because a mean over four typo classes describes none of them, and \
+a zero that moves at all is a different finding."""
