@@ -29,17 +29,20 @@ likely to run while pasting output into an issue.
 
 import argparse
 import ast
+import contextlib
 import inspect
-from collections.abc import Callable, Coroutine
+import uuid
+from collections.abc import AsyncIterator, Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 import uvicorn
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, MissingGreenlet, OperationalError
 
 from usher import cli as usher_cli
+from usher.config import Settings
 from usher.ports.errors import (
     PortAuthFailed,
     PortDataMalformed,
@@ -78,6 +81,7 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
     "work": ["work", "--once"],
     "index": ["index"],
     "derive": ["derive"],
+    "genres": ["genres"],
     "search": ["search", "dune"],
     "suggest": ["suggest", "du"],
     "similar": ["similar", "--rebuild"],
@@ -250,6 +254,52 @@ def test_a_database_error_the_driver_does_wrap_is_operator_facing(
         usher_cli.main(["bootstrap-status"])
 
     assert 'relation "titles" does not exist' in str(exit_info.value)
+
+
+def test_a_missing_greenlet_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The case issue #8 is about, and it is
+    `test_a_programming_error_keeps_its_traceback` in the one family that
+    reached this boundary for real.
+
+    `MissingGreenlet` is `InvalidRequestError` is `SQLAlchemyError`, so a
+    boundary that names `SQLAlchemyError` catches it -- and M9's S3 run
+    recorded exactly that: one of three `usher work` daemons died at
+    23:26:57Z on 2026-08-11 and the whole of what it left behind was
+
+        usher work: MissingGreenlet: greenlet_spawn has not been called; ...
+        (the stack is one flag away: `usher --traceback work`)
+
+    Nothing an operator sets or starts makes IO-outside-a-greenlet go away;
+    it is a bug in this project, and the stack is the bug report. The
+    boundary's own comment already says what it means to admit -- *"everything
+    the driver does wrap"* -- and that is `DBAPIError`, not every error
+    SQLAlchemy can raise.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        usher_cli,
+        "_work",
+        _raising(MissingGreenlet("greenlet_spawn has not been called; can't call await_only()")),
+    )
+
+    with pytest.raises(MissingGreenlet):
+        usher_cli.main(["work", "--once"])
+
+
+def test_the_operator_database_family_is_what_the_driver_wraps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The membership assertion behind the case above, so the repair cannot be
+    undone by widening the tuple back without noticing.
+
+    `DBAPIError` is the driver's half -- a missing table, a dead pool, a
+    permission the role does not have. `InvalidRequestError` is this
+    project's half: a session used wrong, a statement built wrong, IO in a
+    place there is no greenlet to run it in. The tuple may hold the first and
+    must not hold anything that catches the second.
+    """
+    assert DBAPIError in usher_cli.OPERATOR_ERRORS
+    assert not any(issubclass(MissingGreenlet, member) for member in usher_cli.OPERATOR_ERRORS)
 
 
 def test_a_rejected_setting_is_reported_without_the_value_it_rejected(
@@ -617,3 +667,99 @@ def test_a_malformed_upstream_payload_keeps_its_traceback(
 
     with pytest.raises(PortDataMalformed):
         usher_cli.main(["search", "dune"])
+
+
+class _AbsentTitle:
+    """`TitleRepository.get` for an id no row carries.
+
+    Only the one method `_unmatched` may reach, so a resolution that grew a
+    second lookup fails here rather than passing against a stub that answers
+    anything.
+    """
+
+    async def get(self, title_id: uuid.UUID) -> None:
+        return None
+
+
+class _RefusesTheForeignKey:
+    """`PostgresMediaItemRepository.attach_title` against a real Postgres.
+
+    The raise is not invented: `media_items.title_id` carries
+    `fk_media_items_title_id_titles`, the `UPDATE` matches the row, asyncpg
+    raises `ForeignKeyViolationError`, and the repository translates every
+    `IntegrityError` on that statement into this. Reproduced 2026-08-18
+    against `pgvector/pgvector:pg17` at `alembic head` by seeding one source
+    and one unmatched item and calling `_unmatched` with a well-formed title
+    id naming no row -- the traceback ended in exactly this type carrying
+    exactly this message.
+
+    **The message names the media item and the media item is the id that was
+    fine**, which is the second half of what made the shipped behaviour
+    useless at a terminal.
+    """
+
+    def __init__(self) -> None:
+        self.attempted: list[uuid.UUID] = []
+
+    async def attach_title(
+        self, media_item_id: uuid.UUID, *, title_id: uuid.UUID, episode_id: uuid.UUID | None
+    ) -> bool:
+        self.attempted.append(title_id)
+        raise RepositoryConflict(
+            f"cannot attach media item {media_item_id}",
+            constraint="fk_media_items_title_id_titles",
+        )
+
+
+async def test_resolving_to_a_title_the_catalog_does_not_hold_is_a_sentence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An operator typo in `--title` used to be a stack, and this module's
+    rule 2 does not cover it: the id is well-formed, so `_as_uuid` passes it,
+    and the row it names is the operator's mistake rather than a bug in this
+    project's code.
+
+    The write is what raised, so the guard has to run **before** it -- the
+    order `POST /admin/unmatched/{id}/resolve` already keeps, and for the
+    same reason it documents: `attach_title` writes what it is given, so a
+    refusal that arrived after the write would be a refusal that had already
+    happened. `attempted` is what asserts the order rather than the outcome;
+    a lookup added after the call would print the same line.
+
+    Reads like `no such media item`, the other arm of this one branch, rather
+    than like `_as_uuid`'s `SystemExit`: two ways to name something that does
+    not exist, in one command, would be two exit codes for one operator
+    mistake.
+    """
+    media_items = _RefusesTheForeignKey()
+    absent = uuid.UUID("0198c6b1-0000-7000-8000-00000000dead")
+
+    class _Pipeline:
+        def __init__(self) -> None:
+            self.titles = _AbsentTitle()
+            self.media_items = media_items
+
+    class _Session:
+        async def commit(self) -> None:
+            raise AssertionError("a refused resolution must not commit")
+
+    @contextlib.asynccontextmanager
+    async def _session_for(settings: Settings) -> AsyncIterator[object]:
+        yield _Session()
+
+    monkeypatch.setattr(usher_cli, "_session_for", _session_for)
+    monkeypatch.setattr(usher_cli, "build_pipeline", lambda session, settings: _Pipeline())
+
+    await usher_cli._unmatched(
+        Settings(database_url="postgresql+asyncpg://u:p@db:5432/usher", secret_key="s" * 32),
+        limit=50,
+        offset=0,
+        resolve="0198c6b1-0000-7000-8000-000000000001",
+        title=str(absent),
+    )
+
+    printed = capsys.readouterr().out
+    assert str(absent) in printed, printed
+    assert "resolved" not in printed, printed
+    assert "Traceback" not in printed, printed
+    assert media_items.attempted == [], "the write ran before the id it needs was checked"

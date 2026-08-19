@@ -105,16 +105,27 @@ class SearchResponse(BaseModel):
     came back blank or over-long. `llm_calls` is where spend is legible. It is
     `null` on every path that embedded the query as typed: the shipped default
     with expansion off, a `full_text` search, a blank query, a deployment with
-    no embedder, and a failed or unusable expansion.
+    no embedder, a filtered population with no vectors for the lane to rank
+    (#16), and a failed or unusable expansion.
 
     **`semantic_coverage` is `SearchOutcome`'s number, passed through and never
-    recomputed** from the results below it. It is the fraction of the *filtered
-    population* that had a vector; derived from the returned hits it would read
-    `1.0` exactly whenever every hit happened to have one, which is precisely
-    what a green test seeds. A `full_text` request reports `0.0` because no
-    semantic lane ran — that is a statement about the request and not about the
-    catalog, and a client must ask for `semantic` or `fused` if that is the
-    question.
+    recomputed** from the results below it. Derived from the returned hits it
+    would read `1.0` exactly whenever every hit happened to have one, which is
+    precisely what a green test seeds. A `full_text` request reports `0.0`
+    because no semantic lane ran — that is a statement about the request and
+    not about the catalog, and a client must ask for `semantic` or `fused` if
+    that is the question.
+
+    ⚠️ **Its denominator is the *enriched* tier and not the catalog, and this
+    said "the fraction of the filtered population" until issue #31.** Skeleton
+    titles are never embedded and are excluded from the denominator
+    deliberately; the lexical lane searches them anyway. So `1.000` means *the
+    backfill has drained*, **not** *the vector lane can see everything this
+    query could match* — on the catalog this project measures the two differ
+    by an order of magnitude (130,720 vectors over ~130,647 enriched titles,
+    against 1,271,138 titles). A client rendering "semantic search is warming
+    up" off this field is reading it correctly; one rendering "semantic search
+    covers your library" is not. `SearchOutcome` carries the full argument.
 
     **`query` is echoed as typed**, never the rewrite: it is what the lexical
     lane matched on and what a client renders above the results. The pair

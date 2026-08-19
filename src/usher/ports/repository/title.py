@@ -23,8 +23,30 @@ __all__ = [
     "BrowseCursorPosition",
     "BrowseFacets",
     "BrowseSort",
+    "TitleGenres",
     "TitleRepository",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class TitleGenres:
+    """One title's id and its genre labels — the whole projection the
+    write-time genre sweep reads and writes.
+
+    **Not a `Title`.** `usher genres --backfill` walks 1.27M rows to decide
+    whether two of thirty-three columns need touching, and hydrating an
+    entity per row would detoast an overview, a tsvector's worth of derived
+    state and up to ten cast names to answer a question about a `text[]`.
+    `credit_names_for`'s mapping is the nearest precedent on this port: a
+    read shaped by what the caller does with it rather than by the aggregate.
+
+    A tuple rather than a list, so it compares by value against
+    `canonicalise_genres`' own output — which is what makes "did this row
+    change" one `!=` rather than a normalisation of two container types.
+    """
+
+    id: uuid.UUID
+    genres: tuple[str, ...]
 
 
 #: Each sort's `titles` column -- which is also its `Title` field, because the
@@ -669,9 +691,20 @@ class TitleRepository(ABC):
         because a two-valued flag makes *"unset"* and *"the user asked for
         unowned"* the same request.
 
-        `genre` matches the `genres` array (containment, never the keywords
-        array beside it) and `year` is exact. Both narrow; given together they
-        intersect.
+        `genre` matches the `genres` array (never the keywords array beside
+        it) and `year` is exact. Both narrow; given together they intersect.
+
+        **`genre` names a concept, not a spelling** — [ADR-0039](
+        ../../../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md).
+        `titles.genres` unions two importers' vocabularies with nothing in
+        common: the IMDb bulk phase writes `Sci-Fi` and `EnrichService` writes
+        TMDb's `Science Fiction`, and on the live catalog **zero** of 1,272,866
+        titles carry both. So this is *not* containment of the string the
+        client sent — it is an overlap with every spelling of the concepts that
+        string names (`usher.domain.genres.genre_spellings`), which makes the
+        two requests one query over one population. A label from outside the
+        vocabulary expands to itself alone, which is exactly the containment
+        this replaced.
 
         `limit` rows at most, and it has **no default** for
         `list_unwatched_candidates`' recorded reason: three signatures with
@@ -711,13 +744,25 @@ class TitleRepository(ABC):
         it looks entirely correct on every request that does not use that
         facet, which is most of them.
 
-        **A facet the client asked for is present at `0`, never absent.** This
-        is `count_by_state`'s rule — *"never a sparse dict"* — arriving at a
-        vocabulary that is open rather than an enum, so the guarantee is
-        narrowed to the values the request itself named: `genre` and `year`.
-        A `GROUP BY` returns only the values that have rows, so without this a
-        filter that matches nothing comes back as a *missing key*, which is
-        indistinguishable from a filter the client did not send.
+        **One entry per concept, not one per spelling** — [ADR-0039](
+        ../../../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md).
+        The genre counts are keyed by Usher's canonical vocabulary, so
+        `Sci-Fi`'s 20,051 titles and `Science Fiction`'s 6,223 are one
+        `Science Fiction` button of 26,274 rather than two buttons a viewer
+        loses half the catalog by choosing between. Each count is the size of
+        the page pressing that button serves, which is the property that makes
+        the facet and `browse`'s filter one rule read twice.
+
+        **A facet the client asked for is present at `0`, never absent, under
+        its concept's key.** This is `count_by_state`'s rule — *"never a sparse
+        dict"* — arriving at a vocabulary that is open rather than an enum, so
+        the guarantee is narrowed to the values the request itself named:
+        `genre` and `year`. A `GROUP BY` returns only the values that have
+        rows, so without this a filter that matches nothing comes back as a
+        *missing key*, indistinguishable from a filter the client did not
+        send. The key is the canonical label rather than the spelling that
+        arrived, or a client filtering on `Sci-Fi` gets an entry that is both
+        absent and present depending on which key it reads.
 
         `years` is keyed by year and a NULL-year title is in no bucket: the
         map's key type says so, and "unknown" is not a year a client can
@@ -734,4 +779,59 @@ class TitleRepository(ABC):
         in the rest itself rather than let the query's own sparsity leak
         through (a bare `counts[EnrichmentState.ENRICHED]` must never
         raise `KeyError` just because nothing is enriched yet).
+        """
+
+    @abstractmethod
+    async def list_genres_page(
+        self, *, limit: int = 1000, after: uuid.UUID | None = None
+    ) -> list[TitleGenres]:
+        """One page of the catalog's genre labels, oldest id first.
+
+        **A keyset cursor over *every* title, not over the ones that look
+        wrong.** Two decisions, and both are about where the vocabulary is
+        allowed to live.
+
+        The cursor is a keyset for `list_stale`'s reason — `OFFSET` is
+        measured at 43.7 ms at offset 0 and 388.9 ms at offset 1,126,574, so
+        it is linear per page and quadratic to drain, which is fine for an
+        operator reading page one and wrong for a sweep whose whole job is to
+        walk a population to exhaustion. Pass the last id of a page as
+        `after`; an empty list means drained.
+
+        The population is unfiltered because the *only* definition of "this
+        row needs rewriting" is `usher.domain.genres.canonicalise_genres`,
+        and a `WHERE` clause naming the alias spellings would be a second
+        one, in SQL, that drifts the moment the vocabulary grows a member.
+        That is `_FINGERPRINT_SQL`'s failure shape one column over, and it
+        would also miss the rows the aliases cannot describe — 12 titles on
+        the live catalog carry a *duplicate* label and normalise to a shorter
+        array with no alias involved. The cost is a page-walk of two narrow
+        columns; the alternative is a predicate nobody can keep in step.
+        """
+
+    @abstractmethod
+    async def replace_genres(self, rows: Sequence[TitleGenres]) -> int:
+        """Set each title's genres, returning how many rows actually moved.
+
+        **The count is rows *changed*, not rows named**, and an
+        implementation owes that guard on its own account rather than
+        trusting the caller to have filtered. It is what makes a re-run of
+        the backfill observably free: a second sweep over a normalised
+        catalog answers 0, which is the same honesty
+        `PostgresJobQueue.enqueue` reports for a re-seen job. Without it a
+        batch of a thousand unchanged rows produces a thousand dead row
+        versions, the WAL and the vacuum for them, and a report claiming work
+        that did not happen.
+
+        An empty batch writes nothing and issues no statement. An id naming
+        no row is absent from the count rather than an error — a page read a
+        moment ago can name a title an enrichment has since deleted, which is
+        ordinary.
+
+        **Nothing here knows about embeddings, and that is the design.**
+        `titles.genres` is segment 6 of `compose_document`, so a row this
+        method moves stops reproducing its stored `source_fingerprint` and
+        `usher index` claims it with no help. A backfill that staled rows
+        itself would be a second definition of stale beside
+        `_FINGERPRINT_SQL`.
         """

@@ -58,6 +58,7 @@ from usher.ports.errors import RepositoryConflict
 from usher.ports.search import (
     FilterNotSupported,
     SearchDocument,
+    SearchFilters,
     SearchHit,
     SearchIndex,
     SearchMode,
@@ -100,6 +101,39 @@ _WEIGHTS_SQL = "CAST(ARRAY[" + ",".join(str(weight) for weight in _WEIGHTS) + "]
 # is asked about, so the backfill re-claims the row exactly once.
 _UNVERIFIED = "unverified"
 
+# Issue #25's signal: the typed string **is** this title's name.
+#
+# **`lower(t.name)`, which is `prefix.py`'s own spelling and deliberately not a
+# second one.** Tier-1 suggest already computes "the typed text against
+# `lower(titles.name)`" and already answers this query correctly -- `GET
+# /search/suggest?q=The Matrix&tier=prefix` returns the 1999 film first while
+# `GET /search` returned it fifth -- so what is carried over is that tier's
+# rule, at the one strength this lane can defend.
+#
+# **Equality and not tier 1's `LIKE 'prefix%'`, and the argument is the
+# defect's own shape.** The three video essays that outranked *The Matrix* are
+# themselves prefix matches: *"The Matrix for Realists (aka Reviewing The
+# Matrix in Terms of One Cypher)"* starts with the whole query. A prefix key
+# would flag all four rows alike and separate none of them, so it cannot fix
+# this defect -- while it *would* cost something real, promoting every "Matrix
+# Warrior" over "The Matrix" on the query `Matrix`. Nothing measured says a
+# prefix match deserves that, and tier 1 does not say it either: there the
+# whole candidate set is prefix matches, so the key is a filter and the
+# *ordering* is popularity's. Here the set is mixed. Exact equality is the part
+# of the rule that transfers.
+#
+# `btrim` because `websearch_to_tsquery` ignores surrounding whitespace and an
+# equality test does not: without it a trailing space silently turns the signal
+# off, which is invisible from the result set. Only the ends -- interior
+# spacing is part of a name.
+#
+# **No `title_search_names` arm**, though tier 1 unions one. That table holds
+# aliases and 10.9M person rows; an equality join against it in the lexical
+# lane is a second scan on the one statement with a latency figure to keep, and
+# "the query is the exact name of a *person*" is a different claim from this
+# one. It is the obvious next measurement, not an omission with no reason.
+_EXACT_NAME = "lower(t.name) = lower(btrim(:query))"
+
 # `ts_rank_cd` rather than `ts_rank`: cover density rewards terms that occur
 # close together, which is what makes a two-word title beat a title whose
 # overview happens to mention both words a paragraph apart. It reads
@@ -110,16 +144,24 @@ _UNVERIFIED = "unverified"
 # than erroring.
 _FULL_TEXT = f"""
 SELECT t.id,
-       ts_rank_cd({_WEIGHTS_SQL}, t.search_document, q.query) AS score
+       ts_rank_cd({_WEIGHTS_SQL}, t.search_document, q.query) AS score,
+       {_EXACT_NAME} AS exact_name
 FROM titles AS t,
      websearch_to_tsquery('english', :query) AS q(query)
 WHERE t.search_document @@ q.query
   {{predicates}}
+-- **An exact name match leads, and it leads the LIMIT as well as the sort.**
+-- That is issue #25: the row a viewer means was 5th and the blend cannot
+-- reach past dense rank 0 to fetch it back. Ordering it here rather than in
+-- the blend also puts it inside the window at all -- a title whose name is a
+-- common phrase can otherwise fall outside the LIMIT and never reach the
+-- ranker, which no re-weighting can fix.
+--
 -- The id tiebreak is not decoration. ts_rank_cd ties are common on short
 -- documents, and without a total order two identical searches can answer
 -- differently the moment a row is rewritten and heap order stops agreeing
 -- with id order.
-ORDER BY score DESC, t.id
+ORDER BY exact_name DESC, score DESC, t.id
 LIMIT :limit
 """  # noqa: S608 - every interpolated fragment is a module constant
 
@@ -161,15 +203,41 @@ _REMOVE = "DELETE FROM title_embeddings WHERE title_id = CAST(:title_id AS uuid)
 #
 # `relaxed_order` over `strict_order` because strict terminates earlier to
 # pay for index order, and nothing downstream needs index order -- the outer
-# statement re-sorts by distance and Task 19's RRF re-ranks by rank. And
-# `ef_search` is *not* the lever: 40 -> 200 with the GUC off still returns
-# 4.24 of 10.
+# statement re-sorts by distance and Task 19's RRF re-ranks by rank.
 #
 # Caveat, because the numbers are meaningless without it: the probe used
 # uniform-random 384-dim vectors, the worst case for any ANN index, so
 # absolute recall is a pessimistic floor. **0.56 is not a production recall
 # figure.** What transfers is the ordering of the options and the row-count
 # failure, which is structural.
+#
+# **This comment used to end "`ef_search` is *not* the lever: 40 -> 200 with
+# the GUC off still returns 4.24 of 10", and that sentence is true only of the
+# configuration it was measured in -- `hnsw.iterative_scan = off`, 2% filter
+# selectivity, uniform-random 384-lane vectors -- which is not the shipped
+# one.** With `relaxed_order` on, on 132,409 real 1024-lane `bge-m3` vectors,
+# unfiltered, over 12 typed plot queries against an exact scan (issue #32,
+# 2026-08-19), `ef_search` **is** the lever and the curve is monotone at every
+# one of the 12: recall@10 0.700 at 40, 0.858 at 100, 0.917 at 200, 0.967 at
+# 400, 0.992 at 1000. `Settings.search_hnsw_ef_search` moved 100 -> 200 on
+# that measurement; the p50/p95 beside each value are in `config.py`.
+#
+# **Two things about `relaxed_order` that only the same run makes visible, and
+# both are about this module's `LIMIT`s rather than about recall.** The scan
+# emits rows in exact distance order while the row count asked for is at or
+# below `ef_search`, and stops doing so the moment it passes it -- at
+# `ef_search = 100`, 200 rows came back out of order on 12 of 12 queries with
+# a row displaced by as much as 96 positions, and at 200 the same break moves
+# to 250 rows. The planner does not repair it: it takes the index's ordering
+# as a presorted key and puts an **Incremental Sort** on top, which sorts only
+# within a group of equal distance. So `_SEMANTIC` (LIMIT = the caller's
+# limit, capped at `search_result_limit` = 50) is always inside the exact
+# region, and `_FUSED`'s lanes (`limit * _LANE_MULTIPLIER`, up to 250 at that
+# cap) are not -- its vector lane truncates an approximately ordered stream,
+# which decides *which* candidates reach RRF. The `row_number()` window's own
+# `ORDER BY` re-sorts what survives, so the ranks fed to RRF are right for the
+# set that arrived. Recorded rather than fixed: no non-monotonicity in
+# recall@10 follows from it at any `ef_search` measured.
 _ITERATIVE_SCAN = "relaxed_order"
 _ITERATIVE_SCAN_VALUES = frozenset({"off", "relaxed_order", "strict_order"})
 
@@ -310,15 +378,17 @@ async def _force_exact_scan(session: AsyncSession) -> None:
 # over at most `lane_limit` rows.
 _FUSED = f"""
 WITH lexical AS MATERIALIZED (
-    SELECT top.id, row_number() OVER (ORDER BY top.score DESC, top.id) AS rnk
+    SELECT top.id, top.exact_name,
+           row_number() OVER (ORDER BY top.exact_name DESC, top.score DESC, top.id) AS rnk
     FROM (
         SELECT t.id,
-               ts_rank_cd({_WEIGHTS_SQL}, t.search_document, q.query) AS score
+               ts_rank_cd({_WEIGHTS_SQL}, t.search_document, q.query) AS score,
+               {_EXACT_NAME} AS exact_name
         FROM titles AS t,
              websearch_to_tsquery('english', :query) AS q(query)
         WHERE t.search_document @@ q.query
           {{predicates}}
-        ORDER BY score DESC, t.id
+        ORDER BY exact_name DESC, score DESC, t.id
         LIMIT :lane_limit
     ) AS top
 ),
@@ -335,10 +405,21 @@ vec AS MATERIALIZED (
     ) AS top
 )
 SELECT COALESCE(lexical.id, vec.id) AS id,
+       -- A vector-only row has no lexical arm to have compared a name in, and
+       -- NULL sorts first under DESC -- trap 1 in the list above, arriving
+       -- through a new column. false is the honest value and it is also the
+       -- one the vector lane answers on its own.
+       COALESCE(lexical.exact_name, false) AS exact_name,
        COALESCE(1.0 / (:rrf_k + lexical.rnk), 0.0)
      + COALESCE(1.0 / (:rrf_k + vec.rnk), 0.0) AS score
 FROM lexical FULL OUTER JOIN vec ON lexical.id = vec.id
-ORDER BY score DESC, id
+-- Ahead of the fused score, matching the lexical lane one CTE up: RRF fuses
+-- two *rankings* and neither lane knows that the query is a title's whole
+-- name, so a hit that is 1st lexically and absent from the vector lane can
+-- still be fused below one that placed in both. `_dense_ranks` reads the order
+-- it is given, so an exact match arriving third would take dense rank 2 and be
+-- displaceable again (issue #25).
+ORDER BY exact_name DESC, score DESC, id
 LIMIT :limit
 """  # noqa: S608 - every interpolated fragment is a module constant
 
@@ -538,6 +619,26 @@ class PostgresSearchIndex(SearchIndex):
             )
         return await self._fused(request, predicates, parameters)
 
+    async def semantic_coverage(self, filters: SearchFilters) -> float:
+        """The port's pre-search probe, over `_COVERAGE` and nothing new.
+
+        **The one statement, not a second definition of coverage.** It reaches
+        `_predicates` and `_coverage` -- the same two the two vector lanes
+        above already compose -- so this method cannot come to disagree with
+        the number the same request's `SearchOutcome` reports. A fresh `SELECT`
+        here would be the shape `services/search.py`'s module docstring refuses
+        for the fingerprint: one question, two spellings, both of them
+        answering.
+
+        It costs what `_coverage` costs, which is a count over the enriched
+        tier through `ix_titles_enrichment_state` -- so it is a read a caller
+        must decide to make rather than one it makes by reflex.
+        `SearchService` makes it only where a completion is otherwise about to
+        be bought.
+        """
+        predicates, parameters = _predicates(filters)
+        return await self._coverage(predicates, parameters)
+
     async def _full_text(
         self, request: SearchRequest, predicates: str, parameters: dict[str, object]
     ) -> SearchOutcome:
@@ -549,7 +650,10 @@ class PostgresSearchIndex(SearchIndex):
         # reporting coverage for a lane that did not run invites a caller to
         # read it as a fact about the catalog.
         return SearchOutcome(
-            hits=tuple(SearchHit(title_id=row.id, score=float(row.score)) for row in rows),
+            hits=tuple(
+                SearchHit(title_id=row.id, score=float(row.score), exact_name=bool(row.exact_name))
+                for row in rows
+            ),
             semantic_coverage=0.0,
         )
 
@@ -575,6 +679,13 @@ class PostgresSearchIndex(SearchIndex):
         # two lanes' scores at least point the same way. They are still not
         # on the same *scale* as a ts_rank_cd, which is why Task 19 fuses by
         # rank and never by adding these numbers together.
+        #
+        # **No `exact_name`, and the omission is the lane's own boundary.**
+        # This statement is handed a vector and no text; a `lower(name) =`
+        # predicate here would be a lexical signal smuggled into the lane that
+        # exists not to have one, and `fused` is where the two are supposed to
+        # meet. The consequence is stated rather than hidden: `mode=semantic`
+        # ranks exactly as it did before issue #25.
         return tuple(SearchHit(title_id=row.id, score=1.0 - float(row.distance)) for row in rows)
 
     async def _fused(
@@ -601,7 +712,10 @@ class PostgresSearchIndex(SearchIndex):
         # 1.0 on a request the vector lane happened to dominate -- neither of
         # which answers "can the semantic lane see this catalog yet".
         return SearchOutcome(
-            hits=tuple(SearchHit(title_id=row.id, score=float(row.score)) for row in rows),
+            hits=tuple(
+                SearchHit(title_id=row.id, score=float(row.score), exact_name=bool(row.exact_name))
+                for row in rows
+            ),
             semantic_coverage=await self._coverage(predicates, parameters),
         )
 

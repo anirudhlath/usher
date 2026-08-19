@@ -162,6 +162,31 @@ be added if a client turns out to need flexible field selection.
 > different facts about the catalog and a client cannot tell them apart. The
 > two reasons are separate because they have two different fixes.
 >
+> ✅ **The genre facet is one button per *concept*, not per spelling, and
+> `?genre=` matches the concept —
+> [ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md).**
+> `titles.genres` unions two importers' vocabularies with nothing in common, so
+> until 2026-08-19 this endpoint offered `Sci-Fi` (20,051) and `Science
+> Fiction` (6,223) as separate buttons and returned **disjoint** sets for one
+> concept — zero titles carry both labels. The counts are now keyed by Usher's
+> canonical vocabulary and the filter is an overlap with every spelling of the
+> concepts the label names, so each count is the size of the page pressing that
+> button serves and a bookmarked `?genre=Sci-Fi` answers the whole concept.
+> **Two caveats a client should know.** A label from outside the vocabulary
+> behaves exactly as it did, because the column is open even though the
+> vocabulary is not. And the cursor is *not* canonicalised: `CursorSpec.filters`
+> carries the genre string verbatim, so a cursor minted under one spelling and
+> replayed under the other is still `400 invalid_cursor` — a case no client
+> taking its labels from `facets` can reach.
+>
+> ✅ **On a catalog swept by `usher genres --backfill` the two spellings stop
+> existing** ([ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md)'s
+> Amendment). Nothing in this contract changes: the filter still expands a label
+> into every spelling of its concepts, because an unswept deployment is the
+> normal state of a fresh install and this endpoint has to be correct there.
+> What changes is reachability — after a sweep only a client hand-typing
+> `Sci-Fi` can produce a mismatched cursor, since no facet offers it.
+>
 > ⚠️ **A browse page is itself over budget and this document does not yet
 > promise otherwise.** The same run put a predicated page at **139.92 ms p95**
 > at the median-selectivity genre against a 50 ms bar, and the unfiltered page
@@ -215,19 +240,51 @@ be added if a client turns out to need flexible field selection.
 > search box sends one between keystrokes — and **`?limit=` declares a floor
 > and no ceiling**, because `USHER_SEARCH_RESULT_LIMIT` is the ceiling and
 > spelling it twice is two numbers that agree until somebody moves one.
-> ⚠️ **`?mode=semantic` cannot succeed on an API-only deployment and answers
-> `422 validation_failed`** naming the remedy: `create_app` builds an embedding
-> model only when `USHER_WORKER_ENABLED` is true and does not expose it, so the
-> request scope holds none. `?mode=fused` narrows to full text instead and says
-> so through `requested_mode` ≠ `mode`. Closing that is a **new capability** —
-> expose the lifespan's model, or build a second one per API process at 65 MB
-> and a ~4.8 s cold load — not a change to this route. The 422 is the closest
+> ✅ **`?mode=semantic` is served wherever this process holds an embedding
+> model, and answers `422 validation_failed` where it does not** — issue #31,
+> closed by exposing the lifespan's model rather than by building a second
+> one. `create_app` builds the embedder whatever the lane switches say, since
+> it is `USHER_EMBEDDING_ENABLED` that decides whether one exists at all, and
+> parks it on `app.state`; `api/deps.get_search_service` reads it. So the 422
+> now names a deployment that configured no model, rather than naming the
+> product.
+> *(This read ⚠️ **"cannot succeed on an API-only deployment"** until #31, and
+> the cost it cited against closing — 65 MB, a ~4.8 s cold load — was an
+> argument against **building** a model per API process, not against reading
+> one the process already built. It is also runtime-dependent and predates the
+> second runtime: since 2026-08-13 `USHER_EMBEDDING_MODEL` carries a prefix,
+> and `openai:` holds no model in memory at all.)*
+> **`semantic_coverage` is the number that says how much of the catalog that
+> model can answer for**, and on a catalog whose skeleton tier dwarfs its
+> enriched one those are very different quantities — see the field's own
+> definition below.
+> `?mode=fused` still narrows to full text where there is no model, and says
+> so through `requested_mode` ≠ `mode`. The 422 is the closest
 > member of [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s
 > closed seven: the request is well formed, names a mode this server cannot
 > process, and the client's remedy is to change it. **No member of that
 > vocabulary means "this deployment lacks a capability"** and this route mints
 > none; if a later one needs to distinguish *malformed* from *unserviceable
 > here*, that is an amendment to ADR-0030.
+
+> ⚠️ **`semantic_coverage`'s denominator is the *enriched* tier, not the
+> catalog, and a client that reads it as the catalog will read `1.000` as
+> "semantic search covers everything I can search".** It does not. The
+> denominator is every title matching the request's filters **and**
+> `enrichment_state <> 'skeleton'` — boundary call 4, deliberate, because
+> skeletons are never embedded and counting them would report ~0.008 on a
+> healthy catalog and read as a broken subsystem forever. The lexical lane has
+> no such restriction, so the two lanes of one `fused` search do not see the
+> same population: on the catalog this project measures, 130,720 vectors over
+> ~130,647 enriched titles is `1.000`, against **1,271,138** titles in
+> `titles` — the semantic lane can answer for about **10%** of what the
+> lexical one searches, at full coverage. Both numbers are honest about
+> different questions; this field answers *"has the backfill drained?"* and
+> not *"can the vector lane see this catalog?"*.
+> *(The wording said "the fraction of the filtered population" in
+> `SearchOutcome`, `SearchResponse` and here until issue #31 measured it. The
+> number did not move — a denominator with a measured argument behind it is
+> not made better by being changed to one without — the sentence did.)*
 
 > ✅ **`GET /search/suggest` as shipped**, and the three things a client writes
 > against. **`?tier=`** is the `SuggestTier` enum in `/openapi.json` —
@@ -1059,8 +1116,19 @@ codec refusing its own input, the same shape as `invalid_cursor` one status over
 
 #### The shape
 
-Four properties, each of which is a rule rather than a detail:
+Five properties, each of which is a rule rather than a detail:
 
+- **The media type is `application/problem+json`, on the wire and in
+  `/openapi.json`.** RFC 9457 section 3, and it is the half of the RFC that
+  costs nothing and is most often skipped: it is how a client tells a problem
+  document from a route's own body *before* parsing either, which is exactly the
+  decision a generated client makes. The two halves are separate facts and both
+  are pinned — `api/errors.py` sets it on the response, and `UsherAPI.openapi`
+  moves every `ProblemResponse` declaration onto it in a post-pass, because
+  FastAPI renders an additional response's model under the *route's* media type
+  and offers no per-response override. Until issue #6 the schema said
+  `application/json` while the wire said otherwise, so every error path in every
+  generated client was wrong in the same way.
 - **`type` is derived from `code` by one function** —
   `https://usher.dev/errors/<code-in-kebab-case>` — never hand-written per member,
   so a code and its type cannot drift apart. RFC 9457 says a `type` URI SHOULD

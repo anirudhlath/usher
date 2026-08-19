@@ -1119,18 +1119,27 @@ suspicion.
   **Post-v1 unless M9's `search_queries` supplies a real evaluation set** —
   which is the thing that would actually settle it, and is the reason not to
   re-litigate it on five queries.
-- **Expansion is billed on searches the semantic lane cannot serve** — the guard
-  is `embedder is None`, not "anything is embedded". Measured: with
-  `USHER_EMBEDDING_ENABLED=true` and `title_embeddings` empty, `usher search`
-  bought a completion, printed the rewrite, returned `semantic_coverage=0.000`,
-  and *then* said no title had an embedding — **the warning arrives after the
-  money**, on every fused search of a not-yet-backfilled deployment. The honest
-  predicate ("does any title in the *filtered* population have a vector") is
-  unanswerable before the vector that does the filtering exists, and the cheap
-  global stand-in is a weaker guard costing a port method, an implementation, a
-  fake, a contract case and a read on every fused search. Mitigated but not
-  closed by the new default: it now takes two opt-ins rather than one. **Goes
-  with whoever takes the entry above.**
+- ✅ **Expansion is billed on searches the semantic lane cannot serve —
+  issue #16, closed.** The guard was `embedder is None`, not "anything is
+  embedded". Measured: with `USHER_EMBEDDING_ENABLED=true` and
+  `title_embeddings` empty, `usher search` bought a completion, printed the
+  rewrite, returned `semantic_coverage=0.000`, and *then* said no title had an
+  embedding — **the warning arrives after the money**, on every fused search of
+  a not-yet-backfilled deployment. It is now
+  `SearchIndex.semantic_coverage(filters) > 0.0`, asked in front of the
+  expansion.
+
+  ⚠️ **This entry's own pricing was wrong twice, and that is the transferable
+  part.** *"The honest predicate is unanswerable before the vector that does
+  the filtering exists"* — it is answerable: nothing in a `SearchFilters` is
+  derived from a query vector, and `PostgresSearchIndex._COVERAGE` already
+  took predicates and no vector. So the strong predicate was already computed,
+  a few lines away, and only the *callability* was missing; the entry costed
+  the weak stand-in it thought it was reduced to. And *"a read on every fused
+  search"* is a consequence of where the read is put, not of having one: behind
+  `expander is not None` it is bought only by deployments that expand, which is
+  none by default. **A carried-debt entry that prices a fix is a claim, and it
+  ages exactly like any other claim in this repository.**
 - ✅ **The candidate pool has no ownership *filter*, only an `ORDER BY` key** —
   while the curation prompt asserted *"one household's **own** library"*.
   Reachable on any library with fewer than `USHER_CURATION_POOL_SIZE` unwatched
@@ -1285,7 +1294,7 @@ suspicion.
   rows, and a `logger.warning` in a stream nothing asserts on. **The claim lease
   is the fix for both**; until then this path is the one to name first, because
   it is the deployment shape `docker compose up` gives you by default.
-- **`usher unmatched --resolve` stack-traces on an unknown `--title`** — found
+- ✅ **`usher unmatched --resolve` stack-traces on an unknown `--title`** — found
   by M9's E4, which fixed the *route* and could not fix the CLI because
   `cli.py` is not that task's file. The route now reads the title first and
   answers a problem document; the command hands the id straight to
@@ -1299,6 +1308,23 @@ suspicion.
   question ADR-0026 asks before adding a member is how often an operator hits
   it, and answering that for a *refusal* type whose other raise sites are
   genuine conflicts is the work.
+  ✅ **Paid on 2026-08-18 (issue #5), and the taxonomy question above was the
+  wrong one to have been waiting on.** The fix is not a tenth member of
+  `OPERATOR_ERRORS`: it is the route's own `SELECT` in front of the write, so
+  the command answers `no such title: <id>` and `RepositoryConflict` keeps
+  every stack it had. That leaves ADR-0026's line exactly where it was, which
+  is why this cost no argument about the family — the entry sized the work as
+  "decide whether a refusal type is operator-facing" when the available fix
+  was "do not raise one".
+  **Reproduced before it was fixed**, against `pgvector/pgvector:pg17` at
+  `alembic head` with one seeded source and one unmatched item: the traceback
+  ended in `RepositoryConflict: cannot attach media item <media item id>` —
+  **naming the id that was correct**, which the entry above did not record and
+  which is half of why the shipped output diagnosed nothing.
+  **The other arm of that branch was checked and needed nothing.** An unknown
+  `--resolve` is not symmetric with an unknown `--title`: the `UPDATE` matches
+  no row, so the foreign key is never evaluated, and `attach_title`'s boolean
+  has answered `no such media item` since M4. Confirmed on the same database.
 - **A covering index for `GET /admin/unmatched` is measured, requested, and
   declined** — M9's E4, over 200,000 items / 70,000 unmatched / 23,333 undated.
   `ix_media_items_unmatched` is `(source_id) WHERE title_id IS NULL` and carries
@@ -1311,26 +1337,39 @@ suspicion.
   `(added_at DESC NULLS LAST, id DESC) WHERE title_id IS NULL` removes the sort.
   Not authorised in M9: 16.4 ms on an admin review queue is acceptable and a
   fourth migration for it is not worth the milestone.
-- **`/openapi.json` describes every problem response at `application/json`
-  while the wire sends `application/problem+json`** — measured by M9's H2 and
-  reported rather than closed, which is the disposition to keep. FastAPI renders
+- ~~**`/openapi.json` describes every problem response at `application/json`
+  while the wire sends `application/problem+json`**~~ — measured by M9's H2 and
+  reported rather than closed. FastAPI renders
   `responses={404: {"model": ProblemResponse}}` under the *route's* response
-  media type, so the document is wrong about the one header RFC 9457 makes
-  load-bearing. Spelling the media type in would fork `test_api_playback.py`'s
-  and `test_api_watch.py`'s assertions, which read `content["application/json"]`,
-  and buys a client nothing it cannot read off the `type` member — so H2's
-  conformance check asserts the response **shape** and not the media type, and
-  says so in its own docstring. The honest statement is that a generated client
-  will annotate these responses with the wrong content type until somebody takes
-  it.
-  ✅ **Both sites now say so where the fix would land** — the milestone's final
+  media type, so the document was wrong about the one header RFC 9457 makes
+  load-bearing. Spelling the media type in forks `test_api_playback.py`'s and
+  `test_api_watch.py`'s assertions, which read `content["application/json"]`,
+  and H2 judged that it "buys a client nothing it cannot read off the `type`
+  member" — so its conformance check asserted the response **shape** and not
+  the media type, and said so in its own docstring.
+  ✅ **Both sites said so where the fix would land** — the milestone's final
   review found the two assertions reading `content["application/json"]` with no
   comment naming why, so the *cost* of the fix was documented everywhere except
-  at the two places that have to change. Corrected 2026-08-12: each carries the
-  known-wrong marker and points at `tests/unit/test_api_openapi.py`. **A debt
+  at the two places that have to change. Corrected 2026-08-12: each carried the
+  known-wrong marker and pointed at `tests/unit/test_api_openapi.py`. **A debt
   recorded only in the roadmap is a debt the person editing the code does not
   see** — the same shape as the curation role sentence corrected in
   `testing-discipline.md` this same day, one subsystem over.
+  ✅ **Taken 2026-08-19 (issue #6), and the reason it was carried is the part
+  that did not hold.** *"Buys a client nothing it cannot read off the `type`
+  member"* is a claim about a client that has already decided to parse the body
+  as a problem document; a generated one decides that from the **declared media
+  type**, before it parses anything — and `~/code/usher-web` generates against
+  this document with `openapi-typescript`. Measured before: **56** responses
+  across 35 operations carried a `ProblemResponse`, every one of them declared
+  `application/json`, against a wire that answered `application/problem+json`
+  on all five vocabulary members reachable without a database. The fix is
+  `UsherAPI.openapi` in `api/app.py` — a post-pass over the generated document,
+  keyed off the `$ref` rather than off a status list, because FastAPI offers no
+  per-response media type and dropping `model=` to hand-write `content` would
+  leave `ProblemResponse` out of `components` and every ref dangling.
+  `test_api_openapi.py` enumerates rather than samples, and a second case
+  compares the declared type to the one three real routes actually send.
 
 ## Post-v1 candidates
 

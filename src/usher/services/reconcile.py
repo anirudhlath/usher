@@ -141,7 +141,7 @@ class ReconcileService:
         with _tracer.start_as_current_span("sync.reconcile") as span:
             span.set_attribute("usher.source", source.name)
             span.set_attribute("usher.sync.kind", kind.value)
-            cursor = await self._cursor_for(source, kind)
+            cursor = await self.cursor_for(source, kind)
             run = SyncRun(source_id=source.id, kind=kind, cursor_at=cursor)
             # Inserted and committed before the walk begins, `RUNNING`: an
             # operator watching a six-hour sync needs a row to watch, and a
@@ -185,9 +185,18 @@ class ReconcileService:
         )
         return run
 
-    async def _cursor_for(self, source: Source, kind: SyncRunKind) -> AwareDatetime | None:
+    async def cursor_for(self, source: Source, kind: SyncRunKind) -> AwareDatetime | None:
         """`None` for a full walk; the newest completed item-lane run's start
         instant for a delta.
+
+        **Public because `None` is the answer to "how big is this walk", and a
+        caller has to be able to ask before committing to one.**
+        `LaneSupervisor._close_gap` asks exactly this before it decides whether
+        a reconnect delta is a bounded window or the entire library
+        (`USHER_PUSH_GAP_CLOSE`). Reusing this method rather than reading
+        `latest_completed_cursor` at the call site is what keeps the answer the
+        lane logs and the answer the walk uses from drifting: the "later of
+        both item lanes" rule below is stated once.
 
         A full walk must ignore every cursor: one that inherited a `since`
         would return only what changed and then sweep, which is the exact

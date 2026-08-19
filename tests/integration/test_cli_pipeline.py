@@ -141,7 +141,17 @@ async def _purge(settings: Settings) -> None:
             "DELETE FROM search_queries",
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM sources WHERE name LIKE 'cli-%'",
-            "DELETE FROM titles WHERE sort_name = 'cli-orphan'",
+            # `LIKE 'cli-%'`, not `= 'cli-orphan'`, and the difference is a
+            # whole-suite outage. This file commits through its own sessions
+            # rather than the rolled-back one, so a title it seeds under any
+            # other name survives every later case in the session and inflates
+            # their counts -- `titles` is read by the candidate pool, by
+            # `count_by_state`, and by the curate cases' own premise guards.
+            # Adding one `cli-real` row for a case that needs a title that
+            # *exists* turned 1 failure into 43, none of them in the file that
+            # wrote the row. Matching the prefix the `sources` line above
+            # already uses covers whatever the next case needs to seed.
+            "DELETE FROM titles WHERE sort_name LIKE 'cli-%'",
             # M9's overrides table. It ships **empty** and is never seeded, so
             # `DELETE FROM` restores the shipped state exactly -- and it is what
             # makes `usher home`'s provider count a fact rather than a hope
@@ -417,10 +427,50 @@ async def test_unmatched_lists_and_resolves_through_the_real_repository(
 async def test_resolving_an_item_that_does_not_exist_says_so(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The media item is the absent one, so the title has to be real.
+
+    This case passed a random uuid for *both* ids until 2026-08-19 and
+    asserted the media-item message, which made it a test of check order
+    wearing the name of a test about a missing item: issue #5 added the
+    title lookup that now runs first, and the case failed reporting the
+    other true fact. Each absence gets its own case below, and each one
+    seeds the id it is not testing.
+    """
+    title_id = new_id()
+    async with _session_for(cli_settings) as own:
+        await own.execute(
+            text(
+                "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
+                "VALUES (:id, 'movie', 'cli-real', 'cli-real', 'skeleton')"
+            ),
+            {"id": title_id},
+        )
+        await own.commit()
+
     await _unmatched(
-        cli_settings, limit=50, offset=0, resolve=str(uuid.uuid4()), title=str(new_id())
+        cli_settings, limit=50, offset=0, resolve=str(uuid.uuid4()), title=str(title_id)
     )
     assert "no such media item" in capsys.readouterr().out
+
+
+async def test_resolving_to_a_title_that_does_not_exist_says_so(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #5: a well-formed `--title` naming no row used to reach the
+    write and come back as a `RepositoryConflict` stack, whose message
+    named the *media item* id -- the one the operator got right.
+
+    The media item is absent here too, and that is deliberate: the point
+    is that the title check runs *before* the write, so it does not need
+    a media item to exist in order to refuse.
+    """
+    missing = new_id()
+    await _unmatched(
+        cli_settings, limit=50, offset=0, resolve=str(uuid.uuid4()), title=str(missing)
+    )
+    out = capsys.readouterr().out
+    assert "no such title" in out
+    assert str(missing) in out
 
 
 async def test_a_disabled_source_is_never_walked(session: AsyncSession) -> None:

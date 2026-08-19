@@ -257,6 +257,86 @@ class SearchIndexContract:
         )
         assert mentioned.title_id in ranked, "the overview match should still be a candidate"
 
+    async def test_a_title_named_exactly_the_query_leads_a_longer_document_repeating_it(
+        self, index: SearchIndex
+    ) -> None:
+        """**Issue #25, in the lane that decides it.**
+
+        `GET /search?q=The Matrix` returned the 1999 film 5th behind three 2018
+        video essays repeating the phrase in their own names, and the blend
+        could not rescue it: no combination of popularity, ownership, watch
+        state, recency and taste can overturn dense rank 0 (margin 0.009615,
+        deliberate, and the bound F5's taste weight is derived from). So the
+        lane has to put the right row there.
+
+        **The premise is asserted from the hits themselves and it is what makes
+        this a relevance test**: the essay's own index score is strictly
+        *higher* -- it repeats the query and carries the words twice more in
+        its overview -- so an implementation that orders by score alone puts it
+        first, which is the shipped behaviour this case exists to fail. Both
+        drivers reproduce that ordering for their own reasons (real
+        `ts_rank_cd` on Postgres; the name plus prose weight classes in the
+        fake), and neither is asked to agree on the *value*.
+
+        The essay is created first and is 900x the more popular, so the two
+        tiebreaks a wrong implementation falls back on -- id ascending, then
+        popularity -- both point at the wrong answer rather than coin-flipping
+        into a pass.
+        """
+        essay = _document(
+            "Vacuum for Realists (aka Reviewing Vacuum in Terms of One Cypher)",
+            overview="A vacuum, reviewed at length, in a vacuum.",
+            popularity=900.0,
+        )
+        named = _document("Vacuum", overview="A study of harbour lights.", popularity=1.0)
+        await self.index_all(index, [essay, named])
+
+        outcome = await index.search(SearchRequest(query="vacuum"))
+
+        ranked = [hit.title_id for hit in outcome.hits]
+        scores = {hit.title_id: hit.score for hit in outcome.hits}
+        assert scores[essay.title_id] > scores[named.title_id], (
+            "the premise: the longer document outscores the exact name on this backend's "
+            "own text score, which is the whole defect -- without it any sort passes"
+        )
+        assert essay.title_id < named.title_id, (
+            "the premise: creation order is id order, so the id tiebreak also points at the essay"
+        )
+        assert ranked[0] == named.title_id, (
+            "a longer document repeating the query outranked the title the query names"
+        )
+
+    async def test_only_the_title_named_exactly_the_query_is_flagged_as_an_exact_name(
+        self, index: SearchIndex
+    ) -> None:
+        """The flag the blend reads, and **the mutation that matters is the
+        generous one.**
+
+        `SearchService._dense_ranks` groups by `(exact_name, score)`, so a flag
+        set on every hit alike is indistinguishable from no flag at all -- the
+        rows tie again and popularity decides -- while a flag set on nothing is
+        the shipped defect. Only asserting *both* arms catches both, which is
+        why the near-miss row here is a **prefix** match rather than an
+        unrelated one: `Vacuum Chamber` starts with the whole query, which is
+        exactly what tier-1 suggest matches on, and carrying that tier's rule
+        over unchanged would flag it too.
+
+        Case-insensitively, because the query is what somebody typed and the
+        catalog's own casing is not theirs to guess -- `lower()` on both sides
+        in the statement, `casefold()` in the fake.
+        """
+        named = _document("Vacuum", popularity=1.0)
+        prefixed = _document("Vacuum Chamber", popularity=900.0)
+        await self.index_all(index, [named, prefixed])
+
+        outcome = await index.search(SearchRequest(query="VACUUM"))
+
+        flagged = {hit.title_id for hit in outcome.hits if hit.exact_name}
+        assert prefixed.title_id in {hit.title_id for hit in outcome.hits}, (
+            "the premise: the near-miss row is a candidate, so its flag is a real answer"
+        )
+        assert flagged == {named.title_id}
+
     async def test_a_filter_the_backend_cannot_express_raises(self, index: SearchIndex) -> None:
         """An implementation that silently ignores a filter it does not
         understand and returns a **larger** result set -- which reads as
@@ -414,6 +494,41 @@ class SearchIndexContract:
         assert embedded.title_id in found
         assert outcome.semantic_coverage == pytest.approx(0.5)
 
+    async def test_coverage_is_answerable_before_a_query_vector_exists(
+        self, index: SearchIndex
+    ) -> None:
+        """**The number `search` reports, askable without a search** -- which
+        is what makes it usable as a guard in front of the embed rather than
+        only as a report after it (issue #16).
+
+        Two claims, and the second is the one an implementation can get wrong
+        while looking right. First, it takes **filters and no vector**: PRD
+        09's carried-debt entry recorded the filtered predicate as *"not
+        answerable before the vector that does the filtering exists"*, and it
+        is -- nothing in a `SearchFilters` is derived from a query vector.
+        Second, it is the **filtered** population and not the whole catalog:
+        the two agree on any arrangement where the filter matches everything,
+        so the narrowing case below is the only thing that separates them.
+
+        Fails against an implementation answering over the whole catalog
+        (`0.5` in the second assertion), and against one deriving coverage
+        from hits it has not got (`0.0` or a `ZeroDivisionError` in the
+        first).
+        """
+        if not self.supports_semantic:
+            pytest.skip("this implementation stores no vectors to have coverage of")
+        embedded = _document("Harbour Lights", vector=_vector(1.0, 0.0), kind=TitleKind.MOVIE)
+        unembedded = _document("Vacuum Chamber", vector=None, kind=TitleKind.SERIES)
+        await self.index_all(index, [embedded, unembedded])
+
+        assert await index.semantic_coverage(SearchFilters()) == pytest.approx(0.5)
+        assert await index.semantic_coverage(
+            SearchFilters(kinds=(TitleKind.SERIES,))
+        ) == pytest.approx(0.0), "coverage was measured over the catalog, not over the filtered set"
+        assert await index.semantic_coverage(
+            SearchFilters(kinds=(TitleKind.MOVIE,))
+        ) == pytest.approx(1.0)
+
     # --- fusion ------------------------------------------------------------
 
     async def test_fusion_produces_an_order_neither_input_produced(
@@ -465,6 +580,55 @@ class SearchIndexContract:
             "fusion returned a lane's own winner; the two lanes were seeded to disagree "
             "precisely so that returning either one fails"
         )
+
+    async def test_fusion_puts_an_exact_name_match_first_even_when_it_fuses_lower(
+        self, index: SearchIndex
+    ) -> None:
+        """**The exact-name key survives fusion, and RRF is exactly what would
+        lose it.**
+
+        A title in *both* lanes beats a title in one, arithmetically and
+        always: `1/62 + 1/61` against `1/61`, whatever either lane thought of
+        either row. So the row whose name **is** the query -- and which has no
+        vector, like nine titles in ten on this catalog -- fuses **below** a
+        near-match that placed in both, and `_dense_ranks` would hand it dense
+        rank 1 where the other five signals can bury it again (issue #25).
+
+        The premise is the fused scores themselves, asserted from the hits: the
+        distractor's is strictly higher, so this is not satisfied by any
+        ordering by score. It is also 900x the more popular and is created
+        second, so neither tiebreak rescues a wrong implementation.
+
+        Kills three mutants the full-text cases cannot see: the exact-name
+        column dropped from the fused projection, the outer `ORDER BY` left on
+        `score DESC` alone, and `COALESCE(lexical.exact_name, false)` written
+        without its `COALESCE` -- a NULL from the vector-only arm sorts
+        **first** under `DESC`, which is trap 1 of this statement's own list
+        arriving through a new column.
+        """
+        if not self.supports_semantic:
+            pytest.skip("this implementation cannot express a supplied query vector")
+        named = _document("Vacuum", popularity=1.0)
+        both = _document(
+            "Vacuum Chamber",
+            overview="Inside the vacuum, a vacuum.",
+            vector=_vector(1.0, 0.0),
+            popularity=900.0,
+        )
+        await self.index_all(index, [named, both])
+
+        fused = await index.search(
+            SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=_vector(1.0, 0.0))
+        )
+
+        scores = {hit.title_id: hit.score for hit in fused.hits}
+        assert scores[both.title_id] > scores[named.title_id], (
+            "the premise: the two-lane row fuses higher, which is what makes this an "
+            "ordering assertion rather than a restatement of the fused score"
+        )
+        assert fused.hits[0].title_id == named.title_id
+        assert fused.hits[0].exact_name, "the flag has to survive the fusion, not just the lane"
+        assert not fused.hits[1].exact_name
 
     async def test_fusion_does_not_add_scores_from_different_scales(
         self, index: SearchIndex

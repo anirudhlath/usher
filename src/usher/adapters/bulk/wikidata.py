@@ -61,7 +61,7 @@ from typing import Any
 
 import httpx
 
-from usher.adapters.http import retry_after_seconds
+from usher.adapters.http import failure_detail, retry_after_seconds
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, IdCrosswalkPair
 from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
 
@@ -193,7 +193,13 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
                 timeout=_TIMEOUT_SECONDS,
             )
         except httpx.HTTPError as exc:
-            raise PortUnavailable(f"WDQS request failed: {exc}") from exc
+            # `failure_detail`, never `{exc}`: every httpx timeout
+            # stringifies to the empty string (issue #35). It matters more
+            # here than anywhere, because WDQS's own **504** already means
+            # "the query took too long at their end" and is translated a few
+            # lines down -- so a `ReadTimeout` is the other failure, ours
+            # gave up first, and `{exc}` distinguished neither.
+            raise PortUnavailable(f"WDQS request failed: {failure_detail(exc)}") from exc
         if response.status_code == 429:
             raise PortRateLimited(retry_after_seconds(response.headers.get("retry-after")))
         if response.status_code >= 400:

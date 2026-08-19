@@ -195,6 +195,41 @@ class MetadataProvider(ABC):
         than being a display string.
         """
 
+    @property
+    @abstractmethod
+    def genre_vocabulary(self) -> frozenset[str]:
+        """Which canonical genres (`usher.domain.genres`) this provider can
+        name. **The set of concepts it is entitled to delete.**
+
+        `genres` is in `EnrichService`'s replace list, so a provider that
+        supplies any genre at all replaced the whole array — and a label naming
+        a concept this provider has no word for was therefore not re-spelled
+        but **deleted**. Measured against the real IMDb dump and the live
+        catalog on 2026-08-19: of 132,116 enriched titles the dump also gives
+        genres for, 53,724 lost at least one IMDb label — 69,160 deletions, of
+        which 11,466 were of a concept TMDb cannot express. `Film-Noir` was
+        deleted 827 times and survived zero. Control: **0 of 1,021,623**
+        skeletons lost one, so this is the enrichment boundary and nothing
+        else. [ADR-0039](../../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md).
+
+        **A fact about the provider's vocabulary, not about any one response.**
+        A response that omits `Drama` when the provider *has* a `Drama` is the
+        provider disagreeing, and it wins — 13,141 of those deletions are
+        exactly that and they are right. A response that omits `Biography` when
+        the provider has no `Biography` says nothing at all, and silence is not
+        a claim (the distinction ADR-0014 draws one lane over).
+
+        **Abstract with no default**, for the reason `EnrichmentResult.seasons`
+        has none: a default of "expresses everything" restores the deletion
+        silently, and a default of "expresses nothing" leaves a provider unable
+        to correct a genre it does know better. A provider that has not thought
+        about this should have to write the set down.
+
+        Canonical labels, never the provider's own spellings — `Sci-Fi` and
+        `Science Fiction` are one concept, and a set written in either spelling
+        answers the question wrongly for every title carrying the other.
+        """
+
     @abstractmethod
     async def search(
         self, name: str, year: int | None, kind: TitleKind | None = None

@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -11,6 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from usher.api.errors import (
     http_error_as_a_problem_document,
+    problem_responses_carry_their_media_type,
     validation_error_without_the_request_body,
 )
 from usher.api.lanes import LaneSupervisor
@@ -49,6 +51,30 @@ from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
 
 
+class UsherAPI(FastAPI):
+    """`FastAPI` with one override: `/openapi.json` tells the truth about the
+    media type of a problem document.
+
+    A subclass rather than `app.openapi = …`, which is the spelling FastAPI's
+    own "Extending OpenAPI" page shows. Two reasons, the first measured:
+    `app.openapi = custom` is `error: Cannot assign to a method
+    [method-assign]` under this project's mypy settings and would need the
+    only `type: ignore` in `src/usher/api/`; and a replacement function has to
+    re-implement the caching *and* the `_openapi_routes_version` invalidation
+    `FastAPI.openapi` has since grown, which is a copy that goes silently
+    wrong the day either changes. Delegating to `super()` keeps both and costs
+    one idempotent walk of a 35-operation document per call.
+
+    **Deliberately not an eager rewrite of `app.openapi_schema` in the
+    factory.** Generating the document at build time would make every
+    `create_app()` in the suite pay for a schema no case reads, and would turn
+    a schema-generation failure into a failure to boot.
+    """
+
+    def openapi(self) -> dict[str, Any]:
+        return problem_responses_carry_their_media_type(super().openapi())
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_telemetry(settings)
@@ -71,12 +97,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         provider, close_provider = (
             await metadata_provider(settings) if settings.worker_enabled else (None, nothing)
         )
-        # The embedding model, on the same terms and for the same reason: one
-        # per process, built only where a worker will use it. Not built at all
-        # in a push-only deployment -- a 65 MB ONNX session with no reader.
-        model, close_model = (
-            await embedder(settings) if settings.worker_enabled else (None, nothing)
-        )
+        # The embedding model. **One per process, and -- unlike the provider
+        # above and the client below -- built whatever the lane switches say
+        # (issue #31).** The other two are worker capabilities; this one has a
+        # second reader on a request path, because `api/deps.get_search_service`
+        # hands it to `SearchService` and `?mode=semantic` is unservable
+        # without it. Gated on `worker_enabled` it was absent from exactly the
+        # deployment `.claude/rules/api-telemetry-and-lanes.md` recommends -- a
+        # server beside a `usher work` container, `USHER_WORKER_ENABLED=false`
+        # on the server -- which then had a configured model, a backfilled
+        # catalog, and a 422 on every semantic search.
+        #
+        # **Nothing had to be decoupled to do it: `composition.embedder`
+        # already answers `(None, no-op)` unless `embedding_enabled`**, which
+        # is `false` by default and is an operator naming a model. So the lane
+        # switch was standing in for a setting that says the same thing more
+        # precisely, and the deployment that now pays something it did not --
+        # `embedding_enabled` on, `worker_enabled` off, the `fastembed:`
+        # runtime -- pays a 65 MB / 4.84 s load at startup for the capability
+        # it configured a model to get. On the `openai:` runtime it is an
+        # `httpx.AsyncClient`.
+        #
+        # `report=` is the lane switch's remaining job, and it is the whole of
+        # it: `embedder`'s warnings all end *"index jobs will not be claimed"*,
+        # which is true of a process running the worker lane and false of one
+        # that claims nothing. Silence is right there -- what a push-only
+        # deployment loses is legible on the wire instead, as the 422 naming
+        # the missing capability.
+        model, close_model = await embedder(settings, report=settings.worker_enabled)
+        # **Parked, and that is the line issue #31 is about.** Held only by
+        # `LaneSupervisor` it is a process resource with one reader; on
+        # `app.state` it is the one `api/deps.get_search_service` reads, which
+        # is what makes `?mode=semantic` and the vector half of `?mode=fused`
+        # reachable from the HTTP surface at all. `None` here is not an
+        # absence to be guarded against -- it is `build_search_service`'s own
+        # default for the parameter, so a deployment with no model serves
+        # exactly what it served before.
+        app.state.embedder = model
         # The completion client, on the same terms again: one per process,
         # built only where a worker will use it. `USHER_LLM_ENABLED=false` is
         # the shipped default and answers `(None, no-op)`, which is what
@@ -152,7 +209,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await close_images()
             await engine.dispose()
 
-    app = FastAPI(
+    app = UsherAPI(
         title="Usher",
         version="0.1.0",
         description="A self-hosted media catalog backend.",

@@ -47,6 +47,30 @@ name, **B: `credit_names`** (M7), C: overview and tagline, D: genres and
 keywords — indexed with GIN and `fastupdate = off` (the default buffers into
 a pending list that produces mysterious p99 spikes).
 
+**The lane's ordering is not `ts_rank_cd` alone.** A title whose name *is* the
+query leads, by `lower(name) = lower(btrim(query))`, ahead of the score and
+ahead of the `LIMIT`; the weight classes decide everything below it. Why that
+key rather than a heavier weight or a lower relevance decay, and what it was
+worth over 800 sampled titles, is under [Ranking](#ranking).
+
+✅ **Weight class D carried two spellings of one concept until 2026-08-19, and
+`usher genres --backfill` is what fixes it —
+[ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md) and its
+Amendment.** `titles.genres` unions two importers' vocabularies and the two
+spellings share no lexemes: `to_tsvector('english','Sci-Fi')` is `'fi':3
+'sci':2 'sci-fi':1` against `'fiction':2 'scienc':1`. A query reaching the
+genres segment matched one half of the catalog — 20,051 titles or 6,223, never
+both, because zero titles carry both labels. ADR-0039 fixed `/browse`'s filter
+and facets at *read* time and deferred this one at a cost of *"~1.8 h of
+re-embedding plus a 3.3 h `usher similar --rebuild`"*; **that estimate priced
+the whole embedded population and the real bill is 304 embeddings**, so the
+deferral was withdrawn the same day. `search_document` is
+`GENERATED ALWAYS AS (...) STORED`, so the backfill's own `UPDATE` recomputes
+the tsvector in the same statement — this lane costs nothing beyond the sweep.
+Still unmeasured, and the sampleable version needs no user traffic: how many
+`Sci-Fi` titles change position in a `/search` for a science-fiction query now
+that they carry the other label.
+
 **Weight class B is filled by M7, and the sentence M6 wrote about what that
 would cost was optimistic.** M6 shipped B *reserved and empty* — correctly:
 there was no `Person`, `Credit`, `Collection` or `Image` table, model or port
@@ -566,6 +590,22 @@ a 0.4751 cross-title mean.
 - `hnsw.iterative_scan = relaxed_order` **must be set explicitly** — it is off
   by default, and without it filtered vector queries suffer severe recall
   collapse.
+- **`hnsw.ef_search` is 200, and 2026-08-19 is the first time this project
+  priced it against a real index.** Over 132,409 real 1024-lane vectors and 12
+  typed plot queries, recall@10 against an exact scan of the whole embedded
+  population is **0.858 at the previous default of 100 and 0.917 at 200**, for
+  a p50 of 4.77 ms against 10.59 ms and a p95 of 7.30 against 16.18 — beside a
+  recorded query embed of p50 5.7 ms. It keeps buying recall (0.967 at 400,
+  0.992 at 1000) and stops being affordable: 400 costs a p50 of 20.13 ms. The
+  curve is **monotone at every one of the 12 queries**, which is what the
+  change rests on rather than the single missing film that prompted it. Under
+  a 4.8%-selectivity genre filter the same move buys 0.783 → 0.808 only, so
+  **this is an unfiltered-path fix**; on the filtered path the lever is
+  over-fetch and re-rank (0.783 → 0.892 at `ef_search` 100, fetching 5× and
+  cutting back), which is measured and not built. The full evidence, including
+  the two controls that say why an "exact re-score" of an over-fetched
+  candidate set is arithmetically a no-op, is in
+  `.claude/rules/search-and-embeddings.md`.
 - Owned titles skip ANN entirely; exact brute-force cosine is faster and exact
   at that scale. **The claim above that this is "sub-millisecond" is true in
   numpy and false in Postgres**: measured at 10k vectors, 1.820 ms in
@@ -817,6 +857,32 @@ are decided by its vector rather than pushed to the bottom of every list.
 [ADR-0014](decisions/0014-absence-is-not-zero.md), applied to a set-valued
 field.
 
+⚠️ **The genre term was scored over two vocabularies that never co-occur — a
+trap that was not sprung, and is now disarmed rather than closed.**
+`titles.genres` unioned IMDb's labels and TMDb's, and zero of 1,272,866 titles
+carried both spellings of any concept
+([ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md)). A skeleton
+science-fiction film and an enriched one scored a hard **0** on this term while
+both are science fiction. It cost nothing, because `_POPULATION` excludes
+skeletons, so both sides of every stored pair spoke TMDb's vocabulary — and it
+would have become real the moment the embedded population widened past the
+enriched tier.
+
+**`usher genres --backfill` removes the vocabulary half.** Both sides now speak
+one alphabet whoever they are, which is a property of the column rather than of
+who happens to be embedded, so widening the population no longer springs it.
+The read-time expansion never reached here — `SimilarityService` reads the raw
+column, as do `GenreAffinityProvider`, `TasteService`, `CurationPool`,
+`BecauseYouWatched` and `Seasonal` — which is exactly why normalising the data
+is what closes all six at once.
+
+⚠️ **The other half is untouched and is the residue worth its own issue.**
+`_jaccard` still cannot tell "these two share no genres" from "we do not know
+either one's genres", and that is about a title whose `genres` is **empty** —
+118,856 of them on this catalog. No vocabulary fixes an empty set; it needs the
+absence-as-absence treatment the paragraph above describes, applied to a
+set-valued field.
+
 **The precompute is exact, not approximate**, and the argument is about the
 artefact rather than about the cost: recall loss in a live query is per-query,
 while recall loss in a cached artefact is permanent — a neighbour an ANN scan
@@ -970,18 +1036,34 @@ seam was left for.
   *(This bullet read "Not measured. The retrieval improvement above is the
   literature's, not this project's" until 2026-08-07. It stopped being true the
   day the measurement ran, and the measurement pointed the other way.)*
-- **Billed on searches the semantic lane cannot serve, and that is open.** The
-  guard is `embedder is None`, not *"anything is embedded"* — so on a
-  deployment with a model and an empty `title_embeddings` (every deployment
-  before its first `usher index --backfill`), a fused search with expansion on
-  buys a completion, prints `expanded: …`, and then reports
-  `semantic_coverage=0.000`: **the warning arrives after the money.**
-  `--mode full_text` correctly buys nothing. The correct predicate — *does any
-  title in the **filtered** population have a vector* — is not answerable
-  before the vector that does the filtering exists, so closing this means a new
-  `TitleEmbeddingRepository` read on the search path answering a weaker
-  question. Recorded rather than fixed; the default above limits it to
-  deployments that opted in.
+- ✅ **No longer billed on searches the semantic lane cannot serve — issue
+  #16, closed.** The guard was `embedder is None` rather than *"anything is
+  embedded"*, so on a deployment with a model and an empty `title_embeddings`
+  (every deployment before its first `usher index --backfill`) a fused search
+  with expansion on bought a completion, printed `expanded: …`, and *then*
+  reported `semantic_coverage=0.000`: **the warning arrived after the money.**
+  It is now `SearchIndex.semantic_coverage(filters) > 0.0`, asked immediately
+  before the expansion and inside the same `else` — so `--mode full_text`, a
+  blank query, `usher suggest` and a deployment with no model go on buying
+  nothing, for the reasons they already did.
+
+  ⚠️ **Two claims in this entry were wrong, and they are why it stayed open a
+  milestone.** It said the filtered predicate is *"not answerable before the
+  vector that does the filtering exists"* — it is. Nothing in a
+  `SearchFilters` is derived from a query vector, and `_COVERAGE` already took
+  predicates and no vector, so the honest question was answerable all along
+  and merely had no spelling outside `search`. And it priced the fix as *"a
+  new `TitleEmbeddingRepository` read … answering a weaker question"*: what
+  landed is a `SearchIndex` method over the statement the answer already
+  reports through, asking the **same** question rather than a weaker global
+  one. **Before pricing a fix as needing a weaker predicate, check whether the
+  strong one is already computed somewhere that simply is not callable yet.**
+
+  **Its remaining cost is paid by an ordering rather than defended by an
+  argument.** The probe sits behind `expander is not None`, which is false on
+  every shipped deployment, so *"a read on every fused search"* is answered by
+  an `and`: deployments that never expand never pay for it, and the ones that
+  do trade one count over the enriched tier for one completion.
 
 ## Ranking
 
@@ -1053,6 +1135,57 @@ open `(0, 0.01)`; the taste weight is its midpoint. Pinned by
 asserts the arithmetic rather than an ordering — a re-weighting that reorders
 nothing changes every score on the wire and is invisible to any number of
 ordering cases (M9 F4 measured this: `owned` 0.15 → 0.10 left all ten green).
+
+🔴 **Rank 0 is therefore a pure function of the lexical score — and the
+lexical score was putting the wrong row there.** The bound above says nothing
+about *which* title the index ranked first; it only says the blend cannot
+argue with it. `GET /search?q=The Matrix` returned the 1999 film **fifth**
+(0.3501) behind three 2018 video essays repeating the phrase in their own names
+(0.8032 each), and popularity was applied and *helped* — without it the film
+scores 0.2729. `ts_rank_cd` rewards a document that repeats the query; it has
+no idea that the query **is** a title's whole name
+([#25](https://github.com/anirudhlath/usher/issues/25)).
+
+**So the lexical lane carries an exact-name key, ahead of its own score.**
+`SearchHit.exact_name` is `lower(name) = lower(btrim(query))`, computed in the
+lexical statement, ordered ahead of `ts_rank_cd` *and ahead of the `LIMIT`* —
+a title whose name is a common phrase could otherwise fall outside the
+candidate window and never reach the ranker at all, which no re-weighting
+reaches. `SearchService._dense_ranks` then reads it as the leading key, so an
+exact match is **alone** at dense rank 0 rather than sharing it: `ts_rank_cd`
+ties are pervasive (a tie group of 498 among the top 500 values for one query),
+and a shared rank 0 cancels the relevance term and hands the decision back to
+popularity. **Every weight above is unchanged and so is the bound** — this is
+candidate 1 of the issue's three precisely because candidates 2 and 3 are not:
+capping the relevance decay would make rank-0 dominance contestable and
+invalidate the taste ceiling derived from it, and breaking ties inside the lane
+is narrower than the defect, since the essays *outscore* the film rather than
+tying it.
+
+**Measured against a bar written before the run**, over 800 titles drawn from
+the live 1,272,866-title catalog (400 `skeleton`, 400 `enriched`), each queried
+by its own name through the shipped path: the exact-name miss rate falls
+**38.4% → 20.8%**, and the class the defect is about — *retrievable, uniquely
+named, and outranked anyway* — falls **234 → 0 of 800 (29.3% → 0.0%)**. Nothing
+regressed: of the 493 titles already at rank 1, **493** still are. The 166
+remaining misses are 155 titles that lost to a **namesake** (another title
+carrying the identical name, which no name-based signal can separate) and 11
+that never match their own name at all — a name of nothing but stop words (`In
+Between`), or one containing ` - `, which `websearch_to_tsquery` reads as
+**negation**: `Regret - Cherie Laurent` compiles to `'regret' & !'cheri' &
+'laurent'`. Both are retrieval defects rather than ranking ones and are
+recorded, unfixed, in `.claude/rules/search-and-embeddings.md`.
+
+**The exact-name key is deliberately not tier-1 suggest's prefix key**, though
+it is the same rule at a different strength — `GET /search/suggest?tier=prefix`
+already answered this query correctly, which is what identified the signal. The
+three essays are *themselves* prefix matches of `The Matrix`, so a prefix key
+would flag all four rows alike and separate none of them, while promoting every
+`Matrix Warrior` above `The Matrix` on the query `Matrix`. On tier 1 the whole
+candidate set is prefix matches and popularity does the ordering; here the set
+is mixed. `mode=semantic` carries no exact-name key either: that statement is
+handed a vector and no text, and a `lower(name) =` predicate there would be a
+lexical signal inside the lane that exists not to have one.
 
 **Taste-centroid proximity is a term, and it is *read* rather than computed.**
 `TasteService.centroid` needs an embedder and a request holds none

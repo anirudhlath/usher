@@ -272,14 +272,20 @@ async def search(
 ) -> SearchResponse:
     """Retrieve, rank, and report what actually ran.
 
-    ⚠️ **`mode=semantic` cannot succeed on an API-only deployment**, and that
-    is a property of the wiring rather than of this route: `create_app`'s
-    lifespan builds an embedding model **only when `worker_enabled`** and does
-    not expose it, so `api/deps.get_search_service` holds none. `mode=fused`
-    narrows to full text and reports the narrowing; `mode=semantic` answers the
-    422 below. Closing it is a new capability — expose the lifespan's model, or
-    build a second one per API process at 65 MB and a ~4.8 s cold load — not a
-    change here.
+    **`mode=semantic` succeeds wherever this process holds an embedding model,
+    and that is a property of the wiring rather than of this route.**
+    `create_app`'s lifespan builds one per process whenever
+    `USHER_EMBEDDING_ENABLED` names one, and parks it on `app.state` for
+    `api/deps.get_search_service` to read (issue #31). Where a deployment
+    configured none, `mode=fused` narrows to full text and reports the
+    narrowing while `mode=semantic` answers the 422 below -- a statement about
+    that deployment, not about this API.
+
+    *(This read ⚠️ "cannot succeed on an API-only deployment" until #31, and
+    named a 65 MB / ~4.8 s cold load as the price of closing it. That price was
+    an argument against **building** a model here; this route reads one the
+    process built anyway. It is runtime-dependent besides -- the `openai:`
+    runtime holds no model in memory at all.)*
 
     The `try` wraps the call and nothing else. `SemanticSearchUnavailable` is
     raised before any retrieval, so there is no partial answer to discard and

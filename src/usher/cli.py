@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.api.lanes import LaneSupervisor
@@ -74,6 +74,7 @@ from usher.services.bootstrap import (
 )
 from usher.services.curation import CurationReport
 from usher.services.curation_validate import DropReason
+from usher.services.genres import GenreNormalisationService
 from usher.services.home import ComposeReport, HomeService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
@@ -154,7 +155,24 @@ OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     OSError,
     # Everything the driver does wrap: a missing table (`alembic upgrade
     # head` never ran), a dead pool, a permission the role does not have.
-    SQLAlchemyError,
+    #
+    # **`DBAPIError`, not `SQLAlchemyError`, and the narrowing is issue #8's
+    # measured half.** This line read `SQLAlchemyError` until 2026-08-19, and
+    # `SQLAlchemyError` is also the base of `InvalidRequestError` -- which is
+    # `MissingGreenlet`, `PendingRollbackError`, `ObjectDeletedError`,
+    # `ArgumentError`, `CompileError`: every one of them a bug in this project
+    # rather than a condition an operator can act on. M9's S3 measured the
+    # cost. One of three `usher work` daemons died 78 minutes into a
+    # 130,334-request enrichment crawl on an unhandled `MissingGreenlet`, and
+    # the entire record it left in `w1.log` was the two lines
+    # `_operator_problem` prints. The stack that would have diagnosed it was
+    # caught here and discarded, and the issue was filed reading "the run used
+    # bare `usher work`, so no stack was recorded" -- which put the fault on
+    # the operator for not passing `--traceback` when the fault was this
+    # tuple. `DBAPIError` is what the comment above already claims to admit:
+    # errors *the driver raised*, which is where a missing table, a dead pool
+    # and a rejected permission all arrive.
+    DBAPIError,
     # TMDb, Emby, and every bulk download that is *not* behind a port -- and
     # every one of them is behind a port today, which is why the three below
     # exist. Kept because an adapter is free to let one through and because
@@ -414,13 +432,38 @@ async def _unmatched(
     Listing and resolving are one command rather than two because they are
     one loop: an operator reads a page, resolves one line of it, and reads
     the next.
+
+    **Both ids are checked before anything is written, and only one of them
+    needs a lookup to do it.** `--resolve` naming no row is `attach_title`'s
+    boolean -- the `UPDATE` matches nothing, so nothing is written and there
+    is nothing to undo. `--title` naming no row is not symmetric: the
+    `UPDATE` matches, `fk_media_items_title_id_titles` fires, and the
+    repository translates it into a `RepositoryConflict` whose message names
+    the *media item* -- the id that was fine. That family is deliberately
+    outside `OPERATOR_ERRORS`, because its other raise sites are tripwires
+    for bugs in this project's own code, so the operator got sixty frames
+    for a typo. The guard is a `SELECT` in front of the write, which is the
+    order `POST /admin/unmatched/{id}/resolve` already keeps for the reason
+    it documents: `attach_title` writes what it is given, so a refusal that
+    arrived after the write would be a refusal that had already happened.
+
+    Both refusals print and return rather than raising `SystemExit` the way
+    `_as_uuid` does. One command naming two things that do not exist owes
+    them one exit code, and `no such media item` has had this one since M4.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if resolve is not None and title is not None:
+            # Parsed in argument order, so a command that misspells both is
+            # still told about `--resolve` first.
+            media_item_id = _as_uuid(resolve, "media item id")
+            title_id = _as_uuid(title, "title id")
+            if await pipeline.titles.get(title_id) is None:
+                print(f"no such title: {title_id}")
+                return
             attached = await pipeline.media_items.attach_title(
-                _as_uuid(resolve, "media item id"),
-                title_id=_as_uuid(title, "title id"),
+                media_item_id,
+                title_id=title_id,
                 # `None`, deliberately: a hand resolution names a `Title`.
                 # An episode-level resolution needs an `Episode.id` an
                 # operator has no way to read off this listing, and M9's
@@ -710,6 +753,77 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
         print(f"{seen} stale titles swept, {written} index jobs written")
 
 
+async def _genres(
+    settings: Settings,
+    *,
+    backfill: bool,
+    batch_size: int,
+    limit: int,
+    after: uuid.UUID | None,
+) -> None:
+    """Report how much of `titles.genres` is written in a source's spelling,
+    or rewrite it into Usher's own vocabulary.
+
+    **Its own subcommand rather than a flag on `index` or `derive`, and the
+    two rejections are the argument.** `usher index` is about
+    `title_embeddings` — its `--backfill` enqueues jobs for a worker that owns
+    a model, and folding a `titles` rewrite into it would make the command that
+    reports search freshness also a writer of the catalog. `usher derive`
+    re-derives people, credits, collections and artwork *from cached TMDb
+    payloads*: it needs a `MetadataProvider` to exist and declines to run
+    without one, reads `raw_payloads`, and writes four other tables. This
+    reads no payload, needs no provider and no model, and writes one column.
+    Three commands, three artefacts —
+    [ADR-0026](../../docs/prd/decisions/0026-the-cli-boundary-names-families.md)'s
+    family rule applied to what a command *is about* rather than to what it
+    happens to be near.
+
+    **The bare form only reads**, which is the bargain `index` and `derive`
+    already take, so it is safe on a production box while diagnosing
+    something. It is a full page-walk rather than a `count(*)` because the
+    only definition of "this row needs rewriting" is `canonicalise_genres`,
+    and a `WHERE` clause naming the alias spellings would be a second one
+    living in SQL. See `TitleRepository.list_genres_page`.
+
+    **`--after` is what makes an interrupt cheap rather than merely safe.**
+    Re-running from the start is already correct — the map is idempotent and
+    the write is guarded by `IS DISTINCT FROM`, so an already-normalised
+    prefix costs one index probe per row and writes nothing — but on 1.27M
+    rows that is a scan an operator need not repeat, so every run prints the
+    cursor to resume from.
+    """
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        service = GenreNormalisationService(
+            titles=pipeline.titles,
+            embeddings=pipeline.embeddings,
+            commit=session.commit,
+            model_name=settings.embedding_model,
+        )
+        report = await service.normalise(
+            batch_size=batch_size, limit=limit, after=after, write=backfill
+        )
+    print(f"rows scanned: {report.rows_scanned:,}")
+    if not backfill:
+        # Named for what they are on a run that wrote nothing. "rows
+        # rewritten: 4" printed by a command that did not rewrite anything is
+        # the report reading as the thing it declined to do.
+        print(f"rows to rewrite: {report.rows_rewritten:,}")
+        print(f"rows already canonical: {report.rows_unchanged:,}")
+        return
+    print(f"rows rewritten: {report.rows_rewritten:,}")
+    print(f"rows unchanged: {report.rows_unchanged:,}")
+    # **Expect this to be far smaller than the rewrite count, and that is the
+    # finding rather than a defect**: the embedded population is the enriched
+    # tier and the source spellings are almost entirely on skeletons. Measured
+    # on the live catalog 2026-08-19, 79,913 rows move and 304 embeddings go
+    # stale. A skeleton whose genre moved is not stale because it was never
+    # embedded, not because the fingerprint missed it.
+    print(f"embeddings staled: {report.embeddings_staled:,}")
+    if report.last_id is not None:
+        print(f"resume after: {report.last_id}")
+
+
 def _filters_from(args: argparse.Namespace) -> SearchFilters:
     """`SearchFilters`' whole closed vocabulary, built in one place.
 
@@ -898,6 +1012,15 @@ def _print_search_answer(answer: SearchAnswer) -> None:
         print("no match")
     # Always, not only when it is low: a number an operator sees only when
     # something is wrong is a number they have no baseline for.
+    #
+    # ⚠️ **Its denominator is the *enriched* tier, not the catalog**, so
+    # `1.000` says the backfill has drained and not that the vector lane can
+    # see everything this search matched -- skeletons are never embedded and
+    # the lexical lane searches them anyway. On the catalog this project
+    # measures the two differ by an order of magnitude. `SearchOutcome` carries
+    # the argument; the label is left as the field's own name because that is
+    # what PRD 07 and the route call it, and a second name here would be a
+    # second thing to keep in step.
     print(
         f"mode={answer.mode.value} results={len(answer.results)} "
         f"semantic_coverage={answer.semantic_coverage:.3f}"
@@ -910,9 +1033,12 @@ def _print_search_answer(answer: SearchAnswer) -> None:
         )
     elif answer.mode is SearchMode.FUSED and answer.semantic_coverage == 0.0:
         # The warning names the command that fixes it, which is the difference
-        # between a diagnostic and a complaint.
+        # between a diagnostic and a complaint. "Enriched", not "filtered":
+        # that is the population `_COVERAGE` counts, and the sentence has to
+        # name the same rows the number did or an operator whose catalog is
+        # mostly skeletons reads it as a claim about the catalog.
         print(
-            "warning: no title in the filtered population has an embedding, so this "
+            "warning: no enriched title in the filtered population has an embedding, so this "
             "was full-text only -- run `usher index --backfill`"
         )
 
@@ -1659,6 +1785,23 @@ def build_parser() -> argparse.ArgumentParser:
     # flight. A number to keep in mind, not a measured optimum.
     derive.add_argument("--page-size", type=int, default=500)
 
+    genres = sub.add_parser(
+        "genres", help="report or normalise the genre vocabulary in titles.genres"
+    )
+    genres.add_argument(
+        "--backfill",
+        action="store_true",
+        help="rewrite titles.genres into Usher's vocabulary (the bare form only reads)",
+    )
+    # **An argument rather than a constant**, which is design constraint 3:
+    # the right batch is a property of the deployment's `work_mem`, its WAL
+    # and how long its operator is willing to hold a transaction, none of
+    # which this file knows. 1000 for `index --backfill`'s reason -- a page
+    # here carries a uuid and a short `text[]`, not a JSONB payload.
+    genres.add_argument("--batch-size", type=int, default=1000, help="rows per transaction")
+    genres.add_argument("--limit", type=int, default=0, help="stop after N titles; 0 drains")
+    genres.add_argument("--after", help="resume from a title id a previous run printed")
+
     search = sub.add_parser("search", help="search the catalog")
     search.add_argument("query", help="what to search for")
     # `SearchMode`'s values, taken from the enum rather than retyped: a
@@ -1946,6 +2089,16 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
     elif args.command == "derive":
         asyncio.run(
             _derive(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)
+        )
+    elif args.command == "genres":
+        asyncio.run(
+            _genres(
+                settings,
+                backfill=args.backfill,
+                batch_size=args.batch_size,
+                limit=args.limit,
+                after=_as_uuid(args.after, "title id") if args.after else None,
+            )
         )
     elif args.command == "search":
         asyncio.run(

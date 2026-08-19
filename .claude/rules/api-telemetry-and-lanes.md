@@ -496,6 +496,38 @@ escapes only characters illegal in a URI anyway (`a b.mkv?q=1|2` →
 `a%20b.mkv?q=1%7C2`). `%` is in the safe set, so there is no double-encoding
 hazard for a URL that already carries an escape.
 
+**FastAPI has no per-response media type, so `/openapi.json` described 56
+problem responses at `application/json` while the wire sent
+`application/problem+json`.** Measured 2026-08-19 taking issue #6, against the
+whole document rather than a sample: 56 responses over 35 operations carry a
+`ProblemResponse`, and every one of them was filed under the wrong key.
+`openapi/utils.py` renders an additional response's model under
+``route_response_media_type or "application/json"`` — the *route's* own type,
+read off its `response_class` — and there is no override: adding `content` to
+the `responses=` dict **appends** an entry beside the generated one
+(`deep_dict_update` merges), so a route would declare its 404 twice, once
+truthfully. Dropping `model=` to hand-write the `$ref` is worse: with no route
+naming the model, `ProblemResponse` stops being a component and every ref
+dangles. What works is a post-pass — `UsherAPI.openapi` (`api/app.py`)
+delegates to `super()`, then moves any `application/json` body whose `$ref` is
+`ProblemResponse` onto `PROBLEM_MEDIA_TYPE`. **Key it off the `$ref`, never off
+a status list**, so a route added later is covered by the same act that adopts
+the envelope; and it must be idempotent, because `app.openapi()` caches into
+`app.openapi_schema` and the override runs again over its own output. A
+subclass rather than `app.openapi = …`, which is FastAPI's own documented
+spelling: the assignment needs a `type: ignore[method-assign]` under mypy
+strict *and* obliges the override to re-implement both the cache and the
+`_openapi_routes_version` invalidation `FastAPI.openapi` has since grown.
+
+**The debt was carried for a year on a reason that reads well and is wrong.**
+M9's H2 recorded that spelling the media type in "buys a client nothing it
+cannot read off the `type` member" — true of a client that has already decided
+to parse the body as a problem document, and a generated one decides that from
+the **declared media type**, before it parses anything. The distinction to keep:
+*what a document contains* and *what a consumer is told it contains* are
+different claims, and a conformance check that asserts the first passes on a
+document that lies about the second.
+
 **`api/dto/` names every model `…Response`, nested ones included, and that is
 load-bearing.** `tests/unit/test_api_dto.py` discovers response models by
 `name.endswith("Response")` and asserts none declares a credential-shaped field
@@ -512,20 +544,45 @@ URL. Shipped as `PlayTargetResponse`/`PlaySourceResponse`, for the reason
 The Emby half of that run is in `.claude/rules/emby-push-and-ingest.md`; these
 three are about the *route* and belong here.
 
-🔴 **Starting the shipped app against a real source is itself an unbounded
-walk, and nothing warns you.** `LaneSupervisor` starts a push lane per **enabled**
-source, and the lane's reconnect gap-closer calls
-`reconcile(source, SyncRunKind.DELTA, adapter)`. Against a real household —
-1,126,789 items on the one this project measures — that is exactly the walk
-`emby-push-and-ingest.md` forbids, issued by a bare
+✅ **Starting the shipped app against a real source was itself an unbounded
+walk with nothing warning you — closed 2026-08-19 (issue #9).**
+`LaneSupervisor` starts a push lane per **enabled** source, and the lane's
+reconnect gap-closer calls `reconcile(source, SyncRunKind.DELTA, adapter)`.
+Against a real household — 1,126,789 items on the one this project measures —
+that was exactly the walk `emby-push-and-ingest.md` forbids, issued by a bare
 `uvicorn usher.api.app:create_app --factory` with default settings and no
 command of its own. H4/H5's run set `USHER_PUSH_ENABLED=false` and
 `USHER_WORKER_ENABLED=false` for that reason (and the second is required anyway,
-because H5's worker pass has to be a real `usher work --once`). **Any live HTTP
-run against a real source must set both, or budget for a delta walk it did not
-ask for.** The two settings are also what make such a run's request budget
-*statable*: with the lanes on, the count is whatever a websocket and a gap
-closer decide.
+because H5's worker pass has to be a real `usher work --once`). **Those two
+settings are still what make such a run's request budget *statable*** — with
+the lanes on, the count is whatever a websocket and a gap closer decide — so a
+live HTTP run still sets both.
+
+**`push_gap_min_interval_seconds` looks like the bound and is not.** It was at
+its shipped 60 s throughout: it rate-limits how *often* the gap is closed and
+says nothing about how large the walk is. The size lives in
+`ReconcileService.cursor_for` — public since this fix, for exactly this reason —
+because a DELTA resumes from the newest *completed* item-lane run, so with none
+there is no `since` and `list_items(since=None)` reads the whole library.
+`LaneSupervisor._close_gap` now asks that method before committing to a walk,
+and `USHER_PUSH_GAP_CLOSE` (`cursored` | `always` | `never`, default
+`cursored`) is what it does with the answer. **The bound is a refusal rather
+than a cap, and that is not squeamishness**: a truncated walk records
+`COMPLETED`, and `latest_completed_cursor` then reads its `started_at`, so
+every item the truncation never reached is skipped by every later delta,
+silently and permanently.
+
+**Every arm logs, and the log lives in `_close_gap` rather than in `refresh()`
+or `_start_lane`** — the refresher calls those once per
+`push_source_refresh_seconds` forever, which is the ~17,280-warnings-a-day shape
+`config-cli-and-deployment.md` records against `build_worker`.
+`test_the_gap_close_is_logged_per_close_and_not_per_supervisor_poll` drains
+twelve units of work and asserts the sink holds **one** line, because a case
+that asserted after a single poll cannot tell "once" from "per poll". The lane
+cases also needed a harness change to be writable at all: `FakeSyncRunRepository`
+was constructed *per unit of work* in `tests/unit/test_api_lanes.py`, i.e. a
+database that forgot every completed walk when the session closed, under which
+no delta ever has a cursor. It is on `_Fakes` now, beside the queue.
 
 **`quote(ticket, safe="=")` is a no-op at the length the shipped path actually
 produces, confirmed live.** D1 measured the encoding question over synthetic
@@ -616,3 +673,49 @@ lease is what changed — so `USHER_WORKER_ENABLED=false` on a server beside a
 one. What two processes still do is spend the same upstream budget twice:
 `USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` are both per
 process, against a rate limit that is per client.
+
+## Issue #31 — a lane switch was gating a request-path resource (2026-08-19)
+
+**`create_app`'s lifespan built the embedding model under
+`settings.worker_enabled` and parked it nowhere, so `GET /search?mode=semantic`
+answered `422` on every deployment there was** — including one with a live
+`openai:BAAI/bge-m3` endpoint and 130,720 vectors, where the identical query
+through `usher search` returned coherent results at the same moment.
+`?mode=fused` narrowed to `full_text` and said so, which is the degradation
+working; what nothing said was that the narrowing was unconditional.
+
+**The lane switch was standing in for a setting that already says the same
+thing more precisely.** `composition.embedder` answers `(None, no-op)` unless
+`embedding_enabled`, which is off by default and is an operator naming a model,
+so `worker_enabled` was adding nothing except an exclusion — and it excluded
+exactly the split deployment this file recommends four entries up
+(`USHER_WORKER_ENABLED=false` on a server beside a `usher work` container).
+The model is now built whatever the lane switches say and parked on
+`app.state.embedder`, and `api/deps.get_search_service` reads it.
+`report=settings.worker_enabled` is the switch's remaining job and the whole of
+it: every warning in `embedder` ends *"index jobs will not be claimed"*, which
+is false of a process that claims none.
+
+**Two arguments in the old docstrings, and only one of them was ever true.**
+
+- *"Would work in development and 500 in exactly the push-only deployment PRD
+  08 describes."* Never reachable: no model is `None`, `None` is
+  `build_search_service`'s own default, and the answer is the 422 naming the
+  missing capability. What made it *look* reachable is that a conditionally
+  built resource parked nowhere leaves the attribute **absent** rather than
+  `None` — so the fix and the fear are the same line. Pinned by
+  `test_a_deployment_with_no_embedding_model_exposes_none_rather_than_nothing`.
+- *"A once-per-process 65 MB resource."* Real, **runtime-dependent, and an
+  argument about the wrong verb.** It is `fastembed:`'s ONNX session (65 MB,
+  4.84 s cold); `openai:` is an `httpx.AsyncClient` holding no model, and the
+  prefix has selected between them since 2026-08-13 — the sentence predates it
+  and never said which runtime it was about. It argues against *building* a
+  model per API process, which is the other option issue #31 names, and not
+  against *reading* one the process built anyway. Nothing in the fix is
+  conditional on the prefix, because reading an attribute costs the same under
+  both.
+
+**The general form: a cost sentence with no date and no runtime named is a
+measurement of one configuration wearing the grammar of a rule.** Both these
+docstrings were written when there was one runtime, and neither said so, so the
+number went on being quoted through the release that made it optional.
