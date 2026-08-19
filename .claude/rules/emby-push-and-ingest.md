@@ -165,15 +165,26 @@ real upstream this project talks to has ever produced the header that feeds it.
   because H5's worker pass has to be a real `usher work --once` **subprocess**
   and a patched parent cannot reach it. It writes a marker file that the caller
   asserts on: a plant that did not land looks exactly like a check that passed.
-- 🔴 **Starting the shipped app against a real source is itself an unbounded
-  walk, and nothing warns you.** `LaneSupervisor` starts a push lane per enabled
-  source, and its reconnect gap-closer calls
-  `reconcile(source, SyncRunKind.DELTA, adapter)` — against this server that is
-  the walk every rule in this file forbids, issued by `uvicorn` with default
-  settings and no command of its own. This run set
-  `USHER_PUSH_ENABLED=false` and `USHER_WORKER_ENABLED=false` on the app. Anyone
-  driving a live HTTP run against a real household must do the same, or budget
-  for a delta walk they did not ask for.
+- ✅ **Starting the shipped app against a real source used to be an unbounded
+  walk with no warning — closed 2026-08-19 (issue #9).** `LaneSupervisor` starts
+  a push lane per enabled source, and its reconnect gap-closer calls
+  `reconcile(source, SyncRunKind.DELTA, adapter)`. **The half that made it a
+  full walk is `_cursor_for`, not the gap-closer**: a DELTA resumes from the
+  newest *completed* item-lane run, so with none there is no `since` and
+  `list_items(since=None)` reads the whole library — the walk every rule in this
+  file forbids, issued by `uvicorn` with default settings and no command of its
+  own. This run set `USHER_PUSH_ENABLED=false` and `USHER_WORKER_ENABLED=false`
+  on the app for that reason.
+  **What holds now:** `USHER_PUSH_GAP_CLOSE` defaults to `cursored`, so the lane
+  closes a gap only when a completed walk gives it a `since`, and logs a
+  `WARNING` naming the source otherwise. A live run still wants both switches
+  off to keep its request budget *statable* — one socket and one gap-closer
+  still decide the count — but a run that forgets them no longer walks a
+  household. `always` is the old behaviour, which now warns before it starts.
+  **The bound is a refusal rather than a cap on purpose**: a truncated walk
+  records `COMPLETED`, and `latest_completed_cursor` then reads its
+  `started_at`, so everything the truncation never reached is skipped by every
+  later delta, silently and permanently.
 
 **Emby push works.** Verified 2026-07-29 against the live server with a normal
 non-admin token: `/embywebsocket` upgrades (101), delivers periodic `Sessions`,

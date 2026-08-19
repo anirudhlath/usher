@@ -288,6 +288,20 @@ whole library unavailable in one run
 ([ADR-0015](docs/prd/decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)).
 Only use it for a library the operator really did remove.
 
+⚠️ **A new source needs this command once, and that is deliberate.** With the
+push lane on (the default) the running server holds a channel per source and
+closes the gap after a reconnect with a *delta* walk — but a delta resumes from
+your last completed walk, and a source that has never had one has nothing to
+resume from, so that "delta" would read **every item your server has**. Usher
+will not do that to a media server on its own: it logs a warning naming the
+source and pointing back here, and waits for you to run `usher sync`. Once one
+walk has completed, every later reconnect takes the small delta it was designed
+to take. `USHER_PUSH_GAP_CLOSE` is the switch — `always` restores the old
+behaviour (still warning first), `never` turns gap-closing walks off entirely,
+at the cost of not seeing what changed while a socket was down until your next
+sync. Full reasoning in
+[08 — Operations](docs/prd/08-operations.md#starting-the-app-is-not-a-command-to-walk-your-library).
+
 **Inspect and repair**
 
 ```bash

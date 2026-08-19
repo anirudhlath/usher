@@ -512,20 +512,45 @@ URL. Shipped as `PlayTargetResponse`/`PlaySourceResponse`, for the reason
 The Emby half of that run is in `.claude/rules/emby-push-and-ingest.md`; these
 three are about the *route* and belong here.
 
-🔴 **Starting the shipped app against a real source is itself an unbounded
-walk, and nothing warns you.** `LaneSupervisor` starts a push lane per **enabled**
-source, and the lane's reconnect gap-closer calls
-`reconcile(source, SyncRunKind.DELTA, adapter)`. Against a real household —
-1,126,789 items on the one this project measures — that is exactly the walk
-`emby-push-and-ingest.md` forbids, issued by a bare
+✅ **Starting the shipped app against a real source was itself an unbounded
+walk with nothing warning you — closed 2026-08-19 (issue #9).**
+`LaneSupervisor` starts a push lane per **enabled** source, and the lane's
+reconnect gap-closer calls `reconcile(source, SyncRunKind.DELTA, adapter)`.
+Against a real household — 1,126,789 items on the one this project measures —
+that was exactly the walk `emby-push-and-ingest.md` forbids, issued by a bare
 `uvicorn usher.api.app:create_app --factory` with default settings and no
 command of its own. H4/H5's run set `USHER_PUSH_ENABLED=false` and
 `USHER_WORKER_ENABLED=false` for that reason (and the second is required anyway,
-because H5's worker pass has to be a real `usher work --once`). **Any live HTTP
-run against a real source must set both, or budget for a delta walk it did not
-ask for.** The two settings are also what make such a run's request budget
-*statable*: with the lanes on, the count is whatever a websocket and a gap
-closer decide.
+because H5's worker pass has to be a real `usher work --once`). **Those two
+settings are still what make such a run's request budget *statable*** — with
+the lanes on, the count is whatever a websocket and a gap closer decide — so a
+live HTTP run still sets both.
+
+**`push_gap_min_interval_seconds` looks like the bound and is not.** It was at
+its shipped 60 s throughout: it rate-limits how *often* the gap is closed and
+says nothing about how large the walk is. The size lives in
+`ReconcileService.cursor_for` — public since this fix, for exactly this reason —
+because a DELTA resumes from the newest *completed* item-lane run, so with none
+there is no `since` and `list_items(since=None)` reads the whole library.
+`LaneSupervisor._close_gap` now asks that method before committing to a walk,
+and `USHER_PUSH_GAP_CLOSE` (`cursored` | `always` | `never`, default
+`cursored`) is what it does with the answer. **The bound is a refusal rather
+than a cap, and that is not squeamishness**: a truncated walk records
+`COMPLETED`, and `latest_completed_cursor` then reads its `started_at`, so
+every item the truncation never reached is skipped by every later delta,
+silently and permanently.
+
+**Every arm logs, and the log lives in `_close_gap` rather than in `refresh()`
+or `_start_lane`** — the refresher calls those once per
+`push_source_refresh_seconds` forever, which is the ~17,280-warnings-a-day shape
+`config-cli-and-deployment.md` records against `build_worker`.
+`test_the_gap_close_is_logged_per_close_and_not_per_supervisor_poll` drains
+twelve units of work and asserts the sink holds **one** line, because a case
+that asserted after a single poll cannot tell "once" from "per poll". The lane
+cases also needed a harness change to be writable at all: `FakeSyncRunRepository`
+was constructed *per unit of work* in `tests/unit/test_api_lanes.py`, i.e. a
+database that forgot every completed walk when the session closed, under which
+no delta ever has a cursor. It is on `_Fakes` now, beside the queue.
 
 **`quote(ticket, safe="=")` is a no-op at the length the shipped path actually
 produces, confirmed live.** D1 measured the encoding question over synthetic
