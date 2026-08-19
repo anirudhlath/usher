@@ -21,6 +21,86 @@ lives in, and nothing loaded when you wrote a *new* adapter's translation. The
 subsystem files keep their per-upstream tables; this one holds the rules that
 are true of all of them.
 
+## `f"…: {exc}"` is an empty message for every httpx timeout, and the common path through a transport handler is the empty one
+
+**Found 2026-08-19 on a live deployment against a real Emby 4.9.5.0 (issue
+#33), and measured against httpx 0.28.1 rather than reasoned about.** A
+`watch_state` sync ran **57 minutes**, walked **121,000 items**, failed, and
+the whole of `sync_runs.error` was:
+
+```
+GET /Users/{id}/Items failed:
+```
+
+The message ended at the colon. `str(exc)` was the entire payload.
+
+**The emptiness is a property of the wrapping, not of any one class**, which
+is what makes it a rule rather than five special cases.
+`httpcore.map_exceptions` re-raises as `to_exc(exc)` around **the object it
+caught** — a bare `TimeoutError()` for every timeout, an
+`anyio.EndOfStream()` for a read error, both of which stringify to `""` — and
+httpx's `map_httpcore_exceptions` then re-raises with `message = str(exc)`.
+So a `TimeoutException` subclass added by a later httpx will be empty too.
+
+Provoked against real sockets, one row per way it was provoked:
+
+| how it was provoked | class | `str(exc)` |
+|---|---|---|
+| a server that accepts and never answers | `ReadTimeout` | `''` |
+| the blackholed TEST-NET-1 address `192.0.2.1` | `ConnectTimeout` | `''` |
+| a pool of one with a request already in flight | `PoolTimeout` | `''` |
+| `httpcore.ReadError(anyio.EndOfStream())`, the wrapping shown directly | `ReadError` | `''` |
+| TCP abort after the request | `RemoteProtocolError` | `'Server disconnected without sending a response.'` |
+| a garbage status line | `RemoteProtocolError` | `"illegal status line: bytearray(b'NOT-HTTP')"` |
+| a body cut short of `Content-Length` | `RemoteProtocolError` | `'peer closed connection without sending complete message body …'` |
+| nothing listening on the port | `ConnectError` | `'All connection attempts failed'` |
+| a closed `httpx.AsyncClient` | `RuntimeError` | `'Cannot send a request, as the client has been closed.'` |
+
+⚠️ **Two rows refute the issue that reported this**, which listed
+`RemoteProtocolError` among the empty five: it carries h11's own text in all
+three ways it could be provoked here, and so does `ConnectError`. The empty
+family is the **timeouts plus `ReadError`/`WriteError`** — which is still the
+common path, because a timeout is what an unreachable or overloaded upstream
+produces and a protocol error is not.
+
+**`usher.adapters.http.failure_detail` is the one definition**, and the
+`type(exc).__name__` half of it was already spelled inline at five sites
+(`EmbyPushChannel` twice, `TmdbClient`, `OpenAICompatibleClient`, the
+embedding client, `TmdbImageProvider`) before `EmbySession` and the two bulk
+adapters were found still interpolating `{exc}`. It adds the **timeout budget**,
+recovered rather than invented: `build_request` writes
+`extensions["timeout"]` from the client default *or* from a per-request
+`timeout=` kwarg, and httpx sets `.request` on every `RequestError`, so
+`ReadTimeout after 30.0s (read budget)` is available at the handler with no
+new plumbing. That is the fact an operator acts on — whether to raise
+`USHER_SOURCE_TIMEOUT_SECONDS` or go and look at the network — and the empty
+message answered neither.
+
+**Reading it needs four guards, because it runs while formatting an
+exception message.** `RequestError.request` is a property that *raises*
+`RuntimeError` when unset rather than answering `None`; `RuntimeError` and
+`CookieConflict`/`InvalidURL` have no `.request` attribute at all;
+`extensions` is caller-supplied; and a transport may put a non-number under
+`timeout`. A guard that missed would replace a recorded sync failure with an
+unrelated crash — strictly worse than the empty message.
+
+**What the fix gives up, deliberately: `str(exc)` where it was non-empty.**
+`RemoteProtocolError`'s h11 text is genuinely informative and is now lost.
+It is not worth keeping, because httpx's messages belong to a third party
+and nothing promises what a later version puts in one — which is the reason
+`TmdbClient` and `OpenAICompatibleClient` excluded `str(exc)` in the first
+place, `Settings.tmdb_base_url` and `Settings.llm_base_url` both being URLs
+an operator may point at a provider carrying a token in a path segment.
+
+**The general shape, which is the reason this is filed here rather than in
+`emby-push-and-ingest.md`: an error path's payload has a *common* case and a
+*flattering* case, and the one that gets read at review time is the
+flattering one.** `HTTPStatusError` and `InvalidURL` carry text, which is
+presumably why `{exc}` read as adequate for three milestones. Ask which
+member of the caught tuple actually fires in production — the same question
+the alarm-rate rule below asks about a *type* — and check that one's payload,
+not the tuple's best member.
+
 ## A refusal and a fault raised as the same type are indistinguishable to every consumer downstream, and the commonest one sets the alarm rate
 
 **Found 2026-08-11 in M9's image proxy, and it is a rule about naming rather

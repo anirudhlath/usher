@@ -125,6 +125,33 @@ async def test_revision_translates_a_transport_error(cache: Path) -> None:
             await CachedDatasetFile(client, URL, cache).revision()
 
 
+@pytest.mark.parametrize("method", ["revision", "ensure_local"])
+async def test_a_timed_out_download_names_the_failure_rather_than_ending_at_a_colon(
+    cache: Path, method: str
+) -> None:
+    """Issue #33's defect, in the second place it lives. `str(exc)` is empty
+    for every httpx timeout, so `f"HEAD {url} failed: {exc}"` recorded a
+    message ending at the colon -- and this is the adapter that fetches
+    multi-gigabyte IMDb and MovieLens dumps, where a stall is both the most
+    likely failure and the most expensive one to diagnose twice.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("")
+
+    async with httpx.AsyncClient(transport=_transport(handler), timeout=60.0) as client:
+        dataset = CachedDatasetFile(client, URL, cache)
+        with pytest.raises(PortUnavailable) as exc_info:
+            if method == "revision":
+                await dataset.revision()
+            else:
+                await dataset.ensure_local('"v1"')
+    message = str(exc_info.value)
+    assert "ReadTimeout" in message
+    assert "60.0s" in message
+    assert not message.rstrip().endswith(":")
+
+
 async def test_ensure_local_downloads_then_reads_lines(cache: Path) -> None:
     async with httpx.AsyncClient(transport=_serve()) as client:
         dataset_file = CachedDatasetFile(client, URL, cache)

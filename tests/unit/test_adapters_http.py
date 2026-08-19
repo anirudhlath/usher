@@ -18,7 +18,12 @@ import json
 import httpx
 import pytest
 
-from usher.adapters.http import UNTRANSLATED_FAILURES, decode_json, port_error_for
+from usher.adapters.http import (
+    UNTRANSLATED_FAILURES,
+    decode_json,
+    failure_detail,
+    port_error_for,
+)
 from usher.ports.errors import (
     PortAuthFailed,
     PortDataMalformed,
@@ -239,3 +244,139 @@ def test_the_untranslated_tuple_covers_the_families_httpx_error_does_not() -> No
     # that is the fourth member's whole reason: an injected client closed by
     # its owner is not something an adapter's own closed-flag can see.
     assert issubclass(RuntimeError, UNTRANSLATED_FAILURES)
+
+
+# --------------------------------------------------------------------------
+# failure_detail
+
+
+def test_every_httpx_timeout_stringifies_to_the_empty_string() -> None:
+    """The premise `failure_detail` exists for, asserted rather than cited.
+
+    Issue #33: a `watch_state` sync walked 121,000 items for 57 minutes
+    against a real Emby 4.9.5.0, failed, and recorded the whole of
+    `GET /Users/{id}/Items failed:` -- a message ending at the colon,
+    because `str(exc)` was the entire payload.
+
+    The mechanism is general, not per-class. `httpcore.map_exceptions`
+    re-raises as `to_exc(exc)` around whatever it caught -- a bare
+    `TimeoutError()` for every timeout, an `anyio.EndOfStream()` for a read
+    error, both of which stringify empty -- and httpx's
+    `map_httpcore_exceptions` then re-raises with `message = str(exc)`. So
+    the emptiness is a property of the wrapping, and a `TimeoutException`
+    subclass added by a later httpx will have it too.
+
+    Measured on httpx 0.28.1 against real sockets: a server that accepts and
+    never answers gives `ReadTimeout` with `str(exc) == ""`; the blackholed
+    TEST-NET-1 address 192.0.2.1 gives `ConnectTimeout` with `str(exc) ==
+    ""`; a pool of one with a request already in flight gives `PoolTimeout`
+    with `str(exc) == ""`.
+
+    Two of the issue's five are refuted here and the refutation is the
+    reason this case lists them: `RemoteProtocolError` carries h11's own
+    text in all three ways it could be provoked (`"Server disconnected
+    without sending a response."`, `"illegal status line: …"`, `"peer closed
+    connection without sending complete message body …"`) and `ConnectError`
+    carries `"All connection attempts failed"`. Both are *lost* by the fix,
+    deliberately -- see `failure_detail`.
+    """
+    for cls in (
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+        httpx.ReadError,
+        httpx.WriteError,
+    ):
+        assert str(cls(str(TimeoutError()))) == ""
+        assert issubclass(cls, UNTRANSLATED_FAILURES)
+
+
+def test_failure_detail_names_the_type_when_the_text_is_empty() -> None:
+    assert failure_detail(httpx.ReadError("")) == "ReadError"
+    assert failure_detail(RuntimeError()) == "RuntimeError"
+
+
+def test_failure_detail_never_carries_httpx_own_text() -> None:
+    """`type(exc).__name__` and nothing else, which is the rule
+    `TmdbClient`, `OpenAICompatibleClient` and the embedding client each
+    wrote for themselves: httpx's messages belong to a third party, this
+    project cannot promise what a later version puts in one, and two of
+    these upstreams are pointed by an operator at a URL that may carry a
+    token in a path segment.
+    """
+    leaky = httpx.ConnectError("connecting to https://host.invalid/?api_key=SEKRIT failed")
+    assert failure_detail(leaky) == "ConnectError"
+    assert "SEKRIT" not in failure_detail(leaky)
+
+
+def test_failure_detail_recovers_the_budget_a_timeout_exhausted() -> None:
+    """The number is Usher's own, and it is recovered rather than invented:
+    `Client.build_request` writes `extensions["timeout"]` from the client's
+    `Timeout`, and httpx sets `.request` on every `RequestError` on its way
+    out of `send`.
+
+    Named per phase because `httpx.Timeout` carries four independent budgets.
+    A client built from one scalar -- which is what
+    `Settings.source_timeout_seconds` gives it -- sets all four the same, so
+    the phase only earns its place when they differ; it costs four words and
+    it is the difference between "the connect budget" and "the read budget"
+    on a source that sets them apart.
+    """
+    request = httpx.Request(
+        "GET",
+        "https://emby.invalid/Users/u/Items",
+        extensions={"timeout": {"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 1.5}},
+    )
+    assert failure_detail(httpx.ReadTimeout("", request=request)) == (
+        "ReadTimeout after 30.0s (read budget)"
+    )
+    assert failure_detail(httpx.ConnectTimeout("", request=request)) == (
+        "ConnectTimeout after 5.0s (connect budget)"
+    )
+    assert failure_detail(httpx.PoolTimeout("", request=request)) == (
+        "PoolTimeout after 1.5s (pool budget)"
+    )
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        # `RequestError.request` is a property that **raises** rather than
+        # answering `None` when it was never set.
+        httpx.ReadTimeout(""),
+        # Not a `RequestError` at all, so no `.request` attribute exists:
+        # `CookieConflict`/`InvalidURL` subclass `Exception` directly and a
+        # closed `httpx.AsyncClient` raises a bare `builtins.RuntimeError`.
+        httpx.CookieConflict("two cookies of that name"),
+        RuntimeError("Cannot send a request, as the client has been closed."),
+        # Extensions a caller supplied itself, with no timeout in them.
+        httpx.ReadTimeout("", request=httpx.Request("GET", "https://x.invalid", extensions={})),
+        # A custom transport putting something that is not a number there.
+        httpx.ReadTimeout(
+            "", request=httpx.Request("GET", "https://x.invalid", extensions={"timeout": "soon"})
+        ),
+        httpx.ReadTimeout(
+            "",
+            request=httpx.Request(
+                "GET", "https://x.invalid", extensions={"timeout": {"read": None}}
+            ),
+        ),
+    ],
+    ids=[
+        "no-request",
+        "no-request-attr",
+        "runtime-error",
+        "no-timeout",
+        "not-a-dict",
+        "not-a-number",
+    ],
+)
+def test_failure_detail_still_names_a_failure_it_cannot_price(exc: BaseException) -> None:
+    """This runs while *formatting an exception message*. A guard that missed
+    would replace the recorded sync failure with an unrelated crash, which is
+    strictly worse than the empty message it set out to fix.
+    """
+    detail = failure_detail(exc)
+    assert detail == type(exc).__name__
+    assert detail

@@ -83,7 +83,7 @@ import httpx
 from opentelemetry import metrics, trace
 
 from usher import __version__
-from usher.adapters.http import UNTRANSLATED_FAILURES, retry_after_seconds
+from usher.adapters.http import UNTRANSLATED_FAILURES, failure_detail, retry_after_seconds
 from usher.adapters.http import decode_json as _decode_json_body
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
@@ -354,10 +354,14 @@ class EmbySession:
             )
             return await self._client.send(request)
         except UNTRANSLATED_FAILURES as exc:
-            # `exc` carries a method and a URL, never a header or a body,
-            # so this message cannot leak the credential -- and the one
-            # request that does carry it is never formatted into a message.
-            raise PortUnavailable(f"{method} {path} failed: {exc}") from exc
+            # `failure_detail`, never `{exc}`: every httpx timeout
+            # stringifies to the empty string, so `{exc}` recorded an hour of
+            # work as a message ending at a colon (issue #33). What is
+            # interpolated here is a class name and a number Usher itself
+            # configured -- no header, no body, no URL -- so this message
+            # cannot leak the credential, and the one request that does carry
+            # it is never formatted into a message.
+            raise PortUnavailable(f"{method} {path} failed: {failure_detail(exc)}") from exc
         finally:
             _request_duration.record(
                 self._clock() - started, {"source": self._source_name, "op": op}

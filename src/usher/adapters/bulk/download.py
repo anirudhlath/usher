@@ -29,7 +29,7 @@ from pathlib import Path
 
 import httpx
 
-from usher.adapters.http import retry_after_seconds
+from usher.adapters.http import failure_detail, retry_after_seconds
 from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
 
 # 1 MiB: large enough that the per-chunk overhead is irrelevant against a
@@ -137,7 +137,11 @@ class CachedDatasetFile:
         try:
             response = await self._client.head(self._url, follow_redirects=True)
         except httpx.HTTPError as exc:
-            raise PortUnavailable(f"HEAD {self._url} failed: {exc}") from exc
+            # `failure_detail`, never `{exc}`: every httpx timeout
+            # stringifies to the empty string (issue #33), and a stalled
+            # multi-gigabyte dump is both the likeliest failure on this path
+            # and the most expensive one to have to reproduce.
+            raise PortUnavailable(f"HEAD {self._url} failed: {failure_detail(exc)}") from exc
         _raise_for_status(response, self._url)
         return _revision_from(response)
 
@@ -194,7 +198,7 @@ class CachedDatasetFile:
                     async for chunk in response.aiter_bytes(_CHUNK_BYTES):
                         sink.write(chunk)
         except httpx.HTTPError as exc:
-            raise PortUnavailable(f"GET {self._url} failed: {exc}") from exc
+            raise PortUnavailable(f"GET {self._url} failed: {failure_detail(exc)}") from exc
 
         # Atomic rename first, completed-file stamp only after it succeeds:
         # a `path` that exists is always a complete file, and now `stamp`

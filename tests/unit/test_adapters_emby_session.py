@@ -522,6 +522,172 @@ async def test_a_transport_failure_outside_httpx_httperror_still_becomes_a_port_
         await client.aclose()
 
 
+def _raising_client(failure: BaseException, *, timeout: float = 30.0) -> httpx.AsyncClient:
+    """A client whose transport authenticates and then raises `failure`.
+
+    The authenticate arm has to succeed, or every message under test reads
+    `POST /Users/AuthenticateByName failed: …` and the path in it is a
+    constant rather than the interpolated one the defect was found on.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/Users/AuthenticateByName":
+            return httpx.Response(200, json={"AccessToken": "t", "User": {"Id": USER_ID}})
+        raise failure
+
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://emby.invalid",
+        timeout=timeout,
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        # Constructed the way httpcore and httpx actually raise them, which
+        # is the whole of this defect. `httpcore.map_exceptions` calls
+        # `to_exc(exc)` with the *object* it caught -- a bare
+        # `TimeoutError()` or an `anyio.EndOfStream()`, both of which
+        # stringify to `""` -- and httpx's `map_httpcore_exceptions` then
+        # re-raises with `message = str(exc)`. Measured on httpx 0.28.1
+        # against real sockets: a server that accepts and never answers
+        # gives `ReadTimeout` with `str(exc) == ""`; a blackholed address
+        # gives `ConnectTimeout` with `str(exc) == ""`; an exhausted pool
+        # gives `PoolTimeout` with `str(exc) == ""`.
+        httpx.ReadTimeout(""),
+        httpx.ConnectTimeout(""),
+        httpx.PoolTimeout(""),
+        httpx.WriteTimeout(""),
+        httpx.ReadError(""),
+        httpx.WriteError(""),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+async def test_a_transport_failure_that_stringifies_empty_still_names_itself(
+    failure: BaseException,
+) -> None:
+    """Issue #33: a `watch_state` sync walked 121,000 items for 57 minutes,
+    failed, and recorded `GET /Users/{id}/Items failed:` in `sync_runs.error`
+    -- the whole diagnostic, ending at the colon.
+
+    `str(exc)` was the entire payload and every one of these stringifies to
+    the empty string, so the *common* path through this handler is the one
+    that produces a message naming no failure at all. An operator cannot
+    tell a read timeout from a connect failure from a pool exhaustion, and
+    the run cost an hour.
+
+    `type(exc).__name__` is non-empty by construction, which is exactly what
+    `EmbyPushChannel`, `TmdbClient`, `OpenAICompatibleClient` and
+    `TmdbImageProvider` already spell at the same arm.
+    """
+    client = _raising_client(failure)
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortUnavailable) as exc_info:
+            await session.json_body("GET", f"/Users/{USER_ID}/Items", op="list")
+    finally:
+        await client.aclose()
+    message = str(exc_info.value)
+    assert type(failure).__name__ in message
+    # The defect itself, asserted as its own premise: the reported message
+    # ended at the colon with nothing after it.
+    assert not message.rstrip().endswith(":")
+    assert message.split("failed:", 1)[1].strip()
+
+
+async def test_a_timeout_carries_the_budget_it_exhausted() -> None:
+    """`ReadTimeout` says which phase gave up; the budget says *what it was*,
+    which is the question the operator reading `sync_runs.error` is actually
+    asking -- whether to raise `USHER_SOURCE_TIMEOUT_SECONDS` or go look at
+    the network.
+
+    Recoverable rather than invented: `Client.build_request` writes
+    `extensions["timeout"]` from the client's own `Timeout`, and httpx sets
+    `.request` on every `RequestError` on the way out, so the number is on
+    the exception this handler already holds. Verified against httpx 0.28.1.
+    """
+    client = _raising_client(httpx.ReadTimeout(""), timeout=7.5)
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortUnavailable) as exc_info:
+            await session.json_body("GET", f"/Users/{USER_ID}/Items", op="list")
+    finally:
+        await client.aclose()
+    assert "7.5s" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        # No `.request` at all: `CookieConflict` and `InvalidURL` subclass
+        # `Exception` directly, and a closed `httpx.AsyncClient` raises a
+        # bare `builtins.RuntimeError`. Reading a timeout budget off these
+        # must not raise *while formatting an exception message*, which
+        # would replace a recorded sync failure with an unrelated crash.
+        httpx.CookieConflict("two cookies of that name"),
+        httpx.InvalidURL("that is not a URL"),
+        RuntimeError("Cannot send a request, as the client has been closed."),
+        # A `RequestError` whose `.request` was never set: `exc.request` is a
+        # property that *raises* `RuntimeError` rather than answering `None`.
+        httpx.ConnectError(""),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+async def test_a_failure_carrying_no_request_still_names_itself(
+    failure: BaseException,
+) -> None:
+    client = _raising_client(failure)
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortUnavailable) as exc_info:
+            await session.json_body("GET", f"/Users/{USER_ID}/Items", op="list")
+    finally:
+        await client.aclose()
+    assert type(failure).__name__ in str(exc_info.value)
+
+
+async def test_the_transport_failure_message_carries_no_credential() -> None:
+    """PRD 08's "credentials are never logged", asserted on the message this
+    arm builds rather than assumed from the shape of it.
+
+    The control fires first: the password and the minted token *are* in
+    scope at this call site, so a check that found nothing without one would
+    be satisfied by a test that never held a secret to begin with.
+    """
+    secret = CREDENTIALS.password.get_secret_value()
+    token = "a-minted-session-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/Users/AuthenticateByName":
+            assert secret in request.content.decode()
+            return httpx.Response(200, json={"AccessToken": token, "User": {"Id": USER_ID}})
+        assert request.headers["X-Emby-Token"] == token
+        raise httpx.ReadTimeout("")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://emby.invalid"
+    )
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortUnavailable) as exc_info:
+            await session.json_body("GET", f"/Users/{USER_ID}/Items", op="list")
+    finally:
+        await client.aclose()
+    message = str(exc_info.value)
+    assert secret not in message
+    assert token not in message
+    assert "emby.invalid" not in message
+
+
 async def test_an_injected_client_closed_by_its_owner_becomes_a_port_error() -> None:
     """The exact hazard `usher.ports.source`'s `aclose` docstring records: a
     closed `httpx.AsyncClient` raises a bare `builtins.RuntimeError`, which
