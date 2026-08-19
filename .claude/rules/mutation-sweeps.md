@@ -5893,7 +5893,10 @@ all.**
 1 equivalent-mutant control, SURVIVED all five gate steps. 0 BAD-ANCHOR, 0
 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.** Every verdict
 matched its pre-registered expectation — *in round two*; the whole of round one
-is discarded and the reason is the second half of this entry.
+is discarded and the reason is the second half of this entry. **Two of those
+verdicts were recorded with the wrong mechanism, and a third round re-measured
+the lot at `3f74777`** — both corrections are below, and the second is where
+the numbers that describe the *shipped* tree are.
 
 Harness at `/var/tmp/m10-s5/sweep.py`, **outside the working tree** so the four
 whole-repository gate steps are not measuring the harness. Plant list and
@@ -5903,8 +5906,26 @@ written 04:07:33 — before the first plant, and re-hashed at write time rather
 than transcribed (S3's ledger recorded a token that was never any digest of its
 file, and that is why this one was hashed twice). Tree committed at `30e7871`
 first, so `git status` is the verification: clean before, clean after every
-restore, and the target `sha256`-verified byte-identical to `git show
-HEAD:src/usher/api/lanes.py` at the end (`29cfbe00…`).
+restore, and the target `sha256`-verified byte-identical to
+`git show 30e7871:src/usher/api/lanes.py` at the end (`29cfbe00…`).
+
+🔴 **That sentence read `git show HEAD:…` until this correction, and `HEAD` is
+not a fact.** All six `backups/*.py` hash to `29cfbe00…`, which is the blob at
+`30e7871`, so the sweep genuinely ran against what the digest names. But the
+same path is **`5d6c37c4…` at `483fae6`** — the commit that ships this
+sentence, and which edited this very file's prose — and **`8eb08ca2…` at
+`3f74777`**. So a reader running the command as written got a digest that did
+not match the one printed beside it, with nothing to tell *stale* from
+*fabricated*, and a fabricated digest is exactly what S3's ledger above
+records. **A digest is a fact about a revision: name the revision, never
+`HEAD`.** *(And spell it `git show "${rev}:path"`. Measured here while
+re-verifying these three: in **zsh**, `git show $rev:src/usher/api/lanes.py`
+applies a history modifier to `$rev` and hands git the bare revision, so it
+prints the **commit** — 28,842 bytes of log message rather than 33,166 of file
+— and `sha256sum` hashes that without complaint. Three plausible, stable,
+entirely wrong digests out of a quoting error, on the one command `CLAUDE.md`
+tells a reader to use to read a file mid-sweep.)*
+
 `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under **both** `src/` and
 `tests/` before every run, `compile()` as the dry run, an exact anchor count
 (`count(old) == 1`) asserted before each plant, landing spelled as **byte
@@ -5917,9 +5938,26 @@ deselected in 190.88 s**. The deselections are
 `test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_own`
 and the three RRF-fusion cases in `test_adapters_search_postgres.py` named in
 the entry above — a verdict scored on *"did the run fail"* is unsound in both
-directions against an intermittent case. Neither group failed in any of the
-eight whole-suite runs this task made, which is one more datapoint for that
-entry's open question and still not a rate.
+directions against an intermittent case.
+
+🔴 **This paragraph ended *"neither group failed in any of the eight
+whole-suite runs this task made"*, and that sentence was wrong twice.** The
+count is wrong: the runs this task recorded are **thirteen** — one baseline,
+six plants in the discarded round one (`round1-invalid.console.log`) and six
+in round two (`sweep2.console.log`) — and the discarded round cannot be
+silently excluded from a count while the same entry uses it as evidence.
+**And the count is beside the point, because every one of the thirteen
+deselects those four node ids by name**, so not one of them was in a position
+to observe the cases it was cited as evidence about. That is *"a run that did
+not run is not a pass"* arriving as a run that did not **select** — and it is
+the specific hazard of quoting a sweep's run count as flake evidence, since a
+sweep deselects exactly the cases the claim is about. The runs that can see
+them are the **undeselected** gate `pytest`s: 5,345 passed / 26 skipped at
+`30e7871`, the same at `483fae6`, 5,346 at `3f74777`, and three more at the
+commit carrying this correction — of which two are 5,346 / 26 and the third is
+red on a case that is **not** one of the four (see the fifth intermittent case
+below). Six whole-suite runs in which all four groups passed is a weaker
+datapoint than "eight in which they did", and it is the one that exists.
 
 | plant | verdict | cases failed |
 |---|---|---|
@@ -5932,14 +5970,67 @@ entry's open question and still not a rate.
 
 All five kills are the same single case,
 `test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator_is_told`,
-and **that is the point rather than a weakness**: the case's five assertion
-groups are each the only thing that can see one of the five plants, which is
-what the three-arm fixture was built for. T1 is the one worth reading twice —
-it leaves the WARNING intact, so *every* "the operator was told" assertion
-passes against it and only `reconciled == [("Cellar", DELTA)]` fires. A case
-that asserted "a warning was emitted" would have ratified a mutant that walks
-1.13M items and then apologises. T5 is the mirror on the redaction assertion,
-whose own positive control is that the source **name** is present.
+and **that is the point rather than a weakness**: the case is the only thing
+in the suite that can see any of the five, which is what the three-arm fixture
+was built for. T1 is the one worth reading twice — it leaves the WARNING
+intact, so *every* "the operator was told" assertion passes against it and
+only `reconciled == [("Cellar", DELTA)]` fires. A case that asserted "a warning
+was emitted" would have ratified a mutant that walks 1.13M items and then
+apologises.
+
+### 🔴 Two of the five kills were recorded dying somewhere they never reach, and a ledger is for the mechanism
+
+**The verdicts were right and the mechanisms were invented.** Found by two
+reviewers independently; re-planted at `3f74777` rather than argued, and what
+the plants actually print is below. Both errors are the same shape — a
+prediction written into the pre-registration's *expected* column and then
+copied out as if it had been observed, when the harness only ever recorded
+`KILLED` plus a case name.
+
+**T3** (the WARNING downgraded to DEBUG) was pre-registered as KILLED *"on the
+refusal count, because the case's sink IS the level filter"*. It dies on the
+**first `_drain`'s five-second deadline**: with the log at DEBUG the refusal
+list stays empty, `len(reconciled) + len(refusals)` never reaches 3, and the
+count assertion is never evaluated at all.
+
+```
+E  AssertionError: the lane never got there: only 1 walked and 0 refused of 3
+   sources: reconciled=[('Cellar', <SyncRunKind.DELTA: 'delta'>)] refusals=[]
+```
+
+That message exists only because `3f74777` gave `_drain` a `note`; round two's
+own captured output for the same plant reads `AssertionError: the lane never
+got there` and names nothing. **A sink filtered at WARNING does not turn a
+downgrade into an absence a count can report — it turns it into a timeout**,
+and a timeout is the one failure mode that says nothing about its cause.
+`_refusals`' docstring claimed the same absence-and-count mechanism, and
+`3f74777` corrected it and gave `_drain` the `note` that makes the deadline
+report what the assertion downstream would have shown.
+
+**T5** (`source.base_url` for `source.name`) was pre-registered as KILLED *"on
+the credential/URL absence assertion, whose positive control is that the name
+is present"*. It dies on **the positive control itself**, two assertions
+earlier, because `base_url` is lower-cased so the name is simply absent and
+the loop holding the three absence assertions is never entered:
+
+```
+E  AssertionError: the refusal names the source it refused: ["WARNING|not
+   closing https://atrium.invalid's gap: …", "WARNING|not closing
+   https://belfry.invalid's gap: …"]
+E  assert set() == {'Atrium', 'Belfry'}
+```
+
+**So the sweep as run never demonstrated that the three absence assertions
+have teeth** — the one plant registered against them cannot reach them. That
+is what `3f74777` closed, with three plants that keep the line count at 2
+*and* the name present and add one field each (`{source} ({url})`,
+`({password})`, `({credentials_ref})`), each killing on its own assertion.
+**The general form: when a plant's predicted death site is an assertion late
+in a case, check what fires first — a positive control placed before it is
+doing its job, and it makes the plant evidence about the control rather than
+about the assertion you registered.** Nearest relative in
+`testing-discipline.md` is *"a premise stated after the assertion it is a
+premise for cannot report"*, seen from the other end.
 
 **The control, measured against every gate step separately** (the check this
 file exists to force):
@@ -5950,15 +6041,52 @@ file exists to force):
 
 **A docstring reword is only safe as a control after two checks, and this task
 had to run both.** `grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`
-returns 31 files, four of which scan under `api/`; none reads
-`src/usher/api/lanes.py`'s prose, and `test_outbound_call_sites.py`'s
-`recorded_in` table names eight `src/` files that do not include it. The second
-check is newer and is the one `.claude/rules/api-telemetry-and-lanes.md` added
+returns 31 files; **ten** of them scan a module under `src/usher/api/`, and
+none reads `src/usher/api/lanes.py`'s prose. The second check is newer and is
+the one `.claude/rules/api-telemetry-and-lanes.md` added
 in S1: **under `api/`, a docstring is often a wire artifact.** `LaneSupervisor`
 is a plain class rather than a pydantic model or a route handler, so this
 docstring reaches no `/openapi.json` `description` — but a control planted in
 `api/dto/` or on a route handler would have been an unreviewed OpenAPI diff
 dressed as an equivalent mutant.
+
+🔴 **The census undercounted by more than half, in both directions, and it
+shipped in two spellings.** This entry and `/var/tmp/m10-s5/PLANTS.md` both
+said *"four of which scan under `api/` (`test_api_rows.py`,
+`test_api_playback_leaks.py`, `test_outbound_call_sites.py`,
+`test_composition.py`)"*. Re-counted at `3f74777` by reading what each scan is
+pointed at rather than what the file is called:
+
+- **Ten scan a module under `src/usher/api/`** — `test_api_browse.py`
+  (`routers/browse.py`), `test_api_caching.py` (`api/caching.py`),
+  `test_api_images.py` (`routers/images.py`), `test_api_people.py`
+  (`routers/people.py`), `test_api_playback_leaks.py` (`dto/playback.py`),
+  `test_api_problem.py` (`api/errors.py`), `test_api_rows.py`
+  (`routers/rows.py`), `test_api_similar.py` (`routers/titles.py`),
+  `test_api_unmatched.py` (`routers/unmatched.py`) and `test_api_watch.py`
+  (`routers/watch.py`).
+- **Two of the four named do not scan under `api/` at all.**
+  `test_outbound_call_sites.py` walks `pathlib.Path(usher.adapters.__file__)
+  .parent.rglob("*.py")` — `adapters/` only, which is why its `recorded_in`
+  table names eight `src/` files and none of them is a route; and
+  `test_composition.py`'s only `inspect.getdoc` is over
+  `JobWorker.registered_kinds`, i.e. `services/jobs.py`.
+- **The sharpest instance is `test_api_caching.py`**, which asserts on
+  `inspect.getdoc(caching)` — the **module docstring** of
+  `src/usher/api/caching.py` — for four separate substrings. A docstring under
+  `api/` is not merely sometimes a wire artifact; here it is a test subject
+  directly.
+
+**The conclusion survives, and it is now measured from the other side as
+well.** Serialising `create_app().openapi()` at `3f74777` (1,691 leaf nodes,
+the same count S1 measured): `LaneSupervisor` does not appear in the document
+at all, and neither does any distinctive phrase of `_close_gap`'s docstring
+(*"A delta with no cursor is not a delta"*, `1,134,919`, `deferred_to_delta`,
+*"Refusing returns rather than raising"*). `LaneSupervisor` reaches FastAPI
+only through `Depends`, never as a schema. **A census counted by filename
+counts the wrong thing** — eight `test_api_*.py` files were missed and two
+non-`api/` scanners were counted — and this repository fixed *"one census
+shipped in two spellings"* one commit earlier, in S4's own entry.
 
 ### 🔴 Round one scored five genuine kills as DID-NOT-RUN, and the harness it inherited that from is the one this repository leaves behind
 
@@ -5991,6 +6119,19 @@ predecessor propagates the predecessor**, because the next person copies the
 canonical filename. Either delete the broken one or rename it to say so — this
 round renamed its own dead output to `round1-invalid.*` for the same reason.
 
+**Done, and re-verified 2026-08-19**: the file is now
+`/var/tmp/m10-s4/sweep-BROKEN-verdict-regex-DO-NOT-COPY.py` (with its empty log
+beside it under the same name), so the name `sweep.py` no longer resolves in
+that directory and a copier has to read the word BROKEN to get the defect.
+Swept the rest of `/var/tmp` for the same hazard while there: of the fifteen
+`sweep*.py` harnesses left by M9 and M10, that renamed file is the **only** one
+whose live `_SUMMARY` is the `====`-requiring spelling — the two other matches
+for it are this round's `sweep.py` and `m10-s5-fix/sweep.py`, both of which
+merely *quote* the broken regex in the comment explaining why they do not use
+it. `/var/tmp/m10-s5/sweep.py` itself carries the repaired regex: round one ran
+before that edit, which is why its output is kept under `round1-invalid.*`
+rather than deleted.
+
 **And the thing that caught it was not the verdict.** `DID-NOT-RUN` on a
 *control* is unremarkable and `DID-NOT-RUN` on a target reads like a harness
 hiccup; what made it obvious was that the harness prints the failing case names
@@ -6000,3 +6141,128 @@ version — *"a harness that printed the verdict alone would have reported eight
 mutations as unobserved"* — arriving a second time, in a different regex, in an
 inherited file. **Print the evidence next to the verdict; the verdict is the
 part that can be wrong.**
+
+### Round three, 2026-08-19 — re-measured at `3f74777`, because two commits of prose landed under the round-two verdicts
+
+**8 plants — 6 KILLED, 2 controls SURVIVED all five gate steps. 0 BAD-ANCHOR,
+0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.** Harness
+`/var/tmp/m10-s5/sweep3.py`,
+`sha256 cf8fc0f6dc4df41e5a75faf489dc9602af4627e26c5742041ab91ecf9d8db3a8`, whose
+`expect` fields were written before the first run; results and mechanisms at
+`/var/tmp/m10-s5/PLANTS-round3.md` beside `results3-<ident>.json`, backups
+under `backups3/`, one plant per invocation with `git status --porcelain` read
+between them (this task has twice lost a sweep mid-round and left the plant
+behind), and all three planted files `sha256`-verified against
+`git show 3f74777:<path>` afterwards. Baseline on the selection first: **5,341 passed / 26 skipped / 5
+deselected in 201.45 s**.
+
+| plant | verdict | cases failed | where it dies |
+|---|---|---|---|
+| T1 refusal moved **after** `reconcile` | KILLED | 2 | `reconciled == [("Cellar", DELTA)]`, and the deferred case's second drain |
+| T2 predicate widened to "no run at all" | KILLED | 1 | the same positive control (`Belfry` walks) |
+| T3 the WARNING downgraded to DEBUG | KILLED | 2 | **the first `_drain`'s deadline**, now carrying the counts |
+| T4 the guard inverted | KILLED | 2 | the positive control, plus the deferred case's drain |
+| T5 `source.base_url` for `source.name` | KILLED | 2 | **`assert set() == {'Atrium', 'Belfry'}`**, the positive control |
+| **F1** *fixture* — `runs = fakes.runs` → `runs = FakeSyncRunRepository()` | KILLED | 2 | **the second `_drain`'s deadline**: `reconciled=[]` |
+| C1 **control** — one sentence of `_close_gap`'s docstring reworded | SURVIVED all five | — | — |
+| **C2** **control** — `delta_cursor`'s comprehension rewritten as its loop | SURVIVED all five | — | — |
+
+**Why re-run at all: a control measured against a tree that has since changed
+is not evidence for the tree that ships.** Round two ran at `30e7871`; `483fae6`
+and `3f74777` both edited `_close_gap`'s docstring afterwards. What was
+*reported* to have gone with them — that C1's anchor no longer exists at HEAD —
+is **false**, and checking cost one `str.count`: all six round-two anchors,
+C1's included, still match **exactly once** at `3f74777`, because `483fae6`
+rewrote the *hours* sentence and `3f74777` added a *paragraph*, neither of them
+the sentence C1 replaces. The re-run was still worth its 28 minutes, for a
+reason the false claim points at anyway: three of the six plants now fail **two**
+cases rather than one, because `3f74777` added
+`test_a_deferred_push_event_on_a_cursorless_source_is_refused_and_its_items_are_dropped`,
+and the round-two table's *"cases failed: 1"* column is stale for T1, T3, T4
+and T5 at HEAD. **A verdict survives a tree change; a blast radius does not.**
+
+**F1 is the plant round two never made, and it settles a fixture comment that
+was a rationalisation.** `_Fakes.runs` is shared across every unit of work, and
+the comment beside it claimed a per-unit-of-work `sync_runs` table *"would
+answer no for every source forever and the guard would look correct while
+testing nothing"*. It does not look correct — it goes red — and it goes red on
+the **third arm** rather than on the guard:
+
+```
+E  AssertionError: the lane never got there: no source reached the watch lane,
+   so the arm that is *not* refused never finished its pair: reconciled=[]
+```
+
+`Cellar`'s `COMPLETED` run lives in that table too, so a fresh repository
+refuses `Cellar` as well, `watch_synced` never fills and the second `_drain`
+expires. **The shared table is load-bearing for the positive control, not for
+the guard** — which is the opposite of what the comment claimed, and is why the
+comment now says so. Same family as this file's *"a plant that falsifies only
+half of a fixture's chain reads as a dead guard"*: the question to ask of a
+fixture rationale is not *would this be wrong* but *which assertion reports it*.
+
+#### C2, and the argument that a docstring reword is the weakest control available
+
+**A docstring reword proves the harness restores cleanly and very little
+else.** Nothing in any suite executes it, `mypy` and `ruff` cannot disagree
+about it, and — per the census above — the only way it could be observed at all
+is a `getdoc` scan that has to be checked for separately. Its SURVIVED verdict
+is therefore *almost* a tautology: the interesting content is the census, not
+the run. The counter-argument is real and is why C1 is kept: a control that
+cannot fail is exactly what proves a **round** is sound rather than a plant —
+it is the round's negative control, and the S1 finding it is checked against
+(*"under `api/`, a docstring is often a wire artifact"*) means even this one had
+a way to be wrong.
+
+**C2 is the version that tests what a control is for**, and it cost one run.
+`delta_cursor`'s body is a comprehension with a walrus over `_ITEM_LANES`;
+rewritten as the explicit loop it desugars to — same calls, same order, same
+value, `list[AwareDatetime]` annotated for `mypy` — it survived all five gate
+steps and the whole selection. Unlike C1 that is a statement about **executed
+code**: every plant in the table above proves the suite reaches that line, so
+C2's survival says the suite runs the code and genuinely cannot tell the two
+spellings apart. **Prefer a behaviour-adjacent equivalent mutant where one is
+expressible**; keep the docstring reword beside it as the cheap round-level
+control, and do not report the docstring one alone as evidence that the suite
+distinguishes anything.
+
+#### 🔴 A fourth intermittent case for the standing list — and a fifth, caught by this round's own gate, which makes it a family rather than a case
+
+`tests/integration/test_episode_repository.py::test_next_up_reads_the_episode_key_index_and_does_not_scan_episodes`
+joins `test_rows_refresh.py`'s stale-serve case and the three RRF-fusion cases
+in `test_adapters_search_postgres.py`. It asserts on **`EXPLAIN` output** under
+`SET LOCAL enable_seqscan = off`, and its third assertion —
+`re.search(r"Index Cond:.*ROW\(season_number, episode_number\)", plan)` — is a
+claim about a *plan shape* over an eight-episode fixture, which planner
+statistics can move without anything in the tree changing. Observed failing
+once in a whole-suite run during S5; **3/3 passing in isolation here (6.59 /
+6.57 / 6.58 s)**. S5 touches no SQL, no index and no episode path, so it is not
+this task's regression. Round three's eight runs deselect it by node id along
+with the other four, which — per the correction above — is precisely why they
+are not evidence about it either way.
+
+**And the gate run for this very commit produced a fifth**, which is why the
+heading says family:
+`tests/integration/test_adapters_search_prefix.py::test_the_tier_one_statement_plans_to_the_prefix_index_and_not_the_near_miss`
+failed at `:429` — `assert _TIER_ONE_INDEX in taken`, i.e. the tier-1 statement
+did not plan to `ix_titles_name_lower_prefix` — in a whole-suite `uv run
+pytest` whose only working-tree change was **one Markdown file under
+`.claude/rules/`**. Re-run immediately: **3/3 passing alone (6.46 / 6.47 /
+6.43 s), 14/14 for its whole file, and 5,346 passed / 26 skipped on the very
+next whole-suite run.**
+
+**Both are `EXPLAIN`-plan assertions, and that is the finding.** Two of the
+five known-intermittent groups on this tree are cases that read a *query plan*
+back and assert on its shape; both pass alone and both have now failed once
+under whole-suite load. A plan is a function of statistics, of
+`autovacuum`/`ANALYZE` timing, and of what else is contending for the
+container — none of which a test controls, and all of which move when 5,346
+cases share one Postgres. **A plan-shape assertion is a load-sensitive
+assertion by construction**, so before writing a new one, ask whether it can be
+scoped the way `test_next_up_…`'s docstring already argues for (assert the
+index that must appear and the scan that must not, and nothing about the rest
+of the plan) — and expect it on the deselection list of any sweep. **S11 runs a
+phase-wide sweep scored on "did the run fail", and that scoring is unsound
+against any of these five: carry all five deselections, name them, and treat a
+plant whose only kill is one of them as a false kill until re-run.** Do not
+chase the root cause from here; two single observations are not a rate.
