@@ -132,14 +132,25 @@ limiter decision for each.
 
 **The unit counted is the module**, and the table below has one row per module.
 **Nine modules** under `src/usher/adapters/` dial an upstream: **eight over
-httpx**, between them **fifteen call sites**, and a ninth — `emby/push.py` —
+httpx**, between them **sixteen call sites**, and a ninth — `emby/push.py` —
 over `websockets`. *Upstreams* is a smaller number however it is counted, which
 is why this is not a count of them: `tmdb/client.py` and `tmdb/provider.py` are
 one host, and `/embywebsocket` is the same machine as the media source. Three
 of the nine are paced; six deliberately are not.
 `tests/unit/test_outbound_call_sites.py::test_the_module_census_is_the_one_the_records_quote`
-asserts all four figures off its own table, so this paragraph cannot drift from
-the tree without a red.
+asserts all four figures off its own table, and
+`::test_prd_01_prints_the_census_this_table_computes` reads this paragraph and
+the table below back out of this file, so neither can drift from the tree
+without a red.
+
+⚠️ **The call-site figure was fifteen until 2026-08-19 and it was short by
+one.** The AST scan behind it enumerated six of `httpx.AsyncClient`'s eleven
+request-issuing methods, omitting `put`, `delete`, `patch`, `head` and
+`options` — and `bulk/download.py`'s `CachedDatasetFile.revision` has issued a
+`HEAD` per dataset since M2. The module census, the paced count and the decline
+count are unchanged; only the call-site total moves. The scan now carries all
+eleven verbs, which is also what a **write-back** adapter at the `SourceKind`
+seam would be spelled with.
 
 | module → upstream | limiter |
 |---|---|
@@ -148,7 +159,7 @@ the tree without a red.
 | `api.themoviedb.org` (`tmdb/provider.py`, six call sites) | the bucket above — this module holds no client of its own |
 | `/embywebsocket` (`emby/push.py`) | **none** — a socket held open is not a request; the reconnect *backoff* is its limiter |
 | `image.tmdb.org` (`images/provider.py`) | **none** — the CDN publishes no limit and the cache is the bound ([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)) |
-| the IMDb/TMDb/MovieLens dataset hosts (`bulk/download.py`) | **none** — one streamed file per dataset, not a request stream |
+| the IMDb/TMDb/MovieLens dataset hosts (`bulk/download.py`, two call sites) | **none** — one streamed file per dataset plus one `HEAD` for its revision, not a request stream |
 | `query.wikidata.org` (`bulk/wikidata.py`) | **none** — a bootstrap phase run by hand, chunked and sequential, not a lane |
 | `USHER_LLM_BASE_URL` (`llm/openai_compatible.py`) | **none** — `curate` is capped at 1 in flight and [06](06-rows-and-recommendations.md) budgets one completion per household per day |
 | `USHER_EMBEDDING_MODEL`'s endpoint (`embedding/openai_compat.py`) | **none** — `index` is capped at 1 in flight |

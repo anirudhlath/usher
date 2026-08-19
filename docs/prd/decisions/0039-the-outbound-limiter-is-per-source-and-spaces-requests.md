@@ -217,9 +217,20 @@ is the identity Usher owns and it survives a rename (`SourceRegistry` keys its
 adapter cache the same way); the **label** on
 `usher.source.throttle.wait` is still the name, matching
 `usher.source.request.duration` rather than minting a second per-source identity
-in telemetry. A renamed source therefore keeps its gate and changes its series,
-which is the right way round. §2's decision — *"yes for the key and no for the
+in telemetry. §2's decision — *"yes for the key and no for the
 value"* — is unchanged: the **rate** is still one setting and not a column.
+
+⚠️ **Corrected 2026-08-19: a renamed source keeps its gate *and its series*
+until the process restarts.** This paragraph said it *"keeps its gate and
+changes its series, which is the right way round"*, and only the first half is
+true — `SourceGateRegistry.gate` reads `source_name` on the **first mint only**,
+so the cached gate goes on recording under the old label. The key surviving a
+rename is the property this section is about and it holds; the series following
+the name does not. It is unreachable today (`api/routers/sources.py` has
+create, list, status, delete and a sync trigger — no update route), so it is
+recorded rather than repaired, and `SourceGateRegistry`'s own docstring carries
+the same note beside the code. **An update route is what makes this a defect**;
+whoever adds one either re-labels on a name change or says so on the metric.
 
 **A second process is a second registry, and that is deliberate.** Two
 `usher work` containers against one Emby spend `2 × rate`. Nothing in a process

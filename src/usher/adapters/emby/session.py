@@ -89,7 +89,7 @@ import httpx
 from opentelemetry import metrics, trace
 
 from usher import __version__
-from usher.adapters.http import UNTRANSLATED_FAILURES, _MinInterval, retry_after_seconds
+from usher.adapters.http import UNTRANSLATED_FAILURES, SourceGate, retry_after_seconds
 from usher.adapters.http import decode_json as _decode_json_body
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
@@ -171,7 +171,7 @@ class EmbySession:
         device_id: str,
         app_version: str = __version__,
         reauth_cooldown_seconds: float = 60.0,
-        limiter: _MinInterval | None = None,
+        limiter: SourceGate | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
@@ -200,7 +200,7 @@ class EmbySession:
         # carries the registry's, because a gate shared by N sessions cannot
         # take one of their clocks.
         self._limiter = (
-            limiter if limiter is not None else _MinInterval(0.0, source=source_name, clock=clock)
+            limiter if limiter is not None else SourceGate(0.0, source=source_name, clock=clock)
         )
         self._lock = asyncio.Lock()
         self._token: str | None = None

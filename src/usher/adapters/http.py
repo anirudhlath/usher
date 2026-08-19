@@ -309,6 +309,27 @@ class _MinInterval:
         _throttle_wait.record(wait, {"source": self._source})
 
 
+#: **The public name for the object above**, and it exists because a private
+#: name had reached three public signatures: `EmbySession.__init__`,
+#: `EmbyAdapter.__init__` and `SourceGateRegistry.gate`'s return type. A caller
+#: outside this module cannot name `_MinInterval` without reaching past the
+#: underscore, and all three of those seams are ones `usher.adapters.factory`
+#: and the composition roots legitimately traffic in.
+#:
+#: **The class keeps the private name because that is what it is** -- a
+#: minimum-interval algorithm, one of two this repository has (`_TokenBucket`
+#: is the other, and ADR-0039 §1 is the argument between them) -- while
+#: `SourceGate` is what it is *for*. A second gate algorithm would be a second
+#: private class and this alias would move; nothing outside would change.
+#:
+#: **One object, two words, and they are not a synonym pair.** The registry
+#: calls it a `gate` because that is what it owns and hands out;
+#: `EmbySession` and `EmbyAdapter` take it as `limiter=` because that is what
+#: the holder does with it. Named here so a reader meeting both spellings does
+#: not go looking for two objects.
+SourceGate = _MinInterval
+
+
 class SourceGateRegistry:
     """One `_MinInterval` per source, for the life of one composition root.
 
@@ -340,8 +361,19 @@ class SourceGateRegistry:
     rename, which a name does not. The name is only the `source` label on
     `usher.source.throttle.wait`, matching `usher.source.request.duration`'s
     existing label rather than minting a second per-source identity in
-    telemetry (ADR-0039 §2). A renamed source therefore keeps its gate and
-    changes its series, which is the right way round.
+    telemetry (ADR-0039 §2).
+
+    ⚠️ **A renamed source keeps its gate *and its series* until the process
+    restarts, which is one dimension less than this docstring claimed until
+    2026-08-19.** `gate` reads `source_name` only on the first mint, so the
+    cached `_MinInterval` goes on recording under the old label -- the key
+    surviving a rename is real, the series following the new name is not. It
+    is unreachable today (`api/routers/sources.py` has no update route, so a
+    name changes only by a direct write to the table and a restart), which is
+    why it is stated here rather than repaired: re-labelling on every ask
+    would put a string comparison on the hot path for a rename nothing can
+    perform. **When an update route lands, this is the line that has to move**
+    -- either re-label on a name change or say so on the metric.
 
     **The rate is one value for every source**, deliberately: issue #19 asks
     whether the ceiling belongs per source and ADR-0039 answers *"yes for the
@@ -350,14 +382,31 @@ class SourceGateRegistry:
 
     **No lock, unlike `SourceRegistry._adapter_for`, and the difference is an
     `await`.** That one builds an adapter, which suspends, so two jobs can both
-    miss and both build. `gate` never awaits, so no two coroutines can
-    interleave inside it and the "check, build, store" sequence is atomic
-    against every other caller.
+    miss and both build. `gate` never awaits, so the "check, build, store"
+    sequence is atomic against every other **coroutine on this loop**. It is
+    **not thread-safe** -- `gate` is check-then-set rather than `setdefault`,
+    and the no-`await` argument is a guarantee about coroutine interleaving
+    and says nothing about threads -- and nothing calls it off the loop: all
+    three `SourceAdapterFactory.build` call sites (`composition.py`,
+    `services/sources.py`, `services/playback.py`) are inside an `async def`.
+    `setdefault` is **not** the repair if that changes: it would construct a
+    `_MinInterval` and an `asyncio.Lock` on every ask only to discard them.
 
     **A second process is a second registry.** That is a capacity decision an
     operator makes -- two `usher work` containers against one Emby run at
     2 x `rate` -- and not a correctness one; nothing here can or should reach
     across a process boundary.
+
+    **Nothing evicts, and the growth is measured rather than waved at**,
+    because this class is documented as living for the process lifetime and
+    the next reader will ask. A deleted source's gate is never reclaimed.
+    Measured on CPython 3.13 (`tracemalloc`, everything a retained entry
+    holds: the `uuid.UUID` key, the `_MinInterval`, its `asyncio.Lock`, both
+    instance dicts and the label string) -- **~440 bytes an entry, 435 KiB for
+    a thousand**, with the `dict` itself at 36,952 bytes at 1,001 entries. So
+    a thousand register-then-delete cycles cost under half a megabyte in a
+    process that holds single-digit sources, behind a deliberate admin action.
+    An eviction hook would be a lifetime rule to get wrong for that.
     """
 
     def __init__(
@@ -372,7 +421,7 @@ class SourceGateRegistry:
         self._sleep = sleep
         self._gates: dict[uuid.UUID, _MinInterval] = {}
 
-    def gate(self, source_id: uuid.UUID, source_name: str) -> _MinInterval:
+    def gate(self, source_id: uuid.UUID, source_name: str) -> SourceGate:
         """This source's gate, minted on first ask and remembered after.
 
         Lazy rather than seeded from the source table: nothing in

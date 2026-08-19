@@ -337,10 +337,24 @@ async def _sync(
     source for the whole command** (ADR-0039 §4). `build_pipeline` builds a
     `SourceGateRegistry` when nobody hands it one, and this command opens
     exactly one pipeline and loops the sources inside it -- so the walk and the
-    watch lane below share a gate per source, and two sources get two. A second
-    `build_pipeline` here would be a second registry and twice the rate, which
-    is the reason this is stated rather than left to be inferred from the
-    indentation.
+    watch lane below share a gate per source, and two sources get two.
+
+    ⚠️ **Until 2026-08-19 this paragraph ended *"a second `build_pipeline` here
+    would be a second registry and twice the rate"*, and that is unreachable as
+    written.** Doubling the rate for one source takes **two** things -- two
+    registries *and* two adapters built against them -- and this command has
+    one of each, so either one alone is a sufficient guard. The loop below
+    opens **one** adapter per source via `_open_adapter` and hands that same
+    object to the reconcile walk and to the watch lane, so however many
+    pipelines existed there would still be one gate per source. Measured: both
+    spellings of the claim's own defect -- a second `build_pipeline` beside the
+    first, and one moved inside the loop -- survive as equivalent mutants,
+    because the adapter count is what is really holding it. The load-bearing
+    property is therefore **one `_open_adapter` per source**, which is what
+    `tests/unit/test_composition.py::test_the_cli_roots_compose_once_rather_than_per_scope`
+    asserts, alongside the property that *is* about the registry: the
+    `build_pipeline` call is in this function's own body and not inside a
+    closure that runs per scope.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(

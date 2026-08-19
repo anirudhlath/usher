@@ -21,8 +21,9 @@ against a real host -- they drive it through an httpx `MockTransport`.
 **Upstream: `datasets.imdbws.com`, `files.tmdb.org` and `files.grouplens.org`.
 Deliberately unthrottled, and this is the reason rather than an omission**
 (M10's S3; the enumeration is `tests/unit/test_outbound_call_sites.py`).
-`ensure_local` issues **one streamed GET per dataset** -- a `HEAD`-shaped
-revision probe and then a single `Range`-resumable transfer of a
+**Two call sites, both recorded**: `revision()` issues one real `HEAD` per
+dataset and `ensure_local` one streamed `GET` -- a revision probe and then a
+single `Range`-resumable transfer of a
 multi-hundred-megabyte file -- so there is no request *stream* for a
 requests-per-second gate to space. `USHER_SOURCE_REQUESTS_PER_SECOND`'s gate
 (ADR-0039) exists because a media source is a machine somebody is watching

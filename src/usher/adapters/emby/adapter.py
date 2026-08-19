@@ -138,7 +138,7 @@ from usher.adapters.emby.session import (
     EmbySession,
     decode_json,
 )
-from usher.adapters.http import _MinInterval
+from usher.adapters.http import SourceGate
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
@@ -252,7 +252,7 @@ class EmbyAdapter(SourceAdapter):
         max_pages: int = MAX_PAGES,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,
-        limiter: _MinInterval | None = None,
+        limiter: SourceGate | None = None,
         push_connect: PushConnector = connect_websocket,
         push_stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
         push_poll_seconds: float = DEFAULT_POLL_SECONDS,
