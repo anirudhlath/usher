@@ -5039,3 +5039,79 @@ empty, both mutated files `md5sum`-verified against `git show HEAD:`):
 `lint-imports` **10 kept / 0 broken**, **4,072 unit / 4 skipped**, **1,232
 integration / 22 skipped**, **5,304 whole-suite / 26 skipped**, PRD link check
 `OK`.
+
+## M10 Task S2 — the outbound minimum-interval gate (2026-08-18)
+
+**5 plants over `src/usher/adapters/http.py`'s `_MinInterval` — 4 behavioural
+targets, all KILLED; 1 equivalent-mutant control, SURVIVED all five gate steps.
+0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.**
+Every verdict matched its pre-registered expectation. Harness at
+`/var/tmp/m10-s2/sweep.py`, **outside the working tree** for V1's reason and
+under `/var/tmp` rather than `/tmp`, which is tmpfs on this host. Plant list and
+expected verdicts at `/var/tmp/m10-s2/PLANTS.md`, written before the first run.
+Tree committed at `609fe0e` first, so `git status` is the verification — clean
+after the round, target `md5`/`sha256`-verified byte-identical to the committed
+file (`sha256 4aa99594…`). `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept
+under **both** `src/` and `tests/` before every run, `compile()` as the dry
+run, an exact anchor count (`count(old) == 1`) asserted before each plant, the
+landing check spelled **byte equality with the intended mutant**
+(`read_text() == planted`, plus `planted != source`), every restore verified by
+hash **and** read-back. Baseline green on the selection first: **143 passed**.
+
+**Selection:** `test_adapters_http.py`, `test_adapters_emby_session.py`,
+`test_adapters_emby_adapter.py`. The two Emby files are in it deliberately: the
+gate is wired onto `EmbySession._send`, so a mutation that faults at `rate=0`
+faults on **every** Emby request the suite makes, and T3 below is the
+measurement that the wiring is real rather than a knob that reads config and
+does nothing.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 the lock released before the sleep (the `await self._sleep` + `_next` update dedented out of `async with self._lock`) | KILLED | 1 — `test_two_calls_are_spaced_and_a_burst_is_not_permitted_after_an_idle_period` |
+| T2 `1.0 / self._rate` → `self._rate` | KILLED | 2 — the spacing case **and** the metric case, whose `rate=2` gate now spaces at 2 s not 0.5 s, so its recorded sum is wrong |
+| T3 the `rate=0` arm deleted (`if self._rate <= 0.0: return` removed) | KILLED | **108** — the `rate=0` http cases divide by zero, and so does **every** Emby session/adapter test, because `EmbySession` builds a `rate=0` gate and calls `take()` per `_send` |
+| T4 `self._next = self._clock() + interval` → `self._next = self._next + interval` (banks the idle gap as burst credit — the token-bucket behaviour the interval refuses) | KILLED | 1 — the spacing case, on a burst of five |
+| C1 the two `__init__` writes swapped (`self._clock = clock` / `self._sleep = sleep`) | SURVIVED all five | — |
+
+**T3's blast radius is the round's yield and it is a *wiring* result, not a
+`_MinInterval` result.** `test_every_setting_is_read_by_something` forces a
+reader for `USHER_SOURCE_REQUESTS_PER_SECOND`, and the honest reader is the
+composition root threading the rate into `EmbySession`, which calls
+`take()` before every send. So deleting the disabled-gate guard is a
+`ZeroDivisionError` on the request path of every Emby test — 108 cases — which
+is the measurement that the limiter is on the wire and not merely constructed.
+A reader that built the gate and never called it (the "knob that does nothing"
+this repository refuses) would have left T3 killing only the two `rate=0` http
+cases.
+
+**T4 is the "simplification back to a bucket" the task named.** The class's
+whole claim over a token bucket is *no burst credit*; `self._clock()` →
+`self._next` re-banks the idle gap, so five idle-period calls all go at once —
+exactly what the `_TokenBucket` positive control in the spacing case asserts a
+bucket does. The same case kills it, which is what makes the positive control
+load-bearing: the case proves the two designs **differ** rather than asserting
+one works, so this mutant cannot pass it.
+
+**The control, measured against every gate step separately** (the check this
+file exists to force — and the harness is outside the tree so the four
+whole-repository steps are not measuring the harness itself):
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `self._clock = clock` / `self._sleep = sleep` swapped | PASS | PASS | PASS | PASS (10/0) | PASS (143) |
+
+C1 is a fact about the *code* rather than about what the tools look at: two
+disjoint attribute writes on a freshly constructed object from two distinct
+parameters, neither right-hand side reading the other and nothing between them —
+the `PlaybackService.__init__` / `WatchWriteService.__init__` precedent, one
+adapter over. It is deliberately not an `__all__` reorder (which `RUF022`
+rejects) nor a reorder of a positional call (A5's reason for checking rather
+than assuming).
+
+**Failing-test-first, recorded because it is the acceptance's own ask.** At the
+base commit `c97aa00` the class did not exist (`git show
+HEAD:src/usher/adapters/http.py` has zero occurrences of `_MinInterval`), so the
+spacing case fails at HEAD on the import. Its `_TokenBucket` positive control
+genuinely distinguishes the two designs — the same fake clock grants the bucket
+all five at once and the gate five spaced — and the `rate=0` arm calls `sleep`
+zero times (asserted directly on the injected sleep's call list).
