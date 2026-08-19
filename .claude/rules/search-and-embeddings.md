@@ -1839,3 +1839,96 @@ configuration-dependent. And **no fix is measured here**: convex fusion is
 #21's proposal, it replaces a parameter-free rule with one that must be tuned,
 and this run establishes only that the change is warranted — not what its
 weights should be.
+
+## Issue #25's exact-name key closes most of #21, and the residual is the tie it cannot break (2026-08-19, issues #21 + #25 re-run)
+
+**The same bar, re-run unchanged against merged code.** Same harness
+(`scripts/measure_fusion_coverage_bias.py`), same pre-registration
+(`/var/tmp/usher-i21-bar/BAR.md`, digest re-read at run time and matched:
+`0687983a9ec4d41f275c7b6b273b29d734ab44e5eef51f269654631bf348bc62`), same seed
+`20260819-i21`, same strata, same denominators, same thresholds. Nothing was
+edited — the only difference is the code under it. Results
+`/var/tmp/i21-rerun/post25-ef100-full.json` (and `-ef200-` for the shipped
+`ef_search`).
+
+**That the run used merged code is proven, not asserted.** A read-only
+`before_cursor_execute` listener recorded every statement the run sent to
+PostgreSQL: **3,200 of 3,200 fused statements and 3,200 of 3,200 `full_text`
+statements carried `lower(t.name) = lower(btrim(:query))` together with
+`ORDER BY exact_name DESC`** (3,200 = 1,600 queries x 2 arms). `main` contains
+zero occurrences of `_EXACT_NAME` and its `_FUSED` outer sort is
+`ORDER BY score DESC, id`, so the two branches are distinguishable from the SQL
+alone and the run is on the right side of the difference.
+
+| stratum A, n = 1,000 | `full_text` | `fused` | delta |
+|---|---|---|---|
+| index arm, pre-#25 | 72.2% | 20.1% | **-52.1** |
+| index arm, post-#25 | 82.5% | 81.6% | **-0.9** |
+| service arm, pre-#25 | 71.8% | 54.8% | **-17.0** |
+| service arm, post-#25 | 83.4% | 81.6% | **-1.8** |
+
+**The mechanism #21 named is gone.** Discordant pairs where an *embedded* row
+took rank 1 from the typed skeleton fell **521 -> 9** on the index arm (98.3%)
+and **172 -> 10** on the service arm (94.2%). The `dropped` bucket — #21's
+first-ever non-zero, and the one an `ORDER BY` was not obviously able to rescue
+— went **8.4% -> 0.0%** (index) and **14.8% -> 0.0%** (service), **67 rows ->
+0**. It was rescuable after all: the key sorts inside the lexical CTE ahead of
+the lane's own `LIMIT`, so the row is no longer truncated out of the lane
+before fusion sees it.
+
+**Read the miss split in absolute rows, not percentages.** Stratum-A fused
+misses fell 799 -> 184 (index), so every surviving bucket's *share* rose while
+its count did not: `below the floor` 23 -> 23 rows, `truncated` 44 -> 31,
+`out-ranked` 665 -> 130, `dropped` 67 -> 0. A split whose denominator moved by
+4.3x cannot be compared bucket-share to bucket-share.
+
+⚠️ **Stratum B got worse, and that is the honest residual.** On the 300
+skeletons whose name is *also* borne by an embedded title, the delta widened
+**-5.0 -> -8.7** (index) and **-7.0 -> -14.3** (service) — both arms improved
+in absolute terms (service `full_text` 7.7% -> 18.0%, `fused` 0.7% -> 3.7%) but
+`full_text` improved more. The reason is structural: when the competitor is
+*also* an exact name match, `exact_name DESC` **ties**, the sort falls through
+to `score DESC`, and there the enriched row's two-lane sum wins exactly as #21
+described. **289 of 289 stratum-B fused misses are to a same-name row.** #25's
+key breaks the ordering only when the competitor is *not* an exact match; it
+cannot break a tie it creates.
+
+**The catalog-composition net, recomputed.** `(1 - t) x delta_A + t x delta_C`
+at `t = 0.104`, with stratum C (n = 300, drawn from the embedded tier, not
+pre-registered) supplying the other side of the trade:
+
+| | delta A | delta C | net |
+|---|---|---|---|
+| service arm, pre-#25 | -17.0 | +9.3 | **-14.3 pts** |
+| service arm, post-#25 | -1.8 | +11.0 | **-0.47 pts**, 95% CI [-1.96, +1.02] |
+| index arm, post-#25 | -0.9 | +7.7 | **-0.01 pts**, 95% CI [-0.63, +0.61] |
+
+**Both nets straddle zero.** Fused went from decisively net-negative on this
+catalog to statistically indistinguishable from `full_text`, while winning
+outright on the 10.4% of the catalog that carries a vector (service arm stratum
+C **75.7% -> 86.7%**, +11.0).
+
+**`ef_search` is not a confound.** The pre-#25 run recorded 100; the shipped
+default is now 200 (issue #32). Re-running the whole bar at both gives nets of
+-0.47 (100) and -0.49 (200) on the service arm — the comparison survives the
+parameter change.
+
+**The bar's own verdict is still CONFIRMED, and the arithmetic says why.**
+B1 now *passes* on the index arm (-0.9 is inside the 1.0-point tolerance) and
+B2 now *passes* on the service arm (`p = 0.995` — by the issue's own accounting,
+which excludes misses to another skeleton, fused wins 24 and loses 10). B3
+fails on both arms, which is the stratum-B tie above. So the verdict is carried
+entirely by the adversarial stratum: **#21 is narrowed to same-name
+collisions, not closed.**
+
+**The harness still wrote nothing.** `search_queries` 67 -> 78 across the
+session, and all 11 rows are `The Matrix`/`space opera` from a *different*
+agent's live-container work on issue #31 — none is a skeleton name from either
+draw. The 6,400 searches this run issued (it passes `user_id=None`) left zero
+rows, and the live catalog was read-only throughout.
+
+**Not settled by this run.** Still only exact-name known-item queries and still
+only recall@1 — mood and partial-title queries, where the semantic lane should
+earn most, remain unmeasured. And the stratum-B tie has no measured fix: the
+obvious one (break the `exact_name` tie on popularity rather than on the fused
+score) is a proposal, not a result.
