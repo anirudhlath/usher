@@ -5117,3 +5117,98 @@ spacing case fails at HEAD on the import. Its `_TokenBucket` positive control
 genuinely distinguishes the two designs — the same fake clock grants the bucket
 all five at once and the gate five spaced — and the `rate=0` arm calls `sleep`
 zero times (asserted directly on the injected sleep's call list).
+
+## M10 Task S3 — the gate's owner moves to the composition root (2026-08-18)
+
+**10 plants over `src/usher/adapters/http.py`, `adapters/emby/session.py`,
+`composition.py`, `api/app.py` and `adapters/tmdb/provider.py` — 8 behavioural
+targets, all KILLED; 2 equivalent-mutant controls, both SURVIVED all five gate
+steps. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN,
+0 HUNG.** Every verdict matched its pre-registered expectation. Harness at
+`/var/tmp/m10-s3/sweep.py`, **outside the working tree** so the four
+whole-repository gate steps are not measuring the harness; plant list and
+expected verdicts at `/var/tmp/m10-s3/PLANTS.md`
+(`sha256 71af6f6e…`), written before the first run. Tree committed at `b5dbd83`
+first, so `git status` is the verification — asserted clean after **every**
+plant by the harness itself, and every restore verified by `sha256` *and* by
+reading the file back against the `cp` backup. `PYTHONDONTWRITEBYTECODE=1`,
+`__pycache__` swept under **both** `src/` and `tests/` before every run,
+`compile()` as the dry run, an exact anchor count (`count(old) == 1`) asserted
+before each plant, and the landing check spelled **byte equality with the
+intended mutant**. Baseline green on the selection first: **192 passed in
+3.11 s** — well inside the one-second mtime resolution the `.pyc`-collision
+entry is about, which is why all three defences were in force.
+
+**Selection:** `test_composition.py`, `test_adapters_factory.py`,
+`test_adapters_emby_session.py`, `test_adapters_emby_adapter.py`,
+`test_adapters_http.py`, `test_outbound_call_sites.py`.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 `SourceGateRegistry.gate` never reads its cache (a fresh gate per ask — the per-adapter gate S3 removed) | KILLED | **4** — both identity cases, the factory tuning case, and the two-adapters-one-gate case |
+| T2 `gate` returns the first gate of **any** source (one global gate) | KILLED | 2 — and see below, this is the round's point |
+| T3 `EmbySession` ignores the injected `limiter` and builds its own disabled one | KILLED | **5** — the four above plus the send-count case |
+| T4 `adapter_factory` passes `gates=None` to the factory | KILLED | 2 — both identity cases |
+| T5 `unit_of_work` resolves the registry **inside** `open()` rather than once | KILLED | 2 — both identity cases |
+| T6 `take()` moved out of `_send` into `request()` | KILLED | 1 — `test_every_send_passes_the_gate_including_the_authenticating_one` |
+| T7 `create_app` gives the lanes a *different* registry from `app.state`'s | KILLED | 1 — the four-roots case |
+| T8 one `self._client.get(` in `tmdb/provider.py` respelled `self._client.post(` | KILLED | 1 — `test_no_outbound_http_call_escapes_a_recorded_decision` |
+| C1 `gate`'s cache read respelled `if source_id not in self._gates:` | SURVIVED all five | — |
+| C2 `SourceGateRegistry.__init__`'s `self._rate` / `self._clock` writes swapped | SURVIVED all five | — |
+
+🔴 **T2 is the round's yield, and the interesting part is *which* assertion
+kills it.** One global gate is the plausible wrong implementation — it satisfies
+"two adapters for one source share a gate" perfectly, and it halves the
+configured rate for every source after the first with nothing saying so. Verified
+by re-planting it alone and reading the `E` line:
+`assert gate_a is gate_b` **passes** and
+`assert gate_a is not gate_c, "two sources sharing one gate is a limiter that
+halves itself per source"` is the one that fails. **A version of the identity
+case carrying only its first assertion would have ratified T2**, which is
+exactly what a positive control is for and why one was written into the case
+rather than left to a reviewer.
+
+**T3 has the widest blast radius and it is a *wiring* result.** Ignoring the
+injected limiter is the shape a careless S3 would actually ship — the registry
+built, threaded through three constructors, and then dropped at the last one —
+and it looks completely correct at every layer above the session. It fails five
+cases across three files, and the send-count case is the only one of the five
+that can see it *behaviourally* rather than by object identity.
+
+**T6 is the placement finding, measured.** With `take()` in `request()` instead
+of `_send`, the count case reports
+`5 send(s) reached Emby without passing the gate: ['POST /Users/AuthenticateByName',
+'GET /System/Info', 'GET /System/Info', 'GET /System/Info', 'GET /System/Info/Public']`
+— **including the authenticating send**, which is the one not reached from any
+public method's own body and therefore the one a gate placed at the public
+surface silently exempts.
+
+**The two controls, measured against every gate step separately** (the check
+this file exists to force):
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| C1 `gate`'s cache read respelled | PASS | PASS | PASS | PASS (10/0) | PASS (4,096) |
+| C2 the two `__init__` writes swapped | PASS | PASS | PASS | PASS (10/0) | PASS (4,096) |
+
+**C1 is the better of the two, and deliberately not another `__init__` reorder.**
+Its equivalence is a fact about the *code* rather than about what the tools look
+at: `dict.get(k)` returning `None` and `k not in dict` are the same test for a
+dict whose values are never `None`, and — the load-bearing half —
+`SourceGateRegistry.gate` contains **no `await`**, so no two coroutines can
+interleave between the check and the store and the two spellings cannot be told
+apart by any concurrency the process can produce. That absence of an `await` is
+itself the reason the method needs no lock, unlike `SourceRegistry._adapter_for`
+one module over, which builds an adapter and therefore does. C2 is S2's C1 shape
+reused one class along, kept as the cheap second control; neither is an `__all__`
+reorder, which `RUF022` rejects.
+
+**Failing-test-first, recorded because it is the acceptance's own ask.** At
+`da77962` the identity case fails on its own assertion —
+`AssertionError: two pipelines from one composition root gave one source two
+gates … assert <_MinInterval object at 0x…> is <_MinInterval object at 0x…>` —
+because `adapter_factory` minted a fresh factory, hence a fresh session, hence a
+fresh gate per pipeline. The send-count case's red at that head is a
+`TypeError: EmbySession.__init__() got an unexpected keyword argument 'limiter'`,
+i.e. a red on the missing seam rather than on its own assertion; its
+*behavioural* red is T6 above, which is the one to quote.
