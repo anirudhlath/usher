@@ -584,16 +584,28 @@ async def test_a_walk_stopped_at_the_gap_ceiling_keeps_every_batch_it_committed(
 
 
 async def test_a_walk_stopped_at_the_gap_ceiling_sweeps_nothing() -> None:
-    """A truncated walk must not reach the availability sweep, and a `FULL`
-    one is where that matters: a walk bounded at 7 of 20 items has 13
-    perfectly healthy rows it never looked at, and a sweep would retract
-    every one of them.
+    """A truncated walk must not reach the availability sweep: it has rows it
+    never looked at, and the sweep retracts exactly those.
 
     Reachable only by passing `max_items` alongside `FULL`, which nothing in
     `src/` does -- the argument is the lane's opt-in and the lane only ever
     asks for a delta. Pinned anyway, because "the caller happens not to" is
-    not a property, and the same `return` is what makes the ceiling's
-    `FAILED` row honest.
+    not a property, and the same branch is what makes the ceiling's `FAILED`
+    row honest.
+
+    🔴 **The arithmetic is chosen so ADR-0015's guard cannot rescue the
+    case, and the first version of it was rescued.** This is the trap this
+    module's own docstring records for `test_a_walk_that_raises_sweeps_nothing`,
+    arriving one branch over and caught by the sweep rather than by review:
+    written as 20 items bounded at **7**, the sweep would retract 13 of 20 --
+    65%, over `max_retract_fraction`'s 0.25 -- so `AvailabilitySweepRefused`
+    fires, `reconcile`'s own handler records *that* as the run's failure,
+    nothing is retracted, and every assertion below passes against a
+    reconciler that sweeps after a bounded walk. Measured: the plant
+    (`_sweep` called in the truncated branch) **SURVIVED the whole suite** in
+    that shape. At a ceiling of **16** the unseen four are 20% -- under the
+    ceiling -- so the sweep succeeds, retracts four healthy rows, and the
+    case fails on the assertion it was written to make.
     """
     fixture = _Fixture(batch_size=3)
     for index in range(20):
@@ -601,10 +613,14 @@ async def test_a_walk_stopped_at_the_gap_ceiling_sweeps_nothing() -> None:
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
 
     run = await fixture.service.reconcile(
-        fixture.source, SyncRunKind.FULL, fixture.adapter, max_items=7
+        fixture.source, SyncRunKind.FULL, fixture.adapter, max_items=16
     )
 
     assert run.status is SyncRunStatus.FAILED
+    assert (run.error or "").startswith(CEILING_ERROR_CODE), (
+        "the premise: this run failed on its ceiling and not on a refused sweep, which is "
+        f"the arithmetic that makes the retraction assertions below able to fail: {run.error}"
+    )
     assert run.items_retracted == 0
     for index in range(20):
         stored = await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index}")
