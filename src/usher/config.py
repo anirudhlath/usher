@@ -14,6 +14,26 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #: a secret.
 _SHORTEST_REDACTABLE = 4
 
+#: What `LaneSupervisor._close_gap` is allowed to do on a reconnect, and the
+#: one setting in this file whose *default* is a refusal rather than a limit.
+#:
+#: The gap-closer runs `reconcile(source, DELTA, adapter)`, and a DELTA reads
+#: its `since` from the newest **completed** item-lane run. With none there is
+#: no `since`, so the "delta" is `list_items(since=None)` -- the whole library,
+#: 1,126,789 items on the household this project measures -- performed by
+#: `uvicorn` on startup with no operator command. A gap is the window a socket
+#: was down; with no completed walk the window is the entire catalog, which is
+#: `usher sync`'s job.
+#:
+#: - ``cursored`` -- close the gap only when a completed walk gives a `since`.
+#:   Shipped default. A deployment that has synced even once is unaffected.
+#: - ``always`` -- the pre-2026-08-19 behaviour, walking the whole library when
+#:   there is no cursor. Logged at WARNING before the walk starts, every time.
+#: - ``never`` -- no gap-closing walk at all. Costly and deliberate: Emby does
+#:   not re-deliver what a disconnected client missed, so whatever changed
+#:   during an outage waits for the operator's next walk.
+PushGapClose = Literal["cursored", "always", "never"]
+
 
 def settings_rejection(exc: ValidationError, *, entry_point: str) -> str:
     """pydantic's diagnosis with every rejected value stripped out.
@@ -672,6 +692,17 @@ class Settings(BaseSettings):
     # reconnect", which is expensive and correct, unlike every other zero
     # here.
     push_gap_min_interval_seconds: float = Field(default=60.0, ge=0)
+    # What the gap-closer may do when the delta has no cursor -- see
+    # `PushGapClose` above for the vocabulary and the measurement. **The one
+    # default in this block that changes behaviour for an existing
+    # deployment**, and only for one that has never completed an item walk:
+    # such a deployment used to have its whole library walked by the push lane
+    # on startup, and now gets a WARNING naming the source and pointing at
+    # `usher sync` instead. Everything past its first walk has a `since` and
+    # behaves exactly as before. The rate limit beside it is not a substitute:
+    # `push_gap_min_interval_seconds` bounds how *often* the walk happens and
+    # says nothing about how large it is.
+    push_gap_close: PushGapClose = "cursored"
     # How often the lane supervisor re-reads the source list, so a source
     # added through `POST /admin/sources` gets a lane without a restart.
     push_source_refresh_seconds: float = Field(default=60.0, gt=0)

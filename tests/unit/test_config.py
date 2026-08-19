@@ -442,6 +442,31 @@ def test_the_push_lane_and_worker_settings_have_the_measured_defaults(
     assert settings.push_source_refresh_seconds == 60.0
 
 
+def test_the_gap_closer_defaults_to_refusing_an_uncursored_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one default in this block that is a *refusal*, and the one that
+    changed behaviour for an existing deployment (2026-08-19, issue #9).
+
+    A reconnect delta reads its `since` from the newest completed item-lane
+    run; with none there is no `since`, so the walk is the whole library --
+    performed by `uvicorn` on startup, against a server the operator may not
+    own. `cursored` is the shipped answer; the vocabulary is closed, so a
+    typo is a startup failure rather than a value that silently means
+    something.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    assert Settings().push_gap_close == "cursored"
+    for good in ("cursored", "always", "never"):
+        monkeypatch.setenv("USHER_PUSH_GAP_CLOSE", good)
+        assert Settings().push_gap_close == good
+    for bad in ("", "true", "bounded", "CURSORED"):
+        monkeypatch.setenv("USHER_PUSH_GAP_CLOSE", bad)
+        with pytest.raises(ValidationError):
+            Settings()
+
+
 def test_the_staleness_window_is_bounded_below_by_something_useful(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
