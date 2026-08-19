@@ -8,7 +8,8 @@ after the fact.
 **Nothing here has a default bar, a default file or a default answer.** The
 bars live in `docs/evals/bars.toml`, which is data this code reads, so every
 way that file can fail to be usable -- absent, unparseable, holding no bars,
-holding a bar that cannot gate -- raises rather than degrading. That is the
+holding a bar that cannot gate, holding two bars that answer to one key --
+raises rather than degrading. That is the
 whole design: a harness that answers `pass` for a bar it could not read is
 worse than one that crashes, because the crash gets fixed and the `pass` gets
 believed. ADR-0002's typo gate is the reason the distinction is not
@@ -27,6 +28,12 @@ from pathlib import Path
 #: than a new idea -- `load_bars` refuses one instead of falling through to
 #: the bound comparisons, where an unregistered kind would be judged as a
 #: window and reported as a verdict.
+#:
+#: **A fourth *idea* is a different question, and it is deferred rather than
+#: absent.** There is no ceiling-only kind, so a bar whose only real gate is an
+#: upper bound is spelled `floor` with `low = 0.0` -- which is what the shipped
+#: latency bar is. `judge`'s docstring says what that costs and why adding the
+#: kind is not a change to make in passing.
 _KINDS = frozenset({"window", "floor", "pending"})
 
 
@@ -60,8 +67,25 @@ class Bar:
 
     `source` is not decoration. A threshold with no argument behind it is
     indistinguishable from a threshold reverse-engineered from the number it
-    judges, which is the one thing pre-registration exists to rule out -- so
-    it travels with the bar into whatever reports it.
+    judges, which is the one thing pre-registration exists to rule out.
+
+    **What carries it to a later reader is the file's sha256, not the ledger
+    row -- and this docstring claimed the opposite until 2026-08-19, saying it
+    "travels with the bar into whatever reports it".** It does not, and nothing
+    is scheduled to make it: the ledger row this harness is being built to
+    write carries `bar_kind`, `bar_low`, `bar_high` and the bar file's digest,
+    with no column for the argument, and the report line prints tier, metric,
+    value, n and the judgement. So the row an auditor ends up reading carries
+    the threshold and not the argument, which is exactly the thing the
+    paragraph above condemns. What makes the argument
+    recoverable anyway is that the digest is over the **raw bytes**, and the
+    prose lives in those bytes: hash each revision of `docs/evals/bars.toml`
+    that git holds, and the one matching a run's recorded digest is the file
+    that run faced, `source` included. That costs a `git rev-list` and a loop
+    rather than a `SELECT`; carrying a `bar_source` column into the ledger
+    would make it a `SELECT`, and that is a decision for whoever builds the
+    ledger and the report rather than a promise this docstring gets to make on
+    their behalf.
     """
 
     surface: str
@@ -82,7 +106,7 @@ class BarSet:
     sha256: str
     path: Path
 
-    def find(self, surface: str, tier: str, metric: str, stratum: str) -> Bar | None:
+    def find(self, *, surface: str, tier: str, metric: str, stratum: str) -> Bar | None:
         """The bar registered for exactly this key, or `None`.
 
         **All four keys, matched together.** Three of the five shipped bars
@@ -91,6 +115,16 @@ class BarSet:
         mean over everything -- so a lookup comparing three of the four would
         answer one stratum's bar to another stratum's question and quote its
         reasoning in the report.
+
+        **All four keyword-only, and that is a guard rather than a style.**
+        Four adjacent `str` parameters, two of which -- `metric` and `stratum`
+        -- read most alike and are the pair E2's new surfaces will be
+        inventing. Transposed positionally the lookup finds nothing, `judge`
+        answers `UNBARRED`, and `UNBARRED` fails at no level: not the
+        judgement, not the verdict, not the exit code. `mypy` cannot see it
+        either, because all four are `str`. Keyword-only makes the positional
+        spelling unspellable, which is the only check available for a defect
+        whose whole symptom is silence.
         """
         for bar in self.bars:
             if (bar.surface, bar.tier, bar.metric, bar.stratum) == (
@@ -102,8 +136,20 @@ class BarSet:
                 return bar
         return None
 
-    def judge(self, surface: str, tier: str, metric: str, stratum: str, value: float) -> Judgement:
-        """Judge one value.
+    def judge_with_bar(
+        self, *, surface: str, tier: str, metric: str, stratum: str, value: float
+    ) -> tuple[Bar | None, Judgement]:
+        """The bar this value was judged against, and the judgement.
+
+        **One lookup, so the two answers cannot be about different bars.** A
+        ledger row needs both -- the verdict, and the `kind`/`low`/`high` it
+        was reached against -- and the obvious way to fill one in is `find`
+        then `judge`, which scans twice and re-derives the key. That is correct
+        today and is one edit away from not being: a later change to either
+        scan leaves a row quoting one bar's thresholds beside another bar's
+        verdict, with nothing to notice. Writing the lookup once makes the
+        agreement structural rather than conventional, which is the same move
+        `_settle` made for *record and commit* in the curation service.
 
         **An absent bar is `UNBARRED`, not `PASS`.** A metric nobody wrote a
         bar for reading green is how a surface gets added and silently gates
@@ -120,17 +166,44 @@ class BarSet:
         file's own header claims of a floor, and a value landing exactly on a
         registered bound is ordinary rather than exotic: the shipped latency
         floor is 0.0, and a tier that answered nothing scores exactly that.
+
+        **That latency bar's `low = 0.0` cannot fail, and it is documentation
+        rather than a gate.** A p95 over a monotonic-clock delta has no
+        negative value to produce, so the half of that bar which actually gates
+        is its `high = 10.0`; the floor states, for a reader of the file alone,
+        which direction the quantity runs. It is spelled that way because this
+        vocabulary has no ceiling-only kind, and both available repairs are
+        larger than they look -- a fourth member of `_KINDS`, or a change to
+        the shape of a bar that is already registered -- so both are deferred
+        deliberately rather than made in a review round. Note what is *not*
+        unfalsifiable: the comparison itself is exercised, by
+        `test_a_floor_admits_the_floor_itself_and_the_ceiling_itself` judging
+        -0.5. What cannot fail is that one bar's floor, not this code.
         """
-        bar = self.find(surface, tier, metric, stratum)
+        bar = self.find(surface=surface, tier=tier, metric=metric, stratum=stratum)
         if bar is None:
-            return Judgement.UNBARRED
+            return bar, Judgement.UNBARRED
         if bar.kind == "pending":
-            return Judgement.PENDING
+            return bar, Judgement.PENDING
         if bar.low is not None and value < bar.low:
-            return Judgement.FAIL
+            return bar, Judgement.FAIL
         if bar.high is not None and value > bar.high:
-            return Judgement.FAIL
-        return Judgement.PASS
+            return bar, Judgement.FAIL
+        return bar, Judgement.PASS
+
+    def judge(
+        self, *, surface: str, tier: str, metric: str, stratum: str, value: float
+    ) -> Judgement:
+        """The verdict alone, for a caller that does not need the bar.
+
+        Delegates rather than repeating the comparisons, so there is exactly
+        one implementation of the precedence and one lookup behind both
+        spellings -- see `judge_with_bar`, which is where the argument lives.
+        """
+        _, judgement = self.judge_with_bar(
+            surface=surface, tier=tier, metric=metric, stratum=stratum, value=value
+        )
+        return judgement
 
 
 def load_bars(path: Path) -> BarSet:
@@ -155,33 +228,64 @@ def load_bars(path: Path) -> BarSet:
       question unreachable rather than merely decided;
     * an unknown `kind` is a typo, and falling through would judge it as a
       window;
+    * a `low` above its `high` refuses every value there is, and the run is
+      then red for a reason that is in the file rather than in the thing
+      measured -- loud, but only the message makes an operator look at the
+      bounds rather than at the surface;
+    * **two bars answering to one key** are one bar and one piece of dead
+      weight that still reads as registered, because `find` returns the first
+      match. The reachable spelling is filling a pending bar in by copying its
+      neighbour, changing `kind`, `low` and `source`, and forgetting the
+      `stratum` line: the pending copy answers first, the filled floor gates on
+      nothing, that stratum reports `pending` forever, and the run exits 0;
     * a file holding no bars at all hashes and answers `UNBARRED` to
       everything, so the ledger would record the sha256 of a pre-registration
       that registered nothing.
+
+    **Every refusal here is a `ValueError` and deliberately not an
+    `EvalRefused`, and the distinction is load-bearing.** `EvalRefused` is what
+    the runner catches into `skipped` and `baseline-invalid`, **both of which
+    exit 0** -- so a bar file the harness could not read would be reported as
+    "this measurement did not happen, and that is fine". The next
+    contributor's instinct is to unify this package's error vocabulary onto its
+    own exception type; that refactor turns every refusal above into a green
+    run, silently, and is the one change to this function that needs an
+    argument rather than a tidy-up.
 
     A missing key raises `KeyError` rather than being defaulted:
     `entry.get("metric", "")` builds a bar no query can match, so the file
     would hold five bars while the harness found four and the fifth metric
     reported `UNBARRED` forever with nothing to say why.
 
-    **`named` is what raises, and it is built for every entry rather than only
-    for the ones being refused.** Measured 2026-08-19: with `named` eager,
-    defaulting all four keys in the `Bar(...)` construction below survives all
-    27 cases -- nothing reaches the construction without having already read
-    them -- and defaulting them in `named` too fails
+    **`key` is what raises, and it is built for every entry rather than only
+    for the ones being refused.** Re-measured 2026-08-19 against 32 cases:
+    with `key` eager, defaulting all four keys in the `Bar(...)` construction
+    below survives every one of them -- nothing reaches the construction
+    without having already read them -- and defaulting them in `key` too fails
     `test_a_bar_missing_one_of_its_keys_is_loud_rather_than_unmatchable`. So
     the eager line is the load-bearing one and the reads below are its
-    redundancy, not the reverse; moving `named` inside the guards to save a
-    format on the happy path is what would open this.
+    redundancy, not the reverse; moving `key` inside the guards to save a tuple
+    on the happy path is what would open this.
+
+    **`named` is derived from `key` rather than reading `entry` a second
+    time**, so all four keys are read eagerly in exactly one place. Two eager
+    reads are each a redundant copy of the other's guarantee, which is how one
+    of them later gets tidied away on the grounds that the other covers it.
+    The duplicate check compares the **tuple** and not that rendered string,
+    because `/` is legal inside a stratum name and `("a/b", "c", ...)` renders
+    identically to `("a", "b/c", ...)` -- a refusal keyed on the display form
+    would refuse two bars that are not the same bar.
     """
     raw = path.read_bytes()
     document = tomllib.loads(raw.decode())
     bars: list[Bar] = []
+    seen: set[tuple[str, str, str, str]] = set()
     for entry in document.get("bar", []):
         kind = entry["kind"]
         low = entry.get("low")
         high = entry.get("high")
-        named = f"{entry['surface']}/{entry['tier']}/{entry['metric']}/{entry['stratum']}"
+        key = (entry["surface"], entry["tier"], entry["metric"], entry["stratum"])
+        named = "/".join(key)
         if kind not in _KINDS:
             raise ValueError(
                 f"unknown bar kind {kind!r}: {named} in {path} declares a kind that is "
@@ -209,6 +313,24 @@ def load_bars(path: Path) -> BarSet:
                 "against -- a bar reverse-engineered from the number it judges is "
                 "not a bar. Set the kind to `window` or `floor` to gate on it."
             )
+        if low is not None and high is not None and low > high:
+            raise ValueError(
+                f"a bar's bounds are the wrong way round: {named} has low={low} "
+                f"high={high}. A floor above its own ceiling refuses every value "
+                "there is, so the run goes red for a reason that is in this file "
+                "rather than in the thing being measured. Swap them."
+            )
+        if key in seen:
+            raise ValueError(
+                f"two bars answer to one key: {named} is registered twice in "
+                f"{path}. `find` returns the first match, so the second gates on "
+                "nothing while still reading as a registered bar. The reachable "
+                "spelling is filling a pending bar in by copying its neighbour "
+                "and forgetting to change the `stratum` -- which leaves the "
+                "pending copy answering first, the filled bar unreachable, and "
+                "the run exiting 0."
+            )
+        seen.add(key)
         bars.append(
             Bar(
                 surface=entry["surface"],

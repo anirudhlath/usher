@@ -4,11 +4,34 @@
 # number is then a hash change in the record rather than a git blame nobody
 # reads.
 #
+# **What that digest proves, exactly, is "this recorded run faced these
+# bytes".** It is computed at run time from whatever is on disk, so on its own
+# it establishes no order: precedence comes only from comparing it against an
+# *earlier recorded run carrying a different hash*. Two ordinary situations
+# leave nothing to compare against -- `--quick` is the default and records no
+# ledger row, so the usual way to see a number leaves no trace; and a bar
+# filled in from a first baseline has no predecessor by construction, because
+# the run that produced the number recorded the *pending* file's hash.
+#
+# **So the procedure below is the durable half, not the digest.** A pending bar
+# is filled in ONCE, from a recorded `--full` run, with that run's digest
+# written into its `source`. A number is NEVER moved to make a run green. A
+# re-baseline that is legitimate replaces the bar *and* names the run that
+# justifies it, in the same `source` -- "the bar changed" and "here is what
+# changed it" arrive together, or the change is not finished.
+#
 # Three kinds:
 #   window  -- the value must stay inside [low, high]. For a number whose
 #              *movement in either direction* means the thing measured is not
 #              the thing that was measured before.
-#   floor   -- the value must be >= low. A regression floor.
+#   floor   -- the value must be >= low. A regression floor. It may also carry
+#              an optional `high`, which IS enforced -- not an ignored key.
+#              There is no ceiling-only kind, so a bar whose real gate is an
+#              upper bound is written as a floor with `low = 0.0`, which is
+#              what the latency bar below is. The floor half of such a bar
+#              cannot fail for a quantity with no negative value to produce;
+#              it records which direction the number runs, and the `high` is
+#              what gates.
 #   pending -- **no prior measurement exists.** The runner reports the value
 #              and does not gate. The first `--full` run against a reproducing
 #              frame is what fills it in, together with that run's digest.

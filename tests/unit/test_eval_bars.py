@@ -26,6 +26,23 @@ one. The wrong implementations, and the case that kills each:
   matches on three of the four keys -- so a stratum's bar answers another
   stratum's question -- dies on `test_a_bar_is_found_by_all_four_of_its_keys`
   and on `test_the_three_pending_suggest_bars_are_three_bars_and_not_one_found_three_times`;
+* **the four lookup keys taken positionally**, which is not a wrong
+  implementation of anything in this module but a wrong *call site* it makes
+  available: `metric` and `stratum` are two adjacent `str` parameters that read
+  alike, transposing them answers `UNBARRED`, and `UNBARRED` fails at no level
+  -- not the judgement, not the verdict, not the exit code. `mypy` is blind to
+  it because all four are `str`. Keyword-only is the only check there is, and
+  `test_the_four_lookup_keys_cannot_be_handed_over_positionally` is what says
+  it is still in force;
+* **a bar and a verdict fetched by two separate lookups**, which agree today
+  and are one edit from quoting one bar's thresholds beside another bar's
+  judgement in the same ledger row, is refused structurally: `judge_with_bar`
+  is the single lookup and `judge` delegates to it, pinned by
+  `test_the_bar_and_the_verdict_come_from_one_lookup`;
+* **a second bar on an already-registered key**, which `find` never reaches and
+  which still reads as a registered bar, dies on
+  `test_two_bars_sharing_all_four_keys_are_refused_rather_than_one_shadowing_the_other`.
+  That is Task 14's own most likely slip and the reason the refusal exists;
 * **a `sha256` over the parsed TOML** rather than the raw bytes, which leaves
   an edited comment or a reordered table invisible and makes the
   pre-registration claim unfalsifiable, dies on
@@ -38,10 +55,11 @@ one. The wrong implementations, and the case that kills each:
   (`test_a_pending_bar_carrying_a_number_is_refused_at_load`), so neither
   precedence is reachable;
 * **a bar file the harness cannot use, read as one it can** -- absent,
-  malformed, holding no bars, holding a bar with no floor or an unknown kind --
-  dies on the five refusal cases at the end. `docs/evals/bars.toml` is data
-  this code reads, and a default that shadows a broken file would make a
-  broken file read as working.
+  malformed, holding no bars, holding a bar with no floor, an unknown kind,
+  transposed bounds or a key another bar already answers to -- dies on the
+  refusal cases at the end. `docs/evals/bars.toml` is data this code reads, and
+  a default that shadows a broken file would make a broken file read as
+  working.
 
 **The numbers in `test_the_registered_numbers_are_the_ones_that_were_registered`
 are literals on purpose, and a later task will have to edit them.** That is
@@ -50,6 +68,7 @@ the edit that has to be visible, and a case whose expectation is read out of
 the file it is checking would pass against any file at all.
 """
 
+import inspect
 import tomllib
 from pathlib import Path
 
@@ -121,7 +140,9 @@ def test_the_shipped_bar_file_loads() -> None:
         "a run faced; a hard-coded path would name the right file for the wrong "
         f"reason: {bars.path}"
     )
-    assert bars.find("suggest", "prefix", "recall_at_5", "all") is not None
+    assert (
+        bars.find(surface="suggest", tier="prefix", metric="recall_at_5", stratum="all") is not None
+    )
 
 
 def test_the_registered_numbers_are_the_ones_that_were_registered() -> None:
@@ -138,6 +159,20 @@ def test_the_registered_numbers_are_the_ones_that_were_registered() -> None:
     deliberate, reviewed act the design asks for -- it is not the same event
     as a number being nudged until CI goes green, which is what would happen
     if this case derived its expectations from `bars.toml`.
+
+    ⚠️ **`registered` is a `dict` keyed by the four-tuple, so two bars sharing
+    one key would collapse into one entry and this case would fail with a
+    message about a missing bar rather than about a duplicate one.** That is a
+    trap for whoever edits this case in Task 14, because "make the expected
+    dict match what loaded" is then an available and wrong repair. It is not
+    reachable through this assertion any more -- `load_bars` refuses a
+    duplicate key outright, so a copied-and-not-re-keyed bar raises *two bars
+    answer to one key* from the `load_bars` line above and never reaches the
+    comprehension. **If that is the red you are looking at, the repair is the
+    `stratum` line you forgot in `bars.toml`, not this dict.** No count
+    assertion is written here on purpose: with duplicates refused at load it
+    could not fail independently of the equality below it, and an assertion
+    that cannot fail is what this module's neighbours keep having to delete.
     """
     bars = load_bars(_SHIPPED)
 
@@ -172,7 +207,10 @@ def test_the_three_pending_suggest_bars_are_three_bars_and_not_one_found_three_t
     bars = load_bars(_SHIPPED)
     strata = ("all", "band=2-4", "typo_class=transposition")
 
-    found = [bars.find("suggest", "fuzzy", "recall_at_5", one) for one in strata]
+    found = [
+        bars.find(surface="suggest", tier="fuzzy", metric="recall_at_5", stratum=one)
+        for one in strata
+    ]
     assert [one.stratum for one in found if one is not None] == list(strata)
     assert len({one.source for one in found if one is not None}) == 3, (
         "the three strata came back carrying one reason between them, so the "
@@ -232,9 +270,15 @@ def test_a_window_fails_in_both_directions(tmp_path: Path) -> None:
     is not the thing that was measured before, so a window checked on one side
     is a floor wearing a window's name."""
     bars = _bars(tmp_path, _bar(kind="window", low=0.016, high=0.022))
-    assert bars.judge("s", "t", "m", "all", 0.019) is Judgement.PASS
-    assert bars.judge("s", "t", "m", "all", 0.004) is Judgement.FAIL
-    assert bars.judge("s", "t", "m", "all", 0.400) is Judgement.FAIL
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.019) is Judgement.PASS
+    )
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.004) is Judgement.FAIL
+    )
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.400) is Judgement.FAIL
+    )
 
 
 def test_a_window_admits_the_two_bounds_it_names(tmp_path: Path) -> None:
@@ -247,18 +291,22 @@ def test_a_window_admits_the_two_bounds_it_names(tmp_path: Path) -> None:
     so the comparison is exact rather than nearly exact.
     """
     bars = _bars(tmp_path, _bar(kind="window", low=0.5, high=0.75))
-    assert bars.judge("s", "t", "m", "all", 0.5) is Judgement.PASS
-    assert bars.judge("s", "t", "m", "all", 0.75) is Judgement.PASS
-    assert bars.judge("s", "t", "m", "all", 0.25) is Judgement.FAIL
-    assert bars.judge("s", "t", "m", "all", 1.0) is Judgement.FAIL
+    assert bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.5) is Judgement.PASS
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.75) is Judgement.PASS
+    )
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.25) is Judgement.FAIL
+    )
+    assert bars.judge(surface="s", tier="t", metric="m", stratum="all", value=1.0) is Judgement.FAIL
 
 
 def test_a_floor_fails_only_below(tmp_path: Path) -> None:
     """The comparison inverted -- a floor that refuses everything above it --
     is the other single-character defect, and this is what sees it."""
     bars = _bars(tmp_path, _bar(kind="floor", low=0.5))
-    assert bars.judge("s", "t", "m", "all", 0.9) is Judgement.PASS
-    assert bars.judge("s", "t", "m", "all", 0.4) is Judgement.FAIL
+    assert bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.9) is Judgement.PASS
+    assert bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.4) is Judgement.FAIL
 
 
 def test_a_floor_with_a_ceiling_fails_above_it(tmp_path: Path) -> None:
@@ -267,8 +315,10 @@ def test_a_floor_with_a_ceiling_fails_above_it(tmp_path: Path) -> None:
     floor branch ignores would leave the one bar in the file that gates on a
     latency gating on nothing."""
     bars = _bars(tmp_path, _bar(kind="floor", low=0.0, high=10.0))
-    assert bars.judge("s", "t", "m", "all", 4.0) is Judgement.PASS
-    assert bars.judge("s", "t", "m", "all", 40.0) is Judgement.FAIL
+    assert bars.judge(surface="s", tier="t", metric="m", stratum="all", value=4.0) is Judgement.PASS
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=40.0) is Judgement.FAIL
+    )
 
 
 def test_a_floor_admits_the_floor_itself_and_the_ceiling_itself(tmp_path: Path) -> None:
@@ -281,18 +331,28 @@ def test_a_floor_admits_the_floor_itself_and_the_ceiling_itself(tmp_path: Path) 
     exactly that.
     """
     bars = _bars(tmp_path, _bar(kind="floor", low=0.0, high=10.0))
-    assert bars.judge("s", "t", "m", "all", 0.0) is Judgement.PASS
-    assert bars.judge("s", "t", "m", "all", 10.0) is Judgement.PASS
-    assert bars.judge("s", "t", "m", "all", -0.5) is Judgement.FAIL
-    assert bars.judge("s", "t", "m", "all", 10.5) is Judgement.FAIL
+    assert bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.0) is Judgement.PASS
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=10.0) is Judgement.PASS
+    )
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=-0.5) is Judgement.FAIL
+    )
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=10.5) is Judgement.FAIL
+    )
 
 
 def test_a_pending_bar_never_gates(tmp_path: Path) -> None:
     """No number is wrong against a bar that does not exist yet. Reporting
     PENDING rather than PASS keeps a run from claiming a bar it never faced."""
     bars = _bars(tmp_path, _bar(kind="pending"))
-    assert bars.judge("s", "t", "m", "all", 0.0) is Judgement.PENDING
-    assert bars.judge("s", "t", "m", "all", 1.0) is Judgement.PENDING
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.0) is Judgement.PENDING
+    )
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=1.0) is Judgement.PENDING
+    )
 
 
 def test_the_four_judgements_are_four_different_strings_and_pending_is_not_spelled_pass() -> None:
@@ -330,7 +390,10 @@ def test_an_unbarred_metric_is_unbarred_rather_than_passing(tmp_path: Path) -> N
     """A metric nobody wrote a bar for must not read as green. That is how a
     surface gets added and silently gates on nothing."""
     bars = _bars(tmp_path, _bar(kind="pending"))
-    assert bars.judge("s", "t", "other", "all", 0.9) is Judgement.UNBARRED
+    assert (
+        bars.judge(surface="s", tier="t", metric="other", stratum="all", value=0.9)
+        is Judgement.UNBARRED
+    )
 
 
 @pytest.mark.parametrize(
@@ -355,11 +418,87 @@ def test_a_bar_is_found_by_all_four_of_its_keys(
     one to write -- is passed by three of the four wrong implementations.
     """
     bars = _bars(tmp_path, _bar(kind="window", low=0.1, high=0.2))
-    assert bars.judge("s", "t", "m", "all", 0.15) is Judgement.PASS, (
+    assert (
+        bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.15) is Judgement.PASS
+    ), (
         "the premise: the exact key is barred, so an UNBARRED below is about "
         "the key that was changed and not about a bar that was never found"
     )
-    assert bars.judge(surface, tier, metric, stratum, 0.15) is Judgement.UNBARRED
+    assert (
+        bars.judge(surface=surface, tier=tier, metric=metric, stratum=stratum, value=0.15)
+        is Judgement.UNBARRED
+    )
+
+
+def test_the_four_lookup_keys_cannot_be_handed_over_positionally() -> None:
+    """The four keys are keyword-only, and that is a guard rather than a style.
+
+    `surface`, `tier`, `metric` and `stratum` are four adjacent `str`
+    parameters, and the middle pair reads most alike -- they are also the pair
+    E2's new surfaces will be inventing. Transposed positionally, the lookup
+    finds nothing, `judge` answers `UNBARRED`, and `UNBARRED` fails at no
+    level: not the judgement, not the run's verdict, not the exit code. So the
+    defect's entire symptom is a gate that stopped gating, and `mypy` cannot
+    help -- measured against `f392bec`, `judge("suggest", "prefix", "all",
+    "recall_at_5", 0.400)` type-checks clean and turns a `fail` into an
+    `unbarred`.
+
+    Asserted over the **signature** rather than by making the call, because the
+    call that would prove it is one `mypy` rejects in this file -- which is the
+    point of the change, and would make this module fail the gate rather than
+    the case. The premise guard is not decoration either: a scan over a
+    signature that has lost its parameters passes exactly like a scan over one
+    that kept them keyword-only.
+    """
+    for method in (BarSet.find, BarSet.judge, BarSet.judge_with_bar):
+        kinds = {
+            name: parameter.kind
+            for name, parameter in inspect.signature(method).parameters.items()
+            if name != "self"
+        }
+        assert kinds, f"the premise: {method.__name__} still takes arguments at all"
+        assert set(kinds.values()) == {inspect.Parameter.KEYWORD_ONLY}, (
+            f"{method.__name__} takes a key positionally, so `metric` and "
+            "`stratum` can be transposed at a call site and the answer is "
+            f"UNBARRED rather than an error: {kinds}"
+        )
+
+
+def test_the_bar_and_the_verdict_come_from_one_lookup() -> None:
+    """A ledger row carries both -- the verdict, and the `kind`/`low`/`high` of
+    the bar it was reached against -- so the two have to be about the same bar.
+
+    The obvious way to fill such a row in is `find` and then `judge`, which
+    scans the bars twice and re-derives the key. That agrees today and is one
+    edit to either scan away from a row quoting one bar's thresholds beside
+    another bar's judgement, with nothing anywhere able to notice. So the
+    single lookup is the one this method exposes, and `judge` delegates to it.
+
+    The shipped file is what makes the case say something rather than restate
+    the implementation: three of its bars agree on surface, tier and metric and
+    differ only in `stratum`, so a second lookup that dropped a key would hand
+    back a *different, real* bar beside the same verdict -- which is precisely
+    the failure a synthetic one-bar file cannot exhibit.
+    """
+    bars = load_bars(_SHIPPED)
+    key = {"surface": "suggest", "tier": "fuzzy", "metric": "recall_at_5"}
+
+    bar, judgement = bars.judge_with_bar(**key, stratum="band=2-4", value=0.5)
+    assert bar is not None, "the premise: that stratum really is registered"
+    assert bar.stratum == "band=2-4", (
+        "the bar handed back beside the verdict belongs to another stratum, so "
+        f"a row would quote its reasoning against this one's number: {bar}"
+    )
+    assert bar is bars.find(**key, stratum="band=2-4")
+    assert judgement is bars.judge(**key, stratum="band=2-4", value=0.5)
+    assert judgement is Judgement.PENDING
+
+    absent, unbarred = bars.judge_with_bar(**key, stratum="band=never-registered", value=0.5)
+    assert absent is None, (
+        "an unbarred key came back carrying a bar, so the row would name a bar "
+        f"the run never faced: {absent}"
+    )
+    assert unbarred is Judgement.UNBARRED
 
 
 @pytest.mark.parametrize(("low", "high"), [(0.1, None), (None, 0.2)])
@@ -420,6 +559,66 @@ def test_an_unknown_kind_is_refused_rather_than_judged_by_its_bounds(tmp_path: P
     """
     with pytest.raises(ValueError, match="kind"):
         _bars(tmp_path, _bar(kind="flooor", low=0.1, high=0.2))
+
+
+@pytest.mark.parametrize(("kind", "low", "high"), [("window", 0.2, 0.1), ("floor", 10.0, 0.0)])
+def test_a_bar_whose_bounds_are_transposed_is_refused_at_load(
+    tmp_path: Path, kind: str, low: float, high: float
+) -> None:
+    """A floor above its own ceiling refuses every value there is.
+
+    The failure is loud rather than silent, which is what makes this the
+    smallest of the refusals -- but a run that reports `fail` on every stratum
+    says nothing about which of the two numbers is the wrong way round, and
+    leaves an operator reading the surface for a defect that is in this file.
+    Naming it at load is one line and turns a whole red run into a sentence.
+
+    Both kinds, because the `floor` arm is the shipped shape: the latency bar
+    is a floor carrying a `high`, so a guard written for `window` alone would
+    miss the only bar in the file that has two bounds and is not a window.
+    """
+    with pytest.raises(ValueError, match="wrong way round"):
+        _bars(tmp_path, _bar(kind=kind, low=low, high=high))
+
+
+def test_two_bars_sharing_all_four_keys_are_refused_rather_than_one_shadowing_the_other(
+    tmp_path: Path,
+) -> None:
+    """`find` returns the first match, so a second bar on the same four keys is
+    dead weight that still reads as a registered bar.
+
+    **The reachable spelling is Task 14's, and it is what this case seeds**:
+    fill the `band=2-4` bar in by copying the `stratum = "all"` pending entry
+    above it, change `kind`, `low` and `source`, forget the `stratum` line. The
+    pending copy answers first, the floor below it gates on nothing, that
+    stratum reports `pending` for good -- and `pending` is not a failure, so
+    the run exits 0. Same family as the four refusals around it: a bar that
+    cannot do its job has to say so rather than answer quietly.
+
+    Measured against `f392bec`, that file loaded two bars and answered
+    `pending` to `0.10` -- a value 0.6 below the floor it was supposed to have
+    been gated by.
+
+    The second half is the control, and it is what stops this being satisfied
+    by a loader that refuses any file holding more than one bar: the same two
+    entries differing only in `stratum` are two bars and load fine. Without it,
+    the refusal above is also what a loader that had stopped supporting the
+    three-stratum shipped file would produce.
+    """
+    shadowed = _bar(kind="pending", metric="recall_at_5") + _bar(
+        kind="floor", metric="recall_at_5", low=0.7014
+    )
+    with pytest.raises(ValueError, match="two bars answer to one key"):
+        _bars(tmp_path, shadowed)
+
+    distinct = _bar(kind="pending", metric="recall_at_5") + _bar(
+        kind="floor", metric="recall_at_5", stratum="band=2-4", low=0.7014
+    )
+    assert len(_bars(tmp_path, distinct).bars) == 2, (
+        "the control: two bars differing only in `stratum` are two bars, so "
+        "the refusal above is about the key they share and not about a file "
+        "holding more than one entry"
+    )
 
 
 def test_a_bar_file_holding_no_bars_is_refused_rather_than_judging_nothing(
