@@ -701,6 +701,43 @@ class Settings(BaseSettings):
     # reconnect", which is expensive and correct, unlike every other zero
     # here.
     push_gap_min_interval_seconds: float = Field(default=60.0, ge=0)
+    # The ceiling on **one** gap-closing delta, counted in items. What is
+    # left after M10 S5 removed the cursorless case is a delta *with* a
+    # cursor that is still large -- a source Usher has not reached for a
+    # month, a library the owner re-scanned, or a `deferred_to_delta`
+    # outcome arriving on a busy evening.
+    #
+    # **Items, deliberately, and not pages.** `MAX_PAGES`
+    # (`adapters/emby/adapter.py`) is already the dead-man's switch against a
+    # server that ignores `StartIndex`, and exhausting it raises
+    # `PortDataMalformed` -- so a ceiling spelled in pages would report a
+    # deliberate, correct stop as a broken upstream in the one message an
+    # operator acts on.
+    #
+    # **The default is derived, not picked.** PRD 03 measured this
+    # household's 30-day item-lane delta at **28,934 items**
+    # (`MinDateLastSaved`), i.e. 145 pages at `source_page_size`'s 200, and
+    # M10 S1 measured a page at a **6.0369 s** pooled mean (2026-08-15;
+    # `.claude/rules/emby-push-and-ingest.md`) -- the mean rather than the
+    # median because a sum over pages wants the mean of a right-tailed
+    # distribution. That is ~14.6 minutes of upstream before the lane has
+    # done anything else, issued by a bare `uvicorn` against every enabled
+    # source at once. 20,000 items is 100 pages, **~10 minutes** at that
+    # mean, and roughly three weeks of the same household's measured change
+    # rate. Deliberately *under* 28,934: a ceiling the one measured
+    # pathological case slips beneath is not a ceiling. One household, one
+    # evening -- re-derive it against your own before trusting it.
+    #
+    # The trade, in one sentence: **a ceiling buys a bounded startup and
+    # costs a reconcile an operator must run**, because a walk stopped here
+    # records `FAILED`, advances no cursor, and leaves the rest of the
+    # window for `usher sync --kind full` (`services/reconcile.py`).
+    #
+    # `ge=0` with zero meaning unlimited -- the same deliberate exception
+    # `push_gap_min_interval_seconds` above makes, and for the same reason:
+    # "close the whole gap however big it is" is expensive and correct,
+    # unlike every other zero in this block.
+    push_gap_max_items: int = Field(default=20_000, ge=0)
     # How often the lane supervisor re-reads the source list, so a source
     # added through `POST /admin/sources` gets a lane without a restart.
     push_source_refresh_seconds: float = Field(default=60.0, gt=0)

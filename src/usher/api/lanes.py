@@ -452,26 +452,57 @@ class LaneSupervisor:
         push lane goes on delivering, which is the point of the lane. What
         the operator has to run is in the line, because a refusal that does
         not say what to do is a dead end.
+
+        **A delta that does have a cursor can still be large, and
+        `USHER_PUSH_GAP_MAX_ITEMS` is where that is bounded (M10 S6).** A
+        source Usher has not reached for a month, a library the owner
+        re-scanned, or a `deferred_to_delta` outcome all produce one: PRD 03
+        measured this household's 30-day delta at 28,934 items, which at the
+        shipped page size is 145 pages and ~14.6 minutes at S1's 6.0369 s
+        pooled mean. The ceiling is passed here and nowhere else, which is
+        the same split the refusal above makes -- `usher sync --kind delta`
+        and `POST /admin/sources/{id}/sync` are an operator asking for the
+        whole thing and pass nothing.
+
+        **It bounds the item lane and not the watch lane, deliberately.**
+        `WatchStateSyncService.sync` derives its own cursor under its own
+        upstream filter (`MinDateLastSavedForUser`, 29,005 items against the
+        item lane's 28,934 over the same 30-day window) and takes no ceiling
+        argument at all, so a gap close whose item walk stopped still walks
+        the watch lane whole. That is a real cost and not a free choice --
+        the startup this bounds is bounded on one of the two lanes -- and it
+        is stated in PRD 03's Reconnect-delta row and PRD 08's degradation
+        table rather than left as an accident of where the argument was
+        threaded. Bounding the watch lane too would widen a second service's
+        signature for a cursor that fails the same way, and is a task of its
+        own.
         """
         async with self._work() as pipeline:
-            # Bound rather than tested inline: the value is what a *bound*
-            # on a delta that does have a cursor (S6) would be computed
-            # from, so that bound needs no read of `sync_runs` of its own.
+            # Bound rather than tested inline, and **the reason S5 gave for
+            # binding it did not survive S6**, which is recorded here rather
+            # than quietly deleted. That reason was: *"the value is what a
+            # bound on a delta that does have a cursor (S6) would be
+            # computed from, so that bound needs no read of `sync_runs` of
+            # its own"*. S6's ceiling is a count of **items**, evaluated in
+            # `ReconcileService`'s own walk loop where `run.items_seen`
+            # already lives; it is computed from nothing about the cursor,
+            # so this binding buys it nothing. It is a refusal rather than a
+            # clamp, which is the other half of the same prediction and is
+            # the half that held: `reconcile()` still takes no `since`
+            # override.
             #
-            # It is **not** a saving on the shipped path, and an earlier
-            # version of this comment claimed it was. `reconcile()` derives
-            # the identical cursor again through `_cursor_for`
-            # (`services/reconcile.py`), so a gap close that *does* run now
+            # It is **not** a saving on the shipped path either, and an
+            # earlier version of this comment claimed it was. `reconcile()`
+            # derives the identical cursor again through `_cursor_for`
+            # (`services/reconcile.py`), so a gap close that *does* run
             # issues `latest_completed_cursor` four times where it used to
             # issue two. Negligible -- two indexed reads on `sync_runs`
             # against a walk of a library -- but the binding is not what
-            # makes it negligible, and a comment that says otherwise is a
-            # claim a reader would have to re-derive to distrust.
+            # makes it negligible.
             #
-            # And the bound only pays off if S6's ceiling is a **refusal**.
-            # `reconcile()` takes no `since` override, so a ceiling that
-            # *clamps* the cursor forward has to widen that signature, and
-            # this value buys nothing on the way.
+            # What it does buy is the refusal below, which needs the value
+            # and not merely its absence-or-presence, and one reader of
+            # `None` shared with `reconcile()` instead of two.
             cursor = await pipeline.reconcile.delta_cursor(source)
             if cursor is None:
                 # The source's **name**, never its base URL and never
@@ -486,7 +517,17 @@ class LaneSupervisor:
                     source=source.name,
                 )
                 return
-            await pipeline.reconcile.reconcile(source, SyncRunKind.DELTA, adapter)
+            await pipeline.reconcile.reconcile(
+                source,
+                SyncRunKind.DELTA,
+                adapter,
+                max_items=self._settings.push_gap_max_items,
+            )
+            # Unconditionally, and after a bounded item walk as much as
+            # after a whole one. `reconcile` never raises, so a truncated
+            # walk arrives here as a returned `FAILED` run rather than as
+            # control flow -- and the watch lane must still run, because it
+            # is a different lane with a different cursor.
             await pipeline.watch.sync(source, adapter, user_id=await self._user_id())
 
     async def _write_push_available(self, source: Source, available: bool) -> None:

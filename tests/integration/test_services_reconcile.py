@@ -41,9 +41,15 @@ from usher.ports.errors import PortUnavailable
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService
+from usher.services.reconcile import CEILING_ERROR_CODE, ReconcileService
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
+# The ceiling case's two numbers, named so the arithmetic below reads. 200 is
+# also `USHER_SOURCE_PAGE_SIZE`'s default, which is a coincidence this case
+# does not rely on: the ceiling is counted in *items*, deliberately, because
+# `MAX_PAGES` already means something else.
+CEILING = 200
+PAST_THE_CEILING = 500
 
 
 def _item(external_id: str) -> SourceItem:
@@ -79,12 +85,20 @@ def media_items(session: AsyncSession) -> PostgresMediaItemRepository:
     return PostgresMediaItemRepository(session)
 
 
-@pytest.fixture
-def service(
+def _service(
     session: AsyncSession,
     runs: PostgresSyncRunRepository,
     media_items: PostgresMediaItemRepository,
+    *,
+    batch_size: int,
 ) -> ReconcileService:
+    """The fixture's own wiring, reachable at another batch size.
+
+    Extracted rather than parametrised because exactly one case wants a
+    different one: the ceiling case walks 500 items, and 250 flushes of two
+    would make it a benchmark of the ingest pipeline instead of a test of
+    where the walk stops.
+    """
     titles = PostgresTitleRepository(session)
     matching = PostgresTitleMatchRepository(session)
     queue = PostgresJobQueue(session, max_attempts=5, backoff_seconds=30.0)
@@ -100,8 +114,17 @@ def service(
         events=FakeEventPublisher(),
         runs=runs,
         commit=session.flush,
-        batch_size=2,
+        batch_size=batch_size,
     )
+
+
+@pytest.fixture
+def service(
+    session: AsyncSession,
+    runs: PostgresSyncRunRepository,
+    media_items: PostgresMediaItemRepository,
+) -> ReconcileService:
+    return _service(session, runs, media_items, batch_size=2)
 
 
 class _Adapter:
@@ -114,8 +137,15 @@ class _Adapter:
     def __init__(self) -> None:
         self.items: dict[str, SourceItem] = {}
         self.fail_after: int | None = None
+        # Every `since` this adapter was asked to walk from, in order.
+        # `sync_runs.cursor_at` is the reconciler agreeing with itself; this
+        # is the value that actually crossed the port, which is what "the
+        # next delta re-requests what the truncated one never reached" is a
+        # claim about.
+        self.since_calls: list[datetime | None] = []
 
     def list_items(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
+        self.since_calls.append(since)
         return self._walk()
 
     async def _walk(self) -> AsyncIterator[SourceItem]:
@@ -225,6 +255,102 @@ async def test_a_run_that_failed_does_not_move_the_delta_cursor(
     delta = await service.reconcile(source, SyncRunKind.DELTA, adapter)  # type: ignore[arg-type]
     assert delta.cursor_at == completed.started_at
     assert await runs.latest_completed_cursor(source.id, SyncRunKind.DELTA) is not None
+
+
+async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_does_not_skip_what_it_missed(  # noqa: E501
+    session: AsyncSession,
+    runs: PostgresSyncRunRepository,
+    media_items: PostgresMediaItemRepository,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """M10 S6, and the reason the ceiling may not let its run complete.
+
+    `latest_completed_cursor` is `started_at` of the newest **completed**
+    run in the lane, so a delta that stopped at a ceiling and recorded
+    `COMPLETED` would advance the cursor to its own start instant — and
+    everything past the ceiling would never be requested by any delta
+    again. Nothing in `src/` schedules the nightly full reconcile that would
+    otherwise cover it (M9's boundary call 6), so on a shipped deployment
+    with no cron a truncated-and-completed delta is a hole with no closer.
+
+    **Three arms, in this order, because each is a different claim and the
+    third is the one the task exists for.**
+
+    1. The walk really stopped: exactly `CEILING` items were committed and
+       are readable, and the item past the ceiling is not there. Committed,
+       not merely counted — `_flush` commits per batch, so a ceiling costs
+       the cursor advance and nothing else.
+    2. The run is `FAILED` with a ceiling-shaped `error`, read back off the
+       row rather than off the returned object.
+    3. A **second** delta re-requests from the *original* cursor rather than
+       from the truncated run's `started_at`, asserted on the `since` that
+       crossed the port.
+
+    **Real Postgres rather than the fake arm**, because the property is
+    `latest_completed_cursor`'s `WHERE status = 'completed'` and a dict has
+    no such predicate.
+    """
+    service = _service(session, runs, media_items, batch_size=30)
+    adapter.items["seed"] = _item("seed")
+    completed = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    assert completed.status is SyncRunStatus.COMPLETED, (
+        "the premise: there is a completed run for a delta to resume from"
+    )
+    adapter.items.clear()
+    for index in range(PAST_THE_CEILING):
+        adapter.items[f"m{index}"] = _item(f"m{index}")
+
+    truncated = await service.reconcile(
+        source,
+        SyncRunKind.DELTA,
+        adapter,  # type: ignore[arg-type]
+        max_items=CEILING,
+    )
+
+    # -- arm 1: the walk stopped where it said, and kept what it saw -------
+    assert truncated.items_seen == CEILING, (
+        f"the ceiling is counted in items and is exact: {truncated.items_seen}"
+    )
+    for external_id in ("m0", f"m{CEILING - 1}"):
+        stored = await media_items.get_by_external_id(source.id, external_id)
+        assert stored is not None, (
+            f"{external_id} was seen before the ceiling and `_flush` commits per batch, "
+            "so a bounded walk must not cost the items it did see"
+        )
+    assert await media_items.get_by_external_id(source.id, f"m{CEILING}") is None, (
+        "the first item past the ceiling was never committed"
+    )
+
+    # -- arm 2: and it is recorded as a failure, with a named reason -------
+    assert truncated.status is SyncRunStatus.FAILED
+    assert (truncated.error or "").startswith(CEILING_ERROR_CODE), truncated.error
+    stored_run = await runs.get(truncated.id)
+    assert stored_run is not None
+    assert stored_run.status is SyncRunStatus.FAILED, (
+        "the durable row is what `latest_completed_cursor` reads, not the returned object"
+    )
+
+    # -- arm 3: so the next delta re-requests what this one never reached --
+    assert truncated.started_at > completed.started_at, (
+        "the premise: the truncated run's own start instant is later than the cursor, "
+        "so 'resumed from the cursor' and 'resumed from the truncated run' are different "
+        "answers this case can tell apart"
+    )
+    adapter.since_calls.clear()
+    second = await service.reconcile(
+        source,
+        SyncRunKind.DELTA,
+        adapter,  # type: ignore[arg-type]
+        max_items=CEILING,
+    )
+    assert second.cursor_at == completed.started_at, (
+        "the truncated delta advanced the cursor to its own start instant, so everything "
+        f"past its ceiling is never requested again: {second.cursor_at}"
+    )
+    assert adapter.since_calls == [completed.started_at], (
+        f"the `since` that crossed the port is the original cursor: {adapter.since_calls}"
+    )
 
 
 def test_the_service_is_constructed_from_ports_only() -> None:

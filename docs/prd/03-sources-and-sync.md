@@ -358,7 +358,7 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 | Lane | Trigger | Work |
 |---|---|---|
 | **Push** | WebSocket event | **Apply it inline when it is small; defer to a delta when it is large.** A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk instead, because a request per item against a 1,126,789-item library is a design defect rather than a slow path |
-| **Reconnect delta** | Socket re-established, **or a push event deferred to a delta** | Items changed since the last cursor — and **refused outright when there is no cursor**, because a source with no completed item-lane run has none and the "delta" is then a walk of the whole library that nobody asked for (M10 S5; the lane starts itself for every enabled source, so on a fresh deployment that walk is the first thing the server does). The lane logs a WARNING naming the source and `usher sync --kind full`, and keeps the socket up. `usher sync --kind delta` on such a source still walks: the refusal is the *lane's*, not `ReconcileService`'s. **The refusal covers the deferral trigger too, and that is a real cost**: an oversized event on a cursorless source is applied neither inline nor by a walk, so it is discarded until the full sync runs — deliberate, because the alternative is that walk of everything on the strength of one event. **And "the catalog is empty anyway" is not the premise**: a deployment bootstrapped in bulk ([04](04-catalog-bootstrap.md)) has a populated catalog and no `sync_runs` row at all — `BootstrapService` writes `import_runs` — so it is refused indefinitely, with the remedy in the line. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds — but that limit is a bound on *cadence* only, and the first gap after a restart is never skipped |
+| **Reconnect delta** | Socket re-established, **or a push event deferred to a delta** | Items changed since the last cursor — and **refused outright when there is no cursor**, because a source with no completed item-lane run has none and the "delta" is then a walk of the whole library that nobody asked for (M10 S5; the lane starts itself for every enabled source, so on a fresh deployment that walk is the first thing the server does). The lane logs a WARNING naming the source and `usher sync --kind full`, and keeps the socket up. `usher sync --kind delta` on such a source still walks: the refusal is the *lane's*, not `ReconcileService`'s. **The refusal covers the deferral trigger too, and that is a real cost**: an oversized event on a cursorless source is applied neither inline nor by a walk, so it is discarded until the full sync runs — deliberate, because the alternative is that walk of everything on the strength of one event. **And "the catalog is empty anyway" is not the premise**: a deployment bootstrapped in bulk ([04](04-catalog-bootstrap.md)) has a populated catalog and no `sync_runs` row at all — `BootstrapService` writes `import_runs` — so it is refused indefinitely, with the remedy in the line. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds — but that limit is a bound on *cadence* only, and the first gap after a restart is never skipped. **And a delta that *does* have a cursor is bounded in size** (M10 S6): the item walk stops at `USHER_PUSH_GAP_MAX_ITEMS` and the run records **`FAILED`**, never `COMPLETED`, because `latest_completed_cursor` reads `started_at` of the newest *completed* run — so a truncated run that completed would advance the cursor to its own start instant and everything past the ceiling would never be requested by any delta again, with no scheduled full reconcile anywhere in `src/` to cover it. Nothing the bounded walk saw is lost (`_flush` commits per batch); what it costs is the cursor advance, and the WARNING names `usher sync --kind full`. **The ceiling bounds the item lane only** — the watch lane owns its own cursor under `MinDateLastSavedForUser` and still walks whole after a truncated item walk, which is a stated cost rather than an oversight |
 | **Full reconcile** | Nightly, or an operator's `POST /admin/sources/{id}/sync` (M9) | Walk the source; upsert everything; mark unseen items `available = false` |
 
 Polling is the backstop, not the design.
@@ -413,6 +413,39 @@ sweep regardless of which task wrote it. A `full` sync requested through this
 route while the push lane happens to be closing a gap on the same source is
 therefore not a new failure mode this route introduces; it is the existing
 concurrent-walk safety argument exercised by a fourth caller.
+
+**The other half of the same argument is size, and it is M10 S6's.** A delta
+*with* a cursor can still be enormous — a source Usher has not reached for a
+month, a library the owner re-scanned (a `LibraryChanged` naming thousands of
+items is deferred to exactly this walk by `push_max_items_per_event`), or a
+`deferred_to_delta` outcome on a busy evening. Against the household measured
+above, a 30-day cursor returns **28,934** items for the item lane: 145 pages at
+`USHER_SOURCE_PAGE_SIZE`'s 200, and ~14.6 minutes of upstream at the **6.0369 s**
+pooled mean M10 S1 measured for a page on 2026-08-15. `USHER_PUSH_GAP_MAX_ITEMS`
+bounds it, defaulting to **20,000 items** — 100 pages, ~10 minutes at that mean,
+and deliberately *below* 28,934, because a ceiling the one measured pathological
+case slips beneath is not a ceiling. Zero is unlimited.
+
+**A bounded walk records `FAILED`, and that is the whole design rather than a
+detail of it.** `latest_completed_cursor` is `started_at` of the newest
+*completed* run in the lane, so a truncated run recorded `COMPLETED` would
+advance the cursor to its own start instant and everything past the ceiling
+would never be requested by any delta again. The nightly full reconcile would
+cover it — except that **nothing in `src/` schedules anything** ([09](09-roadmap.md)'s
+M9 boundary call 6) and `usher sync --kind` defaults to `full` because a human
+runs it, so on a shipped deployment with no cron that hole has no closer. What
+the ceiling costs is therefore the cursor advance and nothing else: `_flush`
+commits per batch, so every item the bounded walk saw is durable, and the
+WARNING it logs names the source, how far it got, the setting, and `usher sync
+--kind full`. A fourth `SyncRunStatus` member would say it more precisely and
+is DDL; it is named as a candidate and not taken.
+
+**It bounds the item lane and not the watch lane.**
+`WatchStateSyncService.sync` derives its own cursor under
+`MinDateLastSavedForUser` (29,005 items over the same window) and takes no
+ceiling, so a gap close whose item walk stopped still walks the watch lane
+whole. The startup this bounds is bounded on one of the two lanes — a real
+cost, recorded here rather than left implicit.
 
 **A push `ITEM_REMOVED` retracts nothing.**
 [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)

@@ -19,6 +19,7 @@ established.
 
 import asyncio
 import dataclasses
+import inspect
 import io
 import time
 import uuid
@@ -177,6 +178,13 @@ class _Adapters(SourceAdapterFactory):
         self.built: dict[str, FakeSourceAdapter] = {}
         self.crashing: set[str] = set()
         self.slow: set[str] = set()
+        # Applied to every adapter at construction, which is the only moment
+        # a case can reach: `_start_lane` builds the adapter and hands it
+        # straight to `PushSupervisor.run`, whose first act after connecting
+        # is to close the gap. Seeding off `built` afterwards races that
+        # walk, and a case that lost the race would assert against a library
+        # of zero items -- which is exactly what a broken ceiling produces.
+        self.prepare: Callable[[FakeSourceAdapter], None] | None = None
 
     def crash(self, name: str) -> None:
         self.crashing.add(name)
@@ -189,6 +197,8 @@ class _Adapters(SourceAdapterFactory):
         else:
             kind = FakeSourceAdapter
         adapter = kind(source)
+        if self.prepare is not None:
+            self.prepare(adapter)
         self.built[source.name] = adapter
         return adapter
 
@@ -238,6 +248,7 @@ class _RecordingReconcile(ReconcileService):
     def __init__(
         self,
         walks: list[tuple[str, SyncRunKind]],
+        ceilings: list[int],
         *,
         ingest: IngestService,
         media_items: MediaItemRepository,
@@ -249,10 +260,23 @@ class _RecordingReconcile(ReconcileService):
             ingest=ingest, media_items=media_items, runs=runs, events=events, commit=commit
         )
         self._walks = walks
+        self._ceilings = ceilings
 
-    async def reconcile(self, source: Source, kind: SyncRunKind, adapter: SourceAdapter) -> SyncRun:
+    async def reconcile(
+        self,
+        source: Source,
+        kind: SyncRunKind,
+        adapter: SourceAdapter,
+        *,
+        max_items: int = 0,
+    ) -> SyncRun:
         self._walks.append((source.name, kind))
-        return await super().reconcile(source, kind, adapter)
+        # Recorded as well as counted, for the reason `_CountingQueue`
+        # records `older_than_seconds`: the ceiling's correctness is in
+        # *what the lane passed*, and "the gap closed" is what a lane
+        # passing nothing produces too.
+        self._ceilings.append(max_items)
+        return await super().reconcile(source, kind, adapter, max_items=max_items)
 
 
 class _RecordingWatchSync(WatchStateSyncService):
@@ -321,6 +345,10 @@ class _Fakes:
     # rather than one, because `_close_gap` runs two lanes in a stated order
     # and a refusal has to stop both.
     reconciled: list[tuple[str, SyncRunKind]]
+    # The `max_items` each of those walks was handed, in the same order.
+    # Separate from `reconciled` rather than a third tuple slot, so every
+    # assertion written before the ceiling existed still reads.
+    gap_ceilings: list[int]
     watch_synced: list[str]
     commits: list[float]
     # When each unit of work was opened. The `rows.refresh` lane's whole
@@ -404,6 +432,7 @@ def _pipeline(
         ingest=ingest,
         reconcile=_RecordingReconcile(
             fakes.reconciled,
+            fakes.gap_ceilings,
             ingest=ingest,
             media_items=fakes.media_items,
             runs=runs,
@@ -537,6 +566,7 @@ def fakes() -> _Fakes:
         adapters=_Adapters(),
         events=FakeEventPublisher(),
         reconciled=[],
+        gap_ceilings=[],
         watch_synced=[],
         commits=[],
         units_of_work=[],
@@ -838,6 +868,76 @@ async def test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator
         assert atrium.base_url not in line and belfry.base_url not in line
         assert CREDENTIALS.password.get_secret_value() not in line
         assert atrium.credentials_ref not in line and belfry.credentials_ref not in line
+
+
+async def test_the_gap_closers_delta_carries_the_ceiling_and_the_watch_lane_still_runs_after_it(
+    fakes: _Fakes,
+) -> None:
+    """M10 S6, and the deliberate half of it is the second assertion.
+
+    **The ceiling is the item lane's and only the item lane's.** The watch
+    lane derives its own cursor under its own upstream filter
+    (`MinDateLastSavedForUser`, 29,005 items against the item lane's 28,934
+    over the same 30-day window) and `WatchStateSyncService.sync` takes no
+    ceiling at all -- so a gap close whose item walk stopped at
+    `USHER_PUSH_GAP_MAX_ITEMS` still runs the watch lane, whole. That is a
+    cost, not a free choice: the *startup* a ceiling bounds is bounded on
+    the item lane alone, and PRD 03's Reconnect-delta row says so.
+
+    Both halves are needed and neither implies the other. Without the
+    first, the lane closes an unbounded gap while looking configured; the
+    obvious careful spelling of the second's defect is
+    `if run.status is FAILED: return` after the item walk, which passes
+    every assertion this file had before this case and quietly stops the
+    watch lane on every bounded gap close.
+    """
+    source = _source("Atrium")
+    await _seed(fakes, source)
+    await _item_run(fakes, source, SyncRunStatus.COMPLETED)
+
+    def stock(adapter: FakeSourceAdapter) -> None:
+        """More items than the ceiling, on the lane's own adapter, so the
+        walk genuinely truncates rather than merely being handed a number."""
+        for index in range(10):
+            adapter.seed(_item(f"a-{index}"), datetime.now(UTC))
+
+    fakes.adapters.prepare = stock
+    supervisor = _supervisor(fakes, push_gap_max_items=3)
+    try:
+        await supervisor.start()
+        await _drain(
+            lambda: bool(fakes.watch_synced),
+            note=lambda: (
+                "the item lane's ceiling stopped the watch lane too: "
+                f"reconciled={fakes.reconciled} watch_synced={fakes.watch_synced}"
+            ),
+        )
+    finally:
+        await supervisor.stop()
+
+    deltas = [
+        run
+        for run in await fakes.runs.list_for_source(source.id, limit=20)
+        if run.kind is SyncRunKind.DELTA
+    ]
+    assert [run.status for run in deltas] == [SyncRunStatus.FAILED], (
+        "the premise: the item walk really did stop at the ceiling, so the watch-lane "
+        f"assertion below is about a gap close that truncated: {deltas}"
+    )
+    assert [run.items_seen for run in deltas] == [3]
+    assert fakes.reconciled == [("Atrium", SyncRunKind.DELTA)]
+    assert fakes.gap_ceilings == [3], (
+        "the gap-closer hands the item lane `USHER_PUSH_GAP_MAX_ITEMS`; a lane passing "
+        f"nothing closes an unbounded gap while looking configured: {fakes.gap_ceilings}"
+    )
+    assert fakes.watch_synced == ["Atrium"], (
+        "the ceiling is the item lane's alone -- the watch lane owns a different cursor "
+        f"under a different upstream filter and is not bounded by it: {fakes.watch_synced}"
+    )
+    assert "max_items" not in inspect.signature(WatchStateSyncService.sync).parameters, (
+        "and it cannot be, structurally: adding a ceiling to the watch lane is a port-"
+        "adjacent signature change, not a quiet argument"
+    )
 
 
 async def test_an_operators_delta_on_a_fresh_source_still_walks(fakes: _Fakes) -> None:

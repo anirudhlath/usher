@@ -42,6 +42,27 @@ rolled back along with the refusal.
 `commit` is injected rather than a session being passed in: `services/` may
 depend only on `domain/` and `ports/` (PRD 01, layering rule 2), and a
 session is neither. Same shape `BootstrapService` already uses.
+
+**A walk stopped at `max_items` records `FAILED`, and that is not a lie
+about the source -- it is the only zero-DDL spelling of "do not advance the
+cursor".** `latest_completed_cursor` is `started_at` of the newest
+**completed** run in the lane (`db/repositories/sync.py`), so a delta that
+stopped at a ceiling and recorded `COMPLETED` would move the cursor to its
+own start instant and *everything past the ceiling would never be requested
+by any delta again*. The cover would be the nightly full reconcile, which
+`_cursor_for` correctly makes cursorless -- except that **nothing in `src/`
+schedules anything** (M9's boundary call 6) and `usher sync --kind` defaults
+to `full` precisely because a human runs it. So on a shipped deployment with
+no cron, a truncated-and-completed delta is a hole with no closer. A fourth
+`SyncRunStatus` member would say it better and is DDL; named as a candidate,
+not taken.
+
+Two things make the `FAILED` row honest rather than a fiction. `reconcile`
+already turns every `UsherPortError` into a `FAILED` row with `str(exc)` in
+`sync_runs.error`, so an operator reading `usher sync-status` is reading one
+column with one meaning -- *"this run did not finish and moved no cursor"*.
+And **the items the walk did see are not lost**: `_flush` commits per batch,
+so a ceiling costs the cursor advance and nothing else.
 """
 
 import time
@@ -75,6 +96,26 @@ _run_duration = _meter.create_histogram(
 # under a different upstream filter (`MinDateLastSavedForUser`, measured as
 # genuinely different) and owns its own cursor.
 _ITEM_LANES: tuple[SyncRunKind, ...] = (SyncRunKind.FULL, SyncRunKind.DELTA)
+
+# The first token of a bounded walk's `error`, and the reason it is a
+# constant rather than prose.
+#
+# **Two different things end a walk early and both land in this one
+# column.** `MAX_PAGES` is `EmbyAdapter`'s dead-man's switch against a server
+# that ignores `StartIndex`; exhausting it raises `PortDataMalformed`
+# carrying *"Emby's item listing never ended; the server appears to ignore
+# StartIndex"*, and that is a broken upstream to investigate. This one is
+# Usher stopping on purpose and is closed by one command. Spelling the
+# ceiling as a page count would have reported the second as the first, in
+# the one message an operator acts on -- which is why the ceiling is counted
+# in **items**, in this service's own loop, where `run.items_seen` already
+# lives.
+#
+# An operator reads the sentence. A dashboard, an alert rule, or the next
+# reader of this file has to be able to tell the two apart **without parsing
+# English**, so the bounded walk's message begins with this and nothing else
+# in the project uses it.
+CEILING_ERROR_CODE = "gap_delta_ceiling"
 
 
 class _Progress:
@@ -127,7 +168,14 @@ class ReconcileService:
         self._batch_size = batch_size
         self._max_retract_fraction = max_retract_fraction
 
-    async def reconcile(self, source: Source, kind: SyncRunKind, adapter: SourceAdapter) -> SyncRun:
+    async def reconcile(
+        self,
+        source: Source,
+        kind: SyncRunKind,
+        adapter: SourceAdapter,
+        *,
+        max_items: int = 0,
+    ) -> SyncRun:
         """Walk `source` and reconcile it. Never raises a `UsherPortError`.
 
         Like `BootstrapService.import_dataset`, a failed run leaves a
@@ -136,6 +184,22 @@ class ReconcileService:
         to run when the first is unreachable. Anything that is *not* a
         `UsherPortError` propagates untouched -- a bug here is not an
         upstream failure and must not be recorded as one.
+
+        **`max_items` is the caller's opt-in to a bounded walk, and 0 -- the
+        default -- is unlimited.** It is a per-call argument rather than a
+        constructor one because the two callers want opposite things and
+        this is the same split S5 made one layer up: `usher sync --kind
+        delta` and `POST /admin/sources/{id}/sync` are an operator asking
+        for the whole thing and pass nothing, while
+        `LaneSupervisor._close_gap` -- the one caller nobody typed a command
+        for -- passes `USHER_PUSH_GAP_MAX_ITEMS`. A ceiling on the service
+        would take the operator's command away to protect the lane.
+
+        **It is a refusal, not a clamp**: the walk stops and the run records
+        `FAILED`, so this signature needs no `since` override and the cursor
+        this run was started from is the cursor the next one resumes from.
+        See the module docstring for why `COMPLETED` would lose items
+        permanently.
         """
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.reconcile") as span:
@@ -150,23 +214,47 @@ class ReconcileService:
             await self._commit()
             progress = _Progress(run)
             try:
-                await self._walk(source, progress, adapter, cursor)
-                # Reached only when the walk returned normally. The whole
-                # safety argument is one `try` boundary wide.
-                run = await self._sweep(progress.run, kind)
-                run = run.evolve(status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC))
+                truncated = await self._walk(source, progress, adapter, cursor, max_items)
+                if truncated:
+                    # Deliberately **not** `usher.failed`: the run is
+                    # recorded `FAILED` because that is what stops the
+                    # cursor, and a trace view that could not tell "the
+                    # source broke" from "Usher stopped on purpose" would
+                    # send an operator looking for an outage that did not
+                    # happen. Same argument as `CEILING_ERROR_CODE`, one
+                    # instrument over.
+                    span.set_attribute("usher.sync.truncated", True)
+                    run = self._failed(progress.run, self._ceiling_error(progress.run))
+                    logger.warning(
+                        "{kind} sync of {source} stopped after {seen} items, its "
+                        "USHER_PUSH_GAP_MAX_ITEMS ceiling. The run is recorded FAILED so it "
+                        "advances no cursor and the next delta re-requests what it never "
+                        "reached; run `usher sync --kind full` for it to close the rest",
+                        kind=kind.value,
+                        # The source's **name**, never its base URL and
+                        # never anything from its credential row -- PRD 08's
+                        # credentials-are-never-logged rule, and the failure
+                        # line below is the local precedent.
+                        source=source.name,
+                        seen=run.items_seen,
+                    )
+                else:
+                    # Reached only when the walk returned normally *and*
+                    # returned everything. The whole safety argument is one
+                    # `try` boundary wide, and the ceiling is inside it: a
+                    # bounded walk has items it never looked at, so a sweep
+                    # after one would retract every one of them.
+                    run = await self._sweep(progress.run, kind)
+                    run = run.evolve(status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC))
             except UsherPortError as exc:
                 # `progress.run`, never the pre-walk `run`: the batches this
                 # walk already committed are real, and recording the failure
                 # over a stale copy would erase their checkpoint.
-                run = progress.run.evolve(
-                    status=SyncRunStatus.FAILED,
-                    # str(exc), never the exception object and never a
-                    # payload -- PRD 08's credentials-never-logged rule, and
-                    # `error` is a Text column an operator reads.
-                    error=str(exc),
-                    finished_at=datetime.now(UTC),
-                )
+                #
+                # str(exc), never the exception object and never a payload --
+                # PRD 08's credentials-never-logged rule, and `error` is a
+                # Text column an operator reads.
+                run = self._failed(progress.run, str(exc))
                 span.set_attribute("usher.failed", True)
                 logger.error(
                     "{kind} sync of {source} failed after {seen} items: {error}",
@@ -184,6 +272,40 @@ class ReconcileService:
             {"source": source.name, "kind": kind.value, "status": run.status.value},
         )
         return run
+
+    @staticmethod
+    def _failed(run: SyncRun, error: str) -> SyncRun:
+        """The one spelling of a terminal failure row.
+
+        One function rather than the two identical `evolve` calls the two
+        branches above would otherwise carry: a rule written twice is a rule
+        one deletion is invisible in, and both branches depend on exactly the
+        same thing being true -- `status` is `FAILED`, so
+        `latest_completed_cursor` skips this run and the next walk of this
+        lane resumes from wherever it resumed from.
+        """
+        return run.evolve(status=SyncRunStatus.FAILED, error=error, finished_at=datetime.now(UTC))
+
+    @staticmethod
+    def _ceiling_error(run: SyncRun) -> str:
+        """What `sync_runs.error` holds after a bounded walk.
+
+        `CEILING_ERROR_CODE` first and a sentence after it: the token is
+        what a machine reads, the sentence is what an operator reads, and
+        neither is recoverable from the other.
+
+        **It takes no `max_items`, and that is the honest shape rather than
+        an omission.** The count and the ceiling are the same number by
+        construction -- a truncated walk saw exactly `max_items` and stopped
+        -- so a signature carrying both would invite a reader to render two
+        numbers that can never differ. It is rendered once, and the ceiling
+        is named by the setting an operator would change.
+        """
+        return (
+            f"{CEILING_ERROR_CODE}: stopped after {run.items_seen} items, this walk's "
+            f"USHER_PUSH_GAP_MAX_ITEMS ceiling. Nothing seen was lost and no cursor moved; "
+            f"run `usher sync --kind full` for this source to close the rest"
+        )
 
     async def delta_cursor(self, source: Source) -> AwareDatetime | None:
         """The instant a delta walk of `source` would resume from, or `None`
@@ -231,19 +353,40 @@ class ReconcileService:
         progress: _Progress,
         adapter: SourceAdapter,
         cursor: AwareDatetime | None,
-    ) -> None:
+        max_items: int,
+    ) -> bool:
+        """Walk the source into the catalog. `True` when it stopped at
+        `max_items` with the source still holding more."""
         batch: list[SourceItem] = []
+        pulled = 0
+        truncated = False
         async for item in adapter.list_items(since=cursor):
+            pulled += 1
+            # `>`, not `>=`, and the difference is a whole cursor. `pulled`
+            # counts the item in hand, so this fires on the first item
+            # *past* the ceiling and that item is dropped unread: a walk
+            # stopped here has committed exactly `max_items`. `>=` would
+            # stop one item early and, worse, would condemn a delta whose
+            # whole answer is exactly `max_items` items -- which is not a
+            # truncation at all, and paying it a cursor buys nothing but a
+            # re-walk of the identical window on the next gap close.
+            if max_items and pulled > max_items:
+                truncated = True
+                break
             batch.append(item)
             if len(batch) >= self._batch_size:
                 progress.run = await self._flush(source, progress.run, batch)
                 batch = []
         if batch:
-            # The trailing partial batch. A walk's item count is almost never
-            # a multiple of the batch size, so omitting this drops the last
-            # page of nearly every walk -- and the sweep then retracts exactly
-            # those items on the next run.
+            # The trailing partial batch, on both exits. A walk's item count
+            # is almost never a multiple of the batch size, so omitting this
+            # drops the last page of nearly every walk -- and the sweep then
+            # retracts exactly those items on the next run. A ceiling that is
+            # not a multiple of the batch size lands here too, which is what
+            # makes "exactly `max_items` were committed" true rather than
+            # "the last whole batch under the ceiling was".
             progress.run = await self._flush(source, progress.run, batch)
+        return truncated
 
     async def _flush(self, source: Source, run: SyncRun, batch: Sequence[SourceItem]) -> SyncRun:
         # `run.started_at`, not `now()`: `last_seen_at` means "the run that

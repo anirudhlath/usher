@@ -509,11 +509,24 @@ class _RecordingReconcile(ReconcileService):
 
     def __init__(self, log: list[str], *, raises: Exception | None = None) -> None:
         self.calls: list[tuple[uuid.UUID, SyncRunKind]] = []
+        # The `max_items` each call was handed. `POST /admin/sources/{id}/sync`
+        # is an operator asking for the whole thing, so the handler must pass
+        # nothing and get M10 S6's unlimited default -- and "0" is a claim a
+        # case can be wrong about in a way "the walk happened" is not.
+        self.ceilings: list[int] = []
         self._log = log
         self._boom = raises
 
-    async def reconcile(self, source: Source, kind: SyncRunKind, adapter: SourceAdapter) -> SyncRun:
+    async def reconcile(
+        self,
+        source: Source,
+        kind: SyncRunKind,
+        adapter: SourceAdapter,
+        *,
+        max_items: int = 0,
+    ) -> SyncRun:
         self.calls.append((source.id, kind))
+        self.ceilings.append(max_items)
         self._log.append("reconcile")
         if self._boom is not None:
             raise self._boom
@@ -596,6 +609,12 @@ async def test_the_lane_in_the_key_is_the_lane_reconcile_is_asked_for(
     )
 
     assert reconcile.calls == [(source.id, SyncRunKind.DELTA)]
+    assert reconcile.ceilings == [0], (
+        "M10 S6: `POST /admin/sources/{id}/sync` is an operator asking for the whole "
+        "delta, so the handler passes no `max_items` and gets the unlimited default. "
+        "The gap ceiling is `LaneSupervisor._close_gap`'s alone -- the one caller "
+        f"nobody typed a command for: {reconcile.ceilings}"
+    )
 
 
 async def test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises(
