@@ -1,23 +1,61 @@
 """The harness's refusals, and the verdicts that are not failures."""
 
+import re
+import tomllib
+from pathlib import Path
+
 import pytest
 
 from usher.eval.errors import EvalDependencyMissing, EvalRefused
 
+# tests/unit/test_eval_runner.py -> tests/unit -> tests -> repo root. Same
+# derivation as tests/unit/test_eval_contract.py, which reads the same file
+# for the same reason: a fact about pyproject.toml has to be read from
+# pyproject.toml, not re-asserted as a literal that can drift out from under
+# it.
+_ROOT = Path(__file__).resolve().parents[2]
 
-def test_a_missing_extra_names_the_command_that_installs_it() -> None:
-    """A bare ImportError tells an operator a module is absent. It does not
-    tell them the module is optional, which extra carries it, or what to
-    type. The message is the whole point of this class existing."""
+
+def test_a_missing_extra_is_a_refusal_and_names_a_command_that_actually_installs_it() -> None:
+    """`EvalDependencyMissing` subclasses `EvalRefused` so every handler that
+    wants a refusal gets this one too -- but `pytest.raises(EvalDependencyMissing)`
+    says nothing about that, since it is satisfied by a child of anything;
+    only an `isinstance` assertion on the parent pins the ancestry (the
+    precedent is `tests/unit/test_ports_ingest.py`'s
+    `test_the_sweep_refusal_is_a_port_error`).
+
+    And the message is the whole point of this class existing: a bare
+    ImportError tells an operator a module is absent, not that it is
+    optional, which extra carries it, or what to type. That command is only
+    honest if the extra it names is one `uv sync --extra` can actually
+    install -- a rename of the extra in `pyproject.toml` must not leave this
+    message pointing an operator at a command that fails, so the extra named
+    here is checked against `pyproject.toml` itself rather than trusted."""
     problem = EvalDependencyMissing("ranx")
+    assert isinstance(problem, EvalRefused)
     assert "uv sync --extra eval" in str(problem)
     assert "ranx" in str(problem)
 
+    named = re.search(r"--extra ([\w-]+)", str(problem))
+    assert named is not None, "the message names no `--extra <name>` command at all"
+    with (_ROOT / "pyproject.toml").open("rb") as handle:
+        extras = tomllib.load(handle)["project"]["optional-dependencies"]
+    assert named.group(1) in extras, (
+        f"the message tells an operator to run `uv sync --extra {named.group(1)}`, "
+        f"which pyproject.toml's [project.optional-dependencies] does not define: "
+        f"{sorted(extras)!r}"
+    )
 
-def test_a_refusal_is_not_a_score() -> None:
-    """`EvalRefused` is raised where a plausible number would be produced
-    over the wrong population -- a drifted sampling frame, an empty catalog.
-    It is a distinct type so no caller can catch a scoring error and a
-    'this measurement is void' with one clause."""
+
+def test_a_refusal_message_survives_construction_and_stays_matchable() -> None:
+    """`EvalRefused` carries the reason a run could not be measured, and that
+    reason has to survive construction and remain something a caller can
+    `pytest.raises(..., match=...)` for -- which is what this case pins.
+
+    It does **not** pin that the type is distinct from a scoring error, or
+    that no caller can catch the two together in one clause -- there is no
+    second type in this module for it to be distinct from yet, so nothing
+    here checks that property. It belongs on whichever future case
+    introduces a scoring-error type and has to catch the two separately."""
     with pytest.raises(EvalRefused, match="sampling frame"):
         raise EvalRefused("the sampling frame does not reproduce the gate's")
