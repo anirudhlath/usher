@@ -273,9 +273,10 @@ there too.
 
 ### Still unverified, named rather than implied
 
-- **This server under sustained concurrency** — every request here was
-  sequential, one in flight. That is **S7**, and nothing in this section
-  licenses a concurrency figure.
+- ✅ **This server under sustained concurrency** — closed by S7 on 2026-08-19,
+  in the section below. Every request in *this* section was sequential, one in
+  flight, and nothing in it licenses a concurrency figure; the one that does is
+  its own measurement.
 - **Any other Emby build**, and any other network path. One household.
 - **`op="watch_history"`** — the same route and payload shape as `get_item`
   (`_fetch(external_id, op=…)`), differing only in its telemetry label, but not
@@ -1189,3 +1190,158 @@ walked `adapter.watch_state()` *looking for one known item id* is a walk of
 issued several hundred requests against a shared server before it was
 killed. Any "find the item where X" over a walk is a full walk; ask the
 server with a filter.
+
+## M10 Task S7 — this server under concurrency, and a tail that was our own TLS (2026-08-19)
+
+**44 bounded read-only requests against the operator's live Emby**, 15:48:51Z →
+15:49:13Z, the operator having stated the server was quiet from the last
+request. Every probe a `GET /Users/{user}/Items/{item}` over an `external_id`
+`media_items` already held — no walk, no iterator, no write, nothing sent to
+`/PlayedItems` or `/UserData`, so there is nothing to restore. Driven from
+`scripts/measure_source_lane.py` with the base URL, token, user id and device
+id redacted from everything printed. Pre-registered bar at
+`/var/tmp/m10-gate/BAR-S7.md`
+(`sha256 ea7a2b5db249fd9afdd34680f2c91954c60de7a02c19c8a72ab7ecd8ca6ce4f4`,
+written 15:39:13 before the first request and re-hashed by the harness at run
+time — the digest printed in both run logs matches). Quiet-check: CPU drift
+−0.034 against a ±0.1 limit, foreign `pytest` census 0.
+
+**Group S budget: S1 spent 52, S7 spent 142 (98 + 44 — see the lost run below),
+leaving 62 of the declared 256 for S8 and S11.**
+
+### The ladder, gate off — this server does not degrade at four
+
+Settings **interleaved and rotated** rather than blocked: interleaving spreads
+wall-clock drift across all three (S1's finding), and rotating the order per
+round stops `c1` always being the one that pays for a cold cache and subsidises
+`c2` and `c4` — a bias that runs in exactly the direction that would make
+concurrency look free.
+
+| in flight | n | median | mean | max | steady-state | vs c=1 |
+|---|---|---|---|---|---|---|
+| 1 | 12 | 0.1377 s | 0.1368 s | 0.1410 s | **7.40 rps** | — |
+| 2 | 11* | 0.1405 s | 0.1394 s | 0.1431 s | **14.21 rps** | 1.92× |
+| 4 | 10* | 0.1363 s | 0.1370 s | 0.1417 s | **28.75 rps** | **3.89×** |
+
+Overlap, because *"four requests finished"* is also what a serialised loop
+produces (`CLAUDE.md`'s fourth evidence rule): peak in flight **1 / 2 / 4**,
+mean in flight **1.00 / 1.99 / 3.51**, IoU **0.000 / 0.986 / 0.995**. The
+concurrency was achieved, measured on the wire.
+
+**Per-request latency is flat and throughput is near-linear.** The c=4 median
+is **1% below** the c=1 median. 🔴 **This refutes the run's own pre-registered
+prediction**, which took W1's TMDb result — a 37% per-worker throughput loss at
+three workers — as the prior and predicted >20% median degradation at c=4, a
+throughput ratio in [1.5, 3.5] and a p95 more than 1.5× worse. Median: refuted.
+Ratio: 3.89×, above the band. p95: see below. **A degradation curve measured
+against a CDN-backed public API is not a prior for a machine on the same LAN.**
+
+### 🔴 The tail was the harness's own connection pool, and the naive reading would have moved a shipped default
+
+\* Three requests in the whole ladder exceeded 0.25 s — one in the first `c2`
+block (0.4153 s) and two in the first `c4` block (0.4098, 0.4085) — against a
+baseline of ~0.137. Read naively that is *"p95 triples under concurrency"*, it
+satisfies the pre-registered p95 prediction, and it would have justified moving
+`KIND_CONCURRENCY[MATCH]` down to 2.
+
+**It is httpx opening connections #2, #3 and #4.** The evidence is internal and
+cost no extra request:
+
+- The slow requests are **exactly** the ones that must open a new connection —
+  one at the first appearance of concurrency 2, two at the first appearance of
+  concurrency 4 — and the excess over baseline (~0.27 s) is a TLS handshake to
+  a remote host.
+- **Every later block at every setting is clean.** `c4`'s second and third
+  blocks have a max of 0.1407 and 0.1360; `c2`'s have 0.1431 and 0.1420. If the
+  server degraded under concurrency the tail would recur, and it never does.
+- **Server-side caching is excluded**, which is what makes this decisive rather
+  than plausible: round 0 ran `c1` first over the same four item ids, so by the
+  time `c2` and `c4` ran, those items had already been served once and twice.
+  The only thing new at each first block is a **connection**.
+
+With the three handshakes removed, `c4`'s max (0.1417 s) is within 0.5% of
+`c1`'s (0.1410 s). **The general form: a harness that opens connections lazily
+manufactures a latency tail at exactly the moment it first raises concurrency,
+and that tail is indistinguishable from server contention in any summary
+statistic.** Warm the pool to the maximum concurrency before the first measured
+block, or — as here — keep enough structure in the run that the artifact can be
+isolated afterwards. Nearest relative in `mutation-sweeps.md` is the `cp -a`
+venv shebang: a complete, plausible, wrong result.
+
+### Arm C — the shipped default makes the concurrency entry moot, measured on the wire
+
+Six requests, four coroutines in flight, `USHER_SOURCE_REQUESTS_PER_SECOND` at
+its shipped **0.4**:
+
+| | measured |
+|---|---|
+| wire send-to-send gaps | **2.5031, 2.5026, 2.5026, 2.5007, 2.5035 s** |
+| peak in flight | **1** |
+| IoU | **0.000** |
+
+So **`KIND_CONCURRENCY[MATCH] = 4` is not what bounds this deployment's request
+rate to a source, and has not been since S3 landed.** `_MinInterval` holds its
+lock across the wait and `SourceGateRegistry` gives one source one gate shared
+by every adapter, so four job slots queue behind one 2.5 s interval. The entry
+bounds jobs in flight — sessions and connections held — and the **gate** bounds
+the wire. Raising it would not raise the rate.
+
+🔴 **And the instrument that would have said otherwise was caught by a stub
+rehearsal, before it cost a request.** The harness times around
+`session.request`, and `EmbySession._send` calls `await self._limiter.take()`
+*inside* that region — deliberately, since the gate's wait is its own series.
+So the coroutine window under a gated arm is dominated by **queueing**: the
+same six requests read **peak in flight 4, IoU 0.802** on that instrument,
+which is the exact opposite conclusion. Overlap is therefore computed from
+httpx's own `request`/`response` event hooks, downstream of the gate. **When a
+component's whole job is to make callers wait, any timer that wraps the wait
+measures the waiting and not the work.**
+
+### 🔴 The run before this one spent 98 live requests and retained nothing
+
+The first invocation completed all 96 ladder requests and then raised
+`TypeError: build_session() got an unexpected keyword argument 'limiter'` in
+the arm-C session builder. The `except` clause caught
+`(BudgetExceeded, ProbeFailed, UsherPortError)` — S1's tuple — so the
+`TypeError` propagated past every line that reports, and **96 observations
+already bought from somebody else's server were discarded**, along with the
+two warm-ups. `--timings-out` is written after the try/finally, so it never ran.
+
+S1 had already recorded this shape (*"a run that ends early otherwise loses
+every observation it bought"*) and defended against it by catching the budget
+exception and reporting anyway. **That defence is a denylist**: it enumerates
+the ways a run was *expected* to end, and the way this one ended — an ordinary
+programming error in a later arm — is on no such list and never will be.
+
+Three repairs, and the first is the only one that generalises:
+
+- **The report is no longer what makes an observation durable; the write is.**
+  Every timing is appended to a JSONL journal and flushed **on arrival**, so a
+  crash, a `SIGKILL` or an exception of any type leaves everything already paid
+  for on disk. JSONL rather than one document because a partial JSONL file is
+  readable and a partial `json.dumps([...])` is not.
+- The `except` is widened to `Exception`, so a bug in a later arm cannot
+  invalidate an earlier arm's data.
+- A `client_factory` seam, so the whole run rehearses against a stub. S1's
+  harness has one and this arm did not — which is why its first rehearsal was
+  the live server. The rehearsal now runs before every live invocation and
+  costs nothing; it is what then caught the arm-C instrument error above.
+
+**The general form: a live-request budget is spent at the transport, but it is
+*earned back* only by the write. Journal on arrival, and treat every line
+between the last request and the report as code that can lose the run.**
+
+### Still unverified, named rather than implied
+
+- **A *paging* load under concurrency.** Every request here is a single-item
+  read. S1 measured a 200-item page at 5.0954 s median — ~34× dearer — and
+  nothing has put pages in flight. Four concurrent *pages* is a different
+  question and this section does not answer it.
+- **Any Emby build but 4.9.5.0**, and any other network path.
+- **N > 1 Usher processes against one source.** Every limiter in this group is
+  per process and `SourceGateRegistry` is per composition root, so two
+  processes are two gates and 0.8 rps. This is the one bound the whole group
+  cannot express.
+- **Concurrency above 4.** The ladder stops at the entry under test; 8 in
+  flight against this server is unmeasured.
+- **A real 429 from this server.** S4 met one only against a stub.

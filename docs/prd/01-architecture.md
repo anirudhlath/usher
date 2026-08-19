@@ -334,8 +334,8 @@ own semaphore, so a slow upstream can't starve the API:
 | Source event stream | 1 per source | push connection |
 | **Job worker, globally** (M9 W1) | **`USHER_JOB_CONCURRENCY`, default 12** | the connection pool; `Settings` refuses a value it cannot serve |
 | — `enrich` | the global (12) | TMDb, at `USHER_TMDB_REQUESTS_PER_SECOND` |
-| — `match`, `watch_history`, `watch_writeback` | 4 | a household media server, **unmeasured under concurrency** |
-| — `derive` | 4 | the pool's share, not a measured throughput |
+| — `match`, `watch_history`, `watch_writeback` | 4 | **measured** (M10 S7): flat latency and 3.89× throughput at 4 in flight |
+| — `derive` | 4 | **measured** (M10 S7): the knee — the 8th job buys +13% for +71% latency |
 | — `index` | 1 | `fastembed` is CPU-bound at a flat tokens/s ceiling |
 | — `curate` | 1 | the reference endpoint has 56 tokens of context spare |
 | — `sync`, `bootstrap` | 1 | a walk of the whole library; a session `bulk_load_window` commits |
@@ -357,19 +357,52 @@ not the policy.
 What replaced it is a **bounded pool per kind on one worker**, not a lane per
 kind: `usher.services.jobs.KIND_CONCURRENCY` is a table over every `JobKind`,
 resolved against the global at build time, and **each entry names the
-measurement it came from in its own source** — with one exception, `derive`,
-which is derived from the connection-pool budget rather than from any measured
-throughput and says so. The global default of 12 is Little's law over S3's
-measured tail (p95 HTTP 0.4267 s plus ~0.033 s of per-job bookkeeping, so
-~11.5 in flight to hold ADR-0005's ~25 rps), not a round number.
+measurement it came from in its own source.** The global default of 12 is
+Little's law over S3's measured tail (p95 HTTP 0.4267 s plus ~0.033 s of
+per-job bookkeeping, so ~11.5 in flight to hold ADR-0005's ~25 rps), not a
+round number.
 
-⚠️ **The `match`/`watch_history`/`watch_writeback` row is the one number here
-that is a *bound* rather than a measurement.** The old table guessed 4 for
-"source sync workers" against a source-latency string this document had been
-quoting from an earlier revision of itself; this repository still has no
-measurement of a household media server under **concurrent** load, so 4
-survives as a deliberately conservative cap. It is written down as unmeasured
-rather than dressed up.
+✅ **The four entries that were bounds are measurements as of 2026-08-19 (M10
+S7), and until then this page contradicted itself about how many there were.**
+The paragraph here called the `match`/`watch_history`/`watch_writeback` row
+*"the one number here that is a bound rather than a measurement"* while the
+table three rows up described `derive` as *"the pool's share, not a measured
+throughput"* — two claims on one page each naming a different single unmeasured
+number, while both in fact flagged both. `usher/services/jobs.py` carried the
+mirror image of the same error, and `.claude/rules/tmdb-and-enrichment.md` said
+*"two of the eight"* against a table of **nine**. It was **four entries and two
+justifications**, and all three documents are corrected together.
+
+🔴 **Nothing pinned those four, either, and that was demonstrated rather than
+argued**: `KIND_CONCURRENCY[MATCH]` set to 7 and `[DERIVE]` to 9 passed all
+**4,119** unit cases. `tests/unit/test_config.py::test_the_four_concurrency_
+entries_that_are_bounds_are_pinned_by_value_and_say_which_measurement_moved_
+them` now pins each by literal.
+
+**What S7 measured, and the second half is the one that reframes the first:**
+
+- **The three Emby-facing kinds do not degrade at 4.** 44 bounded read-only
+  requests, `get_item` at 1, 2 and 4 in flight with the gate off: median
+  **0.1377 / 0.1405 / 0.1363 s** — flat, the c=4 median 1% *below* c=1 — and
+  steady-state **7.40 / 14.21 / 28.75 rps**, i.e. **3.89×** at four in flight.
+  The W1-shaped prediction that a household server would show TMDb's 37%
+  per-worker loss is **refuted** for this workload.
+- ⚠️ **But 4 is a slot count, not a request rate, and has been since S3.** With
+  `USHER_SOURCE_REQUESTS_PER_SECOND` at its shipped **0.4**, four coroutines
+  against one source were measured issuing requests **2.50 s apart, peak one in
+  flight** — `_MinInterval` holds its lock across the wait and one source has
+  one gate. The concurrency entry bounds jobs in flight, and therefore sessions
+  and connections; the **gate** bounds the wire. Raising this row would not
+  raise the request rate.
+- **`derive`'s knee is at 4.** 200 jobs a rung on one pool: **48.7 / 85.3 /
+  115.7 / 130.7 jobs/s** at 1 / 2 / 4 / 8, per-job median **19.8 / 22.6 / 31.8 /
+  54.2 ms**. The eighth in-flight job buys +13% throughput for +71% latency, so
+  the pool-budget argument and the throughput measurement agree.
+
+**What is still unverified is named rather than implied**: any Emby build but
+4.9.5.0, this server under a *paging* load rather than single-item reads (a
+page is ~34× dearer, see below), and N > 1 Usher processes against one source —
+which no limiter here can express, because every one of them is per process.
 
 🔴 **That string has now been measured, and it was never about a request.**
 M10's S1 (2026-08-15, 52 bounded read-only requests against the operator's

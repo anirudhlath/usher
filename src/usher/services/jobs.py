@@ -130,19 +130,40 @@ HEARTBEAT_FRACTION: Final = 3.0
 #:   Postgres bookkeeping per job (S2's one-worker 10.38 rps against its own
 #:   0.0637 s mean HTTP) is a p95 job of ~0.46 s, so holding ADR-0005's ~25 rps
 #:   takes ~11.5 jobs in flight. `Settings.job_concurrency` defaults to 12.
-#: - **`MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK`.** A *household* media
-#:   server, not a CDN-backed public API, and **this repository still has never
-#:   measured one under concurrent load** -- so the number is deliberately a
-#:   small constant rather than the global, and it says so. What *is* measured
-#:   since 2026-08-15 is the sequential cost of the single-item read all three
-#:   of these kinds make: **0.1495 s median, 0.1649 s mean** (M10 S1 --
-#:   `.claude/rules/emby-push-and-ingest.md`), i.e. ~6 rps from one coroutine,
-#:   so four in flight aims for ~24 rps at a machine somebody is also watching
-#:   television on. That is the number to hold this cap against, and it is
-#:   what four in flight *would* draw **if latency stayed flat under
-#:   concurrency** -- which is exactly the term nobody has measured, so read it
-#:   as the optimistic bound rather than as a prediction. The
-#:   seven-milestone-old "1-5 s per request" this comment used to cite was
+#: - **`MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK` = 4, and since 2026-08-19
+#:   this is a measurement.** A *household* media server, not a CDN-backed
+#:   public API -- so the question M10's S7 put to it was not "how many rps"
+#:   but **what four concurrent single-item reads cost this server relative to
+#:   one**. Measured over 44 bounded read-only requests against the operator's
+#:   real Emby, at 1, 2 and 4 in flight with the outbound gate off
+#:   (`scripts/measure_source_lane.py`; full table in
+#:   `.claude/rules/emby-push-and-ingest.md`):
+#:
+#:       in flight   median      steady-state
+#:               1   0.1377 s     7.40 rps
+#:               2   0.1405 s    14.21 rps  (1.92x)
+#:               4   0.1363 s    28.75 rps  (3.89x)
+#:
+#:   **Per-request latency is flat** -- the c=4 median is 1% *below* the c=1
+#:   median -- and throughput scales 3.89x, so four in flight costs this server
+#:   nothing per request and the cap is confirmed rather than merely tolerated.
+#:   ⚠️ **The W1-shaped prediction was refuted.** S3's TMDb run measured a 37%
+#:   per-worker throughput loss at three workers and the bar for this run
+#:   predicted the same shape here; a household Emby serving single-item reads
+#:   does not show it. What that licenses is narrow: **single-item reads, one
+#:   server, one Emby build (4.9.5.0), one process.** A *paging* load is a
+#:   different cost class and is still unmeasured under concurrency.
+#:
+#:   ⚠️ **And this number is a slot count, not a request rate.** With
+#:   `Settings.source_requests_per_second` at its shipped 0.4, four coroutines
+#:   against one source were measured issuing requests **2.50 s apart with a
+#:   peak of one in flight** -- `_MinInterval` holds its lock across the wait
+#:   and `SourceGateRegistry` gives one source one gate shared by every
+#:   adapter. So since S3 landed, **this entry is not what bounds the request
+#:   rate to a source**; raising it would not raise the rate. It bounds jobs in
+#:   flight, and therefore sessions and connections held.
+#:
+#:   The seven-milestone-old "1-5 s per request" this comment used to cite was
 #:   never a measurement at all and was ~20x too slow for these kinds.
 #: - **`INDEX` = 1.** CPU-bound through `fastembed`, and measured:
 #:   `.claude/rules/search-and-embeddings.md` records ~8,000-10,700 tokens/s
@@ -163,18 +184,27 @@ HEARTBEAT_FRACTION: Final = 3.0
 #:   the caller's session** -- the one documented exception on that port -- and
 #:   asks for a session carrying no unrelated pending work. Two phases at once
 #:   also write the same destination tables from two staging copies.
-#: - **`DERIVE` = 4.** ⚠️ **Not measured — and not the only one: the
-#:   `MATCH`/`WATCH_HISTORY`/`WATCH_WRITEBACK` bullet above says in as many
-#:   words that this repository has never measured a household server under
-#:   concurrent load, so four of the nine entries here are unmeasured, not
-#:   one.** The
-#:   honest statement is that it is derived from a *budget* rather than from a
-#:   throughput: derivation is pure Postgres (a JSONB read and three writes, no
-#:   network, no model), so its ceiling is what the connection pool can serve
-#:   without starving the API in the in-process lane -- four of
-#:   `Settings.db_pool_size`'s twenty. The measurement that would replace it is
-#:   derive jobs/s against 1, 2, 4 and 8 in flight on one pool; nothing in this
-#:   repository has run it.
+#: - **`DERIVE` = 4, and since 2026-08-19 this is a measurement too.** It was
+#:   chosen as a *budget* -- derivation is pure Postgres (a JSONB read and
+#:   writes through five repositories, no network, no model), so its ceiling
+#:   was taken to be what the connection pool can serve without starving the
+#:   API in the in-process lane, four of `Settings.db_pool_size`'s twenty. The
+#:   run that comment asked for -- *"derive jobs/s against 1, 2, 4 and 8 in
+#:   flight on one pool"* -- is `scripts/measure_derive_lane.py`, and it has
+#:   now been run: 200 jobs a rung against a throwaway `pgvector/pgvector:pg17`,
+#:   one pool, one session per coroutine, reproduced within 2% on a second run.
+#:
+#:       in flight   jobs/s   per-job median   marginal
+#:               1    48.7        19.8 ms      --
+#:               2    85.3        22.6 ms      +75%
+#:               4   115.7        31.8 ms      +36%
+#:               8   130.7        54.2 ms      **+13%**
+#:
+#:   **The knee is at 4.** The eighth in-flight job buys 13% more throughput
+#:   for 71% more per-job latency, so the budget and the measurement agree --
+#:   which is the outcome that discharges issue #13 for this entry, rather than
+#:   a coincidence to be read as one. ⚠️ The absolute jobs/s is a property of
+#:   that seed and this box; **the shape of the curve is what transfers.**
 KIND_CONCURRENCY: Final[Mapping[JobKind, int | None]] = MappingProxyType(
     {
         JobKind.ENRICH: None,

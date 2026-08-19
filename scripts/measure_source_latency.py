@@ -116,6 +116,7 @@ from scripts.measure_suggest_tiers import _quantile
 
 from usher.adapters.emby.adapter import ITEM_FIELDS, ITEM_TYPES, SORT_BY
 from usher.adapters.emby.session import PUBLIC_INFO_PATH, EmbySession
+from usher.adapters.http import SourceGate
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import UsherPortError
 
@@ -337,7 +338,22 @@ def build_session(
     device_id: str,
     token: str,
     user_id: str,
+    limiter: SourceGate | None = None,
 ) -> EmbySession:
+    """S1's session, plus the one seam S7 needs and could not reach.
+
+    ⚠️ **`limiter` defaults to `None`, which is what `EmbySession` already
+    does** -- it mints a disabled `SourceGate(0.0)` for a caller that passes
+    none -- so S1's own runs are byte-for-byte the same call they always were
+    and its recorded numbers are unaffected. Added rather than worked around
+    because the alternative was S7 importing `_TokenSession` past its
+    underscore, and a private name reached from a second file is how two
+    harnesses come to disagree about what a session is.
+
+    S7 passes a **real** gate for one arm deliberately: the ladder prices the
+    *server* with the gate off, and one separate arm prices the shipped
+    default, which is a different question about a different subject.
+    """
     return _TokenSession(
         client,
         credentials,
@@ -345,6 +361,7 @@ def build_session(
         device_id=device_id,
         token=token,
         user_id=user_id,
+        limiter=limiter,
     )
 
 

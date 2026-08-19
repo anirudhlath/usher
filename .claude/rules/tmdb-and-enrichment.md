@@ -1087,9 +1087,35 @@ this replaced.
 | `curate` | 1 | pool 600 renders ~12,540 prompt tokens, **56 tokens** under `max_model_len` — no room for a second generation's KV cache |
 | `sync`, `bootstrap` | 1 | a walk of 1,126,674 items; ADR-0015's retraction ceiling is per run; `bulk_load_window` commits the caller's session |
 
-**Two of the eight are bounds rather than measurements and say so in the
-source.** The measurement that would move `derive` is derive jobs/s against 1,
-2, 4 and 8 in flight on one pool; nothing here has run it.
+🔴 **This entry said *"two of the eight are bounds rather than measurements"*
+until 2026-08-19, and it was wrong twice: the table over `JobKind` has
+**nine** entries, and **four** of them were unmeasured — `match`,
+`watch_history`, `watch_writeback` and `derive`, covered by **two**
+justification bullets.** The same miscount ran the other way in
+`docs/prd/01-architecture.md` and in `services/jobs.py`, each naming a
+*different* single unmeasured number while flagging both. Three documents, one
+error, corrected together by M10's S7.
+
+✅ **All four are measurements as of 2026-08-19**, and the run this entry
+demanded — *"derive jobs/s against 1, 2, 4 and 8 in flight on one pool"* — is
+`scripts/measure_derive_lane.py`: **48.7 / 85.3 / 115.7 / 130.7 jobs/s** at
+1 / 2 / 4 / 8 with per-job median **19.8 / 22.6 / 31.8 / 54.2 ms**, so the
+eighth in-flight job buys +13% throughput for +71% latency and the knee is at
+the shipped 4. The three Emby-facing kinds were measured against the operator's
+real server and do **not** degrade at 4 (flat median, 3.89× throughput) —
+full table and the limiter caveat in `.claude/rules/emby-push-and-ingest.md`.
+
+**And W1's own shape did not transfer, which is the part worth carrying here.**
+This file records a 37% per-worker throughput loss going from one worker to
+three against TMDb, and per-worker throughput *rising* when a worker died. S7
+predicted the same shape for a household Emby and measured the opposite: four
+concurrent single-item reads cost that server nothing per request. **A
+degradation curve measured against a CDN-backed public API is not a prior for a
+machine on the same LAN** — the two differ in every term that matters (round
+trip, connection reuse, what else the box is doing), and the only thing that
+transfers is the *method*: measure per-request cost at N, never throughput
+alone, because throughput conflates "the pool got better" with "the box got
+faster".
 
 ### Head-of-line blocking is narrowed and not removed
 
