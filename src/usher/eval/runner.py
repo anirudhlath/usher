@@ -9,6 +9,7 @@ from collections.abc import Sequence
 
 from usher.eval.bars import BarSet, Judgement
 from usher.eval.ledger import ScoreRecord
+from usher.eval.metrics.ir import Ranking
 from usher.eval.metrics.ir import score as score_ir
 from usher.eval.surfaces.suggest import SurfaceRun
 from usher.eval.verdicts import Verdict
@@ -103,3 +104,29 @@ def verdict_for(records: Sequence[ScoreRecord]) -> Verdict:
     if Judgement.PENDING in judgements:
         return Verdict.PENDING
     return Verdict.UNBARRED
+
+
+def rotate_labels(rankings: Sequence[Ranking]) -> tuple[Ranking, ...]:
+    """The negative control: every query answered with the next query's hits.
+
+    **A rotation rather than a shuffle, and that is a measurement.**
+    `recall@5` over a single relevant document is order-insensitive within k,
+    so shuffling the top five leaves it *exactly* unchanged -- a control built
+    that way would pass on a green harness and on a broken one alike, which is
+    the "an eval that cannot fail ratifies the bug" failure applied to the
+    control itself.
+
+    Deterministic, so the control needs no seed and no RNG: the same input
+    always produces the same degraded run, which is what lets its expected
+    score be written down as an exact `0.0`.
+
+    A one-element input rotates onto itself and is therefore **not** degraded.
+    Callers use it over the full golden set, where that is unreachable.
+    """
+    if len(rankings) < 2:
+        return tuple(rankings)
+    ids = [ranking.ranked_ids for ranking in rankings]
+    return tuple(
+        Ranking(ranking.query_id, ids[(index + 1) % len(ids)])
+        for index, ranking in enumerate(rankings)
+    )
