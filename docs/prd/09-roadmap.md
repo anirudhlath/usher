@@ -1328,26 +1328,39 @@ suspicion.
   `(added_at DESC NULLS LAST, id DESC) WHERE title_id IS NULL` removes the sort.
   Not authorised in M9: 16.4 ms on an admin review queue is acceptable and a
   fourth migration for it is not worth the milestone.
-- **`/openapi.json` describes every problem response at `application/json`
-  while the wire sends `application/problem+json`** — measured by M9's H2 and
-  reported rather than closed, which is the disposition to keep. FastAPI renders
+- ~~**`/openapi.json` describes every problem response at `application/json`
+  while the wire sends `application/problem+json`**~~ — measured by M9's H2 and
+  reported rather than closed. FastAPI renders
   `responses={404: {"model": ProblemResponse}}` under the *route's* response
-  media type, so the document is wrong about the one header RFC 9457 makes
-  load-bearing. Spelling the media type in would fork `test_api_playback.py`'s
-  and `test_api_watch.py`'s assertions, which read `content["application/json"]`,
-  and buys a client nothing it cannot read off the `type` member — so H2's
-  conformance check asserts the response **shape** and not the media type, and
-  says so in its own docstring. The honest statement is that a generated client
-  will annotate these responses with the wrong content type until somebody takes
-  it.
-  ✅ **Both sites now say so where the fix would land** — the milestone's final
+  media type, so the document was wrong about the one header RFC 9457 makes
+  load-bearing. Spelling the media type in forks `test_api_playback.py`'s and
+  `test_api_watch.py`'s assertions, which read `content["application/json"]`,
+  and H2 judged that it "buys a client nothing it cannot read off the `type`
+  member" — so its conformance check asserted the response **shape** and not
+  the media type, and said so in its own docstring.
+  ✅ **Both sites said so where the fix would land** — the milestone's final
   review found the two assertions reading `content["application/json"]` with no
   comment naming why, so the *cost* of the fix was documented everywhere except
-  at the two places that have to change. Corrected 2026-08-12: each carries the
-  known-wrong marker and points at `tests/unit/test_api_openapi.py`. **A debt
+  at the two places that have to change. Corrected 2026-08-12: each carried the
+  known-wrong marker and pointed at `tests/unit/test_api_openapi.py`. **A debt
   recorded only in the roadmap is a debt the person editing the code does not
   see** — the same shape as the curation role sentence corrected in
   `testing-discipline.md` this same day, one subsystem over.
+  ✅ **Taken 2026-08-19 (issue #6), and the reason it was carried is the part
+  that did not hold.** *"Buys a client nothing it cannot read off the `type`
+  member"* is a claim about a client that has already decided to parse the body
+  as a problem document; a generated one decides that from the **declared media
+  type**, before it parses anything — and `~/code/usher-web` generates against
+  this document with `openapi-typescript`. Measured before: **56** responses
+  across 35 operations carried a `ProblemResponse`, every one of them declared
+  `application/json`, against a wire that answered `application/problem+json`
+  on all five vocabulary members reachable without a database. The fix is
+  `UsherAPI.openapi` in `api/app.py` — a post-pass over the generated document,
+  keyed off the `$ref` rather than off a status list, because FastAPI offers no
+  per-response media type and dropping `model=` to hand-write `content` would
+  leave `ProblemResponse` out of `components` and every ref dangling.
+  `test_api_openapi.py` enumerates rather than samples, and a second case
+  compares the declared type to the one three real routes actually send.
 
 ## Post-v1 candidates
 

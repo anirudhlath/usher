@@ -496,6 +496,38 @@ escapes only characters illegal in a URI anyway (`a b.mkv?q=1|2` →
 `a%20b.mkv?q=1%7C2`). `%` is in the safe set, so there is no double-encoding
 hazard for a URL that already carries an escape.
 
+**FastAPI has no per-response media type, so `/openapi.json` described 56
+problem responses at `application/json` while the wire sent
+`application/problem+json`.** Measured 2026-08-19 taking issue #6, against the
+whole document rather than a sample: 56 responses over 35 operations carry a
+`ProblemResponse`, and every one of them was filed under the wrong key.
+`openapi/utils.py` renders an additional response's model under
+``route_response_media_type or "application/json"`` — the *route's* own type,
+read off its `response_class` — and there is no override: adding `content` to
+the `responses=` dict **appends** an entry beside the generated one
+(`deep_dict_update` merges), so a route would declare its 404 twice, once
+truthfully. Dropping `model=` to hand-write the `$ref` is worse: with no route
+naming the model, `ProblemResponse` stops being a component and every ref
+dangles. What works is a post-pass — `UsherAPI.openapi` (`api/app.py`)
+delegates to `super()`, then moves any `application/json` body whose `$ref` is
+`ProblemResponse` onto `PROBLEM_MEDIA_TYPE`. **Key it off the `$ref`, never off
+a status list**, so a route added later is covered by the same act that adopts
+the envelope; and it must be idempotent, because `app.openapi()` caches into
+`app.openapi_schema` and the override runs again over its own output. A
+subclass rather than `app.openapi = …`, which is FastAPI's own documented
+spelling: the assignment needs a `type: ignore[method-assign]` under mypy
+strict *and* obliges the override to re-implement both the cache and the
+`_openapi_routes_version` invalidation `FastAPI.openapi` has since grown.
+
+**The debt was carried for a year on a reason that reads well and is wrong.**
+M9's H2 recorded that spelling the media type in "buys a client nothing it
+cannot read off the `type` member" — true of a client that has already decided
+to parse the body as a problem document, and a generated one decides that from
+the **declared media type**, before it parses anything. The distinction to keep:
+*what a document contains* and *what a consumer is told it contains* are
+different claims, and a conformance check that asserts the first passes on a
+document that lies about the second.
+
 **`api/dto/` names every model `…Response`, nested ones included, and that is
 load-bearing.** `tests/unit/test_api_dto.py` discovers response models by
 `name.endswith("Response")` and asserts none declares a credential-shaped field

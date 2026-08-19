@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -11,6 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from usher.api.errors import (
     http_error_as_a_problem_document,
+    problem_responses_carry_their_media_type,
     validation_error_without_the_request_body,
 )
 from usher.api.lanes import LaneSupervisor
@@ -47,6 +49,30 @@ from usher.db.base import build_engine, build_session_factory
 from usher.services.events import InMemoryEventBus
 from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
+
+
+class UsherAPI(FastAPI):
+    """`FastAPI` with one override: `/openapi.json` tells the truth about the
+    media type of a problem document.
+
+    A subclass rather than `app.openapi = …`, which is the spelling FastAPI's
+    own "Extending OpenAPI" page shows. Two reasons, the first measured:
+    `app.openapi = custom` is `error: Cannot assign to a method
+    [method-assign]` under this project's mypy settings and would need the
+    only `type: ignore` in `src/usher/api/`; and a replacement function has to
+    re-implement the caching *and* the `_openapi_routes_version` invalidation
+    `FastAPI.openapi` has since grown, which is a copy that goes silently
+    wrong the day either changes. Delegating to `super()` keeps both and costs
+    one idempotent walk of a 35-operation document per call.
+
+    **Deliberately not an eager rewrite of `app.openapi_schema` in the
+    factory.** Generating the document at build time would make every
+    `create_app()` in the suite pay for a schema no case reads, and would turn
+    a schema-generation failure into a failure to boot.
+    """
+
+    def openapi(self) -> dict[str, Any]:
+        return problem_responses_carry_their_media_type(super().openapi())
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -152,7 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await close_images()
             await engine.dispose()
 
-    app = FastAPI(
+    app = UsherAPI(
         title="Usher",
         version="0.1.0",
         description="A self-hosted media catalog backend.",
