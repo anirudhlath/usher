@@ -1167,3 +1167,58 @@ looked entirely right doing it.
   `"A Fused…"` / `"A Skeleton…"` / `"An Enriched…"` is one order in the fake
   and another in Postgres. A browse contract case that asserts on position must
   seed names distinct in their **first word**.
+
+## A batched in-place rewrite of a catalog column: `UPDATE … FROM (VALUES …)`, and the guard is the whole design (2026-08-19, issue #30)
+
+`usher genres --backfill` rewrites `titles.genres` through
+`usher.domain.genres.canonicalise_genres` over 1.27M rows.
+`PostgresTitleRepository.replace_genres` is the write, and three of this file's
+existing entries decide its shape between them:
+
+```sql
+UPDATE titles SET genres = v.genres
+FROM (VALUES (…), (…)) AS v (id, genres)
+WHERE titles.id = v.id AND titles.genres IS DISTINCT FROM v.genres
+```
+
+- **No staging table, and that is a decision rather than an omission.**
+  `usher.db.staging` exists for `COPY`-sized batches and costs transactional
+  DDL; an `UPDATE` keyed on the primary key has **no conflict target**, so none
+  of the three `ON CONFLICT` traps above apply — no partial-index predicate to
+  repeat, no `SELECT DISTINCT ON` needed, no `xmax = 0` to interpret because
+  every row is an update by construction. A `VALUES` join is the whole
+  statement.
+- **`IS DISTINCT FROM` is load-bearing and the `WHERE id =` is not.** Without
+  it every row named is rewritten: `rowcount` becomes the batch size rather
+  than the change count, so a second sweep reports work it did not do, and
+  1.15M dead row versions are produced for no state change — each of which also
+  **re-evaluates the `search_document` generated column and writes its GIN
+  index entry**, which is this table's most expensive write. Exactly
+  `_ENQUEUE`'s `AND jobs.priority < excluded.priority` argument, on a bigger
+  column. Planted: removing the clause fails
+  `test_replacing_genres_with_what_the_row_already_holds_writes_nothing` and
+  `test_a_batch_writes_only_its_changed_members` in
+  `TitleRepositoryGenreSweepContract`, on the Postgres arm and on the fake.
+- **`rowcount` needs the `CursorResult` cast**, which `bulk.py:_rowcount` and
+  `PostgresCollectionRepository.link_title` both already record: `rowcount`
+  lives on `CursorResult`, not on the `Result[Any]` that `session.execute` is
+  annotated to return.
+- **`synchronize_session=False` is required**, not tidy: a multi-row `UPDATE`
+  through the ORM otherwise tries to match the session's identity map against
+  rows it cannot resolve. Nothing above the call holds a `TitleRow` — the sweep
+  reads a two-column projection (`TitleGenres`), not an entity.
+- **The stored generated column pays the rewrite back.** `search_document` is
+  `GENERATED ALWAYS AS (…) STORED` over `usher_array_text(genres)`, so weight
+  class D is corrected *by the same statement* with no job, no second pass and
+  no fingerprint. That is the one place in this schema where a data repair is
+  free on the full-text side and costs a re-embed on the vector side, and the
+  asymmetry is the generated column earning its 4.06× insert cost back.
+
+**And the read is unfiltered on purpose.** `list_genres_page` walks *every*
+title by keyset rather than selecting the rows that look wrong. A `WHERE`
+naming the alias spellings would be a second definition of the vocabulary
+living in SQL beside the one in `usher.domain.genres` — `_FINGERPRINT_SQL`'s
+failure shape one column over — and it would also miss the 12 live titles whose
+`genres` merely contains a **duplicate** (`{Drama,Drama}`), which normalise to
+a shorter array with no alias involved. Filtering saves a tenth of a scan and
+costs a predicate nobody can keep in step.

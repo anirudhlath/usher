@@ -103,6 +103,7 @@ from usher.ports.repository.title import (
     BrowseCursorPosition,
     BrowseFacets,
     BrowseSort,
+    TitleGenres,
     TitleRepository,
 )
 from usher.ports.repository.watch_state import (
@@ -155,6 +156,7 @@ __all__ = [
     "TasteRepository",
     "TitleEmbeddingRepository",
     "TitleEmbeddingUpsert",
+    "TitleGenres",
     "TitleMatchRepository",
     "TitleNeighborRepository",
     "TitleRepository",

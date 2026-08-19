@@ -356,10 +356,42 @@ uv run usher derive             # cached payloads, titles with credits, people, 
 uv run usher derive --backfill  # walk the cache and re-derive inline; idempotent
 ```
 
+`usher genres` normalises `titles.genres` into Usher's own vocabulary
+([ADR-0039](docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)).
+The column is written by two importers that share no alphabet — IMDb's bulk
+phase writes `Sci-Fi`, TMDb's enrichment writes `Science Fiction` — and
+`usher.domain.genres` is the map between them. `/browse` expands the two at
+read time; this rewrites the column, which is what also fixes
+`search_document`'s weight class D, the embedded documents and every row
+provider that reads the raw array.
+
+**It is a command rather than a migration because the vocabulary is data.** It
+will grow, `canonicalise_genres` is idempotent, and re-running is free: the
+write is guarded by `IS DISTINCT FROM`, so a second sweep over a normalised
+catalog reports zero rows. The bare form only reads.
+
+```bash
+uv run usher genres                            # rows scanned / to rewrite / already canonical
+uv run usher genres --backfill                 # rewrite, batched; prints a resume cursor
+uv run usher genres --backfill --batch-size 5000
+uv run usher genres --backfill --limit 100000  # bounded; resume with --after <id>
+uv run usher genres --backfill --after 01a01b35-3380-77e4-909a-9588c7b1056d
+```
+
+Rewriting a genre changes segment 6 of the embedding document, so
+`_FINGERPRINT_SQL` restales exactly the affected titles and the report says how
+many. **Expect that number to be far smaller than the rewrite count**: the
+embedded population is the enriched tier and the source spellings are almost
+entirely on skeletons. Measured on a 1,272,869-title catalog: **79,913 rows
+rewritten, 304 embeddings staled.** Follow it with `usher index --backfill`,
+`usher work`, and — if you keep `title_neighbors` — `usher similar --rebuild`.
+
 **Order matters after a fresh upgrade**: `alembic upgrade head` → `usher derive
---backfill` → `usher index --backfill` → `usher work`. Indexing before deriving
-embeds every title with an empty weight class B and then re-claims all of them
-once `credit_names` is populated, which is the wasted pass twice over.
+--backfill` → `usher genres --backfill` → `usher index --backfill` → `usher
+work`. Indexing before deriving embeds every title with an empty weight class B
+and then re-claims all of them once `credit_names` is populated, which is the
+wasted pass twice over; normalising after indexing re-claims the affected
+titles a second time for the same reason.
 
 Embedding is optional and off by default. The model lives behind an extra
 (`uv sync --extra embedding`, 167 MiB, no torch) and `USHER_EMBEDDING_ENABLED`

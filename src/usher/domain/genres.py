@@ -31,22 +31,35 @@ does not *rename* them — it has no name for them at all.
    there is no canonical `Politics` for its second half to land in, so it maps
    to one label and not two.
 
-**What this module does not do.** It normalises nothing at write time. The
-column still holds whatever its two importers wrote, and this map is applied by
-the reader — `PostgresTitleRepository._browse_filters` expands a filter into
-every spelling of the concept, and `browse_facets` collapses the counts back.
-ADR-0039 records what a write-time normalisation would cost (it changes segment
-6 of `compose_document`, so `_FINGERPRINT_SQL` correctly restales every affected
-title: ~1.8 h of re-embedding plus a 3.3 h `usher similar --rebuild` on this
-catalog) and what stays split until it is paid.
+**This map is applied at both ends, and the two are not redundant.**
+`PostgresTitleRepository._browse_filters` expands a filter into every spelling
+of the concept and `browse_facets` collapses the counts back — that is the
+*reader*, and it is what makes `/browse` correct on a catalog nobody has swept.
+`GenreNormalisationService` (`usher genres --backfill`) rewrites the column
+through `canonicalise_genres` — that is the *writer*, and it is the only thing
+that reaches `search_document`'s weight class D, the embedded documents, and the
+five row providers that read the raw array. The reader stays because a fresh
+bootstrap, a partially-swept catalog and a deployment that has never run the
+command all need `/browse` to answer correctly without an operator's action.
+
+**What ADR-0039 got wrong about the writer, kept here because the shape
+recurs.** It deferred write-time normalisation at *"~1.8 h of re-embedding plus
+a 3.3 h `usher similar --rebuild`"*, which is the cost of re-embedding the
+whole embedded population. The population a genre rewrite stales is the
+intersection of "carries a source spelling" and "carries a vector", and those
+two very nearly do not overlap — the split follows the enrichment boundary and
+`_POPULATION` excludes skeletons. Measured 2026-08-19: **79,913 rows rewritten,
+304 embeddings staled** of 132,440. The deferral was priced on the wrong
+denominator.
 
 **The facet collapse sums its spellings' counts, and that is exact only while
 no title carries two spellings of one concept.** Measured zero across all nine
-alias pairs on 1,272,866 titles, and `EnrichService` cannot create one — it
+alias pairs on 1,272,866 titles; `EnrichService` cannot create one — it
 preserves a label only when the provider's vocabulary has no name for its
-concept, which is by definition a concept with a single spelling. Write-time
-normalisation is what would make a title carry both, and it is also what would
-make the collapse unnecessary. The exact spelling (`SELECT DISTINCT (id,
+concept, which is by definition a concept with a single spelling — and the
+backfill cannot either, because `canonicalise_genres` deduplicates. A
+normalised catalog has one spelling per concept by construction, so on it the
+sum is over a single key. The exact spelling (`SELECT DISTINCT (id,
 canonical)`) was measured at **1,789 ms against 199 ms** on the live catalog,
 which is why the sum is what ships.
 """

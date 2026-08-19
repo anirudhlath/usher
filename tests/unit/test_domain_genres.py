@@ -61,14 +61,40 @@ def test_an_unknown_label_is_its_own_canonical_and_its_own_only_spelling() -> No
 
 
 def test_canonicalising_a_title_s_labels_dedupes_and_keeps_first_seen_order() -> None:
-    """What the facet collapse and any future write-time normalisation both
-    need. A title carrying `Sci-Fi & Fantasy` and `Sci-Fi` names Science
-    Fiction once, not twice."""
+    """What the facet collapse and `GenreNormalisationService` both need, and
+    the dedupe is what makes the sweep idempotent: a title carrying
+    `Sci-Fi & Fantasy` and `Sci-Fi` names Science Fiction once, not twice, so
+    re-running the backfill over its own output is a no-op."""
     assert canonicalise_genres(("Sci-Fi & Fantasy", "Sci-Fi", "Drama")) == (
         "Science Fiction",
         "Fantasy",
         "Drama",
     )
+
+
+def test_canonicalising_is_idempotent_over_the_whole_vocabulary() -> None:
+    """**The property `usher genres --backfill` rests on, asserted directly
+    rather than inferred from one example.**
+
+    A backfill over 1.27M rows has to be safe to interrupt and safe to re-run,
+    and both reduce to `f(f(x)) == f(x)`. Written over *every* member of both
+    tables rather than over a chosen pair, because the way this breaks is a
+    future alias whose target is itself an alias — a two-hop map, which
+    `canonical_genres` does not perform — and one hand-picked example cannot
+    see it. `test_no_canonical_label_is_also_an_alias` guards the same hazard
+    structurally; this one guards it behaviourally, and neither implies the
+    other.
+    """
+    for label in sorted(CANONICAL_GENRES | set(GENRE_ALIASES) | {"Sword & Sandal"}):
+        once = canonicalise_genres((label,))
+        assert canonicalise_genres(once) == once, label
+
+    # And over a whole array, where the dedupe is what has to be stable: the
+    # second pass sees an input the first pass shortened.
+    messy = ("Sci-Fi & Fantasy", "Sci-Fi", "Drama", "Drama", "reality-tv")
+    once = canonicalise_genres(messy)
+    assert once == ("Science Fiction", "Fantasy", "Drama", "Reality")
+    assert canonicalise_genres(once) == once
 
 
 def test_every_alias_resolves_into_the_canonical_vocabulary() -> None:

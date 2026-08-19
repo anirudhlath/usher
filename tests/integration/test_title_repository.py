@@ -16,6 +16,7 @@ from tests.contract.title_repository_contract import (
     TitleRepositoryBrowseContract,
     TitleRepositoryCandidateContract,
     TitleRepositoryContract,
+    TitleRepositoryGenreSweepContract,
     TitleRepositoryOwnedContract,
 )
 from usher.db.models.source import MediaItemRow
@@ -1239,3 +1240,19 @@ async def test_the_written_out_order_cannot_use_the_index_that_nulls_last_can(
         "the premise for the line above: the same penalty is not on the shipped "
         "plan, so the comparison is about the sort key and not about the GUC"
     )
+
+
+class TestPostgresTitleRepositoryGenreSweep(TitleRepositoryGenreSweepContract):
+    """`list_genres_page` and `replace_genres` against real Postgres.
+
+    The half with teeth. `replace_genres` is an `UPDATE ... FROM (VALUES ...)`
+    whose `IS DISTINCT FROM` guard is what makes a re-run write zero rows, and
+    `rowcount` is what reports it -- neither is expressible against a dict,
+    which can only compare in Python and count what it decided to compare. The
+    keyset walk is the same read `usher index --backfill`'s is and fails the
+    same way on `>=`.
+    """
+
+    @pytest.fixture
+    def repo(self, session: AsyncSession) -> PostgresTitleRepository:
+        return PostgresTitleRepository(session)

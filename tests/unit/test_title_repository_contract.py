@@ -14,6 +14,7 @@ from tests.contract.title_repository_contract import (
     TitleRepositoryBrowseContract,
     TitleRepositoryCandidateContract,
     TitleRepositoryContract,
+    TitleRepositoryGenreSweepContract,
     TitleRepositoryOwnedContract,
 )
 from tests.fakes.title_repository import FakeTitleRepository, FakeWatchRow
@@ -143,3 +144,14 @@ class TestFakeTitleRepositoryBrowse(TitleRepositoryBrowseContract):
             copies.append(new_id() if episode else None)
 
         return _own
+
+
+class TestFakeTitleRepositoryGenreSweep(TitleRepositoryGenreSweepContract):
+    """`list_genres_page` and `replace_genres` against the fake. The Postgres
+    half is `tests/integration/test_title_repository.py`, and it is the one
+    that can fail on the `UPDATE ... FROM (VALUES ...)` guard and on
+    `rowcount`."""
+
+    @pytest.fixture
+    def repo(self) -> FakeTitleRepository:
+        return FakeTitleRepository()

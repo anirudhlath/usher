@@ -779,9 +779,14 @@ one, which is what makes it the enrichment boundary and nothing else.
 can express — **the set it is entitled to delete** — and a label outside it
 survives. What still gets overwritten is a label the provider *could* have said
 and did not: 13,141 of those deletions were `Drama`, which is TMDb disagreeing
-about a film and is usually right. The 53,724 titles already enriched keep
-their deletions; repairing them is a backfill that decision deliberately
-declines.
+about a film and is usually right.
+
+⚠️ **The 53,724 titles already enriched keep their deletions, and `usher genres
+--backfill` does not repair them.** That command normalises *spellings* — it
+maps `Sci-Fi` onto `Science Fiction` — and a deleted label is not a spelling,
+it is gone. Restoring one needs `title.basics.tsv.gz` re-joined to the catalog,
+which is a bootstrap-shaped operation and not a vocabulary one. **Normalisation
+is not restoration**, and this is the part of issue #30 neither change closes.
 
 **A successful enrichment now does one more thing:** after the commit, beside
 the `title.updated` publish, it enqueues exactly one `index` job for the title

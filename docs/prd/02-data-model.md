@@ -113,11 +113,17 @@ The IMDb bulk phase writes IMDb's 28 labels and `EnrichService` replaces them
 wholesale with TMDb's 19 movie or 16 television ones, so the column holds 37
 distinct labels and the two alphabets are **disjoint on every concept they both
 name**: 20,051 titles carry `Sci-Fi`, 6,223 carry `Science Fiction`, zero carry
-both (live catalog, 2026-08-19). The column is deliberately **not** normalised
-at write time — `usher.domain.genres` holds Usher's own 31-concept vocabulary
-and the *readers* map into it, because rewriting the column changes segment 6
-of `compose_document` and correctly restales every affected embedding. What the
-enrichment merge now guarantees is narrower, and is the half that was
+both (live catalog, 2026-08-19). `usher.domain.genres` holds Usher's own
+31-concept vocabulary, and it is applied at **both** ends: the readers map into
+it (`/browse`'s filter and facets), and `usher genres --backfill` rewrites the
+column through `canonicalise_genres`. **The column is therefore normalised on a
+swept catalog and open on an unswept one**, which is why the readers stay — a
+fresh bootstrap has to answer correctly before anyone runs a command. Rewriting
+the column changes segment 6 of `compose_document` and correctly restales every
+affected embedding; ADR-0039 first deferred that at ~1.8 h and the real figure
+is **79,913 rows rewritten, 304 embeddings staled**, because the source
+spellings sit almost entirely on skeletons and a skeleton has no vector. What
+the enrichment merge guarantees is narrower, and is the half that was
 destructive: a label naming a concept the provider has no word for
 (`Biography`, `Film-Noir`, `Game-Show`, `Musical`, `Short`, `Sport`, `Adult`)
 survives enrichment rather than being deleted. Measured against the real IMDb

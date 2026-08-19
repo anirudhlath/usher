@@ -1670,7 +1670,7 @@ whether 200 still clears its bar as the embedded population grows past 132k;
 and everything the issue already lists — document length, neighbourhood
 density, `m = 16` at this width.
 
-## Weight class D and segment 6 both carry two spellings of one concept
+## Weight class D and segment 6 both carried two spellings of one concept, and the deferral that left them there was priced on the wrong denominator (2026-08-19)
 
 `titles.genres` unions IMDb's vocabulary and TMDb's, and no title carries both
 spellings of any concept — 20,051 `Sci-Fi` against 6,223 `Science Fiction`,
@@ -1686,18 +1686,66 @@ of this subsystem's genre readers split:
 - **`compose_document` segment 6 of 7**, so every stored vector carries
   whichever spelling its tier had.
 
-**The reason it was left is this file's own arithmetic, not squeamishness.**
-Normalising the column changes segment 6, so `_FINGERPRINT_SQL` correctly marks
-every affected title stale and `usher index --backfill` re-embeds it —
-**~1.8 h** plus a **3.3 h** `usher similar --rebuild` on this catalog by the
-2026-08-13 run. That is the fingerprint working, and it is a bill to schedule
-alongside any other change that stales the same documents rather than pay
-twice. The enrichment-side fix that *did* ship costs nothing extra here: a
-title reaching that merge already had an `INDEX` job enqueued.
+🔴 **The arithmetic that justified leaving them was wrong, and this file
+carried it.** The figure was *"**~1.8 h** plus a **3.3 h** `usher similar
+--rebuild` on this catalog by the 2026-08-13 run"*. That is the cost of
+re-embedding **the whole embedded population**, and it is the wrong population:
+what a genre rewrite stales is the intersection of "carries a source spelling"
+and "carries a vector", and this file's own `_POPULATION` note (`enrichment_state
+<> 'skeleton'`) plus ADR-0039's "the split follows the enrichment boundary
+exactly" say those two barely overlap.
 
-Unmeasured, and sampleable with no user traffic: how many `Sci-Fi` titles
-change position in a `/search` for a science-fiction query if they carry the
-other label.
+**Re-derived 2026-08-19 with the predicate taken from `GENRE_ALIASES` rather
+than hand-listed** — *affected* spelled as `genres IS DISTINCT FROM
+canonicalise_genres(genres)`:
+
+| | count |
+|---|---|
+| titles | 1,272,869 |
+| carrying at least one genre | 1,153,968 |
+| **rewritten by the sweep** | **79,913** |
+| **…of those, embedded** | **304** |
+| total embedded | 132,440 |
+| stale under `openai:BAAI/bge-m3` before the sweep | **0** |
+
+So the re-embed is **304 documents**, seconds, and `usher genres --backfill`
+ships. `search_document` is a **stored generated column**, so weight class D is
+fixed by the same `UPDATE` with no job at all; segment 6 costs one `usher index
+--backfill` pass over 304 titles.
+
+**Two ways to get the affected set wrong, both hit while re-deriving it.** A
+hand-listed array of "non-TMDb labels" gives **158,632** — more than double —
+because Usher's vocabulary *keeps* `Biography`, `Sport`, `Musical`, `Short`,
+`Game-Show`, `Film-Noir` and `Adult` verbatim, so those rows are already
+canonical and `canonicalise_genres` leaves them alone. Only `GENRE_ALIASES`'
+six rows rewrite anything. And counting only the *movie* aliases gives **108**
+embedded instead of 304, because the three **fused television labels** —
+`Sci-Fi & Fantasy` (165), `Action & Adventure` (154), `War & Politics` (25) —
+are TMDb's own spellings and therefore exist *only* on the enriched tier, which
+is 100% embedded. **The general form: when a population is defined by a map,
+derive it from the map. A transcription of a map is a second map.**
+
+**And 12 titles are affected by no alias at all** (`{Drama,Drama}`,
+`{Action,Drama,Romance,Action,Drama,Romance}`) — `canonicalise_genres`
+deduplicates, so they normalise to a shorter array. A SQL predicate naming the
+alias spellings cannot see them, which is why the shipped sweep canonicalises
+every row in Python and filters nothing in SQL.
+
+**The fingerprint really does the staling, verified by mutation rather than
+assumed.** `tests/integration/test_genre_backfill.py::
+test_the_rewrite_stales_the_embedding_through_the_shipped_fingerprint` embeds a
+title at its own document, asserts as a **premise** that it is not stale, runs
+the backfill, and asserts `usher index --backfill` then enqueues it. The
+careless plant — deleting the genres segment from `_FINGERPRINT_SQL` alone —
+fails the *premise*, because SQL then assembles six segments against the
+composer's seven. The careful one — the segment emptied on **both** sides, so
+the two still agree — passes the premise and fails the assertion the case is
+named for. Same pair, same lesson, as
+`test_a_title_embedded_before_its_credits_landed_is_stale_again`.
+
+Still unmeasured, and sampleable with no user traffic: how many `Sci-Fi` titles
+change position in a `/search` for a science-fiction query now that they carry
+the other label.
 
 ## RRF's absent-lane `COALESCE` costs the typed title its own top row, and the bar written to refute it CONFIRMED it (2026-08-19, issue #21)
 

@@ -41,7 +41,12 @@ from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
-from usher.ports.repository import BrowseCursorPosition, BrowseSort, TitleRepository
+from usher.ports.repository import (
+    BrowseCursorPosition,
+    BrowseSort,
+    TitleGenres,
+    TitleRepository,
+)
 from usher.ports.search import FilterNotSupported
 
 
@@ -1792,3 +1797,152 @@ class TitleRepositoryBrowseContract:
         facets = await repo.browse_facets(year=1899)
 
         assert dict(facets.years) == {1998: 1, 1999: 1, 1899: 0}
+
+
+class TitleRepositoryGenreSweepContract:
+    """`list_genres_page` and `replace_genres` — the narrow projection the
+    write-time genre backfill walks and the batched write it lands.
+
+    **Separate from `TitleRepositoryContract` for the reason the browse and
+    owned mixins are separate**: these two methods exist for one command
+    (`usher genres --backfill`) and are the only pair on this port that reads
+    a projection rather than an entity. Grouping them keeps that visible.
+
+    **What the wrong implementations look like, and all of them return rows.**
+
+    - **A page walk that re-asks its own predicate.** A sweep resuming on
+      "what is still unnormalised" cannot terminate against a row the
+      predicate will not clear; this port therefore pages over *every* title
+      by id and lets the caller decide what changed.
+    - **`>=` instead of `>` on the cursor.** One title normalised twice per
+      page break — free, because the write is idempotent, and therefore
+      invisible to any case whose pages do not abut.
+    - **A write with no `IS DISTINCT FROM` guard.** Every row in the batch is
+      rewritten, the rowcount is the batch size rather than the change count,
+      and 1.15M dead row versions are produced by a re-run that changed
+      nothing. The report then says the backfill did work it did not do.
+    - **A write that takes the whole sweep in one transaction.** Correct, and
+      it holds row locks over 1.27M rows and loses everything on an interrupt.
+      Not expressible as a case here; it is why `batch_size` is an argument.
+    """
+
+    @pytest.fixture
+    def repo(self) -> TitleRepository:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @staticmethod
+    def _titled(name: str, *genres: str) -> Title:
+        return Title(
+            kind=TitleKind.MOVIE,
+            name=name,
+            sort_name=f"sweep {name.lower()}",
+            genres=genres,
+            enrichment_state=EnrichmentState.ENRICHED,
+        )
+
+    async def test_the_page_walk_returns_every_title_once_in_id_order(
+        self, repo: TitleRepository
+    ) -> None:
+        """The whole population, ordered, with no row served twice — asserted
+        as a walk rather than as one page, because `>=` and `>` differ only at
+        a boundary two abutting pages have and one page does not."""
+        added = [self._titled(f"Title {index}", "Drama") for index in range(5)]
+        for title in added:
+            await repo.add(title)
+
+        seen: list[uuid.UUID] = []
+        after: uuid.UUID | None = None
+        while True:
+            page = await repo.list_genres_page(limit=2, after=after)
+            if not page:
+                break
+            seen.extend(row.id for row in page)
+            after = page[-1].id
+
+        assert seen == sorted(title.id for title in added)
+
+    async def test_the_page_carries_the_labels_and_nothing_else(
+        self, repo: TitleRepository
+    ) -> None:
+        """A projection, not an entity: the sweep reads 1.27M rows and has no
+        use for 33 columns of each."""
+        title = self._titled("The Quiet Vacuum", "Sci-Fi", "Drama")
+        await repo.add(title)
+
+        page = await repo.list_genres_page(limit=10)
+
+        assert [(row.id, row.genres) for row in page] == [(title.id, ("Sci-Fi", "Drama"))]
+
+    async def test_a_title_with_no_genres_is_still_in_the_walk(self, repo: TitleRepository) -> None:
+        """**The population is every title, not every title with a genre.** A
+        read filtered on `cardinality(genres) > 0` would be a second, silent
+        definition of "affected" living in SQL, next to the one in
+        `usher.domain.genres` — the `_FINGERPRINT_SQL` failure shape, one
+        column over."""
+        bare = self._titled("Untagged")
+        await repo.add(bare)
+
+        page = await repo.list_genres_page(limit=10)
+
+        assert [(row.id, row.genres) for row in page] == [(bare.id, ())]
+
+    async def test_replacing_genres_writes_the_rows_that_differ(
+        self, repo: TitleRepository
+    ) -> None:
+        title = self._titled("The Quiet Vacuum", "Sci-Fi")
+        await repo.add(title)
+
+        written = await repo.replace_genres([TitleGenres(id=title.id, genres=("Science Fiction",))])
+
+        assert written == 1
+        stored = await repo.get(title.id)
+        assert stored is not None
+        assert stored.genres == ("Science Fiction",)
+
+    async def test_replacing_genres_with_what_the_row_already_holds_writes_nothing(
+        self, repo: TitleRepository
+    ) -> None:
+        """**The idempotence guard, in the statement rather than only in the
+        caller.** A re-run over a normalised catalog must be observably free,
+        and `rowcount` is what an operator reads to believe it."""
+        title = self._titled("The Quiet Vacuum", "Science Fiction")
+        await repo.add(title)
+
+        written = await repo.replace_genres([TitleGenres(id=title.id, genres=("Science Fiction",))])
+
+        assert written == 0
+
+    async def test_a_batch_writes_only_its_changed_members(self, repo: TitleRepository) -> None:
+        """The count is per row, not per batch — a batch of ten carrying one
+        change reports one."""
+        changed = self._titled("Changed", "Sci-Fi")
+        same = self._titled("Same", "Drama")
+        await repo.add(changed)
+        await repo.add(same)
+
+        written = await repo.replace_genres(
+            [
+                TitleGenres(id=changed.id, genres=("Science Fiction",)),
+                TitleGenres(id=same.id, genres=("Drama",)),
+            ]
+        )
+
+        assert written == 1
+        still = await repo.get(same.id)
+        assert still is not None
+        assert still.genres == ("Drama",)
+
+    async def test_an_empty_batch_writes_nothing_and_asks_nothing(
+        self, repo: TitleRepository
+    ) -> None:
+        """A page that changed nothing must not reach the database at all —
+        an `UPDATE ... FROM (VALUES)` with no rows is a syntax error, so this
+        is a real refusal rather than a tidiness case."""
+        assert await repo.replace_genres([]) == 0
+
+    async def test_replacing_genres_for_a_title_that_is_gone_changes_nothing(
+        self, repo: TitleRepository
+    ) -> None:
+        """`raw_payloads` outlives `titles` and so does a page read a moment
+        ago. An id naming no row is absent from the count, never an error."""
+        assert await repo.replace_genres([TitleGenres(id=new_id(), genres=("Drama",))]) == 0

@@ -19,6 +19,7 @@ from usher.ports.repository import (
     BrowseCursorPosition,
     BrowseFacets,
     BrowseSort,
+    TitleGenres,
     TitleRepository,
 )
 
@@ -564,3 +565,33 @@ class FakeTitleRepository(TitleRepository):
         for title in self._titles.values():
             counts[title.enrichment_state] += 1
         return counts
+
+    async def list_genres_page(
+        self, *, limit: int = 1000, after: uuid.UUID | None = None
+    ) -> list[TitleGenres]:
+        # `ORDER BY id` explicitly, because a dict preserves insertion order
+        # and the real read preserves id order -- and a sweep asserted against
+        # insertion order here would be relying on something Postgres never
+        # said. Same divergence `list_by_ids` documents, in the direction that
+        # matters for a keyset cursor.
+        ordered = sorted(self._titles.values(), key=lambda title: title.id)
+        return [
+            TitleGenres(id=title.id, genres=title.genres)
+            for title in ordered
+            if after is None or title.id > after
+        ][:limit]
+
+    async def replace_genres(self, rows: Sequence[TitleGenres]) -> int:
+        # The real statement's `IS DISTINCT FROM` guard, in Python, so the
+        # contract case about a re-run writing zero rows means the same thing
+        # on both arms. `updated_at` is re-stamped for `update()`'s reason:
+        # `titles` carries a `set_updated_at` trigger and every real write
+        # moves the column.
+        written = 0
+        for row in rows:
+            existing = self._titles.get(row.id)
+            if existing is None or existing.genres == row.genres:
+                continue
+            self._titles[row.id] = existing.evolve(genres=row.genres, updated_at=datetime.now(UTC))
+            written += 1
+        return written

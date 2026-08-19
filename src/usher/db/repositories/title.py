@@ -65,19 +65,24 @@ autoflush fails.
 
 import uuid
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import (
     ColumnElement,
+    CursorResult,
     Row,
     Text,
+    Uuid,
     and_,
+    column,
     exists,
     func,
     literal,
     nulls_last,
     or_,
     select,
+    update,
+    values,
 )
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
@@ -98,6 +103,7 @@ from usher.ports.repository import (
     BrowseCursorPosition,
     BrowseFacets,
     BrowseSort,
+    TitleGenres,
     TitleRepository,
 )
 
@@ -255,8 +261,15 @@ def _canonical_facet(rows: Sequence[Row[tuple[str, int]]]) -> dict[str, int]:
     FROM (SELECT DISTINCT id, canon ...)` is correct without the premise and
     ran at **1,789 ms** against this query's **199 ms** on the live catalog --
     against a facet block whose B7 bar (p95 <= 200 ms) is already missed at
-    330.81 ms. ADR-0039 records write-time normalisation as what removes both
-    the premise and the collapse.
+    330.81 ms.
+
+    **`usher genres --backfill` removes the need for the collapse without
+    removing the collapse**, and the asymmetry is deliberate. On a normalised
+    catalog every concept has one spelling, so this sum is over a single key
+    and the premise is true by construction rather than by measurement. It
+    stays because a fresh bootstrap, a partially-swept catalog and a deployment
+    that has never run the command all reach this function, and a facet that is
+    correct only after an operator's action is not correct.
 
     A fused label counting under two concepts is not overcounting: `Sci-Fi &
     Fantasy` says two things and is counted under both, which is exactly what
@@ -851,3 +864,69 @@ class PostgresTitleRepository(TitleRepository):
         counts = dict.fromkeys(EnrichmentState, 0)
         counts.update({EnrichmentState(state): count for state, count in result.all()})
         return counts
+
+    async def list_genres_page(
+        self, *, limit: int = 1000, after: uuid.UUID | None = None
+    ) -> list[TitleGenres]:
+        # A two-column projection off `pk_titles`, so the whole walk is an
+        # index scan handing back `uuid` + `text[]` and nothing else. No
+        # `_WITHOUT_DERIVED_COLUMNS` and no `_to_domain`: this is not an
+        # entity read, which is the point of `TitleGenres` existing.
+        statement = select(TitleRow.id, TitleRow.genres).order_by(TitleRow.id).limit(limit)
+        if after is not None:
+            statement = statement.where(TitleRow.id > after)
+        with self._session.no_autoflush:  # see get()'s comment
+            result = await self._session.execute(statement)
+        # `ARRAY(Text)` always reads back as a `list`, never a tuple -- the
+        # module docstring's note, and the reason `_to_row` emits lists. The
+        # tuple is built here so a caller comparing against
+        # `canonicalise_genres`' output compares values rather than container
+        # types.
+        return [TitleGenres(id=row.id, genres=tuple(row.genres)) for row in result.all()]
+
+    async def replace_genres(self, rows: Sequence[TitleGenres]) -> int:
+        # **No staging table, and that is a decision rather than an
+        # omission.** `usher.db.staging` exists for `COPY`-sized batches and
+        # costs DDL inside the transaction; this write is an `UPDATE` keyed
+        # on the primary key, so there is no conflict target, no `ON
+        # CONFLICT` predicate to repeat, and none of the three traps
+        # `db/repositories/bulk.py` is built around. A `VALUES` join is the
+        # whole statement.
+        #
+        # **`IS DISTINCT FROM` is the load-bearing clause**, not the `WHERE
+        # id =`. Without it every row named is rewritten: `rowcount` becomes
+        # the batch size, a second sweep over a normalised catalog reports
+        # work it did not do, and 1.15M dead row versions are produced --
+        # each of which also re-evaluates the `search_document` generated
+        # column and its GIN index -- for no state change at all. Same
+        # argument, same shape, as `_ENQUEUE`'s `AND jobs.priority <
+        # excluded.priority`.
+        #
+        # An empty batch returns before touching the session: `UPDATE ...
+        # FROM (VALUES)` with no rows is a syntax error rather than a no-op.
+        if not rows:
+            return 0
+        source = values(
+            column("id", Uuid),
+            column("genres", PG_ARRAY(Text)),
+            name="new_genres",
+        ).data([(row.id, list(row.genres)) for row in rows])
+        with self._session.no_autoflush:  # see get()'s comment
+            result = await self._session.execute(
+                update(TitleRow)
+                .where(TitleRow.id == source.c.id)
+                .where(TitleRow.genres.is_distinct_from(source.c.genres))
+                .values(genres=source.c.genres)
+                # The ORM would otherwise try to synchronise the session's
+                # identity map against a multi-row UPDATE it cannot match
+                # rows for. Nothing above this call holds a `TitleRow` for
+                # these ids -- the sweep reads a projection.
+                .execution_options(synchronize_session=False)
+            )
+        # `rowcount` is what the `WHERE` matched, and `IS DISTINCT FROM` is
+        # *in* the `WHERE` -- so this is rows **changed**, never rows touched.
+        # The cast is what `bulk.py:_rowcount` and
+        # `PostgresCollectionRepository.link_title` both record: `rowcount`
+        # lives on `CursorResult`, not on the `Result[Any]` that
+        # `session.execute` is annotated to return.
+        return cast(CursorResult[Any], result).rowcount

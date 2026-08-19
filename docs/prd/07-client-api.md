@@ -179,6 +179,14 @@ be added if a client turns out to need flexible field selection.
 > replayed under the other is still `400 invalid_cursor` — a case no client
 > taking its labels from `facets` can reach.
 >
+> ✅ **On a catalog swept by `usher genres --backfill` the two spellings stop
+> existing** ([ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md)'s
+> Amendment). Nothing in this contract changes: the filter still expands a label
+> into every spelling of its concepts, because an unswept deployment is the
+> normal state of a fresh install and this endpoint has to be correct there.
+> What changes is reachability — after a sweep only a client hand-typing
+> `Sci-Fi` can produce a mismatched cursor, since no facet offers it.
+>
 > ⚠️ **A browse page is itself over budget and this document does not yet
 > promise otherwise.** The same run put a predicated page at **139.92 ms p95**
 > at the median-selectivity genre against a 50 ms bar, and the unfiltered page

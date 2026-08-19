@@ -74,6 +74,7 @@ from usher.services.bootstrap import (
 )
 from usher.services.curation import CurationReport
 from usher.services.curation_validate import DropReason
+from usher.services.genres import GenreNormalisationService
 from usher.services.home import ComposeReport, HomeService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
@@ -750,6 +751,77 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
         # after a worker pass rather than before it.
         await gauges.refresh(pipeline.embeddings, pipeline.neighbors, model)
         print(f"{seen} stale titles swept, {written} index jobs written")
+
+
+async def _genres(
+    settings: Settings,
+    *,
+    backfill: bool,
+    batch_size: int,
+    limit: int,
+    after: uuid.UUID | None,
+) -> None:
+    """Report how much of `titles.genres` is written in a source's spelling,
+    or rewrite it into Usher's own vocabulary.
+
+    **Its own subcommand rather than a flag on `index` or `derive`, and the
+    two rejections are the argument.** `usher index` is about
+    `title_embeddings` — its `--backfill` enqueues jobs for a worker that owns
+    a model, and folding a `titles` rewrite into it would make the command that
+    reports search freshness also a writer of the catalog. `usher derive`
+    re-derives people, credits, collections and artwork *from cached TMDb
+    payloads*: it needs a `MetadataProvider` to exist and declines to run
+    without one, reads `raw_payloads`, and writes four other tables. This
+    reads no payload, needs no provider and no model, and writes one column.
+    Three commands, three artefacts —
+    [ADR-0026](../../docs/prd/decisions/0026-the-cli-boundary-names-families.md)'s
+    family rule applied to what a command *is about* rather than to what it
+    happens to be near.
+
+    **The bare form only reads**, which is the bargain `index` and `derive`
+    already take, so it is safe on a production box while diagnosing
+    something. It is a full page-walk rather than a `count(*)` because the
+    only definition of "this row needs rewriting" is `canonicalise_genres`,
+    and a `WHERE` clause naming the alias spellings would be a second one
+    living in SQL. See `TitleRepository.list_genres_page`.
+
+    **`--after` is what makes an interrupt cheap rather than merely safe.**
+    Re-running from the start is already correct — the map is idempotent and
+    the write is guarded by `IS DISTINCT FROM`, so an already-normalised
+    prefix costs one index probe per row and writes nothing — but on 1.27M
+    rows that is a scan an operator need not repeat, so every run prints the
+    cursor to resume from.
+    """
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        service = GenreNormalisationService(
+            titles=pipeline.titles,
+            embeddings=pipeline.embeddings,
+            commit=session.commit,
+            model_name=settings.embedding_model,
+        )
+        report = await service.normalise(
+            batch_size=batch_size, limit=limit, after=after, write=backfill
+        )
+    print(f"rows scanned: {report.rows_scanned:,}")
+    if not backfill:
+        # Named for what they are on a run that wrote nothing. "rows
+        # rewritten: 4" printed by a command that did not rewrite anything is
+        # the report reading as the thing it declined to do.
+        print(f"rows to rewrite: {report.rows_rewritten:,}")
+        print(f"rows already canonical: {report.rows_unchanged:,}")
+        return
+    print(f"rows rewritten: {report.rows_rewritten:,}")
+    print(f"rows unchanged: {report.rows_unchanged:,}")
+    # **Expect this to be far smaller than the rewrite count, and that is the
+    # finding rather than a defect**: the embedded population is the enriched
+    # tier and the source spellings are almost entirely on skeletons. Measured
+    # on the live catalog 2026-08-19, 79,913 rows move and 304 embeddings go
+    # stale. A skeleton whose genre moved is not stale because it was never
+    # embedded, not because the fingerprint missed it.
+    print(f"embeddings staled: {report.embeddings_staled:,}")
+    if report.last_id is not None:
+        print(f"resume after: {report.last_id}")
 
 
 def _filters_from(args: argparse.Namespace) -> SearchFilters:
@@ -1713,6 +1785,23 @@ def build_parser() -> argparse.ArgumentParser:
     # flight. A number to keep in mind, not a measured optimum.
     derive.add_argument("--page-size", type=int, default=500)
 
+    genres = sub.add_parser(
+        "genres", help="report or normalise the genre vocabulary in titles.genres"
+    )
+    genres.add_argument(
+        "--backfill",
+        action="store_true",
+        help="rewrite titles.genres into Usher's vocabulary (the bare form only reads)",
+    )
+    # **An argument rather than a constant**, which is design constraint 3:
+    # the right batch is a property of the deployment's `work_mem`, its WAL
+    # and how long its operator is willing to hold a transaction, none of
+    # which this file knows. 1000 for `index --backfill`'s reason -- a page
+    # here carries a uuid and a short `text[]`, not a JSONB payload.
+    genres.add_argument("--batch-size", type=int, default=1000, help="rows per transaction")
+    genres.add_argument("--limit", type=int, default=0, help="stop after N titles; 0 drains")
+    genres.add_argument("--after", help="resume from a title id a previous run printed")
+
     search = sub.add_parser("search", help="search the catalog")
     search.add_argument("query", help="what to search for")
     # `SearchMode`'s values, taken from the enum rather than retyped: a
@@ -2000,6 +2089,16 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
     elif args.command == "derive":
         asyncio.run(
             _derive(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)
+        )
+    elif args.command == "genres":
+        asyncio.run(
+            _genres(
+                settings,
+                backfill=args.backfill,
+                batch_size=args.batch_size,
+                limit=args.limit,
+                after=_as_uuid(args.after, "title id") if args.after else None,
+            )
         )
     elif args.command == "search":
         asyncio.run(
