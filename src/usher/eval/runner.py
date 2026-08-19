@@ -71,7 +71,9 @@ def score_surface(run: SurfaceRun, *, tier: str, bars: BarSet) -> tuple[ScoreRec
 def _record(
     bars: BarSet, tier: str, metric: str, stratum: str, value: float, observations: int
 ) -> ScoreRecord:
-    bar = bars.find(surface="suggest", tier=tier, metric=metric, stratum=stratum)
+    bar, judgement = bars.judge_with_bar(
+        surface="suggest", tier=tier, metric=metric, stratum=stratum, value=value
+    )
     return ScoreRecord(
         surface="suggest",
         tier=tier,
@@ -79,9 +81,7 @@ def _record(
         stratum=stratum,
         value=float(value),
         observations=observations,
-        judgement=bars.judge(
-            surface="suggest", tier=tier, metric=metric, stratum=stratum, value=value
-        ),
+        judgement=judgement,
         bar_kind=None if bar is None else bar.kind,
         bar_low=None if bar is None else bar.low,
         bar_high=None if bar is None else bar.high,
