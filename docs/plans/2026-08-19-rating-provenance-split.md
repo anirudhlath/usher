@@ -677,8 +677,11 @@ line 248, replace `Title.community_rating` with `Title.imdb_average_rating`.
 
 - [ ] **Step 5: Retarget the staging table and the UPDATE**
 
-In `src/usher/db/repositories/bulk.py`, replace the body of `apply_ratings`
-(lines 621-647) with:
+In `src/usher/db/repositories/bulk.py`, replace the whole of `apply_ratings`
+(find it by name — Task 1 moved the line numbers, and after that task its
+staging table still spells `community_rating`/`vote_count` while its `UPDATE`
+now targets `tmdb_vote_average`/`tmdb_vote_count`, which is the dual-write bug
+made legible rather than fixed) with:
 
 ```python
     async def apply_ratings(self, rows: Sequence[ImdbRating]) -> int:
@@ -1056,7 +1059,20 @@ git log -1 --pretty='%(trailers)'   # must print nothing
 
 - [ ] **Step 1: Change `_ELIGIBLE`**
 
-Replace the predicate at `src/usher/eval/goldens/suggest.py:91`:
+⚠️ **Corrected after Task 1.** This plan was written when the predicate read
+`t.vote_count >= 500`. Task 1's rename reached `_ELIGIBLE` — which its own file
+list did not anticipate — so the text you are replacing now reads
+`t.tmdb_vote_count >= 500`. That intermediate state is *wrong in a new way*: it
+anchors the frame on the column TMDb enrichment overwrites, so the frame moves
+with every crawl. This step is what makes it right.
+
+In `src/usher/eval/goldens/suggest.py`, replace:
+
+```python
+    WHERE t.kind = 'movie' AND t.tmdb_vote_count >= 500
+```
+
+with:
 
 ```python
     WHERE t.kind = 'movie' AND t.imdb_num_votes >= 500
