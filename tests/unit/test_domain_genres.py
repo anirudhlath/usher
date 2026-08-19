@@ -85,3 +85,42 @@ def test_no_canonical_label_is_also_an_alias() -> None:
     """A label on both sides of the map is a two-hop resolution nothing here
     performs — `canonical_genres` reads the alias table exactly once."""
     assert not CANONICAL_GENRES & set(GENRE_ALIASES)
+
+
+def test_a_hand_typed_label_resolves_regardless_of_case() -> None:
+    """`?genre=` is a URL an operator edits by hand and a bookmark they keep.
+
+    The alias table is written in the sources' own casing, so before this the
+    lookup was exact: `Sci-Fi` expanded to both spellings and `sci-fi` matched
+    the `@>` containment literally and returned **nothing** -- an empty page
+    with no way to tell "no such genre" from "no titles". The vocabulary
+    exists so a client need not know a source's spelling; requiring its
+    capitalisation gives that back with the other hand.
+    """
+    assert canonical_genres("sci-fi") == canonical_genres("Sci-Fi")
+    assert canonical_genres("SCIENCE FICTION") == ("Science Fiction",)
+    assert genre_spellings("science fiction") == genre_spellings("Science Fiction")
+    assert genre_spellings("sci-fi & fantasy") == genre_spellings("Sci-Fi & Fantasy")
+
+
+def test_folding_does_not_invent_a_match_for_a_label_outside_the_vocabulary() -> None:
+    """The open-column invariant survives the fold, and this is the case that
+    would catch a fold applied too early.
+
+    An unmapped label must stay **byte-identical** to what the client sent --
+    a third source's genre, or a TMDb label minted after this table was
+    written, still filters exactly as `@>` always did. Folding it to lower
+    case would silently stop matching the column it is checked against.
+    """
+    assert canonical_genres("Sword & Sandal") == ("Sword & Sandal",)
+    assert canonical_genres("sword & sandal") == ("sword & sandal",)
+    assert genre_spellings("SWORD & SANDAL") == ("SWORD & SANDAL",)
+
+
+def test_no_two_labels_differ_only_by_case() -> None:
+    """`_FOLDED` is keyed on `casefold()`, so two labels differing only in
+    capitalisation would collapse and one would silently shadow the other.
+    The vocabulary is small enough to assert this rather than hope for it."""
+    labels = [*GENRE_ALIASES, *CANONICAL_GENRES]
+    folded = [label.casefold() for label in labels]
+    assert len(set(folded)) == len(labels), "two labels differ only by case"
