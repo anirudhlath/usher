@@ -1081,6 +1081,14 @@ honest sentence is **34 instruments Usher declares plus one it inherits,
 against 35 documented rows**, and PRD 10's preamble now carries it so the next
 reader counts the right thing.
 
+⚠️ **The count moved on 2026-08-18: M10's S2 added `usher.source.throttle.wait`
+(the outbound rate gate's own series, `usher.adapters.http`), so it is now
+**35 declared plus one inherited against 36 rows** — `assert len(catalogue) ==
+36` and `35 == 35` in `test_telemetry_metric_names.py`. The *mechanism* above is
+unchanged; only the two numbers moved, and both live-assertion sites (the census
+test and PRD 10's preamble) were updated in S2's commit. The "34 and 35" prose
+here is the reading as of 2026-08-14 and is left dated rather than rewritten.
+
 **The scan has a trap that manufactures plausible missing metrics, and the
 filter is the factory name — never the prefix.** Re-measured 2026-08-14 at
 `fe4becd`: a naive walk over `src/usher/` for calls whose attribute name
