@@ -7,7 +7,16 @@ from ([03](../03-sources-and-sync.md), [10](../10-telemetry-and-dashboards.md)).
 **Amended 2026-08-18 by M10's S3**: §4 was written as known-provisional and is
 now the shipped design (one gate per source per process, owned by the
 composition root), and §2's *"the gate does not key on `source.id` at all"* is
-corrected in place.
+corrected in place. **Amended again the same day by S3's review**, which found
+that "in place" had reached only the *second* of the two instances: §2's
+opening sentence still described the superseded per-`EmbySession` gate. Both
+are corrected now, and §2 says what the miss was.
+
+**Line references in this document are measured at `8df11af`** unless the
+sentence carrying one says otherwise. They are given because the code they
+point at is the evidence; they are dated because S3 moved
+`src/usher/composition.py` by ~60 lines and every figure taken before it is
+now short by that much.
 
 ## Context
 
@@ -58,9 +67,11 @@ limiter that still slept is one an operator cannot turn off.
 
 ### 2. Keyed per source; the *value* is one setting, and why
 
-The gate is constructed on each `EmbySession` (keyed on the source *name* so
-its metric series is per source; §4 covers where the gate itself lives and why
-that placement is provisional). But the **rate** is one setting,
+The gate is owned by `SourceGateRegistry` at the composition root and handed
+into every adapter for a source — **keyed by `source.id`** and only *labelled*
+by `source.name`, which is what makes its metric series per source (§4 is where
+the gate lives, and since S3 that placement is the shipped design rather than a
+provisional one). But the **rate** is one setting,
 `USHER_SOURCE_REQUESTS_PER_SECOND`, not a per-source column.
 
 Issue #19 asks whether the ceiling belongs per source — *"a self-hosted server
@@ -72,7 +83,8 @@ created_at, updated_at — ten fields, none a rate), and adding one is DDL this
 phase's data model does not open. Per-source *values* are a post-v1 candidate
 with the column named, not left to be rediscovered. Addressing a source by
 `source.id` is M9's **W1** — the worker's `SourceRegistry`
-(`src/usher/composition.py:1631,1668`) — **not** M9's S3, which is the TMDb
+(`src/usher/composition.py:1692,1729` at `8df11af`; `:1631,1668` when S2 wrote
+this, before S3 added ~60 lines above them) — **not** M9's S3, which is the TMDb
 priority-tier enrichment run (130,334 requests,
 `.claude/rules/tmdb-and-enrichment.md`) and settled nothing about source
 addressing. ⚠️ **Amended 2026-08-18 by S3, and the sentence that stood here is corrected
@@ -85,6 +97,18 @@ match the existing `usher.source.request.duration` label rather than minting a
 second per-source identity in telemetry. A rename therefore keeps the gate and
 changes the series. What is unchanged is this section's actual decision: the
 **value** is one setting and not a per-source column.
+
+🔴 **And the amendment above missed one, which is the finding worth keeping.**
+The superseded claim appeared **twice** in this section — once in the opening
+sentence and once in the paragraph the ⚠️ marks — and S3 corrected the second
+while leaving the first, so for one commit this section opened by describing
+the per-`EmbySession` gate and closed by saying that description was false. A
+reader stops at the first. That is verbatim the shape
+`.claude/rules/prd-maintenance.md` and this repository's own records already
+name: *a correction filed below the claim it corrects is not a correction, it
+is a second claim*, and **amending a document means grepping it for the claim
+being amended** rather than fixing the instance you happened to be reading.
+Corrected in both places 2026-08-18 by S3's review.
 
 The setting is named `source_*` and **not** `emby_*` deliberately — `config.py`
 is not an adapter, and a setting named for one media server would be the first
@@ -167,7 +191,18 @@ composition root** and handed *into* `composition.adapter_factory`:
 | the server process | `create_app`'s lifespan, on `app.state.source_gates` | the push lane and the worker lane, through the one `UnitOfWork` the lifespan hands `LaneSupervisor`; every request, through `api/deps.get_source_gates` |
 | `usher work` | `unit_of_work`, once for the daemon | every job scope |
 | `usher sync` | `build_pipeline`, once for the command | the item walk and the watch lane, for every source |
-| `usher lanes` | `unit_of_work`, once for the process | both lanes |
+| bare `usher push` (no `--probe`) | `unit_of_work`, once for the process — `cli._run_lanes` | both lanes |
+
+⚠️ **That last row said `usher lanes` until 2026-08-18, and there is no such
+command.** The *root* is real — `cli._run_lanes` runs exactly the lanes
+`create_app` would, with no HTTP server — but it is reached by typing
+`usher push` with no `--probe`, and `usher --help`'s subcommands are `serve`,
+`bootstrap`, `bootstrap-status`, `sync`, `sync-status`, `unmatched`, `work`,
+`index`, `derive`, `search`, `suggest`, `similar`, `home`, `curate`, `push`.
+Naming a root after a command an operator cannot type is the thing `CLAUDE.md`
+means by *"do not invent commands for tooling that does not exist yet"*: it
+reads as a documented entry point and sends the next reader to `--help` for
+nothing.
 
 So **one source has one gate per process**, however many pipelines, lanes,
 adapters or in-flight requests exist. `adapter_factory(settings, gates)` takes
@@ -206,7 +241,16 @@ the configured rate for every source after the first, so a case carrying only
 the first would ratify it.
 `test_every_composition_root_that_dials_a_source_reaches_one_gate_per_source`
 drives all four roots in the table above, the server's through a real
-`create_app` lifespan, and
+`create_app` lifespan — and its **request** arm through a real request, on a
+probe route that resolves `api/deps.get_source_adapter_factory` off the app's
+own dependency graph. That last clause is a correction: as S3 shipped, the arm
+called `composition.adapter_factory(settings, app.state.source_gates)` itself,
+which is that dependency's body re-derived, and a `get_source_adapter_factory`
+minting a fresh registry per request — the defect this ADR is about — passed
+the entire suite.
+`test_a_request_without_the_lifespan_is_refused_rather_than_quietly_ungated`
+covers the other arm, `get_source_gates`' `RuntimeError`, which no test had
+executed at all. And
 `tests/unit/test_adapters_emby_session.py::test_every_send_passes_the_gate_including_the_authenticating_one`
 counts gate acquisitions against sends so that `_authenticate_locked` — the one
 send not reached from a public method's own body — cannot slip past.
@@ -218,7 +262,8 @@ The gate was constructed **inside each `EmbySession`**, and every
 fresh `_MinInterval`. So it was **per adapter instance, not per process.** The
 measured consequence: the push lane (`src/usher/api/lanes.py:179`,
 `_open_adapters`) and the worker (`SourceRegistry._adapters`,
-`src/usher/composition.py:1631`) keep **separate** adapter caches, and
+`src/usher/composition.py:1692` at `8df11af`, `:1631` when this was measured)
+keep **separate** adapter caches, and
 `create_app` runs **both lanes in one process** (both settings-gated, both
 default on). So a single server process held **≥2 gates for the same source**,
 each pacing independently — a source given a 0.4 rps gate on each of two lanes

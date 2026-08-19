@@ -189,6 +189,9 @@ class EmbySession:
         # `SourceGateRegistry` (`usher.adapters.http`) owns it now, keyed by
         # `source.id` at the composition root, so every adapter for one source
         # shares one gate however many pipelines exist (M10 S3; ADR-0039 §4).
+        # This module is one row of the closed outbound table in
+        # `tests/unit/test_outbound_call_sites.py`, which asserts that the row
+        # and this paragraph do not outlive one another.
         #
         # `None` is an unthrottled session, which is what a test that builds one
         # directly wants -- and a session built without a registry has nothing

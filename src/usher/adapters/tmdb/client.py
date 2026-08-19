@@ -7,7 +7,11 @@ number and no `Retry-After` guarantee. So this client throttles itself with a
 token bucket rather than discovering the ceiling by hitting it, and treats a
 `Retry-After` header as a hint that may not arrive
 (`usher.adapters.http.retry_after_seconds`, shared with the Emby adapter).
-The clock is injected, so the throttle is testable without sleeping.
+The clock is injected, so the throttle is testable without sleeping. This
+module is one row of the closed outbound table in
+`tests/unit/test_outbound_call_sites.py` — which also owns
+`tmdb/provider.py`'s six call sites, because they all go out through the one
+client built here and therefore through this bucket.
 
 **Two authentication forms, and the choice is a credential-exposure
 decision rather than a preference.** TMDb v3 accepts either an `api_key`

@@ -25,11 +25,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
+from fastapi import Depends
 from loguru import logger
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -58,12 +59,13 @@ from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.api.app import create_app
+from usher.api.deps import get_source_adapter_factory, get_source_gates
 from usher.composition import (
     Pipeline,
+    SourceGateRegistry,
     SourceRegistry,
     UnitOfWork,
     _worker_handlers,
-    adapter_factory,
     build_curation_service,
     build_enrich_service,
     build_pipeline,
@@ -101,7 +103,12 @@ from usher.ports.repository import (
     TitleRepository,
     WatchStateRepository,
 )
-from usher.ports.source import SourceAdapter, SourceItem, SourceItemKind
+from usher.ports.source import (
+    SourceAdapter,
+    SourceAdapterFactory,
+    SourceItem,
+    SourceItemKind,
+)
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import ITEM_IDS_KEY, REASON_KEY, ROWS_KEY, TITLE_KEY
 from usher.services.events import DeferredEventPublisher
@@ -1994,9 +2001,25 @@ async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_s
     |---|---|---|
     | the server's push lane | `LaneSupervisor` reads `create_app`'s one `UnitOfWork` | 1 + 2 |
     | the server's worker lane | the same `UnitOfWork`, a scope per claim and per job | 1 + 2 |
-    | an HTTP request | `get_source_adapter_factory`, off `app.state.source_gates` | 1 |
+    | an HTTP request | a real one, resolving `get_source_adapter_factory` off the graph | 1 |
     | `usher work` | `unit_of_work(...)`, a scope per job | 2 |
     | `usher sync` | one `build_pipeline`, sources looped inside it | 3 |
+
+    🔴 **The request arm is a request, and as S3 shipped it, it was not.** That
+    row read the same then and the arm below it called
+    `adapter_factory(settings, app.state.source_gates)` — which is
+    `get_source_adapter_factory`'s *body* re-derived here, so it asserted the
+    wiring this file writes rather than the wiring `api/deps.py` has. Measured
+    on the shipped tree: planting `get_source_adapter_factory` to
+    `return adapter_factory(settings, SourceGateRegistry())` — a fresh registry
+    per request, i.e. verbatim the defect `api/deps.py`'s `EnrichService`
+    comment records and this task exists to remove — passed `ruff`, `mypy`,
+    `lint-imports` and **the whole 5,329-case suite**, because every test that
+    names that dependency overrides it and `get_source_gates` was executed by
+    no test at all. `.claude/rules/testing-discipline.md` has the general
+    form: *a dependency every test overrides is a dependency no test covers*.
+    So the arm drives a real request through a probe route and reads the
+    factory the graph resolved.
 
     **What "one process" means here, stated plainly because the flattering
     reading is available.** Within one process, one source has one gate however
@@ -2017,12 +2040,32 @@ async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_s
 
     # -- 1. the server: the lanes' unit of work and the request path -------
     app = create_app(settings)
-    async with LifespanManager(app):
+    # The request path, driven rather than re-derived. A probe route on the
+    # real app, because a `SourceAdapterFactory` cannot come back over HTTP and
+    # what this arm needs is the object the graph built:
+    # `get_source_adapter_factory` -> `get_source_gates` -> `app.state`. The
+    # same shape `tests/integration/test_pipeline_deps.py` uses for the four
+    # other dependencies whose wiring no route can show.
+    resolved: list[SourceAdapterFactory] = []
+
+    @app.get("/_probe/adapter-factory")
+    def _probe(
+        adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
+    ) -> dict[str, bool]:
+        resolved.append(adapters)
+        return {"resolved": True}
+
+    async with LifespanManager(app) as manager:
         gates = app.state.source_gates
-        # The request path, through the real dependency rather than a
-        # re-derivation of it: `get_source_adapter_factory` takes the registry
-        # `get_source_gates` reads off `app.state`.
-        through_a_request = adapter_factory(settings, gates).build(_GATED, _GATE_CREDENTIALS)
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            probe = await client.get("/_probe/adapter-factory")
+        assert probe.status_code == 200, f"the probe route did not run: {probe.text}"
+        assert len(resolved) == 1, (
+            "the premise: the dependency graph resolved exactly one factory, so the gate "
+            "asserted below came through `api/deps.py` rather than from this file"
+        )
+        through_a_request = resolved[0].build(_GATED, _GATE_CREDENTIALS)
         # The lanes, through the supervisor's own unit of work -- the object
         # `_start_lane` (push) and `_run_worker` both open their pipelines
         # from. Two scopes, because the two lanes never share one.
@@ -2088,3 +2131,75 @@ async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_s
             await elsewhere.aclose()
     finally:
         await engine.dispose()
+
+
+async def test_a_request_without_the_lifespan_is_refused_rather_than_quietly_ungated() -> None:
+    """`api/deps.get_source_gates`' `RuntimeError` arm, which nothing ran.
+
+    🔴 **This dependency was executed by no test in the suite** — not one, in
+    either direction. Every case that names `get_source_adapter_factory`
+    replaces it through `dependency_overrides` (`test_api_playback.py`,
+    `test_api_playback_leaks.py`, and three integration files),
+    `test_api_health.py::test_readiness_never_touches_a_source` asserts that
+    readiness does **not** resolve it, and the arm above reaches it only with a
+    started lifespan. So the code path that decides what happens when the
+    registry is missing had never been taken, and its message had never been
+    read by anything.
+
+    **It matters because the alternative failure is silent.** `app.state` is
+    typed `Any` and raises `AttributeError` for a missing name, so the
+    defensive `getattr(..., None)` here is what turns "the lifespan did not
+    run" into a sentence naming the attribute and the fix, rather than into a
+    500 from an attribute lookup — or, if the default had been a fresh
+    `SourceGateRegistry()`, into a process that dials a household's server
+    completely unthrottled and reports nothing at all. A limiter's missing
+    owner has to be loud.
+
+    Driven as a real request through `httpx.ASGITransport` **without**
+    `LifespanManager`, because that is precisely the configuration the message
+    is written for: the transport speaks HTTP to the app and never sends it a
+    lifespan event, so `create_app`'s startup block never runs.
+    """
+    settings = _settings(push_enabled=False, worker_enabled=False)
+    app = create_app(settings)
+
+    @app.get("/_probe/gates")
+    def _probe(gates: Annotated[SourceGateRegistry, Depends(get_source_gates)]) -> dict[str, bool]:
+        return {"resolved": True}  # pragma: no cover -- the point is that it does not
+
+    assert not hasattr(app.state, "source_gates"), (
+        "the premise: the lifespan really has not run, so the refusal below is the "
+        "dependency's own and not an artefact of this case clearing state"
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with pytest.raises(RuntimeError, match="source_gates is not set") as caught:
+            await client.get("/_probe/gates")
+
+    assert "LifespanManager" in str(caught.value), (
+        "the message names the attribute and not the remedy, which is the half a "
+        "reader needs -- `asgi_lifespan.LifespanManager` is what a bare ASGI "
+        "transport is missing"
+    )
+
+
+def test_get_source_gates_is_the_only_reader_of_app_state_source_gates() -> None:
+    """The registry reaches a request through the dependency and no other way.
+
+    A second reader — a router doing `request.app.state.source_gates` inline —
+    would resolve, pass mypy and behave identically today, and it is exactly
+    how the `RuntimeError` above stops being the only answer to a missing
+    lifespan. Asserted as a source scan rather than argued, in the shape
+    `test_no_outbound_http_call_escapes_a_recorded_decision` uses one package
+    over.
+    """
+    api = pathlib.Path(usher.__file__).parent / "api"
+    readers = sorted(
+        path.relative_to(api).as_posix()
+        for path in api.rglob("*.py")
+        if "state.source_gates" in path.read_text(encoding="utf-8")
+    )
+    assert readers == ["app.py", "deps.py"], (
+        "`app.state.source_gates` is written by `create_app`'s lifespan and read by "
+        f"`get_source_gates`, and by nothing else: {readers}"
+    )

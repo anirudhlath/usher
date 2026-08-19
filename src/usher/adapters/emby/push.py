@@ -38,6 +38,23 @@ Four seams, each with a reason:
    logged, or interpolated into an exception.** Every error message this
    module raises names a path, never a URL. ADR-0012's handling rules apply
    to it unchanged.
+
+**Upstream: `/embywebsocket` on the configured media source. Deliberately
+unthrottled, and the sixth of M10's S3 declines** (the enumeration is
+`tests/unit/test_outbound_call_sites.py`). This is the same machine
+`session.py` dials -- which is why a count of *hosts* and a count of *modules*
+give different answers there -- but it is reached over `websockets` rather
+than httpx, and the connection is **held open**. So `EmbySession`'s
+`_MinInterval` gate (ADR-0039, `USHER_SOURCE_REQUESTS_PER_SECOND`) has nothing
+here to space: **a socket held open is not a request**, and a
+requests-per-second ceiling over one connect per lane per reconnect expresses
+no policy anybody asked for. What genuinely bounds this channel is the
+reconnect **backoff** (`PushSupervisor._backoff`, `src/usher/services/push.py`),
+which is the right shape for the failure a limiter would be for here -- a lane
+reconnecting in a loop against a server that is refusing -- together with
+`push_gap_min_interval_seconds` on the gap-closing delta the reconnect
+triggers. Written here rather than only in the test table because that is the
+acceptance: the decision goes where the code is.
 """
 
 import asyncio

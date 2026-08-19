@@ -127,14 +127,25 @@ exists — `retry_after_seconds`, `decode_json`, `port_error_for`,
 its per-process `SourceGateRegistry`. The client *lifecycle* is still
 per-adapter, because `CachedDatasetFile` is handed a client it does not own
 while `EmbyAdapter` owns one per source. M10's S3 enumerated every outbound
-call site under `adapters/` by grep rather than by memory — **nine upstreams,
-fifteen call sites across eight modules** — and recorded a limiter decision for
-each:
+call site under `adapters/` by grep rather than by memory and recorded a
+limiter decision for each.
 
-| upstream | limiter |
+**The unit counted is the module**, and the table below has one row per module.
+**Nine modules** under `src/usher/adapters/` dial an upstream: **eight over
+httpx**, between them **fifteen call sites**, and a ninth — `emby/push.py` —
+over `websockets`. *Upstreams* is a smaller number however it is counted, which
+is why this is not a count of them: `tmdb/client.py` and `tmdb/provider.py` are
+one host, and `/embywebsocket` is the same machine as the media source. Three
+of the nine are paced; six deliberately are not.
+`tests/unit/test_outbound_call_sites.py::test_the_module_census_is_the_one_the_records_quote`
+asserts all four figures off its own table, so this paragraph cannot drift from
+the tree without a red.
+
+| module → upstream | limiter |
 |---|---|
 | the configured media source (`emby/session.py`) | the per-source minimum-interval gate, `USHER_SOURCE_REQUESTS_PER_SECOND` ([ADR-0039](decisions/0039-the-outbound-limiter-is-per-source-and-spaces-requests.md)) |
-| `api.themoviedb.org` (`tmdb/client.py`, and `tmdb/provider.py` through it) | `_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` ([ADR-0005](decisions/0005-bulk-bootstrap.md)) |
+| `api.themoviedb.org` (`tmdb/client.py`) | `_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` ([ADR-0005](decisions/0005-bulk-bootstrap.md)) |
+| `api.themoviedb.org` (`tmdb/provider.py`, six call sites) | the bucket above — this module holds no client of its own |
 | `/embywebsocket` (`emby/push.py`) | **none** — a socket held open is not a request; the reconnect *backoff* is its limiter |
 | `image.tmdb.org` (`images/provider.py`) | **none** — the CDN publishes no limit and the cache is the bound ([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)) |
 | the IMDb/TMDb/MovieLens dataset hosts (`bulk/download.py`) | **none** — one streamed file per dataset, not a request stream |
@@ -142,8 +153,10 @@ each:
 | `USHER_LLM_BASE_URL` (`llm/openai_compatible.py`) | **none** — `curate` is capped at 1 in flight and [06](06-rows-and-recommendations.md) budgets one completion per household per day |
 | `USHER_EMBEDDING_MODEL`'s endpoint (`embedding/openai_compat.py`) | **none** — `index` is capped at 1 in flight |
 
-**Five of the nine get nothing, and every one of the five has a stated reason
-rather than an omission** — that is as much the deliverable as the wiring is,
+**Six of the nine get nothing, and every one of the six has a stated reason
+rather than an omission** — `emby/push.py` included, whose decline S3 recorded
+only in the test table and which now carries it in its own module docstring.
+That is as much the deliverable as the wiring is,
 because `.claude/rules/ports-and-error-taxonomy.md` records what happens when a
 decision about an upstream is left implicit. Each reason is written beside the
 code, and `tests/unit/test_outbound_call_sites.py` holds the same table closed
