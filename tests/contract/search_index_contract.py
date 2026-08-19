@@ -414,6 +414,41 @@ class SearchIndexContract:
         assert embedded.title_id in found
         assert outcome.semantic_coverage == pytest.approx(0.5)
 
+    async def test_coverage_is_answerable_before_a_query_vector_exists(
+        self, index: SearchIndex
+    ) -> None:
+        """**The number `search` reports, askable without a search** -- which
+        is what makes it usable as a guard in front of the embed rather than
+        only as a report after it (issue #16).
+
+        Two claims, and the second is the one an implementation can get wrong
+        while looking right. First, it takes **filters and no vector**: PRD
+        09's carried-debt entry recorded the filtered predicate as *"not
+        answerable before the vector that does the filtering exists"*, and it
+        is -- nothing in a `SearchFilters` is derived from a query vector.
+        Second, it is the **filtered** population and not the whole catalog:
+        the two agree on any arrangement where the filter matches everything,
+        so the narrowing case below is the only thing that separates them.
+
+        Fails against an implementation answering over the whole catalog
+        (`0.5` in the second assertion), and against one deriving coverage
+        from hits it has not got (`0.0` or a `ZeroDivisionError` in the
+        first).
+        """
+        if not self.supports_semantic:
+            pytest.skip("this implementation stores no vectors to have coverage of")
+        embedded = _document("Harbour Lights", vector=_vector(1.0, 0.0), kind=TitleKind.MOVIE)
+        unembedded = _document("Vacuum Chamber", vector=None, kind=TitleKind.SERIES)
+        await self.index_all(index, [embedded, unembedded])
+
+        assert await index.semantic_coverage(SearchFilters()) == pytest.approx(0.5)
+        assert await index.semantic_coverage(
+            SearchFilters(kinds=(TitleKind.SERIES,))
+        ) == pytest.approx(0.0), "coverage was measured over the catalog, not over the filtered set"
+        assert await index.semantic_coverage(
+            SearchFilters(kinds=(TitleKind.MOVIE,))
+        ) == pytest.approx(1.0)
+
     # --- fusion ------------------------------------------------------------
 
     async def test_fusion_produces_an_order_neither_input_produced(

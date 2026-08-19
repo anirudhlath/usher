@@ -170,6 +170,7 @@ class _ScriptedIndex(SearchIndex):
     def __init__(self, outcome: SearchOutcome) -> None:
         self.outcome = outcome
         self.requests: list[SearchRequest] = []
+        self.coverage_probes: list[SearchFilters] = []
 
     async def index_many(self, documents: Sequence[SearchDocument]) -> None:
         return None
@@ -180,6 +181,22 @@ class _ScriptedIndex(SearchIndex):
     async def search(self, request: SearchRequest) -> SearchOutcome:
         self.requests.append(request)
         return self.outcome
+
+    async def semantic_coverage(self, filters: SearchFilters) -> float:
+        """**Derived from the scripted outcome rather than scripted
+        separately**, because it is the same question asked a moment earlier:
+        what fraction of the filtered population has a vector. Two knobs would
+        let a case arrange a service whose probe and whose answer disagree --
+        a deployment that cannot exist -- and every expansion case in this file
+        would then be silently about whichever of the two the implementation
+        happened to read.
+
+        The consequence is that `SearchOutcome()`'s default `0.0` means *no
+        title in this population has a vector*, so a case that wants a
+        completion bought has to say so.
+        """
+        self.coverage_probes.append(filters)
+        return self.outcome.semantic_coverage
 
 
 class _ScriptedSuggest(SuggestIndex):
@@ -661,7 +678,9 @@ async def test_the_expansion_is_what_gets_embedded_and_the_answer_reports_it() -
     assertion that the field is merely populated.
     """
     embedder = FakeEmbedder()
-    index = _ScriptedIndex(SearchOutcome())
+    # A backfilled catalog, stated rather than defaulted: the expansion is
+    # bought only where the semantic lane has something to answer with.
+    index = _ScriptedIndex(SearchOutcome(semantic_coverage=1.0))
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(index, embedder=embedder, expander=expander)
 
@@ -684,7 +703,7 @@ async def test_the_full_text_lane_still_sees_the_words_the_viewer_typed() -> Non
     exact-title search into a search for something else, with a `tsquery` full
     of words the viewer never wrote and nothing to notice it.
     """
-    index = _ScriptedIndex(SearchOutcome())
+    index = _ScriptedIndex(SearchOutcome(semantic_coverage=1.0))
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(index, embedder=FakeEmbedder(), expander=expander)
 
@@ -718,7 +737,9 @@ async def test_an_expansion_that_produced_nothing_leaves_the_query_as_typed() ->
     """
     embedder = FakeEmbedder()
     expander = _Expander(PortUnavailable("the endpoint refused the connection"))
-    service = await _service(_ScriptedIndex(SearchOutcome()), embedder=embedder, expander=expander)
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(semantic_coverage=1.0)), embedder=embedder, expander=expander
+    )
 
     answer = await service.search("movies about isolation in space", mode=SearchMode.SEMANTIC)
 
@@ -734,7 +755,9 @@ async def test_one_search_buys_exactly_one_completion() -> None:
     thing that states it."""
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(
-        _ScriptedIndex(SearchOutcome()), embedder=FakeEmbedder(), expander=expander
+        _ScriptedIndex(SearchOutcome(semantic_coverage=1.0)),
+        embedder=FakeEmbedder(),
+        expander=expander,
     )
 
     await service.search("movies about isolation in space", mode=SearchMode.FUSED)
@@ -804,6 +827,63 @@ async def test_a_semantic_search_with_no_embedder_buys_no_completion() -> None:
 
     assert expander.client.calls == []
     assert expander.ledger.calls == []
+
+
+@pytest.mark.parametrize("mode", [SearchMode.SEMANTIC, SearchMode.FUSED])
+async def test_a_search_over_a_population_with_no_vectors_buys_no_completion(
+    mode: SearchMode,
+) -> None:
+    """**Issue #16.** The guard used to be `embedder is None` rather than
+    *"anything is embedded"*, so a deployment that had configured a model and
+    not yet backfilled bought a completion, embedded the rewrite, and got
+    `semantic_coverage=0.000` back -- the warning arriving after the money, on
+    every semantic or fused search until the backfill drained.
+
+    **The probe is the number the answer already reports**, asked one statement
+    earlier: `SearchIndex.semantic_coverage` takes filters and no vector, which
+    is what makes the *filtered* predicate answerable before the embed rather
+    than only after it.
+
+    Fails against the shipped guard on the count, never on the results -- the
+    search below answers correctly either way, which is exactly why this is a
+    case about `client.calls` and not about `answer.results`.
+    """
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    index = _ScriptedIndex(SearchOutcome(semantic_coverage=0.0))
+    service = await _service(index, embedder=FakeEmbedder(), expander=expander)
+
+    answer = await service.search("movies about isolation in space", mode=mode)
+
+    assert expander.client.calls == [], "a completion was bought for a lane with nothing to rank"
+    assert expander.ledger.calls == []
+    assert answer.expanded_query is None
+    # The premise, and the half a count cannot state: the lane still *ran* and
+    # the query was still embedded as typed. A guard that narrowed the mode
+    # instead of declining the rewrite would also spend nothing here.
+    assert answer.mode is mode
+    assert index.requests[0].query_vector is not None
+
+
+async def test_the_shipped_default_probes_nothing_before_embedding() -> None:
+    """The cost of the guard above, stated as an absence.
+
+    `USHER_QUERY_EXPANSION_ENABLED` is `false` on every shipped deployment, so
+    there is no completion to decline and the probe would be a read bought for
+    nobody -- which is the objection `docs/prd/09-roadmap.md` recorded against
+    fixing #16 at all (*"a read on every fused search"*). It is answered by
+    ordering rather than by argument: the probe sits behind `expander is not
+    None`, so the deployments that never expand never pay for it.
+
+    Fails: a probe hoisted above the expander check, which reads as tidier and
+    puts a `count(*)` over the enriched tier in front of every fused search on
+    every deployment.
+    """
+    index = _ScriptedIndex(SearchOutcome(semantic_coverage=1.0))
+    service = await _service(index, embedder=FakeEmbedder(), expander=None)
+
+    await service.search("movies about isolation in space", mode=SearchMode.FUSED)
+
+    assert index.coverage_probes == []
 
 
 @pytest.mark.parametrize("tier", list(SuggestTier))

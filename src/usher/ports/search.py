@@ -133,12 +133,30 @@ class SearchRequest:
 class SearchOutcome:
     """Hits, plus how much of the population the semantic lane could see.
 
-    `semantic_coverage` is the fraction of the *filtered* population that
-    actually had a vector. It exists because RRF cannot tell "ranked last"
-    from "never a candidate": with no embeddings at all, a `FUSED` search
-    degrades to full-text wearing a blended score, and nothing in the result
-    set says so. A caller that reads 0.0 knows to say "semantic search is
-    still warming up" rather than presenting a confident ranking.
+    `semantic_coverage` is the fraction of the filtered **embeddable**
+    population that actually had a vector. It exists because RRF cannot tell
+    "ranked last" from "never a candidate": with no embeddings at all, a
+    `FUSED` search degrades to full-text wearing a blended score, and nothing
+    in the result set says so. A caller that reads 0.0 knows to say "semantic
+    search is still warming up" rather than presenting a confident ranking.
+
+    ⚠️ **"Embeddable" is load-bearing and this sentence said "the *filtered*
+    population" until issue #31 measured what that implies.** The denominator
+    excludes skeletons (`enrichment_state <> 'skeleton'`, boundary call 4 --
+    they are never embedded, and counting them would report ~0.008 on a
+    healthy catalog and read as a broken subsystem forever). The **lexical**
+    lane has no such restriction, so the two lanes of one `FUSED` search do
+    not see the same population, and `1.0` does not mean the vector lane can
+    see everything the request could match. On the catalog this project
+    measures that gap is an order of magnitude: 130,720 vectors over ~130,647
+    enriched titles reports `1.000`, against 1,271,138 rows in `titles`.
+
+    So this answers *"has the backfill drained?"* and **not** *"can the vector
+    lane see this catalog?"*. The number is not changed to the second
+    question's: a denominator with a measured argument behind it is not
+    improved by being swapped for one without, and the second question is
+    answerable from `usher index`'s own report. What changed is that the field
+    now says which question it answers.
 
     A `FULL_TEXT` request reports **0.0**, because no semantic lane ran.
     That is a statement about the request, not about the catalog, and a
@@ -218,6 +236,35 @@ class SearchIndex(ABC):
 
         Raises `FilterNotSupported` for any member of `SearchFilters` this
         implementation cannot express.
+        """
+
+    @abstractmethod
+    async def semantic_coverage(self, filters: SearchFilters) -> float:
+        """`SearchOutcome.semantic_coverage` for this filtered population,
+        without running a search. The same number over the same denominator --
+        see that field for what the denominator is, and is not.
+
+        **It exists because a caller has to decide things before it has a
+        vector, and the whole of what makes that possible is the signature:
+        this takes `SearchFilters` and no `SearchRequest`.** PRD 09's
+        carried-debt entry on issue #16 recorded the filtered predicate as
+        *"not answerable before the vector that does the filtering exists"* --
+        which reads as a fact about the question and was a fact about where the
+        only spelling of it happened to sit. Nothing in `SearchFilters` is
+        derived from a query vector, so the population is knowable a statement
+        earlier, and `SearchService` uses it to decline a paid query expansion
+        for a lane that has nothing to rank.
+
+        Raises `FilterNotSupported` on the same terms as `search`, and for the
+        same reason: a caller narrowing on a member this backend cannot express
+        must not be told the lane is empty when what is true is that the
+        question could not be asked.
+
+        **A `float` rather than a `bool`, deliberately.** A predicate would be
+        this number compared against a constant chosen inside an implementation,
+        where no caller could see it -- and the one thing a guard over this must
+        not quietly become is a *quality* threshold nobody measured. Callers
+        compare it themselves, in the open.
         """
 
 

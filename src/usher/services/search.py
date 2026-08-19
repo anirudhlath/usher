@@ -424,8 +424,9 @@ class SearchAnswer:
     a bad one, which is also the first thing an operator reading their bug
     report needs. It is `None` on every path that embedded the query **as
     typed**: the shipped default with expansion off, a `full_text` search, a
-    blank query, a deployment with no embedder, and an expansion that failed or
-    came back unusable.
+    blank query, a deployment with no embedder, **a filtered population with no
+    vectors for the lane to rank** (#16), and an expansion that failed or came
+    back unusable.
 
     **That last item bought a completion, which is why the framing is "embedded
     as typed" rather than "bought no completion".** A call that answered with
@@ -575,10 +576,9 @@ class SearchService:
         # because a caller may legitimately have no household to speak for.
         self._watch_states = watch_states
         # **Not an `Embedder` and not a `TasteService`, and both absences are
-        # the point.** The taste term needs a centroid; computing one needs a
-        # model this process does not have and will not be given
-        # (`create_app`'s lifespan builds one only under `worker_enabled`), so
-        # what reaches the blend is a centroid some *other* process wrote --
+        # the point.** The taste term needs a centroid; computing one is a walk
+        # over ~50 titles and an embed, which is a job rather than a request,
+        # so what reaches the blend is a centroid some *other* process wrote --
         # `TasteRepository.latest`, one indexed single-row probe. Routed
         # through `TasteService.centroid` instead, the term would be
         # structurally `None` on every request the shipped default serves: a
@@ -702,6 +702,11 @@ class SearchService:
             return SearchAnswer(requested_mode=requested, mode=requested)
 
         started = self._clock()
+        # Resolved once and used twice -- by the coverage probe below and by
+        # the request -- so the population the guard measured is the population
+        # the search runs over. Two spellings of the same default would be two
+        # populations the day either grew a branch.
+        applied = filters or SearchFilters()
         vector: tuple[float, ...] | None = None
         expanded: str | None = None
         if mode is not SearchMode.FULL_TEXT:
@@ -729,7 +734,43 @@ class SearchService:
                 # generation. `expand` never raises: PRD 08 says a degraded
                 # subsystem narrows, and a search with no rewrite is a complete,
                 # correct search.
-                expanded = None if self._expander is None else await self._expander.expand(query)
+                #
+                # 🔴 **Position was not enough, and issue #16 is the gap it
+                # left.** "This deployment has a model" and "this population
+                # has vectors" are different facts, and the second is the one
+                # an expansion can possibly help: with `title_embeddings` empty
+                # the lane returns nothing however the query is worded, so a
+                # rewrite was billed on every semantic and fused search of
+                # every not-yet-backfilled deployment and the *"no title in the
+                # filtered population has an embedding"* line arrived after the
+                # money.
+                #
+                # **The probe is the number the answer already reports**, asked
+                # a statement earlier: `SearchIndex.semantic_coverage` takes
+                # filters and no vector. PRD 09 recorded the filtered predicate
+                # as unanswerable before the vector existed -- it is not; the
+                # only thing that was true is that nothing had spelled it
+                # anywhere but inside `search`.
+                #
+                # **Ordered so the read is bought by the deployments that
+                # expand and by nobody else.** `self._expander is not None`
+                # comes first, and it is `None` on every shipped deployment
+                # (`USHER_QUERY_EXPANSION_ENABLED` is `false` even where
+                # `USHER_LLM_ENABLED` is `true`, PRD 05) -- which is the whole
+                # of PRD 09's *"a read on every fused search"* objection,
+                # answered by an `and` rather than by an argument. Hoisted
+                # above it, the count runs for every deployment there is; the
+                # ordering is pinned by
+                # `test_the_shipped_default_probes_nothing_before_embedding`.
+                #
+                # `> 0.0` and not a tuned floor: this asks whether the lane can
+                # answer *at all*, and any other threshold is a retrieval-
+                # quality claim nothing in this project has measured.
+                if (
+                    self._expander is not None
+                    and await self._index.semantic_coverage(applied) > 0.0
+                ):
+                    expanded = await self._expander.expand(query)
                 vector = tuple(
                     (await self._embedder.embed([query if expanded is None else expanded]))[0]
                 )
@@ -748,7 +789,7 @@ class SearchService:
                 # row in application code, so an unclamped limit is a scan.
                 limit=min(limit, self._result_limit),
                 mode=mode,
-                filters=filters or SearchFilters(),
+                filters=applied,
                 query_vector=vector,
             )
         )

@@ -18,13 +18,14 @@ scans this file.
 import ast
 import pathlib
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
@@ -41,8 +42,10 @@ from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemCode
 from usher.config import Settings
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
+from usher.ports.embedding import Embedder
 from usher.ports.search import (
     SearchDocument,
+    SearchFilters,
     SearchHit,
     SearchIndex,
     SearchOutcome,
@@ -102,6 +105,13 @@ class _ScriptedIndex(SearchIndex):
     async def search(self, request: SearchRequest) -> SearchOutcome:
         self.requests.append(request)
         return self.outcome
+
+    async def semantic_coverage(self, filters: SearchFilters) -> float:
+        """The scripted outcome's own number, for
+        `tests/unit/test_services_search.py`'s reason: the probe and the answer
+        are the same question a statement apart, and a double that could answer
+        them differently is a deployment that cannot exist."""
+        return self.outcome.semantic_coverage
 
 
 class _ScriptedSuggest(SuggestIndex):
@@ -250,10 +260,13 @@ async def hits() -> _ScriptedIndex:
 
 @pytest.fixture
 async def client(hits: _ScriptedIndex) -> AsyncIterator[httpx.AsyncClient]:
-    """A deployment with no embedder, which is every API-only deployment:
-    `create_app`'s lifespan builds a model only when `worker_enabled` and does
-    not expose it, and `api/deps.get_search_service` passes `None`
-    deliberately."""
+    """A deployment that configured no embedding model, which is the shipped
+    default (`USHER_EMBEDDING_ENABLED=false`).
+
+    Since #31 that is the *only* deployment answering this way: the lifespan
+    builds a model whenever one is configured and parks it on `app.state`, and
+    `api/deps.get_search_service` reads it. The cases below are therefore about
+    a deployment rather than about the product, which they were not before."""
     async for connected in _client(_app(await _service(hits))):
         yield connected
 
@@ -370,6 +383,125 @@ async def test_a_semantic_request_without_an_embedder_is_a_problem_document(
     assert "vacuum" not in response.text
 
 
+async def test_a_semantic_request_is_served_where_this_process_holds_an_embedder(
+    hits: _ScriptedIndex,
+) -> None:
+    """**The positive control the two cases above were missing**, and it was
+    green before #31 was fixed -- which is the point worth stating rather than
+    hiding. The refusal has never been the route's: `?mode=semantic` reaches
+    `SearchService` unmolested and answers 200 whenever the service it was
+    handed holds a model. What shipped until #31 was a *dependency* that never
+    handed it one, so the two negative cases above passed on every deployment
+    there was and nothing on this surface distinguished "this deployment
+    cannot" from "no deployment can".
+
+    Fails: a route that refuses the mode itself -- a 422 minted here from
+    `settings` or a `mode` narrowed in the handler -- which is the shape the
+    problem document above invites and which no negative case can see.
+    """
+    service = await _service(hits, embedder=FakeEmbedder())
+    async for connected in _client(_app(service)):
+        response = await connected.get("/search", params={"q": "vacuum", "mode": "semantic"})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["requested_mode"] == "semantic"
+    assert body["mode"] == "semantic", "a served semantic search is not a degraded one"
+    assert len(body["results"]) == 2
+
+
+async def test_the_lifespan_puts_this_processs_embedder_on_app_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wiring #31 asked for, and the half a route case cannot see.
+
+    **`worker_enabled=False` here on purpose.** The model used to be built only
+    where a worker lane ran, so the split deployment `.claude/rules/
+    api-telemetry-and-lanes.md` recommends -- a server beside a `usher work`
+    container, `USHER_WORKER_ENABLED=false` on the server -- had an embedding
+    model configured, a backfilled catalog, and no way to serve either from the
+    route. `composition.embedder` already answers `(None, no-op)` for a
+    deployment that configured none, so the lane switch was doing a job the
+    setting does itself.
+
+    Fails: a lifespan that builds the model and does not park it (the shipped
+    state, `AttributeError`), and a lifespan that parks it only under
+    `worker_enabled` (this case, `None is not built`).
+
+    The closer is asserted because the model is a process resource with a
+    release step, and an exposure that leaked it would look identical here.
+    """
+    built = FakeEmbedder()
+    closed: list[str] = []
+
+    async def _release() -> None:
+        closed.append("model")
+
+    async def _embedder(
+        settings: Settings, *, report: bool = True
+    ) -> tuple[Embedder | None, Callable[[], Awaitable[None]]]:
+        return built, _release
+
+    monkeypatch.setattr("usher.api.app.embedder", _embedder)
+    app = create_app(_settings())
+    async with LifespanManager(app):
+        assert app.state.embedder is built
+    assert closed == ["model"], "the model was exposed and never released"
+
+
+async def test_a_deployment_with_no_embedding_model_exposes_none_rather_than_nothing() -> None:
+    """The push-only deployment PRD 08 describes, and the claim
+    `get_search_service`'s docstring used to make about it.
+
+    `USHER_EMBEDDING_ENABLED` is `false` by default, so `composition.embedder`
+    answers `(None, no-op)` and this attribute is `None` -- which is
+    `build_search_service`'s own default for the parameter and therefore
+    byte-for-byte the behaviour that shipped: `?mode=semantic` is a 422 naming
+    the missing capability, never a 500.
+
+    Fails: reaching for the model only where one exists, which leaves the
+    attribute absent and turns every search on a push-only deployment into an
+    `AttributeError` -- the failure the old docstring predicted, arriving for
+    the reason it did not name.
+    """
+    app = create_app(_settings())
+    async with LifespanManager(app):
+        assert app.state.embedder is None
+
+
+async def test_get_search_service_hands_over_the_model_this_process_holds() -> None:
+    """The other half of the wiring, and the one a mutation can delete
+    silently: a dependency that went on passing `None` would answer a working
+    `SearchService` on every deployment and fail nothing but `?mode=semantic`.
+
+    Driven directly rather than through a request because the route's own path
+    needs a database and this app has none -- the session below is constructed
+    against a DSN nothing listens on and never connects, which is
+    `tests/unit/test_composition.py`'s established shape for asserting on
+    wiring rather than on rows.
+    """
+    engine = create_async_engine(UNREACHABLE_DSN)
+    try:
+        session = AsyncSession(engine)
+        app = create_app(_settings())
+        model = FakeEmbedder()
+        app.state.embedder = model
+        request = Request({"type": "http", "app": app, "headers": []})
+
+        def _built() -> SearchService:
+            return get_search_service(request=request, session=session, settings=_settings())
+
+        assert _built()._embedder is model
+
+        # The control, and it is the whole of the 500 the old docstring
+        # feared: an API process holding no model builds the same service
+        # with `None`, which is the parameter's own default.
+        app.state.embedder = None
+        assert _built()._embedder is None
+    finally:
+        await engine.dispose()
+
+
 async def test_the_mode_parameter_is_an_enum_on_the_wire_and_semantic_is_not_a_boolean(
     client: httpx.AsyncClient,
 ) -> None:
@@ -428,7 +560,10 @@ async def test_an_expanded_query_reaches_the_body_only_when_a_completion_was_bou
     the path that embedded the query as typed.
     """
     expander = _Expander({QUERY_KEY: "a claustrophobic film about isolation"})
-    hits = _ScriptedIndex(SearchOutcome())
+    # A backfilled catalog, stated rather than defaulted: since #16 the
+    # expansion is declined outright where no title in the population has a
+    # vector, and `SearchOutcome()`'s default coverage is `0.0`.
+    hits = _ScriptedIndex(SearchOutcome(semantic_coverage=1.0))
     service = await _service(hits, embedder=FakeEmbedder(), expander=expander)
     async for client in _client(_app(service)):
         body = (await client.get("/search", params={"q": "vacuum", "mode": "fused"})).json()

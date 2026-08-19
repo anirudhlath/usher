@@ -590,33 +590,55 @@ and means nothing is the failure `extra="forbid"` exists to prevent. M8 Task
 first'"* was sound while expansion was believed to help and is superseded by
 this measurement, not deleted.
 
-**And expansion is billed on searches the semantic lane cannot serve, which
-this run also found and which is not fixed.** The guard is `embedder is None`,
-not *"anything is embedded"*. Measured with `USHER_EMBEDDING_ENABLED=true` and
-`title_embeddings` empty: `usher search --mode fused` bought a completion,
-printed `expanded: …`, returned `semantic_coverage=0.000`, and *then* printed
-*"no title in the filtered population has an embedding"* — **the warning
-arrives after the money**, on every fused search of every not-yet-backfilled
-deployment. `--mode full_text` correctly bought nothing. Not repaired here
-because the correct predicate — *does any title in the **filtered** population
-have a vector* — is not answerable before the vector that does the filtering
-exists, and the cheap global stand-in (`SELECT 1 FROM title_embeddings LIMIT
-1`) is a different guard costing a new `TitleEmbeddingRepository` port method,
-two implementations, a contract case and a read on every fused search. The new
-setting reduces the exposure to deployments that opted in; it does not close
-it.
+**And expansion was billed on searches the semantic lane cannot serve, which
+this run also found — issue #16, closed 2026-08-19.** The guard was `embedder
+is None`, not *"anything is embedded"*. Measured with
+`USHER_EMBEDDING_ENABLED=true` and `title_embeddings` empty: `usher search
+--mode fused` bought a completion, printed `expanded: …`, returned
+`semantic_coverage=0.000`, and *then* printed *"no title in the filtered
+population has an embedding"* — **the warning arrives after the money**, on
+every fused search of every not-yet-backfilled deployment. `--mode full_text`
+correctly bought nothing.
 
-**Its position is the whole cost argument.**
-`QueryExpansionService.expand` is called from exactly one
+🔴 **Both halves of the reason it was left open were wrong, and the shape of
+the error is what transfers.** The entry said the correct predicate — *does any
+title in the **filtered** population have a vector* — *"is not answerable
+before the vector that does the filtering exists"*. Nothing in a
+`SearchFilters` is derived from a query vector, and `PostgresSearchIndex`'s
+`_COVERAGE` already took `predicates` and no vector: **the strong predicate was
+already computed, in the same class, and only its callability was missing.**
+Having convinced itself the strong form was impossible, the entry then priced
+the weak one (`SELECT 1 FROM title_embeddings LIMIT 1`) at *"a new
+`TitleEmbeddingRepository` port method, two implementations, a contract case
+and a read on every fused search"* — and paid for the weak answer at the strong
+answer's price. What shipped is `SearchIndex.semantic_coverage(filters)`,
+delegating to the same `_predicates`/`_coverage` pair, so the guard and the
+reported number cannot drift. **Before pricing a fix as needing a weaker
+predicate, look for the strong one already being computed a few lines away.**
+
+The remaining cost — *"a read on every fused search"* — is a fact about where
+the read is put rather than about having one. It sits behind `expander is not
+None`, which is false on every shipped deployment, so nothing pays for it
+except the deployments that were about to buy a completion, and those trade one
+count over the enriched tier for one 1.4 s call.
+`test_the_shipped_default_probes_nothing_before_embedding` pins the ordering,
+because hoisting the probe above the expander check is the tidier-looking
+version and is the one that costs everybody.
+
+**Its position is *most* of the cost argument, and this said "the whole"
+until #16.** `QueryExpansionService.expand` is called from exactly one
 line -- the line before `SearchService`'s `self._embedder.embed([...])`, inside
-the `else` of the `embedder is None` branch. Four things follow and each is a
-case: a `full_text` search buys no completion (no embed to sit in front of), a
-deployment with no embedder buys none (`semantic` raises and `fused` narrows
-before reaching it), a blank query buys none (refused before the model), and
-**`usher suggest` buys none** -- `SuggestIndex` is its own port with no
-semantic lane, which is what keeps a completion off the path a client drives
-per keystroke. The unit of spend is one search that was going to embed
-something.
+the `else` of the `embedder is None` branch. Four things follow from the
+position and each is a case: a `full_text` search buys no completion (no embed
+to sit in front of), a deployment with no embedder buys none (`semantic` raises
+and `fused` narrows before reaching it), a blank query buys none (refused
+before the model), and **`usher suggest` buys none** -- `SuggestIndex` is its
+own port with no semantic lane, which is what keeps a completion off the path a
+client drives per keystroke. The fifth follows from the *probe* and no position
+could have supplied it: a population with no vectors buys none. **A guard in
+front of a cost says the cost is not paid on the paths that never reach it, and
+says nothing about the paths that reach it and cannot benefit.** The unit of
+spend is one search whose semantic lane was going to be able to answer.
 
 Three decisions worth not re-deriving. **Only the vector comes from the
 rewrite**: `SearchRequest.query` stays the typed string, so under RRF the
@@ -1362,3 +1384,32 @@ person fails to find it. Whoever takes it should note that it also makes the
 model swap a *third* cause of neighbour staleness in ADR-0020's terms, beside
 the blend change (closed) and *some other title was embedded since* (still
 undecidable per row).
+
+## `semantic_coverage`'s denominator is the enriched tier, not the catalog (2026-08-19)
+
+**It reports `1.000` on a deployment where the vector lane can answer for about
+10% of what the lexical lane searches, and three docstrings plus PRD 07 called
+it "the fraction of the *filtered* population".** `_COVERAGE` is
+`count(*) FILTER (WHERE e.embedding IS NOT NULL) / count(*)` over
+`t.enrichment_state <> 'skeleton'` **and** the request's predicates; `_FULL_TEXT`
+and `_FUSED` carry the predicates and **not** the skeleton restriction. So the
+two lanes of one fused search do not see the same population, and the number
+answers *"has the backfill drained?"* rather than *"can the vector lane see this
+catalog?"*. Measured on this project's own catalog: **130,720** vectors over
+**~130,647** enriched titles is `1.000`, against **1,271,138** rows in `titles`
+— which is exactly what issue #31's live `usher search --mode semantic` printed
+while the same catalog was 89.7% invisible to that lane.
+
+**The number was not changed and the sentence was.** The denominator is
+boundary call 4 with an argument behind it — skeletons are never embedded, so
+counting them reports ~0.008 on a healthy catalog and reads as a broken
+subsystem forever — and swapping a measured denominator for an unmeasured one
+is not a repair. What was wrong was a field describing itself in terms of a
+population it does not use, on the wire, where a client renders it.
+
+**The general form, and it is the second time this file has recorded it:** a
+ratio is only as honest as its denominator's name, and *"the filtered
+population"* is the kind of name that survives review because every word in it
+is true of something. Say which rows are in the bottom, at every site that
+quotes the number — here that was `SearchOutcome`, `SearchResponse`, PRD 07,
+the README and `usher search`'s own printed line.

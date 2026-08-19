@@ -357,7 +357,12 @@ and trigram still serve the whole catalog. `usher index` itself loads no model
 route — the CLI delivered the whole capability, exactly as `bootstrap` and the
 ingest commands do. **M9 shipped the routers** (`GET /search`,
 `GET /search/suggest?tier=`) and the CLI is still the second composition root
-rather than a thin client of them: both build the same `SearchService`.
+rather than a thin client of them: both build the same `SearchService`. **They
+also now build it the same way** — the server keeps one embedding model per
+process and `GET /search?mode=semantic` uses it, so the route and the command
+answer the same question with the same lanes (issue #31). Until that landed
+the HTTP surface was lexical-only on every deployment however it was
+configured, and only `usher search` could reach the vector lane.
 
 ```bash
 uv run usher search "the quiet vacuum"                 # hybrid by default
@@ -369,7 +374,12 @@ uv run usher suggest "the quie" --limit 5              # type-ahead, typo-tolera
 
 **`usher search` prints `semantic_coverage` on every run, not only when it is
 low**, and that line is the reason the command has a human-readable mode at
-all. A `--mode fused` search against a catalog with no embeddings degrades to
+all. ⚠️ **Read it as *"has the backfill drained?"*, not as *"how much of my
+catalog can the vector lane see?"*** — its denominator is the enriched tier,
+which excludes the skeleton titles nothing ever embeds, while the lexical lane
+searches them anyway. On the catalog this project measures, 130,720 vectors
+over ~130,647 enriched titles prints `1.000` against 1,271,138 rows in
+`titles`. A `--mode fused` search against a catalog with no embeddings degrades to
 full-text — correctly, because a title with no vector is *absent from the
 semantic candidate list* rather than ranked last — and the result looks
 exactly like a working hybrid search: no error, no empty result, no log line.
@@ -419,10 +429,15 @@ including the ones that failed; an unreachable endpoint or an unusable answer
 leaves the search to run on the words you typed **and is still billed**, so an
 absent `expanded:` line says nothing about whether money was spent.
 
-⚠️ **Run `usher index --backfill` before turning it on.** The guard in front of
-the completion is *"this deployment has an embedding model"*, not *"anything is
-actually embedded"* — so with a model installed and nothing indexed yet, every
-fused search buys a rewrite and then reports `semantic_coverage=0.000`.
+✅ **The guard in front of the completion asks whether the semantic lane can
+*answer*, not merely whether a model exists** (issue #16). It used to be
+*"this deployment has an embedding model"*, so with a model installed and
+nothing indexed yet every fused search bought a rewrite and *then* reported
+`semantic_coverage=0.000` — the warning arriving after the money. It is now
+the coverage of the request's own filtered population, measured before the
+embed, so a not-yet-backfilled deployment spends nothing. Running `usher index
+--backfill` first is still the right order; it is no longer something you are
+billed for forgetting.
 
 Every `SearchFilters` field has a flag and no filter has two, which is
 deliberate: an engine that cannot express a filter raises rather than ignoring

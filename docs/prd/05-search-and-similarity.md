@@ -970,18 +970,34 @@ seam was left for.
   *(This bullet read "Not measured. The retrieval improvement above is the
   literature's, not this project's" until 2026-08-07. It stopped being true the
   day the measurement ran, and the measurement pointed the other way.)*
-- **Billed on searches the semantic lane cannot serve, and that is open.** The
-  guard is `embedder is None`, not *"anything is embedded"* — so on a
-  deployment with a model and an empty `title_embeddings` (every deployment
-  before its first `usher index --backfill`), a fused search with expansion on
-  buys a completion, prints `expanded: …`, and then reports
-  `semantic_coverage=0.000`: **the warning arrives after the money.**
-  `--mode full_text` correctly buys nothing. The correct predicate — *does any
-  title in the **filtered** population have a vector* — is not answerable
-  before the vector that does the filtering exists, so closing this means a new
-  `TitleEmbeddingRepository` read on the search path answering a weaker
-  question. Recorded rather than fixed; the default above limits it to
-  deployments that opted in.
+- ✅ **No longer billed on searches the semantic lane cannot serve — issue
+  #16, closed.** The guard was `embedder is None` rather than *"anything is
+  embedded"*, so on a deployment with a model and an empty `title_embeddings`
+  (every deployment before its first `usher index --backfill`) a fused search
+  with expansion on bought a completion, printed `expanded: …`, and *then*
+  reported `semantic_coverage=0.000`: **the warning arrived after the money.**
+  It is now `SearchIndex.semantic_coverage(filters) > 0.0`, asked immediately
+  before the expansion and inside the same `else` — so `--mode full_text`, a
+  blank query, `usher suggest` and a deployment with no model go on buying
+  nothing, for the reasons they already did.
+
+  ⚠️ **Two claims in this entry were wrong, and they are why it stayed open a
+  milestone.** It said the filtered predicate is *"not answerable before the
+  vector that does the filtering exists"* — it is. Nothing in a
+  `SearchFilters` is derived from a query vector, and `_COVERAGE` already took
+  predicates and no vector, so the honest question was answerable all along
+  and merely had no spelling outside `search`. And it priced the fix as *"a
+  new `TitleEmbeddingRepository` read … answering a weaker question"*: what
+  landed is a `SearchIndex` method over the statement the answer already
+  reports through, asking the **same** question rather than a weaker global
+  one. **Before pricing a fix as needing a weaker predicate, check whether the
+  strong one is already computed somewhere that simply is not callable yet.**
+
+  **Its remaining cost is paid by an ordering rather than defended by an
+  argument.** The probe sits behind `expander is not None`, which is false on
+  every shipped deployment, so *"a read on every fused search"* is answered by
+  an `and`: deployments that never expand never pay for it, and the ones that
+  do trade one count over the enriched tier for one completion.
 
 ## Ranking
 

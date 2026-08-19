@@ -1119,18 +1119,27 @@ suspicion.
   **Post-v1 unless M9's `search_queries` supplies a real evaluation set** —
   which is the thing that would actually settle it, and is the reason not to
   re-litigate it on five queries.
-- **Expansion is billed on searches the semantic lane cannot serve** — the guard
-  is `embedder is None`, not "anything is embedded". Measured: with
-  `USHER_EMBEDDING_ENABLED=true` and `title_embeddings` empty, `usher search`
-  bought a completion, printed the rewrite, returned `semantic_coverage=0.000`,
-  and *then* said no title had an embedding — **the warning arrives after the
-  money**, on every fused search of a not-yet-backfilled deployment. The honest
-  predicate ("does any title in the *filtered* population have a vector") is
-  unanswerable before the vector that does the filtering exists, and the cheap
-  global stand-in is a weaker guard costing a port method, an implementation, a
-  fake, a contract case and a read on every fused search. Mitigated but not
-  closed by the new default: it now takes two opt-ins rather than one. **Goes
-  with whoever takes the entry above.**
+- ✅ **Expansion is billed on searches the semantic lane cannot serve —
+  issue #16, closed.** The guard was `embedder is None`, not "anything is
+  embedded". Measured: with `USHER_EMBEDDING_ENABLED=true` and
+  `title_embeddings` empty, `usher search` bought a completion, printed the
+  rewrite, returned `semantic_coverage=0.000`, and *then* said no title had an
+  embedding — **the warning arrives after the money**, on every fused search of
+  a not-yet-backfilled deployment. It is now
+  `SearchIndex.semantic_coverage(filters) > 0.0`, asked in front of the
+  expansion.
+
+  ⚠️ **This entry's own pricing was wrong twice, and that is the transferable
+  part.** *"The honest predicate is unanswerable before the vector that does
+  the filtering exists"* — it is answerable: nothing in a `SearchFilters` is
+  derived from a query vector, and `PostgresSearchIndex._COVERAGE` already
+  took predicates and no vector. So the strong predicate was already computed,
+  a few lines away, and only the *callability* was missing; the entry costed
+  the weak stand-in it thought it was reduced to. And *"a read on every fused
+  search"* is a consequence of where the read is put, not of having one: behind
+  `expander is not None` it is bought only by deployments that expand, which is
+  none by default. **A carried-debt entry that prices a fix is a claim, and it
+  ages exactly like any other claim in this repository.**
 - ✅ **The candidate pool has no ownership *filter*, only an `ORDER BY` key** —
   while the curation prompt asserted *"one household's **own** library"*.
   Reachable on any library with fewer than `USHER_CURATION_POOL_SIZE` unwatched
