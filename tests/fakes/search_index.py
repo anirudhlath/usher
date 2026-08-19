@@ -1,6 +1,6 @@
 """In-memory `SearchIndex` and `SuggestIndex`.
 
-**Where `FakeSearchIndex` is more forgiving than Postgres, on purpose. Six
+**Where `FakeSearchIndex` is more forgiving than Postgres, on purpose. Seven
 places, and the first is not a nuance -- it is most of what a search engine
 is:**
 
@@ -25,6 +25,11 @@ is:**
 - **`semantic_coverage` is exact**, computed over the whole filtered
   population because the whole filtered population is in memory. A real
   implementation computes it over a candidate window and may approximate.
+- **Its exact-name key is Python's `casefold()`**, where the statement spells
+  `lower(t.name) = lower(btrim(...))` -- the two agree on ASCII and diverge on
+  the handful of code points where the algorithms differ, and no case in this
+  repository names a title in anything else. Same divergence
+  `FakeSuggestIndex` already carries, in a second place.
 - **It cannot fail.** No connection, no lock, no index build cost, no
   timeout, no `PortUnavailable`. Nothing here exercises a single error path.
 
@@ -110,9 +115,16 @@ class FakeSearchIndex(SearchIndex):
     async def search(self, request: SearchRequest) -> SearchOutcome:
         population = self._population(request.filters)
         lexical = _rank(
-            (document, score)
-            for document in population
-            if (score := _text_score(document, _terms(request.query))) > 0.0
+            (
+                (document, score)
+                for document in population
+                if (score := _text_score(document, _terms(request.query))) > 0.0
+            ),
+            # The lexical lane is the only one with a typed string to compare a
+            # name against, which is `PostgresSearchIndex`'s own split: the
+            # vector lane matches an embedding and is handed no query text at
+            # all (issue #25).
+            query=request.query,
         )
         vectors = _rank(
             (document, _dot(document.vector, request.query_vector))
@@ -298,16 +310,43 @@ def _dot(left: tuple[float, ...] | None, right: tuple[float, ...] | None) -> flo
     return sum(one * other for one, other in zip(left, right, strict=True))
 
 
-def _rank(scored: Iterable[tuple[SearchDocument, float]]) -> list[SearchHit]:
-    # Score descending, then popularity descending, then id. The popularity
-    # key is what makes the weight-class case's distractor bite: without it
-    # an unweighted implementation ties and the case coin-flips into a pass.
-    # The id key makes the order total, so a tie cannot come back
-    # differently on two runs.
+def _rank(
+    scored: Iterable[tuple[SearchDocument, float]], *, query: str | None = None
+) -> list[SearchHit]:
+    # An exact name match leads, then score descending, then popularity
+    # descending, then id. The exact-name key is issue #25's: `ts_rank_cd`
+    # ties are pervasive on short names, so a title whose name *is* the query
+    # otherwise shares a dense rank with everything tied to it and the blend
+    # decides on popularity. `None` for the vector lane, which has no typed
+    # string. The popularity key is what makes the weight-class case's
+    # distractor bite: without it an unweighted implementation ties and the
+    # case coin-flips into a pass. The id key makes the order total, so a tie
+    # cannot come back differently on two runs.
     ordered = sorted(
-        scored, key=lambda pair: (-pair[1], -(pair[0].popularity or 0.0), pair[0].title_id.bytes)
+        scored,
+        key=lambda pair: (
+            not _is_exact_name(pair[0], query),
+            -pair[1],
+            -(pair[0].popularity or 0.0),
+            pair[0].title_id.bytes,
+        ),
     )
-    return [SearchHit(title_id=document.title_id, score=score) for document, score in ordered]
+    return [
+        SearchHit(
+            title_id=document.title_id,
+            score=score,
+            exact_name=_is_exact_name(document, query),
+        )
+        for document, score in ordered
+    ]
+
+
+def _is_exact_name(document: SearchDocument, query: str | None) -> bool:
+    """Python's `casefold()` where the statement spells `lower(t.name) =
+    lower(btrim(...))` -- the divergence this module's docstring already
+    records for `FakeSuggestIndex`, in a second place. The two agree on ASCII
+    and no case in this repository names a title in anything else."""
+    return query is not None and document.name.casefold() == query.strip().casefold()
 
 
 def _fuse(*lanes: Sequence[SearchHit]) -> list[SearchHit]:
@@ -320,11 +359,23 @@ def _fuse(*lanes: Sequence[SearchHit]) -> list[SearchHit]:
     what would catch this function being "simplified" into addition.
     """
     scores: dict[uuid.UUID, float] = {}
+    # Carried from whichever lane knew, which is the lexical one. A fused
+    # answer that dropped it would leave `_dense_ranks` with nothing to
+    # separate an exact name match from the rows tied to it, on the one mode
+    # where both lanes ran (issue #25).
+    exact: set[uuid.UUID] = set()
     for lane in lanes:
         for rank, hit in enumerate(lane):
             scores[hit.title_id] = scores.get(hit.title_id, 0.0) + 1.0 / (_RRF_K + rank + 1)
-    ordered = sorted(scores.items(), key=lambda pair: (-pair[1], pair[0].bytes))
-    return [SearchHit(title_id=title_id, score=score) for title_id, score in ordered]
+            if hit.exact_name:
+                exact.add(hit.title_id)
+    ordered = sorted(
+        scores.items(), key=lambda pair: (pair[0] not in exact, -pair[1], pair[0].bytes)
+    )
+    return [
+        SearchHit(title_id=title_id, score=score, exact_name=title_id in exact)
+        for title_id, score in ordered
+    ]
 
 
 def _coverage(population: Sequence[SearchDocument]) -> float:

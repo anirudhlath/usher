@@ -68,6 +68,7 @@ from usher.services.search import (
     SemanticSearchUnavailable,
     SuggestTier,
     _blend,
+    _dense_ranks,
 )
 
 # Fixed ids, ordered on purpose. `_UNOWNED < _OWNED` and `_ZERO_POP <
@@ -96,6 +97,12 @@ _UNDATED = uuid.UUID(int=0x0D)
 # and the tiebreak then puts the *far* one first.
 _FAR = uuid.UUID(int=0x0E)
 _NEAR = uuid.UUID(int=0x0F)
+# Issue #25's own pair, and `_ESSAY < _NAMED` for the reason every pair above
+# is ordered that way: the exact-name signal is the *only* thing separating
+# these two rows, so an implementation that drops it ties them and the
+# id tiebreak puts the essay -- the wrong one -- first.
+_ESSAY = uuid.UUID(int=0x10)
+_NAMED = uuid.UUID(int=0x11)
 _SOURCE = uuid.UUID(int=0xFF)
 _HOUSEHOLD = uuid.UUID(int=0xA1)
 _OTHER_HOUSEHOLD = uuid.UUID(int=0xA2)
@@ -140,6 +147,13 @@ _CATALOG: dict[uuid.UUID, tuple[str, float | None]] = {
     _UNDATED: ("Vacuum, Undated", None),
     _FAR: ("Vacuum, Unlike Yours", None),
     _NEAR: ("Vacuum, Like Yours", None),
+    # Issue #25's shape, popularity included: the video essay repeating the
+    # query in its own name carries **no** popularity (so `_blend` drops the
+    # term and renormalises over a smaller denominator, which is what makes
+    # its score *larger*), and the title the query actually is carries the
+    # 1999 film's real 42.0757.
+    _ESSAY: ("Vacuum for Realists (aka Reviewing Vacuum in Terms of One Cypher)", None),
+    _NAMED: ("Vacuum", 42.0757),
 }
 
 # The model the household's stored centroid and the stored vectors were both
@@ -1602,6 +1616,77 @@ def test_no_combination_of_the_other_five_can_displace_an_exact_match() -> None:
     # And the measurement that closed the interval, asserted rather than
     # described: the value this table's headroom appeared to permit inverts it.
     assert 0.35 + 0.15 + 0.15 + 0.02 + 0.02 + 0.01 > 0.70
+
+
+def test_an_exact_name_match_takes_dense_rank_zero_alone_even_at_an_equal_index_score() -> None:
+    """Issue #25's mechanism, at the one function that decides it.
+
+    **`ts_rank_cd` ties are pervasive rather than occasional** -- `adapters/
+    search/postgres.py` records a tie group of 498 among the top 500 values for
+    one query -- so ordering the exact match first in the lane is not enough on
+    its own: tied with the row behind it, it *shares* dense rank 0, the
+    relevance term cancels, and popularity decides between a film and a video
+    essay named after it. The exact-name key is what makes rank 0 a group of
+    one, which is the only state
+    `test_no_combination_of_the_other_five_can_displace_an_exact_match`'s bound
+    protects.
+
+    **The control is the premise**: the identical hits without the flag share
+    rank 0. Without it this case would pass against a `_dense_ranks` that had
+    simply become strictly positional -- which would break the owned, played
+    and taste cases above, but silently pass this one.
+    """
+    tied = (
+        SearchHit(title_id=_NAMED, score=_STRONG, exact_name=True),
+        SearchHit(title_id=_ESSAY, score=_STRONG),
+    )
+    assert {hit.score for hit in tied} == {_STRONG}, (
+        "the premise: equal index scores, so nothing but the exact-name key can separate them"
+    )
+
+    assert _dense_ranks(tied) == [0, 1]
+    assert _dense_ranks([dataclasses.replace(hit, exact_name=False) for hit in tied]) == [0, 0], (
+        "the control: without the flag these two tie, which is the state the defect lives in"
+    )
+
+
+async def test_a_title_named_exactly_the_query_is_not_displaced_by_a_longer_document() -> None:
+    """**Issue #25 end to end, through the blend that produced it.**
+
+    `GET /search?q=The Matrix` put the 1999 film **5th**, behind three 2018
+    video essays repeating the phrase in their own names -- 0.8032 against
+    0.3501 -- and *popularity was applied and helped*: without it the film
+    scores 0.2729. The defect is not a missing term, it is that no combination
+    of the other five can overturn what the lexical lane put at dense rank 0
+    (margin 0.009615), and the lexical lane had the wrong row there.
+
+    Arranged at the hardest configuration rather than the observed one: the two
+    hits carry **equal** index scores, so the relevance term cancels unless the
+    exact-name key separates them, and at one shared rank the essay is the row
+    `_blend` prefers -- it has no popularity at all, so an absent signal leaves
+    the denominator and it scores **0.82223** against the named title's
+    **0.81994** (2019 on both, `_NOW`'s clock, computed before this case was
+    written). Both wrong implementations therefore fail: no exact-name key at
+    all, and a key set on every hit alike -- which ties them, and `_ESSAY <
+    _NAMED` puts the essay first.
+    """
+    hits = (
+        SearchHit(title_id=_NAMED, score=_STRONG, exact_name=True),
+        SearchHit(title_id=_ESSAY, score=_STRONG),
+    )
+    assert {hit.score for hit in hits} == {_STRONG}, (
+        "the premise: equal index scores, so the relevance term cancels unless the "
+        "exact-name key separates them"
+    )
+    service = await _service(_ScriptedIndex(SearchOutcome(hits=hits)))
+
+    answer = await service.search("vacuum")
+
+    assert [result.title_id for result in answer.results] == [_NAMED, _ESSAY]
+    assert answer.results[0].score > answer.results[1].score, (
+        "the win has to be on score: at equal scores the id tiebreak decides, and "
+        "`_ESSAY < _NAMED` would then have put the essay first anyway"
+    )
 
 
 async def test_with_no_household_and_no_year_the_score_is_the_one_m6_computed() -> None:

@@ -47,6 +47,12 @@ name, **B: `credit_names`** (M7), C: overview and tagline, D: genres and
 keywords — indexed with GIN and `fastupdate = off` (the default buffers into
 a pending list that produces mysterious p99 spikes).
 
+**The lane's ordering is not `ts_rank_cd` alone.** A title whose name *is* the
+query leads, by `lower(name) = lower(btrim(query))`, ahead of the score and
+ahead of the `LIMIT`; the weight classes decide everything below it. Why that
+key rather than a heavier weight or a lower relevance decay, and what it was
+worth over 800 sampled titles, is under [Ranking](#ranking).
+
 **Weight class B is filled by M7, and the sentence M6 wrote about what that
 would cost was optimistic.** M6 shipped B *reserved and empty* — correctly:
 there was no `Person`, `Credit`, `Collection` or `Image` table, model or port
@@ -1085,6 +1091,57 @@ open `(0, 0.01)`; the taste weight is its midpoint. Pinned by
 asserts the arithmetic rather than an ordering — a re-weighting that reorders
 nothing changes every score on the wire and is invisible to any number of
 ordering cases (M9 F4 measured this: `owned` 0.15 → 0.10 left all ten green).
+
+🔴 **Rank 0 is therefore a pure function of the lexical score — and the
+lexical score was putting the wrong row there.** The bound above says nothing
+about *which* title the index ranked first; it only says the blend cannot
+argue with it. `GET /search?q=The Matrix` returned the 1999 film **fifth**
+(0.3501) behind three 2018 video essays repeating the phrase in their own names
+(0.8032 each), and popularity was applied and *helped* — without it the film
+scores 0.2729. `ts_rank_cd` rewards a document that repeats the query; it has
+no idea that the query **is** a title's whole name
+([#25](https://github.com/anirudhlath/usher/issues/25)).
+
+**So the lexical lane carries an exact-name key, ahead of its own score.**
+`SearchHit.exact_name` is `lower(name) = lower(btrim(query))`, computed in the
+lexical statement, ordered ahead of `ts_rank_cd` *and ahead of the `LIMIT`* —
+a title whose name is a common phrase could otherwise fall outside the
+candidate window and never reach the ranker at all, which no re-weighting
+reaches. `SearchService._dense_ranks` then reads it as the leading key, so an
+exact match is **alone** at dense rank 0 rather than sharing it: `ts_rank_cd`
+ties are pervasive (a tie group of 498 among the top 500 values for one query),
+and a shared rank 0 cancels the relevance term and hands the decision back to
+popularity. **Every weight above is unchanged and so is the bound** — this is
+candidate 1 of the issue's three precisely because candidates 2 and 3 are not:
+capping the relevance decay would make rank-0 dominance contestable and
+invalidate the taste ceiling derived from it, and breaking ties inside the lane
+is narrower than the defect, since the essays *outscore* the film rather than
+tying it.
+
+**Measured against a bar written before the run**, over 800 titles drawn from
+the live 1,272,866-title catalog (400 `skeleton`, 400 `enriched`), each queried
+by its own name through the shipped path: the exact-name miss rate falls
+**38.4% → 20.8%**, and the class the defect is about — *retrievable, uniquely
+named, and outranked anyway* — falls **234 → 0 of 800 (29.3% → 0.0%)**. Nothing
+regressed: of the 493 titles already at rank 1, **493** still are. The 166
+remaining misses are 155 titles that lost to a **namesake** (another title
+carrying the identical name, which no name-based signal can separate) and 11
+that never match their own name at all — a name of nothing but stop words (`In
+Between`), or one containing ` - `, which `websearch_to_tsquery` reads as
+**negation**: `Regret - Cherie Laurent` compiles to `'regret' & !'cheri' &
+'laurent'`. Both are retrieval defects rather than ranking ones and are
+recorded, unfixed, in `.claude/rules/search-and-embeddings.md`.
+
+**The exact-name key is deliberately not tier-1 suggest's prefix key**, though
+it is the same rule at a different strength — `GET /search/suggest?tier=prefix`
+already answered this query correctly, which is what identified the signal. The
+three essays are *themselves* prefix matches of `The Matrix`, so a prefix key
+would flag all four rows alike and separate none of them, while promoting every
+`Matrix Warrior` above `The Matrix` on the query `Matrix`. On tier 1 the whole
+candidate set is prefix matches and popularity does the ordering; here the set
+is mixed. `mode=semantic` carries no exact-name key either: that statement is
+handed a vector and no text, and a `lower(name) =` predicate there would be a
+lexical signal inside the lane that exists not to have one.
 
 **Taste-centroid proximity is a term, and it is *read* rather than computed.**
 `TasteService.centroid` needs an embedder and a request holds none

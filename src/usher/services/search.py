@@ -1092,7 +1092,8 @@ class SearchService:
 
 
 def _dense_ranks(hits: Sequence[SearchHit]) -> list[int]:
-    """Positions, with equal index scores sharing a position.
+    """Positions, with equal index scores sharing a position -- and an exact
+    name match in a group of its own.
 
     **Dense rather than strict, and the difference is load-bearing.** Under a
     strict positional rank no two candidates ever tie on relevance, so the
@@ -1104,15 +1105,32 @@ def _dense_ranks(hits: Sequence[SearchHit]) -> list[int]:
     indifferent to whether a backend reports a similarity or a distance. One
     fewer cross-backend convention to get right, and a reason to prefer a
     rank-derived relevance term over the obvious score-derived one.
+
+    🔴 **`SearchHit.exact_name` leads the key, and it is the whole of issue
+    #25's fix on this side of the port.** The lane already orders exact matches
+    first (`ports.search.SearchHit`), so this could look like a formality --
+    it is not, and the reason is a measurement this repository already carries
+    one module over: `ts_rank_cd` ties are *pervasive* rather than occasional
+    (a tie group of 498 among the top 500 values for one query). Tied with the
+    row behind it, an exact match **shares** dense rank 0, the relevance term
+    cancels between them exactly, and popularity then decides between a film
+    and a video essay named after it. Leading the key makes rank 0 a group of
+    one, which is the state `_WEIGHTS`' arithmetic bound is stated over: no
+    combination of the other five can displace it, margin 0.009615.
+
+    Two exact matches with different index scores still take ranks 0 and 1 --
+    that is two titles with one name, which is a real state of this catalog and
+    an ordering the lexical score is entitled to decide.
     """
     ranks: list[int] = []
     rank = 0
-    previous: float | None = None
+    previous: tuple[bool, float] | None = None
     for hit in hits:
-        if previous is not None and hit.score != previous:
+        key = (hit.exact_name, hit.score)
+        if previous is not None and key != previous:
             rank += 1
         ranks.append(rank)
-        previous = hit.score
+        previous = key
     return ranks
 
 
