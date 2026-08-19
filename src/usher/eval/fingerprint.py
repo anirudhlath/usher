@@ -90,7 +90,7 @@ def git_sha() -> str:
     `subprocess.CalledProcessError` **subclasses `SubprocessError`**, so
     `check=True` raises on a directory that is not a repository, the same
     `except` catches it, and the caller is handed the same `"unknown"` --
-    planted, it survives all 27 cases in `test_eval_fingerprint.py`, which is
+    planted, it survives all 28 cases in `test_eval_fingerprint.py`, which is
     an equivalent mutant reported rather than closed. What `check=False` buys
     is that the ordinary thin case (git answers 128, and it is the common one)
     stays on the return path rather than travelling as an exception, so the

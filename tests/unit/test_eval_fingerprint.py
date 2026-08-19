@@ -426,15 +426,16 @@ def test_the_suggest_fingerprint_carries_no_credential_no_host_and_no_user(
     )
     fingerprint = for_suggest(_GATE_FRAME, case_count=GATE_CASES)
 
-    assert _fields_carrying(fingerprint, platform.python_version()) == ["provenance.python"], (
+    found_python = _fields_carrying(fingerprint, platform.python_version())
+    assert found_python == ["provenance.python"], (
         "the premise: this scan can find a string that really is in the record. "
         "A `_fields_carrying` that answered `[]` for everything -- a mis-spelled "
         "serialisation, a half that stopped being iterated -- passes all three "
         "assertions below exactly like a fingerprint that leaks nothing"
     )
-    assert not _fields_carrying(fingerprint, sentinel), (
-        f"a credential from the environment reached the record, through "
-        f"{_fields_carrying(fingerprint, sentinel)}"
+    leaked_credential = _fields_carrying(fingerprint, sentinel)
+    assert not leaked_credential, (
+        f"a credential from the environment reached the record, through {leaked_credential}"
     )
 
     host = platform.node()
@@ -445,13 +446,11 @@ def test_the_suggest_fingerprint_carries_no_credential_no_host_and_no_user(
         "every field contains, so they would fail rather than pass -- but the "
         "premise says so in one line instead of two confusing ones"
     )
-    assert not _fields_carrying(fingerprint, host), (
-        f"the fingerprint names the machine it ran on, through "
-        f"{_fields_carrying(fingerprint, host)}"
-    )
-    assert not _fields_carrying(fingerprint, user), (
-        f"the fingerprint names the operator, through {_fields_carrying(fingerprint, user)}"
-    )
+    leaked_host = _fields_carrying(fingerprint, host)
+    assert not leaked_host, f"the fingerprint names the machine it ran on, through {leaked_host}"
+
+    leaked_user = _fields_carrying(fingerprint, user)
+    assert not leaked_user, f"the fingerprint names the operator, through {leaked_user}"
 
 
 def test_the_sha_is_the_commit_git_names_for_the_tree_the_process_is_standing_in() -> None:
@@ -499,7 +498,7 @@ def test_a_directory_that_is_not_a_repository_is_unknown_rather_than_a_crash(
     equivalent, measured 2026-08-19.** `subprocess.CalledProcessError`
     subclasses `SubprocessError`, so `check=True` raises, `git_sha`'s own
     `except` catches it, and the answer is the same `"unknown"` -- planted, it
-    survives all 27 cases in this file. Written down here as well as in the
+    survives all 28 cases in this file. Written down here as well as in the
     module because a survivor is a claim about the code, and the next reader
     of that flag will otherwise assume a case is holding it.
 
