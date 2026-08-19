@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.genres import canonical_genres, genre_spellings
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import (
@@ -438,8 +439,15 @@ class FakeTitleRepository(TitleRepository):
     ) -> bool:
         """`browse`'s `WHERE`, shared with `browse_facets` so a facet is the
         same population minus one predicate rather than a second reading of
-        the filters."""
-        if genre is not None and genre not in title.genres:
+        the filters.
+
+        The genre leg is the `&&`-over-every-spelling of ADR-0039, in Python:
+        `titles.genres` unions two importers' vocabularies and the label the
+        client sent is written in one of them, so plain membership answered
+        half a concept. For any label outside the alias table the expansion is
+        a one-element set and this collapses to the test it replaced.
+        """
+        if genre is not None and not set(genre_spellings(genre)) & set(title.genres):
             return False
         if year is not None and title.year != year:
             return False
@@ -524,8 +532,16 @@ class FakeTitleRepository(TitleRepository):
             # `genre=None`: the genre facet drops its **own** predicate and
             # keeps the other two.
             if self._browse_matches(title, genre=None, year=year, owned=owned):
+                # One entry per **concept**, not per spelling (ADR-0039), and
+                # the increment is per raw label rather than per title so this
+                # is the same arithmetic as the Postgres arm's `GROUP BY` and
+                # `_canonical_facet` -- summing, with the measured premise that
+                # no title carries two spellings of one concept. Deduping here
+                # and not there is how the two arms come to disagree on the one
+                # population that distinguishes them.
                 for name in title.genres:
-                    genres[name] = genres.get(name, 0) + 1
+                    for canonical in canonical_genres(name):
+                        genres[canonical] = genres.get(canonical, 0) + 1
         years: dict[int, int] = {}
         for title in self._titles.values():
             if title.year is not None and self._browse_matches(
@@ -534,9 +550,11 @@ class FakeTitleRepository(TitleRepository):
                 years[title.year] = years.get(title.year, 0) + 1
         # A value the request named is present at zero rather than absent --
         # `count_by_state`'s "never a sparse dict", narrowed to the keys the
-        # request itself supplied because a genre vocabulary is open.
+        # request itself supplied because a genre vocabulary is open. Under the
+        # concept's key, never the spelling the client sent.
         if genre is not None:
-            genres.setdefault(genre, 0)
+            for canonical in canonical_genres(genre):
+                genres.setdefault(canonical, 0)
         if year is not None:
             years.setdefault(year, 0)
         return BrowseFacets(genres=genres, years=years)

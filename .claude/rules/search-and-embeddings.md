@@ -1362,3 +1362,32 @@ person fails to find it. Whoever takes it should note that it also makes the
 model swap a *third* cause of neighbour staleness in ADR-0020's terms, beside
 the blend change (closed) and *some other title was embedded since* (still
 undecidable per row).
+
+## Weight class D and segment 6 both carry two spellings of one concept
+
+`titles.genres` unions IMDb's vocabulary and TMDb's, and no title carries both
+spellings of any concept — 20,051 `Sci-Fi` against 6,223 `Science Fiction`,
+zero overlap on 1,272,866 rows (2026-08-19).
+[ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)
+fixed `/browse`'s filter and facets at **read** time and deliberately left both
+of this subsystem's genre readers split:
+
+- **`search_document` weight class D.** The two spellings share no lexemes:
+  `to_tsvector('english','Sci-Fi')` is `'fi':3 'sci':2 'sci-fi':1` against
+  `'fiction':2 'scienc':1`. A query reaching the genres segment matches one
+  half of the catalog.
+- **`compose_document` segment 6 of 7**, so every stored vector carries
+  whichever spelling its tier had.
+
+**The reason it was left is this file's own arithmetic, not squeamishness.**
+Normalising the column changes segment 6, so `_FINGERPRINT_SQL` correctly marks
+every affected title stale and `usher index --backfill` re-embeds it —
+**~1.8 h** plus a **3.3 h** `usher similar --rebuild` on this catalog by the
+2026-08-13 run. That is the fingerprint working, and it is a bill to schedule
+alongside any other change that stales the same documents rather than pay
+twice. The enrichment-side fix that *did* ship costs nothing extra here: a
+title reaching that merge already had an `INDEX` job enqueued.
+
+Unmeasured, and sampleable with no user traffic: how many `Sci-Fi` titles
+change position in a `/search` for a science-fiction query if they carry the
+other label.

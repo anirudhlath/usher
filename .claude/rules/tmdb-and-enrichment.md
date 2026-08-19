@@ -1110,3 +1110,82 @@ baseline attempt was discarded**, and the gate is why: it reported two foreign
 suite on this shared box. The load average at the time was 7.04 against 2.04 on
 the run that was kept. That is the census earning its keep on the failure mode
 it was built for.
+
+## Enrichment was deleting genres, not re-spelling them (2026-08-19, issue #30)
+
+`genres` is in `_ENRICHABLE`, so a provider that supplies **any** genre
+replaces the whole array. `titles.genres` unions two importers' vocabularies —
+IMDb's 28 labels from the bulk phase, TMDb's 19 movie / 16 television ones from
+here — and the two are **disjoint on every concept they both name**. What that
+does to a title with a label TMDb has no word for is not a re-spelling.
+[ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md).
+
+### The measurement, and the control is what makes it evidence
+
+Issue #30 *inferred* the deletion from the replace-list plus the label
+distribution. It is now observed, by joining the real `title.basics.tsv.gz`
+(2026-08-10) to the live catalog (1,272,866 titles):
+
+| | |
+|---|---|
+| enriched titles the dump also gives genres for | 132,116 |
+| …that lost at least one IMDb label | **53,724 (40.7%)** |
+| total label deletions | **69,160** |
+| …of a concept TMDb cannot express | **11,466** |
+| **skeletons that lost a label** | **0 of 1,021,623** |
+
+The zero is the control. Without it, 53,724 is equally consistent with the dump
+being newer than the catalog, with the parser dropping labels, or with the
+comparison being wrong — the same shape as *"a run that did not run is not a
+pass"*, one lane over.
+
+The mechanism is confirmed independently, from `raw_payloads`: of 132,407
+enriched titles with a cached TMDb payload, **130,826 of the 130,826 whose
+payload supplied any genre have `titles.genres` byte-identical to that
+payload's list, and zero differ.** The 1,581 that differ supplied *no* genres,
+where `_changes` skips the field — which is also why only 108 enriched titles
+retain an IMDb-only label at all, and four of those are TMDb's own TV `News`.
+
+Per label, deleted against survived: `Biography` 5,562/34, `Musical` 2,767/39,
+`Sport` 2,115/13, **`Film-Noir` 827/0**, `Short` 174/0, `Game-Show` 21/2. And
+`Drama` 13,141, `Crime` 5,506, `Romance` 5,360 — those are TMDb *disagreeing*,
+which it is entitled to do and is usually right about. **The two are different
+defects and only one of them is a defect**, which is why the fix keys on the
+provider's vocabulary rather than on "keep everything".
+
+### The rule that shipped
+
+`MetadataProvider.genre_vocabulary` — the canonical concepts a provider can
+express, i.e. **the set it is entitled to delete** — abstract with no default,
+for `EnrichmentResult.seasons`' reason. `EnrichService._genres_after` keeps any
+existing label whose concept is outside it. TMDb's is derived from
+`TMDB_GENRE_NAMES` rather than restated, because two hand-maintained copies of
+one vocabulary drift and *the failure is silent*: a concept wrongly in the set
+is a label enrichment goes on deleting, which looks exactly like enrichment
+working.
+
+**It stales nothing extra.** `genres` is segment 6 of `compose_document`, so a
+preserved label moves `_FINGERPRINT_SQL` — but `_apply` already enqueues an
+`INDEX` job for every successful enrichment, so a title reaching the merge was
+being re-embedded on that pass anyway. That is what makes this affordable where
+normalising the existing 1,272,866 rows is not.
+
+### Two of the issue's own claims were wrong, and the same query said so
+
+- `Reality-TV`, `Talk-Show` and `News` are listed there as having no TMDb
+  equivalent. TMDb's **television** vocabulary has `Reality`, `Talk` and
+  `News`, so they are re-spellings and not gaps. The real gap is seven
+  concepts: `Adult`, `Biography`, `Film-Noir`, `Game-Show`, `Musical`, `Short`,
+  `Sport`.
+- "Whether TMDb's TV vocabulary ever reaches this column" is filed there as
+  unmeasured, noting that none of the five appears. **All of them do** —
+  `Sci-Fi & Fantasy` 165, `Action & Adventure` 154, `Reality` 57,
+  `War & Politics` 25, `Kids` 19, `Soap` 19, `Talk` 4. So the adapter does not
+  map them away, and three of them *fuse* concepts the movie vocabulary keeps
+  apart, which is why an alias maps to a **tuple** of canonical labels rather
+  than to one.
+
+**Both were reachable from one `GROUP BY` over `unnest(genres)`.** The general
+form, and it is the reason this section exists: an issue's "not measured"
+section is a list of queries nobody ran, not a list of things that are hard to
+know.

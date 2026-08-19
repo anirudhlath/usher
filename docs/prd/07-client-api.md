@@ -162,6 +162,23 @@ be added if a client turns out to need flexible field selection.
 > different facts about the catalog and a client cannot tell them apart. The
 > two reasons are separate because they have two different fixes.
 >
+> ✅ **The genre facet is one button per *concept*, not per spelling, and
+> `?genre=` matches the concept —
+> [ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md).**
+> `titles.genres` unions two importers' vocabularies with nothing in common, so
+> until 2026-08-19 this endpoint offered `Sci-Fi` (20,051) and `Science
+> Fiction` (6,223) as separate buttons and returned **disjoint** sets for one
+> concept — zero titles carry both labels. The counts are now keyed by Usher's
+> canonical vocabulary and the filter is an overlap with every spelling of the
+> concepts the label names, so each count is the size of the page pressing that
+> button serves and a bookmarked `?genre=Sci-Fi` answers the whole concept.
+> **Two caveats a client should know.** A label from outside the vocabulary
+> behaves exactly as it did, because the column is open even though the
+> vocabulary is not. And the cursor is *not* canonicalised: `CursorSpec.filters`
+> carries the genre string verbatim, so a cursor minted under one spelling and
+> replayed under the other is still `400 invalid_cursor` — a case no client
+> taking its labels from `facets` can reach.
+>
 > ⚠️ **A browse page is itself over budget and this document does not yet
 > promise otherwise.** The same run put a predicated page at **139.92 ms p95**
 > at the median-selectivity genre against a 50 ms bar, and the unfiltered page
