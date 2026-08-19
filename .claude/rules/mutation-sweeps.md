@@ -5203,6 +5203,16 @@ one module over, which builds an adapter and therefore does. C2 is S2's C1 shape
 reused one class along, kept as the cheap second control; neither is an `__all__`
 reorder, which `RUF022` rejects.
 
+**One follow-up after the round, and it is the reason to read T2 twice.** T2's
+kill was an `is not` — an identity assertion, which is not what an operator
+experiences. `test_adapters_http.py::test_a_registrys_gate_paces_and_a_second_source_gets_its_own_budget`
+was added afterwards as its behavioural twin, driving two sources through one
+registry against a fake clock; re-planting T2 against it gives
+`assert [0.5, 0.5] == [0.5]` with the message *"a second source waited behind
+the first one's slot"*. That case is also the only reader of
+`SourceGateRegistry`'s injected `clock`/`sleep`, which is why it was written
+rather than left as two constructor arguments nothing passes.
+
 **Failing-test-first, recorded because it is the acceptance's own ask.** At
 `da77962` the identity case fails on its own assertion —
 `AssertionError: two pipelines from one composition root gave one source two

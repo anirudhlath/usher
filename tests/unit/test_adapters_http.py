@@ -15,6 +15,7 @@ away from taking the worker down.
 
 import asyncio
 import json
+import uuid
 
 import httpx
 import pytest
@@ -22,7 +23,13 @@ from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader
 
-from usher.adapters.http import UNTRANSLATED_FAILURES, _MinInterval, decode_json, port_error_for
+from usher.adapters.http import (
+    UNTRANSLATED_FAILURES,
+    SourceGateRegistry,
+    _MinInterval,
+    decode_json,
+    port_error_for,
+)
 from usher.adapters.tmdb.client import _TokenBucket
 from usher.ports.errors import (
     PortAuthFailed,
@@ -384,3 +391,48 @@ async def test_a_disabled_gate_records_no_throttle_series_at_all() -> None:
         for metric in scope.metrics
     }
     assert "usher.source.throttle.wait" not in names
+
+
+# ---------------------------------------------------------------------------
+# SourceGateRegistry -- who owns the gate (M10 S3; ADR-0039 §4)
+
+
+async def test_a_registrys_gate_paces_and_a_second_source_gets_its_own_budget() -> None:
+    """The **behavioural** half of "keyed by `source.id`", which the identity
+    assertions elsewhere cannot state.
+
+    `tests/unit/test_composition.py` pins that two adapters for one source hold
+    the *same* gate object and two sources hold different ones. That is an
+    identity claim, and identity is not the thing an operator experiences —
+    what they experience is that a second server is paced at the full rate
+    rather than at half of it. So this drives two sources through one registry
+    and reads the clock:
+
+    - the second call **for one source** waits `1/rate`;
+    - the first call for a **different** source waits nothing, because it is a
+      different gate with its own `_next`.
+
+    An implementation returning one global gate passes every identity
+    assertion's first half and fails the second arm here, with a number rather
+    than an `is`.
+
+    This is also the only reader of `SourceGateRegistry`'s injected `clock` and
+    `sleep`. They exist so a registry-owned gate can be driven without
+    sleeping, and a constructor argument nothing passes is one nothing covers —
+    `.claude/rules/testing-discipline.md` records that in both directions.
+    """
+    clock = _Clock()
+    gates = SourceGateRegistry(2.0, clock=clock, sleep=clock.sleep)
+    living_room, bedroom = uuid.uuid4(), uuid.uuid4()
+
+    await gates.gate(living_room, "Living Room Emby").take()
+    assert clock.slept == [], "the premise: the first call through a fresh gate never waits"
+
+    await gates.gate(living_room, "Living Room Emby").take()
+    assert clock.slept == [0.5], "the same source's second call is spaced by 1/rate"
+
+    await gates.gate(bedroom, "Bedroom Emby").take()
+    assert clock.slept == [0.5], (
+        "a second source waited behind the first one's slot, so the two share a gate "
+        "and each server is being paced at half the configured rate"
+    )
