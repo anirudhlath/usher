@@ -318,9 +318,9 @@ survives as a deliberately conservative cap. It is written down as unmeasured
 rather than dressed up.
 
 🔴 **That string has now been measured, and it was never about a request.**
-M10's S1 (2026-08-15, 52 bounded read-only requests against the live Emby
-4.9.5.0 — full table and method in
-`.claude/rules/emby-push-and-ingest.md`) prices this deployment's source at:
+M10's S1 (2026-08-15, 52 bounded read-only requests against the operator's
+live Emby — full table and method in `.claude/rules/emby-push-and-ingest.md`)
+prices this deployment's source at:
 
 | op | median | mean | p95 | max | n |
 |---|---|---|---|---|---|

@@ -38,9 +38,11 @@ refresh-token flow; this pattern *is* the refresh mechanism.
   operator revokes it. Re-authentication is **single-flight** — concurrent 401s
   collapse into one `AuthenticateByName` — and exactly one retry is attempted
   per request. A credential that is genuinely *wrong* is remembered for a
-  cooldown, so a bad password cannot turn every call into two requests against
-  a source measured at 0.1495 s per single-item read and 6.04 s per 200-item
-  page ([01](01-architecture.md), M10 S1, 2026-08-15). That matters beyond this section,
+  cooldown, so a bad password cannot turn every call into two requests. ⚠️ The
+  *added* request is `POST /Users/AuthenticateByName`, whose cost nothing here
+  has ever measured; what is measured is the call being retried — 0.1495 s per
+  single-item read, 6.04 s per 200-item page
+  ([01](01-architecture.md), M10 S1, 2026-08-15). That matters beyond this section,
   because a direct-play URL carries this token
   ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)).
 - Credentials live behind `credentials_ref` indirection: an opaque, random

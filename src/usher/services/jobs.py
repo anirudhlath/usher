@@ -138,9 +138,10 @@ HEARTBEAT_FRACTION: Final = 3.0
 #:   of these kinds make: **0.1495 s median, 0.1649 s mean** (M10 S1 --
 #:   `.claude/rules/emby-push-and-ingest.md`), i.e. ~6 rps from one coroutine,
 #:   so four in flight aims for ~24 rps at a machine somebody is also watching
-#:   television on. That is the number to hold this cap against; it is **not**
-#:   Little's law, because the term Little's law needs -- what the latency does
-#:   as concurrency rises -- is exactly the thing still unmeasured. The
+#:   television on. That is the number to hold this cap against, and it is
+#:   what four in flight *would* draw **if latency stayed flat under
+#:   concurrency** -- which is exactly the term nobody has measured, so read it
+#:   as the optimistic bound rather than as a prediction. The
 #:   seven-milestone-old "1-5 s per request" this comment used to cite was
 #:   never a measurement at all and was ~20x too slow for these kinds.
 #: - **`INDEX` = 1.** CPU-bound through `fastembed`, and measured:

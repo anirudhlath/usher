@@ -102,7 +102,9 @@ every class** (M9 S2's finding): any `Σ` over pages wants the mean.
   under 5 s and is **9.68 s**, and **12 of the 24 `list` reps exceeded 5 s** —
   every scattered page and no depth-0 one, which follows from the table (max
   `list@0` is 4.8355 and the pooled median 5.0954 forces min `list@scattered`
-  to 5.3553) and is confirmed in Prometheus, where the replayed reps read
+  to **at least** 5.3553 -- the 12th-smallest of 24 is <= 4.8355, so the 13th
+  is >= 2*5.0954 - 4.8355; a lower bound, not the equality an earlier draft
+  wrote) and is confirmed in Prometheus, where the replayed reps read
   `le="5"` = 12 against `le="10"` = 24. *An earlier version of this entry said
   nine; nine was a guess dressed as a count.*
 - 🔴 **A single-item read is 34× cheaper than a page**, not "1–5 s".
@@ -150,9 +152,13 @@ Library **1,134,919 items** on 2026-08-15 (up from 1,126,789 on 2026-08-02 and
   a source-side rate limiter's default has to be chosen against, not "1–5 s".
 - **M5 measured a real `ItemsUpdated` batch at 42 ids**; applied inline at
   `get_item`'s mean that is **6.9 s**, i.e. about one page.
-- ⚠️ **A rate limiter on `list` cannot bind.** One page at a time is already
-  0.17 rps. Anything that limits the *source* below ~6 rps is a limit on the
-  single-item ops alone.
+- ⚠️ **A rate limiter on `list` cannot bind *a sequential walk*.** One page at
+  a time is already 0.17 rps, so any per-source limit above that never fires on
+  the walk this run measured, and a limit below ~6 rps binds only the
+  single-item ops. Whether it binds a *concurrent* walk is unmeasured and is
+  S7's -- N pages in flight is N x 0.17 rps, which a limiter set for
+  courtesy could well reach. The claim is about the sequential case, which is
+  the only case this run has.
 
 ### Two instruments, and the second one caught a defect in the first's reporting
 

@@ -92,14 +92,16 @@ import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+import traceback
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+from loguru import logger
 from opentelemetry import metrics
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.sdk.metrics import MeterProvider
@@ -116,14 +118,20 @@ from usher.adapters.emby.adapter import ITEM_FIELDS, ITEM_TYPES, SORT_BY
 from usher.adapters.emby.session import PUBLIC_INFO_PATH, EmbySession
 from usher.ports.credentials import SourceCredentials
 
-BAR = Path("/var/tmp/m10-gate/BAR-S1.md")  # noqa: S108 -- durable, not tmpfs; CLAUDE.md
+#: S1's identities, as **defaults** rather than as module constants. A second
+#: arm of this harness (S7's concurrency run) needs its own bar, its own
+#: `service.name` and its own budget; baking S1's into module scope is what
+#: makes reuse a fork. `/var/tmp`, not `/tmp`: `/tmp` here is tmpfs, and a bar
+#: whose only property is that it predates the numbers does not survive a
+#: reboot there (CLAUDE.md).
+DEFAULT_BAR = Path("/var/tmp/m10-gate/BAR-S1.md")  # noqa: S108 -- durable, not tmpfs
 
 METRIC = "usher.source.request.duration"
 
 #: The label written into `{source=...}`. Deliberately *not* the household's
 #: own source name: that name reaches Prometheus, which this task does not get
 #: to put a household identifier into.
-SOURCE_LABEL = "s1-probe"
+DEFAULT_SOURCE_LABEL = "s1-probe"
 
 #: `EmbyAdapter`'s own default page size, so `list` measures the page the
 #: reconcile walk actually asks for.
@@ -145,8 +153,20 @@ SECRET_KEYS: Mapping[str, str] = {
 FINE_BOUNDARIES: tuple[float, ...] = tuple(round(0.01 * (1.05**k), 6) for k in range(165))
 
 
-class BudgetExceeded(RuntimeError):
-    """The declared live-request budget is spent and the next request is refused."""
+class BudgetExceeded(Exception):
+    """The declared live-request budget is spent and the next request is refused.
+
+    🔴 **`Exception`, deliberately not `RuntimeError`, and this is load-bearing
+    rather than stylistic.** The budget is spent at the transport, so the
+    refusal is raised *inside* `EmbySession._send`'s `try` -- and
+    `UNTRANSLATED_FAILURES` (`usher.adapters.http`) lists `RuntimeError`, so a
+    `RuntimeError` subclass is caught there and re-raised as
+    `PortUnavailable(f"{method} {path} failed: ...")`. Measured: the identical
+    refusal spelled as a `RuntimeError` subclass comes back as
+    `PortUnavailable: GET /a failed: budget refused`, which reads as "the
+    household's server is down" and would be recorded as a failed run rather
+    than a bounded one. Spelled as `Exception` it propagates unchanged.
+    """
 
 
 class ProbeFailed(RuntimeError):
@@ -155,7 +175,21 @@ class ProbeFailed(RuntimeError):
 
 @dataclass
 class Budget:
-    """Spent *before* the request is built, never counted after it returns.
+    """One unit per **request on the wire**, spent before the wire sees it.
+
+    🔴 **Not one unit per `Probe`, which is what this counted until a review
+    priced it.** `EmbySession.request` retries once on a 401
+    (`session.py:406-415`) and `_TokenSession._authenticate_locked` issues no
+    request of its own, so a single 401 anywhere in the run made one probe cost
+    two requests and nothing noticed. Demonstrated against a stub answering one
+    401: `spent = 5` against a limit of 5, and **6 requests on the wire**. That
+    falsifies the only property this budget exists to have, and Group S's
+    <= 256 ceiling is assembled out of these declarations.
+
+    So the spend happens in an `httpx` request event hook -- the last thing
+    before the transport, downstream of every retry, redirect and
+    re-authentication `EmbySession` can perform. `install(client)` is how it
+    gets there.
 
     A budget enforced after the fact is a tally. The refusal names the limit so
     that a log line is enough to tell "the run was bounded" from "the run was
@@ -164,6 +198,15 @@ class Budget:
 
     limit: int
     spent: int = 0
+
+    def install(self, client: httpx.AsyncClient) -> httpx.AsyncClient:
+        """Spend one unit per outbound request, before the transport."""
+
+        async def hook(request: httpx.Request) -> None:
+            self.spend(f"{request.method} {request.url.path}")
+
+        client.event_hooks["request"].append(hook)
+        return client
 
     def spend(self, what: str) -> None:
         if self.spent >= self.limit:
@@ -212,7 +255,6 @@ class Stats:
     p95: float = 0.0
     maximum: float = 0.0
     median_bytes: int = 0
-    samples: list[float] = field(default_factory=list)
 
 
 # -- credentials -------------------------------------------------------------
@@ -399,10 +441,13 @@ def plan_probes(
 # -- the run -----------------------------------------------------------------
 
 
-async def issue(
-    session: EmbySession, probe: Probe, budget: Budget
-) -> tuple[Timing, dict[str, Any]]:
-    """One request. The budget is spent first, before anything is built.
+async def issue(session: EmbySession, probe: Probe) -> tuple[Timing, dict[str, Any]]:
+    """One request. **The budget is not spent here** -- see `Budget.install`.
+
+    Spending here counted *probes*; the wire counts *requests*, and a 401
+    retry makes those differ. The hook on the client is downstream of every
+    retry this session can perform, so it cannot be told a different number
+    from the one the transport sees.
 
     Timed around `session.request`, which is `_send` plus a span -- deliberately
     *not* around `json_body`, so that the wall clock and the histogram
@@ -415,7 +460,6 @@ async def issue(
     and that *does* include the decode of a ~15-key object -- microseconds
     against tens of milliseconds.
     """
-    budget.spend(probe.name)
     started_wall = time.time()
     started = time.monotonic()
     if probe.anonymous:
@@ -446,15 +490,26 @@ async def issue(
     )
 
 
-async def run_probes(session: EmbySession, probes: Sequence[Probe], budget: Budget) -> list[Timing]:
-    """The request loop. A budget of zero is the dry run and issues nothing."""
-    timings: list[Timing] = []
-    if budget.limit == 0:
-        return timings
+async def run_probes(session: EmbySession, probes: Sequence[Probe], into: list[Timing]) -> None:
+    """The request loop, appending into a **caller-owned** list.
+
+    🔴 **Caller-owned because a run that ends early otherwise loses every
+    observation it bought.** Returning a fresh list meant `BudgetExceeded` on
+    request 60 of 60 discarded the 59 that had already been paid for against a
+    real household server -- unrecoverable, and S1's entire share of the group
+    budget, for nothing.
+
+    **There is no `budget.limit == 0` guard here any more.** There was one, it
+    was dead code -- the only production caller is downstream of `_run`'s early
+    return, so `limit` is never 0 by the time control arrives -- and it
+    *disagreed* with `Budget.spend`, returning `[]` where the real guard
+    raises. Two spellings of one rule is how the wrong one gets tested. The
+    guards that remain have distinct jobs: `_run` returns before building
+    anything at all, and `Budget.spend` refuses at the transport.
+    """
     for probe in probes:
-        timing, _ = await issue(session, probe, budget)
-        timings.append(timing)
-    return timings
+        timing, _ = await issue(session, probe)
+        into.append(timing)
 
 
 def summarise(timings: Sequence[Timing], key: str = "probe") -> dict[str, Stats]:
@@ -470,8 +525,7 @@ def summarise(timings: Sequence[Timing], key: str = "probe") -> dict[str, Stats]
             mean=statistics.fmean(seconds),
             p95=_quantile(seconds, 0.95),
             maximum=seconds[-1],
-            median_bytes=int(statistics.median(sorted(one.payload_bytes for one in group))),
-            samples=seconds,
+            median_bytes=int(statistics.median([one.payload_bytes for one in group])),
         )
     return out
 
@@ -502,7 +556,11 @@ def build_meter_provider(
 
 
 def replay_with_shipped_buckets(
-    timings: Sequence[Timing], *, endpoint: str, service_name: str
+    timings: Sequence[Timing],
+    *,
+    endpoint: str,
+    service_name: str,
+    source_label: str = DEFAULT_SOURCE_LABEL,
 ) -> None:
     """The same numbers, through a provider configured exactly as ship does.
 
@@ -516,7 +574,7 @@ def replay_with_shipped_buckets(
         METRIC, unit="s", description="Wall time per request to a media source"
     )
     for timing in timings:
-        histogram.record(timing.seconds, {"source": SOURCE_LABEL, "op": timing.op})
+        histogram.record(timing.seconds, {"source": source_label, "op": timing.op})
     provider.force_flush()
     provider.shutdown()
 
@@ -596,7 +654,13 @@ def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, UTC).strftime("%H:%M:%SZ")
 
 
-def _agreement(left: float | None, right: float | None) -> str:
+def _relative_difference(left: float | None, right: float | None) -> str:
+    """|left - right| / right, as a percentage.
+
+    Named for what it computes. It was called `_agreement` and printed under a
+    heading of "agree", so `0.13%` read as *terrible* agreement to anyone who
+    did not already know the convention -- the column is headed `\u0394%` now.
+    """
     if left is None or right is None or not right:
         return "n/a"
     return f"{abs(left - right) / right * 100:.2f}%"
@@ -641,37 +705,128 @@ async def _item_ids(database_url: str, limit: int) -> list[str]:
         await engine.dispose()
 
 
+async def warm_up(
+    session: EmbySession,
+    *,
+    user_id: str,
+    item_ids: Sequence[str],
+    into: list[Timing],
+) -> int:
+    """The four discarded probes, and the two preconditions they exist to check.
+
+    A named function rather than an inline block so **S7 can reuse or replace
+    it** without forking `_run` -- the plan invites a concurrency arm built on
+    this harness, and a monolith is not something you build an arm on.
+
+    Returns `TotalRecordCount`, which the probe plan needs in order to scatter
+    a `StartIndex` over a library whose size nothing else here knows.
+    """
+    warm, _ = await issue(session, verify_probe())
+    into.append(warm)
+    warm, page = await issue(session, list_probe(user_id, 0, name="list@0"))
+    into.append(warm)
+    total_items = int(page.get("TotalRecordCount") or 0)
+    if total_items <= PAGE_SIZE:
+        raise ProbeFailed(f"TotalRecordCount={total_items} leaves nothing to scatter over")
+    print(f"library: {total_items} items (TotalRecordCount from the warm-up page)")
+    warm, item = await issue(session, get_item_probe(user_id, item_ids[0]))
+    into.append(warm)
+    if not item.get("Id"):
+        raise ProbeFailed(
+            "the recorded media_items id no longer resolves on this server; "
+            "a 404 is a cheaper code path and measuring it answers a different question"
+        )
+    warm, _ = await issue(session, list_probe(user_id, total_items // 2, name="list@scattered"))
+    into.append(warm)
+    # Printed, not merely counted: these are discarded from the statistics and
+    # are *not* discarded from the histogram, so somebody reconciling the two
+    # instruments needs to see them.
+    print(
+        f"warm-up: {len(into)} requests, discarded from the statistics but not "
+        f"from the histogram -- " + ", ".join(f"{one.probe} {one.seconds:.4f}s" for one in into)
+    )
+    return total_items
+
+
+WARMUP_REQUESTS = 4
+PROBE_CLASSES = 4
+
+
+def check_budget_is_sufficient(*, budget: int, reps: int) -> None:
+    """Refuse a run the budget cannot finish, **before the first request**.
+
+    🔴 **Because the alternative was measured and it is the worst outcome this
+    harness can produce.** `--reps 15 --budget 60` spends all sixty requests
+    against a real household server, raises `BudgetExceeded` on the last one,
+    and -- before the `finally` work below existed -- produced no table, no
+    timings file and no flush. Sixty live requests, S1's entire share of the
+    group ceiling, unrecoverable, for nothing. Arithmetic that is knowable
+    before the first packet belongs before the first packet.
+    """
+    if reps < 1:
+        raise SystemExit(f"--reps must be at least 1; got {reps}")
+    needed = WARMUP_REQUESTS + PROBE_CLASSES * reps
+    if needed > budget:
+        raise SystemExit(
+            f"--reps {reps} needs {needed} requests "
+            f"({WARMUP_REQUESTS} warm-up + {PROBE_CLASSES}x{reps}) "
+            f"and --budget is {budget}; refusing to start a run that cannot finish"
+        )
+
+
 async def _run(
     args: argparse.Namespace,
     secrets: Mapping[str, str],
     *,
+    plan: Callable[..., list[Probe]] = plan_probes,
+    runner: Callable[..., Awaitable[None]] = run_probes,
+    warmer: Callable[..., Awaitable[int]] = warm_up,
     client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     provider_factory: Callable[..., MeterProvider] = build_meter_provider,
 ) -> int:
-    """The whole run. **Two seams, and the first one exists because a review
-    found the guard it protects to be unpinned.**
+    """The whole run, with the three things a second arm must replace injected.
 
-    `--budget 0` is enforced *here*, not in `run_probes`: by the time
-    `run_probes` is reached the four warm-ups have already gone to the
-    operator's server, so `run_probes`' own zero-guard is unreachable in
-    production and a test that drives it proves nothing about a dry run.
-    `client_factory` is what lets a test drive *this* function against a stub
-    transport and assert on the wire.
+    **`plan`, `runner` and `warmer` are composition seams, not test seams**, and
+    they exist because M10's S7 is invited to build a *concurrency* arm on this
+    harness. A concurrency arm replaces exactly those three -- a different probe
+    plan, a loop with N in flight, and possibly a different warm-up -- and
+    reuses everything else here: the quiet check, `_item_ids`, the budget, the
+    session and its token swap, `summarise`/`_table`, `--timings-out`, the
+    replay and `read_back`. Without the seams that reuse is a fork, and a fork
+    is how two harnesses come to disagree about what a request costs.
+    `--bar`, `--source-label` and `--service-name` are arguments for the same
+    reason: they were S1 identities at module scope.
 
-    **Two spellings of the defect, and they do different things -- measured,
-    because the first write-up of this docstring asserted the second one's
-    behaviour for both and was wrong.** Moving this early return below the
-    warm-ups *alone* puts **zero** requests on the wire: `Budget(0)` still
-    refuses the first spend, so the dry run dies with `BudgetExceeded` having
-    built an HTTP client and a meter provider. Add the "0 means unlimited"
-    idiom to `Budget.spend` as well and it puts **four** requests on somebody
-    else's Emby. Both pass `ruff`; both passed the whole suite before
-    `test_a_dry_run_is_enforced_where_the_guard_actually_lives` existed.
+    ⚠️ **`--budget`'s default is S1's share of Group S's ceiling, not a
+    property of this file.** A second arm passes its own, and there is still no
+    shared ledger across S1/S7/S8/S11 -- each declares and each is trusted.
+    Named here rather than discovered by whoever spends it twice.
 
-    `provider_factory` is the same idea for the exporter: a test must be able
-    to run the real loop without a `PeriodicExportingMetricReader` opening a
-    gRPC channel and leaving a daemon thread behind.
+    `--budget 0` is enforced *here*: by the time `runner` is reached the
+    warm-ups have already gone to the operator's server, so a guard down there
+    is unreachable in production. `client_factory` is what lets a test drive
+    *this* function against a stub transport and assert on the wire, and
+    `provider_factory` lets it run the real loop without a
+    `PeriodicExportingMetricReader` opening a gRPC channel.
+
+    **Three spellings of the dry-run defect, measured rather than described,
+    because two earlier versions of this docstring asserted one spelling's
+    behaviour for all of them:**
+
+    * this early return moved below the **warm-ups**, alone -> **0** requests
+      on the wire and an **uncaught `BudgetExceeded`**; the case dies there,
+      before it reaches its own assertions.
+    * the same, plus `Budget.spend`'s "0 means unlimited" idiom -> **4**
+      requests on somebody else's Emby, and it returns 0.
+    * this early return moved below the **client construction** -- literally
+      the shape this harness shipped before the guard was hoisted -> **0**
+      requests, but a client is built. This is the plant `built == []` earns
+      its place against, and `return 1` here is what `code == 0` earns its.
     """
+    # The import is inside the function on purpose: `_run` reads these three
+    # names at *call* time, so a test can `monkeypatch.setattr` the module and
+    # be seen. A module-level import would bind them once at import and the
+    # monkeypatch would be a silent no-op.
     from scripts.measure_suggest_tiers import (
         _CPU_DRIFT_LIMIT,
         _CPU_SETTLE_SECONDS,
@@ -683,19 +838,21 @@ async def _run(
     foreign = int(before["processes"]["pytest"])
     print(f"quiet: opening cpu busy {opening}, foreign pytest {foreign}")
 
+    if args.budget == 0:
+        # **Before the exporter and before the database.** A dry run that spun
+        # up a `PeriodicExportingMetricReader` -- or opened a Postgres
+        # connection to read item ids, which this used to do -- has done
+        # something, and the whole claim of `--budget 0` is that it did not.
+        print("DRY RUN (--budget 0): no request issued, no exporter, no database")
+        return 0
+    check_budget_is_sufficient(budget=args.budget, reps=args.reps)
+
     item_ids = (
         args.item_id if args.item_id else await _item_ids(args.database_url, max(args.reps, 4))
     )
     if not item_ids:
         raise SystemExit("no media_items ids available; pass --item-id or --database-url")
     print(f"get_item ids: {len(item_ids)} from media_items (values not printed)")
-
-    if args.budget == 0:
-        # **Before the exporter, not after.** A dry run that spins up a
-        # `PeriodicExportingMetricReader` has done something, and the whole
-        # claim of `--budget 0` is that it did not.
-        print("DRY RUN (--budget 0): no request issued, no exporter started")
-        return 0
 
     provider = provider_factory(
         endpoint=args.otlp_endpoint,
@@ -707,83 +864,48 @@ async def _run(
     budget = Budget(args.budget)
     timings: list[Timing] = []
     warmups: list[Timing] = []
-    client = client_factory(base_url=secrets["emby_server"], timeout=httpx.Timeout(args.timeout))
+    failure: BaseException | None = None
+    client = budget.install(
+        client_factory(base_url=secrets["emby_server"], timeout=httpx.Timeout(args.timeout))
+    )
     session = build_session(
         client,
         credentials=SourceCredentials(username="unused", password=SecretStr("unused")),
-        source_name=SOURCE_LABEL,
+        source_name=args.source_label,
         device_id=secrets["emby_device_id"],
         token=secrets["emby_token"],
         user_id=secrets["emby_user_id"],
     )
     try:
-        # -- warm-up, discarded, but counted against the budget -------------
-        warm, _ = await issue(session, verify_probe(), budget)
-        warmups.append(warm)
-        warm, page = await issue(
-            session, list_probe(secrets["emby_user_id"], 0, name="list@0"), budget
+        total_items = await warmer(
+            session, user_id=secrets["emby_user_id"], item_ids=item_ids, into=warmups
         )
-        warmups.append(warm)
-        total_items = int(page.get("TotalRecordCount") or 0)
-        if total_items <= PAGE_SIZE:
-            raise ProbeFailed(f"TotalRecordCount={total_items} leaves nothing to scatter over")
-        print(f"library: {total_items} items (TotalRecordCount from the warm-up page)")
-        warm, item = await issue(
-            session, get_item_probe(secrets["emby_user_id"], item_ids[0]), budget
-        )
-        warmups.append(warm)
-        if not item.get("Id"):
-            raise ProbeFailed(
-                "the recorded media_items id no longer resolves on this server; "
-                "a 404 is a cheaper code path and measuring it answers a different question"
-            )
-        warm, _ = await issue(
-            session,
-            list_probe(secrets["emby_user_id"], total_items // 2, name="list@scattered"),
-            budget,
-        )
-        warmups.append(warm)
-        # Printed, not merely counted: these are discarded from the statistics
-        # and are *not* discarded from the histogram, so somebody reconciling
-        # the two instruments needs to see them.
-        print(
-            f"warm-up: {len(warmups)} requests, discarded from the statistics but not "
-            f"from the histogram -- "
-            + ", ".join(f"{one.probe} {one.seconds:.4f}s" for one in warmups)
-        )
-
-        probes = plan_probes(
+        probes = plan(
             user_id=secrets["emby_user_id"],
             item_ids=item_ids,
             total_items=total_items,
             reps=args.reps,
             seed=args.seed,
         )
-        timings = await run_probes(session, probes, budget)
+        await runner(session, probes, timings)
+    except (BudgetExceeded, ProbeFailed) as exc:
+        # **Caught, not propagated, so the partial run still reports.** Every
+        # observation already on `timings` was paid for against a real
+        # household server; discarding them because the run ended early is
+        # throwing away the only thing the requests bought.
+        failure = exc
+        print(f"\nINCOMPLETE -- {type(exc).__name__}: {exc}")
     finally:
         await client.aclose()
+        provider.force_flush()
+        provider.shutdown()
 
-    # **Two windows, and the wide one first, because the first spelling of
-    # this printed only the narrow one and the write-up then quoted a
-    # different instant than the artifact held.** `timings` excludes the
-    # warm-up; every request in `warmups` went to the same server and belongs
-    # in "when did this harness touch it".
     every = [*warmups, *timings]
-    window = f"{_iso(every[0].started_at)} -> {_iso(every[-1].ended_at)}"
-    reps_window = f"{_iso(timings[0].started_at)} -> {_iso(timings[-1].ended_at)}"
-    print(
-        f"\nrequests issued: {budget.spent} (budget {budget.limit}); "
-        f"window (all {len(every)}) {window}; window (the {len(timings)} reps) {reps_window}"
-    )
-    print(f"nothing was sent to the source after {_iso(every[-1].ended_at)} by this process")
-    print(_table("per probe class (harness wall clock)", summarise(timings, "probe")))
-    by_op = summarise(timings, "op")
-    print(_table("per op (the label the shipped adapter emits)", by_op))
-    if args.timings_out:
-        # **Every observation, not just the summary.** The first run persisted
-        # only the 4-dp printed table, so a reviewer could reconstruct sums,
-        # counts and medians from Prometheus and nothing else -- p95 and max
-        # rested on a rounded print. 52 rows of JSON is not a cost.
+    if args.timings_out and every:
+        # **Every observation, not just the summary, and in the `finally`
+        # half.** The first run persisted only a 4-dp printed table, so a
+        # reviewer could reconstruct sums, counts and medians from Prometheus
+        # and nothing else -- p95 and max rested on a rounded print.
         Path(args.timings_out).write_text(
             json.dumps(
                 [
@@ -804,15 +926,38 @@ async def _run(
         )
         print(f"wrote {len(every)} raw timings to {args.timings_out} (no credential in it)")
 
-    provider.force_flush()
-    provider.shutdown()
-    if args.shipped_bucket_service:
+    if not every:
+        print(f"\nrequests issued: {budget.spent} (budget {budget.limit}); nothing recorded")
+        return 1
+
+    # **Two windows, and the wide one first, because the first spelling of
+    # this printed only the narrow one and the write-up then quoted a
+    # different instant than the artifact held.** `timings` excludes the
+    # warm-up; every request in `warmups` went to the same server and belongs
+    # in "when did this harness touch it".
+    window = f"{_iso(every[0].started_at)} -> {_iso(every[-1].ended_at)}"
+    reps_window = (
+        f"{_iso(timings[0].started_at)} -> {_iso(timings[-1].ended_at)}" if timings else "none"
+    )
+    print(
+        f"\nrequests issued: {budget.spent} (budget {budget.limit}); "
+        f"window (all {len(every)}) {window}; window (the {len(timings)} reps) {reps_window}"
+    )
+    print(f"nothing was sent to the source after {_iso(every[-1].ended_at)} by this process")
+    print(_table("per probe class (harness wall clock)", summarise(timings, "probe")))
+    by_op = summarise(timings, "op")
+    print(_table("per op (the label the shipped adapter emits)", by_op))
+
+    if args.shipped_bucket_service and timings:
         replay_with_shipped_buckets(
-            timings, endpoint=args.otlp_endpoint, service_name=args.shipped_bucket_service
+            timings,
+            endpoint=args.otlp_endpoint,
+            service_name=args.shipped_bucket_service,
+            source_label=args.source_label,
         )
         print(f"replayed the same {len(timings)} timings with the shipped default buckets")
 
-    if args.prometheus_container:
+    if args.prometheus_container and by_op:
         print(f"\nwaiting {args.prometheus_wait}s for the collector and Prometheus")
         time.sleep(args.prometheus_wait)
         stored = read_back(args.prometheus_container, args.service_name, sorted(by_op))
@@ -827,20 +972,20 @@ async def _run(
         # comparison below is therefore over `warmups + timings`, which is
         # exactly what the histogram holds; the reported statistics above stay
         # reps-only.
-        by_op_all = summarise([*warmups, *timings], "op")
+        by_op_all = summarise(every, "op")
         print(
-            f"\n{'op':<12} {'wall median':>12} {'prom median':>12} {'agree':>8} "
-            f"{'wall mean':>10} {'prom mean':>10} {'agree':>8}  (warm-up included, n as stored)"
+            f"\n{'op':<12} {'wall median':>12} {'prom median':>12} {'delta%':>8} "
+            f"{'wall mean':>10} {'prom mean':>10} {'delta%':>8}  (warm-up included, n as stored)"
         )
         for op, one in sorted(stored.items()):
             wall = by_op_all[op]
             print(
                 f"{op:<12} {wall.median:>12.4f} "
                 f"{(one['median'] if one['median'] is not None else float('nan')):>12.4f} "
-                f"{_agreement(one['median'], wall.median):>8} "
+                f"{_relative_difference(one['median'], wall.median):>8} "
                 f"{wall.mean:>10.4f} "
                 f"{(one['mean'] if one['mean'] is not None else float('nan')):>10.4f} "
-                f"{_agreement(one['mean'], wall.mean):>8}"
+                f"{_relative_difference(one['mean'], wall.mean):>8}"
             )
         if args.shipped_bucket_service:
             shipped = read_back(
@@ -860,10 +1005,18 @@ async def _run(
     foreign = max(foreign, int(after["processes"]["pytest"]))
     drift = round(closing - opening, 4)
     print(f"\nquiet: closing cpu busy {closing}, drift {drift} (limit +-{_CPU_DRIFT_LIMIT})")
+    # ⚠️ **This is a local-CPU guard on a network-bound measurement**, imported
+    # wholesale from a harness whose work was local Postgres queries. For 2.5
+    # minutes this process is idle-blocked on a socket, so the thing that could
+    # actually invalidate the run -- contention on the path to the household
+    # server, or on the server itself -- is not sampled at all. A TCP-connect
+    # RTT sample to the same host before and after costs no Emby request and is
+    # the right addition; recorded rather than done, and it belongs with S7's
+    # concurrency arm.
     if abs(drift) > _CPU_DRIFT_LIMIT or foreign:
         print("QUIET CHECK FAILED -- discard this run and repeat it")
         return 1
-    return 0
+    return 1 if failure is not None else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -888,6 +1041,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--otlp-endpoint",
         default=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317"),
     )
+    parser.add_argument("--bar", default=str(DEFAULT_BAR))
+    parser.add_argument("--source-label", default=DEFAULT_SOURCE_LABEL)
     parser.add_argument("--service-name", default="usher-m10-s1")
     parser.add_argument("--shipped-bucket-service", default="usher-m10-s1-shipped-buckets")
     parser.add_argument("--prometheus-container", default=None)
@@ -903,14 +1058,37 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
 
-    print(f"bar: {BAR} sha256={_sha256(BAR) if BAR.exists() else 'MISSING'}")
+    # **loguru's default handler runs with `diagnose=True`, which renders the
+    # value of every name on the frame of a raised exception -- including the
+    # `payload` dict `EmbySession._send` goes to such lengths to keep off its
+    # own awaiting line (`session.py`, the long comment there). `create_app`
+    # installs `configure_logging`; a bare script does not, so for a live run
+    # against a real household the default handler is what is listening.
+    # Removed rather than reconfigured: this script prints its own output and
+    # has no use for a log line it did not write.
+    logger.remove()
+
+    bar = Path(args.bar)
+    if not bar.exists():
+        # **Fatal, not a `MISSING` line and carry on.** The only property a
+        # pre-registered bar has is that it provably predates the numbers, and
+        # a run that cannot show its bar has no way to acquire that property
+        # afterwards. Printing `sha256=MISSING` and measuring anyway produces
+        # numbers nobody can ever score.
+        raise SystemExit(f"the pre-registered bar {bar} does not exist; refusing to measure")
+    print(f"bar: {bar} sha256={_sha256(bar)}")
     if not args.secrets:
         raise SystemExit("--secrets (or USHER_EMBY_SECRETS) is required; there is no default")
     secrets = read_secrets(Path(args.secrets))
     try:
         return asyncio.run(_run(args, secrets))
-    except Exception as exc:
-        print(f"FAILED: {redact(f'{type(exc).__name__}: {exc}', secrets)}")
+    except Exception:
+        # **The traceback, redacted -- not `str(exc)` alone.** Dropping it
+        # loses where the failure happened, and keeping it raw would print a
+        # frame carrying the token. `redact` over the formatted traceback
+        # keeps both properties; the test drives this path with a known fake
+        # secret and asserts the value is gone and the placeholder is there.
+        print(f"FAILED:\n{redact(traceback.format_exc(), secrets)}")
         return 1
 
 

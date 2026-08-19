@@ -436,10 +436,12 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
         # pointing at the very objects `get_item` is still reading to build
         # the item's `StreamTarget`s. Measured at 17 us per item against
         # the movie fixture, i.e. ~1.6 s across the 94,395-item library
-        # this was built for -- against an upstream measured at **30 ms per
-        # item** (a 200-item page costs 6.04 s mean; M10 S1, 2026-08-15,
-        # `.claude/rules/emby-push-and-ingest.md`), so the copy is three
-        # orders of magnitude below the wire it rides on.
+        # this was built for -- against an upstream costing **30 ms per item
+        # amortised across a 200-item page** (6.04 s mean for the page; M10 S1,
+        # 2026-08-15, `.claude/rules/emby-push-and-ingest.md`). Amortised is the
+        # honest word: the *measured* price of one item fetched on its own is
+        # 0.1649 s, 5x larger, and this walk never pays it. Either way the copy
+        # is three orders of magnitude below the wire it rides on.
         raw=deepcopy(dict(payload)),
     )
 

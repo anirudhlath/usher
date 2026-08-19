@@ -34,15 +34,20 @@ first write-up of this paragraph asserted the second one's behaviour for both
 and was wrong — *the same failure the finding above is about, committed inside
 the fix for it*:
 
-- **`_run`'s guard moved below the warm-ups, alone → 0 requests on the wire.**
-  `Budget(0)` still refuses the first spend, so the dry run dies with
-  `BudgetExceeded` having built an HTTP client and a meter provider.
+- **`_run`'s guard moved below the warm-ups, alone → 0 requests on the wire**,
+  and an **uncaught `BudgetExceeded`**. `Budget(0)` refuses the first spend, so
+  the case dies inside `_drive_run` and never reaches its own `# The claim.`
+  block at all.
 - **The same, plus `Budget.spend`'s `if self.limit and …` idiom → 4 requests**
   on somebody else's Emby, and it returns 0 while doing it.
+- **`_run`'s guard moved below the *client construction* → 0 requests, but a
+  client is built.** This is literally the shape the harness shipped before the
+  guard was hoisted, and it is the plant `built == []` earns its place against;
+  `return 1` in the dry-run branch is what `code == 0` earns its.
 
-Both pass `ruff`. The case below sees each of them, and it sees the first one
-through `built == []` and `code == 0` rather than through the request count —
-which is why those two assertions are there and are not decoration.
+Three spellings, three different deaths, and **the third is why those two
+assertions are not decoration** — an earlier version of this paragraph credited
+them with catching the first, which dies before they run.
 
 **The import mechanism is `test_scripts_measure_pair_rates.py`'s, for its
 reasons**: `scripts/` has no `__init__.py`, `[tool.mypy] files = ["src",
@@ -96,6 +101,8 @@ class _Budget(Protocol):
 
     def spend(self, what: str) -> None: ...
 
+    def install(self, client: httpx.AsyncClient) -> httpx.AsyncClient: ...
+
 
 class _Probe(Protocol):
     name: str
@@ -112,28 +119,35 @@ _BUDGET: Callable[[int], _Budget] = _MODULE.Budget
 _BUDGET_EXCEEDED: type[Exception] = _MODULE.BudgetExceeded
 _PROBE: Callable[..., _Probe] = _MODULE.Probe
 _BUILD_SESSION: Callable[..., object] = _MODULE.build_session
-_RUN_PROBES: Callable[..., Awaitable[Sequence[_Timing]]] = _MODULE.run_probes
+_RUN_PROBES: Callable[..., Awaitable[None]] = _MODULE.run_probes
 
 _USER = "u-not-a-real-user"
 
 
-def _stub(sent: list[httpx.Request]) -> httpx.MockTransport:
+def _stub(sent: list[httpx.Request], *, first_401: bool = False) -> httpx.MockTransport:
     """A transport that records every request that reaches it.
 
     Recording rather than counting: the assertion that matters is which
     requests arrived, and a bare integer cannot tell "five probes issued" from
-    "one probe retried five times".
+    "one probe retried five times" -- which is exactly the distinction
+    `first_401` exists to make. With it, the first response is a 401, and
+    `EmbySession.request` silently re-authenticates and sends the same request
+    again, so one `Probe` costs two requests.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
         sent.append(request)
+        if first_401 and len(sent) == 1:
+            return httpx.Response(401, json={})
         return httpx.Response(200, json={"Items": [], "TotalRecordCount": 0, "Id": "x"})
 
     return httpx.MockTransport(handler)
 
 
-def _session(transport: httpx.MockTransport) -> object:
+def _session(transport: httpx.MockTransport, budget: _Budget | None = None) -> object:
     client = httpx.AsyncClient(transport=transport, base_url="http://stub.invalid")
+    if budget is not None:
+        budget.install(client)
     return _BUILD_SESSION(
         client,
         credentials=SourceCredentials(username="stub", password=SecretStr("stub")),
@@ -158,12 +172,21 @@ def _six_probes() -> list[_Probe]:
     ]
 
 
-def _drive(probes: Sequence[_Probe], budget: _Budget, sent: list[httpx.Request]) -> None:
+def _drive(
+    probes: Sequence[_Probe],
+    budget: _Budget,
+    sent: list[httpx.Request],
+    *,
+    first_401: bool = False,
+) -> list[object]:
+    recorded: list[object] = []
+
     async def go() -> None:
-        session = _session(_stub(sent))
-        await _RUN_PROBES(session, probes, budget)
+        session = _session(_stub(sent, first_401=first_401), budget)
+        await _RUN_PROBES(session, probes, recorded)
 
     asyncio.run(go())
+    return recorded
 
 
 def test_the_harness_refuses_to_issue_more_requests_than_its_declared_budget() -> None:
@@ -185,30 +208,59 @@ def test_the_harness_refuses_to_issue_more_requests_than_its_declared_budget() -
         f"the refusal must name the budget it is enforcing; it said {caught.value!r}"
     )
 
-    # **Second arm: a budget of zero sends nothing at all**, which is what a
-    # dry run has to mean. Its own control is the arm above: five requests on
+    # **Second arm: a budget of zero refuses at the transport**, and it
+    # *raises* rather than returning quietly. `run_probes` used to carry its
+    # own `if budget.limit == 0: return []` -- dead code, because the only
+    # production caller is downstream of `_run`'s early return, and it
+    # *disagreed* with `Budget.spend`. Two spellings of one rule is how the
+    # wrong one gets tested; the branch is gone and this arm now pins what the
+    # surviving guard does. Its own control is the arm above: five requests on
     # an identical transport, so an empty `sent` here is the budget and not a
     # broken stub.
     dry: list[httpx.Request] = []
-    _drive(_six_probes(), _BUDGET(0), dry)
-    assert dry == [], f"a --budget 0 dry run put {len(dry)} request(s) on the wire"
-    # ⚠️ This arm drives `run_probes`, whose zero-guard is **not** the one
-    # production reaches -- see
-    # `test_a_dry_run_is_enforced_where_the_guard_actually_lives` below, which
-    # is the case that sees the defect this one cannot.
+    with pytest.raises(_BUDGET_EXCEEDED):
+        _drive(_six_probes(), _BUDGET(0), dry)
+    assert dry == [], f"a zero budget put {len(dry)} request(s) on the wire"
 
-    # **The second layer, pinned rather than assumed.** `Budget(0).spend` is
-    # what stops the guard-moved-below-the-warm-ups defect from reaching the
-    # wire at all, and until this line nothing anywhere asserted it: both
-    # zero-guards return before a `Budget` is ever spent against, so the "0
-    # means unlimited" idiom passed `ruff` and the whole file. **A redundancy
-    # nothing checks is not a redundancy** -- either pin it or stop counting
-    # it, and it is cheap enough to pin.
+    # **`Budget.spend` directly, because it is *the* guard and not a
+    # redundancy.** Until this line nothing anywhere asserted its zero case:
+    # the "0 means unlimited" idiom passed `ruff` and the whole file.
     with pytest.raises(_BUDGET_EXCEEDED) as refused:
         _BUDGET(0).spend("a probe nobody may issue")
     assert "0" in str(refused.value), (
         f"the refusal must name the budget it is enforcing; it said {refused.value!r}"
     )
+
+
+def test_the_budget_counts_requests_on_the_wire_and_not_probes() -> None:
+    """🔴 The property C1 restored, and the one a 401 silently broke.
+
+    `EmbySession.request` retries once on a 401 and `_TokenSession
+    ._authenticate_locked` issues no request of its own, so with the budget
+    spent per `Probe` a single 401 anywhere in a run made one probe cost two
+    requests and **nothing noticed**. Measured against this exact stub before
+    the fix: `spent = 5` against a limit of 5, and **6 requests on the wire** --
+    which falsifies the one property this module says it exists to pin and the
+    declaration Group S's <= 256 ceiling is assembled out of.
+
+    Neither of the other stubs in this file can see it: both answer 200 to
+    everything, so probes and requests are equal for the wrong reason.
+    """
+    sent: list[httpx.Request] = []
+    budget = _BUDGET(5)
+    with pytest.raises(_BUDGET_EXCEEDED):
+        _drive(_six_probes(), budget, sent, first_401=True)
+
+    # The premise, first: without a retry this case is the one above.
+    assert len(sent) >= 2 and sent[0].url.path == sent[1].url.path, (
+        "the stub did not provoke a retry, so this case is not about a retry: "
+        f"{[str(one.url.path) for one in sent]}"
+    )
+    assert len(sent) == budget.spent, (
+        f"{len(sent)} requests reached the transport against {budget.spent} spent -- "
+        "the budget is counting probes, not requests"
+    )
+    assert len(sent) <= 5, f"the budget of 5 let {len(sent)} requests onto the wire"
 
 
 # -- the dry run, where the guard actually lives ------------------------------
@@ -300,26 +352,35 @@ def test_a_dry_run_is_enforced_where_the_guard_actually_lives(
     green.
 
     **That plant alone puts zero requests on the wire** -- `Budget(0)` refuses
-    the first spend, so the dry run dies with `BudgetExceeded` having built an
-    HTTP client and a meter provider. It takes `Budget.spend`'s "0 means
-    unlimited" idiom *as well* to reach four requests. Hence three assertions
-    below and not one: the wire, the client, and the return code. See the
-    module docstring's table for both spellings measured.
+    the first spend, so it dies with an uncaught `BudgetExceeded` and this case
+    never reaches its `# The claim.` block. It takes `Budget.spend`'s "0 means
+    unlimited" idiom *as well* to reach four requests.
+
+    So the three assertions below die to three different plants, and none is
+    decoration: `dry == []` to the second spelling, `built == []` to the guard
+    moved below the **client construction** (the shape this harness shipped
+    before the guard was hoisted), and `code == 0` to a dry run that returns
+    non-zero. See the module docstring for all three measured.
     """
-    # **The positive control fires first**, and it is a strong one: it pins
-    # that four warm-up requests *do* leave through this seam, which is
-    # precisely what the dry run must not do. Without it, a `_run` that
-    # returned 0 immediately for every budget passes the claim below.
+    # **The positive control fires first**, and it is a strong one: it drives
+    # the whole of `_run` and pins that the four warm-ups *do* leave through
+    # this seam, first and in order, which is precisely what the dry run must
+    # not do. Without it, a `_run` that returned 0 immediately for every budget
+    # passes the claim below. `budget=8, reps=1` is the smallest run
+    # `check_budget_is_sufficient` permits (4 warm-up + 4x1).
     control: list[httpx.Request] = []
     built_control: list[dict[str, Any]] = []
-    with pytest.raises(_BUDGET_EXCEEDED):
-        _drive_run(budget=4, reps=1, sent=control, built=built_control, monkeypatch=monkeypatch)
-    assert [one.url.path for one in control] == [
+    control_code = _drive_run(
+        budget=8, reps=1, sent=control, built=built_control, monkeypatch=monkeypatch
+    )
+    assert control_code == 0, f"the control run failed: {control_code}"
+    assert [one.url.path for one in control[:4]] == [
         "/System/Info/Public",
         f"/Users/{_USER}/Items",
         f"/Users/{_USER}/Items/stub-item",
         f"/Users/{_USER}/Items",
     ], f"the four warm-ups are not what reached the wire: {[str(one.url) for one in control]}"
+    assert len(control) == 8, f"the control spent {len(control)} of its 8-request budget"
 
     # The claim.
     dry: list[httpx.Request] = []
@@ -398,3 +459,207 @@ def test_the_secrets_reader_takes_its_path_and_hard_codes_no_host(tmp_path: Path
     assert "<base-url>" in scrubbed and "<token>" in scrubbed, (
         f"redaction must leave a readable placeholder; got {scrubbed!r}"
     )
+
+
+# -- the statistics the durable record publishes ------------------------------
+
+
+@pytest.mark.parametrize(
+    ("seconds", "median", "p95", "maximum"),
+    [
+        # Twelve ascending values: `p95` at nearest-rank is ceil(0.95*12) = 12,
+        # i.e. the maximum. **That is why four rows of S1's published table show
+        # `p95 == max`** -- with n = 12 there is no 95th percentile short of the
+        # largest sample, and a reader who does not know that reads a
+        # copy-paste error.
+        ([float(n) for n in range(1, 13)], 6.5, 12.0, 12.0),
+        # Twenty values pull p95 off the maximum: ceil(0.95*20) = 19.
+        ([float(n) for n in range(1, 21)], 10.5, 19.0, 20.0),
+        # A single sample is its own everything -- the degenerate row, which is
+        # what a run truncated by the budget can leave behind.
+        ([7.0], 7.0, 7.0, 7.0),
+    ],
+)
+def test_the_published_statistics_are_the_ones_the_table_claims(
+    seconds: list[float], median: float, p95: float, maximum: float
+) -> None:
+    """`summarise` and `_quantile`, neither of which had any test anywhere.
+
+    Measured: `summarise` returning the **median** in the `p95` field passed all
+    4,076 unit cases, and `_quantile` off by one passed all 4,076. `_quantile`
+    is correct -- nearest-rank, matching its docstring -- but S1's table is the
+    first artefact in this repository to publish a p95 out of it, and a number
+    in a durable record with no test under it is the thing this whole task is
+    about.
+
+    Rows one and two differ only in `n`, which is what makes the `p95 == max`
+    coincidence in row one visibly a property of twelve samples rather than a
+    property of the function.
+    """
+    timings = [
+        _MODULE.Timing(
+            probe="p", op="o", seconds=one, started_at=0.0, ended_at=one, payload_bytes=10
+        )
+        for one in seconds
+    ]
+    stats = _MODULE.summarise(timings, "op")["o"]
+    assert stats.n == len(seconds)
+    assert stats.median == pytest.approx(median), f"median: {stats.median}"
+    assert stats.p95 == pytest.approx(p95), f"p95: {stats.p95}"
+    assert stats.maximum == pytest.approx(maximum), f"max: {stats.maximum}"
+    assert stats.mean == pytest.approx(sum(seconds) / len(seconds)), f"mean: {stats.mean}"
+    # The premise for rows one and three, stated rather than left to the reader:
+    # they are the rows where p95 and max coincide, and row two is the control
+    # showing the function does not simply return the maximum.
+    if len(seconds) == 20:
+        assert stats.p95 != stats.maximum, "row two exists to show p95 is not just the max"
+
+
+# -- redaction, which is the only thing between a token and a terminal --------
+
+
+def test_redaction_survives_a_value_that_contains_another_and_a_bare_host() -> None:
+    """Both of `redact`'s stated invariants, neither of which was reachable.
+
+    Measured against the previous fixture -- four values, all scheme-carrying,
+    none a substring of another: **deleting the scheme-stripped `bare` branch
+    left the suite green, and sorting shortest-first instead of longest-first
+    left the suite green.** The docstring states both properties explicitly and
+    the fixture could not exercise either. This is the parameter-table failure
+    mode recorded twice already in `.claude/rules/testing-discipline.md`,
+    landing in the one function whose whole job is keeping four credentials out
+    of a log.
+    """
+    redact: Callable[[str, Mapping[str, str]], str] = _MODULE.redact
+    secrets = {
+        "emby_server": "https://media.example.invalid",
+        # A **proper substring** of the token below. Shortest-first replacement
+        # rewrites this one inside the token and leaves the token's tail
+        # standing in the clear.
+        "emby_user_id": "abc123",
+        "emby_device_id": "dev-9",
+        "emby_token": "abc123456789secret",
+    }
+    line = (
+        "GET https://media.example.invalid/Users/abc123/Items?api_key=abc123456789secret"
+        " (host media.example.invalid, device dev-9)"
+    )
+    scrubbed = redact(line, secrets)
+    for name, value in secrets.items():
+        assert value not in scrubbed, f"{name} survived redaction: {scrubbed!r}"
+    # The specific tail a shortest-first pass leaves behind, named so the
+    # failure says which invariant broke.
+    assert "456789secret" not in scrubbed, (
+        f"the token was rewritten from the inside out, leaving its tail: {scrubbed!r}"
+    )
+    # And the bare-host branch: the value appears without its scheme.
+    assert "media.example.invalid" not in scrubbed, (
+        f"the scheme-stripped host survived: {scrubbed!r}"
+    )
+    assert "<token>" in scrubbed and "<base-url>" in scrubbed
+
+
+def test_main_redacts_the_failure_it_prints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`main`'s `except` is the only path that can print a credential.
+
+    Measured: replacing that line with an unredacted
+    `print(f"FAILED: {type(exc).__name__}: {exc}")` left the whole unit suite
+    green -- 4,076 passed. Nothing drove `main`; the existing case pinned
+    `redact` as a pure function and stopped there.
+
+    The path is reachable with a real value, not a hypothetical one:
+    `EmbySession._send` translates any transport failure into
+    `PortUnavailable(f"{method} {path} failed: {exc}")` and `path` is
+    `/Users/{emby_user_id}/Items/{id}`, so the user id is *in the exception
+    message* by construction. Every secret below is a fixture value.
+    """
+    bar = tmp_path / "BAR.md"
+    bar.write_text("a pre-registered bar", encoding="utf-8")
+    secrets_file = tmp_path / "secrets.yaml"
+    secrets_file.write_text(
+        "emby_server: https://media.example.invalid\n"
+        "emby_user_id: user-abc\n"
+        "emby_device_id: device-abc\n"
+        "emby_token: tok-abc\n",
+        encoding="utf-8",
+    )
+
+    async def explode(*_: Any, **__: Any) -> int:
+        raise RuntimeError(
+            "GET /Users/user-abc/Items/1 failed: connect to "
+            "https://media.example.invalid refused (api_key=tok-abc, device-abc)"
+        )
+
+    monkeypatch.setattr(_MODULE, "_run", explode)
+    monkeypatch.setattr(
+        sys, "argv", ["prog", f"--secrets={secrets_file}", f"--bar={bar}", "--item-id=x"]
+    )
+
+    code = _MODULE.main()
+    printed = capsys.readouterr().out
+
+    # **The positive control fires first.** A `main` that printed nothing at
+    # all satisfies every absence assertion below.
+    assert "FAILED" in printed, f"main printed no failure at all: {printed!r}"
+    for secret in ("user-abc", "tok-abc", "device-abc", "media.example.invalid"):
+        assert secret not in printed, f"{secret!r} reached the terminal: {printed!r}"
+    assert "<token>" in printed and "<user-id>" in printed, (
+        f"redaction must leave a readable placeholder; got {printed!r}"
+    )
+    # The traceback is kept, redacted -- dropping it loses where the failure
+    # happened, which is the other half of what this path is for.
+    assert "Traceback" in printed, f"main dropped the traceback: {printed!r}"
+    assert code == 1
+
+
+def test_a_run_the_budget_cannot_finish_is_refused_before_the_first_request() -> None:
+    """🔴 C2's precondition, and the worst outcome this harness could produce.
+
+    Measured before it existed: `--reps 15 --budget 60` spent **all sixty live
+    requests** against the operator's real server, raised `BudgetExceeded` on
+    the last one, and produced no table, no timings file and no flush. Sixty
+    requests -- S1's entire share of the group ceiling -- unrecoverable, for
+    nothing. And `--reps 0` spent four and then died on an `IndexError`.
+
+    Arithmetic knowable before the first packet belongs before the first packet.
+    """
+    check: Callable[..., None] = _MODULE.check_budget_is_sufficient
+    with pytest.raises(SystemExit) as refused:
+        check(budget=60, reps=15)
+    message = str(refused.value)
+    assert "15" in message and "60" in message and "64" in message, (
+        f"the refusal must name both numbers and what it needs; it said {message!r}"
+    )
+    with pytest.raises(SystemExit):
+        check(budget=60, reps=0)
+    # The premise: the run S1 actually made is *not* refused, or this guard
+    # would simply forbid everything.
+    check(budget=60, reps=12)
+
+
+def test_the_budget_precondition_is_reached_before_any_request_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The precondition **at its call site**, which the case above cannot see.
+
+    Pinning `check_budget_is_sufficient` as a function is satisfied by a `_run`
+    that never calls it -- measured: deleting the call left the case above
+    green. What this asserts is the property the operator's server cares about:
+    an over-subscribed run puts **nothing** on the wire.
+    """
+    sent: list[httpx.Request] = []
+    built: list[dict[str, Any]] = []
+    with pytest.raises(SystemExit):
+        _drive_run(budget=60, reps=15, sent=sent, built=built, monkeypatch=monkeypatch)
+    assert sent == [], (
+        f"--reps 15 --budget 60 put {len(sent)} request(s) on the operator's server "
+        "before discovering it could not finish"
+    )
+    # And the control, so this is not passing because `_drive_run` is broken:
+    # the same seam with a budget that fits runs to completion.
+    ok_sent: list[httpx.Request] = []
+    ok_built: list[dict[str, Any]] = []
+    assert _drive_run(budget=8, reps=1, sent=ok_sent, built=ok_built, monkeypatch=monkeypatch) == 0
+    assert len(ok_sent) == 8, f"the control run issued {len(ok_sent)} requests, not 8"

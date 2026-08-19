@@ -30,9 +30,14 @@ tested:
 2. **Negative caching.** If `AuthenticateByName` itself is rejected, a
    monotonic deadline is recorded and every call raises `PortAuthFailed`
    without a network request until it passes. Without it a wrong password
-   doubles every request forever, against an upstream measured at
-   0.1649 s mean for a single-item read and 6.04 s mean for a 200-item
-   page (M10 S1, 2026-08-15 -- `.claude/rules/emby-push-and-ingest.md`).
+   doubles every request forever. ⚠️ **What the doubling costs is still
+   unmeasured**, and this is the one place it would be easy to quote the wrong
+   number: the added request is `AuthenticateByName`, which no run in this
+   repository has ever exercised -- the operator's secrets hold a token, not a
+   password. What M10's S1 priced on 2026-08-15 is the *other* half, the call
+   being retried: 0.1649 s mean for a single-item read, 6.04 s for a 200-item
+   page (`.claude/rules/emby-push-and-ingest.md`). So the storm is real and its
+   per-unit price is half-known.
    The clock is injected so the *expiry* is testable without sleeping.
 
 The injected clock also times `usher.source.request.duration` (PRD 10's
