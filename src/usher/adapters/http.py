@@ -23,6 +23,7 @@ module.
 
 import datetime as dt
 import email.utils
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -66,6 +67,100 @@ UNTRANSLATED_FAILURES: tuple[type[BaseException], ...] = (
 # provider, and a proxy that gives up waiting is exactly the transient failure
 # the queue's backoff is for.
 _REQUEST_TIMEOUT = 408
+
+# Which key in `Request.extensions["timeout"]` each timeout class exhausted.
+# `httpx.Timeout` carries four independent budgets, so naming the phase is
+# what makes the number mean something on a client whose four differ.
+_TIMEOUT_PHASES: Mapping[type[httpx.TimeoutException], str] = {
+    httpx.ConnectTimeout: "connect",
+    httpx.ReadTimeout: "read",
+    httpx.WriteTimeout: "write",
+    httpx.PoolTimeout: "pool",
+}
+
+
+def _timeout_budget(exc: BaseException) -> tuple[str, float] | None:
+    """The phase and the seconds a timeout exhausted, or `None`.
+
+    Recovered rather than invented. `httpx.Client.build_request` writes
+    `extensions["timeout"] = Timeout(...).as_dict()` -- from the client's
+    default, or from a per-request `timeout=` kwarg, which is the form
+    `WikidataCrosswalkDataset` uses -- and httpx sets `.request` on every
+    `RequestError` on the way out of `send`. So the number is already on the
+    exception these adapters catch. Verified against httpx 0.28.1.
+
+    Four guards, each covering a shape that really occurs. `RuntimeError`
+    from a closed client is not a `RequestError` and has no `.request` at
+    all; `RequestError.request` is a property that **raises** `RuntimeError`
+    rather than answering `None` when it was never set; `extensions` is
+    caller-supplied and may carry no `timeout` key; and a custom transport
+    may put something other than a number under it.
+    """
+    phase = next((name for cls, name in _TIMEOUT_PHASES.items() if isinstance(exc, cls)), None)
+    if phase is None:
+        return None
+    try:
+        request = exc.request  # type: ignore[attr-defined]
+    except (AttributeError, RuntimeError):
+        return None
+    budgets = getattr(request, "extensions", {}).get("timeout")
+    if not isinstance(budgets, Mapping):
+        return None
+    seconds = budgets.get(phase)
+    if not isinstance(seconds, int | float) or isinstance(seconds, bool):
+        return None
+    return phase, float(seconds)
+
+
+def failure_detail(exc: BaseException) -> str:
+    """What a send failure is *called*, and for a timeout what it spent.
+
+    **Never `str(exc)`, and that is measured rather than stylistic.** Issue
+    #35: a `watch_state` sync walked 121,000 items for 57 minutes against a
+    real Emby 4.9.5.0, failed, and recorded the whole of
+    `GET /Users/{id}/Items failed:` in `sync_runs.error` -- the message ended
+    at the colon, because `str(exc)` was the entire payload and every httpx
+    timeout stringifies to the empty string.
+
+    The emptiness is a property of the wrapping rather than of any one
+    class, which is why this is a helper and not a fix at one call site.
+    `httpcore.map_exceptions` re-raises as `to_exc(exc)` around whatever it
+    caught -- a bare `TimeoutError()` for every timeout, an
+    `anyio.EndOfStream()` for a read error, both of which stringify empty --
+    and httpx's `map_httpcore_exceptions` then re-raises with
+    `message = str(exc)`. Measured on httpx 0.28.1 against real sockets:
+    accept-and-never-answer gives `ReadTimeout` with `str(exc) == ""`, the
+    blackholed 192.0.2.1 gives `ConnectTimeout` with `str(exc) == ""`, and a
+    pool of one already in flight gives `PoolTimeout` with `str(exc) == ""`.
+
+    **What is deliberately given up.** `RemoteProtocolError` and
+    `ConnectError` *do* carry text -- h11's `"Server disconnected without
+    sending a response."` and `"All connection attempts failed"`, both
+    measured -- and that text is lost here. It is not worth keeping at the
+    price: httpx's messages belong to a third party, nothing promises what a
+    later version puts in one, and `TmdbClient`, `OpenAICompatibleClient` and
+    the embedding client each excluded `str(exc)` for exactly that reason --
+    `Settings.tmdb_base_url` and `Settings.llm_base_url` let an operator
+    point those at a URL carrying a token in a path segment. Those three
+    spell the type-name half inline and are already correct; they are left
+    alone rather than rewritten in the same commit as a bug fix.
+
+    The budget is the replacement for the lost text and it is a better one,
+    because it is Usher's own number rather than a stranger's prose: it
+    answers the question the empty message left open, which is whether to
+    raise `USHER_SOURCE_TIMEOUT_SECONDS` or go and look at the network.
+
+    Callers pass this whole string, never a prefix of it: it is non-empty by
+    construction, which is the one property the defect turned on. Note that
+    it also runs while *formatting an exception message*, so every guard in
+    `_timeout_budget` is load-bearing -- a failure here would replace a
+    recorded sync failure with an unrelated crash.
+    """
+    budget = _timeout_budget(exc)
+    if budget is None:
+        return type(exc).__name__
+    phase, seconds = budget
+    return f"{type(exc).__name__} after {seconds}s ({phase} budget)"
 
 
 def retry_after_seconds(value: str | None) -> float | None:

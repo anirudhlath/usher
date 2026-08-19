@@ -19,7 +19,13 @@ from pydantic import SecretStr
 from tests.fakes.emby_server import SERVER_VERSION, USER_ID, FakeEmbyServer
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby import session as session_module
-from usher.adapters.emby.session import PUBLIC_INFO_PATH, SYSTEM_INFO_PATH, EmbySession
+from usher.adapters.emby.session import (
+    AUTHENTICATE_PATH,
+    PUBLIC_INFO_PATH,
+    SYSTEM_INFO_PATH,
+    EmbySession,
+    redact_path,
+)
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
     PortAuthFailed,
@@ -522,6 +528,172 @@ async def test_a_transport_failure_outside_httpx_httperror_still_becomes_a_port_
         await client.aclose()
 
 
+def _raising_client(failure: BaseException, *, timeout: float = 30.0) -> httpx.AsyncClient:
+    """A client whose transport authenticates and then raises `failure`.
+
+    The authenticate arm has to succeed, or every message under test reads
+    `POST /Users/AuthenticateByName failed: …` and the path in it is a
+    constant rather than the interpolated one the defect was found on.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/Users/AuthenticateByName":
+            return httpx.Response(200, json={"AccessToken": "t", "User": {"Id": USER_ID}})
+        raise failure
+
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://emby.invalid",
+        timeout=timeout,
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        # Constructed the way httpcore and httpx actually raise them, which
+        # is the whole of this defect. `httpcore.map_exceptions` calls
+        # `to_exc(exc)` with the *object* it caught -- a bare
+        # `TimeoutError()` or an `anyio.EndOfStream()`, both of which
+        # stringify to `""` -- and httpx's `map_httpcore_exceptions` then
+        # re-raises with `message = str(exc)`. Measured on httpx 0.28.1
+        # against real sockets: a server that accepts and never answers
+        # gives `ReadTimeout` with `str(exc) == ""`; a blackholed address
+        # gives `ConnectTimeout` with `str(exc) == ""`; an exhausted pool
+        # gives `PoolTimeout` with `str(exc) == ""`.
+        httpx.ReadTimeout(""),
+        httpx.ConnectTimeout(""),
+        httpx.PoolTimeout(""),
+        httpx.WriteTimeout(""),
+        httpx.ReadError(""),
+        httpx.WriteError(""),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+async def test_a_transport_failure_that_stringifies_empty_still_names_itself(
+    failure: BaseException,
+) -> None:
+    """Issue #35: a `watch_state` sync walked 121,000 items for 57 minutes,
+    failed, and recorded `GET /Users/{id}/Items failed:` in `sync_runs.error`
+    -- the whole diagnostic, ending at the colon.
+
+    `str(exc)` was the entire payload and every one of these stringifies to
+    the empty string, so the *common* path through this handler is the one
+    that produces a message naming no failure at all. An operator cannot
+    tell a read timeout from a connect failure from a pool exhaustion, and
+    the run cost an hour.
+
+    `type(exc).__name__` is non-empty by construction, which is exactly what
+    `EmbyPushChannel`, `TmdbClient`, `OpenAICompatibleClient` and
+    `TmdbImageProvider` already spell at the same arm.
+    """
+    client = _raising_client(failure)
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortUnavailable) as exc_info:
+            await session.json_body("GET", f"/Users/{USER_ID}/Items", op="list")
+    finally:
+        await client.aclose()
+    message = str(exc_info.value)
+    assert type(failure).__name__ in message
+    # The defect itself, asserted as its own premise: the reported message
+    # ended at the colon with nothing after it.
+    assert not message.rstrip().endswith(":")
+    assert message.split("failed:", 1)[1].strip()
+
+
+async def test_a_timeout_carries_the_budget_it_exhausted() -> None:
+    """`ReadTimeout` says which phase gave up; the budget says *what it was*,
+    which is the question the operator reading `sync_runs.error` is actually
+    asking -- whether to raise `USHER_SOURCE_TIMEOUT_SECONDS` or go look at
+    the network.
+
+    Recoverable rather than invented: `Client.build_request` writes
+    `extensions["timeout"]` from the client's own `Timeout`, and httpx sets
+    `.request` on every `RequestError` on the way out, so the number is on
+    the exception this handler already holds. Verified against httpx 0.28.1.
+    """
+    client = _raising_client(httpx.ReadTimeout(""), timeout=7.5)
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortUnavailable) as exc_info:
+            await session.json_body("GET", f"/Users/{USER_ID}/Items", op="list")
+    finally:
+        await client.aclose()
+    assert "7.5s" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        # No `.request` at all: `CookieConflict` and `InvalidURL` subclass
+        # `Exception` directly, and a closed `httpx.AsyncClient` raises a
+        # bare `builtins.RuntimeError`. Reading a timeout budget off these
+        # must not raise *while formatting an exception message*, which
+        # would replace a recorded sync failure with an unrelated crash.
+        httpx.CookieConflict("two cookies of that name"),
+        httpx.InvalidURL("that is not a URL"),
+        RuntimeError("Cannot send a request, as the client has been closed."),
+        # A `RequestError` whose `.request` was never set: `exc.request` is a
+        # property that *raises* `RuntimeError` rather than answering `None`.
+        httpx.ConnectError(""),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+async def test_a_failure_carrying_no_request_still_names_itself(
+    failure: BaseException,
+) -> None:
+    client = _raising_client(failure)
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortUnavailable) as exc_info:
+            await session.json_body("GET", f"/Users/{USER_ID}/Items", op="list")
+    finally:
+        await client.aclose()
+    assert type(failure).__name__ in str(exc_info.value)
+
+
+async def test_the_transport_failure_message_carries_no_credential() -> None:
+    """PRD 08's "credentials are never logged", asserted on the message this
+    arm builds rather than assumed from the shape of it.
+
+    The control fires first: the password and the minted token *are* in
+    scope at this call site, so a check that found nothing without one would
+    be satisfied by a test that never held a secret to begin with.
+    """
+    secret = CREDENTIALS.password.get_secret_value()
+    token = "a-minted-session-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/Users/AuthenticateByName":
+            assert secret in request.content.decode()
+            return httpx.Response(200, json={"AccessToken": token, "User": {"Id": USER_ID}})
+        assert request.headers["X-Emby-Token"] == token
+        raise httpx.ReadTimeout("")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://emby.invalid"
+    )
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortUnavailable) as exc_info:
+            await session.json_body("GET", f"/Users/{USER_ID}/Items", op="list")
+    finally:
+        await client.aclose()
+    message = str(exc_info.value)
+    assert secret not in message
+    assert token not in message
+    assert "emby.invalid" not in message
+
+
 async def test_an_injected_client_closed_by_its_owner_becomes_a_port_error() -> None:
     """The exact hazard `usher.ports.source`'s `aclose` docstring records: a
     closed `httpx.AsyncClient` raises a bare `builtins.RuntimeError`, which
@@ -933,3 +1105,159 @@ async def test_a_failed_request_is_timed_too(monkeypatch: pytest.MonkeyPatch) ->
     finally:
         await client.aclose()
     assert [attributes["op"] for _, attributes in recorder.records] == ["authenticate"]
+
+
+# --- the redacted request path ---------------------------------------------
+
+REAL_USER = "f106b04c6e9f497a846a94aa25703eed"
+
+
+def _authenticating(then: object) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/Users/AuthenticateByName":
+            return httpx.Response(200, json={"AccessToken": "t", "User": {"Id": REAL_USER}})
+        if isinstance(then, httpx.Response):
+            return then
+        raise then  # type: ignore[misc]
+
+    return httpx.MockTransport(handler)
+
+
+def _session_over(transport: httpx.MockTransport) -> tuple[EmbySession, httpx.AsyncClient]:
+    client = httpx.AsyncClient(transport=transport, base_url="https://emby.invalid")
+    return (
+        EmbySession(client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"),
+        client,
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "raiser"),
+    [
+        (None, httpx.ReadTimeout("")),
+        (httpx.Response(502), None),
+        (httpx.Response(200, text="not json"), None),
+    ],
+    ids=["transport-failure", "5xx", "undecodable-body"],
+)
+async def test_no_raise_site_on_this_session_puts_a_user_id_in_its_message(
+    answer: httpx.Response | None, raiser: BaseException | None
+) -> None:
+    """Issue #35, and the reason it is scoped to the session rather than to
+    one `raise`: `_send`, `ok` and `decode_json` each interpolate the path
+    into a message, and a redaction applied at only one of them leaves the
+    other two leaking the identical id.
+
+    The control is the parametrisation itself -- three different failure
+    families reaching three different raise sites, all of them through one
+    path that really does carry a user id.
+    """
+    session, client = _session_over(_authenticating(answer if answer is not None else raiser))
+    path = f"/Users/{REAL_USER}/Items"
+    try:
+        with pytest.raises((PortUnavailable, PortDataMalformed)) as exc_info:
+            await session.json_body("GET", path, op="list")
+    finally:
+        await client.aclose()
+    message = str(exc_info.value)
+    assert REAL_USER not in message
+    # Not collapsed to "a request failed": the route is the whole diagnostic
+    # value and it survives.
+    assert "/Users/{user_id}/Items" in message
+
+
+async def test_the_rfc_9457_detail_is_redacted_too_because_it_reaches_a_client() -> None:
+    """`decode_json` passes the path as **both** the message subject and the
+    `detail`, and `detail` is the half that a route can put in an RFC 9457
+    body -- `SourceStatus.detail` is `str(exc)` on `GET /admin/sources/{id}
+    /status` today. The message is a log line; this one is a response.
+    """
+    session, client = _session_over(_authenticating(httpx.Response(200, text="not json")))
+    try:
+        with pytest.raises(PortDataMalformed) as exc_info:
+            await session.json_body("GET", f"/Users/{REAL_USER}/Items", op="list")
+    finally:
+        await client.aclose()
+    detail = exc_info.value.detail
+    assert detail is not None
+    assert REAL_USER not in detail
+    assert detail == "/Users/{user_id}/Items"
+
+
+async def test_a_401_that_survives_reauthentication_names_the_route_not_the_id() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/Users/AuthenticateByName":
+            return httpx.Response(200, json={"AccessToken": "t", "User": {"Id": REAL_USER}})
+        return httpx.Response(401)
+
+    session, client = _session_over(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(PortAuthFailed) as exc_info:
+            await session.json_body("GET", f"/Users/{REAL_USER}/Items", op="list")
+    finally:
+        await client.aclose()
+    assert REAL_USER not in str(exc_info.value)
+
+
+async def test_a_route_word_is_never_mistaken_for_an_identifier() -> None:
+    """The failure direction that a redaction gets wrong quietly.
+    `/Users/AuthenticateByName` has an id-shaped *position* holding a route
+    word, and rendering it `/Users/{user_id}` would describe the one request
+    that carries a password as if it were an ordinary user read.
+
+    `/System/Info/Public` is the same check for a two-word tail.
+    """
+    assert redact_path("/Users/AuthenticateByName") == "/Users/AuthenticateByName"
+    assert redact_path("/System/Info/Public") == "/System/Info/Public"
+    assert redact_path("/System/Info") == "/System/Info"
+
+
+def test_redact_path_names_the_identifier_it_removed() -> None:
+    """A placeholder rather than a blank: `/Users/{user_id}/Items/{item_id}`
+    is still distinguishable from `/Users/{user_id}/Items`, which is the
+    property that keeps this a redaction rather than a second blindfold.
+    """
+    assert redact_path(f"/Users/{REAL_USER}/Items") == "/Users/{user_id}/Items"
+    assert redact_path(f"/Users/{REAL_USER}/Items/abc123") == "/Users/{user_id}/Items/{item_id}"
+    assert (
+        redact_path(f"/Users/{REAL_USER}/Items/abc123/UserData")
+        == "/Users/{user_id}/Items/{item_id}/UserData"
+    )
+    assert (
+        redact_path(f"/Users/{REAL_USER}/PlayedItems/abc")
+        == "/Users/{user_id}/PlayedItems/{item_id}"
+    )
+    assert redact_path(f"/Users/{REAL_USER}") == "/Users/{user_id}"
+
+
+def test_an_unrecognised_segment_is_redacted_rather_than_kept() -> None:
+    """The safe direction, chosen deliberately and stated so it is not
+    "fixed" later. A route word this vocabulary has not learned renders as
+    `{id}` -- a lost *word* in a message. The other default loses an
+    *identifier* into a public issue, which is what #35 cost.
+
+    The route root is the one exception and it has its own premise: every
+    path this adapter issues begins with a route word, asserted below, so
+    keeping it costs nothing and is what stops an unlearned route from
+    collapsing to something unreadable.
+    """
+    assert redact_path("/Sessions") == "/Sessions"
+    # Deeper unlearned segments are lost, which is the cost being accepted.
+    assert redact_path("/Sessions/9f2/Playing") == "/Sessions/{id}/{id}"
+
+
+def test_no_path_this_adapter_issues_begins_with_an_identifier() -> None:
+    """The premise the route-root rule rests on, asserted rather than
+    assumed -- a rule whose premise is only stated in a docstring is one
+    refactor away from being false and silent."""
+    for path in (
+        AUTHENTICATE_PATH,
+        PUBLIC_INFO_PATH,
+        SYSTEM_INFO_PATH,
+        f"/Users/{REAL_USER}",
+        f"/Users/{REAL_USER}/Items",
+        f"/Users/{REAL_USER}/Items/abc",
+        f"/Users/{REAL_USER}/Items/abc/UserData",
+        f"/Users/{REAL_USER}/PlayedItems/abc",
+    ):
+        assert path.split("/")[1] in {"Users", "System"}

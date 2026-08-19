@@ -295,6 +295,32 @@ async def test_a_504_is_unavailable_not_malformed() -> None:
             [row async for batch in dataset.batches() for row in batch.rows]
 
 
+async def test_a_timed_out_wdqs_query_names_the_failure_and_the_budget() -> None:
+    """Issue #35's defect, in the third place it lives, and the one where the
+    distinction matters most: WDQS answering **504** already means "the query
+    took too long at their end" and is translated as such, so a
+    `ReadTimeout` here is the *other* failure -- ours gave up first -- and
+    `f"WDQS request failed: {exc}"` recorded neither, because every httpx
+    timeout stringifies to the empty string.
+
+    The 90 s is `_TIMEOUT_SECONDS`, this module's own constant, passed per
+    request rather than on the client -- which is the arm of `build_request`
+    that also writes `extensions["timeout"]`.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
+        with pytest.raises(PortUnavailable) as exc_info:
+            [row async for batch in dataset.batches() for row in batch.rows]
+    message = str(exc_info.value)
+    assert "ReadTimeout" in message
+    assert "90.0s" in message
+    assert not message.rstrip().endswith(":")
+
+
 async def test_a_429_becomes_port_rate_limited_with_its_hint() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, headers={"retry-after": "30"})
