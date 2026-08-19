@@ -89,7 +89,7 @@ import httpx
 from opentelemetry import metrics, trace
 
 from usher import __version__
-from usher.adapters.http import UNTRANSLATED_FAILURES, retry_after_seconds
+from usher.adapters.http import UNTRANSLATED_FAILURES, _MinInterval, retry_after_seconds
 from usher.adapters.http import decode_json as _decode_json_body
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
@@ -171,6 +171,7 @@ class EmbySession:
         device_id: str,
         app_version: str = __version__,
         reauth_cooldown_seconds: float = 60.0,
+        requests_per_second: float = 0.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
@@ -180,6 +181,12 @@ class EmbySession:
         self._app_version = app_version
         self._reauth_cooldown = reauth_cooldown_seconds
         self._clock = clock
+        # The proactive outbound gate (ADR-0039). Keyed by this source's name so
+        # its `usher.source.throttle.wait` series is per source; defaulted to
+        # unlimited so a session built directly in a test is unthrottled, and
+        # given the real rate only at the composition root. Shares this
+        # session's clock -- one time source, as the duration histogram does.
+        self._limiter = _MinInterval(requests_per_second, source=source_name, clock=clock)
         self._lock = asyncio.Lock()
         self._token: str | None = None
         self._user_id: str | None = None
@@ -338,6 +345,10 @@ class EmbySession:
         headers: Mapping[str, str],
         op: str,
     ) -> httpx.Response:
+        # Pace before the wire, and before the clock the request duration is
+        # measured against starts: the gate's wait is its own series
+        # (`usher.source.throttle.wait`), never folded into request latency.
+        await self._limiter.take()
         started = self._clock()
         try:
             # Built explicitly, then sent as a *reference* on its own line --

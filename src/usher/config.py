@@ -206,6 +206,29 @@ class Settings(BaseSettings):
     # wrong password turns every request into two (the call, then a doomed
     # re-authentication) for as long as it stays wrong.
     source_reauth_cooldown_seconds: float = Field(default=60.0, ge=0)
+    # The proactive outbound ceiling: calls to one source are spaced at least
+    # `1/rate` seconds apart, per process, per source (ADR-0039). `0` is
+    # unlimited -- the `ge=0` shape `push_gap_min_interval_seconds` uses, not
+    # the `ge=1` a size takes -- because "off" is a value an operator sets.
+    #
+    # The default is derived from S1, not chosen. Little's law over the op
+    # class that dominates a walk -- a 200-item page -- at S1's measured **p95
+    # of 9.1713 s** (`.claude/rules/emby-push-and-ingest.md`, 2026-08-15, one
+    # household one evening), paced by the concurrency `KIND_CONCURRENCY` gives
+    # the Emby-facing kinds today (**4**, which S7 may lower and lowering only
+    # makes this bind less): `4 / 9.1713 = 0.436` rps is the rate at which
+    # Usher already goes as fast as this server answers a concurrent walk. The
+    # default is set **below** it, so the setting is a courtesy margin rather
+    # than a re-statement of the server's own speed.
+    #
+    # It binds a different regime than the concurrency ceiling and neither
+    # substitutes for the other (ADR-0039). A sequential walk is 0.17 rps and
+    # this never fires on it; a concurrent page walk is ~0.44 rps and this is
+    # the courtesy margin just under it; but single-item reads at S1's 0.15 s
+    # run ~27 rps four-in-flight, and there this gate is what binds every call.
+    # Which regime a deployment is in is which op class dominates it -- S1's
+    # table is the evidence, not a guess.
+    source_requests_per_second: float = Field(default=0.4, ge=0)
 
     # The ingest pipeline (PRD 03). Same reasoning as the bulk and source
     # settings above: PRD 08's TOML config layer does not exist yet.

@@ -526,6 +526,33 @@ def test_every_setting_is_read_by_something(monkeypatch: pytest.MonkeyPatch) -> 
     assert unread == []
 
 
+def test_the_source_rate_default_is_the_courtesy_margin_derived_from_s1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`source_requests_per_second` is a *derived* default, not a chosen one, so
+    it gets pinned like a measurement (the `search_*`/`embedding_*` treatment):
+    Little's law over S1's page p95 and the Emby concurrency, `4 / 9.1713 =
+    0.436` rps, with the shipped **0.4** a courtesy margin below it (ADR-0039).
+
+    Two properties beyond the number. `ge=0`, not `ge=1`, because `0` is
+    unlimited -- the shape `push_gap_min_interval_seconds` uses and a size does
+    not -- and the derived default is genuinely below the rate it was derived
+    from, which is the whole of "courtesy margin rather than a re-statement of
+    the server's own speed".
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    assert Settings().source_requests_per_second == 0.4
+    # Below the rate it is derived from, so it is a margin and not the speed.
+    assert Settings().source_requests_per_second < 4 / 9.1713
+
+    monkeypatch.setenv("USHER_SOURCE_REQUESTS_PER_SECOND", "0")
+    assert Settings().source_requests_per_second == 0.0  # unlimited is a value, not an error
+    monkeypatch.setenv("USHER_SOURCE_REQUESTS_PER_SECOND", "-1")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
 def test_the_search_and_embedding_settings_have_the_measured_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

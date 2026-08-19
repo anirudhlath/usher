@@ -66,6 +66,7 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
         page_size=17,
         timeout_seconds=3.5,
         reauth_cooldown_seconds=7.25,
+        requests_per_second=1.25,
         push_stale_after_seconds=11.5,
         push_poll_seconds=0.75,
     )
@@ -75,6 +76,11 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
         assert adapter._page_size == 17
         assert adapter._client.timeout.read == 3.5
         assert adapter._session._reauth_cooldown == 7.25
+        # The outbound gate's rate reaches the session it lives on (ADR-0039).
+        # A factory that dropped it would build an adapter that never paces a
+        # call, and the `usher.source.throttle.wait` panel would be empty not
+        # because the limiter never binds but because it was never wired.
+        assert adapter._session._limiter._rate == 1.25
         # The two push knobs, and this is the whole of what makes
         # `USHER_PUSH_STALE_AFTER_SECONDS` a setting rather than a field
         # that validates and then influences nothing: the registry is the

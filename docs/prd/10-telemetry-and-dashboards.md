@@ -135,8 +135,8 @@ attributes, so "why did the title I just opened take 45 seconds" is one query.
 
 Emitted today (✅) or owned by a later milestone (named). A documented metric
 nothing emits is a permanently empty panel that nothing distinguishes from a
-healthy zero, so this column is maintained rather than aspirational. **35
-rows: 34 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
+healthy zero, so this column is maintained rather than aspirational. **36
+rows: 35 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
 |---|---|---|---|
@@ -158,6 +158,7 @@ rows: 34 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
 | `usher.watch_state.run.duration` | histogram | source, status | ✅ M4 |
 | `usher.watch_state.backfilled` | counter | source | ✅ M4 |
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
+| `usher.source.throttle.wait` | histogram | source | ✅ M10 |
 | `usher.source.push.connected` | gauge | source | ✅ M5 |
 | `usher.source.push.reconnects` | counter | source | ✅ M5 |
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |

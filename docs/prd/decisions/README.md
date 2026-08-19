@@ -46,6 +46,7 @@ otherwise be lost and re-litigated in six months.
 | [0036](0036-the-imdb-tmdb-provenance-rule.md) | Two bulk sources over one entity: `credits.source`, wholesale arbitration, and *not* merging people yet | Accepted — corrects PRD 02 and 08; supersedes M9 T4's withdrawal |
 | [0037](0037-the-worker-is-a-bounded-pool-of-scopes.md) | The job worker is a bounded pool, and a job's scope is a session | Accepted — corrects PRD 01's concurrency table and PRD 08's recovery rule |
 | [0038](0038-the-embedding-width-is-deployment-wide-ddl.md) | The embedding width is deployment-wide DDL, and the fingerprint's "no migration" stops at it | Accepted — **narrows 0020 and 0022**; corrects PRD 02, 04, 05 and 08 |
+| [0039](0039-the-outbound-limiter-is-per-source-and-spaces-requests.md) | The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling | Accepted — adds the proactive half of PRD 01's rate-limit promise; PRD 03 and 10 |
 
 Format: context → decision → consequences → evidence. Short is fine.
 

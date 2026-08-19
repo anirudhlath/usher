@@ -323,6 +323,7 @@ def adapter_factory(settings: Settings) -> SourceAdapterFactory:
         page_size=settings.source_page_size,
         timeout_seconds=settings.source_timeout_seconds,
         reauth_cooldown_seconds=settings.source_reauth_cooldown_seconds,
+        requests_per_second=settings.source_requests_per_second,
         push_stale_after_seconds=settings.push_stale_after_seconds,
         push_poll_seconds=settings.push_poll_seconds,
     )

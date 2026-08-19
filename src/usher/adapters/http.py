@@ -21,11 +21,15 @@ copy is a bug still present in the others; that is the whole argument for this
 module.
 """
 
+import asyncio
 import datetime as dt
 import email.utils
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+from opentelemetry import metrics
 
 from usher.ports.errors import (
     PortAuthFailed,
@@ -33,6 +37,20 @@ from usher.ports.errors import (
     PortRateLimited,
     PortUnavailable,
     UsherPortError,
+)
+
+_meter = metrics.get_meter("usher.adapters.http")
+# PRD 10's catalogue, M10's one metric. Labelled `source` only, exactly as
+# that table specifies -- not `op`, because the gate spaces *every* outbound
+# call to a source regardless of what it is. Recorded on every call the gate
+# governs: a zero is how an operator sees the limiter is enabled and not
+# binding, so it is recorded even when nothing waited. A disabled gate
+# (`rate=0`) records nothing at all -- an empty series says "off", not "never
+# binds", and the two must not read alike.
+_throttle_wait = _meter.create_histogram(
+    "usher.source.throttle.wait",
+    unit="s",
+    description="Seconds a caller spent waiting in a source's outbound rate gate",
 )
 
 # Everything a send may raise that a caller written against
@@ -205,3 +223,73 @@ def port_error_for(
         # attempt, which is what `PortUnavailable` tells `JobWorker`.
         return PortUnavailable(f"{request_line} returned HTTP {status}")
     return None
+
+
+class _MinInterval:
+    """A minimum-interval outbound gate: one source's calls spaced `1/rate`
+    seconds apart, with **no burst credit**, under a lock held *across* the
+    wait. The proactive half PRD 01 promised and this module never had -- every
+    other rate concept here (`retry_after_seconds`, `port_error_for`'s 429 arm)
+    is about a limit already hit.
+
+    **Why a minimum interval and not `TmdbClient`'s token bucket, and the
+    reason is the shape of the traffic rather than taste.** A bucket
+    accumulates up to a second of credit while idle and then lets a whole
+    second's worth of calls through at once. Against a CDN-backed public API
+    (TMDb's median request is 0.0588 s over 130,334 live requests,
+    `.claude/rules/tmdb-and-enrichment.md`) that burst is absorbed. A media
+    source is a machine somebody is watching television on, and the flood after
+    an idle period is the exact failure the operator has already hit on this
+    server -- recorded in issue #19, a Home Assistant card that had to cap
+    concurrent loads at 3 because prefetching *"floods the server and starves
+    visible posters"* for real users. A bucket can express that flood; this
+    gate cannot.
+
+    `rate=0` is unlimited (the `ge=0` shape `push_gap_min_interval_seconds`
+    already uses in `usher.config`) and it does **not** await: a disabled
+    limiter that still slept would be one an operator cannot turn off. It is
+    the one path that records nothing, because "off" and "on and never binding"
+    are two different readings.
+
+    The lock is held across the wait for the reason `_TokenBucket`'s is
+    (`usher.adapters.tmdb.client`): N coroutines that each read the next slot
+    and then sleep independently all decide the same slot is free, which is the
+    burst of N the gate exists to prevent. Held across the wait, each waiter
+    computes its own slot.
+
+    Clock and sleep are injected -- the `TmdbClient` pattern -- so the spacing
+    is asserted against a fake clock rather than by sleeping.
+    """
+
+    def __init__(
+        self,
+        rate: float,
+        *,
+        source: str,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._rate = rate
+        self._source = source
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = asyncio.Lock()
+        # The next instant a call may go. Seeded to now, not to the past, so an
+        # idle gate has no accumulated head start -- there is no burst credit to
+        # give.
+        self._next = clock()
+
+    async def take(self) -> None:
+        if self._rate <= 0.0:
+            return
+        interval = 1.0 / self._rate
+        async with self._lock:
+            now = self._clock()
+            wait = max(0.0, self._next - now)
+            if wait > 0.0:
+                await self._sleep(wait)
+            # Re-read the clock after the wait rather than trusting `now`: the
+            # next slot is `interval` past the instant this call actually goes,
+            # so an idle gate resets to now + interval and cannot bank the gap.
+            self._next = self._clock() + interval
+        _throttle_wait.record(wait, {"source": self._source})
