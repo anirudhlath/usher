@@ -1186,6 +1186,74 @@ async def test_a_crashed_lane_says_so(fakes: _Fakes) -> None:
     assert "ZeroDivisionError" in crash[0]
 
 
+async def test_a_lane_that_reached_the_failure_ceiling_releases_its_adapter_and_is_named_as_stopped(
+    fakes: _Fakes,
+) -> None:
+    """The leak M10's S10 closed, and its positive control in the same case.
+
+    A lane whose task finished -- the failure ceiling, or a crash -- used to
+    keep its `SourceAdapter` in `_open_adapters` for the process lifetime.
+    That adapter is an `EmbyAdapter` holding a live `httpx.AsyncClient`
+    **against a server this deployment does not own**, and it went on feeding
+    `push_snapshots()`, which is the series PRD 10's "Push down" alert reads.
+    A dead lane reporting `delivering=False` forever and a dead lane reporting
+    nothing are different alerts.
+
+    Three things are asserted and the fourth is the control:
+
+    * the adapter is closed **exactly once**, not once per refresh tick -- a
+      count, because `aclose` is idempotent and a flag cannot tell the two
+      apart;
+    * it is gone from the push-gauge snapshot, so the series stops;
+    * the lane is **not restarted**, which is PRD 08's own remedy ("lean on
+      the nightly walk") -- a refresh that replaced it would reconnect forever
+      against the buffering proxy the ceiling exists for;
+    * and source B, whose lane is **live**, keeps its adapter and its series
+      through the same `refresh()`. Without that arm a `refresh` that closed
+      every adapter would pass the first three assertions and break push
+      entirely, which is the loudest regression this file can ship.
+    """
+    await _seed(fakes, _source("A"))
+    await _seed(fakes, _source("B"))
+    fakes.adapters.crash("A")
+    supervisor = _supervisor(fakes)
+    await supervisor.start()
+    try:
+        # The premise, asserted before anything else: a lane that never
+        # finished cannot pass this case.
+        await _drain(
+            lambda: supervisor.crashed_sources() == ["A"],
+            note=lambda: (
+                f"crashed={supervisor.crashed_sources()} running={supervisor.running_sources()}"
+            ),
+        )
+        by_name = {source.name: source for source in await fakes.sources.list_all()}
+        stopped = fakes.adapters.built["A"]
+        live = fakes.adapters.built["B"]
+        assert stopped._closes == 0, "the leak: nothing has released it yet"
+        assert set(supervisor.push_snapshots()) == {"A", "B"}
+
+        await supervisor.refresh()
+
+        assert stopped._closes == 1
+        assert set(supervisor.push_snapshots()) == {"B"}, "the dead lane stops publishing"
+        assert supervisor.push_available(by_name["A"].id) is None, "not probed, not broken"
+        assert supervisor.crashed_sources() == ["A"], "F2 still has a state to report"
+        assert supervisor.running_sources() == ["B"], "and the lane is not restarted"
+
+        # The control: the live lane is untouched by the same call.
+        assert live._closes == 0
+        assert supervisor.push_available(by_name["B"].id) is not None
+
+        # And a second tick does not close it again -- the `pop` is what makes
+        # the release at-most-once, and a timer-driven refresh is what would
+        # otherwise call `aclose` forever.
+        await supervisor.refresh()
+        assert stopped._closes == 1
+    finally:
+        await supervisor.stop()
+
+
 async def test_push_snapshots_report_the_adapters_own_ledger(fakes: _Fakes) -> None:
     """PRD 10's `usher.source.push.reconnects` is fed straight from here, so
     a hard-coded `0` would plot a flat line for every source forever -- the

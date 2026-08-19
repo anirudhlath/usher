@@ -296,8 +296,44 @@ class LaneSupervisor:
     # -- the push lanes --------------------------------------------------
 
     async def refresh(self) -> None:
-        """Start a lane for every enabled source that has none, and drop the
-        lanes of sources that have gone, been disabled, or crashed.
+        """Start a lane for every enabled source that has none, drop the lanes
+        of sources that have gone or been disabled, and **release the adapter
+        of a lane that has finished** without restarting it.
+
+        🔴 **That third clause used to read "or crashed" and the code did no
+        such thing**, which is the defect M10's S10 fixed. A lane reaches
+        `PushSupervisor.run`'s failure ceiling, its task completes, and nothing
+        popped it -- so the `SourceAdapter` stayed in `self._open_adapters`
+        **holding a live `httpx.AsyncClient` against a server this deployment
+        does not own, for the process lifetime**. That is the same class as
+        issues #19 and #9 rather than a tidiness problem, which is why the task
+        moved into Phase 1.
+
+        Worse than the socket: `push_snapshots()` reads that dict, so
+        `usher.source.push.delivering` went on publishing a series for a lane
+        that had stopped existing -- and that is the series PRD 10's *"Push
+        down"* alert reads. A dead lane reporting `delivering=False` forever and
+        a dead lane reporting nothing are different alerts.
+
+        **The lane is deliberately not restarted, and that is unchanged.** PRD
+        08's remedy for the ceiling is *"lean on the nightly walk"*; a `refresh`
+        that replaced a finished lane would reconnect forever against exactly
+        the buffering proxy the ceiling exists for.
+
+        **So the finished task stays in `self._lanes` and only the adapter is
+        released**, which is load-bearing twice over and is the one design
+        choice here worth stating: the entry is what stops the loop below
+        restarting the lane, and it is what `crashed_sources()` reads. S10
+        releases the resource; F2 reports the state. Popping the task instead
+        would restart the lane on the next tick *and* leave F2 nothing to
+        report -- so the plan's sweep target naming `self._lanes.pop` describes
+        a design that cannot work, and the ledger records that rather than the
+        code adopting it.
+
+        Releasing it is also what makes `GET /admin/sources/{id}/status`
+        honest. `push_available()` answers `None` -- *"not probed"* -- when no
+        adapter is open, which is the truthful answer for a source this process
+        has stopped watching, against a `False` read off a dead ledger.
 
         **Not re-entrant, and never called concurrently.** The refresher
         task awaits one call before sleeping, and nothing else in `src/`
@@ -318,6 +354,14 @@ class LaneSupervisor:
             for source_id in list(self._lanes):
                 if source_id not in wanted:
                     await self._stop_lane(source_id)
+            for source_id, task in list(self._lanes.items()):
+                # `task.done()` is the whole predicate, and it is the only
+                # thing separating this from the loudest regression this file
+                # could ship -- releasing a *live* lane's adapter mid-stream.
+                # The case for this carries a positive control over a running
+                # lane for exactly that reason.
+                if task.done():
+                    await self._release_adapter(source_id)
             for source_id, source in wanted.items():
                 if source_id not in self._lanes:
                     await self._start_lane(pipeline, source)
@@ -385,6 +429,24 @@ class LaneSupervisor:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await self._release_adapter(source_id)
+
+    async def _release_adapter(self, source_id: uuid.UUID) -> None:
+        """Close this source's adapter and forget it, at most once.
+
+        The `pop` is what makes it at-most-once, and that is the property
+        rather than an optimisation: `refresh` runs on a timer, so a release
+        path that only called `aclose()` would call it again every
+        `push_source_refresh_seconds` for the life of the process. `aclose` is
+        idempotent on both implementations, so nothing would break and nothing
+        would say so -- which is why the case for this asserts a **count** and
+        not a flag.
+
+        Shared with `_stop_lane` deliberately: a source whose lane is stopped
+        and a source whose lane finished on its own must release the adapter
+        the same way, and two spellings of one rule is how the wrong one gets
+        tested.
+        """
         adapter = self._open_adapters.pop(source_id, None)
         if adapter is not None:
             await adapter.aclose()

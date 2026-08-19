@@ -156,9 +156,22 @@ has no caller.
 
 **Failure-mode gaps.**
 
-- **The `supports_push` degradation does fire — that claim is refuted**, and what survives is one row down: `LaneSupervisor.refresh` never pops a finished lane
-  (`08-operations.md:298`): the counter resets on *delivery*, not on
-  *connection*, so a documented degradation path is unreachable.
+- ~~*"The counter resets on delivery, not on connection, so a documented
+  degradation path is unreachable"*~~ — **refuted, and the sentence it was read
+  off is a counterfactual.** `08-operations.md:298` argues *for* resetting on
+  delivery by describing what would happen **if** it reset on connection; the
+  spec read the premise as the conclusion. The degradation fires: the ceiling
+  case in `tests/unit/test_services_push.py` drives it end to end, and M5's
+  final sweep measured the inverse mutation at **4** failing cases. What
+  survives is one row down and is a resource leak — `LaneSupervisor.refresh`
+  never released a finished lane's adapter, so an `EmbyAdapter` held a live
+  client against somebody else's server for the process lifetime and went on
+  feeding the series PRD 10's "Push down" alert reads. **M10 S10** closes that.
+  ⚠️ This bullet was already half-corrected by `71c44e5`, which prepended the
+  refutation and left the false clause dangling after it, so the sentence read
+  as a claim about the *leak* instead — completing the strike is S10's, and the
+  half-edit is recorded rather than quietly finished, because a correction that
+  leaves its subject intact is harder to spot than an uncorrected claim.
 - **Orphaned claims produce nothing in `/health/ready`.** W1 shipped the lease,
   `touch()` and `recover()`; the operator still cannot see the condition.
 - The image proxy's honest 502 has **no code in ADR-0030's closed vocabulary**
