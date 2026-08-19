@@ -30,6 +30,22 @@ and merged. It is the first thing in this file a reader sees, so it was the
 most-read wrong statement in the repository. Rebuilt from the `## ✅ MN MERGED`
 headings below and from `git log main`.
 
+## Quality-eval phases (from docs/specs/2026-08-18-usher-quality-evals-design.md)
+| Phase | What it delivers | Plan file | Status |
+|---|---|---|---|
+| E1 | Eval skeleton + the suggest surface | docs/plans/2026-08-18-e1-eval-skeleton-and-suggest.md | 🔨 in progress on `spec/quality-evals` — 15 tasks planned; Task 1 landed (`515823a`, `51819bd`): the `usher.eval` package, its extra, and the eleventh import contract |
+| E2 | Search + similarity surfaces | — | not planned |
+| E3 | Judge + curation + rows | — | not planned |
+| E4 | CI — `eval-quick` gate, nightly `eval-full` | — | not planned |
+
+**This is a second table because these are not milestones.** The four phases
+above come from a different spec than the table above them, which is what its
+own heading says, and E1–E4 have no place in an M1–M10 numbering. They sit here
+rather than in a section of their own further down for the reason the milestone
+table sits at the top: a status table nobody scrolls to is the next stale one.
+Both tables are policed by `tests/unit/test_docs_currency.py`, which fails if a
+file in `docs/plans/` is named by neither.
+
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)
 

@@ -23,6 +23,16 @@ check reporting success. Both tables are therefore harvested from **table rows
 under a named heading**, and
 `test_a_plan_named_only_in_prose_does_not_satisfy_the_table` proves the scoping
 against a document that carries both spellings.
+
+**`docs/plans/progress.md` now carries two such headings and is read as their
+union**, because the first plan that is not a milestone arrived on 2026-08-18:
+E1 is phase 1 of 4 of `docs/specs/2026-08-18-usher-quality-evals-design.md`,
+and the milestone table's heading names the *other* spec. Registering E1 there
+would have made that heading false in order to make this file green -- so the
+scope segment of `_PLAN_FILENAME` was widened from `m\\d+` to `[a-z]+\\d+`, a
+second heading was added naming its own spec, and both the widening and the
+spec exclusion it had to preserve are asserted by
+`test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec`.
 """
 
 import pathlib
@@ -41,12 +51,20 @@ _PRD_README = _ROOT / "docs" / "prd" / "README.md"
 PLAN_FILES_AT_M9_CLOSE = 9
 
 _MILESTONE_TABLE = "## Milestones (from"
+_EVAL_PHASE_TABLE = "## Quality-eval phases (from"
 _IMPLEMENTATION_PLAN_TABLE = "## Implementation plans"
 
-# `2026-08-06-m8-curation.md`. Deliberately narrow: the milestone table's own
-# heading names `docs/specs/2026-07-28-usher-v1-design.md`, which is a spec and
-# not a plan, and must not be harvested as one.
-_PLAN_FILENAME = re.compile(r"20\d\d-\d\d-\d\d-m\d+-[a-z0-9-]+\.md")
+# `2026-08-06-m8-curation.md`, `2026-08-18-e1-eval-skeleton-and-suggest.md`.
+# The scope segment was `m\d+` until E1, which is a *phase* and not a milestone
+# and so was invisible to a check whose whole subject is plans nobody
+# registered. Widened to `[a-z]+\d+` rather than to anything looser, because
+# the narrowness is load-bearing: both status tables name their own spec in
+# their own heading, and `docs/specs/2026-07-28-usher-v1-design.md` must not be
+# harvested as a plan. It still is not -- a spec's date is followed by `usher-`,
+# and no letters-then-digits segment follows the date in either spec name.
+# `test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec`
+# asserts both halves.
+_PLAN_FILENAME = re.compile(r"20\d\d-\d\d-\d\d-[a-z]+\d+-[a-z0-9-]+\.md")
 
 
 def _section(document: str, heading: str) -> list[str]:
@@ -85,6 +103,14 @@ def test_every_plan_file_is_named_by_both_status_tables() -> None:
     resolves nowhere, and the PRD link check does not cover `docs/plans/`
     (`.claude/rules/prd-maintenance.md` records why that exclusion is a
     correction rather than a convenience).
+
+    `docs/plans/progress.md` is read as the **union of its two tables**, one per
+    spec. The alternative -- an E1 row under a heading that says *"Milestones
+    (from docs/specs/2026-07-28-usher-v1-design.md)"* -- turns that heading into
+    a false statement to satisfy a check about documentation being true, which
+    is the trade this whole module exists to refuse. A phase of a second spec is
+    registered under a second heading naming that spec, and the union is what
+    keeps the obligation *"every plan file is named"* one obligation.
     """
     on_disk = {path.name for path in _PLANS.glob("*.md")} - {"progress.md"}
 
@@ -95,9 +121,10 @@ def test_every_plan_file_is_named_by_both_status_tables() -> None:
         "the plan-file scan ran but found no M1 plan, so it is not reading docs/plans/"
     )
 
+    progress = _PROGRESS.read_text()
     tables = {
-        "docs/plans/progress.md's milestone table": _table_rows(
-            _PROGRESS.read_text(), _MILESTONE_TABLE
+        "docs/plans/progress.md's milestone and quality-eval tables": (
+            _table_rows(progress, _MILESTONE_TABLE) | _table_rows(progress, _EVAL_PHASE_TABLE)
         ),
         "docs/prd/README.md's implementation-plan table": _table_rows(
             _PRD_README.read_text(), _IMPLEMENTATION_PLAN_TABLE
@@ -143,6 +170,46 @@ def test_a_plan_named_only_in_prose_does_not_satisfy_the_table() -> None:
     }, "the premise: the prose really does name a second plan file"
 
 
+def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() -> None:
+    """Pins the widening that let `E1` in, because an unpinned widening is the
+    same defect as an unregistered plan: both are a check that reports success
+    over a file it cannot see.
+
+    `2026-08-18-e1-eval-skeleton-and-suggest.md` is a *phase* of a second spec,
+    not a milestone of the first, and the pattern was `-m\\d+-` until this case
+    existed -- so the plan was on disk, its row was in a table, and the harvest
+    of that row was the empty set. The first assertion is the widening.
+
+    The second is what the widening had to keep. `_PLAN_FILENAME` is narrow so
+    that a `docs/specs/…` path is not harvested as a plan, and both status
+    tables name their own spec in their own heading. A pattern loose enough to
+    read `usher-v1-design` would make the milestone table's title one of its
+    own rows, so the exclusion is asserted where a harvest actually happens --
+    inside a table row -- rather than against the heading, which
+    `_table_rows` skips for a different reason and would pass either way.
+    """
+    document = (
+        "## Quality-eval phases (from docs/specs/2026-08-18-usher-quality-evals-design.md)\n"
+        "| Phase | What it delivers | Plan file | Status |\n"
+        "|---|---|---|---|\n"
+        "| E1 | Skeleton | docs/plans/2026-08-18-e1-eval-skeleton-and-suggest.md | in progress |\n"
+    )
+
+    assert _table_rows(document, _EVAL_PHASE_TABLE) == {
+        "2026-08-18-e1-eval-skeleton-and-suggest.md"
+    }
+
+    specs = (
+        "## Quality-eval phases (from docs/specs/2026-08-18-usher-quality-evals-design.md)\n"
+        "| — | — | docs/specs/2026-07-28-usher-v1-design.md | — |\n"
+        "| — | — | docs/specs/2026-08-18-usher-quality-evals-design.md | — |\n"
+    )
+
+    assert _table_rows(specs, _EVAL_PHASE_TABLE) == set(), (
+        "a spec is not a plan, and the two headings name theirs"
+    )
+
+
 def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> None:
     """The premise the case above is modelled on, stated against the real
     document so the model is not a hypothetical.
@@ -155,16 +222,26 @@ def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> Non
     Asserted as a floor and not as an equality: the number grows by one per
     milestone, and the claim being kept alive is *"this document's prose names
     plan files"*, not *"it names exactly six"*.
+
+    **Both** table sections are excluded, and the second one is why this
+    paragraph exists. `## Quality-eval phases` arrived on 2026-08-18 and its
+    rows are outside the *milestone* section, so a scan subtracting only that
+    one would have counted a table row as a line of prose -- and the floor
+    would have kept passing, on evidence it is written to exclude. A floor that
+    goes green because the thing it measures was diluted is worse than one that
+    fails: it reports that the scoping is still load-bearing while quietly
+    measuring something else. The count is 8 at E1's start, all eight genuinely
+    prose.
     """
     text = _PROGRESS.read_text()
-    section = set(_section(text, _MILESTONE_TABLE))
+    tabled = set(_section(text, _MILESTONE_TABLE)) | set(_section(text, _EVAL_PHASE_TABLE))
     outside = [
         line
         for line in text.splitlines()
-        if line not in section and _PLAN_FILENAME.search(line) is not None
+        if line not in tabled and _PLAN_FILENAME.search(line) is not None
     ]
 
     assert len(outside) >= 6, (
-        "progress.md no longer names a plan file outside its milestone table, so "
+        "progress.md no longer names a plan file outside its status tables, so "
         f"the scoping above is no longer load-bearing: found {outside!r}"
     )
