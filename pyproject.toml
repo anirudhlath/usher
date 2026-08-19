@@ -788,7 +788,11 @@ source_modules = [
     "usher.eval.errors",
     "usher.eval.fingerprint",
     "usher.eval.goldens",
+    "usher.eval.ledger",
+    "usher.eval.runner",
+    "usher.eval.suggest_run",
     "usher.eval.surfaces",
+    "usher.eval.verdicts",
 ]
 forbidden_modules = ["ranx"]
 allow_indirect_imports = true

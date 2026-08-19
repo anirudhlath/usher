@@ -56,6 +56,8 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
+from usher.eval.errors import EvalDependencyMissing
+from usher.eval.goldens.suggest import GATE_SEED
 from usher.ports.errors import (
     PortAuthFailed,
     PortDataMalformed,
@@ -956,6 +958,36 @@ async def _suggest(settings: Settings, *, prefix: str, limit: int, tier: str) ->
         print("no match")
 
 
+async def _eval(
+    settings: Settings, *, surface: str | None, full: bool, seed: int, sample: int
+) -> None:
+    """Measure a surface's quality against bars written down before the run.
+
+    **Not a test.** It reads a real catalog and drives the real services; it
+    creates nothing and writes only to the `eval` schema, and only with
+    `--full`.
+
+    The `eval` extra is checked here rather than at import: `usher --help`
+    must work on a deployment that has never installed it, and a bare
+    `ModuleNotFoundError: ranx` tells an operator a module is absent and
+    nothing else.
+    """
+    try:
+        from usher.eval.suggest_run import run_suggest
+        from usher.eval.verdicts import exit_code_for
+    except EvalDependencyMissing as problem:
+        raise SystemExit(str(problem)) from problem
+
+    if surface not in (None, "suggest"):
+        raise SystemExit(f"no eval surface named {surface!r}")
+
+    async with _session_for(settings) as session:
+        report = await run_suggest(session, settings, full=full, seed=seed, sample=sample)
+    for line in report.lines:
+        print(line)
+    raise SystemExit(exit_code_for(report.verdict))
+
+
 async def _similar(
     settings: Settings, *, title_id: uuid.UUID | None, limit: int, rebuild: bool
 ) -> None:
@@ -1702,6 +1734,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=SuggestTier.FUZZY.value,
     )
 
+    evaluate = sub.add_parser("eval", help="measure the quality of a surface against its bars")
+    evaluate.add_argument(
+        "surface",
+        nargs="?",
+        default=None,
+        choices=["suggest"],
+        help="one surface, or every surface when omitted",
+    )
+    evaluate.add_argument(
+        "--full",
+        action="store_true",
+        help="full golden sets, bars enforced, ledger written (default: a seeded quick sample)",
+    )
+    evaluate.add_argument(
+        "--seed",
+        type=int,
+        default=GATE_SEED,
+        help=f"the golden-set seed (default {GATE_SEED}, ADR-0002's own)",
+    )
+    evaluate.add_argument(
+        "--sample",
+        type=int,
+        default=100,
+        help="cases per surface in quick mode; ignored with --full",
+    )
+
     similar = sub.add_parser("similar", help="titles like this one, or rebuild the table")
     # Optional because `--rebuild` is the write form of the same command. Two
     # subcommands for one artefact is how `usher index` and its backfill would
@@ -1959,6 +2017,16 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
         )
     elif args.command == "suggest":
         asyncio.run(_suggest(settings, prefix=args.prefix, limit=args.limit, tier=args.tier))
+    elif args.command == "eval":
+        asyncio.run(
+            _eval(
+                settings,
+                surface=args.surface,
+                full=args.full,
+                seed=args.seed,
+                sample=args.sample,
+            )
+        )
     elif args.command == "similar":
         asyncio.run(
             _similar(
