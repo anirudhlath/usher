@@ -8,6 +8,8 @@ from typing import Any, cast
 import pytest
 import pytest_asyncio
 from sqlalchemy import ColumnElement, Select, Table, event, insert, select, text
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.exc import MissingGreenlet
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from tests.contract.title_repository_contract import (
@@ -160,6 +162,75 @@ async def test_update_leaves_the_session_usable_after_a_caught_conflict(
     other = Title(kind=TitleKind.MOVIE, name="Sicario", sort_name="Sicario")
     await repo.add(other)
     assert await repo.get(other.id) is not None
+
+
+async def test_a_caught_conflict_leaves_an_expired_row_and_every_read_refreshes_it(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    """The case above reads back a *different* title; this one reads back the
+    title the conflict was about, which is the one the SAVEPOINT rollback
+    leaves behind.
+
+    Issue #8. `SessionTransaction._restore_snapshot` expires every dirty state
+    in the identity map when a SAVEPOINT rolls back, so a caught
+    `RepositoryConflict` leaves this session holding a **fully expired**
+    `TitleRow` -- alive until CPython's cyclic collector takes it, since
+    nothing strongly references it. In an async session an expired attribute
+    is a *lazy load*, and a lazy load reached from a synchronous frame is
+    exactly `MissingGreenlet: greenlet_spawn has not been called`. That is the
+    error one of three `usher work` daemons died on 78 minutes into M9's S3
+    run, whose last two log records were both this conflict path.
+
+    So this case measures both halves. The hazard is real and is asserted
+    directly rather than described -- an f-string, a `__repr__`, a pydantic
+    validator or a log line that formats this row raises it. And every read
+    `PostgresTitleRepository` ships refreshes the row inside its own `await`
+    instead, which is what keeps the hazard closed and is the property a
+    future read must not break.
+
+    The premise is asserted first for `testing-discipline.md`'s reason: if
+    SQLAlchemy ever stopped leaving the row expired, every assertion below
+    would pass while being about nothing.
+    """
+    first = Title(
+        kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=90000201, imdb_id="tt99000201"
+    )
+    second = Title(
+        kind=TitleKind.MOVIE,
+        name="Arrival",
+        sort_name="Arrival",
+        tmdb_id=90000202,
+        imdb_id="tt99000202",
+    )
+    await repo.add(first)
+    await repo.add(second)
+    with pytest.raises(RepositoryConflict) as conflict:
+        await repo.update(second.evolve(imdb_id="tt99000201"))
+    assert conflict.value.constraint == "ix_titles_imdb_id"
+
+    # The premise: the conflicted row really is still here, and really is
+    # expired. Without this the reads below prove nothing.
+    held: list[TitleRow] = [
+        row
+        for row in session.identity_map.values()
+        if isinstance(row, TitleRow) and cast(Any, sa_inspect(row)).identity == (second.id,)
+    ]
+    assert held, "the SAVEPOINT rollback left no row to be about"
+    poisoned = held[0]
+    assert cast(Any, sa_inspect(poisoned)).expired is True
+
+    # The hazard, measured rather than described.
+    with pytest.raises(MissingGreenlet):
+        # The attribute access *is* the assertion -- an f-string because that is
+        # the shape a log line or an exception message reaches it in.
+        assert f"{poisoned.name}"
+
+    # And every shipped read refreshes it inside its own `await`.
+    assert (await repo.get(second.id)) is not None
+    assert (await repo.get_by_tmdb_id(90000202, TitleKind.MOVIE)) is not None
+    assert (await repo.get_by_imdb_id("tt99000202")) is not None
+    assert len(await repo.list_by_ids([second.id])) == 1
+    assert sum((await repo.count_by_state()).values()) == 2
 
 
 # --- Regression coverage for autoflush leaking storage exceptions past

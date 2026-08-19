@@ -37,7 +37,7 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, MissingGreenlet, OperationalError
 
 from usher import cli as usher_cli
 from usher.ports.errors import (
@@ -250,6 +250,52 @@ def test_a_database_error_the_driver_does_wrap_is_operator_facing(
         usher_cli.main(["bootstrap-status"])
 
     assert 'relation "titles" does not exist' in str(exit_info.value)
+
+
+def test_a_missing_greenlet_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The case issue #8 is about, and it is
+    `test_a_programming_error_keeps_its_traceback` in the one family that
+    reached this boundary for real.
+
+    `MissingGreenlet` is `InvalidRequestError` is `SQLAlchemyError`, so a
+    boundary that names `SQLAlchemyError` catches it -- and M9's S3 run
+    recorded exactly that: one of three `usher work` daemons died at
+    23:26:57Z on 2026-08-11 and the whole of what it left behind was
+
+        usher work: MissingGreenlet: greenlet_spawn has not been called; ...
+        (the stack is one flag away: `usher --traceback work`)
+
+    Nothing an operator sets or starts makes IO-outside-a-greenlet go away;
+    it is a bug in this project, and the stack is the bug report. The
+    boundary's own comment already says what it means to admit -- *"everything
+    the driver does wrap"* -- and that is `DBAPIError`, not every error
+    SQLAlchemy can raise.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        usher_cli,
+        "_work",
+        _raising(MissingGreenlet("greenlet_spawn has not been called; can't call await_only()")),
+    )
+
+    with pytest.raises(MissingGreenlet):
+        usher_cli.main(["work", "--once"])
+
+
+def test_the_operator_database_family_is_what_the_driver_wraps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The membership assertion behind the case above, so the repair cannot be
+    undone by widening the tuple back without noticing.
+
+    `DBAPIError` is the driver's half -- a missing table, a dead pool, a
+    permission the role does not have. `InvalidRequestError` is this
+    project's half: a session used wrong, a statement built wrong, IO in a
+    place there is no greenlet to run it in. The tuple may hold the first and
+    must not hold anything that catches the second.
+    """
+    assert DBAPIError in usher_cli.OPERATOR_ERRORS
+    assert not any(issubclass(MissingGreenlet, member) for member in usher_cli.OPERATOR_ERRORS)
 
 
 def test_a_rejected_setting_is_reported_without_the_value_it_rejected(

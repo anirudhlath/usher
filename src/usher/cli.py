@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.api.lanes import LaneSupervisor
@@ -154,7 +154,24 @@ OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     OSError,
     # Everything the driver does wrap: a missing table (`alembic upgrade
     # head` never ran), a dead pool, a permission the role does not have.
-    SQLAlchemyError,
+    #
+    # **`DBAPIError`, not `SQLAlchemyError`, and the narrowing is issue #8's
+    # measured half.** This line read `SQLAlchemyError` until 2026-08-19, and
+    # `SQLAlchemyError` is also the base of `InvalidRequestError` -- which is
+    # `MissingGreenlet`, `PendingRollbackError`, `ObjectDeletedError`,
+    # `ArgumentError`, `CompileError`: every one of them a bug in this project
+    # rather than a condition an operator can act on. M9's S3 measured the
+    # cost. One of three `usher work` daemons died 78 minutes into a
+    # 130,334-request enrichment crawl on an unhandled `MissingGreenlet`, and
+    # the entire record it left in `w1.log` was the two lines
+    # `_operator_problem` prints. The stack that would have diagnosed it was
+    # caught here and discarded, and the issue was filed reading "the run used
+    # bare `usher work`, so no stack was recorded" -- which put the fault on
+    # the operator for not passing `--traceback` when the fault was this
+    # tuple. `DBAPIError` is what the comment above already claims to admit:
+    # errors *the driver raised*, which is where a missing table, a dead pool
+    # and a rejected permission all arrive.
+    DBAPIError,
     # TMDb, Emby, and every bulk download that is *not* behind a port -- and
     # every one of them is behind a port today, which is why the three below
     # exist. Kept because an adapter is free to let one through and because

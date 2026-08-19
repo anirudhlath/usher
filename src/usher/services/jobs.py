@@ -14,10 +14,14 @@ Six properties that are not obvious from "it calls a handler":
    upstream answered, and the answer was wrong. Retrying does not help, so a
    caller parks the work rather than backing off." Every other
    `UsherPortError` backs off, and parks at the queue's attempt ceiling.
-3. **Anything that is not a `UsherPortError` propagates.** A bug in a
-   handler is not an upstream failure; recording it as one turns a crash
-   into five retries and a park whose message points at the wrong thing,
-   with the worker still running and nothing ever loud.
+3. **Anything that is not a `UsherPortError` propagates -- after being
+   written down.** A bug in a handler is not an upstream failure; recording
+   it as one turns a crash into five retries and a park whose message points
+   at the wrong thing, with the worker still running and nothing ever loud.
+   It still propagates; what `_run` does on the way past is log the job's
+   kind and key **with the traceback**, because a stack that only exists on
+   the dying process's stderr is a stack nobody has once the process is gone
+   (issue #8).
 4. **A failing job costs its own job, not the batch.** Each job is completed
    and committed as it finishes, so a crash halfway through a batch cannot
    un-complete the half that worked -- and a bug that escapes one job's task
@@ -453,6 +457,46 @@ class JobWorker:
                     await self._fail(job, exc, scope, retryable=False)
                 except UsherPortError as exc:
                     await self._fail(job, exc, scope, retryable=True)
+                except Exception:
+                    # **Records and re-raises; it does not handle.** Property 3
+                    # above is untouched -- a bug is still not an upstream
+                    # failure, still does not reach `fail()`, and still leaves
+                    # this pass by the `raise` below. What this arm adds is the
+                    # two facts a stack cannot supply once the process is gone.
+                    #
+                    # Issue #8, and it is the gap that made that issue
+                    # unanswerable for a week. M9's S3 lost a `usher work`
+                    # daemon to an unhandled `MissingGreenlet` 78 minutes and
+                    # ~92,000 jobs in; its log's last two records name a job
+                    # that failed *cleanly* on the `ix_titles_imdb_id` conflict
+                    # path, and the job that actually died appears nowhere. The
+                    # stack was thrown away one layer up (`cli.OPERATOR_ERRORS`
+                    # named `SQLAlchemyError`, which is `MissingGreenlet`'s
+                    # base; narrowed to `DBAPIError` in the same commit as
+                    # this). Both halves are needed: the CLI's fix puts the
+                    # stack on stderr, and this puts it in the *log*, beside
+                    # the job it belongs to, in the same JSON stream an
+                    # operator is already collecting.
+                    #
+                    # `except Exception` and not `BaseException`:
+                    # `CancelledError` is how `_pass` stops a lane and is not a
+                    # crash to report.
+                    #
+                    # `logger.opt(exception=True)` rather than this module's
+                    # `str(exc)` house rule, and the difference is safe for one
+                    # measured reason: `telemetry.configure_logging` sets
+                    # `diagnose=False`, which is what stops loguru rendering
+                    # frame *locals* -- PRD 08's credentials-are-never-logged
+                    # rule survives, because a traceback without locals carries
+                    # frames and no values.
+                    span.set_attribute("usher.job.crashed", True)
+                    logger.opt(exception=True).error(
+                        "{kind} job {key} crashed; the claim stays running until the lease "
+                        "expires and another worker recovers it",
+                        kind=job.kind.value,
+                        key=job.key,
+                    )
+                    raise
                 else:
                     await scope.queue.complete(job.id)
                     # Per job, not per batch: a crash nineteen jobs into twenty

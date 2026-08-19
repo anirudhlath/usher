@@ -472,6 +472,40 @@ async def test_a_bug_in_a_handler_is_not_recorded_as_an_upstream_failure(
     assert await fixture.queue.parked() == []
 
 
+async def test_a_bug_in_a_handler_records_its_traceback_and_says_which_job(
+    fixture: _Fixture, errors: io.StringIO
+) -> None:
+    """Issue #8's operational half, and the *only* thing the S3 run lacked.
+
+    A crash still propagates -- that is the case above and it is not
+    negotiable -- but propagating is the last thing that happens to it in this
+    process, and everything above here is a boundary that formats. What the
+    log has to hold before the stack leaves is the two facts the stack alone
+    cannot supply once the process is gone: **which job** was in flight, and
+    the traceback, without anybody having had to remember `usher --traceback
+    work` beforehand. S3 recorded neither: its last two records name the job
+    that failed *cleanly* on the conflict path, and the job that actually died
+    is not in the log at all.
+
+    `logger.opt(exception=True)` and not `str(exc)`, deliberately against this
+    module's own house rule for `_fail`: PRD 08's credentials-are-never-logged
+    rule is enforced here by `telemetry.configure_logging` setting
+    `diagnose=False`, which is what stops loguru rendering frame *locals* into
+    the traceback. The frames themselves carry no values.
+    """
+    fixture.register(JobKind.ENRICH, fixture.raising(ZeroDivisionError("bug")))
+    await fixture.given("t1")
+    with pytest.raises(ZeroDivisionError):
+        await fixture.worker.run_once()
+
+    recorded = errors.getvalue()
+    assert "enrich" in recorded
+    assert "t1" in recorded
+    # The traceback, not just the repr: the frame that raised has to be in it.
+    assert "ZeroDivisionError" in recorded
+    assert "Traceback (most recent call last)" in recorded
+
+
 async def test_every_port_error_backs_off_rather_than_escaping(fixture: _Fixture) -> None:
     """Not just the two subclasses the other cases happen to raise. A worker
     that named `PortUnavailable` specifically would let `PortAuthFailed` and
