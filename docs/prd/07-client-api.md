@@ -1059,8 +1059,19 @@ codec refusing its own input, the same shape as `invalid_cursor` one status over
 
 #### The shape
 
-Four properties, each of which is a rule rather than a detail:
+Five properties, each of which is a rule rather than a detail:
 
+- **The media type is `application/problem+json`, on the wire and in
+  `/openapi.json`.** RFC 9457 section 3, and it is the half of the RFC that
+  costs nothing and is most often skipped: it is how a client tells a problem
+  document from a route's own body *before* parsing either, which is exactly the
+  decision a generated client makes. The two halves are separate facts and both
+  are pinned — `api/errors.py` sets it on the response, and `UsherAPI.openapi`
+  moves every `ProblemResponse` declaration onto it in a post-pass, because
+  FastAPI renders an additional response's model under the *route's* media type
+  and offers no per-response override. Until issue #6 the schema said
+  `application/json` while the wire said otherwise, so every error path in every
+  generated client was wrong in the same way.
 - **`type` is derived from `code` by one function** —
   `https://usher.dev/errors/<code-in-kebab-case>` — never hand-written per member,
   so a code and its type cannot drift apart. RFC 9457 says a `type` URI SHOULD
