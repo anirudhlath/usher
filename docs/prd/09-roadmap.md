@@ -1285,7 +1285,7 @@ suspicion.
   rows, and a `logger.warning` in a stream nothing asserts on. **The claim lease
   is the fix for both**; until then this path is the one to name first, because
   it is the deployment shape `docker compose up` gives you by default.
-- **`usher unmatched --resolve` stack-traces on an unknown `--title`** — found
+- ✅ **`usher unmatched --resolve` stack-traces on an unknown `--title`** — found
   by M9's E4, which fixed the *route* and could not fix the CLI because
   `cli.py` is not that task's file. The route now reads the title first and
   answers a problem document; the command hands the id straight to
@@ -1299,6 +1299,23 @@ suspicion.
   question ADR-0026 asks before adding a member is how often an operator hits
   it, and answering that for a *refusal* type whose other raise sites are
   genuine conflicts is the work.
+  ✅ **Paid on 2026-08-18 (issue #5), and the taxonomy question above was the
+  wrong one to have been waiting on.** The fix is not a tenth member of
+  `OPERATOR_ERRORS`: it is the route's own `SELECT` in front of the write, so
+  the command answers `no such title: <id>` and `RepositoryConflict` keeps
+  every stack it had. That leaves ADR-0026's line exactly where it was, which
+  is why this cost no argument about the family — the entry sized the work as
+  "decide whether a refusal type is operator-facing" when the available fix
+  was "do not raise one".
+  **Reproduced before it was fixed**, against `pgvector/pgvector:pg17` at
+  `alembic head` with one seeded source and one unmatched item: the traceback
+  ended in `RepositoryConflict: cannot attach media item <media item id>` —
+  **naming the id that was correct**, which the entry above did not record and
+  which is half of why the shipped output diagnosed nothing.
+  **The other arm of that branch was checked and needed nothing.** An unknown
+  `--resolve` is not symmetric with an unknown `--title`: the `UPDATE` matches
+  no row, so the foreign key is never evaluated, and `attach_title`'s boolean
+  has answered `no such media item` since M4. Confirmed on the same database.
 - **A covering index for `GET /admin/unmatched` is measured, requested, and
   declined** — M9's E4, over 200,000 items / 70,000 unmatched / 23,333 undated.
   `ix_media_items_unmatched` is `(source_id) WHERE title_id IS NULL` and carries

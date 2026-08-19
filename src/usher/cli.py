@@ -414,13 +414,38 @@ async def _unmatched(
     Listing and resolving are one command rather than two because they are
     one loop: an operator reads a page, resolves one line of it, and reads
     the next.
+
+    **Both ids are checked before anything is written, and only one of them
+    needs a lookup to do it.** `--resolve` naming no row is `attach_title`'s
+    boolean -- the `UPDATE` matches nothing, so nothing is written and there
+    is nothing to undo. `--title` naming no row is not symmetric: the
+    `UPDATE` matches, `fk_media_items_title_id_titles` fires, and the
+    repository translates it into a `RepositoryConflict` whose message names
+    the *media item* -- the id that was fine. That family is deliberately
+    outside `OPERATOR_ERRORS`, because its other raise sites are tripwires
+    for bugs in this project's own code, so the operator got sixty frames
+    for a typo. The guard is a `SELECT` in front of the write, which is the
+    order `POST /admin/unmatched/{id}/resolve` already keeps for the reason
+    it documents: `attach_title` writes what it is given, so a refusal that
+    arrived after the write would be a refusal that had already happened.
+
+    Both refusals print and return rather than raising `SystemExit` the way
+    `_as_uuid` does. One command naming two things that do not exist owes
+    them one exit code, and `no such media item` has had this one since M4.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if resolve is not None and title is not None:
+            # Parsed in argument order, so a command that misspells both is
+            # still told about `--resolve` first.
+            media_item_id = _as_uuid(resolve, "media item id")
+            title_id = _as_uuid(title, "title id")
+            if await pipeline.titles.get(title_id) is None:
+                print(f"no such title: {title_id}")
+                return
             attached = await pipeline.media_items.attach_title(
-                _as_uuid(resolve, "media item id"),
-                title_id=_as_uuid(title, "title id"),
+                media_item_id,
+                title_id=title_id,
                 # `None`, deliberately: a hand resolution names a `Title`.
                 # An episode-level resolution needs an `Episode.id` an
                 # operator has no way to read off this listing, and M9's
