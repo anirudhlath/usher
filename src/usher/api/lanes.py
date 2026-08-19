@@ -427,6 +427,22 @@ class LaneSupervisor:
         `_Gate.at` is `None` until a gap has run, so the first one is never
         skipped (`services/push.py`).
 
+        **There is a second caller, and it is on the delivery path rather
+        than the reconnect path.** `PushSupervisor.run` closes the gap
+        again whenever an applied event comes back `deferred_to_delta` --
+        an event naming more than `push_max_items_per_event` items with no
+        payload (`services/push.py`), deferred precisely *because* a
+        request per item is worse than a paged walk. Against a cursorless
+        source that walk is refused too, so those items are applied
+        **neither inline nor by a walk**: the event is discarded, and stays
+        discarded until an operator runs the full sync the line names. That
+        is the deliberate trade and not an oversight -- the alternative is
+        the whole-library walk above, triggered by an event -- and it is
+        the reason the WARNING carries a remedy rather than only a
+        diagnosis. `tests/unit/test_api_lanes.py::
+        test_a_deferred_push_event_on_a_cursorless_source_is_refused_and_its_items_are_dropped`
+        is where that half is pinned.
+
         **`usher sync --kind delta` on a fresh source keeps working**, and
         that is not an accident of where the check sits: an operator asking
         for a walk of everything is asking for exactly this, so
@@ -438,9 +454,24 @@ class LaneSupervisor:
         not say what to do is a dead end.
         """
         async with self._work() as pipeline:
-            # Bound rather than tested inline: the value is what a *bound* on
-            # a delta that does have a cursor would be computed from, and
-            # there is no second read of `sync_runs` in that shape.
+            # Bound rather than tested inline: the value is what a *bound*
+            # on a delta that does have a cursor (S6) would be computed
+            # from, so that bound needs no read of `sync_runs` of its own.
+            #
+            # It is **not** a saving on the shipped path, and an earlier
+            # version of this comment claimed it was. `reconcile()` derives
+            # the identical cursor again through `_cursor_for`
+            # (`services/reconcile.py`), so a gap close that *does* run now
+            # issues `latest_completed_cursor` four times where it used to
+            # issue two. Negligible -- two indexed reads on `sync_runs`
+            # against a walk of a library -- but the binding is not what
+            # makes it negligible, and a comment that says otherwise is a
+            # claim a reader would have to re-derive to distrust.
+            #
+            # And the bound only pays off if S6's ceiling is a **refusal**.
+            # `reconcile()` takes no `since` override, so a ceiling that
+            # *clamps* the cursor forward has to widen that signature, and
+            # this value buys nothing on the way.
             cursor = await pipeline.reconcile.delta_cursor(source)
             if cursor is None:
                 # The source's **name**, never its base URL and never

@@ -358,7 +358,7 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 | Lane | Trigger | Work |
 |---|---|---|
 | **Push** | WebSocket event | **Apply it inline when it is small; defer to a delta when it is large.** A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk instead, because a request per item against a 1,126,789-item library is a design defect rather than a slow path |
-| **Reconnect delta** | Socket re-established | Items changed since the last cursor — and **refused outright when there is no cursor**, because a source with no completed item-lane run has none and the "delta" is then a walk of the whole library that nobody asked for (M10 S5; the lane starts itself for every enabled source, so on a fresh deployment that walk is the first thing the server does). The lane logs a WARNING naming the source and `usher sync --kind full`, and keeps the socket up. `usher sync --kind delta` on such a source still walks: the refusal is the *lane's*, not `ReconcileService`'s. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds — but that limit is a bound on *cadence* only, and the first gap after a restart is never skipped |
+| **Reconnect delta** | Socket re-established, **or a push event deferred to a delta** | Items changed since the last cursor — and **refused outright when there is no cursor**, because a source with no completed item-lane run has none and the "delta" is then a walk of the whole library that nobody asked for (M10 S5; the lane starts itself for every enabled source, so on a fresh deployment that walk is the first thing the server does). The lane logs a WARNING naming the source and `usher sync --kind full`, and keeps the socket up. `usher sync --kind delta` on such a source still walks: the refusal is the *lane's*, not `ReconcileService`'s. **The refusal covers the deferral trigger too, and that is a real cost**: an oversized event on a cursorless source is applied neither inline nor by a walk, so it is discarded until the full sync runs — deliberate, because the alternative is that walk of everything on the strength of one event. **And "the catalog is empty anyway" is not the premise**: a deployment bootstrapped in bulk ([04](04-catalog-bootstrap.md)) has a populated catalog and no `sync_runs` row at all — `BootstrapService` writes `import_runs` — so it is refused indefinitely, with the remedy in the line. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds — but that limit is a bound on *cadence* only, and the first gap after a restart is never skipped |
 | **Full reconcile** | Nightly, or an operator's `POST /admin/sources/{id}/sync` (M9) | Walk the source; upsert everything; mark unseen items `available = false` |
 
 Polling is the backstop, not the design.
@@ -389,7 +389,11 @@ delta's name as the first act of a freshly started server. The gap-closer
 reads `ReconcileService.delta_cursor(source)` and returns on `None`, logging
 one WARNING that names the source and the command that fixes it. The socket
 stays up and the push lane keeps delivering, which is the point of the lane;
-the walk is the operator's to schedule. **The refusal is deliberately not in
+the walk is the operator's to schedule. **`_close_gap` has two triggers, not
+one** — `PushSupervisor.run` calls it on reconnect and again whenever an
+applied event comes back deferred — so the refusal costs a deferred event its
+items as well as costing a reconnect its delta, and both stay uncovered until
+the full sync runs. **The refusal is deliberately not in
 `ReconcileService`**, because `usher sync --kind delta` against a fresh source
 is an operator asking for precisely that walk, and it still gets one. And
 `usher sync` has always
