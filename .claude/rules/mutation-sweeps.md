@@ -6586,3 +6586,125 @@ unit suite green, which is what demonstrates the absence of a pin. The
 discovery is real and the failing-test-first framing was not available for it —
 recorded here because the next task to inherit that sentence will otherwise try
 to make a tautology fail.
+
+## M10 Task S10 — the leaked adapter, M5's number re-measured, and a positive control no plant reached (2026-08-19)
+
+**6 plants over `src/usher/api/lanes.py` and `src/usher/services/push.py` — 4
+behavioural targets all KILLED, 2 equivalent-mutant controls SURVIVED and both
+passing all five gate steps. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0
+PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.** Every verdict matched its
+pre-registration.
+
+Harness at `/var/tmp/m10-s10/sweep.py`, **outside the working tree** (V1). Plant
+list at `/var/tmp/m10-s10/PLANTS.md`,
+`sha256 ec70449d763ee4285f4e51033a9f0e5eda952b25cb43b1e4953f372c124d34e4`,
+written before the first plant and **re-hashed against the file after the
+round**. Tree committed at `b660ab3`; `git status` asserted clean before,
+**non-empty while each plant was live**, and clean after every restore, with
+every restore compared against `git show "b660ab3:<path>"` rather than against
+the suite going green. `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under
+both `src/` and `tests/`, `compile()` as the dry run, exact anchor counts,
+landing spelled as byte equality with the intended mutant.
+
+**Selection: the whole suite minus the six intermittent node ids.** Whole
+deliberately: P1's entire purpose is comparability with a number M5 measured
+whole-suite, and *a survivor list is only true of the selection it ran against*
+cuts both ways — a scoped count could not be compared with M5's at all.
+Baseline **5,350 passed / 26 skipped / 6 deselected**, and 5,350 + 6 = 5,356
+matches the gate run.
+
+| plant | verdict | cases |
+|---|---|---|
+| P1 `failures = 0` moved from the `if delivering:` arm to just after `async with adapter.events()` | KILLED | **4** |
+| P2 the release loop deleted from `refresh()` (the pre-S10 state) | KILLED | 1 |
+| P3 `_release_adapter`'s `pop` → `get` (closed but never forgotten) | KILLED | 1 |
+| P4 the `if task.done():` predicate deleted (every adapter released) | KILLED | 1 |
+| C1 the release loop moved **above** the stop loop | SURVIVED, all 5 | — |
+| C2 one sentence of `_release_adapter`'s docstring reworded | SURVIVED, all 5 | — |
+
+### P1 — M5's 4 is still 4, one milestone and ~3,250 cases later
+
+The M10 spec claimed *"the counter resets on delivery, not on connection, so a
+documented degradation path is unreachable"*, reading PRD 08's **counterfactual**
+(an argument *for* resetting on delivery, phrased as what would happen **if** it
+reset on connection) as a description of shipping code. M5's final sweep had
+already measured the inverse mutation at **4 cases**; the plan required
+re-measuring rather than quoting, because a survivor list is only true of the
+selection it ran against.
+
+Re-measured against 5,356: **still exactly 4**, and the named cases are
+`test_the_failure_counter_is_reset_by_delivery_not_by_connection`,
+`test_a_delivering_channel_resets_the_counter`,
+`test_the_backoff_doubles_and_is_capped` and
+`test_a_channel_that_ends_quietly_counts_as_a_failure`. **A path with a passing
+end-to-end case and a 4-case inverse mutation is not an unreachable path**, and
+that is the refutation stated as a measurement rather than as a reading. Worth
+carrying for its own sake: a blast radius that survives a milestone unchanged is
+weak evidence the surrounding cases have not drifted into redundancy.
+
+### 🔴 The positive control was not the assertion that fired, and two probes were needed to find out
+
+P4 — releasing *every* adapter regardless of `task.done()` — is the loudest
+regression this change could ship, and the case carries an explicit positive
+control for it (`assert live._closes == 0`, source B's lane being live). The
+sweep reported P4 as KILLED on one case, which reads as the control doing its
+job. **It is not.** Re-planted alone and the `E` line read:
+
+```
+E  AssertionError: the dead lane stops publishing
+E  assert set() == {'B'}
+```
+
+It dies on the **snapshot** assertion two lines earlier, and the control is
+never reached. That is D3's finding verbatim — *"killed by a different
+assertion than predicted is indistinguishable in a summary from killed by the
+assertion that matters"* — and it is why a plant whose predicted death site is a
+named assertion has to be re-planted and read rather than counted.
+
+**A second probe was needed to find out whether the control does anything at
+all**, and it is the more useful half. Planting P3 **and** P4 together (closed
+but never forgotten, on every adapter) still dies on the snapshot assertion —
+now `{'A', 'B'} == {'B'}`, i.e. for the opposite reason, A having survived the
+`get`. So **no plant in this round reaches `assert live._closes == 0`.**
+
+It is kept, and the reason is this file's own test for a survivor rather than
+sentiment: the state it pins — *B's adapter closed while still in
+`_open_adapters`* — is one the snapshot assertion structurally cannot see
+(membership is not closed-ness), and it is constructible by a `_release_adapter`
+that closes without popping. Constructible-but-unreached is **coverage**, not an
+equivalence. What changes is the claim: the write-up says the snapshot assertion
+carries the live-lane control, and `live._closes == 0` is defence for a shape
+this round did not produce. **The general form: an assertion written as a
+positive control is only a control if some plant reaches it — otherwise it is an
+untested claim sitting inside a passing case, which is the same shape as a
+premise guard that cannot fire.**
+
+### The controls
+
+| control | `ruff check` | `format --check` | `mypy` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 release loop above the stop loop | PASS | PASS | PASS | PASS | PASS (5,350) |
+| C2 `_release_adapter` docstring reworded | PASS | PASS | PASS | PASS | PASS (5,350) |
+
+C1's equivalence is a fact about the *code*: `_stop_lane` pops the task and then
+calls the same `_release_adapter`, whose `pop` makes the release at-most-once,
+so a source handled by both loops is closed exactly once in either order; and a
+live lane is skipped by the release loop in both. It is the behaviour-adjacent
+control S5's round three argued for in preference to a prose reword, and —
+unlike a docstring — every plant in this round proves the suite reaches that
+code. C2 is the cheap round-level control kept beside it, checked first against
+the docstring-scan grep: `test_api_problem_vocabulary.py` AST-walks every module
+under `src/usher/api/` but harvests `ProblemCode` accesses and `code=` literals,
+so prose is outside it by construction, and S5's own C1 already measured a
+`lanes.py` docstring reword as surviving.
+
+### Plan drift, recorded rather than substituted
+
+S10's acceptance names a sweep target *"`self._lanes.pop(source_id)` deleted
+from the new release path"*. **There is no such call, and there cannot be.**
+Popping the finished task would (a) let the start loop below restart the lane on
+the same tick — the one thing PRD 08's remedy forbids, since a replaced lane
+reconnects forever against the buffering proxy the ceiling exists for — and (b)
+leave `crashed_sources()` nothing to read, which is the state F2 is scheduled to
+report. The release path therefore pops **`_open_adapters`** and leaves `_lanes`
+alone; P2 and P3 are the plants that target what it actually does.
