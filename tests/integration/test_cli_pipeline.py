@@ -141,7 +141,17 @@ async def _purge(settings: Settings) -> None:
             "DELETE FROM search_queries",
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM sources WHERE name LIKE 'cli-%'",
-            "DELETE FROM titles WHERE sort_name = 'cli-orphan'",
+            # `LIKE 'cli-%'`, not `= 'cli-orphan'`, and the difference is a
+            # whole-suite outage. This file commits through its own sessions
+            # rather than the rolled-back one, so a title it seeds under any
+            # other name survives every later case in the session and inflates
+            # their counts -- `titles` is read by the candidate pool, by
+            # `count_by_state`, and by the curate cases' own premise guards.
+            # Adding one `cli-real` row for a case that needs a title that
+            # *exists* turned 1 failure into 43, none of them in the file that
+            # wrote the row. Matching the prefix the `sources` line above
+            # already uses covers whatever the next case needs to seed.
+            "DELETE FROM titles WHERE sort_name LIKE 'cli-%'",
             # M9's overrides table. It ships **empty** and is never seeded, so
             # `DELETE FROM` restores the shipped state exactly -- and it is what
             # makes `usher home`'s provider count a fact rather than a hope
