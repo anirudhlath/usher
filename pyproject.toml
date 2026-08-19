@@ -46,6 +46,19 @@ dependencies = [
 # dependency is a dependency nobody can install on purpose.
 embedding = ["fastembed>=0.8"]
 
+# The quality-eval harness's IR metrics. An extra for the same reason
+# `embedding` is one, and the precedent that settled it: measured 2026-08-18,
+# `ranx` 0.3.21 is ~30 packages (numba, llvmlite, matplotlib, pandas, scipy,
+# seaborn) against `embedding`'s accepted 28 and 167 MiB. CI runs
+# `uv sync --frozen`, so this costs the production image and the five-step
+# gate nothing at all -- `usher.eval` is imported by no shipped code path,
+# which the eleventh import contract enforces rather than assumes.
+#
+# `ranx` is confined to `usher/eval/metrics/ir.py`. `ir_measures` (4 packages)
+# is the one-file swap if numba ever blocks a CPython upgrade, which is the
+# named residual risk.
+eval = ["ranx>=0.3.21"]
+
 [project.scripts]
 # `usher <command>` as well as `python -m usher <command>`; both land on
 # `usher.cli.main`, which reads `sys.argv` when handed no argv. The
@@ -440,3 +453,40 @@ modules = [
     "usher.ports.repository.title",
     "usher.ports.repository.watch_state",
 ]
+
+# **The eleventh contract.** `usher.eval` may import anything -- it drives the
+# real services through the real composition root, which is the whole design --
+# and **nothing may import it**. Without this it would sit outside all ten
+# contracts above, which is precisely the "a new package can't silently escape
+# every contract" failure the allowlist note at the top of this section names,
+# and it would let a shipped code path pick up a dev-only extra.
+#
+# `usher.cli` is absent from `source_modules` **deliberately and is the only
+# absence**: `usher eval` is a subcommand, so the CLI is this package's
+# composition root. That is the same exemption `usher.composition` holds in
+# three contracts above, and it is safe for the same reason -- the contract
+# "cli is a composition root, nothing depends on it" already stops anything
+# reaching `usher.eval` back through `usher.cli`.
+#
+# Verified in both directions, with the careful spelling. A plant that dies on
+# ruff `F401` proves only that ruff works, so the plant is *used*:
+#     `from usher.eval import fingerprint` in `usher/services/search.py`, in
+#     its isort position, with `_ = fingerprint.__name__` beside it.
+# Expected: 10 kept, 1 broken. Reverted from a `cp` backup and re-verified at
+# 11 kept, 0 broken -- never with `git checkout <path>`, which discards
+# uncommitted work along with the plant.
+[[tool.importlinter.contracts]]
+name = "the eval harness is a leaf, nothing depends on it"
+type = "forbidden"
+source_modules = [
+    "usher.domain",
+    "usher.ports",
+    "usher.services",
+    "usher.adapters",
+    "usher.db",
+    "usher.api",
+    "usher.config",
+    "usher.composition",
+    "usher.telemetry",
+]
+forbidden_modules = ["usher.eval"]
