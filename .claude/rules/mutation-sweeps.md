@@ -5124,11 +5124,39 @@ zero times (asserted directly on the injected sleep's call list).
 `composition.py`, `api/app.py` and `adapters/tmdb/provider.py` — 8 behavioural
 targets, all KILLED; 2 equivalent-mutant controls, both SURVIVED all five gate
 steps. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN,
-0 HUNG.** Every verdict matched its pre-registered expectation. Harness at
-`/var/tmp/m10-s3/sweep.py`, **outside the working tree** so the four
+0 HUNG.** Every verdict matched its pre-registered expectation.
+
+⚠️ **That "all KILLED" is a statement about the ten plants listed below, not
+about the code S3 changed, and the difference is not academic.** The plant list
+omits `src/usher/api/deps.py`, which the plan's own Files list names — so the
+request path, which is the composition root this task's own finding is about,
+was never planted in. It had a surviving defect: see the review round appended
+after this entry, where the same registry-per-request mutation `api/deps.py`'s
+`EnrichService` comment describes passed all five gate steps and the whole
+5,329-case suite. Read the two entries together; this one alone overstates what
+was measured.
+
+Harness at `/var/tmp/m10-s3/sweep.py`, **outside the working tree** so the four
 whole-repository gate steps are not measuring the harness; plant list and
 expected verdicts at `/var/tmp/m10-s3/PLANTS.md`
-(`sha256 71af6f6e…`), written before the first run. Tree committed at `b5dbd83`
+(`sha256 8018f47a…`), written before the first run.
+
+🔴 **This ledger first recorded that file as `sha256 71af6f6e…`, and that was
+not its digest — nor any digest of it.** Re-hashed 2026-08-18 during the review:
+the file is `sha256 8018f47a…` (`sha1 9accd63c…`, `md5 be5cbbc4…`), and every
+file in `/var/tmp/m10-s3/` and `/var/tmp/m10-s3/backups/` was hashed under all
+three algorithms with **nothing** matching `71af6f6e`. It is not a stale digest
+either: `PLANTS.md`'s mtime (22:18:19) predates the ledger commit (22:25:32) and
+it was not touched afterwards, so the file has not changed since the token was
+written. **The recorded token was never the file's hash.** The pre-registration
+itself is intact and its content matches the plant table below, so the
+*discipline* held and only the integrity token failed — which is exactly why
+this is written up rather than quietly corrected. **A fabricated integrity token
+is worse than no token**: every provenance record in this repository rests on
+those digests meaning something, and one that never matched teaches the next
+reader that they are decorative. Caught by a reviewer re-hashing the file
+instead of reading the number, which is the only way this class of error is ever
+caught. Tree committed at `b5dbd83`
 first, so `git status` is the verification — asserted clean after **every**
 plant by the harness itself, and every restore verified by `sha256` *and* by
 reading the file back against the `cp` backup. `PYTHONDONTWRITEBYTECODE=1`,
@@ -5177,11 +5205,28 @@ that can see it *behaviourally* rather than by object identity.
 
 **T6 is the placement finding, measured.** With `take()` in `request()` instead
 of `_send`, the count case reports
-`5 send(s) reached Emby without passing the gate: ['POST /Users/AuthenticateByName',
+`2 send(s) reached Emby without passing the gate: ['POST /Users/AuthenticateByName',
 'GET /System/Info', 'GET /System/Info', 'GET /System/Info', 'GET /System/Info/Public']`
-— **including the authenticating send**, which is the one not reached from any
-public method's own body and therefore the one a gate placed at the public
-surface silently exempts.
+and `assert 3 == 5` — **including the authenticating send**, which is the one not
+reached from any public method's own body and therefore the one a gate placed at
+the public surface silently exempts.
+
+⚠️ **That message read `5 send(s)` here until 2026-08-18 and T6 does not
+produce it.** Re-planted in the review round and read off the `E` line: `takes`
+is **3**, because `request`, `ok` and `json_body` all go through `request()` and
+pay the gate there; the two that escape are `POST /Users/AuthenticateByName`
+(reached from `_session()`, not from a public body) and `anonymous_json`'s
+`GET /System/Info/Public`. The pre-registration had it right —
+`/var/tmp/m10-s3/PLANTS.md`'s T6 row says *"`_authenticate_locked` and
+`anonymous_json` escape the gate"*, which is two — so the error was in the
+write-up and not in the measurement, and T6's conclusion is unaffected.
+**Where the `5 send(s)` string does come from is a different mutation**, measured
+the same day: deleting `await self._limiter.take()` from `_send` outright gives
+`5 send(s) reached Emby without passing the gate: [the same five]` with
+`assert 0 == 5`, character for character. Second-order, and the reason a quoted
+list needs reading as well as copying: the list printed beside the count is
+`server.requests`, i.e. **every** send, not the escaping ones — so quoting it
+beside "5" read as though all five had escaped when three had passed.
 
 **The two controls, measured against every gate step separately** (the check
 this file exists to force):
@@ -5222,3 +5267,96 @@ fresh gate per pipeline. The send-count case's red at that head is a
 `TypeError: EmbySession.__init__() got an unexpected keyword argument 'limiter'`,
 i.e. a red on the missing seam rather than on its own assertion; its
 *behavioural* red is T6 above, which is the one to quote.
+
+## M10 Task S3 — the review round, and the plant the first round could not have made (2026-08-18)
+
+**5 plants over `src/usher/api/deps.py`, `adapters/emby/session.py`,
+`adapters/bulk/wikidata.py`, `adapters/emby/push.py` and
+`tests/unit/test_outbound_call_sites.py` — all 5 behavioural, all KILLED.
+0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.**
+Every verdict matched its pre-registration. Harness at
+`/var/tmp/m10-s3-review/sweep.py`, outside the working tree; plant list at
+`/var/tmp/m10-s3-review/PLANTS.md` (`sha256 627ebdba…`, written 23:21:10 before
+any plant landed — **hash verified by re-running `sha256sum` against the file
+after the round**, which is the check the first round's token failed). Tree
+committed at `7e679df` first, `git status` asserted clean after every plant,
+every restore verified by `sha256` and by reading the file back against its `cp`
+backup. `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under both `src/` and
+`tests/` before every run, `compile()` as the dry run, an exact `count(old) == 1`
+per anchor and the landing check spelled byte-equality with the intended mutant.
+Baseline green on the selection first: **206 passed in 3.53 s**.
+
+**Selection:** the first round's six files plus `tests/unit/test_api_health.py`
+(which is the only other file naming `get_source_adapter_factory`).
+
+| plant | verdict | cases failed |
+|---|---|---|
+| R1 `get_source_adapter_factory` returns `adapter_factory(settings, SourceGateRegistry())` — a fresh registry per request | KILLED | 1 — `test_every_composition_root_that_dials_a_source_reaches_one_gate_per_source` |
+| R2 `take()` moved out of `_send` into `request()` (T6 re-planted, to read its real message) | KILLED | 1 — `test_every_send_passes_the_gate_including_the_authenticating_one` |
+| R3 `bulk/wikidata.py`'s whole decline paragraph deleted | KILLED | 1 — `test_every_recorded_decision_points_at_a_file_that_exists` |
+| R4 `_call_sites`' receiver filter broken (`"client"` → `"httpxclient"`), so the scan resolves nothing | KILLED | 3 — and the one that matters is the push case, see below |
+| R5 `emby/push.py`'s decline paragraph deleted | KILLED | 1 — `test_every_recorded_decision_points_at_a_file_that_exists` |
+
+🔴 **R1 is the round's point, and it is a plant the first round's file selection
+made impossible.** `src/usher/api/deps.py` was in the plan's Files list and in
+no plant, so nothing measured the request path — and the request path had the
+defect. **Its pre-round survival was re-measured rather than taken on report**,
+on a `git archive 8df11af | tar -x` copy outside the working tree (the shape
+`CLAUDE.md` prescribes for reading a tree a sweep is not allowed to touch): with
+R1 planted at that head it passes `ruff check`, `mypy` over **587 source files**,
+`lint-imports` **10 kept / 0 broken** and **4,097 unit cases / 4 skipped** — the
+whole unit suite, green, with a fresh rate gate per HTTP request. It survived because the arm that claimed to
+drive the dependency called `composition.adapter_factory` directly instead, and
+because *every* case naming `get_source_adapter_factory` overrides it
+(`test_api_playback.py`, `test_api_playback_leaks.py`, three integration files)
+while `test_api_health.py` asserts readiness does not resolve it — so
+`get_source_gates` was executed by nothing at all, `RuntimeError` arm included.
+`.claude/rules/testing-discipline.md`'s own line, landing on the one dependency
+the task was about: **a dependency every test overrides is a dependency no test
+covers**. It now dies on
+`AssertionError: the push lane paces independently of the request path … assert
+<_MinInterval object at 0x…> is <_MinInterval object at 0x…>`.
+
+**The generalisation worth more than R1 itself: a sweep's file selection is a
+claim about coverage, and it is the claim nobody states.** Ten plants all killed
+reads as "the change is covered"; what it means is "these ten were caught". The
+selection is where a defect hides, because a file with no plant cannot produce a
+survivor. **Diff the plant list against the task's own Files list before
+scoring a round** — S3's plan named `api/deps.py` in writing and the sweep
+simply did not visit it.
+
+**R4 is the premise finding, and it inverts.** Before this round, breaking the
+scan so `_call_sites()` returned `[]` made
+`test_no_outbound_http_call_escapes_a_recorded_decision` fail on `assert 0 >= 9`
+and left `test_the_push_channel_is_not_a_request_and_the_scan_confirms_it`
+**passing** — an absence assertion satisfied by a scan that found nothing, in a
+file whose module docstring is about exactly that. With the premise added it now
+fails on `AssertionError: the premise: the scan found nothing … assert 0 >= 9`,
+i.e. on the premise rather than on the absence claim, which is the only failure
+that tells a reader what actually broke. **An absence assertion needs two
+premises, not one**: that the scan found *something* (R4's), and that it looked
+at the subject (a walk that never parsed `emby/push.py` also reports it absent).
+The second is not implied by the first and no `>= N` guard can express it.
+
+**R3 and R5 are the same finding twice: a pointer that only runs one way cannot
+fail.** `test_every_recorded_decision_points_at_a_file_that_exists` checked that
+each `recorded_in` resolves — and every one names an ordinary `src/` module that
+exists for its own reasons, so deleting an entire decline paragraph left it
+green. The repair is the **back-pointer**: the file has to name
+`tests/unit/test_outbound_call_sites.py` back, exactly once. Both plants now die
+on `a file this table points at does not name … exactly once … ['…/wikidata.py
+(0x)']`. **The upstream's host name would not have worked, and that is measured
+rather than assumed** — `datasets.imdbws.com` appears 3× in `bulk/download.py`
+and `query.wikidata.org` 3× in `bulk/wikidata.py`, one of each inside the
+decline, so a host-token assertion is satisfied by a file whose decline has been
+deleted. Asserting a *path* rather than a sentence also keeps the prose free to
+be rewritten, which is the trade `testing-discipline.md` records both halves of.
+
+**One post-round measurement, pre-registered separately in
+`/var/tmp/m10-s3-review/PLANTS-addendum.md` (`sha256 f3db3046…`) and labelled as
+not part of the round**, because it is a fact-check on a durable record rather
+than a coverage plant: R6 deletes `await self._limiter.take()` from `_send`
+outright and reproduces the `5 send(s) reached Emby without passing the gate`
+string the first ledger attributed to T6, with `assert 0 == 5`. That is how the
+misquote was pinned to a specific other mutation rather than merely called
+wrong.
