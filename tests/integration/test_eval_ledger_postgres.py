@@ -79,6 +79,8 @@ async def test_a_run_and_its_scores_round_trip(session: AsyncSession) -> None:
         )
     ).one()
     assert stored.surface == "suggest"
+    assert stored.verdict == "pass"
+    assert stored.inputs_digest == _record().fingerprint.digest
     assert stored.case_count == 2993
     scores = (
         await session.execute(
@@ -110,6 +112,12 @@ async def test_the_inputs_are_queryable_as_jsonb_not_stored_as_text(
 async def test_deleting_a_run_takes_its_scores(session: AsyncSession) -> None:
     await ensure_schema(session)
     run_id = await write_postgres(session, _record(), started_at=_STARTED_AT)
+    before = (
+        await session.execute(
+            text("SELECT count(*) FROM eval.scores WHERE run_id = :id"), {"id": run_id}
+        )
+    ).scalar_one()
+    assert before == 1  # premise: the run has a score to lose
     await session.execute(text("DELETE FROM eval.runs WHERE id = :id"), {"id": run_id})
     orphans = (
         await session.execute(
@@ -126,7 +134,12 @@ async def test_the_trend_view_shows_full_runs_and_hides_quick_ones(
     a full run compares two populations on one axis."""
     await ensure_schema(session)
     await write_postgres(session, _record(), started_at=_STARTED_AT)
-    quick = replace(_record(), mode="quick")
+    quick = replace(_record(verdict="fail"), mode="quick")
     await write_postgres(session, quick, started_at=_STARTED_AT)
     rows = (await session.execute(text("SELECT count(*) FROM eval.v_trend"))).scalar_one()
     assert rows == 1
+    # The FULL run (verdict=pass), not the quick one (verdict=fail): this proves the
+    # view's WHERE is mode='full' and not the inverted mode='quick', which also returns
+    # exactly one row and would pass the count assertion above.
+    surviving = (await session.execute(text("SELECT verdict FROM eval.v_trend"))).scalar_one()
+    assert surviving == "pass"
