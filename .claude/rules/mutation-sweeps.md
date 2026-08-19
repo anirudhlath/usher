@@ -5886,3 +5886,117 @@ all.**
   a plant whose only kill is one of these three is a false kill until re-run.
   **Do not chase the root cause from here** — that is nobody's task yet, and a
   rate measured on one host on one evening is not the diagnosis.
+
+## M10 Task S5 — the gap-closer's refusal, and a harness that scored five kills as DID-NOT-RUN (2026-08-19)
+
+**6 plants over `src/usher/api/lanes.py` — 5 behavioural targets, all KILLED;
+1 equivalent-mutant control, SURVIVED all five gate steps. 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.** Every verdict
+matched its pre-registered expectation — *in round two*; the whole of round one
+is discarded and the reason is the second half of this entry.
+
+Harness at `/var/tmp/m10-s5/sweep.py`, **outside the working tree** so the four
+whole-repository gate steps are not measuring the harness. Plant list and
+expected verdicts at `/var/tmp/m10-s5/PLANTS.md`,
+`sha256 3aabdde0eef2d01738c17c2eb202f37cbb983b5e880eec3f12badd830c58b424`,
+written 04:07:33 — before the first plant, and re-hashed at write time rather
+than transcribed (S3's ledger recorded a token that was never any digest of its
+file, and that is why this one was hashed twice). Tree committed at `30e7871`
+first, so `git status` is the verification: clean before, clean after every
+restore, and the target `sha256`-verified byte-identical to `git show
+HEAD:src/usher/api/lanes.py` at the end (`29cfbe00…`).
+`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under **both** `src/` and
+`tests/` before every run, `compile()` as the dry run, an exact anchor count
+(`count(old) == 1`) asserted before each plant, landing spelled as **byte
+equality with the intended mutant**, every restore verified by hash **and** by
+reading the file back against the `cp` backup.
+
+**Selection: the whole suite minus four node ids, named rather than silent.**
+Baseline green on that selection first: **5,341 passed / 26 skipped / 4
+deselected in 190.88 s**. The deselections are
+`test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_own`
+and the three RRF-fusion cases in `test_adapters_search_postgres.py` named in
+the entry above — a verdict scored on *"did the run fail"* is unsound in both
+directions against an intermittent case. Neither group failed in any of the
+eight whole-suite runs this task made, which is one more datapoint for that
+entry's open question and still not a rate.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 the refusal moved **after** `reconcile` — the walk happens and the warning still prints | KILLED | 1 |
+| T2 the predicate widened from *"no completed run"* to *"no run at all"* (`runs.list_for_source`), so a `FAILED`-only source is walked again | KILLED | 1 |
+| T3 the WARNING downgraded to DEBUG | KILLED | 1 |
+| T4 the guard inverted (`cursor is None` → `is not None`) | KILLED | 1 |
+| T5 the log line carries `source.base_url` instead of `source.name` | KILLED | 1 |
+| C1 **control** — one sentence of `_close_gap`'s docstring reworded | SURVIVED all five | — |
+
+All five kills are the same single case,
+`test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator_is_told`,
+and **that is the point rather than a weakness**: the case's five assertion
+groups are each the only thing that can see one of the five plants, which is
+what the three-arm fixture was built for. T1 is the one worth reading twice —
+it leaves the WARNING intact, so *every* "the operator was told" assertion
+passes against it and only `reconciled == [("Cellar", DELTA)]` fires. A case
+that asserted "a warning was emitted" would have ratified a mutant that walks
+1.13M items and then apologises. T5 is the mirror on the redaction assertion,
+whose own positive control is that the source **name** is present.
+
+**The control, measured against every gate step separately** (the check this
+file exists to force):
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 one sentence of `_close_gap`'s docstring reworded | PASS | PASS | PASS | PASS (10/0) | PASS (5,341) |
+
+**A docstring reword is only safe as a control after two checks, and this task
+had to run both.** `grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`
+returns 31 files, four of which scan under `api/`; none reads
+`src/usher/api/lanes.py`'s prose, and `test_outbound_call_sites.py`'s
+`recorded_in` table names eight `src/` files that do not include it. The second
+check is newer and is the one `.claude/rules/api-telemetry-and-lanes.md` added
+in S1: **under `api/`, a docstring is often a wire artifact.** `LaneSupervisor`
+is a plain class rather than a pydantic model or a route handler, so this
+docstring reaches no `/openapi.json` `description` — but a control planted in
+`api/dto/` or on a route handler would have been an unreviewed OpenAPI diff
+dressed as an equivalent mutant.
+
+### 🔴 Round one scored five genuine kills as DID-NOT-RUN, and the harness it inherited that from is the one this repository leaves behind
+
+**The whole first round is discarded**, kept at
+`/var/tmp/m10-s5/round1-invalid.console.log`. Its six verdicts read
+`DID-NOT-RUN` while its own captured output showed
+`1 failed, 5340 passed, 26 skipped, 4 deselected` and named the failing case on
+every one of them.
+
+**The mechanism is the `-q` trap, one layer over from where it is already
+recorded.** `addopts` carries `-q`, so pytest's final counts line is
+**undecorated** — `5341 passed, 26 skipped, 4 deselected in 190.88s` — while the
+verdict regex copied from `/var/tmp/m10-s4/sweep.py` was
+`r"^=+ .*?(\d+) (?:passed|failed).*?=+$"`, which requires the `====` banner that
+only appears without `-q`. It therefore matches **nothing**, on a green run and
+on a red one alike, and `score_pytest` returns `DID-NOT-RUN` for both. The
+existing entry above says harnesses here must not pass `-q`; this is the
+complementary failure, **a harness that does not pass `-q` and is parsing as
+though nobody else did**.
+
+**What makes it worth an entry is where the broken harness came from.** S4 hit
+exactly this and repaired it — `/var/tmp/m10-s4/sweep2.py` carries
+`r"^=*\s*\d+ (?:passed|failed).*$"`, which matches both spellings — and its
+ledger entry is titled *"a round whose surviving evidence described runs that
+never happened"*. But **both files survive side by side, and the broken one is
+the one called `sweep.py`.** Copying "the previous task's harness" by its
+obvious name picks up the defect; only reading the neighbour named `sweep2.py`
+finds the fix. The general form: **a repaired harness left beside its broken
+predecessor propagates the predecessor**, because the next person copies the
+canonical filename. Either delete the broken one or rename it to say so — this
+round renamed its own dead output to `round1-invalid.*` for the same reason.
+
+**And the thing that caught it was not the verdict.** `DID-NOT-RUN` on a
+*control* is unremarkable and `DID-NOT-RUN` on a target reads like a harness
+hiccup; what made it obvious was that the harness prints the failing case names
+and the run detail beside each verdict, and the detail said `1 failed`. That is
+the same property the `-q`/`-qq` entry above credits with catching its own
+version — *"a harness that printed the verdict alone would have reported eight
+mutations as unobserved"* — arriving a second time, in a different regex, in an
+inherited file. **Print the evidence next to the verdict; the verdict is the
+part that can be wrong.**

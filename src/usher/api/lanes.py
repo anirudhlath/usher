@@ -411,8 +411,10 @@ class LaneSupervisor:
         source with no completed item-lane run, and a delta started from it
         walks `list_items(since=None)` -- the whole library, measured at
         1,134,919 items over 5,675 pages on the one household this project
-        has, i.e. 7.3-11.8 hours at that run's 6.04 s pooled mean per page
-        (M10 S1, 2026-08-15; `.claude/rules/emby-push-and-ingest.md`).
+        has: **~9.5 hours** at that run's 6.04 s pooled mean per page, and
+        7.3-11.8 h across its two `list` classes' means (M10 S1,
+        2026-08-15; `.claude/rules/emby-push-and-ingest.md`). One household,
+        one evening, sequential.
 
         **This is the one caller of `reconcile` nobody typed a command
         for**, which is the whole reason the refusal is here.
