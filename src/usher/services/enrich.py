@@ -46,6 +46,7 @@ from pydantic import AwareDatetime
 
 from usher.domain.enums import ENRICHMENT_RANK, EnrichmentState
 from usher.domain.episode import Episode
+from usher.domain.genres import canonical_genres
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, UsherPortError
@@ -356,6 +357,53 @@ class EnrichService:
             changes[field] = value
         return changes
 
+    def _genres_after(self, title: Title, supplied: tuple[str, ...]) -> tuple[str, ...]:
+        """The provider's genres, plus the ones it has no word for.
+
+        **The one field in `_ENRICHABLE` where "the provider supplied it" and
+        "the provider had something to say about it" are different questions**,
+        because a genre list is a *set* and this merge replaces sets wholesale.
+        `titles.genres` unions two importers' vocabularies (ADR-0039) and TMDb
+        names 24 of the 31 canonical concepts, so before this method a title
+        whose only IMDb label was `Biography` came out of enrichment with that
+        label gone rather than re-spelled. Measured 2026-08-19 against the real
+        `title.basics.tsv.gz` and the live catalog: 53,724 of 132,116 enriched
+        titles lost at least one IMDb label — 69,160 deletions, **11,466** of
+        them of a concept TMDb cannot express, `Film-Noir` 827 deleted against
+        0 surviving. Control: **0 of 1,021,623** skeletons lost one.
+
+        **What is *not* preserved is the point.** A label whose concept the
+        provider can name is the provider's to overwrite, and 13,141 of those
+        deletions were `Drama` — TMDb disagreeing with IMDb about a film, which
+        it is entitled to do and is usually right about. `Sci-Fi` is the same
+        case one step removed: `Science Fiction` is the same concept, so
+        keeping both spellings would hand one title two words for one thing,
+        which is exactly the state `_canonical_facet`'s collapse is entitled to
+        assume no title is in.
+
+        Order: the provider's list first, in its own order, then whatever it
+        could not say. `Title.genres` order is rendered (`RowCard`, the
+        curation prompt) and the provider's is a relevance order; the preserved
+        tail has no ordering claim to make.
+
+        **This stales the document, and the bill is already on this path.**
+        `genres` is segment 6 of `compose_document`, so a preserved label moves
+        `_FINGERPRINT_SQL` — but `_apply` enqueues an `INDEX` job for every
+        successful enrichment anyway, so a title reaching this method was going
+        to be re-embedded on this pass regardless. Nothing is restaled that was
+        not already stale, which is what makes this affordable where a backfill
+        over the existing 1,272,866 rows is not (ADR-0039).
+        """
+        vocabulary = self._provider.genre_vocabulary
+        return (
+            *supplied,
+            *(
+                label
+                for label in title.genres
+                if label not in supplied and not vocabulary.intersection(canonical_genres(label))
+            ),
+        )
+
     def _merged(self, title: Title, result: EnrichmentResult, changes: dict[str, Any]) -> Title:
         """The stored title with what the provider supplied written over it.
 
@@ -363,7 +411,15 @@ class EnrichService:
         is frozen and `model_copy` skips validation entirely, so it can hand
         back a `Title` carrying an out-of-range `community_rating` that
         pydantic then serialises without complaint.
+
+        `genres` is the one field not written straight through — see
+        `_genres_after`. The substitution happens here rather than in
+        `_changes` because it needs the *stored* title, which `_changes` does
+        not see; `changes` keeps its meaning as "what the provider supplied",
+        which is what `title.updated` names on the wire.
         """
+        if "genres" in changes:
+            changes = {**changes, "genres": self._genres_after(title, changes["genres"])}
         return title.evolve(
             **changes,
             # `ENRICHMENT_RANK`, never a direct comparison. `ENRICHED` is the

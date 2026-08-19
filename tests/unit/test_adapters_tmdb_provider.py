@@ -27,6 +27,7 @@ from usher.adapters.tmdb.provider import (
     TmdbMetadataProvider,
 )
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.genres import CANONICAL_GENRES, canonical_genres
 from usher.ports.errors import PortDataMalformed
 from usher.ports.ingest import ProviderRef
 
@@ -856,3 +857,43 @@ async def test_the_provider_names_itself_the_way_a_provider_ref_spells_it() -> N
     provider, http = _provider(server)
     async with http:
         assert provider.name == "tmdb"
+
+
+async def test_the_genre_vocabulary_is_every_tmdb_name_as_a_canonical_concept() -> None:
+    """**Which concepts enrichment is entitled to delete** (ADR-0039).
+
+    `genres` is in `EnrichService`'s replace list, so this set decides whether
+    an IMDb-only label is re-spelled or destroyed — and it is the half
+    `FakeMetadataProvider` cannot speak to, because that fake transcribes the
+    same set rather than deriving it.
+
+    Both directions are asserted and only the second one fails against the
+    defect. That TMDb names `Science Fiction` is uninteresting; that it names
+    **none** of the seven concepts IMDb has to itself is the whole subject, and
+    the live catalog is what says these seven are real rather than theoretical:
+    `Biography` 24,552 titles, `Sport` 19,918, `Musical` 13,546, `Game-Show`
+    10,729, `Short` 6,248, `Film-Noir` 49 (2026-08-19).
+    """
+    server = _Server()
+    provider, http = _provider(server)
+    async with http:
+        vocabulary = provider.genre_vocabulary
+
+    assert "Science Fiction" in vocabulary
+    # IMDb's `Sci-Fi` is the same concept, so it is TMDb's to overwrite.
+    assert set(canonical_genres("Sci-Fi")) <= vocabulary
+    assert vocabulary.isdisjoint(
+        {"Adult", "Biography", "Film-Noir", "Game-Show", "Musical", "Short", "Sport"}
+    )
+    # The complement, stated as an equality so a concept added to
+    # `CANONICAL_GENRES` without a decision about TMDb fails here rather than
+    # silently joining one side.
+    assert CANONICAL_GENRES - vocabulary == {
+        "Adult",
+        "Biography",
+        "Film-Noir",
+        "Game-Show",
+        "Musical",
+        "Short",
+        "Sport",
+    }

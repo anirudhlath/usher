@@ -763,6 +763,26 @@ raises it through `ENRICHMENT_RANK`
 enrichment records `Title.enrichment_error` and leaves the tier exactly where
 it was.
 
+**`genres` is the one replaced field where the merge asks a second question,
+and it is the one that was destroying data —
+[ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md).** Every
+field in `_ENRICHABLE` is replaced wholesale when the provider supplies it, and
+for a *set* that means a title whose only IMDb label was `Biography` came out of
+enrichment with the label **gone** rather than re-spelled: TMDb has no
+`Biography` in either id space, so there was nothing for it to become. Measured
+2026-08-19 by joining the real `title.basics.tsv.gz` to the live catalog:
+**53,724 of 132,116 enriched titles lost at least one IMDb label — 69,160
+deletions**, 11,466 of them of a concept TMDb cannot express, `Film-Noir`
+deleted 827 times and surviving 0. Control: **0 of 1,021,623** skeletons lost
+one, which is what makes it the enrichment boundary and nothing else.
+`MetadataProvider.genre_vocabulary` now names the canonical concepts a provider
+can express — **the set it is entitled to delete** — and a label outside it
+survives. What still gets overwritten is a label the provider *could* have said
+and did not: 13,141 of those deletions were `Drama`, which is TMDb disagreeing
+about a film and is usually right. The 53,724 titles already enriched keep
+their deletions; repairing them is a backfill that decision deliberately
+declines.
+
 **A successful enrichment now does one more thing:** after the commit, beside
 the `title.updated` publish, it enqueues exactly one `index` job for the title
 it just wrote — one job per enriched title, on this stage's hot path. Stage 4

@@ -53,6 +53,22 @@ ahead of the `LIMIT`; the weight classes decide everything below it. Why that
 key rather than a heavier weight or a lower relevance decay, and what it was
 worth over 800 sampled titles, is under [Ranking](#ranking).
 
+⚠️ **Weight class D carries two spellings of one concept, and this lane is
+*not* fixed by
+[ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md).**
+`titles.genres` unions two importers' vocabularies and the two spellings share
+no lexemes: `to_tsvector('english','Sci-Fi')` is `'fi':3 'sci':2 'sci-fi':1`
+against `'fiction':2 'scienc':1`. A query reaching the genres segment matches
+one half of the catalog — 20,051 titles or 6,223, never both, because zero
+titles carry both labels. ADR-0039 fixed `/browse`'s filter and facets at
+*read* time and deliberately left this one: the repair is a write-time
+normalisation of the column, which changes segment 6 of `compose_document` and
+correctly restales every affected embedding (~1.8 h of re-embedding plus a
+3.3 h `usher similar --rebuild` on this catalog). Unmeasured, and the
+sampleable version needs no user traffic — how many `Sci-Fi` titles change
+position in a `/search` for a science-fiction query if they carry the other
+label.
+
 **Weight class B is filled by M7, and the sentence M6 wrote about what that
 would cost was optimistic.** M6 shipped B *reserved and empty* — correctly:
 there was no `Person`, `Credit`, `Collection` or `Image` table, model or port
@@ -838,6 +854,22 @@ signal leaves the numerator *and* the denominator, so a thin title's neighbours
 are decided by its vector rather than pushed to the bottom of every list.
 [ADR-0014](decisions/0014-absence-is-not-zero.md), applied to a set-valued
 field.
+
+⚠️ **The genre term is scored over two vocabularies that never co-occur, and
+it is a trap that is not sprung yet — stated that way on purpose.**
+`titles.genres` unions IMDb's labels and TMDb's, and zero of 1,272,866 titles
+carry both spellings of any concept
+([ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md)). A skeleton
+science-fiction film and an enriched one therefore score a hard **0** on this
+term while both are science fiction, and `_jaccard` cannot tell that from "we
+do not know either one's genres" — the distinction the paragraph above is
+about. **It costs nothing today**, because `_POPULATION` excludes skeletons, so
+both sides of every stored pair speak TMDb's vocabulary. It becomes real the
+moment the embedded population widens past the enriched tier, which is the
+direction this project is going. ADR-0039's read-time fix does **not** reach
+here: `SimilarityService` reads the raw column, and so do
+`GenreAffinityProvider`, `TasteService`, `CurationPool`, `BecauseYouWatched`
+and `Seasonal`.
 
 **The precompute is exact, not approximate**, and the argument is about the
 artefact rather than about the cost: recall loss in a live query is per-query,

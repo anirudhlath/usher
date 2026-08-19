@@ -669,9 +669,20 @@ class TitleRepository(ABC):
         because a two-valued flag makes *"unset"* and *"the user asked for
         unowned"* the same request.
 
-        `genre` matches the `genres` array (containment, never the keywords
-        array beside it) and `year` is exact. Both narrow; given together they
-        intersect.
+        `genre` matches the `genres` array (never the keywords array beside
+        it) and `year` is exact. Both narrow; given together they intersect.
+
+        **`genre` names a concept, not a spelling** — [ADR-0039](
+        ../../../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md).
+        `titles.genres` unions two importers' vocabularies with nothing in
+        common: the IMDb bulk phase writes `Sci-Fi` and `EnrichService` writes
+        TMDb's `Science Fiction`, and on the live catalog **zero** of 1,272,866
+        titles carry both. So this is *not* containment of the string the
+        client sent — it is an overlap with every spelling of the concepts that
+        string names (`usher.domain.genres.genre_spellings`), which makes the
+        two requests one query over one population. A label from outside the
+        vocabulary expands to itself alone, which is exactly the containment
+        this replaced.
 
         `limit` rows at most, and it has **no default** for
         `list_unwatched_candidates`' recorded reason: three signatures with
@@ -711,13 +722,25 @@ class TitleRepository(ABC):
         it looks entirely correct on every request that does not use that
         facet, which is most of them.
 
-        **A facet the client asked for is present at `0`, never absent.** This
-        is `count_by_state`'s rule — *"never a sparse dict"* — arriving at a
-        vocabulary that is open rather than an enum, so the guarantee is
-        narrowed to the values the request itself named: `genre` and `year`.
-        A `GROUP BY` returns only the values that have rows, so without this a
-        filter that matches nothing comes back as a *missing key*, which is
-        indistinguishable from a filter the client did not send.
+        **One entry per concept, not one per spelling** — [ADR-0039](
+        ../../../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md).
+        The genre counts are keyed by Usher's canonical vocabulary, so
+        `Sci-Fi`'s 20,051 titles and `Science Fiction`'s 6,223 are one
+        `Science Fiction` button of 26,274 rather than two buttons a viewer
+        loses half the catalog by choosing between. Each count is the size of
+        the page pressing that button serves, which is the property that makes
+        the facet and `browse`'s filter one rule read twice.
+
+        **A facet the client asked for is present at `0`, never absent, under
+        its concept's key.** This is `count_by_state`'s rule — *"never a sparse
+        dict"* — arriving at a vocabulary that is open rather than an enum, so
+        the guarantee is narrowed to the values the request itself named:
+        `genre` and `year`. A `GROUP BY` returns only the values that have
+        rows, so without this a filter that matches nothing comes back as a
+        *missing key*, indistinguishable from a filter the client did not
+        send. The key is the canonical label rather than the spelling that
+        arrived, or a client filtering on `Sci-Fi` gets an entry that is both
+        absent and present depending on which key it reads.
 
         `years` is keyed by year and a NULL-year title is in no bucket: the
         map's key type says so, and "unknown" is not a year a client can

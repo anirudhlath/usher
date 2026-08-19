@@ -1492,6 +1492,60 @@ class TitleRepositoryBrowseContract:
 
         assert [one.id for one in rows] == [by_genre.id]
 
+    async def test_the_genre_filter_answers_one_concept_across_both_source_spellings(
+        self, repo: TitleRepository
+    ) -> None:
+        """**Issue #30's user-visible half, as a test.** `titles.genres` is
+        written by two importers with no shared vocabulary: the IMDb bulk phase
+        spells it `Sci-Fi` and `EnrichService` spells it `Science Fiction`, and
+        on the live catalog the two never co-occur (20,051 / 6,223 / **0**
+        both, 2026-08-19). Exact containment therefore answers half a concept
+        under either spelling, and looks completely right doing it.
+
+        **Both arms are asserted, and the order is the assertion.** A filter
+        that expanded only the canonical spelling would pass a
+        `?genre=Science Fiction` case and still serve a bookmarked
+        `?genre=Sci-Fi` its old half — so each spelling is asked for the whole
+        population, positionally, under `sort=name`.
+
+        The Comedy row is the premise that the expansion is a *union of one
+        concept* and not simply a widened filter: it must be absent from both
+        answers.
+        """
+        # Single-word-distinct names, because the two arms of this contract do
+        # not agree about spaces: Python compares `"a "` before `"an"` and
+        # Postgres's default collation ignores the space at the primary level,
+        # so "A Fused…"/"A Skeleton…"/"An Enriched…" is a *different* order on
+        # the two implementations and the difference is about the collation
+        # rather than about anything this case is testing.
+        imdb_spelling = self._browsable("Alpha Skeleton Space Opera", genres=("Sci-Fi",))
+        tmdb_spelling = self._browsable("Bravo Enriched Space Opera", genres=("Science Fiction",))
+        fused = self._browsable("Charlie Fused Series Label", genres=("Sci-Fi & Fantasy",))
+        unrelated = self._browsable("Zulu Comedy", genres=("Comedy",))
+        for one in (imdb_spelling, tmdb_spelling, fused, unrelated):
+            await repo.add(one)
+
+        under_imdb = await repo.browse(sort=BrowseSort.NAME, genre="Sci-Fi", limit=_ROOMY)
+        under_tmdb = await repo.browse(sort=BrowseSort.NAME, genre="Science Fiction", limit=_ROOMY)
+
+        assert [one.id for one in under_imdb] == [imdb_spelling.id, tmdb_spelling.id, fused.id]
+        assert [one.id for one in under_tmdb] == [imdb_spelling.id, tmdb_spelling.id, fused.id]
+
+    async def test_a_genre_outside_the_vocabulary_filters_exactly_as_it_did(
+        self, repo: TitleRepository
+    ) -> None:
+        """The column is open even though the vocabulary is Usher-owned. An
+        expansion that dropped an unmapped label — or widened it to everything
+        — would be invisible on the labels the map does name."""
+        tagged = self._browsable("A Sword And Sandal Film", genres=("Sword & Sandal",))
+        other = self._browsable("Zed Comedy", genres=("Comedy",))
+        for one in (tagged, other):
+            await repo.add(one)
+
+        rows = await repo.browse(sort=BrowseSort.NAME, genre="Sword & Sandal", limit=_ROOMY)
+
+        assert [one.id for one in rows] == [tagged.id]
+
     async def test_the_year_filter_is_exact_and_the_two_filters_intersect(
         self, repo: TitleRepository
     ) -> None:
@@ -1593,6 +1647,64 @@ class TitleRepositoryBrowseContract:
         filtered = await repo.browse_facets(genre="Horror")
 
         assert dict(filtered.genres) == dict(unfiltered.genres)
+
+    async def test_the_genre_facet_offers_one_button_per_concept_not_per_spelling(
+        self, repo: TitleRepository
+    ) -> None:
+        """**The other half of issue #30.** `GET /browse?facets=true` offered
+        `Sci-Fi` (20,075) and `Science Fiction` (6,204) as two buttons for one
+        concept, so whichever a viewer pressed silently lost the other.
+
+        The assertion is on the **whole map**, which is what catches the two
+        wrong implementations that both look right: one that emits the
+        canonical key *alongside* the spellings it collapsed, and one that
+        keeps whichever spelling it saw last.
+
+        The fused TMDb television label is here because it is the case that
+        makes a facet count larger than the sum of its parts legitimately: it
+        names two concepts and is counted under both.
+        """
+        for index in range(3):
+            await repo.add(self._browsable(f"Skeleton {index}", genres=("Sci-Fi",)))
+        for index in range(2):
+            await repo.add(self._browsable(f"Enriched {index}", genres=("Science Fiction",)))
+        await repo.add(self._browsable("A Series", genres=("Sci-Fi & Fantasy",)))
+        await repo.add(self._browsable("A Reality Show", genres=("Reality-TV",)))
+
+        facets = await repo.browse_facets()
+
+        assert dict(facets.genres) == {"Science Fiction": 6, "Fantasy": 1, "Reality": 1}
+
+    async def test_a_facet_count_is_the_size_of_the_page_that_button_would_serve(
+        self, repo: TitleRepository
+    ) -> None:
+        """The facet and the filter are one rule read twice, and this is the
+        case that fails if they drift apart. A count collapsed into a canonical
+        label that the filter does not expand — or expanded by a filter the
+        facet does not collapse — leaves a button whose number is not the
+        number of rows pressing it produces."""
+        for index in range(3):
+            await repo.add(self._browsable(f"Skeleton {index}", genres=("Sci-Fi",)))
+        for index in range(2):
+            await repo.add(self._browsable(f"Enriched {index}", genres=("Science Fiction",)))
+
+        facets = await repo.browse_facets()
+        rows = await repo.browse(sort=BrowseSort.NAME, genre="Science Fiction", limit=_ROOMY)
+
+        assert facets.genres["Science Fiction"] == len(rows) == 5
+
+    async def test_a_facet_the_request_named_is_zero_under_its_canonical_label(
+        self, repo: TitleRepository
+    ) -> None:
+        """`browse_facets`' "never a sparse dict", after the collapse. A client
+        that filtered on a legacy spelling must get its zero back under the key
+        the rest of the map is written in, or the entry is both absent and
+        present depending on how you look."""
+        await repo.add(self._browsable("A Comedy", genres=("Comedy",)))
+
+        facets = await repo.browse_facets(genre="Sci-Fi")
+
+        assert dict(facets.genres) == {"Comedy": 1, "Science Fiction": 0}
 
     async def test_the_year_facet_is_counted_without_its_own_predicate(
         self, repo: TitleRepository

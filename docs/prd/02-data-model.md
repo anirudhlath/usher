@@ -107,6 +107,22 @@ worth the ergonomics cost — `field_provenance` stays a plain `dict[str,
 str]`, which is why `Title` is deliberately the one domain model that isn't
 hashable.
 
+**`genres` holds two importers' vocabularies, and one concept can be spelled
+twice — [ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md).**
+The IMDb bulk phase writes IMDb's 28 labels and `EnrichService` replaces them
+wholesale with TMDb's 19 movie or 16 television ones, so the column holds 37
+distinct labels and the two alphabets are **disjoint on every concept they both
+name**: 20,051 titles carry `Sci-Fi`, 6,223 carry `Science Fiction`, zero carry
+both (live catalog, 2026-08-19). The column is deliberately **not** normalised
+at write time — `usher.domain.genres` holds Usher's own 31-concept vocabulary
+and the *readers* map into it, because rewriting the column changes segment 6
+of `compose_document` and correctly restales every affected embedding. What the
+enrichment merge now guarantees is narrower, and is the half that was
+destructive: a label naming a concept the provider has no word for
+(`Biography`, `Film-Noir`, `Game-Show`, `Musical`, `Short`, `Sport`, `Adult`)
+survives enrichment rather than being deleted. Measured against the real IMDb
+dump, it had been deleted 69,160 times across 53,724 titles.
+
 `field_provenance` exists so a second metadata provider can be added later
 without ambiguity about which source won a given field.
 

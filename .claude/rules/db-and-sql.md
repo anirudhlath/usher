@@ -1129,3 +1129,41 @@ unit_of_work` opens a **fresh session per scope**, and `_claim`, `_heartbeat`
 and each `_run_in_scope` take one each, so no `AsyncSession` is reachable from
 two coroutines. Anyone re-deriving this must check the scope factory, not the
 sentence.
+
+## `/browse`'s genre filter is an overlap over a concept, not containment of a string (2026-08-19)
+
+`titles.genres` holds 37 labels from two importers that share no vocabulary,
+and the two alphabets are **disjoint on every concept they both name**:
+`Sci-Fi` 20,051 titles, `Science Fiction` 6,223, **zero with both**, and the
+same zero for all nine alias pairs on 1,272,866 rows. `TitleRow.genres @>
+ARRAY[:genre]` therefore answered half a concept under either spelling and
+looked entirely right doing it.
+[ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md).
+
+- **`&&` over `usher.domain.genres.genre_spellings(genre)`.** For an unmapped
+  label the expansion is one element and `a && ARRAY[x]` **is** `a @>
+  ARRAY[x]`, so the open-vocabulary behaviour is unchanged rather than
+  approximately unchanged. Written out for the reason `@>` was: the *generic*
+  `ARRAY` these columns are declared with implements neither operator through
+  SQLAlchemy's helpers, and the failure is at statement-build time in the
+  integration run and **never at all against the fake**.
+- **The facet collapse is a sum, and the exact spelling was measured and
+  declined.** `SELECT canon, count(*) FROM (SELECT DISTINCT t.id,
+  COALESCE(a.canon, g) FROM titles t CROSS JOIN LATERAL unnest(t.genres) g LEFT
+  JOIN alias a ON a.src = g)` is correct with no premise at all and ran at
+  **1,789 ms** against the shipped `GROUP BY unnest(genres)`'s **199 ms** on
+  the live catalog — a 9× regression on a facet block already missing its B7
+  bar (p95 ≤ 200 ms) at 330.81 ms. Summing is exact while no title carries two
+  spellings of one concept, which is *measured* zero rather than assumed, and
+  `EnrichService` cannot create one because a concept with no TMDb name has
+  exactly one spelling.
+- **The fake sums too, per raw label rather than per title.** Deduping in
+  Python and not in SQL is how the two arms of a contract suite come to
+  disagree on the exact population that distinguishes them — and the fake is
+  the arm where the divergence would be invisible.
+- **A collation trap the contract suite walked into.** `sort_name` ordering is
+  **not** the same on the two arms: Python compares `"a "` before `"an"`, and
+  Postgres's default collation ignores the space at the primary level, so
+  `"A Fused…"` / `"A Skeleton…"` / `"An Enriched…"` is one order in the fake
+  and another in Postgres. A browse contract case that asserts on position must
+  seed names distinct in their **first word**.

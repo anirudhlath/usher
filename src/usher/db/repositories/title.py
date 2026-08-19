@@ -67,7 +67,18 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import ColumnElement, Text, and_, exists, func, literal, nulls_last, or_, select
+from sqlalchemy import (
+    ColumnElement,
+    Row,
+    Text,
+    and_,
+    exists,
+    func,
+    literal,
+    nulls_last,
+    or_,
+    select,
+)
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.exc import IntegrityError
@@ -80,6 +91,7 @@ from usher.db.models.title import DERIVED_COLUMNS, TitleRow
 from usher.db.models.watch import WatchStateRow
 from usher.db.repositories._errors import constraint_name
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.genres import canonical_genres, genre_spellings
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import (
@@ -186,11 +198,27 @@ def _browse_filters(
     """
     clauses: list[ColumnElement[bool]] = []
     if genre is not None:
-        # `@>` written out for `list_owned_by_tag`'s measured reason: the
+        # **`&&` over every spelling of the concept, not `@>` over the one
+        # string the client sent** (ADR-0039). `titles.genres` unions two
+        # importers' vocabularies -- the IMDb bulk phase writes `Sci-Fi`
+        # (20,051 titles) and `EnrichService` writes TMDb's `Science Fiction`
+        # (6,223), and **zero** titles carry both -- so exact containment
+        # answered half a concept under either spelling and looked entirely
+        # right doing it. `genre_spellings` resolves the label to its concepts
+        # and the concepts back to every spelling that names them, so the two
+        # requests are one query over one population.
+        #
+        # Identical to `@>` for an unmapped label: the expansion is a
+        # one-element array and `a && ARRAY[x]` is `a @> ARRAY[x]` there.
+        #
+        # `&&` written out for `list_owned_by_tag`'s measured reason: the
         # generic `ARRAY` these columns are declared with raises
-        # `NotImplementedError` from `ARRAY.contains()`, at statement-build
-        # time in the integration run and never at all against the fake.
-        clauses.append(TitleRow.genres.bool_op("@>")(sql_cast([genre], PG_ARRAY(Text))))
+        # `NotImplementedError` from `ARRAY.overlap()`/`.contains()`, at
+        # statement-build time in the integration run and never at all against
+        # the fake.
+        clauses.append(
+            TitleRow.genres.bool_op("&&")(sql_cast(list(genre_spellings(genre)), PG_ARRAY(Text)))
+        )
     if year is not None:
         clauses.append(TitleRow.year == year)
     if owned is not None:
@@ -208,6 +236,37 @@ def _browse_filters(
         )
         clauses.append(copy if owned else ~copy)
     return clauses
+
+
+def _canonical_facet(rows: Sequence[Row[tuple[str, int]]]) -> dict[str, int]:
+    """`browse_facets`' genre counts, one entry per concept rather than one per
+    spelling.
+
+    **The collapse is a sum, and its premise is measured rather than assumed.**
+    Summing overcounts exactly when one title carries two spellings of one
+    concept, and that is zero across all nine alias pairs on the live catalog
+    (1,272,866 titles, 2026-08-19) -- `Sci-Fi`/`Science Fiction` 0,
+    `Reality-TV`/`Reality` 0, `Fantasy`/`Sci-Fi & Fantasy` 0, and so on. It
+    stays zero because `EnrichService` preserves an IMDb label only when the
+    provider's vocabulary cannot name its concept, and a concept with no TMDb
+    name has exactly one spelling.
+
+    **The exact spelling was measured and declined.** `SELECT canon, count(*)
+    FROM (SELECT DISTINCT id, canon ...)` is correct without the premise and
+    ran at **1,789 ms** against this query's **199 ms** on the live catalog --
+    against a facet block whose B7 bar (p95 <= 200 ms) is already missed at
+    330.81 ms. ADR-0039 records write-time normalisation as what removes both
+    the premise and the collapse.
+
+    A fused label counting under two concepts is not overcounting: `Sci-Fi &
+    Fantasy` says two things and is counted under both, which is exactly what
+    `?genre=Fantasy` will then return.
+    """
+    counts: dict[str, int] = {}
+    for label, count in rows:
+        for canonical in canonical_genres(label):
+            counts[canonical] = counts.get(canonical, 0) + count
+    return counts
 
 
 def _browse_order(key: ColumnElement[Any], *, descending: bool) -> tuple[ColumnElement[Any], ...]:
@@ -766,14 +825,20 @@ class PostgresTitleRepository(TitleRepository):
                 )
                 .group_by(TitleRow.year)
             )
-        genres = {name: count for name, count in genre_rows.all()}
+        genres = _canonical_facet(genre_rows.all())
         years = {value: count for value, count in year_rows.all()}
         # `count_by_state`'s "never a sparse dict", narrowed to the keys the
         # request itself named because a genre vocabulary is open. A `GROUP BY`
         # returns only the values with rows, and an absent facet is
         # indistinguishable from a filter the client did not send.
+        #
+        # Under the concept's own key, never the spelling the client sent: a
+        # client that filtered on `Sci-Fi` and got `{"Sci-Fi": 0}` back beside a
+        # map written in canonical labels has an entry that is both absent and
+        # present depending on how it looks.
         if genre is not None:
-            genres.setdefault(genre, 0)
+            for canonical in canonical_genres(genre):
+                genres.setdefault(canonical, 0)
         if year is not None:
             years.setdefault(year, 0)
         return BrowseFacets(genres=genres, years=years)

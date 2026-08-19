@@ -88,6 +88,7 @@ from pydantic import AwareDatetime
 
 from usher.adapters.tmdb.client import TmdbClient
 from usher.adapters.tmdb.mapping import (
+    TMDB_GENRE_NAMES,
     changed_ids,
     collection_from_payload,
     images_from_payload,
@@ -97,6 +98,7 @@ from usher.adapters.tmdb.mapping import (
     title_from_payload,
 )
 from usher.domain.enums import TitleKind
+from usher.domain.genres import canonicalise_genres
 from usher.ports.errors import PortDataMalformed
 from usher.ports.ingest import ProviderRef
 from usher.ports.metadata import (
@@ -224,6 +226,18 @@ class TmdbMetadataProvider(MetadataProvider):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @property
+    def genre_vocabulary(self) -> frozenset[str]:
+        """TMDb's 35 genre names as the 24 canonical concepts they name.
+
+        Derived from `TMDB_GENRE_NAMES` rather than written out a second time:
+        two hand-maintained lists of one vocabulary is how one of them comes to
+        hold a concept the other does not, and the consequence here is silent —
+        a concept wrongly in this set is a label enrichment goes on deleting,
+        which looks exactly like enrichment working.
+        """
+        return frozenset(canonicalise_genres(TMDB_GENRE_NAMES))
 
     async def search(
         self, name: str, year: int | None, kind: TitleKind | None = None
