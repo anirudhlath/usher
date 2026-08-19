@@ -296,7 +296,7 @@ async def test_a_504_is_unavailable_not_malformed() -> None:
 
 
 async def test_a_timed_out_wdqs_query_names_the_failure_and_the_budget() -> None:
-    """Issue #33's defect, in the third place it lives, and the one where the
+    """Issue #35's defect, in the third place it lives, and the one where the
     distinction matters most: WDQS answering **504** already means "the query
     took too long at their end" and is translated as such, so a
     `ReadTimeout` here is the *other* failure -- ours gave up first -- and

@@ -138,7 +138,7 @@ class CachedDatasetFile:
             response = await self._client.head(self._url, follow_redirects=True)
         except httpx.HTTPError as exc:
             # `failure_detail`, never `{exc}`: every httpx timeout
-            # stringifies to the empty string (issue #33), and a stalled
+            # stringifies to the empty string (issue #35), and a stalled
             # multi-gigabyte dump is both the likeliest failure on this path
             # and the most expensive one to have to reproduce.
             raise PortUnavailable(f"HEAD {self._url} failed: {failure_detail(exc)}") from exc

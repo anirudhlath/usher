@@ -21,7 +21,7 @@ Four seams, each with a reason:
    this channel's URI contains the session token. `EmbySession` reached the
    same conclusion from the other end and now shares the spelling: its
    `failure_detail` names the exception's type and nothing else, because
-   `{exc}` was empty for every httpx timeout (issue #33). Nothing but the
+   `{exc}` was empty for every httpx timeout (issue #35). Nothing but the
    wrapper stands between this URI and a message.
 2. **`recv(timeout)` raises `TimeoutError` for "nothing arrived yet"**,
    which the caller treats as a *tick* rather than a failure. That is what
@@ -618,7 +618,7 @@ class _WebsocketsConnection(PushConnection):
     `InvalidStatus` carries the response. Every translation below therefore
     names the exception's *type* and nothing else -- the same spelling
     `usher.adapters.http.failure_detail` now gives `EmbySession`, which had
-    interpolated `{exc}` until issue #33 measured that empty for every httpx
+    interpolated `{exc}` until issue #35 measured that empty for every httpx
     timeout.
     """
 

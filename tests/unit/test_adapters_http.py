@@ -253,7 +253,7 @@ def test_the_untranslated_tuple_covers_the_families_httpx_error_does_not() -> No
 def test_every_httpx_timeout_stringifies_to_the_empty_string() -> None:
     """The premise `failure_detail` exists for, asserted rather than cited.
 
-    Issue #33: a `watch_state` sync walked 121,000 items for 57 minutes
+    Issue #35: a `watch_state` sync walked 121,000 items for 57 minutes
     against a real Emby 4.9.5.0, failed, and recorded the whole of
     `GET /Users/{id}/Items failed:` -- a message ending at the colon,
     because `str(exc)` was the entire payload.

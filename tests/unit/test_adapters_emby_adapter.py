@@ -30,6 +30,7 @@ from tests.fakes.push_connection import FakePushConnection, FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import MAX_PAGES, EmbyAdapter
 from usher.adapters.emby.push import SUBSCRIBE_FRAME
+from usher.adapters.emby.session import redact_path
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
@@ -1736,3 +1737,105 @@ async def test_a_rate_limited_walk_surfaces_the_retry_hint() -> None:
     finally:
         await adapter.aclose()
     assert exc_info.value.retry_after == 17.0
+
+
+# --- the redacted request path ---------------------------------------------
+
+
+async def test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identifier() -> None:
+    """Issue #35: `PortUnavailable(f"{method} {path} failed: …")` put the
+    Emby **user id** into `sync_runs.error`, and the reported example carried
+    a real one into a public issue.
+
+    The reasoning that let it through is at `session.redact_path`'s own
+    docstring: *"safe because an Emby URL carries no credential"* -- true,
+    and not the test that was owed. `CLAUDE.md` lists a user id alongside a
+    credential and a host.
+
+    **Enumerated by driving the real adapter, not transcribed.** A table of
+    paths written by hand proves nothing about the set it was meant to
+    cover -- the same failure `is_servable_path`'s pair table is guarded
+    against in `.claude/rules/ports-and-error-taxonomy.md`. This exercises
+    every method that issues a request and reads the paths off the wire, so
+    a route added later with an id in a new position fails this case rather
+    than shipping.
+
+    The control fires first and it is not optional: it asserts the raw paths
+    genuinely *do* carry both ids, so a redaction checked against a
+    recording that never held one cannot pass.
+    """
+    seen: list[str] = []
+    server = FakeEmbyServer()
+    server.add_item(_movie(1), changed_at=T0)
+    server.set_watch_state(
+        SourceWatchState(external_id="movie-1", position_seconds=0, played=False)
+    )
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return server.handle(request)
+
+    adapter = EmbyAdapter(
+        SOURCE,
+        CREDENTIALS,
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(recording), base_url=SOURCE.base_url
+        ),
+        page_size=2,
+    )
+    try:
+        await adapter.verify()
+        [item async for item in adapter.list_items()]
+        await adapter.get_item("movie-1")
+        [state async for state in adapter.watch_state()]
+        await adapter.push_watch_state("movie-1", WatchStateUpdate(position_seconds=1, played=True))
+    finally:
+        await adapter.aclose()
+
+    # The control. Both identifiers really are on the wire, so the
+    # assertions below are about a redaction rather than about an empty
+    # recording.
+    assert seen, "nothing was recorded; the plant did not land"
+    assert any(USER_ID in path for path in seen)
+    assert any(quote("movie-1", safe="") in path for path in seen)
+
+    redacted = {redact_path(path) for path in seen}
+    for shape in redacted:
+        assert USER_ID not in shape
+        assert "movie-1" not in shape
+
+    # Pinned as a *set*, so a new route redacting to a shape nobody chose
+    # fails here. Every one of these still names its route: an operator can
+    # tell the listing from the single item from the write-back.
+    assert redacted == {
+        "/Users/AuthenticateByName",
+        "/System/Info/Public",
+        "/System/Info",
+        "/Users/{user_id}",
+        "/Users/{user_id}/Items",
+        "/Users/{user_id}/Items/{item_id}",
+        "/Users/{user_id}/Items/{item_id}/UserData",
+        "/Users/{user_id}/PlayedItems/{item_id}",
+    }
+
+
+async def test_a_failed_get_item_names_the_route_and_not_the_ids() -> None:
+    """`EmbyAdapter.get_item` builds its own message and its own
+    `decode_json` call rather than going through `json_body`, so it is a
+    second raise site that interpolates a path and it needs its own case.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        return authenticated if authenticated is not None else httpx.Response(502)
+
+    adapter = _on(handler)
+    try:
+        with pytest.raises(PortUnavailable) as exc_info:
+            await adapter.get_item("movie-1")
+    finally:
+        await adapter.aclose()
+    message = str(exc_info.value)
+    assert "/Users/{user_id}/Items/{item_id}" in message
+    assert USER_ID not in message
+    assert "movie-1" not in message

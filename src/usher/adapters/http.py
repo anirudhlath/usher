@@ -116,7 +116,7 @@ def failure_detail(exc: BaseException) -> str:
     """What a send failure is *called*, and for a timeout what it spent.
 
     **Never `str(exc)`, and that is measured rather than stylistic.** Issue
-    #33: a `watch_state` sync walked 121,000 items for 57 minutes against a
+    #35: a `watch_state` sync walked 121,000 items for 57 minutes against a
     real Emby 4.9.5.0, failed, and recorded the whole of
     `GET /Users/{id}/Items failed:` in `sync_runs.error` -- the message ended
     at the colon, because `str(exc)` was the entire payload and every httpx

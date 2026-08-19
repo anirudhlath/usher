@@ -129,7 +129,7 @@ async def test_revision_translates_a_transport_error(cache: Path) -> None:
 async def test_a_timed_out_download_names_the_failure_rather_than_ending_at_a_colon(
     cache: Path, method: str
 ) -> None:
-    """Issue #33's defect, in the second place it lives. `str(exc)` is empty
+    """Issue #35's defect, in the second place it lives. `str(exc)` is empty
     for every httpx timeout, so `f"HEAD {url} failed: {exc}"` recorded a
     message ending at the colon -- and this is the adapter that fetches
     multi-gigabyte IMDb and MovieLens dumps, where a stall is both the most

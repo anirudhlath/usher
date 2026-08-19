@@ -194,7 +194,7 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
             )
         except httpx.HTTPError as exc:
             # `failure_detail`, never `{exc}`: every httpx timeout
-            # stringifies to the empty string (issue #33). It matters more
+            # stringifies to the empty string (issue #35). It matters more
             # here than anywhere, because WDQS's own **504** already means
             # "the query took too long at their end" and is translated a few
             # lines down -- so a `ReadTimeout` is the other failure, ours

@@ -120,6 +120,97 @@ _request_duration = _meter.create_histogram(
 )
 
 
+# Every segment this adapter issues that is a *route word* rather than an
+# identifier. Enumerated from the paths `EmbySession` and `EmbyAdapter`
+# actually build -- `/Users/AuthenticateByName`, `/System/Info{,/Public}`,
+# `/Users/{u}`, `/Users/{u}/Items{,/{i}{,/UserData}}` and
+# `/Users/{u}/PlayedItems/{i}` -- and pinned by a case that drives the real
+# adapter and reads the paths off the wire rather than transcribing them.
+#
+# **This set and the routes the adapter issues must move together**, the
+# shape `.claude/rules/ports-and-error-taxonomy.md` already carries an entry
+# about. A route word missing from here renders as `{id}`: a word lost from a
+# message, which is the *safe* direction and is why the default is to redact
+# rather than to keep.
+_ROUTE_WORDS: frozenset[str] = frozenset(
+    {
+        "Users",
+        "AuthenticateByName",
+        "Items",
+        "PlayedItems",
+        "UserData",
+        "System",
+        "Info",
+        "Public",
+    }
+)
+
+# What an identifier sitting *after* a given route word is called. Emby names
+# a collection before its members, so the preceding word is what says which
+# kind of id this is -- and naming it is what keeps `/Users/{user_id}/Items`
+# distinguishable from `/Users/{user_id}/Items/{item_id}`.
+_ID_NAMES: Mapping[str, str] = {
+    "Users": "user_id",
+    "Items": "item_id",
+    "PlayedItems": "item_id",
+    "Videos": "item_id",
+}
+
+
+def redact_path(path: str) -> str:
+    """An Emby request path with every identifier replaced by a placeholder
+    naming what it was.
+
+    **The rule that was missed, stated so it is not re-derived.** Until issue
+    #35 this module said the path was safe to interpolate *"because an Emby
+    URL carries no credential"*. That sentence is true and it is not the test
+    that was owed: `CLAUDE.md` lists **a user id** alongside a credential and
+    a host, and "carries no credential" is a strictly weaker check than
+    "carries no identifier". The gap was not theoretical -- a real Emby user
+    id reached a public issue in a copied `sync_runs.error` row.
+
+    **A redaction, not a blindfold.** The route is the whole diagnostic value
+    of these messages and it survives: an operator can still tell
+    `/Users/{user_id}/Items` (the walk) from
+    `/Users/{user_id}/Items/{item_id}` (one item) from
+    `/Users/{user_id}/PlayedItems/{item_id}` (the write-back) from
+    `/System/Info`. Collapsing every path to "a request failed" trades one
+    blindfold for another.
+
+    **Classified by route vocabulary, never by the shape of an id.** "32 hex
+    characters is a GUID" is a guess about one server build; an `external_id`
+    is whatever the source last called an item, and this adapter has been
+    surprised by a live Emby's id spellings more than once (`ProviderIds`
+    casing, `MediaSourceId`'s own namespace). A closed set of words this
+    adapter *issues* is something the project controls.
+
+    **The first segment is kept whatever it is, and that has a premise
+    rather than being a convenience.** No route this adapter issues begins
+    with an identifier -- every one of the eight starts `Users` or `System`,
+    and an HTTP route names a collection before a member -- so a root is a
+    route word by construction. Without this, a path the vocabulary has not
+    learned collapses to `{id}` with nothing left to read, which is the
+    "second blindfold" this function exists not to be.
+
+    Percent-encoding is irrelevant here and deliberately not undone:
+    `_segment` quotes an id before it reaches a path, and a quoted id is
+    still an id.
+    """
+    segments = path.split("/")
+    out: list[str] = []
+    previous = ""
+    for index, segment in enumerate(segments):
+        # `index <= 1` is the leading "" from a rooted path and the route
+        # root after it.
+        if not segment or segment in _ROUTE_WORDS or index <= 1:
+            out.append(segment)
+            previous = segment
+            continue
+        out.append("{" + _ID_NAMES.get(previous, "id") + "}")
+        previous = ""
+    return "/".join(out)
+
+
 def _header_safe(value: str) -> str:
     """Make a value safe to interpolate into the quoted MediaBrowser header.
 
@@ -147,12 +238,23 @@ def decode_json(response: httpx.Response, path: str) -> dict[str, Any]:
     than a `ValueError` past a nesting depth of 9,999, so this adapter was
     still one deeply nested payload away from taking the worker process down.
     What stays here is the Emby-shaped call: the request path is both the
-    subject of the message and its `detail`, which is safe because an Emby URL
-    carries no credential and is *not* true of the other two callers. Keeping
-    the wrapper also keeps this two-positional-argument signature, which
-    `EmbyAdapter` imports.
+    subject of the message and its `detail`, and **both go through
+    `redact_path` first**.
+
+    ⚠️ That last clause corrects this docstring rather than adding to it.
+    Until issue #35 it read *"which is safe because an Emby URL carries no
+    credential"* -- a true sentence answering the wrong question. An Emby
+    path carries no credential and does carry a **user id**, which `CLAUDE
+    .md` names alongside a credential and a host, and the two are not the
+    same test. `detail` is the half that matters most here: it is what a
+    route may put in an RFC 9457 body, so it is the one that can reach a
+    client rather than a log.
+
+    Keeping the wrapper also keeps this two-positional-argument signature,
+    which `EmbyAdapter` imports.
     """
-    return _decode_json_body(response, what=path, detail=path)
+    shape = redact_path(path)
+    return _decode_json_body(response, what=shape, detail=shape)
 
 
 class EmbySession:
@@ -356,12 +458,14 @@ class EmbySession:
         except UNTRANSLATED_FAILURES as exc:
             # `failure_detail`, never `{exc}`: every httpx timeout
             # stringifies to the empty string, so `{exc}` recorded an hour of
-            # work as a message ending at a colon (issue #33). What is
+            # work as a message ending at a colon (issue #35). What is
             # interpolated here is a class name and a number Usher itself
             # configured -- no header, no body, no URL -- so this message
             # cannot leak the credential, and the one request that does carry
             # it is never formatted into a message.
-            raise PortUnavailable(f"{method} {path} failed: {failure_detail(exc)}") from exc
+            raise PortUnavailable(
+                f"{method} {redact_path(path)} failed: {failure_detail(exc)}"
+            ) from exc
         finally:
             _request_duration.record(
                 self._clock() - started, {"source": self._source_name, "op": op}
@@ -405,7 +509,7 @@ class EmbySession:
                 )
                 if response.status_code == 401:
                     raise PortAuthFailed(
-                        f"{method} {path} still returned 401 after re-authenticating"
+                        f"{method} {redact_path(path)} still returned 401 after re-authenticating"
                     )
             span.set_attribute("http.response.status_code", response.status_code)
             if response.status_code == 429:
@@ -423,7 +527,9 @@ class EmbySession:
     ) -> httpx.Response:
         response = await self.request(method, path, params=params, payload=payload, op=op)
         if response.status_code >= 400:
-            raise PortUnavailable(f"{method} {path} returned HTTP {response.status_code}")
+            raise PortUnavailable(
+                f"{method} {redact_path(path)} returned HTTP {response.status_code}"
+            )
         return response
 
     async def json_body(
@@ -458,7 +564,7 @@ class EmbySession:
         if response.status_code == 429:
             raise PortRateLimited(retry_after_seconds(response.headers.get("retry-after")))
         if response.status_code >= 400:
-            raise PortUnavailable(f"GET {path} returned HTTP {response.status_code}")
+            raise PortUnavailable(f"GET {redact_path(path)} returned HTTP {response.status_code}")
         return decode_json(response, path)
 
     async def aclose(self) -> None:
