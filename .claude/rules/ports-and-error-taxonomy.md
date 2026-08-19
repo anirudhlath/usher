@@ -126,6 +126,62 @@ as unjustified until the frequency is measured.** The code carrying it will
 behave identically either way, and the difference only shows up as an alert
 volume on real data — long after the person who wrote the reason has gone.
 
+## A refusal path that has never fired is pinned by its construction and not by an observation, and the honest closing note names which of the two the reader is getting
+
+**Found 2026-08-19 in M10's S4, and it arrives at the entry above from the
+opposite direction.** That one is about a refusal *this project* makes on a
+premise nobody measured — "this cannot happen" — where the repair is to measure
+the frequency. This one is about a refusal the *upstream* makes and this project
+only ever handles, and the trouble is not that the reasoning is wrong: the code
+is right, the tests are green, and **the branch has never once executed against
+the thing it models.**
+
+`PortRateLimited` is the specimen. Six `raise` sites across four adapter modules
+construct it; since M9's D9 exactly one thing in `src/` reads its `retry_after`
+(`JobWorker._fail`), and M10's S4 drives that chain end to end — an HTTP 429 in,
+`jobs.run_after` on real Postgres out, over both of RFC 9110's `Retry-After`
+forms. Every one of those facts is a statement about code this project wrote.
+**None of them is a statement about an upstream**, and the runs are why:
+
+| run | requests | 429s | `Retry-After` observed |
+|---|---|---|---|
+| M9 T2, live TMDb, 2026-08-11 | 393 | 0 | none, including on its one 400 |
+| M9 S3, live TMDb, 2026-08-12 | 130,334 | 0 | none on any of 193 non-200s |
+| M9 H4/H5, live Emby 4.9.5.0, 2026-08-12 | 23 | 0 | `run_after` NULL on the only queued row |
+
+**130,750 requests to two upstreams have never produced the header the whole
+chain exists for.** So the 429 in S4's case comes from a stub, and the stub
+admits it: `FakeEmbyServer.rate_limit`'s docstring says it is the one behaviour
+in that file with no observation behind it — no observed status body, no
+observed header, no observed position relative to authentication — where every
+other response there was transcribed from a real server.
+
+**The rule is about what a closing note may claim.** *"The mechanism is
+verified"* and *"the behaviour is verified"* are two claims; a stub buys the
+first and nothing in a test suite can buy the second; and a ✅ that does not
+separate them is read as both. PRD 09's carried-debt entry for
+`PortRateLimited.retry_after` is the worked example, and it is deliberately
+**not** ticked: being pinned twice does not settle it.
+
+**And the corollary that decides what to do about it, because the obvious next
+move is wrong.** Some of these must not be closed by observation. A real 429
+from a household's own media server or from TMDb would be evidence that
+ADR-0039's outbound gate had *failed*, and ADR-0005 sized the crawl under
+TMDb's stated ceiling rather than discovering the real one by hitting it — so
+provoking one is the behaviour the whole design exists to prevent. That makes
+the honest closing state **"pinned by construction, and deliberately never
+observed"**, which is a different sentence from *"pinned by construction, and
+nobody has got round to observing it"* — and a reader acting on the second goes
+and provokes it. **Write the refusal and its reason into the entry, not just
+the gap.**
+
+Expect this shape wherever a project handles a status it is designed never to
+earn: 429, 402, 507, a quota exhaustion, a lock timeout, a partial-failure
+envelope. Three questions, and the third is the one that gets skipped — **has
+this branch ever executed against the real upstream? if not, is the observation
+obtainable at an acceptable cost, or is obtaining it itself a defect? does the
+closing note say which of the two the reader is getting?**
+
 ## Two constants that must move together need a case that says so, and the direction of the failure decides where it goes
 
 `is_servable_path` predicts, from a provider path's suffix, what

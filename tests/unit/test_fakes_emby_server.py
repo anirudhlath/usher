@@ -599,6 +599,60 @@ def test_the_public_route_refuses_a_session_token() -> None:
     assert without.status_code == 200
 
 
+@pytest.mark.parametrize("retry_after", ["120", "Wed, 21 Oct 2026 07:28:00 GMT", None])
+def test_an_armed_rate_limit_answers_one_request_for_one_path(retry_after: str | None) -> None:
+    """`rate_limit` is scoped to its path and consumed by one firing, and both
+    halves are load-bearing rather than tidy.
+
+    A limit that fired for every path would land on `AuthenticateByName`
+    instead of on the read a case armed -- `EmbySession` authenticates before
+    it reads anything -- and a limit that fired forever would make
+    `tests/integration/test_rate_limited_end_to_end.py`'s re-arm between its
+    probe and its worker run a no-op nobody could see. The three parameters are
+    RFC 9110's two forms and its absence: `usher.adapters.http.
+    retry_after_seconds` reaches the date one only after `float(value)` has
+    raised, and answers `None` for a 429 that carried no header at all.
+    """
+    server = FakeEmbyServer()
+    identity = 'MediaBrowser Client="Usher", Device="d", DeviceId="i", Version="1"'
+
+    def send(path: str) -> httpx.Response:
+        url = f"https://emby.invalid{path}"
+        return server.handle(httpx.Request("GET", url, headers={"Authorization": identity}))
+
+    server.rate_limit("/System/Info/Public", retry_after=retry_after)
+    assert send("/Users/x/Items/y").status_code != 429, "an armed limit is not a global switch"
+    fired = send("/System/Info/Public")
+    assert fired.status_code == 429, "the other path's request consumed this one's arming"
+    # `.get` rather than a branch: the absent header and the two present forms
+    # are one assertion, and `None` is what the absence has to read as.
+    assert fired.headers.get("Retry-After") == retry_after
+    assert send("/System/Info/Public").status_code == 200, "one arming, one firing"
+
+
+def test_a_refused_request_does_not_consume_an_armed_rate_limit() -> None:
+    """The identity gate answers *before* the limiter, which is where
+    `rate_limit`'s docstring says it sits.
+
+    Without this the placement is prose and the two orderings are
+    indistinguishable: a limiter in front of the gate answers 429 here, and the
+    request that was going to be refused anyway silently spends the arming --
+    so the case that armed it goes on to see an ordinary 200 and reads the
+    absence of a 429 as an adapter that never asked.
+    """
+    server = FakeEmbyServer()
+    url = "https://emby.invalid/System/Info/Public"
+    identity = 'MediaBrowser Client="Usher", Device="d", DeviceId="i", Version="1"'
+    server.rate_limit("/System/Info/Public", retry_after="120")
+
+    refused = server.handle(httpx.Request("GET", url))
+    assert refused.status_code == 400
+
+    fired = server.handle(httpx.Request("GET", url, headers={"Authorization": identity}))
+    assert fired.status_code == 429
+    assert fired.headers["Retry-After"] == "120"
+
+
 async def test_an_unrouted_path_is_a_404_not_a_cheerful_200(driver: _Driver) -> None:
     """A fake that answered every unknown path with a 200 would let an
     adapter calling a route this server has never heard of look correct --

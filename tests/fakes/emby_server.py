@@ -14,6 +14,18 @@ why M3's definition of done requires a live run. Every path below is
 written out independently of the adapter's own constants, deliberately, so
 a typo on one side fails rather than cancelling out.
 
+**`rate_limit` is the one behaviour here with no observation behind it at
+all, and it says so rather than reading like the rest of this file.** Every
+other response below was transcribed from a real Emby 4.9.5.0 -- the
+`VideoRange` vocabulary, the 400 on `PlayingItems/{item}/Progress`, the
+listing's `PlayCount: 0`. **No run this project has made has ever seen a 429
+from any upstream**: M9's H4/H5 in 23 Emby requests, M9's T2 in 393 TMDb
+requests, and M9's S3 in 130,334 TMDb requests with no `Retry-After` on any
+of 193 non-200s. So a caller reaching for it is exercising a refusal path
+this project *built* and never *met*, and the honest closing note on
+anything it proves has to name which of the two the reader is getting --
+`.claude/rules/ports-and-error-taxonomy.md` carries the general form.
+
 `_TICKS_PER_SECOND` is defined here rather than imported from
 `usher.adapters.emby.mapping` for the same reason: the fake encodes Emby's
 protocol, and importing the adapter's constant would make a wrong constant
@@ -234,6 +246,9 @@ class FakeEmbyServer:
         # omitted `Played` is read as `false`, not as "unchanged" -- so a
         # test has to be able to assert on the body, not only on its effect.
         self.user_data_writes: list[dict[str, Any]] = []
+        # Armed 429s: `(path, Retry-After header value or None)`, each consumed
+        # by the first request for that exact path. See `rate_limit`.
+        self._rate_limits: list[tuple[str, str | None]] = []
         self._items: dict[str, tuple[SourceItem, AwareDatetime]] = {}
         self._alternates: dict[str, list[dict[str, Any]]] = {}
         self._states: dict[str, SourceWatchState] = {}
@@ -300,6 +315,55 @@ class FakeEmbyServer:
         self.credentials_valid = False
         self._session_token = None
 
+    def rate_limit(self, path: str, *, retry_after: str | None = None) -> None:
+        """Answer the **next** request for exactly `path` with a `429`, once.
+
+        `retry_after` is the header value verbatim, or `None` for a 429 that
+        carries no `Retry-After` at all -- which is a distinct upstream
+        behaviour rather than a degenerate one, and the control the hinted arm
+        is compared against: RFC 9110 permits the header and requires nothing,
+        `usher.adapters.http.retry_after_seconds` answers `None` for its
+        absence, and `JobWorker._fail` then falls back to the queue's own
+        jittered schedule. A string, not a number, because the *form* is the
+        thing worth being able to vary: RFC 9110 allows an integer count of
+        seconds **or** an HTTP-date, and `retry_after_seconds` reaches the
+        second only after `float(value)` has raised.
+
+        **Exact path, and one arming per firing.** Not "the next request" and
+        not a prefix: `EmbySession` authenticates before it reads anything, so
+        a limit armed on "the next request" lands on the handshake instead of
+        on the call under test, and `/Users/{u}/Items` is a prefix of
+        `/Users/{u}/Items/{id}`. A path nothing ever asks for arms a 429 that
+        never fires -- silently, which is why a caller has to assert the stub
+        really rate-limited rather than infer it from a downstream failure.
+
+        ⚠️ **Where this sits in `handle`, and it is a choice this fake makes
+        rather than a shape anybody measured.** No run this project has made
+        has ever seen a 429 from an Emby server -- M9's H4/H5 issued 23
+        requests against a real 4.9.5.0 and saw none -- so there is no
+        observed status body, no observed header and no observed position
+        relative to authentication to transcribe. This places the limiter
+        behind the client-identity gate and **in front of** authentication,
+        which is what lets a limit be armed on the authenticating call too;
+        the adapter's translation is identical wherever it really sits,
+        because `EmbySession.request` checks 429 after its 401 arm and
+        `_authenticate_locked` checks it directly. The response carries **no
+        body** for the same reason: the adapter never reads one, and inventing
+        a shape nobody has seen is the failure this module's own docstring is
+        about.
+        """
+        self._rate_limits.append((path, retry_after))
+
+    def _rate_limited(self, path: str) -> httpx.Response | None:
+        """The armed 429 for this path, consumed, or `None` if none is armed."""
+        for index, (armed, retry_after) in enumerate(self._rate_limits):
+            if armed != path:
+                continue
+            del self._rate_limits[index]
+            headers = {} if retry_after is None else {"Retry-After": retry_after}
+            return httpx.Response(429, headers=headers)
+        return None
+
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
 
@@ -320,6 +384,12 @@ class FakeEmbyServer:
         # request would sail straight through.
         if _identity_of(request) is None:
             return httpx.Response(400, json={"Error": "missing MediaBrowser authorization"})
+        # Before the routes and before authentication, after the identity gate
+        # -- `rate_limit` has the argument, and the fact that nothing has ever
+        # observed a 429 from this server at all.
+        limited = self._rate_limited(path)
+        if limited is not None:
+            return limited
         if path == "/Users/AuthenticateByName":
             return self._authenticate(request)
         if path == "/System/Info/Public":

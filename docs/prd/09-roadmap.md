@@ -1025,9 +1025,43 @@ suspicion.
   `len(distinct) > 1` over twenty round trips, which **real `clock_timestamp()`
   drift satisfies on its own** (~8 ms measured with the jitter term deleted,
   against ~410–440 ms with it): both that case and D9's new one now assert a
-  *magnitude*. ⚠️ The field this closes has still never been exercised by a real
-  429 from TMDb — T2's 393-request live run saw none — so its behaviour is
-  pinned by one case and by no observation.
+  *magnitude*.
+  ⚠️ **This entry stays in carried debt, and what it owes is now stated as two
+  claims rather than one** — because the ✅ above invites the reader to take
+  both, and only the first is bought. **The mechanism is pinned; the upstream
+  behaviour is not.** Since 2026-08-19 (M10's S4) the chain is exercised end to
+  end by `tests/integration/test_rate_limited_end_to_end.py`, which fails a real
+  `match` job through the shipped `EmbyAdapter` and the shipped `JobWorker`
+  against real Postgres and reads `run_after - clock_timestamp()` back out of
+  the row — over **both** of RFC 9110's `Retry-After` forms, an integer and an
+  HTTP-date, the second being the one `float(value)` alone raises `ValueError`
+  on and which carried that bug in two separate copies before
+  `usher.adapters.http.retry_after_seconds` was shared. Measured: **147.0 s**
+  and **141.4 s** on the two hinted arms against **15.5 s** and **26.1 s** for
+  the same job under a 429 carrying no header at all, i.e. the ordinary jittered
+  [15, 30) draw. So the field is pinned by two cases and by real interval
+  arithmetic rather than by one case and a Python transcription of it.
+  ⚠️ **The second claim is the one nothing can buy here: no upstream this
+  project talks to has ever sent a 429.** M9's T2 saw none in **393** TMDb
+  requests, with no `retry-after` on its one 400; M9's S3 saw none in
+  **130,334** TMDb requests, with no `Retry-After` on any of its 193 non-200s;
+  M9's H4/H5 saw none in **23** requests to a real Emby 4.9.5.0, with
+  `run_after` NULL on the only queued row. S4's 429 therefore comes from a
+  **stub** — `FakeEmbyServer.rate_limit`, whose own docstring says it is the
+  one behaviour in that file with no observation behind it — and provoking a
+  real one is **refused with a reason**: the only servers this project talks to
+  are a household's own media server and the live TMDb API, and hammering
+  either until it rate-limits is precisely what
+  [ADR-0039](decisions/0039-the-outbound-limiter-is-per-source-and-spaces-requests.md)'s
+  outbound gate exists to prevent, and what
+  [ADR-0005](decisions/0005-bulk-bootstrap.md) declined when it sized the crawl
+  below TMDb's *stated* "somewhere in the 40 requests per second range" rather
+  than discovering the real ceiling by hitting it. Evidence for this half would
+  be evidence that the gate failed. The general form —
+  **a refusal path that has never fired is pinned by its construction and not
+  by an observation, and the honest closing note names which of the two the
+  reader is getting** — is in
+  `.claude/rules/ports-and-error-taxonomy.md`.
 - 🔴 **`test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_own`
   is intermittent under whole-suite load, and this list is where that belongs** —
   **1 failure in 5 whole-`tests/integration` runs, 0 in 5 runs on its own**,
