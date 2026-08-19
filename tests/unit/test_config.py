@@ -560,11 +560,16 @@ def test_the_search_and_embedding_settings_have_the_measured_defaults(
 
     `embedding_batch_size` 16 is CPU throughput at 229.5 texts/s at 38
     tokens, flat 16-64 and degrading at 128. `search_rrf_k` 60 is RRF's
-    original paper and ADR-0002's assumption. `search_hnsw_ef_search` 100 is
-    against a GUC default of 40 that returned 0.88 rows of a requested 10
-    under a filter. `search_trigram_threshold` 0.3 is `pg_trgm`'s own default
-    and sits on the right side of a measured cliff (0.5 admits 23 candidates
-    where 0.3 admits 1,774).
+    original paper and ADR-0002's assumption. **`search_hnsw_ef_search` 200
+    is the first value of this constant measured against a real index**
+    (2026-08-19, 132,409 real 1024-lane vectors, 12 typed plot queries):
+    recall@10 against an exact scan is 0.858 at the old default of 100 and
+    **0.917 at 200**, for p50 4.77 -> 10.59 ms and p95 7.30 -> 16.18 ms
+    beside a 5.7 ms query embed. 400 buys 0.967 and costs a p50 of 20.13 ms,
+    which is outside the budget this repository has recorded for the query
+    side. `search_trigram_threshold` 0.3 is `pg_trgm`'s own default and sits
+    on the right side of a measured cliff (0.5 admits 23 candidates where 0.3
+    admits 1,774).
 
     They landed across three commits -- Group C's four `embedding_*` with the
     embedder, Group D and E's five `search_*` with the indexes and the
@@ -604,7 +609,7 @@ def test_the_search_and_embedding_settings_have_the_measured_defaults(
         settings.search_hnsw_ef_search,
         settings.search_trigram_threshold,
         settings.search_suggest_candidates,
-    ) == (50, 60, 100, 0.3, 200)
+    ) == (50, 60, 200, 0.3, 200)
 
 
 def test_the_embedding_model_name_cannot_be_blank(monkeypatch: pytest.MonkeyPatch) -> None:

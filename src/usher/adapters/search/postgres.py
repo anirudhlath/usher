@@ -162,15 +162,41 @@ _REMOVE = "DELETE FROM title_embeddings WHERE title_id = CAST(:title_id AS uuid)
 #
 # `relaxed_order` over `strict_order` because strict terminates earlier to
 # pay for index order, and nothing downstream needs index order -- the outer
-# statement re-sorts by distance and Task 19's RRF re-ranks by rank. And
-# `ef_search` is *not* the lever: 40 -> 200 with the GUC off still returns
-# 4.24 of 10.
+# statement re-sorts by distance and Task 19's RRF re-ranks by rank.
 #
 # Caveat, because the numbers are meaningless without it: the probe used
 # uniform-random 384-dim vectors, the worst case for any ANN index, so
 # absolute recall is a pessimistic floor. **0.56 is not a production recall
 # figure.** What transfers is the ordering of the options and the row-count
 # failure, which is structural.
+#
+# **This comment used to end "`ef_search` is *not* the lever: 40 -> 200 with
+# the GUC off still returns 4.24 of 10", and that sentence is true only of the
+# configuration it was measured in -- `hnsw.iterative_scan = off`, 2% filter
+# selectivity, uniform-random 384-lane vectors -- which is not the shipped
+# one.** With `relaxed_order` on, on 132,409 real 1024-lane `bge-m3` vectors,
+# unfiltered, over 12 typed plot queries against an exact scan (issue #32,
+# 2026-08-19), `ef_search` **is** the lever and the curve is monotone at every
+# one of the 12: recall@10 0.700 at 40, 0.858 at 100, 0.917 at 200, 0.967 at
+# 400, 0.992 at 1000. `Settings.search_hnsw_ef_search` moved 100 -> 200 on
+# that measurement; the p50/p95 beside each value are in `config.py`.
+#
+# **Two things about `relaxed_order` that only the same run makes visible, and
+# both are about this module's `LIMIT`s rather than about recall.** The scan
+# emits rows in exact distance order while the row count asked for is at or
+# below `ef_search`, and stops doing so the moment it passes it -- at
+# `ef_search = 100`, 200 rows came back out of order on 12 of 12 queries with
+# a row displaced by as much as 96 positions, and at 200 the same break moves
+# to 250 rows. The planner does not repair it: it takes the index's ordering
+# as a presorted key and puts an **Incremental Sort** on top, which sorts only
+# within a group of equal distance. So `_SEMANTIC` (LIMIT = the caller's
+# limit, capped at `search_result_limit` = 50) is always inside the exact
+# region, and `_FUSED`'s lanes (`limit * _LANE_MULTIPLIER`, up to 250 at that
+# cap) are not -- its vector lane truncates an approximately ordered stream,
+# which decides *which* candidates reach RRF. The `row_number()` window's own
+# `ORDER BY` re-sorts what survives, so the ranks fed to RRF are right for the
+# set that arrived. Recorded rather than fixed: no non-monotonicity in
+# recall@10 follows from it at any `ef_search` measured.
 _ITERATIVE_SCAN = "relaxed_order"
 _ITERATIVE_SCAN_VALUES = frozenset({"off", "relaxed_order", "strict_order"})
 

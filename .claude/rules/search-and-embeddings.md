@@ -1413,3 +1413,134 @@ population"* is the kind of name that survives review because every word in it
 is true of something. Say which rows are in the bottom, at every site that
 quotes the number — here that was `SearchOutcome`, `SearchResponse`, PRD 07,
 the README and `usher search`'s own printed line.
+## `ef_search` priced against a real index: 200 ships, the non-monotonicity did not reproduce, and over-fetch is a *filtered*-path lever only (2026-08-19, issue #32)
+
+**The first recall figure this constant has ever had from a real index.** Every
+`ef_search` number above it was taken on uniform-random 384-lane vectors at 2%
+filter selectivity with `hnsw.iterative_scan` **off** — a configuration this
+project has not shipped since M6.
+
+*Sample and denominators.* 132,409 real `openai:BAAI/bge-m3` vectors
+(`halfvec(1024)`, `PLAIN`, `m=16, ef_construction=64`, pgvector 0.8.6 on
+PostgreSQL 17.10), the live `usher-postgres-1`, **read only** — no reindex, no
+rebuild. **12 typed plot queries, embedded once through the deployment's own
+endpoint and frozen**, so every condition scores the identical vectors. Gold is
+the **exact top 10 per query per arm** under `enable_indexscan = off,
+enable_bitmapscan = off` — the two GUCs `nearest_for` forces — so recall@10 has
+a denominator of **10 per query, 120 per condition per arm**. Latency is **288
+observations per condition per arm** (12 queries × 12 scored rounds × 2 runs,
+round 0 discarded as warm-up), with conditions **interleaved** rather than
+blocked so a burst of foreign load cannot tax one of them. Bar, sample and
+decision rule were written down before anything ran, at
+`/var/tmp/i32-measure/PREREGISTRATION.md`, sha256
+`0be3c3504a44c11cb37484c0a0d8f4f0f792bf73025a5dfb26fc1d4bbb59ed6c`.
+
+| `ef_search` | recall@10 unfiltered | p50 | p95 | recall@10 filtered (4.8%) | p50 | p95 |
+|---|---|---|---|---|---|---|
+| 40 | 0.700 | 3.21 ms | 4.75 ms | 0.733 | 16.11 ms | 57.48 ms |
+| **100** — the old default | **0.858** | **4.77 ms** | **7.30 ms** | **0.783** | 18.15 ms | 58.50 ms |
+| **200** — ships | **0.917** | **10.59 ms** | **16.18 ms** | **0.808** | 22.56 ms | 57.45 ms |
+| 400 | 0.967 | 20.13 ms | 29.90 ms | 0.817 | 23.53 ms | 57.80 ms |
+| 1000 | 0.992 | 45.46 ms | 67.50 ms | 0.958 | 49.09 ms | 67.54 ms |
+
+Driver floor (`SELECT 1` through the same connection) p50 **0.095 ms**, so none
+of this is round trip. Beside the recorded query-side budget — embed p50 **5.7
+ms**, p95 9.9 ms — the shipped pair is now ~16 ms at p50 rather than ~10.5.
+**400 and 1000 are refused on cost, not on recall.**
+
+**The filtered arm's spread is a property of the queries, not of a busy box.**
+Per-query p50 there runs 6.0–59.5 ms while the *round*-level median is flat at
+15–19 ms across all 26 rounds of both runs — some queries simply need far more
+traversal to find ten Fantasy titles. The unfiltered arm's round medians span
+4.2–5.9 ms. This host's postgres was **not** quiet (the shipped worker's own
+gauge refreshes plus other agents' harnesses), which is exactly why the
+interleaving and the round-level control are here.
+
+🔴 **The 8-query non-monotonicity did not reproduce, under four readings, and
+the harness is where to look.** Recall@10 is **non-decreasing in `ef_search`
+for every one of 12 queries** on (1) the semantic lane unfiltered, (2) the
+semantic lane filtered, (3) the *first ten rows emitted* by a LIMIT-60 scan —
+the truncation reading, which is the one `relaxed_order` could plausibly break
+— and (4) the **fused** answer scored against the exact vector top 10, which is
+what a harness driving `usher search` without `--mode semantic` measures. Zero
+non-monotone pairs in any of the four. The measurement is also **exactly
+deterministic**: 216 (arm, condition, query) cells × 26 repetitions across two
+independent runs produced byte-identical id lists, gold included, and
+`SHOW hnsw.ef_search` read back inside each scored transaction returned the
+value set. Two candidate harness faults were eliminated by measurement rather
+than by argument — the endpoint returns **bit-identical** vectors across 5
+calls and across batch composition, and no `title_embeddings` row was written
+during the run. What is left as the likely cause is the measured object: the
+CLI and the API return `SearchService._rank`'s **blended** order, not the
+lane's, and the fused mode dilutes the whole ef effect (a query capped at 5 of
+10 there reaches 10 of 10 on the semantic lane).
+
+**`relaxed_order` and `LIMIT` do interact, the boundary is exactly
+`ef_search`, and the consequence is not recall.** The scan emits in exact
+distance order while the row count asked for is ≤ `ef_search`, and breaks the
+moment it passes it — at `ef_search = 100`: 10/50 rows sorted on 12 of 12
+queries, 100 rows unsorted on 1, **200 rows unsorted on 12 of 12 with a row
+displaced by up to 96 positions**, 1000 rows by up to 885. At 200 the same
+break moves to 250 rows. The planner does not repair it: it treats the index's
+order as a presorted key and puts an **Incremental Sort** on top, which sorts
+only within equal-distance groups. So `_SEMANTIC` is always inside the exact
+region (its LIMIT is the caller's, capped at `search_result_limit` = 50) and
+**`_FUSED`'s lanes are not** — `limit * _LANE_MULTIPLIER` is 250 at that cap,
+so the vector lane truncates an approximately ordered stream and *which* 250
+candidates reach RRF is approximate. The `row_number()` window's own `ORDER BY`
+re-sorts what survives, so the ranks are right for the set that arrived.
+**Found, not fixed**, and no non-monotonicity in recall@10 follows from it.
+
+🔴 **Over-fetch-and-re-rank buys nothing unfiltered, and the two controls say
+why before the recall table does.** The distances HNSW returns are
+**bit-identical** to the exact scan's for the same rows (max |delta| exactly
+0.0 over 60 rows) — pgvector approximates *which* vectors it visits, never the
+distance to one — so "re-score the candidates exactly" is arithmetically a
+no-op, and the re-sort is a second no-op wherever the emission was already
+ordered. Measured at the shipped `ef_search = 100`, fetching `10 × N` and
+cutting back to 10:
+
+| N | recall@10 unfiltered | p50 | recall@10 filtered | p50 |
+|---|---|---|---|---|
+| 1 (no over-fetch) | 0.858 | 4.77 ms | 0.783 | 18.15 ms |
+| 2 | 0.858 | 6.14 ms | 0.858 | 26.05 ms |
+| 5 | 0.858 | 5.71 ms | **0.892** | 37.66 ms |
+| 10 | 0.858 | 6.08 ms | 0.892 | 38.75 ms |
+| 20 | 0.858 | 5.88 ms | 0.892 | 38.35 ms |
+
+Unfiltered it is **identical per query at every factor** — the deeper rows the
+iterative scan yields are all farther than the tenth already found. Filtered it
+is worth **+10.9 points**, more than `ef_search` 200 buys there (+2.5), because
+under a predicate the extra rows force real traversal. So the issue's argument
+that over-fetch "makes recall a property of the over-fetch factor rather than
+of graph traversal" is **false on the unfiltered path and true on the filtered
+one**, and it is not built: it loses to `ef_search = 200` on the unfiltered arm
+(0.858 against 0.917) at a similar p50, and it is a second statement shape.
+Whoever takes the filtered path should start here.
+
+⚠️ **The issue's own single case had already decayed when this ran, and that
+is the argument for the sweep rather than a quibble.** *Harry Potter and the
+Philosopher's Stone* is **not** absent from the shipped lane's top 60 today: at
+`ef_search = 100` it is returned at rank **8**, and the row the lane loses is
+*Help! I'm a Boy (2002)*. Its exact rank moved 8 → **9** because a title named
+*Harry Potter (2026)* was embedded at **06:35Z that same morning**, 1,689 rows
+having landed in the previous three hours. Everything else in the issue's table
+reproduces — at 200 the top 12 matches the exact scan row for row. **A default
+argued from one film would have been argued from a rank that changed overnight**;
+the twelve-query curve is what it rests on instead.
+
+**And an exact scan of this table needs its parallelism turned off in a
+container.** `usher-postgres-1` has the Docker default 64 MB `/dev/shm`, and a
+Parallel Hash over 132,409 × 1024-lane vectors exhausts it —
+`DiskFullError: could not resize shared memory segment ... No space left on
+device`, mid-run, on the *gold* half of a measurement. `SET LOCAL
+max_parallel_workers_per_gather = 0` returns identical rows. `nearest_for` does
+not set it and has never hit this, because its own statement is a nested-loop
+over seeds rather than a hash join to `titles`.
+
+**Not measured, and named rather than implied:** real typed queries
+(`search_queries`, still synthetic); any filter other than one 4.8% genre
+overlap; whether the fused lane's approximate truncation is visible to a user;
+whether 200 still clears its bar as the embedded population grows past 132k;
+and everything the issue already lists — document length, neighbourhood
+density, `m = 16` at this width.
