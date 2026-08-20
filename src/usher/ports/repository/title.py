@@ -494,10 +494,10 @@ class TitleRepository(ABC):
         - **Then `tmdb_vote_count`, and deliberately not the popularity.**
           `list_owned_by_tag` leads with `tmdb_popularity` and this read does
           not, which is a divergence rather than an oversight:
-          `titles.tmdb_popularity`
-          was measured NULL on all **1,271,138** rows of a `--phase imdb`
-          catalog (M6, 2026-08-03) and is `NOT NULL DEFAULT 0` in `tmdb_ids`,
-          so on a partially-linked catalog a crosswalk-linked skeleton at
+          `titles.tmdb_popularity` was measured NULL on all **1,271,138** rows
+          of a `--phase imdb` catalog (M6, 2026-08-03) and is
+          `NOT NULL DEFAULT 0` in `tmdb_ids`, so on a partially-linked catalog
+          a crosswalk-linked skeleton at
           `0.0` outranks an unlinked title with half a million votes. That
           hazard is bounded there -- the read is scoped to owned titles,
           single-digit thousands -- and unbounded here, where the candidate
@@ -515,11 +515,25 @@ class TitleRepository(ABC):
           contract case and PRD 06 point here rather than restating it.
 
           The two keys above the vote count are **booleans**, so they
-          partition rather than order, and `tmdb_vote_count` itself is NULL on **732,220 of a
-          measured 1,271,570-title catalog** -- the bootstrap writes it on
-          539,350 through `BulkCatalogRepository.apply_ratings` (measured
-          2026-08-05, M7 Task 36; the number is recorded in
-          `adapters/search/postgres.py`). So the ordinary shape of this answer
+          partition rather than order, and `tmdb_vote_count` itself is NULL on
+          **732,220 of a measured 1,271,570-title catalog** -- the bootstrap
+          wrote it on 539,350 through `BulkCatalogRepository.apply_ratings`
+          (measured 2026-08-05, M7 Task 36; the number is recorded in
+          `adapters/search/postgres.py`).
+
+          ⚠️ **That 539,350 is dated, and ADR-0040's Task 2 moved the writer
+          it names.** `apply_ratings` wrote this column when the number was
+          taken; it now writes `imdb_num_votes`, so nothing but TMDb
+          enrichment fills `tmdb_vote_count` and a bootstrap-only catalog
+          leaves it NULL on **every** row rather than on 732,220 of them. The
+          measurement stands for the catalog it was taken on and no longer
+          describes what a fresh bootstrap produces. Whether this pool should
+          therefore order on `imdb_num_votes` is a real question and a
+          *behaviour* one -- it is issue #39, which the rating-provenance plan
+          is scoped not to build -- so it is recorded here rather than
+          answered.
+
+          So the ordinary shape of this answer
           is four strata whose tails are one large tie, and `limit` falls
           inside one of them: with no total order, two reads of one unchanged
           household return different **sets**, not merely different orders,

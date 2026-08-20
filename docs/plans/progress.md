@@ -49,7 +49,7 @@ if a file in `docs/plans/` is named by none of them.
 ## Rating provenance (from docs/specs/2026-08-19-rating-provenance-split-design.md)
 | Task | What it delivers | Plan file | Status |
 |---|---|---|---|
-| 1–7 | Every rating column names its source; IMDb's numbers re-imported; E1's frame re-anchored | docs/plans/2026-08-19-rating-provenance-split.md | 🔨 in progress on `spec/quality-evals` — 7 tasks planned; Task 1 landed: `m10a` renames the three dual-written columns to `tmdb_*` and adds the `imdb_*` pair, with no behaviour change |
+| 1–7 | Every rating column names its source; IMDb's numbers re-imported; E1's frame re-anchored | docs/plans/2026-08-19-rating-provenance-split.md | 🔨 in progress on `spec/quality-evals` — 7 tasks planned; Task 1 landed: `m10a` renames the three dual-written columns to `tmdb_*`, adds the `imdb_*` pair, and renames `field_provenance`'s three JSONB keys — **the one statement in it that touches a row**, and a pure rename (measured: all 132,415 rows carrying provenance carry all three keys, every value `tmdb`). No rating value is moved; those are re-imported from source instead. The follow-up commit also restored `title.updated`'s `fields` payload to wire names, which the rename had silently moved |
 
 **This is a third table for the second table's reason, and not for a third
 one.** The rating-provenance split has its own spec

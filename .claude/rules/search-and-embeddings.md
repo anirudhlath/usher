@@ -67,6 +67,8 @@ Every configuration measured, same 2,993 cases:
 
 - **`titles.popularity` is NULL on all 1,271,138 rows, so the suggest
   statement's popularity ordering was inert and the tiebreak was `id ASC`.**
+  *(That column is `titles.tmdb_popularity` since `m10a`/ADR-0040; the
+  measurement is left in the spelling it was taken in.)*
   Boundary call 4's premise is that the enriched tier is 2k–10k titles — so on
   the measured deployment "ordered by popularity" ordered by insertion order.
   The shipped code's own comment said "roughly 60% of the catalog is
@@ -116,7 +118,8 @@ Every configuration measured, same 2,993 cases:
   **`ix_titles_popularity` is not merely read by nothing — it is unusable as
   declared** (a `DESC`/NULLS-FIRST btree while every consumer asks `DESC NULLS
   LAST`, a different pathkey the planner never takes; `list_owned_by_tag`, added
-  in M7 Group H, *does* order by `titles.popularity` but its plan is a Merge
+  in M7 Group H, *does* order by `titles.popularity` — `titles.tmdb_popularity`
+  since `m10a` — but its plan is a Merge
   Semi Join over `pk_titles` that never touches the index), and it is **dropped
   in migration `ffc`** with the full measurement in its docstring.
   **`SearchService._blend` is unaffected and was checked rather than assumed**:

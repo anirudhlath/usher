@@ -659,7 +659,9 @@ pages, in order, ending early.
 This is not an edge case on this schema. `titles.year`, `titles.popularity` and
 `titles.vote_count` are all nullable, and `popularity` was measured NULL on
 **all 1,271,138 rows** of a bootstrap-only catalog, so on a fresh install the
-unkeyed group is most of the table. ADR-0034 shipped the row-comparison
+unkeyed group is most of the table. *(`m10a`/ADR-0040 renamed those two to
+`titles.tmdb_popularity` and `titles.tmdb_vote_count`; nullability, and
+therefore everything this section argues, is unchanged.)* ADR-0034 shipped the row-comparison
 spelling as the milestone-wide instruction for three groups writing keyset SQL
 independently; it is corrected there with this table, and the correction
 includes the leading term's direction — `(key IS NOT NULL)` **ascending** puts

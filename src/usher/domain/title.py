@@ -61,11 +61,12 @@ class Title(DomainModel):
     # `vote_count` and `popularity` each had two writers meaning different
     # things: IMDb's `averageRating`/`numVotes` from `adapters/bulk/imdb.py`
     # and TMDb's `vote_average`/`vote_count` from `adapters/tmdb/mapping.py`,
-    # counted over different electorates -- ~36x apart on the only *paired*
-    # sample taken (median TMDb 16 against median IMDb 581 over 537 enriched
-    # tier movies, `scripts/enqueue_tier_enrichment.py`). And the ranges
-    # *overlap* among movies (40,518 against 40,695 on the deployed catalog),
-    # so no reader could ever have told them apart by magnitude. Each column
+    # counted over different electorates -- ~38x apart over one identified
+    # population counted both ways (the frozen tier's 130,647 enriched rows:
+    # median TMDb 15 against median frozen IMDb `numVotes` 576, S3). And the
+    # ranges *overlap* among movies (40,518 against 40,695 on the deployed
+    # catalog), so no reader could ever have told them apart by magnitude --
+    # which is the load-bearing half, whatever the typical ratio. Each column
     # now names its source. ADR-0040.
     tmdb_vote_average: float | None = Field(default=None, ge=0, le=10)  # TMDb's 0-10 scale
     tmdb_vote_count: int | None = Field(default=None, ge=0)

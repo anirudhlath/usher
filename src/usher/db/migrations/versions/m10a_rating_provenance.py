@@ -6,13 +6,24 @@ Create Date: 2026-08-19
 
 `titles.vote_count` was written by `adapters/bulk/imdb.py` with IMDb's
 `numVotes` and by `adapters/tmdb/mapping.py` with TMDb's `vote_count`, which
-are the same concept counted over different electorates. **The gap is ~36x on
-the only paired sample this project has taken**: 537 tier movies enriched
-2026-08-11, median TMDb `vote_count` **16** against median IMDb `numVotes`
-**581**, re-measured at S3's scale over 130,647 titles as 15 against 576
-(`scripts/enqueue_tier_enrichment.py`). Paired, i.e. the same rows counted
-both ways -- a ratio of the two maxima in the table below would be ~65x and
-would mean nothing, because those maxima come from disjoint populations.
+are the same concept counted over different electorates. **The gap is ~38x,
+measured over one identified population counted both ways**: of the frozen
+tier's 130,647 enriched rows, median TMDb `vote_count` **15** against a median
+frozen IMDb `numVotes` of **576** (`.claude/rules/tmdb-and-enrichment.md`,
+group S3). The pairing is before-and-after on one frozen set of ids rather
+than two columns read off one row -- no row could hold both until this
+revision and Task 2, which is the entire defect -- and that is what makes it
+a scale comparison rather than two populations set side by side.
+
+⚠️ **An earlier draft of this docstring cited 16 against 581 and called it
+paired. It is not.** That 16 is over the 537 titles S2 enriched and that 581
+is, in its own source's words, *"on the unenriched tier"* -- a different
+population, which is exactly the error the parenthetical below records for
+`popularity`, committed a second time two paragraphs above it. Recorded rather
+than quietly swapped, because the number changing is not the point; the label
+on it is. A ratio of the two maxima in the table below would be ~65x and would
+mean even less, those being disjoint populations too.
+
 `community_rating` was dual-written the same way and **silently**, because
 IMDb's `averageRating` and TMDb's `vote_average` are both 0-10 and no value is
 ever out of range.
