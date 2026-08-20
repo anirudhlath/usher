@@ -6,12 +6,18 @@ constant makes E1's numbers incomparable with the 2026-08-03 run and with
 ADR-0031 -- and the whole reason E1 measures suggest first is that those
 numbers exist.
 
-Movies only, `tmdb_vote_count >= 500` (the gate wrote `vote_count`; ADR-0040
-renamed the column and Task 5 of the rating-provenance plan re-anchors the
-frame onto `imdb_num_votes`, which is a *different* population and will be
-recorded as one), names not unique in the catalog excluded at
-sampling time, five equal draws of 150 over `char_length(name)` bands, four
+Movies only, `imdb_num_votes >= 500`, names not unique in the catalog excluded
+at sampling time, five equal draws of 150 over `char_length(name)` bands, four
 typo classes at a uniformly random position, `random.Random(20260803)`.
+
+**The threshold is the gate's and the column is not, and that is a change of
+population rather than a rename.** The gate wrote `vote_count` when only the
+IMDb bulk import filled it; TMDb enrichment acquired the same column and by
+2026-08-19 the predicate selected 8,523 unique-named movies against the gate's
+48,549. ADR-0040 split the column by source, and this frame now reads the
+IMDb one -- single-source, catalog-wide, unmovable by any TMDb crawl. Whether
+that reproduces the gate's five pools is measured in `GATE_POOLS`, not assumed
+here.
 **2,993 rather than 3,000 because seven two-character names admit no
 deletion.**
 
@@ -89,9 +95,23 @@ TYPO_CLASSES: tuple[str, ...] = ("substitution", "deletion", "transposition", "d
 # never saw. Closing that is the caller's job and costs one repeatable-read
 # transaction spanning both reads; nothing here can do it, because neither
 # function opens the session it is handed.
+# **The threshold is ADR-0002's and the column is not.** The gate was written
+# against `titles.vote_count` when only the IMDb bulk import wrote it; TMDb
+# enrichment later wrote the same column with a figure ~38x smaller (paired:
+# median TMDb 15 against median IMDb 576 over the same 130,647 enriched rows),
+# so by 2026-08-19 `vote_count >= 500` selected **8,523** unique-named movies
+# where the gate recorded 48,549, and `check_frame` refused.
+#
+# `imdb_num_votes` is single-source, catalog-wide, and no TMDb crawl can move
+# it -- so this restores ADR-0002's frame semantics rather than re-choosing
+# them. Whether it restores the *pools* is an open question this module does
+# not get to assume: `GATE_POOLS` below is re-measured against the restored
+# catalog, and if it does not reproduce, the observed frame becomes canonical
+# and the delta is recorded with its cause. A number is never edited to make a
+# run green. ADR-0040.
 _ELIGIBLE = """
     SELECT t.id, t.name FROM titles t
-    WHERE t.kind = 'movie' AND t.tmdb_vote_count >= 500
+    WHERE t.kind = 'movie' AND t.imdb_num_votes >= 500
       AND char_length(t.name) BETWEEN :low AND :high
       AND NOT EXISTS (
           SELECT 1 FROM titles o
