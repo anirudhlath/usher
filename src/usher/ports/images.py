@@ -2,9 +2,23 @@
 addressed by.
 
 **Two ports rather than one, because the two failure modes are different.**
-`ImageFetcher` is a network: a rate limit, an outage and a timeout are all
-`PortUnavailable`, and any other 4xx is `PortDataMalformed`, exactly the split
-`adapters/http.py` already holds for TMDb and the LLM endpoint.
+`ImageFetcher` is a network: an outage, a 408 and a timeout are all
+`PortUnavailable`, and any 4xx that is not 429, 401, 403 or 408 is
+`PortDataMalformed`, exactly the split `adapters/http.py` already holds for
+TMDb and the LLM endpoint.
+
+🔴 **This paragraph said "a rate limit … is `PortUnavailable`, and any other
+4xx is `PortDataMalformed`" until 2026-08-20, and both halves were false.**
+`port_error_for` answers a 429 with `PortRateLimited` and a 401/403 with
+`PortAuthFailed` -- two families that are neither of the types named here, and
+"any other 4xx" silently swallowed the second of them. The correction below on
+`ImageFetcher` is the same fact stated where an implementer reads it; **it was
+added on 2026-08-20 while this sentence was left standing 380 lines above it**,
+which is the failure `.claude/rules/ports-and-error-taxonomy.md` records as its
+own worked example -- a corrected census filed underneath the stale one it
+corrects. Both now say the same thing, and what it costs
+`GET /images/{image_id}`, which catches neither family, is in ADR-0030's image
+amendment and in PRD 09's carried debt.
 `ImageBlobStore` is a disk: it fails when a filesystem fails, it has a fake
 with no filesystem at all for unit cases, and its real arm runs against
 `tmp_path`. Collapsing them into one "cache" port would put both taxonomies

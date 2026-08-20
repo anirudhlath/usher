@@ -1075,6 +1075,61 @@ suspicion.
   by an observation, and the honest closing note names which of the two the
   reader is getting** — is in
   `.claude/rules/ports-and-error-taxonomy.md`.
+- 🔴 **`GET /images/{image_id}` catches two of the four families
+  `port_error_for` returns, so a CDN 429 or 401/403 leaves the RFC 9457 envelope
+  as a bare `500 text/plain`** — found by M10's F3 on 2026-08-20 while measuring
+  something else, and confirmed independently in review. `port_error_for` answers
+  429 with `PortRateLimited` and 401/403 with `PortAuthFailed`; **neither
+  subclasses `PortUnavailable`**, and `get_image`'s ladder is `PortUnavailable` →
+  `MediaTypeNotServable` → `PortDataMalformed`, so neither family is caught
+  anywhere and Starlette answers before any handler can. **The evidence, with its
+  control:** driven through a real `create_app()` with one dependency overridden,
+  `PortUnavailable` answers `503 application/problem+json` (the control fires) and
+  `PortRateLimited` and `PortAuthFailed` both answer `500 text/plain`; a reviewer
+  reproduced it by driving the real `ProviderCdnImageFetcher` over an
+  `httpx.MockTransport`, so the whole chain ran rather than a fake raising.
+  **Never observed live**: 0 firings in F3's 250-request run against the real
+  CDN, and the entry above records 130,750 requests to two upstreams that have
+  never produced a 429 at all — so this is a defect nobody has met, which is why
+  it survived M9's whole review. **Not a vocabulary question**, and that is what
+  makes it small: `PortRateLimited` is unambiguously transient and
+  `503 source_unavailable` with a `Retry-After` already exists one arm away, so
+  the 429 half is an `except` tuple. Only the 401/403 half needs a decision — the
+  CDN needs no credential, so a 403 means something *in front of* it refused,
+  which is the captive-portal population wearing a status
+  ([ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s
+  image amendment has the taxonomy). **F3 deliberately did not fix it**: its bar
+  pre-registered the deliverable as "exactly this and nothing more" before the
+  first request, and a behaviour change inside it would have been editing the bar
+  after seeing the run. The gap was *pre-registered*, not discovered — the bar's
+  classification table gave `escapes_the_route` its own bucket up front.
+  **The transferable half is not about images**: a route's `except` ladder
+  encodes an assumption about the shared `port_error_for` ladder that **nothing
+  type-checks**, so any route catching a subset of what its adapter can raise
+  leaves the envelope silently. Worth a scan across every router before this is
+  called a one-route bug. 🔴 **And the project already knows this shape** — the
+  identical escape is written into `adapters/bulk/download.py` and
+  `adapters/bulk/movielens.py` as a scar (*"naming only one of them is what let a
+  `PortRateLimited` escape uncaught from a caller that had guarded only against
+  `PortUnavailable`"*), and `services/` carries a three-line test idiom for it
+  **twice**: a fresh anonymous `UsherPortError` subclass asserted not to escape
+  (`test_services_jobs.py::test_every_port_error_backs_off_rather_than_escaping`,
+  `test_services_reconcile.py::test_reconcile_never_raises_a_port_error`). **No
+  route in `api/` has one.** The guard stopped at the service boundary because
+  that is where an escape kills a loop, while at a route it is one ugly response
+  nobody is watching. That makes this cheap to fix properly rather than
+  per-route: the recipe already exists in the tree.
+  ⚠️ **Filed with it, because it is the same reader and the same file:
+  `GET /images/{image_id}`'s three failure arms have no counter**, so nothing
+  that ships can say how often any of them fires. That is what makes ADR-0030's
+  reopening trigger for the image amendment un-checkable in its rate half, and
+  it is the read-surface rule (`.claude/rules/ports-and-error-taxonomy.md`'s *"a
+  filter is invisible without a counter"*) applied one layer up. The obvious
+  repair — one `outcome`-labelled counter on `usher.images`, on
+  `usher.images.references`' precedent — carries one real design question, which
+  is that `configure_metrics` installs `metric_readers=[]` unless
+  `telemetry_enabled`, so on a default deployment it would export nowhere and
+  the trigger would be no more checkable than it is now.
 - 🔴 **`test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_own`
   is intermittent under whole-suite load, and this list is where that belongs** —
   **1 failure in 5 whole-`tests/integration` runs, 0 in 5 runs on its own**,

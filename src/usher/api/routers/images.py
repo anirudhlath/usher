@@ -77,8 +77,10 @@ image it holds.
 
 ## Failure
 
-Five answers and no sixth, each a problem document from **ADR-0030**'s closed
-vocabulary rather than FastAPI's default `{"detail": ...}` shape:
+Five *intended* answers, each a problem document from **ADR-0030**'s closed
+vocabulary rather than FastAPI's default `{"detail": ...}` shape -- **and a
+sixth this route does not intend and has not stopped**, measured 2026-08-20 and
+recorded in the last row rather than left out of the table:
 
 | condition | status | code |
 |---|---|---|
@@ -87,6 +89,15 @@ vocabulary rather than FastAPI's default `{"detail": ...}` shape:
 | the CDN timed out, refused, or answered 408 or 5xx | 503 | `source_unavailable`, `Retry-After` |
 | the CDN answered something else unusable | 503 | `source_unavailable`, **no** `Retry-After` |
 | `w` is not a positive integer | 422 | `validation_failed` |
+| 🔴 the CDN answered **429**, or **401/403** | **500** | **none -- `text/plain`** |
+
+🔴 **This heading read *"Five answers and no sixth"* until 2026-08-20, 48 lines
+above the ⚠️ paragraph that measures the sixth.** The count of *answers* was
+never five: `PortRateLimited` and `PortAuthFailed` reach no `except` in
+`get_image`, so Starlette answers a bare 500 and this module's whole premise --
+that every failure here is an RFC 9457 document -- is false on two arms. The
+row is in the table because a defect kept in prose beneath a table that
+contradicts it is how a reader comes away with the table.
 
 **Rows two and four are both `PortDataMalformed` and they are not the same
 event**, which is the whole of what C4's `MediaTypeNotServable` subclass buys
@@ -131,13 +142,28 @@ and a 401/403 with `PortAuthFailed`, and **neither subclasses
 `PortUnavailable`**, so both escape `get_image` and Starlette answers a bare
 `500 text/plain` -- outside the envelope this module exists to keep. Measured
 2026-08-20 through a real `create_app()`, with `PortUnavailable`'s `503
-application/problem+json` as the control. Never observed live (0 in F3's
-250-request run; 130,750 requests to two upstreams have never produced a 429 at
-all), and deliberately **not** repaired by F3: what a CDN 401/403 deserves is
-its own question -- the CDN needs no credential, so one means something in
-front of it refused, which is the captive-portal population wearing a status --
-and answering it inside a task about the *vocabulary* is the fan-out ADR-0030
-exists to prevent.
+application/problem+json` as the control, and independently in review by
+driving the real `ProviderCdnImageFetcher` over an `httpx.MockTransport` so the
+whole chain ran. Never observed live (0 in F3's 250-request run; 130,750
+requests to two upstreams have never produced a 429 at all). **Owned by PRD
+09's carried debt**, which is where a finding gets a schedule rather than only
+a neighbour.
+
+**Why F3 measured it and did not fix it, stated precisely because the obvious
+reason is the weaker one.** It is *not* that the repair is hard or forks the
+vocabulary: the 429 half needs no vocabulary decision at all -- `PortRateLimited`
+is unambiguously transient and `503 source_unavailable` with a `Retry-After`
+already exists one arm below for exactly that. The reason is that **F3's
+pre-registered bar fixed the declining deliverable as "exactly this and nothing
+more" before the first request**, and shipping a behaviour change inside it
+would have been editing the bar after seeing the run -- the one thing a
+pre-registration exists to forbid. **The gap was pre-registered, not
+discovered**: the bar's own classification table gave `escapes_the_route` its
+own bucket, with the note *"the route catches none of these"*, before any
+socket opened. The 401/403 half does still carry a real question (the CDN needs
+no credential, so one means something in front of it refused -- the
+captive-portal population wearing a status), and that question belongs to
+whoever takes the debt.
 """
 
 import uuid
@@ -189,8 +215,13 @@ _IMAGE_CONTENT: Final[dict[str, dict[str, Any]]] = {
 #: status everywhere, and no member names a 502, so the transient arm and the
 #: non-transient one are told apart by `Retry-After` rather than by code. That
 #: distinction is a header and lives outside the schema -- ADR-0030's amendment
-#: carries it and names an `upstream_unusable`-shaped member as a request this
-#: task did not mint. The `422` is declared rather than left to FastAPI, whose
+#: carries it, and the `upstream_unusable`-shaped member it named as a request
+#: is **answered `Declined`** since 2026-08-20 (this comment called it "a
+#: request this task did not mint" until then), so the header is the contract
+#: rather than a placeholder and this mapping is not waiting on anything. The
+#: 500s the table above names are absent here on purpose: an undeclared status
+#: is the honest schema for an arm nothing intends. The `422` is declared
+#: rather than left to FastAPI, whose
 #: automatic one names `HTTPValidationError` while `api/errors.py` answers an
 #: RFC 9457 document. `tests/unit/test_api_openapi.py` holds all of it.
 _IMAGE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {

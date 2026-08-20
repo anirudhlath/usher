@@ -32,7 +32,7 @@ the same event:
 | cause | what it means | how often |
 |---|---|---|
 | the provider served an `image/svg+xml` logo | the upstream answered correctly and *this deployment* declines to carry it | **~1 title in 17**, measured over 51 popular and top-rated titles |
-| a captive portal or reverse proxy answered an HTML login page under a 200 | the upstream is not the upstream | rare, and an operator has to act on it |
+| a captive portal or reverse proxy answered an HTML login page under a 200, or any other residual `PortDataMalformed` | the upstream is not the upstream | **0 of 240**, measured 2026-08-20 — see below |
 
 Both arrive at a route as one type. So any mapping from `PortDataMalformed` to
 an upstream-fault status would have reported **one request in seventeen as an
@@ -40,6 +40,25 @@ incident**, and the signal an operator genuinely needs would have been buried
 under it at seventeen to one. **The alarm was in the *type*, not in a log line
 — nothing in that package logs at all**, which is why a search for "what would
 be noisy here" that looks only at logging finds nothing.
+
+✅ **The second row carried the word "rare" and no number until 2026-08-20, and
+the number now exists.** M10's F3 measured the residual arm live against the
+provider image CDN under a hashed pre-registration: **0 of 240** fetches — 3
+kinds × 20 stored rows × all 4 rungs, both controls firing (a nonexistent path
+classified `residual`, eight `.svg` rows classified `declined`). Bounds:
+**≤1.25%** treating a fetch as the trial, **~5%** treating an image's four rungs
+as one cluster, **~22–25%** for the (kind, rung) cell the design was built
+around. **Which is what kept the vocabulary closed at seven** —
+ADR-0030's image amendment is `Declined` on this measurement, because both 503
+arms being rare means neither is setting the other's alarm rate, which is the
+inverse of the situation the SVG row above describes. Two caveats that travel
+with the number: `.svg` rows are excluded from that frame by construction (they
+are the *declined* arm), and the sample is stratified rather than
+production-weighted. **The one residual cause it could not reach is the captive
+portal itself** — it is a property of a network interposed in front of the
+deployment, not of the CDN, so no sample size on a healthy network would have
+seen one. The row above is a rate; this one is an upper bound with a hole in
+it, and the two should not be read in the same voice.
 
 **The test to apply before reusing an error member, and both halves are
 needed:**
@@ -198,12 +217,91 @@ nobody has got round to observing it"* — and a reader acting on the second goe
 and provokes it. **Write the refusal and its reason into the entry, not just
 the gap.**
 
+🔴 **And that closing state was materially incomplete until 2026-08-20, in the
+direction this file warns about — a stale "verified" fact being worse than
+none.** *"Pinned by construction"* is true of the **job** path and false of one
+route: at `GET /images/{image_id}` a `PortRateLimited` is not merely
+unobserved, it is **uncaught**. `get_image`'s ladder is `PortUnavailable` →
+`MediaTypeNotServable` → `PortDataMalformed`, and `PortRateLimited` subclasses
+none of them, so a CDN 429 leaves the RFC 9457 envelope entirely as a bare
+`500 text/plain` — measured through a real `create_app()` with
+`PortUnavailable`'s `503 application/problem+json` as the control, and
+reproduced over an `httpx.MockTransport` driving the real
+`ProviderCdnImageFetcher`. `PortAuthFailed` does the same. So the six
+construction sites are pinned and **one consumer of one of them is not**, and a
+reader who took "pinned by construction" as a claim about the whole project
+took more than it bought. Owned by PRD 09's carried debt; see the next entry
+for the shape rather than the instance.
+
 Expect this shape wherever a project handles a status it is designed never to
 earn: 429, 402, 507, a quota exhaustion, a lock timeout, a partial-failure
 envelope. Three questions, and the third is the one that gets skipped — **has
 this branch ever executed against the real upstream? if not, is the observation
 obtainable at an acceptable cost, or is obtaining it itself a defect? does the
 closing note say which of the two the reader is getting?**
+
+## A route's `except` ladder is an untype-checked assumption about the adapter's ladder, and a family it omits leaves the envelope entirely
+
+**Found 2026-08-20 in M10's F3, and this is the general form of the entry
+above.** That one is about `PortRateLimited` at one route. This is about why
+nothing caught it for a whole milestone.
+
+`port_error_for` returns **four** families — `PortRateLimited` (429),
+`PortAuthFailed` (401/403), `PortDataMalformed` (any other 4xx but 408) and
+`PortUnavailable` (408 and 5xx). They are **siblings**, all direct children of
+`UsherPortError`; only `MediaTypeNotServable` is anybody's subclass. A route
+catches the ones its author was thinking about, and **nothing anywhere states
+which families its adapter can hand it**:
+
+- `mypy` cannot help. `except` clauses are not checked against what a callee
+  raises; Python has no checked exceptions and the port ABCs describe their
+  errors in **prose docstrings**, which is exactly where the false claim lived.
+- The tests cannot help either, and this is the part worth internalising:
+  every case is written by choosing an exception to raise, so **the families
+  nobody thought of are the families nobody parametrised**. A test suite
+  covering three arms perfectly is silent about a fourth.
+- The failure is maximally quiet. An uncaught `UsherPortError` is not a
+  crash a developer sees — it is a 500 in production, on a branch that fires
+  rarely by construction, on the one deployment nobody instruments.
+
+🔴 **And the sharpest part: this project already knows. It found the same
+failure twice, wrote the guard, and never carried it across the `api/`
+boundary.**
+
+- `adapters/bulk/download.py` and `adapters/bulk/movielens.py` both carry the
+  scar in prose — *"naming only one of them is what let a `PortRateLimited`
+  escape uncaught from a caller that had guarded only against
+  `PortUnavailable`"*. Same two families, same mechanism, a different lane.
+- `services/` has the **working test idiom**, twice, and it is three lines:
+  define a fresh anonymous subclass of `UsherPortError` and assert it does not
+  escape. `test_services_jobs.py::test_every_port_error_backs_off_rather_than_escaping`
+  (*"a worker that named `PortUnavailable` specifically would let
+  `PortAuthFailed` and `PortRateLimited` escape `run_once` and kill the loop"*)
+  and `test_services_reconcile.py::test_reconcile_never_raises_a_port_error`.
+  Both name the exact families that escape `get_image`.
+
+So the repair is not research. **The idiom exists, it is cheap, it is proven,
+and no route in `api/` has one** — the guard stopped at the service boundary
+because that is where the loop-killing consequence was felt, while at a route
+the consequence is one ugly response nobody is watching. `get_image` catches
+three types and no base; a fresh-`UsherPortError` case against every router that
+catches a port error is what would have caught this in M9.
+
+**The stronger check, if a set comparison is wanted**, is an `ast` walk:
+enumerate the types the adapter's translation can produce, enumerate the types
+the route's `except` clauses catch including via base classes, and assert
+subset — the same shape
+`test_the_declined_media_type_arm_precedes_its_parents` already uses on this
+very handler to pin `except` **order**. Ordering had a known trap and got a
+case; **coverage was merely assumed and got none**, which is the asymmetry to
+notice.
+
+**Ask it of any route that catches a port error at all**, not only this one:
+does this ladder catch every family its adapter can raise, and is the answer
+written down somewhere a type checker or a test can read? Two of the four
+families here were named correctly in seven separate statements *as being
+handled* — the prose was confident, unanimous and wrong, which is the strongest
+argument in this file for encoding a claim rather than restating it.
 
 ## Two constants that must move together need a case that says so, and the direction of the failure decides where it goes
 

@@ -482,7 +482,7 @@ here once because several behaviours already read differently under the two
 and all of them shipped assuming the first: the retraction ceiling above
 assumes removals are the operator's to authorise; *"availability goes stale,
 not wrong"* ([08](08-operations.md)) assumes staleness is the only failure;
-and the watch write-back ([07](07-api-surface.md)) writes play state to an
+and the watch write-back ([07](07-client-api.md)) writes play state to an
 account on a server the operator does not administer. **Pointing Usher at a
 server somebody else runs is an intended deployment, not a misuse** — it is
 the one this project is developed against — so the assumption is named rather
