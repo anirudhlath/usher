@@ -22,7 +22,9 @@
     "gen:types": "npx -y --package=typescript@5.9 --package=openapi-typescript@7 openapi-typescript ${USHER_ORIGIN:-http://localhost:8100}/openapi.json -o src/api/schema.d.ts",
     "verify": "npm run typecheck && npm run lint && npm run format:check && npm run test && npm run build",
     "build:fixtures": "vite build --mode fixtures --outDir dist-fixtures",
-    "preview:fixtures": "vite preview --outDir dist-fixtures"
+    "preview:fixtures": "vite preview --outDir dist-fixtures",
+    "e2e:docker": "docker run --rm -v \"$PWD\":/w -w /w --ipc=host mcr.microsoft.com/playwright:v1.62.1-noble bash -lc 'npm ci --no-audit --no-fund && npx playwright test'",
+    "e2e:docker:update": "docker run --rm -v \"$PWD\":/w -w /w --ipc=host mcr.microsoft.com/playwright:v1.62.1-noble bash -lc 'npm ci --no-audit --no-fund && npx playwright test --update-snapshots'"
   },
   "dependencies": {
     "@fontsource-variable/instrument-sans": "^5.2.10",

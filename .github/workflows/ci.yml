@@ -103,13 +103,43 @@ jobs:
           fi
           echo "production bundle is clean"
 
+  # End-to-end, accessibility and visual regression, in a **pinned container**.
+  #
+  # ⚠️ **This job exists as its own job, in an image, because a screenshot
+  # baseline is not portable.** Generated on a developer's machine and compared
+  # on `ubuntu-latest`, all 120 of them failed: same fonts (Playwright's own log
+  # says "fonts loaded"), same bundle, but glyph rasterisation differs by OS, so
+  # a section rendered 2249 px tall locally and 2277 px on the runner and 6% of
+  # pixels differed against a 1% threshold. Nothing was wrong with the product.
+  #
+  # The threshold is not the lever — a 28 px layout shift is not noise to be
+  # tolerated, it is a different rendering. Pinning the environment is, and the
+  # image is tagged with the exact `@playwright/test` version from
+  # `package-lock.json` so the browser, its dependencies and the font stack are
+  # one artefact. `npm run e2e:docker` runs the identical image locally, which
+  # is how baselines are regenerated.
+  console-e2e:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      # Chromium's default /dev/shm inside a container is 64 MB and it crashes
+      # on a large page rather than failing an assertion.
+      options: --ipc=host
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `setup-node`: the image ships the Node the browser was built against,
+      # and installing another one is how the two drift apart.
+      - name: Install dependencies
+        run: npm ci
+
       # Chromium only. The design is specified at three widths, not on three
       # engines, and the accessibility sweep is against axe rather than against
-      # a browser's own behaviour -- so a second engine would triple the job
-      # for coverage this design does not claim.
-      - name: Install Playwright's browser
-        run: npx playwright install --with-deps chromium
-
+      # a browser's own behaviour -- so a second engine would triple the job for
+      # coverage this design does not claim.
       - name: End-to-end, accessibility and visual regression
         run: npm run e2e
 
