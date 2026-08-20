@@ -4630,6 +4630,16 @@ assertions, which read `content["application/json"]`, and buys a client nothing
 it cannot read off the `type` member. The scan therefore asserts the **shape**
 and not the media type, and says so where a reader will find it.
 
+✅ **Closed 2026-08-20 by M10's F5, and the sentence that carried it is the part
+that did not survive.** *"Buys a client nothing it cannot read off the `type`
+member"* is a claim about a client that has **already decided** to parse the
+body as a problem document; the media type is what a generated client switches
+on *before* it parses anything. The fork was also smaller than the estimate:
+five assertions across the two files, of which three move and two stay, because
+a **200** really is `application/json`. `test_api_openapi.py` gained a fifth
+claim and lost the `One bounded untruth` paragraph. F5's ledger is at the end of
+this file.
+
 ## M9 Task H6 — the tenth import contract, and a contract whose list can drift while the gate says 10 kept (2026-08-12)
 
 **3 plants, no sweep** — this task is a documentation reconciliation and its one
@@ -7259,3 +7269,93 @@ so it is a mitigation and not a fix.
 Same family as *"a plant that did not land looks exactly like a check that
 passed"* in CLAUDE.md: here the plant lands perfectly and the **interpreter**
 never reads it.
+
+## M10 F5 — the problem media type, and two plan predictions about *which assertion fires* that were both wrong (2026-08-20)
+
+Five mutations pre-registered in `/var/tmp/m10-f5/BAR.md`
+(`sha256:adbe533de3d43787001f6b63e71d7d2b6fd1510ac55b130b51de3865cb849178`,
+written and hashed before the first plant), scored against `tests/unit` whole
+at `8cb299b`. Baseline **4,134 passed, 4 skipped in 45.04 s**; every run below
+collected the identical 4,138, so no plant moved what it was scored against.
+**4 killed, 1 control surviving as designed, 0 unintended survivors.** 0
+BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.
+
+| # | mutation | verdict | fails |
+|---|---|---|---|
+| P1 | `_problem_bodies_carry_their_media_type` keyed on **status** (every non-2xx `application/json` body) rather than on the schema | KILLED | **1** — the new case's `moved` arm, naming `GET /health/ready 503`. **Not the case the plan named** |
+| P2 | the problem key **added** rather than moved (`content["application/json"]` for `content.pop(...)`) | KILLED | **3** — the new case's `at_json == []` arm with 56 entries, plus both forked cases in `test_api_playback.py` and `test_api_watch.py`, which is what their new `"application/json" not in ...["content"]` arms are for |
+| P3 | `model=` deleted from **one** `_*_FAILURES` constant (`_PLAY_FAILURES`'s `404`) | KILLED | **3** — the completeness case, the every-failure-is-a-problem case, and playback's own openapi case. **The components assertion stays green** |
+| P3b | `model=` deleted from **all 20** declaration sites across the 14 router modules | KILLED | **6**, including the new case on the **components assertion** (`test_api_openapi.py:543`), which is the assertion P3 was written to reach |
+| C1 | CONTROL: `_PLAY_FAILURES`'s `404` and `409` entries swapped in the dict literal | SURVIVED all five gate steps | equivalent, as predicted |
+
+🔴 **Both of the plan's predictions about *which assertion* a plant fires on
+were wrong, and both were registered as disagreements before the runs rather
+than corrected after.** The pattern is the same one F2's `#3`/`3b` and F4's
+`P2` found, arriving for the third time in one group: **a plan can name the
+right plant and the wrong assertion, and a sweep that records only "KILLED"
+cannot tell the difference.**
+
+- **P1 was predicted to fail "on `/health/ready` (the exemption case)".** It
+  does not. `test_every_exemption_names_a_real_response_and_the_shape_it_keeps`
+  reads the schema through `_schema_ref`, which iterates **every** media entry
+  and returns the first `$ref` it finds — so it is **structurally blind to
+  which key a body is filed under** and stays green with `/health/ready`'s 503
+  moved onto `application/problem+json`. The only thing that sees it is the new
+  case's `moved` arm. Worth knowing in both directions: the exemption tuple is
+  an assertion about the *shape* an exemption keeps, and shape and media type
+  are two claims. Had F5 shipped without the `moved` arm — which the acceptance
+  criteria called for as *"the 36 non-problem bodies are unmoved, asserted as a
+  count"* — a status-keyed rewrite would have passed the whole suite while
+  publishing `/health/ready`'s readiness body as a problem document.
+- **P3 was predicted to fail "on the components assertion".** It cannot, and
+  the reason is arithmetic rather than subtle: `ProblemResponse` is registered
+  by **20 declaration sites across 14 router modules**, so deleting one leaves
+  nineteen and the component survives. **A registration is not scarce, and an
+  assertion that a component exists is only reachable by a plant that removes
+  the last registration.** P3b is that plant, and it is the one that fires on
+  `test_api_openapi.py:543`. Both are kept in the ledger for F4's `P4`/`P4b`
+  reason: the pair is the demonstration.
+
+**The count itself is a correction to the plan.** It said *"20 `_*_FAILURES`
+constants across 14 router modules"*. There are **18** constants literally
+named `_*_FAILURES`, plus two inline `responses={...}` dicts (`images.py`'s
+`GET /images/{id}` and `playback.py`'s `GET /stream/{ticket}`) — 20 *declaration
+sites* across 14 modules, which is the number that matters and not the number
+of constants. Two further response-map constants exist and carry no
+`ProblemResponse` at all: `health.py`'s `_DEGRADED` and `sources.py`'s
+`_REJECTED`.
+
+**The control was re-measured, not inherited from M9's D4/H2 ledgers**, which
+recorded the same shape against `_TITLE_FAILURES`' `404`/`422`. That mattered
+here for a reason specific to this task: F5 adds a **new reader** of that dict
+literal — `UsherAPI.openapi` walks the rendered document — and a new reader is
+exactly what could turn an order-blind control into an order-sensitive one. It
+did not: the literal is merged by FastAPI into an OpenAPI `responses` object
+keyed by status, every consumer reads it as a mapping, and the swap passes
+`ruff check`, `ruff format --check`, `mypy` (588 files), `lint-imports` (10
+kept) and `pytest tests/unit` (4,134 passed, 4 skipped in 44.68 s — the summary
+line read rather than the exit code, because a run that did not run is not a
+pass).
+
+**The two positive controls of the new case were watched to fail before the
+implementation was believed**, which is the half a survivor census cannot
+supply. The `>= 50` floor fails *"the walk found 0 problem responses against a
+floor of 50"* against a document with its problem bodies removed; the
+components assertion fails against the dangling-`$ref` document. And the
+dangling spelling's danger was measured on its own two-route probe rather than
+argued: an app declaring `{"content": {PROBLEM_MEDIA_TYPE: {"schema": {"$ref":
+"#/components/schemas/P"}}}}` and no `model=` publishes
+`components.schemas == ["Ok"]` while **every media-type assertion in the case
+passes** and `schema["$ref"].endswith("/P")` passes with them. That is why the
+components assertion is an acceptance criterion and not a note.
+
+`PYTHONDONTWRITEBYTECODE=1` throughout, `__pycache__` swept under `src/` and
+`tests/` before every run (27 directories on the baseline, **0** on every run
+after it, which is the flag proving itself). Each plant was verified to have
+landed by byte-equality against the intended mutant — P3b moves 14 files, for
+which the substring form is wrong — with `compile()` as the dry run. Each
+restore was a `cp` from `/var/tmp/m10-f5/*.backup` verified against
+`git show "HEAD:<path>"`, with `git status --porcelain` asserted empty after
+every revert; never `git checkout`. Harness at `/var/tmp/m10-f5/sweep.py`,
+outside the working tree. Swept **in place** rather than in a copy, for the
+reason the `cp -a` entry above gives.
