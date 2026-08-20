@@ -7154,6 +7154,11 @@ pytest's harness, which in a real `usher unmatched` invocation is replaced by
 is the right order of magnitude and is now a measurement rather than an
 estimate.
 
+**Re-scored at `1aa84d9`** after both refusal cases gained an
+`isinstance(exit_info.value.code, str)` arm: identical verdicts, identical
+failing cases, baseline still 159. Recorded because a sweep's verdicts are a
+statement about the selection it ran against, and the selection changed.
+
 `PYTHONDONTWRITEBYTECODE=1` throughout, `__pycache__` swept under `src/` and
 `tests/` before every run (27 directories on the baseline, **0** on every run
 after it, which is the flag proving itself). Each plant was verified to have
