@@ -1,4 +1,8 @@
-"""The gate's 2,993 typo cases, regenerated rather than restored.
+"""The frame's 2,991 typo cases, regenerated rather than restored.
+
+ADR-0040 re-anchored the frame on `imdb_num_votes`; the gate's own total was
+2,993 and the re-measured one is 2,991. Where a docstring below quotes 2,993
+it is describing ADR-0002's 2026-08-03 run, which is still true of that run.
 
 The pure generator is tested here against a hand-built pool. The catalog
 reads are `tests/integration/test_eval_goldens_postgres.py`'s -- not the
@@ -17,6 +21,7 @@ from usher.eval.errors import EvalRefused
 from usher.eval.goldens.suggest import (
     GATE_BANDS,
     GATE_CASES,
+    GATE_DRAW_PER_BAND,
     GATE_POOLS,
     GATE_SEED,
     GATE_SHARED_LOWER_NAMES,
@@ -294,27 +299,33 @@ def test_the_query_id_carries_the_band_and_class_the_strata_are_scored_on() -> N
     assert len({case.query_id for case in cases}) == len(cases)
 
 
-def test_the_case_count_arithmetic_reproduces_the_gates_2993() -> None:
-    """**Run before this plan was written, and it is the strongest evidence
-    the port is faithful.** Five bands x 150 names x four classes is 3,000;
-    the gate recorded 2,993, and the seven missing are two-character names
-    that admit no deletion. Against a synthetic pool whose 2-4 band holds
-    exactly seven two-character names, this generator produces **2,993** --
-    750 substitutions, 750 transpositions, 750 doubles and **743** deletions.
+def test_the_case_count_arithmetic_reproduces_the_pinned_total() -> None:
+    """**The strongest evidence the port is faithful, re-pinned 2026-08-19.**
+    Five bands x 150 names x four classes is 3,000, and the shortfall is
+    two-character names, which admit no deletion. Against a synthetic pool
+    whose 2-4 band holds exactly that many, this generator reproduces
+    `GATE_CASES` -- 750 substitutions, 750 transpositions, 750 doubles and
+    the rest deletions.
 
     Note the transposition arm stays at 750: `"ab"` transposes to `"ba"`,
-    which is why the seven declines are deletions alone. A generator whose
-    transposition arm also declined would give 2,986 and would not be this
+    which is why the declines are deletions alone. A generator whose
+    transposition arm also declined would give 2,982 and would not be this
     procedure.
 
-    Asserted against `GATE_CASES` and not against the literal `2993`.
-    `GATE_CASES` had no reader anywhere in `src/` or `tests/` while this line
-    hardcoded the number it holds, and this repository's recorded finding is
-    that when a constant's whole purpose is being the same object as another
-    one, equality is not the assertion -- the binding is.
+    **The fixture's short-name count is derived from `GATE_CASES`, not typed
+    beside it.** ADR-0040 re-anchored the frame on `imdb_num_votes` and the
+    live 2-4 band went from seven such names to **nine**, so a hardcoded `7`
+    made this case fail against a correct generator -- the fixture had
+    silently become a claim about the old catalog. Deriving it means the next
+    re-pin moves one constant and this case follows; the *value* of
+    `GATE_CASES` is pinned by a literal in
+    `test_the_gates_recorded_pool_sizes_cannot_be_edited_in_place`'s sibling,
+    which is where a re-pin should force a human to look.
     """
+    undeletable = 4 * GATE_DRAW_PER_BAND * len(GATE_BANDS) - GATE_CASES
+    assert undeletable == 9, "the premise: the pinned total implies nine two-character names"
     pools = {
-        "2-4": _pool(["ab" if n < 7 else f"name{n:04d}" for n in range(150)]),
+        "2-4": _pool(["ab" if n < undeletable else f"name{n:04d}" for n in range(150)]),
         **{
             band: _pool([f"{band}-name-{n:04d}" for n in range(150)])
             for band, _low, _high in GATE_BANDS
@@ -324,7 +335,7 @@ def test_the_case_count_arithmetic_reproduces_the_gates_2993() -> None:
     cases = build_typo_cases(pools, seed=GATE_SEED)
     assert len(cases) == GATE_CASES
     counts = Counter(case.typo_class for case in cases)
-    assert counts["deletion"] == 743
+    assert counts["deletion"] == 750 - undeletable
     assert counts["substitution"] == counts["transposition"] == counts["doubled"] == 750
 
 
@@ -349,7 +360,7 @@ def test_the_refusal_names_the_number_that_moved_and_not_the_five_that_did_not()
     with pytest.raises(EvalRefused) as caught:
         check_frame(_gate_frame(**{"8-11": 1}))
     message = str(caught.value)
-    assert "8-11: expected 7178, observed 7179" in message
+    assert "8-11: expected 7097, observed 7098" in message
     assert "12-19" not in message
     assert "shared_lower_names" not in message
 
@@ -361,7 +372,7 @@ def test_a_band_missing_from_the_frame_is_named_rather_than_only_unequal() -> No
     pools = {band: count for band, count in GATE_POOLS.items() if band != "20+"}
     with pytest.raises(EvalRefused) as caught:
         check_frame(Frame(shared_lower_names=GATE_SHARED_LOWER_NAMES, pools=pools))
-    assert "20+: expected 17887, observed None" in str(caught.value)
+    assert "20+: expected 18146, observed None" in str(caught.value)
 
 
 def test_a_band_the_gate_never_had_is_refused() -> None:
@@ -383,7 +394,7 @@ def test_the_gates_recorded_pool_sizes_cannot_be_edited_in_place() -> None:
     `__hash__` to the dict it wraps and that is `None`."""
     with pytest.raises(TypeError):
         GATE_POOLS["2-4"] = 433  # type: ignore[index]
-    assert GATE_POOLS["2-4"] == 432
+    assert GATE_POOLS["2-4"] == 428
 
 
 def test_the_gates_own_frame_is_accepted() -> None:

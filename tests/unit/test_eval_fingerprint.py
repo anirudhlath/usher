@@ -569,8 +569,23 @@ def test_the_gate_digest_is_this_exact_value() -> None:
     renamed, a separator, a field added -- moves it, and every ledger row
     written before that change silently stops matching every row written
     after. Measured 2026-08-19 on this tree.
+
+    **Moved once, deliberately, and the reason is not a serialisation
+    change.** ADR-0040 re-anchored the sampling frame from `vote_count` --
+    which had acquired a second writer on a ~38x different scale -- onto
+    `imdb_num_votes`, and re-measured the five pools, `shared_lower_names`
+    and `case_count` against the restored catalog. Those six numbers are
+    `_GATE_INPUTS`, so the digest *should* move: a run over the old frame and
+    a run over this one are genuinely not comparable, and a digest that
+    survived the re-anchor would be asserting that they are.
+
+    **It cost nothing, because it happened before the first baseline.**
+    Checked at the time: `docs/evals/ledger.jsonl` held **0 rows** and no bar
+    in `docs/evals/bars.toml` named the old digest, so no recorded run was
+    orphaned. A later re-anchor will not be free, and this is the paragraph
+    that says so.
     """
-    assert GATE_DIGEST == "01e07fc9c78a9849fb9ecbd72e582d76abcf6d021a33b05f6f7d461139aa9530"
+    assert GATE_DIGEST == "21678a1e2ed38b8a08700e44e5b249323cd0214a272fb07da77941017c7a369d"
 
 
 def test_the_gates_own_run_is_comparable_with_the_gates_baseline() -> None:

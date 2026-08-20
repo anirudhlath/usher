@@ -71,17 +71,39 @@ GATE_DRAW_PER_BAND = 150
 # documentation and this is the constant the whole comparability story rests
 # on: `GATE_POOLS["2-4"] = 433` on a plain dict is one line, silent, and
 # process-wide, and it moves the number `check_frame` refuses against.
+#
+# **Re-measured 2026-08-19 against the restored catalog, and the delta is
+# recorded rather than absorbed.** ADR-0002's gate recorded
+# 432 / 2,532 / 7,178 / 20,520 / 17,887 = 48,549 against `vote_count`, which by
+# then had acquired a second writer; the same predicate on `imdb_num_votes`
+# answers 48,639 -- **+90, or +0.19%**. That near-reproduction is the evidence
+# the diagnosis was complete: no other column tried came within 40,000 of it,
+# and the contaminated one answered 8,523.
+#
+# **The residual +90 is a different IMDb snapshot, not a different frame.** The
+# gate ran against the dump cached on 2026-08-03; this ran against
+# `"3a2f2e8cf3a6e045bcaa6bb213fe143a-2"`, generated 2026-08-18. Eight days of
+# vote accumulation moves titles across the `>= 500` threshold in both
+# directions, which is why four bands fall and one rises. So these are the
+# *observed* frame and no longer literally the gate's, and a run comparing E1's
+# numbers with the 2026-08-03 ones carries that caveat -- alongside the one
+# this module's docstring already carries, that the 750 drawn names were never
+# the gate's own 750 either.
 GATE_POOLS: Mapping[str, int] = MappingProxyType(
     {
-        "2-4": 432,
-        "5-7": 2532,
-        "8-11": 7178,
-        "12-19": 20520,
-        "20+": 17887,
+        "2-4": 428,
+        "5-7": 2541,
+        "8-11": 7097,
+        "12-19": 20425,
+        "20+": 18146,
     }
 )
-GATE_SHARED_LOWER_NAMES = 81_054
-GATE_CASES = 2_993
+GATE_SHARED_LOWER_NAMES = 81_088
+# **Re-derived by running the generator, not adjusted to fit.** 2,991 rather
+# than the gate's 2,993 because the 2-4 band now draws **nine** names that admit
+# no deletion where it drew seven: 591 cases from that band against 600 from
+# each of the other four.
+GATE_CASES = 2_991
 TYPO_CLASSES: tuple[str, ...] = ("substitution", "deletion", "transposition", "doubled")
 
 # One statement, two readers. `read_pools` selects from it and `read_frame`
