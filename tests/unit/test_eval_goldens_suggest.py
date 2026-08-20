@@ -401,3 +401,67 @@ def test_the_gates_own_frame_is_accepted() -> None:
     """The positive control. Without it the cases above pass for a
     `check_frame` that refuses everything."""
     check_frame(Frame(shared_lower_names=GATE_SHARED_LOWER_NAMES, pools=dict(GATE_POOLS)))
+
+
+def test_the_band_order_is_pinned_because_it_is_what_the_rng_consumes() -> None:
+    """**Found 2026-08-20 by Task 15's sweep, hiding behind a correct
+    prediction.** The plan planted `8-11` and `12-19` swapped and expected it
+    to survive "because a `sample` per band is independent of band order". It
+    did survive -- and the reasoning is wrong. That argument is about
+    `GATE_POOLS`, which is keyed by band *name*; it is not about the
+    generator, which walks this tuple in order against one `Random(seed)`.
+
+    Measured directly rather than argued: with the two entries swapped, the
+    drawn set shares only **1,266 of 3,000** cases with the shipped order --
+    58% of the measurement changes. `build_typo_cases`' own docstring says so
+    ("Any other order draws a different set from the same seed"), and nothing
+    checked it, so the order could be edited silently and every subsequent
+    run would be incomparable with the recorded baseline while still
+    reproducing `check_frame` perfectly -- the pools are unchanged, only the
+    draw moves.
+
+    Pinned as the literal sequence because here the ordering *is* the
+    defence, not prose describing one. The companion case below is what keeps
+    that from being an arbitrary change-detector: it demonstrates the
+    consequence, so a reader who wants to edit this tuple can see the cost."""
+    assert [band for band, _low, _high in GATE_BANDS] == ["2-4", "5-7", "8-11", "12-19", "20+"]
+
+
+def test_a_different_band_order_draws_a_different_set_from_the_same_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason the order above is pinned, as a measurement rather than a
+    claim -- and the control for it, since "the sets differ" is also what a
+    generator ignoring the seed entirely would produce.
+
+    Same seed, same pools, same case *count*; only the tuple's order moves.
+    So a difference in the drawn set is attributable to the order and to
+    nothing else, which is exactly what the shipped order buys."""
+    from usher.eval.goldens import suggest as module
+
+    pools = {
+        band: [
+            (uuid.UUID(int=index + 1000 * position), f"{band}-name{index:03d}-word")
+            for index in range(200)
+        ]
+        for position, (band, _low, _high) in enumerate(GATE_BANDS)
+    }
+
+    shipped = module.build_typo_cases(pools, seed=GATE_SEED)
+    reordered = (GATE_BANDS[0], GATE_BANDS[1], GATE_BANDS[3], GATE_BANDS[2], GATE_BANDS[4])
+    monkeypatch.setattr(module, "GATE_BANDS", reordered)
+    swapped = module.build_typo_cases(pools, seed=GATE_SEED)
+
+    assert len(shipped) == len(swapped), "the premise: only the order moved, not the count"
+    as_pairs = {(str(one.title_id), one.probe) for one in shipped}
+    swapped_pairs = {(str(one.title_id), one.probe) for one in swapped}
+    assert as_pairs != swapped_pairs
+    # The control, and it is the reason this case is not satisfied by a
+    # generator that ignores its seed: asked *again* under the same reordered
+    # tuple, the generator reproduces the reordered draw exactly. So it is
+    # deterministic, and the inequality above is therefore attributable to the
+    # band order rather than to run-to-run noise.
+    again = {
+        (str(one.title_id), one.probe) for one in module.build_typo_cases(pools, seed=GATE_SEED)
+    }
+    assert again == swapped_pairs

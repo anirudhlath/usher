@@ -10,9 +10,11 @@ import pytest
 from usher.eval.bars import Judgement, load_bars
 from usher.eval.errors import EvalDependencyMissing, EvalRefused
 from usher.eval.goldens.suggest import TypoCase
+from usher.eval.ledger import ScoreRecord
 from usher.eval.metrics.ir import Ranking
-from usher.eval.runner import score_surface
+from usher.eval.runner import score_surface, verdict_for
 from usher.eval.surfaces.suggest import SurfaceRun
+from usher.eval.verdicts import Verdict
 
 # tests/unit/test_eval_runner.py -> tests/unit -> tests -> repo root. Same
 # derivation as tests/unit/test_eval_contract.py, which reads the same file
@@ -126,3 +128,62 @@ def test_latency_is_reported_and_is_not_averaged_with_recall() -> None:
     metrics = {one.metric for one in scores}
     assert "latency_p95_ms" in metrics
     assert "recall_at_5" in metrics
+
+
+def _judged(*judgements: Judgement) -> tuple[ScoreRecord, ...]:
+    return tuple(
+        ScoreRecord(
+            surface="suggest",
+            tier="prefix",
+            metric=f"m{index}",
+            stratum="all",
+            value=0.0,
+            observations=1,
+            judgement=judgement,
+            bar_kind=None,
+            bar_low=None,
+            bar_high=None,
+        )
+        for index, judgement in enumerate(judgements)
+    )
+
+
+@pytest.mark.parametrize(
+    ("judgements", "expected"),
+    [
+        ((Judgement.PENDING,), Verdict.PENDING),
+        ((Judgement.UNBARRED,), Verdict.UNBARRED),
+        ((Judgement.PASS,), Verdict.PASS),
+        ((Judgement.FAIL,), Verdict.FAIL),
+        ((Judgement.PENDING, Judgement.UNBARRED), Verdict.PENDING),
+        ((Judgement.PASS, Judgement.PENDING, Judgement.UNBARRED), Verdict.PASS),
+        ((Judgement.FAIL, Judgement.PASS, Judgement.PENDING), Verdict.FAIL),
+    ],
+)
+def test_the_verdict_precedence_holds_in_every_combination(
+    judgements: tuple[Judgement, ...], expected: Verdict
+) -> None:
+    """**`verdict_for` had no test at all**, found 2026-08-20 by Task 15's
+    sweep: the plant `only PENDING -> PASS` survived the whole eval selection,
+    and a grep afterwards found nothing in `tests/` naming the function.
+
+    The first row is the one the plant falsified and the one that matters
+    today, because `docs/evals/bars.toml` ships **three** pending bars: a run
+    whose only judgements are PENDING must report PENDING, not PASS. It is
+    `exit_code_for`'s input, so the damage is a CI job going green on a run
+    that faced no bar -- the "a run that did not run is not a pass" trap, one
+    level down from where this repository usually meets it.
+
+    Parametrised over the whole precedence rather than over that one row,
+    because the function's four branches are ordered and a case pinning only
+    the branch a sweep happened to plant leaves the other three where this one
+    was. The mixed rows are the ones with teeth: any single-judgement row is
+    also satisfied by an implementation that returns whatever it was given."""
+    assert verdict_for(_judged(*judgements)) is expected
+
+
+def test_an_empty_run_is_unbarred_rather_than_a_pass() -> None:
+    """The degenerate input, and it is not hypothetical: a surface whose tiers
+    all raised produces no records, and `UNBARRED` is what says so. `PASS`
+    here would be a run claiming to have faced a bar it never reached."""
+    assert verdict_for(()) is Verdict.UNBARRED
