@@ -1324,6 +1324,24 @@ Check each against the bar:
   exists for — an IMDb-scale value surviving in a `tmdb_*` column means the
   separation failed.
 - **P6**: `titles = 1272870`.
+
+Then measure the **suggest tiebreak's new reach**, because it changes what the
+baseline is about to measure and the number belongs in the log rather than in a
+later explanation:
+
+```bash
+docker exec usher-postgres-1 psql -U usher -d usher -c "
+SELECT count(tmdb_popularity) AS pop_set,
+       count(tmdb_vote_count) AS tmdb_votes_set,
+       count(imdb_num_votes)  AS imdb_votes_set,
+       count(*) FILTER (WHERE tmdb_popularity IS NULL AND tmdb_vote_count IS NULL) AS unordered_by_either
+FROM titles;"
+```
+
+`unordered_by_either` is the population for which the type-ahead box now falls
+all the way through to `id ASC` — insertion order. Before this plan it was the
+rows carrying neither `popularity` nor the mixed `vote_count`; record both the
+new figure and the 540,275 the old key reached.
 - `Breaking Bad` carries 2,656,080 in `imdb_num_votes` and NULL in
   `tmdb_vote_count`; `Inception` carries ~39,838 in `tmdb_vote_count` **and** a
   real IMDb count in `imdb_num_votes`.
@@ -1438,6 +1456,33 @@ Consequences, Evidence. It must contain:
    this plan's "The boundary" section.
 6. **The consequence to state plainly**: `?sort=vote_count` orders 131,241 rows
    instead of 540,275, on one scale instead of two.
+7. **The second consequence, found during Task 2 and bigger than the first — the
+   suggest tiebreak.** `adapters/search/postgres.py` and
+   `adapters/search/prefix.py` both order
+   `dist, tmdb_popularity DESC NULLS LAST, tmdb_vote_count DESC NULLS LAST, id`,
+   and `postgres.py`'s comment block justifies the vote-count key with a
+   measurement: *"on the ~77% that stay NULL this clause degenerates to
+   `dist ASC, id ASC` … and `tmdb_vote_count` — written by the bootstrap on
+   539,350 rows — is what orders them."*
+
+   **Task 2 made that false.** The bootstrap now writes `imdb_num_votes`, so
+   nothing but TMDb enrichment fills `tmdb_vote_count`. Measured on the deployed
+   catalog: the key falls from **540,275 rows to the 132,415 that are genuinely
+   enriched**, and on a bootstrap-only catalog it is NULL on *every* row, where
+   the tiebreak previously ordered 539,350. So the second sort key of the
+   type-ahead box has quietly stopped working for most of the catalog.
+
+   ⚠️ **This lands inside the population E1's baseline measures**, which is the
+   whole reason the harness exists — record it in the ADR *before* the baseline
+   runs, so the numbers are read against a stated change rather than explaining
+   one afterwards. Do **not** repair it by pointing the key at `imdb_num_votes`:
+   that is a ranking decision with its own measurement, and it is
+   [#39](https://github.com/anirudhlath/usher/issues/39). File it there, with
+   these numbers.
+
+   Two files already carry a dated ⚠️ recording the stale attribution
+   (`ports/repository/title.py`, from Task 1's review round). The two search
+   adapters do not yet — check and annotate them the same way.
 7. **Cross-references**: ADR-0036 as the precedent (a credit names its source),
    ADR-0002 for the frame, and [#39](https://github.com/anirudhlath/usher/issues/39)
    as the deferred combined metric.
