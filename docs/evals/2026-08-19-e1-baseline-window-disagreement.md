@@ -174,6 +174,27 @@ varies the numerator, not the ordering inputs. The sweep bounds the *noise*
 below can see that, and it is now cheaper to interpret because the noise it has
 to beat is measured rather than assumed.
 
+**Measured 2026-08-20, and the mechanism is not the one written above.** Joined
+against `titles_rating_backup_20260819` over all 1,272,870 rows:
+
+| column | backup non-null | current non-null | rows differing |
+|---|---|---|---|
+| `tmdb_popularity` | 292,320 | 292,320 | **0** |
+| `tmdb_vote_count` | 540,275 | 132,415 | **407,860** |
+
+**The primary sort key was never touched**, and every one of the 407,860
+differing rows is **value → NULL** (0 null→value, 0 value→value; the
+arithmetic closes exactly). So the decontamination *deleted* contaminated
+counts rather than correcting them, and the whole effect runs through the
+**tiebreaker** — which is not a minor role here, because 77.0% of the catalog
+(980,550 rows) has a NULL `tmdb_popularity` and for all of those
+`tmdb_vote_count` *is* the ordering. **25.2% of the eligible frame — 24,018 of
+95,338 titles — is in the nulled set**, and those are what a typo case targets.
+
+Tier 2 sorts by the same two columns one key down (`postgres.py:811`:
+`dist ASC, tmdb_popularity DESC NULLS LAST, tmdb_vote_count DESC NULLS LAST,
+id ASC`), so this reaches the fuzzy tier too.
+
 **3 — An 8-day-newer IMDb snapshot.** Recorded in the goldens module as the
 cause of the residual +0.19% in frame size. Weakest of the three: it moves which
 titles are eligible, and by argument above eligibility does not move the drawn
@@ -199,6 +220,68 @@ indistinguishable from zero, the window is the thing to fix — and it should th
 be re-derived as an interval over draws (mean ± k·SD, with the SD measured
 above) rather than one draw ± a guess.
 
+## The paired result — run 2026-08-20
+
+Eight seeds, both arms, quick mode over the whole frame so nothing was written
+to the ledger. `n` is identical within every pair, which is the pairing holding:
+restoring the tiebreaker cannot move the sampling frame, and the counts confirm
+it did not.
+
+| seed | n | damaged | restored | diff |
+|---|---|---|---|---|
+| 20260803 | 2991 | 0.0237 | 0.0237 | +0.0000 |
+| 20260804 | 2986 | 0.0214 | 0.0218 | +0.0004 |
+| 20260805 | 2989 | 0.0221 | 0.0228 | +0.0007 |
+| 20260806 | 2992 | 0.0197 | 0.0197 | +0.0000 |
+| 20260807 | 2992 | 0.0184 | 0.0191 | +0.0007 |
+| 20260808 | 2989 | 0.0241 | 0.0244 | +0.0003 |
+| 20260809 | 2989 | 0.0221 | 0.0224 | +0.0003 |
+| 20260810 | 2992 | 0.0231 | 0.0231 | +0.0000 |
+
+| tier | mean diff | SD | SE | \|mean\|/SE |
+|---|---|---|---|---|
+| prefix | **+0.000300** | 0.000293 | 0.000104 | **2.90** |
+| fuzzy | **+0.001750** | 0.001006 | 0.000356 | **4.92** |
+
+**No negative pair on either tier.** The damaged arm also reproduced all eight
+previously-measured seeds exactly, including the `--full` baseline's 0.0237 at
+n=2991 — the control that makes the restored arm comparable rather than merely
+newer.
+
+### The rule landed in a branch that was not written
+
+The result is **significant and positive**, which is neither of the two
+branches above. It was pre-registered as a possible third outcome while one of
+the sixteen runs had completed, on the strength of the column measurements
+alone: if the defect *nulls* a tiebreaker, it pushes targets **down**, and the
+diff has to be positive.
+
+**And the analysis script's own reporting is wrong for this input**, which is
+recorded rather than quietly patched because the wrong sentence is the one that
+would have reached this file. Its else-branch prints *"the paired difference is
+indistinguishable from zero"* — false at 2.90 SE. The arithmetic was right and
+the prose was not.
+
+### What it settles
+
+**The ordering defect is real, and it depresses recall rather than raising
+it.** Repairing it moves prefix recall *up*, so the undamaged system's mean is
+**0.022125** — *further* above the window's 0.022 ceiling than the damaged
+0.021825 was. Cause 2 therefore cannot excuse a baseline that came in high; it
+makes the disagreement slightly worse.
+
+**So cause 1 stands: the window is the thing to fix**, for the reason already
+recorded — its half-width is 1.53 observed draw SD, and ADR-0031's 0.019 is
+itself one draw of the same noisy quantity.
+
+**The effect is an order of magnitude smaller than the mechanism predicted, and
+that gap is not explained.** A quarter of the frame gets pushed down by the
+nulled tiebreaker and it moved prefix recall by 1.4% relative. The likely
+reason is that tier 1 is an exact-prefix probe whose recall is entirely the
+deletion class, and a probe returning fewer than five candidates never
+exercises the tiebreak at all — so ordering is irrelevant to most cases. **That
+is a hypothesis and nothing here measures it.**
+
 ## What was deliberately not done
 
 - **The window was not widened.** Moving `high` from 0.022 to 0.024 makes the
@@ -209,6 +292,23 @@ above) rather than one draw ± a guess.
   `band=2-4`, 0.6893 at `typo_class=transposition`). A pending bar is filled in
   once, from a baseline that is trusted; a baseline whose frame is under active
   suspicion cannot authorise it. They stay `pending` until cause 2 is settled.
+
+  **Still not filled after the paired run, and now for a measured reason
+  rather than a suspicion.** All three are `fuzzy recall_at_5`, and the fuzzy
+  tier is the arm the ordering defect hits *hardest* — **+0.001750 at 4.92
+  SE**. Filling them from this baseline would pin a number that a confirmed
+  defect is holding down by ~0.0018, and when #39 repairs the ordering the
+  measured value rises. A window bar set at today's damaged value would then
+  **fail on the fix** — which is "an eval that cannot fail ratifies the bug"
+  arriving through the bar rather than through the control. They should be
+  filled from a run of the repaired system, and #39 is the blocker.
+
+- **`bars.toml` was not edited at all**, deliberately, including its prose. The
+  recorded ledger entry carries `bars_sha256
+  ae51d05c1f9abdeb9f9f7bfef5d752a56cff492e3f80798d065012bf0268c6a5`, and that
+  hash is only useful while the file it names can still be produced. Adding a
+  comment explaining why the bars stay pending would have moved it for no
+  functional gain, so the explanation lives here instead.
 - **Task 14 Steps 3 and 4 are not done**, so nothing gates yet. Step 5 (ADR-0039)
   and Step 6 (the PRD corrections) were independent of the outcome and are done.
 

@@ -1268,13 +1268,24 @@ at exactly 0.0% because an exact-prefix probe cannot survive either.
 window's half-width of 0.003 is 1.53 observed SD and it rejected 5 of the 8.
 **The 1.9% above is itself one draw of that same quantity, not a property of the
 system**, and once its own error is propagated the gap between it and the
-eight-draw mean is 1.36 SE — not significant. The remaining candidate is tier
-1's `ORDER BY`, which reads two columns
-[ADR-0040](decisions/0040-rating-columns-name-their-source.md) rewrote and has
-not finished decontaminating; the seed sweep is blind to it, because all eight
-draws share the same columns. Write-up and the paired experiment that settles it:
+eight-draw mean is 1.36 SE — not significant.
+
+**The competing candidate was tier 1's `ORDER BY`, and a paired experiment on
+2026-08-20 settled it — against the direction it was proposed in.** Re-running
+the same eight seeds against a catalog whose ordering columns are restored from
+`titles_rating_backup_20260819` moves prefix recall **up** by 0.000300 (2.90 SE)
+and fuzzy recall **up** by 0.001750 (4.92 SE), with no negative pair on either
+tier. So the defect is real and it *depresses* recall: repaired, the system
+scores **0.022125**, further above the window than the damaged 0.021825. It
+cannot explain a baseline that came in high. Measured cause:
+[ADR-0040](decisions/0040-rating-columns-name-their-source.md) left
+`tmdb_popularity` byte-identical and nulled 407,860 `tmdb_vote_count` values, and
+77% of the catalog has no popularity at all — so the tiebreaker is the ordering
+for most titles. Tracked as #39. Write-up:
 [the baseline disagreement](../evals/2026-08-19-e1-baseline-window-disagreement.md).
-**The window has not been widened to accommodate the number.**
+**The window has not been widened to accommodate the number**, and the three
+pending bars stay pending: all three are `fuzzy recall_at_5`, the arm the defect
+hits hardest, so filling them now would pin a value that the eventual fix fails.
 
 ✅ **Tier 1 is built.** `PostgresPrefixSuggestIndex`
 (`adapters/search/prefix.py`) is the probe: `lower(name) LIKE 'typed%'` over

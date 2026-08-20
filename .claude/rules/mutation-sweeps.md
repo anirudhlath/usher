@@ -5028,3 +5028,50 @@ Gate green before and after on the fully restored tree (`git status` clean,
 both mutated files `md5sum`-verified): `ruff check`, `ruff format --check` (629
 files), `mypy` over 611 files, `lint-imports` **12 kept / 0 broken**, and
 **5,473 passed / 26 skipped** over the whole suite.
+
+## E1 Task 15 — the eval package, and two survivors that a correct prediction hid (2026-08-20)
+
+**19 plants over `usher.eval`, 16 killed, 3 predicted survivors — and the sweep
+found two real coverage gaps, one of them behind a prediction that was right for
+the wrong reason.** Selection: `tests/unit/test_eval_*.py` plus
+`tests/integration/test_eval_*.py` (12 files, 174 cases), scoped because the only
+reach into the package from outside is four lines in `cli.py` — grepped, not
+assumed. Plant list written to `/var/tmp/e1-sweep/PLANTS.md` **before anything
+ran** and hashed (`63fc98ca9f6e7d7439eef6bcf4bed439564539c991ecfe3e3c89171b52a86b06`),
+so a verdict edited afterwards to match a result would be visible. Zero HUNG,
+zero DID-NOT-RUN, zero BROKEN-MUTATION; every anchor pre-checked unique and every
+mutant pre-compiled; tree committed first and `git status` asserted clean after
+every plant.
+
+**T16 — `verdict_for` had no test in the repository at all.** The plant
+`only PENDING → PASS` survived, and `grep -rn "verdict_for" tests/` afterwards
+returned **nothing**. Its four-branch precedence was entirely unpinned. This is
+not latent: `docs/evals/bars.toml` ships three `pending` bars today, and
+`verdict_for` is `exit_code_for`'s input, so the defect is a CI job exiting 0 on
+a run that faced no bar — *"a run that did not run is not a pass"* one level
+down from where this repository usually meets it. Closed by a parametrisation
+over the whole precedence plus the empty-input case; re-planted, it dies.
+
+**C1 — the plan predicted SURVIVE, it survived, and the prediction was wrong.**
+The plant swaps `GATE_BANDS`' `8-11` and `12-19`. The plan's reasoning was "a
+`sample` per band is independent of band order" — which is a true statement
+about `GATE_POOLS`, keyed by band *name*, and a false one about the
+**generator**, which walks that tuple in order against a single `Random(seed)`.
+Measured rather than argued: with the two swapped, the drawn set shares only
+**1,266 of 3,000** cases with the shipped order — 58% of the measurement moves,
+while `check_frame` still passes perfectly, because the pools are untouched and
+only the draw shifts. `build_typo_cases`' own docstring says exactly this ("Any
+other order draws a different set from the same seed") and nothing checked it.
+
+**The shape worth carrying: a correct verdict can hide a live gap, and the
+sweep's own bookkeeping is what conceals it.** A harness that scores
+`got == expected` marks C1 `ok` and moves on. The gap was only visible because
+the plant list recorded the *reason* beside the verdict and the reason did not
+survive contact with the module. **Write the mechanism into the plant list, not
+just the expected verdict — then a survivor whose stated reason is wrong reads
+as a finding rather than as a confirmation.** Nearest relative is M9 F5 and M5's
+`socket_logger`, both of which are predicted verdicts reached by the wrong
+mechanism; this is the first where the wrong mechanism left a real hole.
+
+Both closed in `eb0c7c8` and both re-planted afterwards: **T16 KILLED, C1
+KILLED.**
