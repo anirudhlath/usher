@@ -1448,3 +1448,143 @@ column is empty, and therefore why S8's probe had nothing to measure against.
   adapter walks; a library removed from *view* rather than from disk is
   invisible to both.
 - **Any Emby build but 4.9.5.0**, one household, one evening.
+
+## M10 Task S11 — the Phase 1 gate: push enabled against a real household, in two requests (2026-08-19)
+
+**11 live requests against a declared ceiling of 40**, across four observations,
+21:13Z–02:25Z. Pre-registered checklist `/var/tmp/m10-gate/GATE-S.md`
+(`sha256 6cb2e82d7b4471bf4d17e1c227de6ec705ad27e70bebcc9ffa667c7c107f06df`),
+written and hashed **before the first socket opened** and re-verified by every
+driver at run time — all four printed the matching digest. No walk began, no
+write was made to the operator's account, and every request was a `GET`.
+
+| # | observation | requests | verdict |
+|---|---|---|---|
+| **#19** | the outbound gate through the shipped composition | 8 | **pass** |
+| **#9** | the app started with push **enabled** against the real source | **2** | **pass** |
+| **#13** | the concurrency entries pinned by value | 0 | **pass** |
+| **#20** | the retraction drift probe | 1 | **pass** |
+
+### 🔴 #9 — the scenario this whole project has been working around, in two requests
+
+**Every rule in this repository has said *set `USHER_PUSH_ENABLED=false` before
+pointing anything at a real household*,** because `LaneSupervisor` starts a lane
+per enabled source and its reconnect gap-closer calls `reconcile(..., DELTA,
+...)` — which against this library is **5,634 pages nobody asked for**. This is
+the first time the shipped app has been started with that switch **on** against
+the operator's own server, and the result is the phase's headline:
+
+```
+kind=delta  status=failed  items_seen=50  items_matched=31
+error: gap_delta_ceiling: stopped after 50 items, this walk's
+       USHER_PUSH_GAP_MAX_ITEMS ceiling. Nothing seen was lost and no cursor
+       moved; run `usher sync --kind full` for this source to close the rest
+```
+
+**Two live requests, both `StartIndex=0`** — one per lane, and the parameters
+are the evidence that they were two *different* lanes: request 1 carried
+`MinDateLastSaved` (the item lane's filter) and request 2 `MinDateLastSavedForUser`
+(the watch lane's). The run recorded **`FAILED`, never `COMPLETED`**, so
+`latest_completed_cursor` does not advance past the hole; the WARNING named the
+source, the setting **and** the remedy. **The external kill never fired** — the
+code's own ceiling held, which is the whole claim.
+
+**Run against a throwaway Postgres, not the deployment's**, and that was decided
+before the session rather than after: the deployment's database is at `m10a`
+from a concurrent session in `~/code/usher-evals`, this branch's chain does not
+contain that revision, and a second session writing the same rows mid-observation
+would make the reading unreproducible.
+
+🔴 **The finding that made the run bounded rather than lucky, and it was found by
+reading `_close_gap` before writing the driver.** `USHER_PUSH_GAP_MAX_ITEMS`
+bounds **only the item lane** — `WatchStateSyncService.sync` takes no ceiling
+argument, by a decision `api/lanes.py` states explicitly — so the watch lane runs
+*after* the bounded item walk and is bounded by nothing but its own cursor. A
+driver that seeded only an item cursor would have left the watch lane cursorless
+and walking all 1,137,557 items, which is precisely the outcome the observation
+exists to rule out. **So the seed carries two cursors with deliberately different
+windows**: the item cursor 30 days wide, so the delta overruns the ceiling on its
+first page and the refusal is a *prediction* rather than an accident of when the
+last sync happened; the watch cursor 15 minutes wide, because its window is the
+only thing bounding it. One window for both cannot satisfy both halves.
+
+**The bound that was never needed but had to exist:** an `os._exit(99)` at 10
+requests, counted in the app subprocess's own httpx wrapper. *A bound that lives
+only inside the code under test is not a bound on a run that exists to find out
+whether that code works.*
+
+### #19 — the gate at 1/rate, and two findings about the instrument
+
+Four single-item reads at `USHER_SOURCE_REQUESTS_PER_SECOND=0.5`, then four more
+at `0`, through the shipped `SourceGateRegistry` and `EmbyAdapter`, exported over
+the real OTLP collector. Spacing read from httpx's own `request` event hook —
+**downstream of the gate**, because a timer wrapping `_MinInterval.take()`
+measures the waiting rather than the pacing (S7's arm-C finding).
+
+| arm | wire gaps | median | vs `1/rate` |
+|---|---|---|---|
+| rate **0.5** | 2.0013, 2.0026, 2.0026 s | **2.0026 s** | **0.13%** (pass < 10%) |
+| rate **0** (control) | 0.4702, 0.1593, 0.1453 s | **0.1593 s** | collapsed |
+
+The control's first gap is the TLS handshake, S7's connection artefact again; the
+other two sit on S1's 0.1495 s and S7's 0.1377 s single-item medians. In
+Prometheus, `usher_source_throttle_wait_seconds` reads **sum 5.0046 over count 4
+= 1.2512 s mean** on the paced arm. That is self-consistent with the wire: the
+first request meets a fresh gate and waits ~0, three wait ~1.668 s each, and
+1.668 s of waiting plus ~0.33 s of request is the 2.0 s spacing measured.
+
+🔴 **Finding 1: the two arms' `service.name` separation did not take, and only a
+label saved the control.** `configure_telemetry` was called twice in one process
+and `set_meter_provider` is **set-once**, so both arms exported under the *first*
+arm's job name. What actually separated them is the `source` label — and only
+because the two arms were given different source *names*. **A same-named pair
+would have merged silently and the control would have read as a pass.** S1 and S7
+used a distinct `service.name` per run and both were separate processes, which is
+why the trap had not been met before; `api-telemetry-and-lanes.md` already
+records the set-once provider, one consequence over.
+
+🔴 **Finding 2: at rate 0 the throttle histogram publishes no series at all,
+rather than a zero.** Measured: `usher_source_throttle_wait_seconds_count{source=
+"gate-s19-unpaced"}` is **absent**, while that arm's
+`usher_source_request_duration_seconds_count` is present at 4 — so the export
+worked and the instrument simply recorded nothing. On PRD 10's panel *"the gate
+is off"* and *"the exporter is down"* are therefore the same silence. **This is
+the defect S8 fixed one metric over** — `usher.sync.retraction.fraction` is
+recorded on every finished full walk *including* the zeros for exactly this
+reason — and it is recorded here rather than fixed, because the gate is not the
+place to change an instrument.
+
+### #20 — the drift probe, re-read inside the gate's own window
+
+One request. **Live total 1,137,557 against Usher's 11,851 available, drift 0** —
+and the library moved **+55 items in three hours** against the 1,137,502 S8 read
+at 23:07Z, which is the reading's own evidence that the source is live. The 0
+means *"Usher holds 1.04% of this source"* and not *"the library is stable"*;
+GATE-S predicted both the value and that reading in advance, so neither is
+hindsight.
+
+### #13 — zero requests
+
+The four `KIND_CONCURRENCY` entries are pinned **by literal** in
+`tests/unit/test_config.py` (`== 4` four times, `SYNC == 1`), with the derived
+cross-check kept *beside* them rather than in place of them — the defect S7's own
+first sweep round found. Headline restated with its denominator: at the shipped
+`source_requests_per_second = 0.4`, four coroutines issue requests **2.503 s
+apart with peak in-flight 1**, so the entry bounds job slots and the gate bounds
+the wire.
+
+### Still unverified after this gate, named rather than implied
+
+- **Any Emby build but 4.9.5.0**, one household, one evening.
+- **A real 429 from anywhere.** Still *"pinned by construction, deliberately
+  never observed"* — provoking one is the behaviour ADR-0039's gate exists to
+  prevent.
+- **This server under a paging load.** Every concurrency figure in the phase is
+  from single-item reads.
+- **N > 1 Usher processes against one source** — the one bound this group cannot
+  express, because every limiter is per process.
+- **A completed full walk of this library**, and therefore the retraction guard
+  on an honest denominator. None has ever finished.
+- **#9's other arm** — S5's cursorless refusal against a genuinely fresh source.
+  The operator chose the gap-closer arm; the refusal is pinned by tests and by
+  the deployment's own history, not by this run.
