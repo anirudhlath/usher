@@ -1020,3 +1020,62 @@ The old `pool_size=10, max_overflow=5` could not hold the worker alone.
 getting slower until it starts parking jobs, which is a configuration mistake
 wearing an upstream's clothes. `Settings` refuses that arithmetic at startup
 instead.
+
+## The shared dev database is shared: clone it before migrating, never upgrade it from a feature branch (2026-08-19)
+
+**One `alembic upgrade head` against the shared `usher` database took the
+deployment down for ~3.5 hours**, and the mechanism is worth knowing because
+nothing about it looks dangerous at the moment you type it.
+
+A rating-provenance branch (`spec/quality-evals`) applied **`m10a`** to `usher`,
+renaming three `titles` columns. That put the shared database **one revision
+ahead of every `m09f` checkout** — including the running container, whose image
+was built before that revision existed. `usher-usher-1` then failed its
+readiness probe with *database at `m10a`, code expects `m09f`* and stayed
+unhealthy until the rollback. **There was never a lock**: `pg_stat_activity`
+showed zero waiters throughout, so nothing blocked and nothing timed out. The
+only symptom was a migration-version mismatch, which `/health/ready` is
+deliberately strict about.
+
+**The rule, and it costs 23 seconds:**
+
+```bash
+# In psql against the server, NOT against `usher` itself:
+CREATE DATABASE usher_myfeature TEMPLATE usher;   # ~23 s for the 6 GB catalog
+# then point the branch at the clone
+export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@127.0.0.1:5432/usher_myfeature"
+uv run alembic upgrade head
+```
+
+`TEMPLATE` is a block-level copy, so it is fast and it is a real database rather
+than a dump/restore. The clone is disposable; the shared one is not.
+
+**Three things that make this sharper than "be careful":**
+
+- **`.env` is the trap, not the command.** Every checkout of this project has a
+  `.env` pointing at the shared database, and `alembic`'s `env.py` reads
+  `get_settings()` — so `uv run alembic upgrade head` in a feature worktree
+  targets production-shared state **by default**, with no flag and no prompt.
+  The dangerous command is the one from the README.
+- **A rollback needs a snapshot taken *before* the destructive step**, and this
+  one had one: `titles_rating_backup_20260819` (1,272,870 rows, 151 MB) still
+  sits in `usher`. **Do not drop it.** Its columns are named
+  `tmdb_vote_average`/`tmdb_vote_count`/`tmdb_popularity`, which do not exist in
+  `titles` at `m09f` — that is the *point* of a snapshot taken across a rename,
+  not corruption.
+- **"The data is fine" is a measurement, not a reassurance.** The rollback was
+  verified by comparing against that snapshot rather than by inspection:
+  `community_rating` 540,275, `vote_count` 540,275, `popularity` 292,320, **0
+  rows differing across all six rating columns**, and `field_provenance` with
+  132,415 rows carrying the old key names and **0** carrying a new one.
+
+**Integration tests are unaffected and that is worth stating**, because it is
+why this hazard survives so long unnoticed: `tests/integration/` migrates a
+throwaway testcontainer per session, so the whole suite can be green forever
+while the one manual command in the README is the one that bites. The exposure
+is *scripts and manual runs*, not CI.
+
+**The same argument applies to any live-verification run.** M10's S11 used a
+throwaway `pgvector/pgvector:pg17` for exactly this reason and would have been
+right to even without the incident: a run whose numbers have to be reproducible
+must not share a database with whatever else is in flight.

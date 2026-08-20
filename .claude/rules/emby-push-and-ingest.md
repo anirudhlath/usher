@@ -1490,10 +1490,23 @@ source, the setting **and** the remedy. **The external kill never fired** — th
 code's own ceiling held, which is the whole claim.
 
 **Run against a throwaway Postgres, not the deployment's**, and that was decided
-before the session rather than after: the deployment's database is at `m10a`
-from a concurrent session in `~/code/usher-evals`, this branch's chain does not
-contain that revision, and a second session writing the same rows mid-observation
-would make the reading unreproducible.
+before the session rather than after: at the time of the gate the deployment's
+database was at `m10a` from a concurrent session in `~/code/usher-evals`, this
+branch's chain did not contain that revision, and a second session writing the
+same rows mid-observation would have made the reading unreproducible.
+
+⚠️ **That condition was temporary and is recorded in the past tense on purpose.**
+The shared database was rolled back to `m09f` the same evening and
+`usher-usher-1` is ready again; the `m10a` work moved to a separate `usher_m10a`
+database. **The gate's numbers are unaffected and that is checked rather than
+assumed:** #19 and #20 read `usher-postgres-1` **directly** rather than through
+the app, that container was never stopped, both ran ~90 minutes before the
+app's restart, and `media_items` still reads 11,851/11,851 — the denominator
+#20 was closed on. The decision to use a throwaway database would be the right
+one regardless; a live-verification run should not share a database with
+whatever else is in flight. The pre-registered `GATE-S.md` still says *"is at
+`m10a`"* and is **deliberately not edited** — a bar records what was true when
+it was written.
 
 🔴 **The finding that made the run bounded rather than lucky, and it was found by
 reading `_close_gap` before writing the driver.** `USHER_PUSH_GAP_MAX_ITEMS`
