@@ -113,23 +113,48 @@ Three candidates survive. This run does not choose between them.
 | 20260804 | 0.0214 | pass |
 | 20260805 | 0.0221 | fail (by 0.0001) |
 | 20260806 | 0.0197 | pass |
+| 20260807 | 0.0184 | pass |
+| 20260808 | 0.0241 | fail |
+| 20260809 | 0.0221 | fail |
+| 20260810 | 0.0231 | fail |
 
-Four draws, two outside, spanning 0.0197–0.0237 — **a range twice the window's
-full width.** The lowest of them lands on ADR-0031's 0.019 almost exactly, which
-is the observation that reframes the whole disagreement: **the pinned seed sits
-high in a distribution whose centre is near where the window was set**, rather
-than the system having moved away from it.
+**Eight draws, five outside the window.** Mean 0.02183, SD **0.00196**, range
+0.0184–0.0241 — a range 1.9× the window's full width.
 
-At p ≈ 0.02 and n ≈ 2,991 the naive binomial standard error is ≈ 0.0026, so the
-window's half-width is barely **1.2 standard errors** of a single draw. The
-naive figure is itself an *under*estimate: the 2,991 cases come from ~750 names,
-four typo classes each, and recall is strongly correlated within a name — a long
-name is hard for all four of its cases at once. The clustered standard error is
-larger than 0.0026, so the true half-width is under one standard error.
+The window's half-width of 0.003 is **1.53 observed SD**. A bar that narrow
+around a metric this noisy rejects a correctly-behaving system most of the time,
+which is what happened: 5 of 8.
 
-A bar that a correct system fails on half its re-draws is not measuring what it
-was meant to measure. More seeds are still running; this table is the part that
-is settled.
+**The measured SD also settles a question the first four draws could not.** At
+p ≈ 0.02 and n ≈ 2,991 the naive *binomial* SE is 0.0026 — larger than what the
+draws actually show. The naive figure treats 2,991 cases as independent when
+they come from ~750 names, four typo classes each; the true clustering runs the
+other way from the usual worry, because holding the band structure fixed at 150
+names per band *constrains* the length mix that drives the whole metric. Use the
+observed 0.00196, not a computed one.
+
+### The comparison against 0.019, done two ways
+
+This is the part worth getting right, because the two readings point opposite
+directions and the first one is wrong.
+
+| reading | treats ADR-0031's 0.019 as | result |
+|---|---|---|
+| naive | a population constant | (0.02183 − 0.019) / 0.00069 = **4.08 SE — decisive** |
+| honest | **one draw, like these eight** | (0.02183 − 0.019) / 0.00212 = **1.36 SE — not significant** |
+
+**ADR-0031's 1.9% is a single measurement over the gate's own 750 names, not a
+property of the system.** It carries the same ±0.00196 every row of the table
+above carries. Comparing a mean-of-eight against it must propagate that, and
+once it does, the gap is 1.36 SE and there is nothing to explain.
+
+**Correcting an earlier reading in this file:** with only four draws it looked
+as though the distribution's centre sat near 0.019 and the pinned seed was
+simply high. It does not — the centre is 0.0218, and seed 20260806's 0.0197 was
+a low draw being over-read. The conclusion survives the correction, but by the
+other route: not "the centre is where the bar is", but "the bar was set from one
+draw of a quantity whose draws move by ±0.002, and then given a half-width of
+0.003."
 
 **2 — The tier-1 ordering reads two columns this branch rewrote.**
 `prefix.py:125` is
@@ -141,25 +166,38 @@ wherever more than five titles share the typed prefix, which is common in the
 short bands. This is the candidate that would be a real defect rather than a
 mis-set bar, and it is already half-tracked as #39.
 
-**The seed sweep weakens this one without closing it.** A broken ordering input
-should shift every draw in the same direction; four draws spanning 0.0197–0.0237
-with the low end on ADR-0031's own number look more like noise around an intact
-system than a systematic displacement. What keeps it open is that all four draws
-share the same damaged columns, so the sweep cannot see a shift common to all of
-them — only the restore experiment below can.
+**The seed sweep cannot weaken this one, and it was a mistake to think it
+could.** All eight draws query the same damaged columns, so a displacement
+common to all of them is exactly what the sweep is blind to — re-drawing names
+varies the numerator, not the ordering inputs. The sweep bounds the *noise*
+(SD 0.00196) and says nothing about the *offset*. Only the restore experiment
+below can see that, and it is now cheaper to interpret because the noise it has
+to beat is measured rather than assumed.
 
 **3 — An 8-day-newer IMDb snapshot.** Recorded in the goldens module as the
 cause of the residual +0.19% in frame size. Weakest of the three: it moves which
 titles are eligible, and by argument above eligibility does not move the drawn
 length mix.
 
-**What separates 1 from 2:** re-run the pinned seed against a catalog whose
-`tmdb_popularity`/`tmdb_vote_count` are restored to their pre-ADR-0040 values —
-the `titles_rating_backup_20260819` table holds exactly those columns for all
-1,272,870 rows, which is what it was kept for. Same seed, same names, only the
-ordering inputs differ. If 0.0237 moves toward 0.019, cause 2 dominates and the
-window was never wrong. If it does not move, the window is the thing to fix, and
-it should be re-derived as an interval over draws rather than a point ± a guess.
+**What separates 1 from 2, and why it is a paired measurement.** Re-run *the
+same eight seeds* against a catalog whose `tmdb_popularity`/`tmdb_vote_count`
+are restored to their pre-ADR-0040 values — `titles_rating_backup_20260819`
+holds exactly those columns for all 1,272,870 rows, which is what it was kept
+for. Same seeds, same names, same cases; **only the ordering inputs differ.**
+
+Pairing matters here more than anywhere else in this file. Unpaired, a shift has
+to clear the 0.00196 draw SD to be visible at all, and cause 2's whole plausible
+magnitude is about 0.003. Paired, the draw noise cancels: each seed is compared
+against *itself*, and the statistic is the mean of eight differences. The
+project's signature failure mode is running this comparison unpaired, finding
+nothing, and recording "no effect".
+
+Decision rule, written before the run: if the paired mean difference is
+negative and its magnitude exceeds the difference's own standard error by 2×,
+cause 2 is real and the window was never wrong. If the paired difference is
+indistinguishable from zero, the window is the thing to fix — and it should then
+be re-derived as an interval over draws (mean ± k·SD, with the SD measured
+above) rather than one draw ± a guess.
 
 ## What was deliberately not done
 

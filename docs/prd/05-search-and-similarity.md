@@ -1262,11 +1262,17 @@ outside the `[0.016, 0.022]` window pre-registered from this section's number �
 so the run failed and the harness's three pending bars were left unfilled rather
 than set from a frame under suspicion. The number decomposes exactly: tier 1's
 recall is **entirely the deletion class** (9.45%), with substitution and doubling
-at exactly 0.0% because an exact-prefix probe cannot survive either. The
-candidate causes are draw variance (the window's half-width is ~1.2 standard
-errors of one draw) and tier 1's `ORDER BY`, which reads two columns
+at exactly 0.0% because an exact-prefix probe cannot survive either.
+
+**Re-drawing the names at eight seeds gives 0.0184–0.0241, SD 0.00196** — so the
+window's half-width of 0.003 is 1.53 observed SD and it rejected 5 of the 8.
+**The 1.9% above is itself one draw of that same quantity, not a property of the
+system**, and once its own error is propagated the gap between it and the
+eight-draw mean is 1.36 SE — not significant. The remaining candidate is tier
+1's `ORDER BY`, which reads two columns
 [ADR-0040](decisions/0040-rating-columns-name-their-source.md) rewrote and has
-not finished decontaminating. Write-up and the experiment that separates them:
+not finished decontaminating; the seed sweep is blind to it, because all eight
+draws share the same columns. Write-up and the paired experiment that settles it:
 [the baseline disagreement](../evals/2026-08-19-e1-baseline-window-disagreement.md).
 **The window has not been widened to accommodate the number.**
 
