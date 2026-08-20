@@ -50,6 +50,29 @@ def test_every_adr_file_is_listed_in_the_decisions_register() -> None:
     assert linked - files == set(), f"register rows pointing at nothing: {sorted(linked - files)}"
 
 
+def test_no_two_decision_records_claim_the_same_number() -> None:
+    """The case above compares **filenames** in both directions, which is
+    why it watched two ADRs numbered 0039 land and stayed green.
+
+    Measured 2026-08-20: `milestone/m10-hardening` and `main` each minted an
+    `0039` -- the genre vocabulary on the trunk, the outbound limiter on the
+    branch -- and the merge brought in both. Two distinct filenames, both
+    present as files, both present as register rows, so `files - linked` and
+    `linked - files` were empty and the register looked correct. What was
+    broken is the thing a register is *for*: a bare `ADR-0039` in prose no
+    longer named one decision, across roughly sixty sites.
+
+    The numeric prefix is the identifier every citation actually uses, and
+    nothing parsed it until this case did. The limiter moved to 0040; this
+    is what stops the next parallel branch re-doing it.
+    """
+    numbers = [path.name[:4] for path in _DECISIONS.glob("0*.md")]
+
+    assert numbers, "the register scan found no ADRs"
+    duplicates = sorted({one for one in numbers if numbers.count(one) > 1})
+    assert duplicates == [], f"two decision records claim one number: {duplicates}"
+
+
 def test_the_provider_proposal_adr_is_reachable_from_prd_06() -> None:
     """An ADR the PRD does not link is one the next person composing rows
     will not read, and this is the decision they are most likely to
