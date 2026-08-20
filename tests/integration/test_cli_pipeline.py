@@ -748,6 +748,8 @@ async def test_an_unknown_title_id_is_a_sentence_against_real_postgres(
         )
 
     message = str(exit_info.value)
+    # `str` rather than an int, which is what makes this exit 1.
+    assert isinstance(exit_info.value.code, str)
     assert str(unknown) in message, message
     assert "Traceback" not in message, message
     assert "resolved" not in capsys.readouterr().out

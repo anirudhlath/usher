@@ -324,6 +324,10 @@ async def test_resolving_to_a_title_that_does_not_exist_names_the_id_and_keeps_t
         )
 
     message = str(exit_info.value)
+    # A `str` code is what makes this exit 1 rather than 0 -- `SystemExit(0)`
+    # renders as "0" and would satisfy nothing else here, but stating it is
+    # cheaper than leaving the exit status to be inferred from the message.
+    assert isinstance(exit_info.value.code, str)
     assert str(unknown) in message, message
     assert "Traceback" not in message, message
     assert harness.media_items.attached == [], harness.media_items.attached
