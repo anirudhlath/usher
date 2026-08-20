@@ -339,6 +339,73 @@ async def test_work_completes_a_job_for_an_item_no_source_addresses(
     assert remaining == 0, "a job for an item nothing addresses is done, not poison"
 
 
+#: Backdated an hour, past `USHER_JOB_LEASE_SECONDS`' 300 s default without
+#: moving the setting. A **raw `INSERT`** because that is the only way to own
+#: `jobs.updated_at`: every statement in `PostgresJobQueue` stamps it
+#: `clock_timestamp()` itself, so a claim made through the port is by
+#: construction fresh and can never be older than the lease.
+_PLANT_AN_ORPHAN = """
+INSERT INTO jobs (id, kind, key, priority, status, attempts, created_at, updated_at)
+VALUES (
+    :id, :kind, :key, :priority, 'running', 0,
+    clock_timestamp() - interval '1 hour',
+    clock_timestamp() - interval '1 hour'
+)
+"""
+
+
+async def test_work_names_the_claims_it_took_back_from_a_process_that_stopped(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**`recover()`'s return value has a reader at both call sites**, and
+    this is the `usher work` one (M10 F2).
+
+    It was `await worker.recover()` as a bare statement here and in
+    `api/lanes.py` since W1, so the only trace of M9's S3 condition -- a
+    worker dead at 78 minutes holding twenty claims -- was a WARNING that
+    fires only when the count is non-zero. The server reports the total in
+    `/health/ready`'s body; this command has no readiness route, so it says so
+    in the pass line it already prints rather than growing a surface.
+
+    The premise is asserted first and from the command's own session: a row
+    recovery cannot see recovers `0`, and `0` is also what a discarded return
+    value prints.
+    """
+    key = f"an-orphan-{new_id()}"
+    async with _session_for(cli_settings) as session:
+        await session.execute(
+            text(_PLANT_AN_ORPHAN),
+            {
+                "id": new_id(),
+                "kind": JobKind.MATCH.value,
+                "key": key,
+                "priority": int(JobPriority.NEW),
+            },
+        )
+        await session.commit()
+    async with _session_for(cli_settings) as session:
+        stale = (
+            await session.execute(
+                text(
+                    "SELECT status, updated_at <= clock_timestamp() - "
+                    "make_interval(secs => :lease) AS stale FROM jobs WHERE key = :key"
+                ),
+                {"lease": cli_settings.job_lease_seconds, "key": key},
+            )
+        ).one()
+    assert (stale.status, stale.stale) == ("running", True), (
+        "the premise: an abandoned claim older than the lease is what recovery takes back"
+    )
+
+    await _work(cli_settings, once=True)
+
+    out = capsys.readouterr().out
+    assert "1 recovered claims" in out, out
+    # And the recovered claim really was re-run in the same pass, which is
+    # what makes the number a recovery rather than a count of anything.
+    assert "1 jobs" in out, out
+
+
 async def test_unmatched_lists_and_resolves_through_the_real_repository(
     cli_settings: Settings,
     clean_slate: None,

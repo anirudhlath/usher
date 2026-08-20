@@ -596,6 +596,14 @@ async def _work(settings: Settings, *, once: bool) -> None:
         )
 
         recovered_at = 0.0
+        # The running total of what this process has taken back from workers
+        # that stopped heartbeating, kept for the same reason the server keeps
+        # it in `/health/ready`'s body: `recover()` has returned this number
+        # since M9's W1 and **both** callers discarded it, so the only trace of
+        # M9's S3 condition was a WARNING that fires when the count is
+        # non-zero. This command has no readiness route, so it goes in the pass
+        # line it already prints rather than growing a surface (M10 F2).
+        recovered = 0
 
         async def _measure() -> int:
             # PRD 08's recovery, on the lease rather than on "everything
@@ -606,10 +614,10 @@ async def _work(settings: Settings, *, once: bool) -> None:
             # the lease for `api/lanes.py`'s reason: it is an `UPDATE` scanning
             # `status = 'running'`, and between leases there is nothing to
             # find.
-            nonlocal recovered_at
+            nonlocal recovered_at, recovered
             now = time.monotonic()
             if now - recovered_at >= settings.job_lease_seconds / 2:
-                await worker.recover()
+                recovered += await worker.recover()
                 recovered_at = now
             done = await worker.run_once()
             async with work() as pipeline:
@@ -620,7 +628,7 @@ async def _work(settings: Settings, *, once: bool) -> None:
             return done
 
         ran = await _measure()
-        print(f"{ran} jobs")
+        print(f"{ran} jobs, {recovered} recovered claims")
         while not once:
             if ran == 0:
                 await asyncio.sleep(_IDLE_SLEEP_SECONDS)

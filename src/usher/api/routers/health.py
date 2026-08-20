@@ -137,11 +137,20 @@ async def ready(
     # load-balancer half was always the load-bearing one and is left standing
     # alone rather than propped up by a number nobody had taken.
     #
-    # Free to report and therefore worth reporting: `running_sources()` and
-    # `worker_running()` read task state off an in-memory supervisor, so
-    # this endpoint still makes **no upstream request at all**.
+    # Free to report and therefore worth reporting: all five of these read
+    # in-memory state off the supervisor -- task state for the first three,
+    # and for the last two the number `JobWorker.recover()` already returned
+    # rather than a `SELECT count(*) ... WHERE status = 'running'` per 2 s
+    # poll over a table with no index on that value. So this endpoint still
+    # makes **no upstream request and issues no third statement at all**.
     return ReadinessResponse(
         status="ready" if is_ready else "degraded",
         checks=checks,
-        lanes=LaneReport(push=lanes.running_sources(), worker=lanes.worker_running()),
+        lanes=LaneReport(
+            push=lanes.running_sources(),
+            worker=lanes.worker_running(),
+            crashed_sources=lanes.crashed_sources(),
+            recovered_claims=lanes.recovered_claims(),
+            recovered_at=lanes.recovered_at(),
+        ),
     )

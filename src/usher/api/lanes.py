@@ -83,6 +83,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from loguru import logger
 from opentelemetry import trace
@@ -180,6 +181,12 @@ class LaneSupervisor:
         self._worker: asyncio.Task[None] | None = None
         self._refresher: asyncio.Task[None] | None = None
         self._rows_lane: asyncio.Task[None] | None = None
+        # What `JobWorker.recover()` measured, kept rather than discarded --
+        # see `recovered_claims()` below. `None` until the first recovery pass
+        # returns, so a process that runs no worker lane reports *not probed*
+        # rather than *no orphans*.
+        self._recovered_claims: int | None = None
+        self._recovered_at: datetime | None = None
         self._gauges = QueueGauges()
         # PRD 10's embedding backlog, on the same beat and for the same
         # reason: an OTel observable callback runs on the metric reader's
@@ -256,6 +263,49 @@ class LaneSupervisor:
 
     def worker_running(self) -> bool:
         return self._worker is not None and not self._worker.done()
+
+    def recovered_claims(self) -> int | None:
+        """How many abandoned claims this process has taken back since it
+        started, or `None` if it has never asked.
+
+        The number `JobWorker.recover()` already returned, summed -- **never a
+        fresh query**. `/health/ready` reports this and the shipped compose
+        healthcheck polls it every 2 s; a `SELECT count(*) FROM jobs WHERE
+        status = 'running' AND updated_at <= clock_timestamp() - ...` per poll
+        is a scan of a table with no index on that value (`ix_jobs_claim` is
+        partial on `pending`, `ix_jobs_parked` on `parked`) and M4 measured it
+        at 1,126,674 rows. This costs nothing and is what `recover()` knows.
+
+        `None` is *not probed*, on `push_available()`'s own terms one method
+        up: with `USHER_WORKER_ENABLED=false` beside a `usher work` container
+        this process never calls `recover()`, and `0` would answer "no
+        orphans" to a question it never asked.
+
+        **Per process, so it cannot see a peer's orphans that the peer
+        recovered** -- two workers each report what they took back and the sum
+        is the truth. Stated rather than solved, because the alternative is
+        the per-poll query above.
+        """
+        return self._recovered_claims
+
+    def recovered_at(self) -> datetime | None:
+        """When the last recovery pass that *found something* ran.
+
+        Not "when recovery last ran": that moves on its own every half lease
+        and would tell a poller nothing.
+        """
+        return self._recovered_at
+
+    def _note_recovery(self, recovered: int) -> None:
+        """Fold one `recover()` result into the two reported fields.
+
+        Reads the **return value**; a counter incremented before the call
+        would report passes rather than claims, and the two agree at exactly
+        the moment nothing is wrong.
+        """
+        self._recovered_claims = (self._recovered_claims or 0) + recovered
+        if recovered:
+            self._recovered_at = datetime.now(UTC)
 
     def rows_refreshing(self) -> bool:
         """Whether the `rows.refresh` lane has a live task.
@@ -754,7 +804,13 @@ class LaneSupervisor:
                     )
                 now = time.monotonic()
                 if now - recovered_at >= self._settings.job_lease_seconds / 2:
-                    await worker.recover()
+                    # The return value has a reader, which it did not until
+                    # M10's F2: `/health/ready`'s body carries the total, so
+                    # an operator can see the condition M9's S3 hit rather
+                    # than only a WARNING that fires when it is non-zero.
+                    # `recovered_at` here is the monotonic *throttle*, which
+                    # is a different reading from `self._recovered_at`.
+                    self._note_recovery(await worker.recover())
                     recovered_at = now
                 ran = await worker.run_once()
                 async with self._work() as pipeline:

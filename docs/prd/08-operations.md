@@ -461,6 +461,27 @@ fix, which is the same argument that keeps liveness off the database. The
 failure table above already prices an unreachable source as "catalog fully
 browsable"; a 503 would contradict it.
 
+✅ **M10 F2 adds three more body-only fields on exactly those terms** —
+`lanes.crashed_sources` (lanes whose task finished, i.e. reached
+`USHER_PUSH_MAX_CONSECUTIVE_FAILURES`), `lanes.recovered_claims` (how many
+abandoned claims *this process* has taken back since it started) and
+`lanes.recovered_at` (when the last recovery pass that found something ran) —
+and **none of the three is in the status code either**, for the reason the two
+above are not: a process that has just taken back a dead peer's twenty claims
+is doing its job, and dropping it out of a load balancer for saying so is the
+inversion the liveness/readiness split exists to prevent. Two things to read
+precisely. `recovered_claims` is **`null`, not `0`**, in a process that runs no
+worker (`USHER_WORKER_ENABLED=false` beside a `usher work` container, the split
+topology above) — it never asked, and `0` would answer "no orphans";
+`GET /admin/sources/{id}/status`'s `push_available` uses `null` the same way.
+And it is **per process**, so with two workers each reports what it took back
+and the sum is the truth — the deployment-wide number is a dashboard's query
+against Postgres on its own beat, not a probe's, because this endpoint reports
+the total `JobWorker.recover()` already returned rather than issuing a
+`SELECT count(*) … WHERE status = 'running'` per 2 s poll over a table with no
+index on that value. `usher work` has no readiness route and prints the same
+total in its pass line.
+
 The report is still degraded rather than binary, so a dashboard can
 distinguish "down" from "running without Emby" — it just does so by reading
 the body, which is what a dashboard does and what Kubernetes, Docker

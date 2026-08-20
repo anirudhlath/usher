@@ -7019,3 +7019,33 @@ into a pass/fail, which is what the plan asked for.
 
 `git status --porcelain` asserted empty after every revert, and every file
 compared byte-for-byte against `git show "HEAD:<path>"` — never `git checkout`.
+
+## M10 F2 — orphaned claims reach `/health/ready`, and `== 1` is the assertion that cannot tell a claim from a pass (2026-08-19)
+
+Four mutations pre-registered in `/var/tmp/m10-f2/SWEEP-F2.md`
+(`sha256:4385fdf2…`, written before any plant), plus one added while the plan's
+own targets were being spelled. **4 killed, 1 control surviving as designed.**
+
+| # | mutation | verdict | fails |
+|---|---|---|---|
+| 1 | `recovered_claims` folded into `ReadinessChecks` (added to the model *and* to the construction site, still reported in `LaneReport`) | KILLED | all 5 rows of `test_no_lane_state_can_change_the_readiness_verdict` on the exact `checks` equality, **and** 4 integration cases on `assert 503 == 200` |
+| 2 | the counter incremented *before* `recover()`: `self._note_recovery(1)` then a bare `await worker.recover()` | KILLED | `test_a_worker_that_asked_and_found_nothing_reports_zero_not_null_and_not_one`, on `assert 1 == 0`, **and that case alone** |
+| 3 | `crashed_sources()` returning the *running* lanes (`if not task.done()`) | KILLED | 3 cases in `tests/unit/test_api_lanes.py`, including S10's own `test_a_lane_that_reached_the_failure_ceiling_releases_its_adapter_and_is_named_as_stopped` |
+| 3b | the **router** feeding `crashed_sources=lanes.running_sources()` | KILLED | `test_readiness_reports_the_lanes` — the stub reports two different lists, which is what makes the wiring observable at the route |
+| 4 | CONTROL: the two field declarations `recovered_claims` / `recovered_at` swapped in `LaneReport` | SURVIVED all five gate steps | equivalent, as predicted: every construction is by keyword, every assertion reads the serialised mapping by key |
+
+🔴 **The finding is #2, and it is a correction to the task's own spec.** The plan
+specified one planted orphan and `body["lanes"]["recovered_claims"] == 1`. **That
+assertion is satisfied by a counter that counts recovery *passes* rather than
+recovered *claims***, because in the window a test can hold open the throttle
+(half a lease) lets exactly one pass run, so "one claim" and "one pass" are the
+same number. Measured: with the plant in place the one-orphan case stays
+**green** and only the zero case goes red. The discriminator is the third value
+the field can take — `null` / `0` / non-zero are three different statements
+(*never asked* / *asked and found none* / *took some back*) and a case is needed
+for each. Same family as *"a count and an argument are two assertions"* one file
+over, and as *"a fixture whose origin is the identity element cannot distinguish
+the operation from its absence"*: at N=1 a sum and a tally agree.
+
+`git status --porcelain` was read after every revert and each file compared
+against its `cp` backup in `/var/tmp/m10-f2/` — never `git checkout`.
