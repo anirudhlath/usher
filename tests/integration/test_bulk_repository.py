@@ -27,7 +27,7 @@ from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.domain.enums import SourceKind, TitleKind
 from usher.domain.ids import new_id
-from usher.ports.bulk import ImdbAka, ImdbTitle
+from usher.ports.bulk import ImdbAka, ImdbRating, ImdbTitle
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import BulkCatalogRepository
 
@@ -207,6 +207,52 @@ async def test_apply_ratings_upsert_tmdb_ids_upsert_crosswalk_accept_empty_batch
     assert await PostgresBulkCatalogRepository(session).apply_ratings([]) == 0
     assert await PostgresBulkCatalogRepository(session).upsert_tmdb_ids([]) == 0
     assert await PostgresBulkCatalogRepository(session).upsert_crosswalk([]) == 0
+
+
+async def test_apply_ratings_writes_only_the_imdb_columns(session: AsyncSession) -> None:
+    """**The whole of ADR-0040 in one assertion.** Before it, this same call
+    wrote `vote_count`/`community_rating` -- the columns TMDb enrichment also
+    writes -- so an IMDb import silently overwrote a TMDb figure with a number
+    on a 50-100x different scale, and nothing recorded which had won. The
+    `tmdb_*` half of this assertion is the load-bearing half: a writer that
+    filled the IMDb columns *and* left its old write in place would satisfy
+    every assertion about `imdb_*` and change nothing at all.
+
+    Seeded through raw SQL rather than `upsert_titles`, because the only
+    column set that can state the premise -- a title already carrying TMDb's
+    own figures -- is one the IMDb loader deliberately never writes (see
+    `upsert_titles`' `DO UPDATE` omissions).
+    """
+    title_id = new_id()
+    await session.execute(
+        text(
+            "INSERT INTO titles (id, kind, imdb_id, name, sort_name,"
+            " tmdb_vote_count, tmdb_vote_average)"
+            " VALUES (:id, 'movie', 'tt99000210', 'Probe', 'Probe', 42, 7.5)"
+        ),
+        {"id": title_id},
+    )
+    repository = PostgresBulkCatalogRepository(session)
+
+    written = await repository.apply_ratings(
+        [ImdbRating(imdb_id="tt99000210", average_rating=9.3, num_votes=2_900_000)]
+    )
+
+    assert written == 1
+    row = (
+        await session.execute(
+            text(
+                "SELECT imdb_num_votes, imdb_average_rating,"
+                " tmdb_vote_count, tmdb_vote_average FROM titles WHERE id = :id"
+            ),
+            {"id": title_id},
+        )
+    ).one()
+    assert row.imdb_num_votes == 2_900_000
+    assert row.imdb_average_rating == pytest.approx(9.3)
+    # Untouched, and this is the assertion the old code fails.
+    assert row.tmdb_vote_count == 42
+    assert row.tmdb_vote_average == pytest.approx(7.5)
 
 
 async def test_an_over_long_alias_is_refused_for_the_whole_call_and_names_the_constraint(

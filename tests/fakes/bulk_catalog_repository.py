@@ -212,7 +212,7 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
             stored = self._titles.get(row.imdb_id)
             if stored is None:
                 continue
-            incoming = (row.community_rating, row.vote_count)
+            incoming = (row.average_rating, row.num_votes)
             if stored.rating != incoming:
                 stored.rating = incoming
                 changed += 1

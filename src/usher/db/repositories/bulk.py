@@ -625,32 +625,32 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         await self._stage(
             """
             CREATE TEMP TABLE stg_ratings (
-                imdb_id text, community_rating double precision, vote_count integer
+                imdb_id text, imdb_average_rating double precision, imdb_num_votes integer
             ) ON COMMIT DROP
             """,
             "stg_ratings",
-            ("imdb_id", "community_rating", "vote_count"),
-            [(row.imdb_id, row.community_rating, row.vote_count) for row in rows],
+            ("imdb_id", "imdb_average_rating", "imdb_num_votes"),
+            [(row.imdb_id, row.average_rating, row.num_votes) for row in rows],
         )
         # UPDATE ... FROM, never an upsert: title.ratings.tsv.gz covers
         # titleTypes this milestone drops, and a rating with no title is not
         # a catalog entry. The IS DISTINCT FROM guard keeps a no-op re-import
         # from firing the set_updated_at trigger on a million unchanged rows.
         #
-        # **This IMDb writer still targets the TMDb-named columns, and the
-        # rename is what makes that legible rather than what causes it.** The
-        # dual write ADR-0040 measured is unchanged by `m10a`; redirecting it
-        # onto `imdb_average_rating`/`imdb_num_votes` is a behaviour change and
-        # is deliberately not part of the rename.
+        # **The two columns named here are IMDb's own, and that is ADR-0040.**
+        # This statement used to write `community_rating`/`vote_count`, which
+        # `adapters/tmdb/mapping.py` also writes -- so whichever ran last won,
+        # on scales ~50-100x apart, with nothing recording the winner.
         return await self._rowcount("""
             UPDATE titles t
-            SET tmdb_vote_average = s.community_rating, tmdb_vote_count = s.vote_count
+            SET imdb_average_rating = s.imdb_average_rating,
+                imdb_num_votes = s.imdb_num_votes
             FROM (
                 SELECT DISTINCT ON (imdb_id) * FROM stg_ratings ORDER BY imdb_id
             ) s
             WHERE t.imdb_id = s.imdb_id
-              AND (t.tmdb_vote_average, t.tmdb_vote_count)
-                  IS DISTINCT FROM (s.community_rating, s.vote_count)
+              AND (t.imdb_average_rating, t.imdb_num_votes)
+                  IS DISTINCT FROM (s.imdb_average_rating, s.imdb_num_votes)
         """)
 
     async def fill_credit_names(self, rows: Sequence[ImdbCreditNames]) -> CreditNamesFillResult:

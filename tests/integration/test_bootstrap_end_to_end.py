@@ -118,16 +118,22 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
     linked = await catalog.link_crosswalk()
     assert linked.linked == 2
 
+    # `imdb_average_rating` beside `tmdb_vote_average`, and the NULL is the
+    # assertion ADR-0040 bought: the ratings phase above ran *after* the id
+    # export wrote `tmdb_popularity`, and before the split it would have
+    # written IMDb's `averageRating` into the TMDb column with nothing
+    # recording the swap. This is the whole fix seen from the bootstrap it
+    # ships in, rather than from one repository call.
     result = await session.execute(
         text(
-            "SELECT imdb_id, tmdb_id, tvdb_id, tmdb_popularity, tmdb_vote_average, "
-            "enrichment_state FROM titles WHERE imdb_id IN ('tt99000020','tt99000030') "
-            "ORDER BY imdb_id"
+            "SELECT imdb_id, tmdb_id, tvdb_id, tmdb_popularity, imdb_average_rating, "
+            "tmdb_vote_average, enrichment_state FROM titles "
+            "WHERE imdb_id IN ('tt99000020','tt99000030') ORDER BY imdb_id"
         )
     )
     rows = result.all()
-    assert rows[0] == ("tt99000020", 90000020, None, 12.5, 7.4, "skeleton")
-    assert rows[1] == ("tt99000030", 90001399, 91000030, 31.5, 6.8, "skeleton")
+    assert rows[0] == ("tt99000020", 90000020, None, 12.5, 7.4, None, "skeleton")
+    assert rows[1] == ("tt99000030", 90001399, 91000030, 31.5, 6.8, None, "skeleton")
 
 
 async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, cache: Path) -> None:

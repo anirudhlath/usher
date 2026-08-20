@@ -279,16 +279,15 @@ class BulkCatalogRepository(ABC):
 
     @abstractmethod
     async def apply_ratings(self, rows: Sequence[ImdbRating]) -> int:
-        """Set `tmdb_vote_average`/`tmdb_vote_count` on titles that already
+        """Set `imdb_average_rating`/`imdb_num_votes` on titles that already
         exist, returning how many rows changed.
 
-        ⚠️ **Those are the TMDb-named columns and this is IMDb's data, which
-        is the bug ADR-0040 names rather than a description of intent.** The
-        rename made the dual write legible; redirecting this method onto
-        `imdb_average_rating`/`imdb_num_votes` is a behaviour change and is
-        Task 2 of `docs/plans/2026-08-19-rating-provenance-split.md`. Stated
-        here because an ABC that described the write it *should* make would
-        leave the implementation looking like the defect.
+        **Those are IMDb's own columns, and ADR-0040 is why they exist.**
+        This method wrote `community_rating`/`vote_count` until then — the
+        columns `adapters/tmdb/mapping.py` also writes — so whichever writer
+        ran last won, on scales ~50-100x apart, with nothing recording the
+        winner. The write is now single-source in both directions: nothing
+        else writes these two, and this writes nothing else.
 
         Never creates a title: `title.ratings.tsv.gz` covers `titleType`s
         this milestone drops, and a rating with no title is not a catalog

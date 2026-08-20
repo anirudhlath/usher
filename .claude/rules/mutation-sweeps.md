@@ -4881,3 +4881,106 @@ asserted clean after every one of the 21 plants and every restore
 (594 files), `mypy` over **578** files, `lint-imports` **10 kept / 0 broken**,
 **3,997 unit / 4 skipped** and **1,224 integration / 22 skipped**, PRD link
 check `OK`.
+
+## ADR-0040 Task 2 — the IMDb writer redirected, and two arms of one case that each catch a different plant (2026-08-19)
+
+**6 plants over `db/repositories/bulk.py`'s `apply_ratings` and
+`adapters/bulk/imdb.py`'s `parse_ratings_row` — 5 KILLED, 1
+equivalent-mutant control SURVIVED all five gate steps, 0 unintended
+survivors. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0
+DID-NOT-RUN, 0 HUNG.** Every verdict matched its pre-registered expectation,
+including the one written down as a *correction* to the plan's own prediction.
+The three-way split is the one that says something: "5 killed" would report a
+control as a kill and hide the round's subject.
+
+Harness at `/var/tmp/adr40-plants/plants.py`, **outside the working tree** for
+V1's reason and under `/var/tmp` rather than `/tmp`, which is tmpfs on this
+host. Plant list with **expected verdicts** at `/var/tmp/adr40-plants/PLANTS.md`
+(`sha256 3529b100a401…`), written before the first plant was applied. Tree
+committed first, so `git status --porcelain` is the verification — asserted
+empty after every plant, and both files `md5sum`-verified byte-identical to
+their pre-sweep digests afterwards. `PYTHONDONTWRITEBYTECODE=1`, `__pycache__`
+swept under **both** `src/` and `tests/` before every run, `compile()` as the
+dry run, an exact anchor count asserted before each plant, the landing check
+spelled as **byte equality with the intended mutant** (F3's repair), a 900 s
+per-plant timeout, a signal handler restoring from the `cp` backups, and no
+second `-q`.
+
+**Selection:** `test_adapters_bulk_imdb.py`, `test_ports_bulk.py`,
+`test_bulk_repository_contracts.py` (unit) and `test_bulk_repository.py`
+(integration) — **189 cases, ~9 s a run**, green before and after. The flake
+check this file's rules require was *done rather than inherited*:
+`test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_
+session_of_its_own` lives in `tests/integration/test_rows_refresh.py`, which is
+not in this selection.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the `UPDATE` writes `tmdb_vote_average`/`tmdb_vote_count` again (the whole regression) | KILLED | **1**, on the **`imdb_*` arm** — `assert None == 2900000` |
+| P2 the `UPDATE` writes **both** pairs (the "defensive" half-fix) | KILLED | **1**, on the **`tmdb_*` arm** — `assert 2900000 == 42` |
+| P3 the `IS DISTINCT FROM` guard deleted | KILLED | 1 — `test_apply_ratings_is_a_no_op_when_nothing_changed`, Postgres arm alone |
+| P4 `parse_ratings_row` swaps `average_rating` and `num_votes` | KILLED | 1 — `test_ratings_parse_on_imdbs_own_scale` |
+| C1 the staging **DDL**'s two column definitions written in the other order | SURVIVED all five gate steps | — |
+| C1-literal the plan's own spelling of C1 — DDL **and** the `("imdb_id", …)` tuple swapped together, records unchanged | KILLED | 3 |
+
+**P1 and P2 are the round's subject and they die on two different assertions
+of one case, which is the whole argument for writing both.** The dispatch
+predicted both would die on the `tmdb_*` arm; measured, only P2 does, and the
+reason is assertion *order* rather than coverage. Under P1 the IMDb columns are
+never written at all, so `assert row.imdb_num_votes == 2_900_000` is reached
+first and fails at `None` — the row reads `(None, None, 2900000, 9.3)`, i.e.
+IMDb's figures sitting in TMDb's columns, which is precisely the defect, caught
+one assertion earlier than predicted. Under P2 every `imdb_*` assertion passes
+(the row reads `(2900000, 9.3, 2900000, 9.3)`) and the `tmdb_*` arm is the only
+thing in the repository that can see it. **So the two arms are each
+load-bearing and each is load-bearing against a different mutant — which is a
+stronger result than the prediction, and a summary saying "both killed by the
+new case" would have hidden it.** Nearest relative is M9 D3's *"killed by a
+different assertion than predicted"*, arriving at a case whose two halves were
+written for two different regressions rather than at one assertion pair.
+
+🔴 **The plan's own equivalence argument for C1 is false, and C1-literal is the
+measurement rather than the claim.** The plan says *"`_stage`'s column tuple
+and the `CREATE TEMP TABLE` column list are matched positionally to each other,
+so moving both together is inert while moving one is a `COPY` type error."*
+`usher.db.staging.stage_records` ends in `driver.copy_records_to_table(table,
+records=records, columns=list(columns))`, so asyncpg builds `COPY "stg_ratings"
+(imdb_id, imdb_average_rating, imdb_num_votes) FROM STDIN` — **`columns` is
+matched to `records` positionally and to the table's columns by name.** The
+DDL's declaration order is therefore read by nothing (its only consumer is
+`SELECT DISTINCT ON (imdb_id) * FROM stg_ratings`, whose columns the `UPDATE`
+references by name), which is what makes C1-as-corrected a fact about the code;
+and the plan's spelling moves the tuple *away* from the records, which is a
+defect and not a control. Planted, it fails 3 of the 4 cases that stage a
+non-empty batch. **The general form: a control's equivalence argument is a
+claim about the code, so it has to be read out of the code — a plausible
+sentence about "positional matching" in a plan is exactly the shape that gets
+copied into a ledger as evidence.**
+
+**And C1-literal's failure mode is not the one the plan's own module docstring
+predicts, which is worth a line.** `staging.py` records that asyncpg's binary
+`COPY` is strictly typed and *"a `str` into an `integer` column raises
+`TypeError` client-side before a byte reaches Postgres"*. That does not extend
+to `float` into `integer`: `7.4` landed in the staging `imdb_num_votes integer`
+column as `7`, silently, and the kill arrived one statement later as
+`CheckViolationError` on `ck_titles_imdb_average_rating_range` when the staged
+`12345` reached `titles.imdb_average_rating`. The fourth case
+(`test_apply_ratings_deduplicates_within_one_batch`) survived the same mutant
+only because its `DISTINCT ON (imdb_id)` with no tiebreak happened to keep the
+`1.0`/`1` row rather than the `9.0`/`999` one — planner-dependent, which that
+case's own docstring already says is the only thing it can pin.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 the staging DDL's `imdb_average_rating` and `imdb_num_votes` definitions in the other order | PASS | PASS | PASS | PASS (12/0) | PASS (189) |
+
+Its equivalence is a fact about the *code* rather than about what the tools
+look at, argued above from `stage_records`' last line. It is deliberately
+**not** an `__all__` reorder, which `RUF022` rejects, and not a reorder of a
+positional call, which A5's entry is the reason for checking rather than
+assuming.
+
+Gate green before and after on the fully restored tree (`git status` clean,
+both mutated files `md5sum`-verified): `ruff check`, `ruff format --check` (629
+files), `mypy` over 611 files, `lint-imports` **12 kept / 0 broken**, and
+**5,473 passed / 26 skipped** over the whole suite.

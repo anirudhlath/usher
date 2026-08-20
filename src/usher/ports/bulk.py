@@ -92,24 +92,20 @@ class ImdbTitle:
 
 @dataclass(frozen=True, slots=True)
 class ImdbRating:
-    """One row of IMDb's `title.ratings.tsv.gz`.
+    """One row of `title.ratings.tsv.gz`, named for the source that supplied it.
 
-    `community_rating` is IMDb's `averageRating`, already on the 0-10 scale
-    every rating field on `Title` promises (`Field(ge=0, le=10)`, on
-    `tmdb_vote_average` and `imdb_average_rating` alike), so no rescaling
-    happens anywhere.
+    `average_rating` is IMDb's `averageRating`, already on the 0-10 scale
+    `titles.imdb_average_rating` promises, so no rescaling happens anywhere.
 
-    ⚠️ **These two field names are IMDb's data under TMDb-shaped names, and
-    that is the defect rather than the design.** ADR-0040 renames them to
-    `average_rating`/`num_votes` in Task 2 of
-    `docs/plans/2026-08-19-rating-provenance-split.md`, alongside redirecting
-    `apply_ratings` onto the `imdb_*` columns; the source file this row is
-    parsed from already carries IMDb's own `averageRating`/`numVotes` header.
+    **The names carry the source because the columns do.** These were
+    `community_rating` and `vote_count` until ADR-0040, which is how an IMDb
+    import came to overwrite TMDb's figures on a 50-100x different scale with
+    nothing recording which source had won.
     """
 
     imdb_id: str
-    community_rating: float
-    vote_count: int
+    average_rating: float
+    num_votes: int
 
 
 @dataclass(frozen=True, slots=True)

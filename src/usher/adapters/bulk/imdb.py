@@ -253,7 +253,7 @@ def parse_ratings_row(line: str) -> ImdbRating | None:
             detail=imdb_id,
         )
     count = _optional_int(votes, imdb_id=imdb_id, column="numVotes")
-    return ImdbRating(imdb_id=imdb_id, community_rating=rating, vote_count=count or 0)
+    return ImdbRating(imdb_id=imdb_id, average_rating=rating, num_votes=count or 0)
 
 
 def parse_akas_row(line: str) -> ImdbAka | None:
