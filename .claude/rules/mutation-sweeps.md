@@ -6823,3 +6823,108 @@ else in `tests/` reads the series or the label.
 Restoration verified both ways after every round — byte-identical to the `cp`
 backup **and** to `git show "HEAD:src/usher/services/reconcile.py"` — never with
 `git checkout`.
+
+## M10 Task S9 — the failed-run exit, and a positive control that was an equivalent mutant (2026-08-19)
+
+**9 plants over two rounds. Round 1: 6 of 8 agreed, one predicted survivor
+confirmed, and the positive control survived. Round 2, after both repairs: 8
+KILLED, 1 designed survivor, 0 unintended.** Subjects: `_sync`'s failed-run
+exit and `_sync_failed` (`src/usher/cli.py`), and `_recorded_error` /
+`RETRACTION_ERROR_CODE` (`src/usher/services/reconcile.py`), at `2907fde`.
+
+Pre-registered plant list at `/var/tmp/m10-gate/SWEEP-S9.md`
+(`sha256 5770478c360795f08f32a1c19fcfd7409a2df0f3f433c06ee55c0a0378ce5d45`),
+digest matching in every round. Harness `/var/tmp/m10-gate/sweep_s9_base.py`,
+outside the tree.
+
+| plant | what it breaks | round 1 | round 2 |
+|---|---|---|---|
+| **N1** | the failed-run exit deleted | KILLED ×2 | KILLED ×3 |
+| **N2** | the retraction hint offered unconditionally | KILLED | KILLED |
+| **N3** | the retraction hint never offered | KILLED | KILLED |
+| **N4** | the token never written | KILLED | KILLED |
+| **N5** | the token written for every failure | KILLED | KILLED |
+| **N6** | the exit moved *inside* the loop | **SURVIVED** | KILLED |
+| **P1** | control — `RETRACTION_ERROR_CODE`'s value changed | **SURVIVED** | survives the selection, **KILLED** wide |
+| **P2** | control, corrected — the flag's own spelling | — | KILLED |
+| **C1** | designed survivor — the exit line's tail reworded | SURVIVED | SURVIVED |
+
+### 🔴 A positive control can be an equivalent mutant, and this one was
+
+P1 changed `RETRACTION_ERROR_CODE`'s value and was pre-registered as *must be
+KILLED*, with the round declared **void** if it were not. It survived — and the
+harness was working: six other plants died on their own `E ` lines in the same
+run, and every landing check passed byte-for-byte. **The control was wrong, not
+the round.**
+
+The reason is the thing worth carrying. **Every reader imports the constant** —
+the service that writes the prefix, the CLI that matches it, and the case that
+asserts it — so changing its value changes the expectation in the same motion
+and nothing can observe the move. That is exactly the property the constant
+exists to have (one definition, no copies, the shape
+`testing-discipline.md` argues for under *"before writing a test that asserts N
+copies of a constant agree, ask whether the copies need to exist"*), and it is
+what makes the value **unpinnable from inside the repository**.
+
+**Re-measured against the precedent it was copied from**: `grep gap_delta_ceiling`
+over `src/`, `tests/`, `docs/` and `.claude/` returns **exactly one line**, its
+own definition in `reconcile.py`. So S6's `CEILING_ERROR_CODE` had the identical
+hole and S9 inherited it by following the pattern.
+
+**Both values are wire artefacts, which is why the hole matters.** They are
+prefixes on `sync_runs.error` — a durable column `usher sync-status` prints and
+`GET /admin/sync` serves — and `CEILING_ERROR_CODE`'s own comment states the
+purpose: *"a dashboard, an alert rule, or the next reader of this file has to be
+able to tell the two apart **without parsing English**"*. A consumer keying on
+one is outside this repository by construction, exactly like a metric name; PRD
+10's catalogue pins those by literal for the same reason.
+`test_the_two_error_codes_are_pinned_by_value_because_they_are_wire_artefacts`
+now does the same, and asserts they are distinct and that neither is a prefix of
+the other (both are matched against one column). Re-planted, P1 fails **that
+case alone** out of the whole of `tests/unit`.
+
+⚠️ **And it fails only there, which is a note about the selection rather than
+about the repair.** The pinning case lives in `tests/unit/test_services_reconcile.py`,
+which the pre-registered selection does not include, so P1 still reports
+SURVIVED against the scored set and KILLED against `tests/unit` whole. Recorded
+rather than fixed by widening the selection after the fact — a scored set edited
+once the verdicts are in is not a pre-registration.
+
+**The general form: a positive control has to be a change no reader of the
+mutated thing moves with.** A constant with exactly one definition and N
+importers fails that by design. Pick something with an *external* referent
+instead — P2 changes the spelling of `--allow-full-retraction`, which is
+argparse's own flag name and which the asserting case writes as a literal
+because it must. Nearest relatives are S10's *"an assertion is only a positive
+control if some plant reaches it"* and S8's `-x` finding one entry up: three
+different ways for a control to report confidence it has not earned.
+
+### 🔴 N6 — one source cannot distinguish "collect and exit after" from "exit on the first"
+
+Predicted to survive and it did. `_sync` loops sources and raises `SystemExit`
+**after** the loop; moving the `raise` inside it passed every case in
+`test_cli_errors.py`, because each wired exactly **one** source, and with one
+source the two programs are identical.
+
+The claim is load-bearing and lived only in prose: it is the same property
+`ReconcileService.reconcile` swallows the exception for one layer down — a
+household with a sleeping laptop and a running NAS must still get the NAS
+walked. Exiting on the first failure reintroduces at the CLI precisely what the
+service gave up raising in order to prevent.
+
+The repair is a fixture that can be two sources, and the case asserts its own
+premise first: **both** adapters opened and closed, before claiming the second
+was walked. Same family as `testing-discipline.md`'s *"could this fixture also
+be the row above or below?"* — here the fixture was *degenerate for the
+operation under test*, the identity-element trap arriving at a loop rather than
+at a clock.
+
+### Scope
+
+Scored against `tests/unit/test_cli_errors.py` and
+`tests/integration/test_services_reconcile.py`. Restoration verified after every
+round against both the `cp` backup and `git show "HEAD:<path>"`, for both files,
+never with `git checkout`. The harness is S8's with the plant list swapped —
+declared because `mutation-sweeps.md` records that copying a sweep harness
+inherits its defects; S8's had been validated over two rounds, and P2 is what
+re-establishes that this copy lands plants.
