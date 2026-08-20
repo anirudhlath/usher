@@ -202,8 +202,35 @@ _TMDB_EXPORT_RECORD = re.compile(r"\{[^{}]*\"(?:original_title|original_name)\"[
 _EXPORT_RECORD_ID = re.compile(r"\"id\"\s*:\s*(\d+)")
 
 # Everything the whole-repository scan walks past.
+#
+# **`node_modules` and `dist` joined this set the day `web/` appeared, and the
+# reason is the scan's cost rather than its correctness.** This walker
+# `read_text()`s every decodable file in the repository; an installed npm tree
+# is ~220 packages and tens of thousands of files, and `web/dist` is a build
+# artefact regenerated from sources this scan already reads. Both are
+# gitignored, so neither can carry a committed dataset row — which is what this
+# module exists to catch — and walking them would turn a fast unit test into a
+# multi-second one that measures a dependency tree nobody here wrote.
+#
+# The console's own *sources* are still scanned, exactly as `src/` and `docs/`
+# are. A fixture full of real IMDb rows under `web/src/test/` is precisely the
+# kind of thing this test is for, and the shipping rule ("importers, never
+# data") does not stop at the language boundary.
 _NEVER_SCANNED = frozenset(
-    {".git", ".venv", "data", "__pycache__", ".ruff_cache", ".pytest_cache", ".mypy_cache"}
+    {
+        ".git",
+        ".venv",
+        "data",
+        "__pycache__",
+        ".ruff_cache",
+        ".pytest_cache",
+        ".mypy_cache",
+        "node_modules",
+        "dist",
+        "coverage",
+        "playwright-report",
+        "test-results",
+    }
 )
 
 _ID_POSITIONS = (

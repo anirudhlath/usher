@@ -172,11 +172,16 @@ services:
       start_period: 15s
 
 networks:
-  # Named so `usher-web`'s compose (~/code/usher-web) can join it as an
-  # external network and reach this service at `usher:8000`. Without the
-  # explicit name compose would call it `usher_default`, which is what it
-  # is called today -- pinning it here makes that a contract rather than a
-  # consequence of the directory name.
+  # Pinned so the name is a contract rather than a consequence of the
+  # directory this file happens to sit in -- compose derives an unnamed
+  # default network from the project name, so a rename or a worktree would
+  # move it.
+  #
+  # It was named for `usher-web`, a client in a sibling repository that joined
+  # this as an external network to reach `usher:8000`. **That client is gone
+  # and the name still matters**: it is what any future sidecar joins by, and
+  # renaming it now would be a silent breaking change for anything already
+  # holding it.
   default:
     name: usher_default
   # The shared telemetry stack, created by ~/code/observability. `external`

@@ -1,0 +1,11 @@
+/* Component styles. Imported by the root styles.css so a consumer links one file. */
+@import url('icon/icon.css');
+@import url('actions/actions.css');
+@import url('forms/forms.css');
+@import url('navigation/navigation.css');
+@import url('media/media.css');
+@import url('data/data.css');
+@import url('status/status.css');
+@import url('feedback/feedback.css');
+@import url('playback/playback.css');
+@import url('charts/charts.css');

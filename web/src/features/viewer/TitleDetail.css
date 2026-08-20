@@ -1,0 +1,358 @@
+/* Title detail. Written in the design system's idiom — plain CSS over semantic
+   tokens, `u-`-prefixed classes — rather than Tailwind utilities, because every
+   value here is colour, type, elevation or a designed height, and a literal in a
+   utility class is exactly the drift the token layer prevents.
+
+   The three designed widths are the hero's (patterns.md §11): 420 px at 1440,
+   330 px at 834, 260 px at 390 with no poster and the title over the backdrop. */
+
+.u-title {
+  display: flex;
+  flex-direction: column;
+}
+
+/* A patched element gets one 1000 ms highlight, opacity only. It must not move,
+   resize or reorder: moving a row under a pointer about to click it is hostile.
+   Reduced motion keeps this rule — a colour change with no travel is the
+   accessible fallback — which is why `--dur-highlight` is not collapsed. */
+.u-title--patched {
+  animation: u-patch-flash var(--dur-highlight) var(--ease-out) 1;
+}
+
+/* ---- hero ---------------------------------------------------------------- */
+
+.u-title__hero {
+  position: relative;
+  height: 420px;
+  overflow: hidden;
+}
+.u-title__hero .u-art {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+.u-title__hero .u-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.u-title__scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--gradient-protect-bottom);
+  pointer-events: none;
+}
+.u-title__heroband {
+  position: absolute;
+  left: var(--gutter-page);
+  right: var(--gutter-page);
+  bottom: var(--space-6);
+  display: flex;
+  gap: var(--space-6);
+  align-items: flex-end;
+}
+.u-title__poster {
+  width: 168px;
+  flex: none;
+  border-radius: var(--radius-artwork);
+  overflow: hidden;
+  box-shadow: var(--shadow-artwork);
+}
+.u-title__headline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+  min-width: 0;
+}
+.u-title__h1 {
+  font: var(--text-display);
+  letter-spacing: var(--track-display);
+  color: var(--text-primary);
+}
+.u-title__tagline {
+  font: var(--text-body-lg);
+  font-style: italic;
+  color: var(--text-secondary);
+}
+.u-title__facts {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--text-secondary);
+}
+.u-title__facts .u-mono {
+  color: var(--text-secondary);
+}
+.u-title__genres {
+  font: var(--text-body-sm);
+  color: var(--text-secondary);
+}
+.u-title__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 20rem;
+}
+.u-title__progresstext {
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-muted);
+}
+
+/* ---- body ---------------------------------------------------------------- */
+
+.u-title__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-6) var(--gutter-page) var(--space-10);
+  width: 100%;
+  max-width: var(--width-content);
+  margin: 0 auto;
+}
+
+.u-title__h2 {
+  font: var(--text-title-sm);
+  letter-spacing: var(--track-title);
+  color: var(--text-primary);
+}
+.u-title__note {
+  font: var(--text-body-xs);
+  color: var(--text-muted);
+  max-width: 78ch;
+  text-wrap: pretty;
+}
+.u-title__prose {
+  font: var(--text-body-lg);
+  color: var(--text-secondary);
+  max-width: var(--width-prose);
+  text-wrap: pretty;
+}
+
+/* The skeleton-tier notice. `u-beat` is the heartbeat pulse, dropped under
+   reduced motion by the base layer's duration collapse. */
+.u-title__live {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3);
+  border: 1px solid var(--info-border);
+  background: var(--info-quiet);
+  border-radius: var(--radius-card);
+  font: var(--text-body-sm);
+  color: var(--text-secondary);
+}
+.u-title__enrichfail {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding: var(--space-3);
+  border: 1px solid var(--warn-border);
+  background: var(--warn-quiet);
+  border-radius: var(--radius-card);
+  font: var(--text-body-sm);
+  color: var(--text-secondary);
+}
+.u-title__enrichfail .u-icon {
+  color: var(--warn-text);
+  flex: none;
+}
+.u-title__enrichfailbody {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.u-title__enrichfailbody .u-mono {
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.u-title__columns {
+  display: flex;
+  gap: var(--space-6);
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+.u-title__actions,
+.u-title__availability {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  flex: 1 1 20rem;
+  min-width: 17rem;
+}
+.u-title__buttons {
+  display: flex;
+  gap: var(--space-2x);
+  flex-wrap: wrap;
+}
+.u-title__targets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+  margin-top: var(--space-2x);
+}
+.u-title__availability h2:focus-visible {
+  outline: var(--ring-width) solid var(--border-focus);
+  outline-offset: var(--ring-offset);
+}
+
+/* ---- availability -------------------------------------------------------- */
+
+.u-title__copies {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+}
+.u-copy {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2x) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.u-copy--missing {
+  background: var(--warn-quiet);
+}
+.u-copy__specs {
+  color: var(--text-secondary);
+  min-width: 0;
+}
+.u-copy__source {
+  font: var(--text-body-xs);
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+/* ---- credits ------------------------------------------------------------- */
+
+.u-title__credits {
+  display: flex;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+}
+.u-title__creditcol {
+  flex: 1 1 20rem;
+  min-width: 17rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+}
+.u-title__creditlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.u-title__creditlist li + li .u-credit {
+  border-top: 1px solid var(--border-subtle);
+}
+.u-credit {
+  appearance: none;
+  background: none;
+  border: none;
+  width: 100%;
+  padding: var(--space-2x) 0;
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  text-align: left;
+  cursor: pointer;
+}
+.u-credit__name {
+  font: var(--text-body-sm);
+  color: var(--text-primary);
+}
+.u-credit__role {
+  font: var(--text-body-sm);
+  color: var(--text-muted);
+}
+
+/* ---- similar ------------------------------------------------------------- */
+
+.u-title__similar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.u-title__similarhead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.u-title__rail {
+  display: flex;
+  gap: var(--gutter-rail);
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  padding-bottom: 4px;
+}
+
+/* ---- images -------------------------------------------------------------- */
+
+.u-title__images {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+}
+.u-title__imagegrid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: var(--space-2x);
+  flex-wrap: wrap;
+}
+.u-title__image {
+  width: 200px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-artwork);
+  overflow: hidden;
+}
+.u-title__image--poster,
+.u-title__image--profile {
+  width: 100px;
+}
+.u-title__imagekind {
+  display: block;
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-muted);
+  padding: 2px 4px;
+}
+
+/* ---- responsive ---------------------------------------------------------- */
+
+@media (max-width: 1439px) {
+  .u-title__hero {
+    height: 330px;
+  }
+}
+
+@media (max-width: 833px) {
+  .u-title__hero {
+    height: 260px;
+  }
+  .u-title__heroband {
+    left: var(--gutter-page-phone);
+    right: var(--gutter-page-phone);
+  }
+  .u-title__h1 {
+    font: var(--text-display-sm);
+    letter-spacing: var(--track-display);
+  }
+  .u-title__body {
+    padding-inline: var(--gutter-page-phone);
+  }
+  .u-title__credits {
+    gap: var(--space-6);
+  }
+}

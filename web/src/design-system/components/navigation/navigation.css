@@ -1,0 +1,9 @@
+/* Navigation — real tabs. */
+.u-tabs{display:flex;gap:var(--space-1);border-bottom:1px solid var(--border-subtle)}
+.u-tab{appearance:none;background:none;border:none;padding:var(--space-2x) var(--space-3);font:var(--text-label);color:var(--text-muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;display:inline-flex;align-items:center;gap:var(--space-2x);transition:var(--transition-control)}
+.u-tab:hover{color:var(--text-primary)}
+.u-tab[aria-selected=true]{color:var(--text-primary);border-bottom-color:var(--accent-solid)}
+.u-tab:focus-visible{outline:var(--ring-width) solid var(--border-focus);outline-offset:-2px;border-radius:var(--radius-sm)}
+.u-tab__count{font:var(--text-mono-xs);letter-spacing:var(--track-mono);color:var(--text-muted);font-variant-numeric:tabular-nums}
+.u-tabpanel{padding-top:var(--space-4)}
+.u-tabpanel:focus-visible{outline:none}

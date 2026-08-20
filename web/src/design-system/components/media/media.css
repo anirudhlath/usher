@@ -1,0 +1,79 @@
+/* Media — artwork, cards, rails, progress. Artwork is the only saturated thing on a viewer screen. */
+.u-art{position:relative;overflow:hidden;border-radius:var(--radius-artwork);background:var(--bg-skeleton);display:block;width:100%}
+.u-art img{width:100%;height:100%;object-fit:cover;display:block}
+.u-art--poster{aspect-ratio:var(--aspect-poster)}
+.u-art--backdrop{aspect-ratio:var(--aspect-backdrop)}
+.u-art--square{aspect-ratio:var(--aspect-square)}
+.u-art__fallback{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--space-1);padding:var(--space-2x);text-align:center;background:var(--bg-surface);border:1px dashed var(--border-default);border-radius:var(--radius-artwork);color:var(--text-muted);font:var(--text-body-xs)}
+.u-art__fallback--retry{border-style:solid;border-color:var(--warn-border);color:var(--warn-text)}
+.u-art__initial{font:var(--text-title);color:var(--text-disabled);letter-spacing:var(--track-title)}
+.u-art--loading{background:var(--bg-skeleton);background-image:var(--gradient-skeleton);background-size:220% 100%;animation:u-sweep var(--dur-shimmer) linear infinite}
+@keyframes u-sweep{from{background-position:-120% 0}to{background-position:220% 0}}
+.u-progress{height:var(--progress-height);background:var(--progress-track);border-radius:var(--radius-pill);overflow:hidden;width:100%}
+.u-progress__fill{height:100%;background:var(--progress-fill);border-radius:var(--radius-pill)}
+.u-progress--played .u-progress__fill{background:var(--progress-played)}
+.u-card{position:relative;display:flex;flex-direction:column;gap:var(--space-2x);text-align:left;background:none;border:none;padding:0;cursor:pointer;transition:var(--transition-card);border-radius:var(--radius-artwork)}
+.u-card__shot{position:relative;box-shadow:var(--shadow-artwork);border-radius:var(--radius-artwork);overflow:hidden}
+.u-card:hover{transform:var(--hover-card-lift)}
+.u-card:hover .u-card__shot{box-shadow:var(--shadow-3)}
+.u-card:active{transform:var(--press-scale)}
+.u-card:focus-visible{outline:var(--ring-width) solid var(--border-focus);outline-offset:3px}
+.u-card--poster{width:var(--card-poster-w)}
+.u-card--landscape{width:var(--card-landscape-w)}
+.u-card__meta{display:flex;flex-direction:column;gap:1px;padding-inline:1px}
+.u-card__title{font:var(--text-heading-sm);color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.u-card__sub{font:var(--text-mono-xs);letter-spacing:var(--track-mono);color:var(--text-muted);font-variant-numeric:tabular-nums;display:flex;gap:var(--space-1);align-items:center}
+.u-card__overlay{position:absolute;inset:0;z-index:var(--z-artwork-overlay);display:flex;flex-direction:column;justify-content:flex-end;padding:var(--space-2x);gap:var(--space-1);background:var(--gradient-protect-bottom);opacity:0;transition:opacity var(--dur-base) var(--ease-out)}
+.u-card__overlay--always{opacity:1;background:linear-gradient(to top,oklch(0.122 0.006 60/0.9),transparent 52%)}
+.u-card:hover .u-card__overlay,.u-card:focus-visible .u-card__overlay{opacity:1}
+.u-card__badge{position:absolute;top:var(--space-2x);left:var(--space-2x);z-index:var(--z-artwork-overlay)}
+.u-card__ep{position:absolute;top:var(--space-2x);right:var(--space-2x);z-index:var(--z-artwork-overlay);font:var(--text-mono-xs);color:var(--n-50);background:oklch(0.122 0.006 60/0.78);padding:1px 5px;border-radius:var(--radius-xs)}
+.u-card__ep-line{font:var(--text-mono-xs);letter-spacing:var(--track-mono);color:var(--text-secondary)}
+.u-card__tier{color:var(--tier-skeleton-text)}
+/* --unowned-opacity used to be an `opacity` on the whole shot, which is an ancestor of Artwork's
+   absent-state panel: "No artwork on record" measured 2.48:1 dark and 2.24:1 light there. No tone
+   could have rescued it inside that group — in light, even pure black on that panel reaches only
+   4.95:1, because a group opacity composites foreground and background toward the same canvas —
+   so the dim has to stop being an ancestor of the sentence. Two disjoint cases:
+
+   With a picture, a canvas-coloured scrim over it. For an opaque element sitting on the canvas a
+   scrim and a group opacity are the same arithmetic — 0.55·element + 0.45·canvas either way — so
+   a dimmed poster is pixel-for-pixel what it was.
+
+   Without one, the panel covers the whole box and there is nothing underneath to scrim, so its
+   fill and hairline recede by the same amount instead and the sentence keeps --text-muted: 5.8:1
+   dark, 5.3:1 light. `:not(:has())` keeps the two apart rather than layering one over the other,
+   which also keeps the panel's background computable — an axe sweep reports a sentence under an
+   overlapping element as indeterminate rather than as a pass, and a check that can no longer see
+   the thing it was written for is not a check.
+
+   The badge and the episode label are no longer dimmed either. They are words on a tinted fill,
+   and that is the same pattern that put TargetPicker's info Badge at 4.46:1. */
+.u-card--unowned .u-art:not(:has(.u-art__fallback))::after{content:'';position:absolute;inset:0;background:var(--bg-canvas);opacity:calc(1 - var(--unowned-opacity));pointer-events:none}
+.u-card--unowned .u-art__fallback{
+  background:color-mix(in srgb,var(--bg-surface) calc(var(--unowned-opacity) * 100%),var(--bg-canvas));
+  border-color:color-mix(in srgb,var(--border-default) calc(var(--unowned-opacity) * 100%),var(--bg-canvas))
+}
+.u-row{display:flex;align-items:center;gap:var(--space-3);padding:var(--density-cell-pad-y) var(--density-cell-pad-x);border-radius:var(--radius-md);cursor:pointer;background:none;border:none;width:100%;text-align:left;min-height:var(--density-row-h);transition:background-color var(--dur-fast) var(--ease-standard)}
+.u-row:hover{background:var(--bg-raised)}
+.u-row:focus-visible{outline:var(--ring-width) solid var(--border-focus);outline-offset:-2px}
+.u-row__thumb{width:34px;flex:none}
+.u-row__body{min-width:0;display:flex;flex-direction:column;gap:1px;flex:1}
+.u-row__title{font:var(--text-body-sm);color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.u-row__sub{font:var(--text-mono-xs);letter-spacing:var(--track-mono);color:var(--text-muted);display:flex;gap:var(--space-2x);align-items:center}
+.u-row__tier{color:var(--tier-skeleton-text)}
+.u-row__genres{font:var(--text-body-xs);color:var(--text-muted)}
+.u-row__trail{margin-left:auto;display:flex;align-items:center;gap:var(--space-3);flex:none}
+.u-rail{display:flex;flex-direction:column;gap:var(--space-3)}
+.u-rail__head{display:flex;align-items:baseline;gap:var(--space-3);padding-inline:var(--gutter-page)}
+.u-rail__title{font:var(--text-title-sm);color:var(--text-primary)}
+.u-rail__reason{font:var(--text-body-sm);color:var(--text-muted)}
+.u-rail__track{display:flex;gap:var(--gutter-rail);overflow-x:auto;padding-inline:var(--gutter-page);scroll-snap-type:x proximity;scrollbar-width:none}
+.u-rail__track::-webkit-scrollbar{display:none}
+.u-rail__track>*{scroll-snap-align:start}
+/* Live patch (patterns.md §7). A frame lights the element for --dur-highlight and settles. Colour
+   only — no transform, no size, no order, because moving a card under a pointer that is about to
+   click it is hostile. --dur-highlight is deliberately not collapsed by reduced motion: a colour
+   change with no travel is the accessible fallback, so this rule stands in both modes. */
+.u-card--patched,.u-row--patched{animation:u-patch-flash var(--dur-highlight) var(--ease-out) 1}
+@keyframes u-patch-flash{from{background-color:var(--live-patch-flash)}to{background-color:transparent}}

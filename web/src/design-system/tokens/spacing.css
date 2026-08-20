@@ -1,0 +1,52 @@
+/* Space, radii, and the density switch.
+   4 px grid. --space-hair and --space-2 exist for hairlines and icon nudges; everything else is 4×. */
+:root{
+  --space-hair:1px;--space-0:0;--space-2:2px;
+  --space-1:0.25rem;   /* 4 */
+  --space-2x:0.5rem;   /* 8 */
+  --space-3:0.75rem;   /* 12 */
+  --space-4:1rem;      /* 16 */
+  --space-5:1.25rem;   /* 20 */
+  --space-6:1.5rem;    /* 24 */
+  --space-8:2rem;      /* 32 */
+  --space-10:2.5rem;   /* 40 */
+  --space-12:3rem;     /* 48 */
+  --space-16:4rem;     /* 64 */
+  --space-20:5rem;     /* 80 */
+  --space-24:6rem;     /* 96 */
+
+  /* radii — artwork stays nearly square so posters read as posters */
+  --radius-none:0;--radius-xs:2px;--radius-sm:4px;--radius-md:6px;--radius-lg:10px;
+  --radius-xl:14px;--radius-2xl:20px;--radius-pill:999px;
+  --radius-control:var(--radius-md);--radius-card:var(--radius-lg);
+  --radius-artwork:var(--radius-sm);--radius-sheet:var(--radius-xl);
+
+  /* hit targets — 44 px minimum on touch, always */
+  --target-touch:44px; /* @kind other */
+
+  /* DENSITY — one system, two moods. Default is comfortable (viewer).
+     [data-density="compact"] on any subtree switches the operator tables and drawers.
+     Only these tokens change; nothing else in the system is allowed to branch on density. */
+  --density-control-h:2.25rem;      /* 36 */
+  --density-control-h-sm:1.75rem;   /* 28 */
+  --density-row-h:2.75rem;          /* 44 */
+  --density-pad-x:0.75rem;          /* 12 */
+  --density-pad-y:0.5rem;           /* 8 */
+  --density-cell-pad-x:0.75rem;
+  --density-cell-pad-y:0.625rem;
+  --density-gap:var(--space-3);
+  --density-text:var(--text-body); /* @kind other */
+  --density-section-gap:var(--space-8);
+}
+[data-density="compact"]{
+  --density-control-h:1.75rem;      /* 28 */
+  --density-control-h-sm:1.5rem;    /* 24 */
+  --density-row-h:2rem;             /* 32 */
+  --density-pad-x:0.5rem;
+  --density-pad-y:0.25rem;
+  --density-cell-pad-x:0.5rem;
+  --density-cell-pad-y:0.25rem;
+  --density-gap:var(--space-2x);
+  --density-text:var(--text-body-xs); /* @kind other */
+  --density-section-gap:var(--space-6);
+}

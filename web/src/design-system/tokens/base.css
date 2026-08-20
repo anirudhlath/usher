@@ -1,0 +1,26 @@
+/* Minimal base layer. Resets plus the four things every screen must not get wrong:
+   focus visibility, link colour, selection colour, and scrollbars that do not repaint the page. */
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg-canvas);color:var(--text-primary);font:var(--text-body);letter-spacing:var(--track-body);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+h1,h2,h3,h4,p,figure,blockquote{margin:0}
+h1,h2,h3,h4{letter-spacing:var(--track-title)}
+button,input,select,textarea{font:inherit;color:inherit}
+img,svg,video{display:block;max-width:100%}
+a{color:var(--text-link);text-decoration-color:oklch(from currentColor l c h/0.4);text-underline-offset:2px}
+a:hover{color:var(--text-link-hover);text-decoration-color:currentColor}
+:focus{outline:none}
+:focus-visible{outline:var(--ring-width) solid var(--border-focus);outline-offset:var(--ring-offset);border-radius:var(--radius-sm)}
+::selection{background:var(--accent-quiet);color:var(--text-primary)}
+code,kbd,samp,pre{font:var(--text-mono-sm);letter-spacing:var(--track-mono)}
+[data-numeric],table td[data-numeric]{font-variant-numeric:var(--numeric-tabular)}
+*{scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:var(--radius-pill);border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-track{background:transparent}
+.u-skip-link{position:fixed;top:var(--space-2x);left:var(--space-2x);z-index:var(--z-skip-link);padding:var(--space-2x) var(--space-3);background:var(--bg-raised);color:var(--text-primary);border:1px solid var(--border-control);border-radius:var(--radius-md);transform:translateY(-200%)}
+.u-skip-link:focus-visible{transform:none}
+.u-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.u-mono{font:var(--text-mono-sm);letter-spacing:var(--track-mono);font-variant-numeric:var(--numeric-tabular)}
+.u-eyebrow{font:var(--text-eyebrow);letter-spacing:var(--track-eyebrow);text-transform:uppercase;color:var(--text-muted)}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:1ms !important;animation-iteration-count:1 !important;transition-duration:1ms !important}}

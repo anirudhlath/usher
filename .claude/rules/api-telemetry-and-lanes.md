@@ -719,3 +719,97 @@ is false of a process that claims none.
 measurement of one configuration wearing the grammar of a rule.** Both these
 docstrings were written when there was one runtime, and neither said so, so the
 number went on being quoted through the release that made it optional.
+
+## `traceresponse` — the id leaves the process, and three things about it were not what they looked like (2026-08-19)
+
+**The console was built for a link the backend could not supply, and both halves
+looked finished.** `web/docs/patterns.md` §3 makes *"`Problem` MUST render 'Open
+trace' into Tempo"* a MUST; `Problem` takes `traceId`/`traceHref`,
+`Settings.tempo_url` exists, `/console/config.json` serves it and
+`useTraceUrl()` formats the URL. **No response carried a trace id**, so the
+whole chain was inert on every deployment — the dev drawer even shipped a
+`BackendWork` note saying so. Every request has had a real server span since M1
+(`FastAPIInstrumentor` is unconditional and `configure_tracing` installs a real
+provider with or without an OTLP endpoint), so nothing had to be *built*; the id
+had to be **sent**. `api/trace_response.py` is one ASGI middleware and
+`telemetry.traceresponse` is one formatter.
+
+**The header name is not the settled standard the obvious reading suggests, and
+checking cost one fetch.** Read 2026-08-19 rather than recalled:
+`https://www.w3.org/TR/trace-context-2/` — the *published* Trace Context Level 2
+Recommendation — defines `traceparent` and `tracestate` and **no response header
+at all**; the string `traceresponse` does not occur in it. On `w3c/trace-context`
+`main`, `spec/21-http_response_header_format.md` is now titled *Trace Context
+Server Timing Metric Format* and the binding has moved onto `Server-Timing` under
+the metric name `trace`. **The value grammar did not move** —
+`version "-" trace-id "-" child-id "-" trace-flags`, 2/32/16/2 lowercase hex,
+*"All zeroes forbidden"* on both ids, `ff` a forbidden version — so the bytes are
+current and only the field carrying them is contested. Shipped as `traceresponse`
+because that is what `opentelemetry.instrumentation.propagators.
+TraceResponsePropagator` emits, i.e. what this stack already speaks; the
+`Server-Timing` spelling is one more `set` over the same value if anything ever
+wants it. **The general form: "prefer the standard header" is not a decision
+until you have read which document is current, because a header can be
+implemented everywhere and specified nowhere.**
+
+**Where an `add_middleware` actually lands under the instrumentor, measured.**
+`FastAPIInstrumentor.instrument_app` monkey-patches `build_middleware_stack` and
+rebuilds it as `ServerErrorMiddleware → OpenTelemetryMiddleware →
+ServerErrorMiddleware → ExceptionHandlerMiddleware → [user middleware] →
+ExceptionMiddleware → router`. Two consequences and one gap:
+
+- **The server span is current in the user slot**, because
+  `OpenTelemetryMiddleware` holds it open with `trace.use_span` around
+  everything inside. So `trace.get_current_span()` read at
+  `http.response.start`, *before* delegating, is the SERVER span and not the
+  `http send` span the ASGI instrumentation opens inside its own `send`.
+- **`ExceptionMiddleware` is inside it**, so both of `api/errors.py`'s handlers —
+  the 404/405 problem document and the 422 — carry the header. A 404 is exactly
+  when somebody wants the link.
+- ⚠️ **A bare 500 does not.** `ServerErrorMiddleware` sends its synthesised
+  response through the `send` it was *given* rather than the one it passed down,
+  and both of its instances are outside the user slot. Measured against a real
+  app: `/health` 200 ✓, `/no-such-route` 404 ✓, `/images/nope` 422 ✓, an
+  unhandled `RuntimeError` 500 ✗. **Both alternatives are worse and were priced
+  rather than assumed.** OTel's own `set_global_response_propagator` does reach
+  it — `otel_send` injects for every message including that one — but it is a
+  *process* global (the shape `_queue_reader`/`_push_reader` and both provider
+  installs already exist to defend against), it does not honour
+  `is_recording()`, it adds an `Access-Control-Expose-Headers` this deployment
+  does not need, and its own module docstring calls it experimental. And
+  overriding `build_middleware_stack` to wrap the finished stack makes
+  `instrument_app`'s `isinstance(inner, ServerErrorMiddleware)` check fail, at
+  which point it **logs one line and skips FastAPI instrumentation entirely** —
+  trading the header on a 500 for the span on every request. Read from the
+  installed package's source, not inferred.
+
+**A raw ASGI middleware rather than `BaseHTTPMiddleware`**, because `GET /events`
+is a live `text/event-stream` and `BaseHTTPMiddleware` runs the downstream app in
+its own task and wraps `receive` — the exact machinery this file's first entry
+records `StreamingResponse`'s disconnect handling depending on.
+
+**The absence rule, in its third subsystem.** `traceresponse()` answers `None` —
+no header at all — for a span that is not recording and for an invalid context,
+and `00-000…0-000…0-00` is precisely the value the guardless version emits:
+well-formed to every regex, matching the shipped one field-for-field in shape,
+and naming nothing. Same rule as `_observations`' "no reader means no
+observation, never a zero" and `current_traceparent`'s `NULL` for a job enqueued
+outside a span. The *sampled-out* case is the half an all-zero check misses: a
+dropped span has a perfectly valid trace id and no exported trace, so a link
+built from it opens an empty Tempo page — "no trace" and "a trace you cannot
+find" are different facts and only the first is one this product may state.
+
+**And the test-side finding, which is this repository's standing rule arriving in
+a new place: a regex is not an identity test.** Planted a hard-coded
+`00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01` in the middleware, in
+place of the live read. The three shape cases — a well-formed header on a 200, on
+a 404 problem document and on a 422 — **all passed**, because a constant has a
+shape. What killed it was reading the request's own SERVER span back out of the
+tracer through a span processor and comparing the whole header against it (plus
+the cheap control that two requests differ, which catches a *cached* read the
+identity case would not, since the cache is populated by the very request that
+case makes). Nearest relatives: *a membership assertion is not an ordering test*,
+and the `sitecustomize.py` proof. The mirror plant — deleting the two guards from
+`traceresponse()` — left all six shape/identity cases green and killed exactly
+the three absence cases, which is the measurement saying the two halves of this
+file cover different things.

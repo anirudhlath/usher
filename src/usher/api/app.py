@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from usher.api.console import mount_console
 from usher.api.errors import (
     http_error_as_a_problem_document,
     problem_responses_carry_their_media_type,
@@ -35,6 +36,7 @@ from usher.api.routers import (
     unmatched,
     watch,
 )
+from usher.api.trace_response import TraceResponseMiddleware
 from usher.composition import (
     DefaultUserId,
     embedder,
@@ -223,6 +225,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # call on every create_app(): instrument_app marks the app object
     # itself, not a process-global singleton (verified directly).
     FastAPIInstrumentor.instrument_app(app)
+    # …and this is what lets that span leave the process. `traceresponse` on
+    # every response with a live span, so `Problem`'s "Open trace" — the single
+    # link `web/docs/patterns.md` §3 says separates a console from a settings
+    # page — has an id to build a Tempo URL from. **Added after the
+    # instrumentor on purpose**: `instrument_app` rebuilds the whole middleware
+    # stack around this one, and reading `trace.get_current_span()` from the
+    # user-middleware slot is only the *server* span because
+    # `OpenTelemetryMiddleware` ends up outside it. `api/trace_response.py`
+    # carries the measured stack and the one response this does not reach.
+    app.add_middleware(TraceResponseMiddleware)
     # The configuration handlers read, via `deps.get_app_settings`. Set here
     # rather than in the lifespan because it is not a resource with a
     # lifetime -- and because `create_app(settings)`'s whole point is that
@@ -292,4 +304,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(titles.router)
     app.include_router(unmatched.router)
     app.include_router(watch.router)
+    # **Last, and that ordering is the whole safety argument.** The console's
+    # mount answers `/console/*` and its history fallback answers any
+    # navigation-shaped miss underneath it -- but Starlette matches routes in
+    # registration order, so every route above is reached first and an
+    # unrouted path outside `/console` still falls through to
+    # `http_error_as_a_problem_document`'s 404. Mounting before the routers
+    # would not shadow them either (the mount's own path is a prefix match on
+    # `/console`), but the register-last rule is what keeps that true when
+    # someone adds the next route.
+    mount_console(app, settings)
     return app

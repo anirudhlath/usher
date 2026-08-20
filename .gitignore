@@ -13,3 +13,16 @@ data/
 
 # Per-worktree scratch written by the M9 execution harness
 .uvicorn-port
+
+# Usher Console (web/). `package-lock.json` is committed on purpose -- the
+# Dockerfile's `npm ci` refuses to run without it, which is what makes the
+# image reproducible.
+web/node_modules/
+web/dist/
+web/dist-fixtures/
+web/coverage/
+web/test-results/
+web/playwright-report/
+web/blob-report/
+web/.vite/
+web/node_modules/.tmp/

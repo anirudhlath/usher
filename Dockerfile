@@ -1,5 +1,35 @@
 # syntax=docker/dockerfile:1
 
+# Usher Console, built here and served by the app itself at /console.
+#
+# **A stage, not a second image.** The previous reference client was its own
+# repository, its own image and its own nginx, which existed only to rewrite
+# `/api/*` back to `/*` — and that rewrite is what made Usher's playback ticket
+# URLs, minted from the incoming `Host` header, point at the wrong port. One
+# process serving both removes the proxy, the rewrite and the CORS question
+# together. See `src/usher/api/console.py`.
+#
+# Node never reaches the runtime image: only `web/dist` is copied out, the same
+# way only `.venv/` and `src/` come out of the Python builder. Measured cost of
+# the bundle itself is a few hundred KB of hashed assets and the two self-hosted
+# webfont families.
+FROM node:26-alpine AS console
+
+WORKDIR /web
+
+# Dependencies first, so editing a component does not re-resolve the tree.
+# `npm ci` rather than `npm install`: it installs exactly the lockfile and
+# fails if the two disagree, which is the property that makes an image
+# reproducible.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+
+# `npm run build` is `tsc -b && vite build`, so a type error fails the image
+# build rather than shipping a bundle that only fails in a browser.
+RUN npm run build
+
 # Multi-stage: the builder stage has uv (and would have a C toolchain, if
 # any dependency here needed one to compile from sdist -- verified directly
 # that none currently do; every dependency in uv.lock resolves to a
@@ -58,6 +88,13 @@ WORKDIR /app
 COPY --from=builder --chown=usher:usher /app/.venv ./.venv
 COPY --from=builder --chown=usher:usher /app/src ./src
 COPY --chown=usher:usher alembic.ini ./
+
+# The console bundle, at the same path a checkout has it: `Settings.
+# console_dist_dir` defaults to `web/dist` and neither deployment overrides it.
+# The alternative -- flattening to `/app/web` because the runtime image has no
+# `web/src` for the `dist` to sit beside -- would buy tidiness with a setting
+# an operator has to know about, and this file already has enough of those.
+COPY --from=console --chown=usher:usher /web/dist ./web/dist
 
 # /data/images is where compose.yml bind-mounts a host directory for the
 # image proxy's cache. **M9 gave this mount its writer** --

@@ -1395,7 +1395,17 @@ Not committed; recorded so the design keeps room for them.
   that write path is the dual write
   [ADR-0002](decisions/0002-postgres-first-search.md) refused — which is
   exactly why the port has no write method today.
-- **Reference client** — separate repository.
+- ~~**Reference client** — separate repository.~~ **Done, and not as written.**
+  Shipped 2026-08-19 as **Usher Console** in `web/`, in *this* repository and in
+  the same container, served at `/console` by `usher.api.console`. The candidate
+  said "separate repository" and that was tried: `usher-web` existed for a day
+  and its whole nginx layer was a `/api/*` → `/*` rewrite, which is what made
+  `POST /play`'s ticket URL — minted from the incoming `Host` header — point at
+  the wrong port for an external player. **A client in another repository cannot
+  be versioned with the API it generates from, and the proxy that a second
+  origin needs is where the defect lived.** The design system it implements is a
+  handoff bundle (28 components, 18 screens, a 103-pair contrast ledger); the
+  behavioural authority is `web/docs/patterns.md`.
 - **Request/wanted list** — titles in the catalog but on no source.
 
 ## Explicitly out of scope

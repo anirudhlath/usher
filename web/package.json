@@ -1,0 +1,63 @@
+{
+  "name": "usher-console",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "lint": "oxlint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "e2e": "playwright test",
+    "e2e:update": "playwright test --update-snapshots",
+    "gen:types": "npx -y --package=typescript@5.9 --package=openapi-typescript@7 openapi-typescript ${USHER_ORIGIN:-http://localhost:8100}/openapi.json -o src/api/schema.d.ts",
+    "verify": "npm run typecheck && npm run lint && npm run format:check && npm run test && npm run build",
+    "build:fixtures": "vite build --mode fixtures --outDir dist-fixtures",
+    "preview:fixtures": "vite preview --outDir dist-fixtures"
+  },
+  "dependencies": {
+    "@fontsource-variable/instrument-sans": "^5.2.10",
+    "@fontsource-variable/jetbrains-mono": "^5.2.10",
+    "@tanstack/react-query": "^5.101.4",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.552.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.2"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.2",
+    "@playwright/test": "^1.57.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "@vitest/coverage-v8": "^4.0.18",
+    "axe-core": "^4.11.2",
+    "jsdom": "^28.0.1",
+    "msw": "^2.12.6",
+    "oxlint": "^1.75.0",
+    "prettier": "^3.7.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0",
+    "vitest": "^4.0.18"
+  },
+  "msw": {
+    "workerDirectory": "public"
+  }
+}

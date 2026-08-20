@@ -806,6 +806,53 @@ class Settings(BaseSettings):
     # and this setting is not the thing to change that for.
     image_cdn_base_url: str = Field(default="https://image.tmdb.org/t/p/", min_length=1)
 
+    # Whether this process also serves Usher Console at `/console` (see
+    # `usher.api.console`). On by default because a self-hosted product whose
+    # only interface is `curl` is not one, and because the console is built
+    # into the image rather than fetched — turning it off saves nothing at
+    # runtime but a `StaticFiles` mount.
+    #
+    # **Off is a real deployment, not a debugging aid.** A worker-only or
+    # push-only container (`USHER_WORKER_ENABLED` / `USHER_PUSH_ENABLED`) has
+    # no browser pointed at it, and a household that puts its own client in
+    # front of this API does not want a second one answering `/`.
+    console_enabled: bool = True
+    # Where the built bundle lives, relative to the working directory exactly
+    # as `image_cache_dir` is.
+    #
+    # **`web/dist` in both places on purpose.** It is where `vite build` writes
+    # in a checkout, and the Dockerfile copies the `console` stage's output to
+    # `/app/web/dist` so the container agrees rather than needing an override —
+    # which is the difference between a setting an operator never touches and
+    # one `.env.example` has to explain. `image_cache_dir` is the counterexample
+    # and it earns its divergence: that path is a bind mount, so it is a
+    # topology fact. This one is just where a build lands.
+    #
+    # A missing bundle is **not** a configuration error: `mount_console` logs
+    # and serves the API alone. A backend running from a checkout with no
+    # `npm run build` has to boot, or `uv run pytest` would need node.
+    console_dist_dir: Path = Path("web/dist")
+    # The deployment's Grafana, for the Insights screen's "Open in Grafana".
+    #
+    # `None` by default and **rendered as absent rather than as a dead link**
+    # when unset, which is the same distinction the rest of this product makes
+    # between never computed and computed and empty. There is no default value
+    # to guess: PRD 10's stack is a sibling compose project, its host is a
+    # deployment fact, and a wrong guess is worse than a stated absence.
+    #
+    # Deliberately **not** proxied through this app. The design forbids
+    # iframing Grafana (its own frame-ancestors policy would refuse anyway),
+    # so this is a link the browser follows directly and Usher never sees.
+    grafana_url: str | None = None
+    # The deployment's Tempo, for the "Open trace" link on a rendered problem
+    # document. Same rules as `grafana_url`: unset means the link is absent,
+    # and this app never proxies it.
+    #
+    # That one link is what PRD 10's telemetry is *for* on a failure path —
+    # every response already carries a trace id, and without somewhere to open
+    # it the id is a string an operator cannot act on.
+    tempo_url: str | None = None
+
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
 
@@ -921,7 +968,9 @@ class Settings(BaseSettings):
             )
         return self
 
-    @field_validator("tmdb_api_key", "otlp_endpoint", "llm_api_key", mode="before")
+    @field_validator(
+        "tmdb_api_key", "otlp_endpoint", "llm_api_key", "grafana_url", "tempo_url", mode="before"
+    )
     @classmethod
     def _blank_to_none(cls, value: object) -> object:
         """An env var that is present but empty (as `.env.example` ships

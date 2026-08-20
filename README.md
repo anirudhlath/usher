@@ -123,6 +123,70 @@ curl -sf http://localhost:8100/health/ready  # adds database + migration state,
                                              # and reports the background lanes
 ```
 
+Then open **<http://localhost:8100/>**, which redirects to the console.
+
+## Usher Console
+
+The web client ships in this repository, in `web/`, and is served by the same
+process as the API — one container, one origin, no reverse proxy. It has two
+halves for the same person: a **viewer** for browsing, searching and playing,
+and an **operator** console for connecting a media server, running imports,
+draining the review queue and reading metrics.
+
+It lives at **`/console`** rather than at `/`, and that is not a preference.
+All seventeen routers are mounted with no prefix, so the API already owns
+`/titles`, `/search`, `/home`, `/browse`, `/admin`, `/stream` and thirteen more
+root segments — a client-side route for a title detail page would collide with
+the operation that answers it. Giving the API an `/api` prefix instead would be
+a breaking change to a public contract for the benefit of the client generated
+from it. Plex and Emby both put their web app on a subpath for the same reason.
+`GET /` redirects, so the bare host still works.
+
+**What serving it in-process buys, beyond one fewer container.** Usher mints
+playback ticket URLs from the incoming `Host` header and ships no CORS
+middleware. The previous client ran behind its own nginx rewriting `/api/*` to
+`/*`, and a proxy that dropped the port from that header produced ticket URLs
+pointing at a different service — invisibly, because a browser re-issues them
+same-origin and only an external player following the `deep_link` ever noticed.
+With no proxy there is no header to get wrong and no origin to allow.
+
+Two settings, both optional, both `null` by default and both rendered as
+*absent* rather than as a dead link when unset: `USHER_GRAFANA_URL` for the
+Insights screen's "Open in Grafana", and `USHER_TEMPO_URL` for the "Open trace"
+link on a failed request. Neither is proxied through Usher; the browser follows
+them directly. `USHER_CONSOLE_ENABLED=false` turns the whole thing off, which is
+the right answer for a worker-only container or a household running its own
+client.
+
+### Developing it
+
+```bash
+cd web
+npm ci
+npm run dev          # Vite on :5173, proxying the API to $USHER_ORIGIN (default :8100)
+npm run verify       # typecheck, lint, format, unit tests, production build
+npm run e2e          # Playwright at 1440 / 834 / 390, with an axe sweep at each
+```
+
+The design system it implements is a handoff bundle: tokens, 28 components in
+ten groups, and 18 screens. `web/CONVENTIONS.md` is the contract between that
+bundle and this codebase, and `web/docs/patterns.md` is the behavioural
+authority — fifteen sections of redlines covering loading, the four absent
+states, the seven-code error taxonomy, keyset pagination, confirms, 202
+receipts, live data, cursor progress, keyboard, density, responsive,
+accessibility and security. Read it before changing a screen.
+
+Three of its rules are correctness rules rather than style, and are the ones
+most likely to be lost: **the UI never lies about what it knows** ("we have
+never computed this" is drawn differently from "we computed this and it is
+empty"); **no number ships without its denominator**, which is why bootstrap
+progress is a cursor and a throughput and never a percentage; and **a playback
+ticket URL is a secret** — never displayed, copied, shared or logged.
+
+A backend checkout with no `npm run build` is a normal state. The app logs the
+missing bundle once and serves the API alone, so `uv run pytest` never needs
+node.
+
 `USHER_SECRET_KEY` is the one value you must fill in: `.env.example` ships it
 empty, it has no default, and compose refuses to start without it. It encrypts
 stored source credentials, so changing it later makes existing ones unreadable

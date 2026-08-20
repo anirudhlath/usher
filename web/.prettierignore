@@ -1,0 +1,19 @@
+dist
+dist-fixtures
+coverage
+node_modules
+playwright-report
+test-results
+package-lock.json
+
+# Generated from the live /openapi.json. Reformatting it would produce a diff
+# on every regeneration that says nothing about the API.
+src/api/schema.d.ts
+
+# Ported verbatim from the design handoff. These are the contract every screen
+# is built against, and a formatter reflowing them makes them stop matching
+# their source -- the same reason ruff excludes docs/ and .claude/ upstream.
+src/design-system/tokens
+src/design-system/components/**/*.css
+src/design-system/styles
+docs

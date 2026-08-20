@@ -1,0 +1,221 @@
+/* ============================================================================
+   Usher Console — Tailwind v4 implementation target
+   ----------------------------------------------------------------------------
+   Client stack: React 19 + TypeScript + Tailwind v4 (CSS-first) + TanStack Query.
+
+   Load order in the app's entry CSS:
+
+     @import "tailwindcss";
+     @import "../design-system/styles.css";      // the token layer (themes live here)
+     @import "./tailwind-theme.css";             // this file (maps tokens to utilities)
+
+   Two blocks, on purpose:
+   · @theme          — the fixed ramps. These generate real values and are theme-independent.
+   · @theme inline   — the semantic layer. `inline` makes Tailwind emit `var(--bg-surface)` into the
+                       utility instead of copying the value, so `bg-surface` re-resolves when
+                       [data-theme="light"] flips. Without `inline`, light theme silently breaks.
+
+   Theme switching is an attribute, not a class: <html data-theme="light" data-density="compact">.
+   The `dark:` variant is NOT used — there is no "default plus dark", there are two themes and dark
+   is the default one. Use the `light:` variant declared at the bottom when a rule must differ.
+   ============================================================================ */
+
+@theme {
+  /* ---- fonts ---- */
+  --font-sans: 'Instrument Sans', 'Helvetica Neue', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* ---- type scale: text-<name> carries its own line-height ---- */
+  --text-display-lg: 3.5rem;      --text-display-lg--line-height: 1.02; --text-display-lg--letter-spacing: -0.022em; --text-display-lg--font-weight: 600;
+  --text-display: 2.75rem;        --text-display--line-height: 1.05;    --text-display--letter-spacing: -0.022em;    --text-display--font-weight: 600;
+  --text-display-sm: 2.125rem;    --text-display-sm--line-height: 1.1;  --text-display-sm--letter-spacing: -0.022em;  --text-display-sm--font-weight: 600;
+  --text-title-lg: 1.625rem;      --text-title-lg--line-height: 1.2;    --text-title-lg--letter-spacing: -0.014em;    --text-title-lg--font-weight: 600;
+  --text-title: 1.375rem;         --text-title--line-height: 1.25;      --text-title--letter-spacing: -0.014em;       --text-title--font-weight: 600;
+  --text-title-sm: 1.125rem;      --text-title-sm--line-height: 1.35;   --text-title-sm--letter-spacing: -0.014em;    --text-title-sm--font-weight: 600;
+  --text-heading: 1rem;           --text-heading--line-height: 1.4;     --text-heading--font-weight: 600;
+  --text-heading-sm: 0.875rem;    --text-heading-sm--line-height: 1.4;  --text-heading-sm--font-weight: 600;
+  --text-body-lg: 1.0625rem;      --text-body-lg--line-height: 1.55;
+  --text-body: 0.9375rem;         --text-body--line-height: 1.5;
+  --text-body-sm: 0.875rem;       --text-body-sm--line-height: 1.5;
+  --text-body-xs: 0.8125rem;      --text-body-xs--line-height: 1.45;
+  --text-label: 0.8125rem;        --text-label--line-height: 1.35;      --text-label--font-weight: 500;
+  --text-label-sm: 0.75rem;       --text-label-sm--line-height: 1.35;   --text-label-sm--font-weight: 500;
+  --text-eyebrow: 0.6875rem;      --text-eyebrow--line-height: 1.3;     --text-eyebrow--letter-spacing: 0.075em;      --text-eyebrow--font-weight: 600;
+  --text-metric: 1.75rem;         --text-metric--line-height: 1.1;      --text-metric--font-weight: 500;
+  --text-metric-sm: 1.25rem;      --text-metric-sm--line-height: 1.15;  --text-metric-sm--font-weight: 500;
+
+  /* ---- spacing: 4px grid. spacing-* multiples come free from --spacing ---- */
+  --spacing: 0.25rem;
+
+  /* ---- radii ---- */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-2xl: 20px;
+  --radius-artwork: 4px;
+  --radius-control: 6px;
+  --radius-card: 10px;
+  --radius-sheet: 14px;
+
+  /* ---- breakpoints: the three designed widths ---- */
+  --breakpoint-phone: 390px;
+  --breakpoint-tablet: 834px;
+  --breakpoint-desktop: 1440px;
+
+  /* ---- containers ---- */
+  --container-prose: 40rem;
+  --container-content: 76rem;
+
+  /* ---- easing + duration ---- */
+  --ease-standard: cubic-bezier(0.2, 0, 0.2, 1);
+  --ease-out-usher: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-usher: cubic-bezier(0.4, 0, 1, 1);
+  --ease-emphasis: cubic-bezier(0.2, 0, 0, 1);
+  --animate-skeleton: skeleton-sweep 1400ms linear infinite;
+  --animate-patch: patch-flash 1000ms var(--ease-out-usher) 1;
+  --animate-heartbeat: heartbeat 2000ms var(--ease-standard) infinite;
+
+  /* ---- base ramps: warm neutral (hue 60) ---- */
+  --color-n-1000: oklch(0.075 0.006 60);
+  --color-n-950:  oklch(0.122 0.006 60);
+  --color-n-900:  oklch(0.155 0.006 60);
+  --color-n-850:  oklch(0.198 0.006 60);
+  --color-n-800:  oklch(0.242 0.007 60);
+  --color-n-750:  oklch(0.285 0.008 60);
+  --color-n-700:  oklch(0.345 0.009 60);
+  --color-n-600:  oklch(0.46 0.01 60);
+  --color-n-500:  oklch(0.53 0.012 60);
+  --color-n-400:  oklch(0.65 0.014 60);
+  --color-n-350:  oklch(0.74 0.012 60);
+  --color-n-300:  oklch(0.8 0.01 60);
+  --color-n-200:  oklch(0.865 0.008 60);
+  --color-n-150:  oklch(0.915 0.006 60);
+  --color-n-100:  oklch(0.955 0.005 60);
+  --color-n-50:   oklch(0.982 0.004 60);
+  --color-n-0:    oklch(1 0 0);
+
+  /* ---- hued ramps: teal (accent + info), green (good), amber (warn), red (bad) ---- */
+  --color-teal-50: oklch(0.968 0.018 195);  --color-teal-100: oklch(0.945 0.03 195);
+  --color-teal-200: oklch(0.895 0.055 195); --color-teal-300: oklch(0.82 0.095 195);
+  --color-teal-400: oklch(0.78 0.13 195);   --color-teal-500: oklch(0.68 0.13 195);
+  --color-teal-600: oklch(0.495 0.125 195); --color-teal-700: oklch(0.4 0.11 195);
+  --color-teal-800: oklch(0.3 0.05 195);    --color-teal-900: oklch(0.225 0.04 195);
+
+  --color-green-50: oklch(0.968 0.018 150);  --color-green-100: oklch(0.945 0.03 150);
+  --color-green-200: oklch(0.895 0.055 150); --color-green-300: oklch(0.82 0.095 150);
+  --color-green-400: oklch(0.78 0.13 150);   --color-green-500: oklch(0.68 0.13 150);
+  --color-green-600: oklch(0.495 0.125 150); --color-green-700: oklch(0.4 0.11 150);
+  --color-green-800: oklch(0.3 0.05 150);    --color-green-900: oklch(0.225 0.04 150);
+
+  --color-amber-50: oklch(0.968 0.018 80);  --color-amber-100: oklch(0.945 0.03 80);
+  --color-amber-200: oklch(0.895 0.055 80); --color-amber-300: oklch(0.82 0.095 80);
+  --color-amber-400: oklch(0.78 0.13 80);   --color-amber-500: oklch(0.68 0.13 80);
+  --color-amber-600: oklch(0.495 0.125 80); --color-amber-700: oklch(0.4 0.11 80);
+  --color-amber-800: oklch(0.3 0.05 80);    --color-amber-900: oklch(0.225 0.04 80);
+
+  --color-red-50: oklch(0.968 0.018 25);  --color-red-100: oklch(0.945 0.03 25);
+  --color-red-200: oklch(0.895 0.055 25); --color-red-300: oklch(0.82 0.095 25);
+  --color-red-400: oklch(0.78 0.13 25);   --color-red-500: oklch(0.68 0.13 25);
+  --color-red-600: oklch(0.495 0.125 25); --color-red-700: oklch(0.4 0.11 25);
+  --color-red-800: oklch(0.3 0.05 25);    --color-red-900: oklch(0.225 0.04 25);
+
+  /* ---- data visualisation, per theme. Series order is 1..8. ---- */
+  --color-viz-blue-dark: oklch(0.68 0.13 250);    --color-viz-blue-light: oklch(0.52 0.16 250);
+  --color-viz-orange-dark: oklch(0.78 0.14 55);   --color-viz-orange-light: oklch(0.58 0.14 55);
+  --color-viz-green-dark: oklch(0.76 0.14 150);   --color-viz-green-light: oklch(0.53 0.14 150);
+  --color-viz-magenta-dark: oklch(0.71 0.18 340); --color-viz-magenta-light: oklch(0.5 0.19 340);
+  --color-viz-yellow-dark: oklch(0.88 0.15 95);   --color-viz-yellow-light: oklch(0.6 0.13 95);
+  --color-viz-cyan-dark: oklch(0.81 0.11 205);    --color-viz-cyan-light: oklch(0.54 0.11 205);
+  --color-viz-violet-dark: oklch(0.66 0.16 295);  --color-viz-violet-light: oklch(0.48 0.19 295);
+  --color-viz-brick-dark: oklch(0.64 0.16 30);    --color-viz-brick-light: oklch(0.48 0.17 30);
+}
+
+/* Semantic utilities. `inline` keeps the var() reference so the theme attribute still governs. */
+@theme inline {
+  --color-canvas: var(--bg-canvas);
+  --color-sunken: var(--bg-sunken);
+  --color-letterbox: var(--bg-letterbox);
+  --color-surface: var(--bg-surface);
+  --color-raised: var(--bg-raised);
+  --color-inset: var(--bg-inset);
+  --color-selected: var(--bg-selected);
+  --color-skeleton: var(--bg-skeleton);
+
+  --color-primary: var(--text-primary);
+  --color-secondary: var(--text-secondary);
+  --color-muted: var(--text-muted);
+  --color-disabled: var(--text-disabled);
+  --color-link: var(--text-link);
+  --color-on-accent: var(--text-on-accent);
+  --color-on-solid: var(--text-on-solid);
+  --color-on-danger: var(--text-on-danger);
+
+  --color-line-subtle: var(--border-subtle);
+  --color-line: var(--border-default);
+  --color-line-strong: var(--border-strong);
+  --color-line-control: var(--border-control);
+  --color-line-focus: var(--border-focus);
+
+  --color-accent: var(--accent-text);
+  --color-accent-solid: var(--accent-solid);
+  --color-accent-quiet: var(--accent-quiet);
+
+  --color-good: var(--good-text);      --color-good-solid: var(--good-solid);   --color-good-quiet: var(--good-quiet);
+  --color-warn: var(--warn-text);      --color-warn-solid: var(--warn-solid);   --color-warn-quiet: var(--warn-quiet);
+  --color-bad: var(--bad-text);        --color-bad-solid: var(--bad-solid);     --color-bad-quiet: var(--bad-quiet);
+  --color-info: var(--info-text);      --color-info-solid: var(--info-solid);   --color-info-quiet: var(--info-quiet);
+
+  --color-action: var(--action-primary-bg);
+  --color-action-text: var(--action-primary-text);
+  --color-action-2: var(--action-secondary-bg);
+
+  --color-viz-1: var(--viz-1); --color-viz-2: var(--viz-2); --color-viz-3: var(--viz-3); --color-viz-4: var(--viz-4);
+  --color-viz-5: var(--viz-5); --color-viz-6: var(--viz-6); --color-viz-7: var(--viz-7); --color-viz-8: var(--viz-8);
+  --color-viz-grid: var(--viz-grid);
+  --color-viz-axis: var(--viz-axis);
+  --color-viz-never: var(--viz-never-fired);
+
+  --shadow-e1: var(--shadow-1);
+  --shadow-e2: var(--shadow-2);
+  --shadow-e3: var(--shadow-3);
+  --shadow-e4: var(--shadow-4);
+  --shadow-artwork: var(--shadow-artwork);
+}
+
+/* Variants. `light:` for the rare rule that must differ; `compact:` for operator density. */
+@custom-variant light (&:where([data-theme="light"] *, [data-theme="light"]));
+@custom-variant compact (&:where([data-density="compact"] *, [data-density="compact"]));
+
+/* Utilities the token layer implies but Tailwind has no primitive for. */
+@utility mono-id {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+@utility focus-ring {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+@utility protect-bottom {
+  background-image: var(--gradient-protect-bottom);
+}
+@utility density-row {
+  min-height: var(--density-row-h);
+  padding-inline: var(--density-cell-pad-x);
+  padding-block: var(--density-cell-pad-y);
+}
+
+@keyframes skeleton-sweep { from { background-position: -180% 0 } to { background-position: 180% 0 } }
+@keyframes patch-flash { 0% { background-color: var(--live-patch-flash) } 100% { background-color: transparent } }
+@keyframes heartbeat { 0%, 88%, 100% { opacity: 0.55 } 92% { opacity: 1 } }
+
+/* Z-index is not a Tailwind theme namespace. Use the tokens directly: z-[var(--z-modal)]. */

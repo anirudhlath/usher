@@ -1,0 +1,79 @@
+/* Configuration — screen-local chrome, written in the design system's own idiom
+   (plain CSS over semantic tokens, `u-`-prefixed classes). Tailwind is layout
+   only on this screen; colour and type are tokens. */
+
+.u-cfg__lock {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2x);
+  padding: var(--space-3);
+  border: 1px solid var(--warn-border);
+  background: var(--warn-quiet);
+  border-radius: var(--radius-card);
+}
+.u-cfg__lock-icon {
+  color: var(--warn-text);
+  flex: none;
+  display: flex;
+  margin-top: 1px;
+}
+.u-cfg__lock-body {
+  font: var(--text-body-sm);
+  color: var(--text-secondary);
+  max-width: 84ch;
+  text-wrap: pretty;
+}
+
+.u-cfg__search {
+  flex: 1 1 280px;
+  max-width: 380px;
+}
+.u-cfg__group {
+  width: 200px;
+}
+
+.u-cfg__about {
+  font: var(--text-body-xs);
+  color: var(--text-secondary);
+  display: block;
+  max-width: 62ch;
+  text-wrap: pretty;
+}
+
+.u-cfg__value {
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-primary);
+  font-variant-numeric: var(--numeric-tabular);
+  word-break: break-word;
+}
+
+.u-cfg__default,
+.u-cfg__observed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+/* The read that proves the value, printed beside it. A value with no provenance
+   on a screen whose whole subject is "nothing serves these" would be the one
+   claim this screen cannot afford to make loosely. */
+.u-cfg__proof {
+  font: var(--text-body-xs);
+  color: var(--text-muted);
+}
+
+.u-cfg__note {
+  font: var(--text-body-sm);
+  color: var(--text-secondary);
+  max-width: 84ch;
+  text-wrap: pretty;
+}
+
+.u-cfg__fine {
+  font: var(--text-body-xs);
+  color: var(--text-muted);
+  max-width: 84ch;
+  text-wrap: pretty;
+}
