@@ -55,7 +55,7 @@ from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.ports.errors import (
     PortAuthFailed,
     PortDataMalformed,
@@ -75,6 +75,7 @@ from usher.services.bootstrap import (
 from usher.services.curation import CurationReport
 from usher.services.curation_validate import DropReason
 from usher.services.home import ComposeReport, HomeService
+from usher.services.reconcile import RETRACTION_ERROR_CODE
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
 from usher.services.search import SearchAnswer, SemanticSearchUnavailable, SuggestTier
@@ -143,6 +144,18 @@ _IDLE_SLEEP_SECONDS = 5.0
 # rather than in `ports/errors.py`, which is why nobody counts them -- stay out
 # for the opposite reason: no measured path reaches this boundary with one, and
 # ADR-0026 asks for evidence per family before the tuple grows.
+#
+# ⚠️ **`AvailabilitySweepRefused` now has that evidence and still stays out, and
+# the two reasons are worth keeping apart** (M10 S9, 2026-08-19). The *family*
+# does occur in the field: the operator's own `sync_runs` holds a `full` run
+# refused by ADR-0015's ceiling on 2026-08-13. What it does not have is a
+# **path** here -- `ReconcileService.reconcile` absorbs it into a `FAILED` row
+# and its docstring promises never to raise, deliberately, so one source's
+# refusal cannot abort a multi-source sync. Adding it to this tuple would be a
+# decision with no effect. `_sync` reports it off the **run row** instead, which
+# is the artefact that does cross this boundary, and exits non-zero there.
+# *"Unreachable here"* and *"never observed"* are two claims, and only the first
+# is still true of this one.
 #
 # `tests/unit/test_cli_errors.py::
 # test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple`
@@ -355,6 +368,21 @@ async def _sync(
     asserts, alongside the property that *is* about the registry: the
     `build_pipeline` call is in this function's own body and not inside a
     closure that runs per scope.
+
+    🔴 **A run that recorded `FAILED` exits non-zero, and until 2026-08-19 it
+    did not.** `ReconcileService.reconcile` absorbs every `UsherPortError`
+    into a `FAILED` row and never raises -- deliberately, so one source's
+    failure cannot abort a multi-source sync -- so nothing reached `main`'s
+    boundary and the command exited 0 having printed the word `failed`. A
+    human reading the terminal saw it; cron, CI and a systemd unit did not.
+    Measured on the deployment this milestone was written against: one `full`
+    run refused by ADR-0015's ceiling on 2026-08-13, and **ten consecutive
+    `watch_state` failures with not one completion, every one of them exit 0.**
+
+    **The exit is collected and raised after the loop**, never inside it: the
+    reason `reconcile` swallows the exception in the first place is that the
+    remaining sources still have to be walked, and exiting early would
+    reintroduce exactly that.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(
@@ -366,6 +394,7 @@ async def _sync(
             return
         user_id = await ensure_default_user(session)
         await session.commit()
+        failed: list[SyncRun] = []
         for source in sources:
             adapter = await _open_adapter(pipeline, source)
             if adapter is None:
@@ -389,8 +418,37 @@ async def _sync(
                     f"unmatched={watch.items_unmatched}"
                     + (f" error={watch.error}" if watch.error else "")
                 )
+                failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)
             finally:
                 await adapter.aclose()
+        if failed:
+            raise SystemExit(_sync_failed(failed))
+
+
+def _sync_failed(runs: Sequence[SyncRun]) -> str:
+    """The exit line for a sync in which at least one run recorded `FAILED`.
+
+    The per-run detail is already on stdout above -- including each `error`,
+    which for a refusal is the two numbers and the ceiling. This says *which*
+    lanes failed and stops the command claiming success, rather than repeating
+    what was printed a line earlier.
+
+    **`--allow-full-retraction` is named only when a refusal is among them**,
+    and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is the one
+    failure here an operator has a command for; a read timeout is not, and an
+    escape hatch offered for every failure is one people learn to paste
+    without reading. The token is matched rather than the refusal's English,
+    because that sentence is built from three numbers in `ports/ingest.py` and
+    is a standing candidate for rewording.
+    """
+    lanes = ", ".join(f"{one.kind.value}" for one in runs)
+    line = f"{len(runs)} sync run(s) failed: {lanes}; see the lines above and `usher sync-status`"
+    if any(RETRACTION_ERROR_CODE in (one.error or "") for one in runs):
+        line += (
+            "\nthe availability sweep refused: if the removal was intended, "
+            "re-run with `usher sync --allow-full-retraction`"
+        )
+    return line
 
 
 async def _sync_status(settings: Settings) -> None:
@@ -1904,6 +1962,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     boundary wraps `_dispatch` rather than living inside it, and
     `tests/unit/test_cli_errors.py` asserts that shape by AST as well as
     asserting the behaviour.
+
+    **`_sync`'s failed-run exit is not a hole in that boundary.** A `SyncRun`
+    that recorded `FAILED` is a *value* the command was handed, not an
+    exception it caught -- `ReconcileService.reconcile` absorbed the exception
+    three layers down and promises to, so there is nothing here to translate.
+    It exits through `SystemExit` like the five below.
 
     Reading the settings is inside it too. A `.env` that fails validation is
     the same kind of failure as a database that is down, it reaches the

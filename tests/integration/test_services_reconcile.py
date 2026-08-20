@@ -44,7 +44,11 @@ from usher.ports.errors import PortUnavailable
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
-from usher.services.reconcile import CEILING_ERROR_CODE, ReconcileService
+from usher.services.reconcile import (
+    CEILING_ERROR_CODE,
+    RETRACTION_ERROR_CODE,
+    ReconcileService,
+)
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
 # The ceiling case's two numbers, named so the arithmetic below reads. 200 is
@@ -306,6 +310,59 @@ async def test_a_refused_sweep_reports_both_numbers_where_an_operator_can_see_th
 
     assert _fraction_points(meter_reader, outcome="refused") == [("Reconcile Source", 0.9)], (
         "the refused arm records what the walk *would* have retracted"
+    )
+
+
+async def test_a_refused_sweep_records_the_token_the_cli_matches_on(
+    service: ReconcileService,
+    source: Source,
+    adapter: _Adapter,
+) -> None:
+    """`sync_runs.error` begins with `RETRACTION_ERROR_CODE`, and the CLI reads it.
+
+    **Two halves of one agreement, and this is the half a literal in the other
+    would hide.** `cli._sync_failed` names `--allow-full-retraction` only when
+    a failed run's `error` carries this token, because that flag resolves a
+    refusal and nothing else in this column -- an escape hatch offered for
+    every read timeout is one an operator learns to paste without reading. If
+    the service stopped writing the prefix, the CLI would silently stop
+    offering the flag on the one failure it fixes, and
+    `tests/unit/test_cli_errors.py` would stay green because it composes its
+    own row. So the token is asserted here, against a **real** refusal raised
+    by real Postgres, and imported there rather than spelled twice.
+
+    The negative arm is the point of the second assertion: a transport failure
+    must **not** carry it. Without that, `_recorded_error` returning the prefix
+    unconditionally passes -- and the flag would be advertised for every
+    failure, which is the defect the token exists to prevent rather than a
+    weaker version of it.
+
+    The prefix and not a new column, because ADR-0015's row is already what
+    `usher sync-status` and `GET /admin/sync` read, and S9 makes no schema
+    change.
+    """
+    for index in range(10):
+        adapter.items[f"m{index}"] = _item(f"m{index}")
+    assert (await service.reconcile(source, SyncRunKind.FULL, adapter)).status is (  # type: ignore[arg-type]
+        SyncRunStatus.COMPLETED
+    ), "the premise: a first walk that lands ten items, so the second can lose nine"
+
+    for index in range(1, 10):
+        del adapter.items[f"m{index}"]
+    refused = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+
+    assert refused.status is SyncRunStatus.FAILED
+    assert (refused.error or "").startswith(f"{RETRACTION_ERROR_CODE}:"), (
+        f"the CLI matches this prefix and nothing else: {refused.error!r}"
+    )
+
+    # The negative arm, on the same source and the same service: a walk that
+    # died in transport is a failure with no flag behind it.
+    adapter.fail_after = 0
+    transport = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    assert transport.status is SyncRunStatus.FAILED, "the premise: this walk failed too"
+    assert RETRACTION_ERROR_CODE not in (transport.error or ""), (
+        "a transport failure must not advertise a flag that cannot fix it"
     )
 
 

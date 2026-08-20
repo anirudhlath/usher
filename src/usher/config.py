@@ -241,6 +241,31 @@ class Settings(BaseSettings):
     # before it refuses and changes nothing (ADR-0015). 1.0 disables the
     # guard, which is what an operator deliberately removing a library
     # passes on the command line.
+    #
+    # **0.25 stayed on 2026-08-19 (M10 S9), and it stayed because somebody
+    # looked.** A number that stayed because nobody looked and a number that
+    # stayed because it was measured are the same value and different claims,
+    # so this comment says which. Issue #20 asked whether the default suits a
+    # library the operator does **not own** and asked for a reading across a
+    # churn event nobody can schedule. What S8 found instead, in the
+    # deployment's own `sync_runs`: the ceiling had **already fired**, on
+    # 2026-08-13, refusing 60 of 180 items at 33% -- and nothing had been
+    # deleted. The walk was *bounded* and saw 120 of the 180 Usher held.
+    #
+    # So the one observation of this guard firing in the field was **Usher's
+    # own partial coverage, not the source's churn**, and moving a ceiling on
+    # that evidence would be tuning it against the wrong population. The
+    # drift probe (`scripts/measure_source_drift.py`) cannot supply the right
+    # one here either: it read 11,851 available against a live 1,137,502, and
+    # its lower bound is structurally 0 for any catalogue that lags its
+    # source. Revisit when a **completed** full walk of a shared library
+    # exists to measure -- none ever has.
+    #
+    # The per-source override is the post-v1 candidate, named rather than
+    # taken: a `sources.max_retract_fraction real` column, nullable, falling
+    # back to this. It is out of scope here because `Source` carries ten
+    # fields and not one of them is tuning, so the first one is a data-model
+    # decision and a migration rather than a default being chosen.
     sync_max_retract_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
     job_batch_size: int = Field(default=20, ge=1, le=500)
     # How many jobs one worker process may have in flight at once, and the

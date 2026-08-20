@@ -63,6 +63,39 @@ re-running a sync and the other is not, and asking once is cheap.
 unreachable, which is exactly what PRD [08](../08-operations.md)'s failure
 table already promises ("Availability goes stale, not wrong").
 
+**And the case this ADR did not distinguish, named on 2026-08-19 (M10 S9): an
+owned library and a *view* of somebody else's.** PRD [03](../03-sources-and-sync.md)
+adopts that vocabulary. **The 0.25 default assumes the first** — it is a
+number for a library whose removals the operator authorises, where a large
+retraction means something went wrong and asking once is cheap. On a **view**,
+three of this ADR's premises read differently:
+
+- The operator cannot authorise a removal they did not make, so *"ask once and
+  re-run with the ceiling raised"* is asking them to ratify somebody else's
+  decision sight unseen.
+- A refusal stops being an incident and becomes a **steady state**, which is
+  the failure mode a ceiling cannot distinguish: refusing every night is
+  indistinguishable from having no sweep at all, and the catalog's
+  availability silently stops being updated.
+- The ceiling is a fraction of what **Usher** holds, so a catalogue that has
+  only partially ingested its source measures the source's churn against its
+  own incompleteness.
+
+**The default stays at 0.25 anyway, and the reason is the evidence rather than
+inertia.** The one time this guard has fired in the field it was tripped by
+Usher's own bounded walk, not by the source (see *Evidence*), and no completed
+full walk of a shared library exists to measure churn against. Moving a ceiling
+on a reading of the wrong population is worse than leaving it where it is and
+saying so. `src/usher/config.py` records the same thing at the number itself.
+
+**What did change is that a refused sweep now reaches the operator.**
+`usher sync` exits non-zero when any run it performed recorded `FAILED`, and
+names `--allow-full-retraction` when a refusal is among them.
+`AvailabilitySweepRefused` deliberately did **not** join `cli.OPERATOR_ERRORS`:
+`ReconcileService.reconcile` absorbs it by contract so one source's refusal
+cannot abort a multi-source sync, so the exception never reaches that boundary
+and adding it there would have changed nothing.
+
 ## Evidence
 
 `tests/contract/media_item_repository_contract.py` asserts the raise *and*

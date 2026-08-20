@@ -288,6 +288,18 @@ whole library unavailable in one run
 ([ADR-0015](docs/prd/decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)).
 Only use it for a library the operator really did remove.
 
+`usher sync` **exits non-zero if any run it performed recorded `FAILED`**, so a
+cron entry or a CI step sees a sync that did not work. Every source is still
+walked first — one source's failure does not skip the others.
+
+**Pointing Usher at a server you do not administer is an intended deployment,
+not a misuse** — it is the one this project is developed against. Two defaults
+assume otherwise and are documented rather than changed: the retraction ceiling
+above assumes removals are yours to authorise, and marking a title played writes
+to your account on that server. See
+[PRD 03](docs/prd/03-sources-and-sync.md) for the distinction between a library
+you own and a *view* of somebody else's.
+
 **Inspect and repair**
 
 ```bash

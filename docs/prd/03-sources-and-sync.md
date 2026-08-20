@@ -476,6 +476,27 @@ An item that reappears in a walk is available again at that moment: the
 upsert restores it, because appearing in a walk *is* the evidence of
 availability. The sweep only ever sets `false`.
 
+**A source is either a library this deployment owns or a *view* of somebody
+else's, and Usher does not model the difference.** The vocabulary is stated
+here once because several behaviours already read differently under the two
+and all of them shipped assuming the first: the retraction ceiling above
+assumes removals are the operator's to authorise; *"availability goes stale,
+not wrong"* ([08](08-operations.md)) assumes staleness is the only failure;
+and the watch write-back ([07](07-api-surface.md)) writes play state to an
+account on a server the operator does not administer. **Pointing Usher at a
+server somebody else runs is an intended deployment, not a misuse** — it is
+the one this project is developed against — so the assumption is named rather
+than left for a stranger to discover.
+
+⚠️ **The ceiling is a fraction of what *Usher* holds, not of the source**, which
+is the part that surprises on a view: a catalogue that has ingested a tenth of
+its source measures that source's churn against its own incompleteness.
+Measured 2026-08-19 (M10 S8): the guard's one observed firing on a real
+deployment was tripped by a **bounded walk of Usher's own**, refusing 60 of 180
+items at 33% on a day nothing had been deleted. The default stays at `0.25` and
+[ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
+carries why. A per-source override is post-v1, named there with its column.
+
 **Only a full walk sweeps, and the ceiling is not a substitute for that.** A
 delta walk returns only what changed, so by construction nearly everything is
 "unseen" — a sweep after one would retract the library. The ceiling fires on

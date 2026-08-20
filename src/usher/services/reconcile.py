@@ -151,6 +151,34 @@ _ITEM_LANES: tuple[SyncRunKind, ...] = (SyncRunKind.FULL, SyncRunKind.DELTA)
 # in the project uses it.
 CEILING_ERROR_CODE = "gap_delta_ceiling"
 
+# The same device for the *other* failure an operator has a command for, and
+# added for the same reason one token over (M10 S9).
+#
+# ADR-0015's refusal is the one sync failure with an escape hatch --
+# `usher sync --allow-full-retraction`. Everything else in this column is a
+# transport fault, a broken upstream or a bounded walk, and offering that flag
+# for all of them is how an operator learns to paste it without reading. So the
+# CLI has to tell one failure from the rest, and **matching on the refusal's own
+# English is what this constant exists to avoid**: the sentence is built in
+# `ports/ingest.py` from three numbers and is a standing candidate for rewording.
+#
+# It is a prefix on what `sync_runs.error` stores rather than a new column,
+# because S9 makes no schema change and because the row is already the surface
+# `usher sync-status` and `GET /admin/sync` both read.
+RETRACTION_ERROR_CODE = "availability_ceiling"
+
+
+def _recorded_error(exc: UsherPortError) -> str:
+    """What `sync_runs.error` holds for a failure this service absorbed.
+
+    One function rather than a branch at the call site, for the reason
+    `_failed` beside it gives: the two are one rule and a rule spelled twice is
+    a rule one deletion is invisible in.
+    """
+    if isinstance(exc, AvailabilitySweepRefused):
+        return f"{RETRACTION_ERROR_CODE}: {exc}"
+    return str(exc)
+
 
 class _Progress:
     """The run as the walk has most recently checkpointed it.
@@ -288,7 +316,7 @@ class ReconcileService:
                 # str(exc), never the exception object and never a payload --
                 # PRD 08's credentials-never-logged rule, and `error` is a
                 # Text column an operator reads.
-                run = self._failed(progress.run, str(exc))
+                run = self._failed(progress.run, _recorded_error(exc))
                 span.set_attribute("usher.failed", True)
                 logger.error(
                     "{kind} sync of {source} failed after {seen} items: {error}",
