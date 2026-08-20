@@ -17,6 +17,27 @@ import { degradedReadiness } from '@/test/handlers'
 import Config from './Config'
 import { CONFIG, SETTING_COUNT } from './Config.settings'
 
+/**
+ * **This file's timeout, and only this file's.**
+ *
+ * Configuration is the largest single surface in the product — 73 setting rows,
+ * rendered twice over (a table and, at 390 px, 73 stacked cards), each with a
+ * description, and two of the cases sweep the whole thing with axe. Measured
+ * under `vitest --coverage`, which is what CI runs and which roughly doubles
+ * everything: 11.0 s for the table case and 6.2 s for the cards case, against a
+ * 5 s default. Every other test in the repository averages ~320 ms.
+ *
+ * So the two are slow rather than stuck, and the distinction is the whole
+ * reason this is scoped to one file. A **global** bump would buy these two
+ * cases headroom by making a genuine hang anywhere else take 30 s to report,
+ * and the suite's own timings say nothing else needs it — the next slowest file
+ * is 5.8 s for *eighteen* tests.
+ *
+ * If this file gets materially faster, take the setting out rather than leaving
+ * an allowance nothing uses.
+ */
+vi.setConfig({ testTimeout: 30_000 })
+
 const noop = () => {}
 
 /** The stub `setup.ts` installs answers `false` to everything; this narrows it. */
@@ -72,14 +93,7 @@ describe('Config', () => {
     expect(screen.getByRole('table', { name: 'Configuration' })).toBeVisible()
 
     await expectNoViolations(container)
-    // 20 s rather than the 5 s default, and for this case only. axe walks every
-    // node, and this screen is the largest single table in the product — 73
-    // rows plus their descriptions. Isolated it finishes in well under a
-    // second; under the full suite's parallelism it crossed 5 s and failed as a
-    // timeout, which reads as a defect in the screen rather than as a slow
-    // sweep. Raising the *global* timeout would hide a real hang somewhere
-    // else, so the allowance is scoped to the case that earned it.
-  }, 20_000)
+  })
 
   it('has no editor, and says why there is none rather than disabling one', async () => {
     renderConfig()
