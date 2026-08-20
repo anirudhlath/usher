@@ -7020,7 +7020,7 @@ into a pass/fail, which is what the plan asked for.
 `git status --porcelain` asserted empty after every revert, and every file
 compared byte-for-byte against `git show "HEAD:<path>"` — never `git checkout`.
 
-## M10 F2 — orphaned claims reach `/health/ready`, and `== 1` is the assertion that cannot tell a claim from a pass (2026-08-19)
+## M10 F2 — orphaned claims reach `/health/ready`, and `== 1` is the assertion that cannot tell a claim from a pass (2026-08-20)
 
 Four mutations pre-registered in `/var/tmp/m10-f2/SWEEP-F2.md`
 (`sha256:4385fdf2…`, written before any plant), plus one added while the plan's
@@ -7046,6 +7046,35 @@ the field can take — `null` / `0` / non-zero are three different statements
 for each. Same family as *"a count and an argument are two assertions"* one file
 over, and as *"a fixture whose origin is the identity element cannot distinguish
 the operation from its absence"*: at N=1 a sum and a tally agree.
+
+**The plan's prediction for target 3 was wrong, and 3b is what says so.** It
+read *"`crashed_sources` reported from `running_sources()` instead must fail
+S10's own case"* — one sentence covering two different edits with two different
+verdicts. The **supervisor**-level spelling fails S10's case (and two more); the
+**router**-level spelling — which is the one the sentence literally describes,
+since F2 is what added that call site — does not touch `test_api_lanes.py` at
+all and dies only at the route. Registering both is what made the difference
+visible; a sweep that spelled only one of them would have recorded a kill
+against the wrong prediction and never known. Written down rather than
+silently corrected, which is the failure this project keeps finding in its own
+records (precedent: S9's ledger).
+
+🔴 **The review round after this sweep found what none of the five mutations
+could: the throttle's origin is the identity element.** `recovered_at = 0.0`
+compared against `time.monotonic()` — seconds since **boot** on Linux — makes
+`now - origin >= lease / 2` false for the first 150 s of host uptime, so a
+worker-enabled process started with the machine skips its first recovery pass
+and reports `recovered_claims: null`, the value documented to mean *"this
+process runs no worker"*. **Three of F2's own cases pass here only because this
+host was at 32 days' uptime**, and all three go red under a shimmed 10 s clock.
+A mutation sweep cannot find this: it is a defect in code the sweep treats as
+the *base*, and every mutation was scored against a tree that already had it.
+Fixed to `float("-inf")` at both call sites and pinned by
+`test_the_worker_lane_recovers_on_its_first_pass_on_a_host_that_just_booted`
+plus its `usher work` twin, each shimming the module's `time` rather than the
+global one. **The lesson generalises past this task: a sweep measures what the
+suite would catch if the code changed, and says nothing about what the code
+already gets wrong at a boundary the suite never reaches.**
 
 `git status --porcelain` was read after every revert and each file compared
 against its `cp` backup in `/var/tmp/m10-f2/` — never `git checkout`.

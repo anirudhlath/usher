@@ -137,12 +137,11 @@ async def ready(
     # load-balancer half was always the load-bearing one and is left standing
     # alone rather than propped up by a number nobody had taken.
     #
-    # Free to report and therefore worth reporting: all five of these read
-    # in-memory state off the supervisor -- task state for the first three,
-    # and for the last two the number `JobWorker.recover()` already returned
-    # rather than a `SELECT count(*) ... WHERE status = 'running'` per 2 s
-    # poll over a table with no index on that value. So this endpoint still
-    # makes **no upstream request and issues no third statement at all**.
+    # Free to report and therefore worth reporting: all five read in-memory
+    # state off the supervisor, so this endpoint still makes **no upstream
+    # request and issues no third statement at all**. Why each is in
+    # `LaneReport` rather than in `checks`, and why the last two are the number
+    # `recover()` returned rather than a query, is on `LaneReport` itself.
     return ReadinessResponse(
         status="ready" if is_ready else "degraded",
         checks=checks,

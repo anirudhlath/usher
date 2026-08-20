@@ -166,13 +166,7 @@ async def _no_user() -> uuid.UUID:
 
 @asynccontextmanager
 async def _client_with_lanes(lanes: LaneSupervisor) -> AsyncIterator[AsyncClient]:
-    settings = Settings(
-        database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
-        secret_key="0123456789abcdef0123456789abcdef",
-        push_enabled=False,
-        worker_enabled=False,
-    )
-    app = create_app(settings)
+    app = create_app(_settings())
     app.dependency_overrides[get_lane_supervisor] = lambda: lanes
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)

@@ -265,43 +265,34 @@ class LaneSupervisor:
         return self._worker is not None and not self._worker.done()
 
     def recovered_claims(self) -> int | None:
-        """How many abandoned claims this process has taken back since it
-        started, or `None` if it has never asked.
+        """The total `JobWorker.recover()` has returned in this process, or
+        `None` if it has never asked.
 
-        The number `JobWorker.recover()` already returned, summed -- **never a
-        fresh query**. `/health/ready` reports this and the shipped compose
-        healthcheck polls it every 2 s; a `SELECT count(*) FROM jobs WHERE
-        status = 'running' AND updated_at <= clock_timestamp() - ...` per poll
-        is a scan of a table with no index on that value (`ix_jobs_claim` is
-        partial on `pending`, `ix_jobs_parked` on `parked`) and M4 measured it
-        at 1,126,674 rows. This costs nothing and is what `recover()` knows.
-
-        `None` is *not probed*, on `push_available()`'s own terms one method
-        up: with `USHER_WORKER_ENABLED=false` beside a `usher work` container
-        this process never calls `recover()`, and `0` would answer "no
-        orphans" to a question it never asked.
-
-        **Per process, so it cannot see a peer's orphans that the peer
-        recovered** -- two workers each report what they took back and the sum
-        is the truth. Stated rather than solved, because the alternative is
-        the per-poll query above.
+        Three values, three statements -- `None` *not probed*, `0` *asked and
+        found none*, non-zero *took some back* -- on the terms
+        `SourceStatus.push_available` (`usher.ports.source`) already sets. **The
+        whole argument for the shape, the cost and the per-process bound is on
+        `LaneReport` (`usher.api.dto.health`), which is the wire contract**;
+        stating it here too is two copies to drift.
         """
         return self._recovered_claims
 
     def recovered_at(self) -> datetime | None:
-        """When the last recovery pass that *found something* ran.
-
-        Not "when recovery last ran": that moves on its own every half lease
-        and would tell a poller nothing.
-        """
+        """When the last recovery pass that *found something* ran -- see
+        `LaneReport` for why it is not "when recovery last ran"."""
         return self._recovered_at
 
     def _note_recovery(self, recovered: int) -> None:
         """Fold one `recover()` result into the two reported fields.
 
-        Reads the **return value**; a counter incremented before the call
-        would report passes rather than claims, and the two agree at exactly
-        the moment nothing is wrong.
+        Reads the **return value**, and a counter incremented before the call
+        instead is the mutation this exists to refuse. The two **diverge where
+        it matters and agree where it does not**: a pass that recovered nothing
+        reports `0` here and `1` there, while at exactly one orphan both say
+        `1` -- which is why F2's own spec, asserting `== 1` against a single
+        planted claim, could not tell them apart, and why the case that kills
+        it is the one that recovers **none**
+        (`.claude/rules/mutation-sweeps.md`, M10 F2).
         """
         self._recovered_claims = (self._recovered_claims or 0) + recovered
         if recovered:
@@ -788,7 +779,21 @@ class LaneSupervisor:
         register_search_gauges(self._backlog.read)
         registry = SourceRegistry()
         worker: JobWorker | None = None
-        recovered_at = 0.0
+        # 🔴 **`-inf`, never `0.0`, and this is a defect rather than a style.**
+        # `time.monotonic()` on Linux is seconds since **boot**, so against a
+        # `0.0` origin `now - throttled_at >= lease / 2` is *false* for the
+        # first 150 s of host uptime at the shipped lease -- a worker-enabled
+        # process started with the machine skips its first recovery pass
+        # entirely and reports `recovered_claims: null`, which this file
+        # documents as meaning "this process runs no worker". The field lies at
+        # exactly the moment a compose stack comes up holding the previous
+        # boot's orphans. `-inf` is the identity for `max`-like "never yet",
+        # and it makes the first pass unconditional, which is what this
+        # docstring and `usher work`'s copy have always claimed.
+        # `.claude/rules/testing-discipline.md`: an origin that is the identity
+        # element of the operation under test cannot distinguish the operation
+        # from its absence.
+        throttled_at = float("-inf")
         while True:
             ran = 0
             try:
@@ -803,15 +808,13 @@ class LaneSupervisor:
                         user_id=await self._user_id(),
                     )
                 now = time.monotonic()
-                if now - recovered_at >= self._settings.job_lease_seconds / 2:
+                if now - throttled_at >= self._settings.job_lease_seconds / 2:
                     # The return value has a reader, which it did not until
                     # M10's F2: `/health/ready`'s body carries the total, so
                     # an operator can see the condition M9's S3 hit rather
                     # than only a WARNING that fires when it is non-zero.
-                    # `recovered_at` here is the monotonic *throttle*, which
-                    # is a different reading from `self._recovered_at`.
                     self._note_recovery(await worker.recover())
-                    recovered_at = now
+                    throttled_at = now
                 ran = await worker.run_once()
                 async with self._work() as pipeline:
                     await self._gauges.refresh(pipeline.queue)

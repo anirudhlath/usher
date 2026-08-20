@@ -595,7 +595,12 @@ async def _work(settings: Settings, *, once: bool) -> None:
             user_id=user_id,
         )
 
-        recovered_at = 0.0
+        # 🔴 **`-inf`, never `0.0`** -- `api/lanes.py` carries the argument, and
+        # it applies here with one extra consequence: `usher work --once` from
+        # a cron inside the first 150 s of host uptime would recover nothing at
+        # all, while `_measure` below claims it recovers "before the first
+        # claim". `time.monotonic()` is seconds since boot on Linux.
+        throttled_at = float("-inf")
         # The running total of what this process has taken back from workers
         # that stopped heartbeating, kept for the same reason the server keeps
         # it in `/health/ready`'s body: `recover()` has returned this number
@@ -603,6 +608,14 @@ async def _work(settings: Settings, *, once: bool) -> None:
         # M9's S3 condition was a WARNING that fires when the count is
         # non-zero. This command has no readiness route, so it goes in the pass
         # line it already prints rather than growing a surface (M10 F2).
+        #
+        # An `int` here and an `int | None` on `LaneReport`, deliberately.
+        # `None` there is *"this process runs no worker"*, which is a state
+        # `create_app` really has (`USHER_WORKER_ENABLED=false`) and which
+        # `usher work` cannot be: with the origin above, the first `_measure`
+        # always recovers before anything is printed, so `0` on this line means
+        # *asked and found none* and there is no third state for a `None` to
+        # name. Spelling it `int | None` would add a branch no run can reach.
         recovered = 0
 
         async def _measure() -> int:
@@ -614,11 +627,11 @@ async def _work(settings: Settings, *, once: bool) -> None:
             # the lease for `api/lanes.py`'s reason: it is an `UPDATE` scanning
             # `status = 'running'`, and between leases there is nothing to
             # find.
-            nonlocal recovered_at, recovered
+            nonlocal throttled_at, recovered
             now = time.monotonic()
-            if now - recovered_at >= settings.job_lease_seconds / 2:
+            if now - throttled_at >= settings.job_lease_seconds / 2:
                 recovered += await worker.recover()
-                recovered_at = now
+                throttled_at = now
             done = await worker.run_once()
             async with work() as pipeline:
                 await gauges.refresh(pipeline.queue)
@@ -632,7 +645,19 @@ async def _work(settings: Settings, *, once: bool) -> None:
         while not once:
             if ran == 0:
                 await asyncio.sleep(_IDLE_SLEEP_SECONDS)
+            taken = recovered
             ran = await _measure()
+            if recovered != taken:
+                # **On a change, never per pass.** Without this a daemon prints
+                # exactly one line, at startup, when the total is almost always
+                # zero -- so every later recovery, which is precisely M9's S3,
+                # is invisible in the only mode a container runs, and PRD 08's
+                # "`usher work` ... prints the same total in its pass line"
+                # would be true of `--once` alone. A line *per pass* is the
+                # other error: at `_IDLE_SLEEP_SECONDS` that is ~17,280 a day,
+                # the rate `.claude/rules/config-cli-and-deployment.md` already
+                # records as training an operator to ignore output.
+                print(f"{ran} jobs, {recovered} recovered claims")
     finally:
         await registry.aclose()
         await aclose()

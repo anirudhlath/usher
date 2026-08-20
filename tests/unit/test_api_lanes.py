@@ -1331,6 +1331,70 @@ async def test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass(
     )
 
 
+class _JustBooted:
+    """`time`, with `monotonic()` frozen at a small uptime.
+
+    Substituted for the **module's** `time`, never the global one:
+    `asyncio`'s own timers resolve `time.monotonic` through `loop.time()` at
+    call time, so patching `time.monotonic` globally freezes every sleep in
+    the event loop and the case hangs instead of failing.
+    """
+
+    def __init__(self, uptime: float) -> None:
+        self._uptime = uptime
+
+    def monotonic(self) -> float:
+        return self._uptime
+
+
+async def test_the_worker_lane_recovers_on_its_first_pass_on_a_host_that_just_booted(
+    fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **The throttle's origin is the identity element of its own
+    comparison, and that made the field above lie.**
+
+    `time.monotonic()` on Linux is seconds since **boot**. Against an origin of
+    `0.0`, `now - origin >= lease / 2` is *false* for the first
+    `job_lease_seconds / 2` -- 150 s at the shipped lease -- so a
+    worker-enabled process started with the machine skips its first recovery
+    pass entirely and `/health/ready` answers `recovered_claims: null`, the
+    value `LaneReport` documents as *"this process runs no worker"*. That is
+    the field lying about the one thing it exists to report, at exactly the
+    moment a compose stack comes up holding the previous boot's orphans.
+
+    `.claude/rules/testing-discipline.md` already names the shape: a fixture
+    whose origin is the identity element of the operation under test cannot
+    distinguish the operation from its absence. Here `0.0` is the identity for
+    the subtraction, and every case in this file that recovers passes only
+    because the host it runs on has been up for longer than half a lease --
+    which is a property of the machine, not of the code.
+
+    So the clock is shimmed rather than trusted, and the assertion is the same
+    one `test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass`
+    makes at a normal uptime. Against `0.0` this reports **0** requeues.
+    """
+    monkeypatch.setattr("usher.api.lanes.time", _JustBooted(10.0))
+    supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
+    assert _settings().job_lease_seconds / 2 > 10.0, (
+        "the premise: the shimmed uptime is inside the window the throttle would skip"
+    )
+
+    await supervisor.start()
+    try:
+        await _drain(lambda: fakes.queue.claims >= 2, bound=2.0)
+    finally:
+        await supervisor.stop()
+
+    assert fakes.queue.requeues == 1, (
+        "a worker started within half a lease of boot never recovered, so its report "
+        "of what it took back is `null` -- indistinguishable from a process running no worker"
+    )
+    # And still exactly once and still at the lease, so the fix did not buy the
+    # first pass by removing the throttle.
+    assert fakes.queue.requeue_ages == [pytest.approx(DEFAULT_LEASE_SECONDS)]
+    assert supervisor.recovered_claims() == 0, "it asked; `null` would mean it never did"
+
+
 async def test_a_missing_tmdb_key_is_not_re_reported_on_every_pass(fakes: _Fakes) -> None:
     """PRD 08's "TMDb key missing" degradation is worth surfacing once.
 

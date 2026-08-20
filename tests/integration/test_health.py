@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.app import create_app
+from usher.api.lanes import IDLE_SLEEP_SECONDS
 from usher.api.routers.health import _check_migrations
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
@@ -155,10 +156,12 @@ async def test_openapi_schema_is_served(client: AsyncClient) -> None:
 # -- the orphan-recovery report (M10 F2) ---------------------------------
 
 #: Bounded, because "the lane never ran" is otherwise a hang rather than a
-#: failure. Generous against `IDLE_SLEEP_SECONDS = 5.0`: the worker lane's
-#: first pass is immediate, so a working lane answers in milliseconds and only
-#: a broken one waits.
-_BOUND_SECONDS = 20.0
+#: failure. Generous against `IDLE_SLEEP_SECONDS`, imported rather than
+#: transcribed so this comment cannot outlive the constant: a lane's first pass
+#: recovers unconditionally (`api/lanes.py`'s `float("-inf")` origin, M10 F2's
+#: review round), so a working lane answers in milliseconds and only a broken
+#: one waits out a poll.
+_BOUND_SECONDS = 4 * IDLE_SLEEP_SECONDS
 
 #: A claim nobody is working on, planted as a **raw `INSERT`** because that is
 #: the only way to own `jobs.updated_at`: every statement in
