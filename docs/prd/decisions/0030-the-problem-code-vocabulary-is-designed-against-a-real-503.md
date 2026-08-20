@@ -245,15 +245,17 @@ The naming rule therefore binds **new** members and does not re-open a shipped
 one. The asymmetry is recorded here so the next reader does not read
 `invalid_cursor` as a precedent for adjective-first spellings.
 
-### Two open amendments live at the bottom of this record, not here
+### The two amendments raised against this vocabulary live at the bottom of this record, not here
 
 Two fan-out routes reached this vocabulary wanting a member it does not
 have, and **neither minted one**. Both are recorded as *requests* under
-**Open amendments** below, in the same shape and each carrying its own
-`Status of the amendment` line: `GET /images/{image_id}`'s non-transient
-upstream arm, whose honest status is a 502 no member names, and
-`GET /search`'s `?mode=semantic` on a deployment with no embedding model.
-They are below rather than here because an unanswered request is not a
+**Amendments raised against the vocabulary** below, in the same shape and each
+carrying its own `Status of the amendment` line: `GET /images/{image_id}`'s
+non-transient upstream arm, whose honest status is a 502 no member names —
+**answered `Declined` on 2026-08-20 by M10's F3, by measurement** — and
+`GET /search`'s `?mode=semantic` on a deployment with no embedding model, which
+is **still `Open`** and is a different question with a stronger case for
+minting. They are below rather than here because an unanswered request is not a
 decision, and filing one under `## Decision` is how it comes to be read as
 settled.
 
@@ -412,18 +414,30 @@ the derivation function is not changed to avoid the question.
   the both-directions case naming the member; a per-resource 404 fails both the
   careless-spelling case and the careful-spelling one.
 
-## Open amendments — requests this record has not answered
+## Amendments raised against the vocabulary — one answered, one still open
 
 **Two of them, and they are here so they have the same shape as each other
-and as the accepted amendment below.** M9's final review found this record
+and as the accepted amendment below.** ⚠️ **One is now answered and this
+section is no longer "requests this record has not answered", which is what it
+was called until 2026-08-20** — the image amendment is `Declined`, the
+`?mode=semantic` one is still `Open`, and the heading is corrected rather than
+left describing a state that stopped being true in the commit below it.
+M9's final review found this record
 giving its amendments *three* treatments: one closed amendment as a `##`
 section with a `Status of the amendment` line, one open request as a `###`
 under `## Decision` with no status at all, and one open request living only
 as a Consequences bullet — while the vocabulary table above stated its answer
 flatly and two other files had already reused that answer as precedent. **An
 open question that is only legible in one bullet, and settled doctrine
-everywhere a reader actually looks, is a decision nobody took.** Both now
-carry a status, and both are `Open`.
+everywhere a reader actually looks, is a decision nobody took.** Both carry a
+status; both read `Open` from 2026-08-12 until 2026-08-20, when the image one
+became `Declined` on a measurement. **An answered request keeps its section
+rather than being deleted into the Decision above**, for the reason the
+`immutable` interim is kept in ADR-0032: the sequence — raised, argued,
+counted, answered — is the argument for why growth here is a recorded
+amendment at all, and a reader arriving from `08-operations.md` needs to land
+on the answer and its denominator rather than on a paragraph that no longer
+mentions the question.
 
 The rule they are both honouring: a fan-out task that needs a member it was
 not given **stops and asks** rather than writing one, and the request is
@@ -433,11 +447,16 @@ waiting cheap.
 
 ### Amendment 2026-08-11 — `GET /images/{image_id}` has a second upstream arm, its honest status is 502, and no member names one
 
-**Status of the amendment: Open.** A request, not a mint; nothing in this
-record's vocabulary changes until it is answered, and `Retry-After` is the
-contract meanwhile. Raised by M9's C5.
+**Status of the amendment: Declined.** No member is minted, the vocabulary
+stays closed at seven, and **`Retry-After` is the contract rather than an
+interim**. Raised by M9's C5 on 2026-08-11; answered by M10's F3 on
+**2026-08-20**, by measurement: the residual arm fired on **0 of 240** live
+fetches against the provider image CDN — 3 kinds × 20 stored rows × all 4 rungs
+— so its rate on this catalog is **below 1.25% at 95% confidence** (the rule of
+three at n = 240). The measurement, its controls and the population it could not
+reach are below.
 
-**This is a request, not a mint.** The rule this record states is that a
+**This was a request, not a mint.** The rule this record states is that a
 fan-out task needing a member it was not given amends this record in the same
 commit; the rule the M9 plan's wave brief adds is that a task must **stop and
 ask** rather than write the member itself. Both are honoured here: the fact is
@@ -447,9 +466,24 @@ it stands.
 The image proxy's upstream failures are **three**, and only the third has no
 name here:
 
-- **`PortUnavailable`** — the CDN timed out, refused the connection,
-  rate-limited or answered 5xx. Transient. `503 source_unavailable` is exactly
-  right and the route ships it with a `Retry-After`.
+- **`PortUnavailable`** — the CDN timed out, refused the connection, or
+  answered 408 or 5xx. Transient. `503 source_unavailable` is exactly right and
+  the route ships it with a `Retry-After`. 🔴 **This bullet said "rate-limited"
+  until 2026-08-20 and that was false, in this record and in three other
+  places.** `port_error_for` answers a 429 with `PortRateLimited` and a 401/403
+  with `PortAuthFailed`, and **neither subclasses `PortUnavailable`**, so
+  neither reaches any arm of `get_image`: driven through a real `create_app()`
+  on 2026-08-20, `PortUnavailable` answers `503 application/problem+json` (the
+  control) while `PortRateLimited` and `PortAuthFailed` both answer a bare
+  **`500 text/plain`** — outside the envelope entirely. F3 corrected the prose
+  here, in `api/routers/images.py`, in `ports/images.py` and in
+  `tests/unit/test_api_images.py`, and **deliberately changed no behaviour**:
+  what a CDN 403 deserves is its own question (it is the captive-portal
+  population wearing a status), it is not this amendment's, and it does not
+  move the answer below — a 429 the route mishandles is still not a 502 anybody
+  is asking for a member for. It fired **0 times in the 250-request run** and
+  `.claude/rules/ports-and-error-taxonomy.md` records 130,750 requests to two
+  upstreams with no 429 at all, so it is a live defect nobody has met.
 - **`MediaTypeNotServable`** — a subclass of `PortDataMalformed` that C4 added
   for exactly this: the provider answered *correctly* about artwork this
   deployment declines to carry, which today is an `image/svg+xml` logo, roughly
@@ -481,13 +515,120 @@ starting from scratch.** Rule 1 is met: there is an emitter in
 The bar this record applies is *"does an existing member already carry this
 meaning, and would a client branch differently on it?"* — and the honest answer
 to the second half is that **an image client probably would not**: it paints a
-placeholder either way. That is the argument against minting one, and it is why
-this is a request rather than a fait accompli. The argument *for* is that the
-two arms differ in whether retrying can ever work, which is the one thing a
-cache or a retry layer in front of a client does branch on.
+placeholder either way. That is the argument against minting one. The argument
+*for* is that the two arms differ in whether retrying can ever work, which is
+the one thing a cache or a retry layer in front of a client does branch on.
 
-Until it is settled, `Retry-After` is the contract and
-`docs/prd/08-operations.md`'s degradation table carries both arms.
+**Neither argument could be weighed until somebody counted the population**,
+which is what `ports-and-error-taxonomy.md`'s two-part test says out loud:
+*"what rate does each cause fire at?"* comes **before** *"would any consumer
+respond differently?"*, and only when both say yes is a distinction owed. C4
+answered the first question for the declined arm (one title in seventeen) and
+nobody had ever answered it for this one. F3 did.
+
+#### The measurement — 2026-08-20, live provider image CDN, 250 requests
+
+Pre-registered before the first socket opened: a bar naming the predictions, the
+sample design, the classification rules and a **hard ceiling of 256 requests in
+the iterator**, hashed to a sibling `.sha256` and re-verified at run time
+(`/var/tmp/m10-f3/BAR-F3.md`, sha256 `ffe5fcee…8829`). Rates and denominators
+are recorded here; **no provider path, image id, URL or byte of third-party
+payload is committed**, per PRD 04's redistribution rule and
+`tests/unit/test_no_third_party_data.py`.
+
+**Design.** The sample frame is the `images` rows this deployment's catalog
+holds — 28,991 at the time, all `provider = 'tmdb'`: 11,544 `poster`, 9,939
+`backdrop`, 7,508 `logo`. **20 rows per kind**, chosen deterministically by
+`md5(id)` so the draw is reproducible, each fetched at **all four rungs** of
+`IMAGE_LADDER` — paired across rungs, because the hypothesis with the best
+chance of a non-zero is a property of the (kind, rung) cell. Every fetch drove
+the shipped `ProviderCdnImageFetcher` and **consumed the body whole**, so
+`_bounded`'s ceiling really ran. Sequential, one connection, a 0.25 s minimum
+interval, no retries, no `original`; 250 requests in 125.9 s.
+
+**Result: 240 of 240 served. Zero residual firings, zero transient, zero
+declined, zero escaping.** Every cell 20/20:
+
+| | w154 | w342 | w780 | w1280 |
+|---|---|---|---|---|
+| poster | 20/20 | 20/20 | 20/20 | 20/20 |
+| backdrop | 20/20 | 20/20 | 20/20 | 20/20 |
+| logo | 20/20 | 20/20 | 20/20 | 20/20 |
+
+**Two controls, because a classifier that never fires reports zero exactly like
+a population that is empty**, and neither is in the denominator. A **residual**
+control — two fetches of a well-formed but nonexistent provider path, through
+the same shipped fetcher — classified `residual` both times on
+`port_error_for`'s 4xx arm (*"the provider image CDN rejected the request with
+HTTP 404"*), so a residual firing is observable by this harness. A **declined**
+control — 4 `.svg` logo rows × 2 rungs — classified `declined`
+(`MediaTypeNotServable`) 8 times out of 8, so the classifier separates the two
+arms it has to separate. The classifier tests the subclass **before** its
+parent, for the same reason the route's `except` order does: reversed, every
+declined SVG would have been counted as a residual firing and manufactured the
+non-zero this run existed to look for.
+
+**The three populations are not equally reachable, and saying which is which is
+half the result.**
+
+- **A 4xx from a withdrawn rung** — the population this design actually tests,
+  and it did not fire. The cell most at risk is `logo` at **w1280**:
+  `/configuration` publishes logos only to `w500`, so it is precisely the
+  narrowing [ADR-0032](0032-the-image-proxy-clamps-to-a-ladder.md)'s Uncertainty
+  names. It served **20/20**, which re-confirms that ADR's *"closed, global
+  across kinds, enforced by the provider"* finding at **twice** its logo sample,
+  nine days later. It cannot see a rung withdrawn *tomorrow*; nothing in `src/`
+  re-reads `/configuration` and this run did not either.
+- **A body past `USHER_IMAGE_MAX_BYTES`** — reachable in principle, quantified
+  rather than asserted. The largest body in 240 fetches was **862,519 bytes**, a
+  `logo` at `w1280`, which is **16.5%** of the 5 MiB ceiling: **6.1× headroom at
+  the worst cell on the ladder.** This is the arithmetic ADR-0032 implies (only
+  `original` is unbounded, and this proxy never asks for it) observed rather
+  than reasoned.
+- **A captive portal's HTML login page under a 200** — **out of reach by
+  construction, not absent.** It is a property of a network interposed between
+  the deployment and the CDN, not of the CDN, so a healthy network cannot
+  produce one and no sample size would have. A zero here says nothing about how
+  often an operator behind a hotel portal meets it. It remains the one residual
+  cause with a real-world story, and it is the one this measurement is silent
+  about.
+
+**The decision rule was fixed before the result, so the result could not choose
+the argument.** Mint at `r ≥ 3` of 240; decline at `r ≤ 2`. Three and not one
+because the rule of three puts a zero observation's 95% upper bound at exactly
+3/240 = 1.25%, which makes the boundary a property of the sample size rather
+than of taste: below it the measurement cannot tell the arm from a rarity.
+`r = 0`.
+
+#### Why declining is the answer the measurement earns
+
+- **The frequency half of the test says no.** C4's repair was owed because a
+  refusal firing at **one in seventeen** was setting the alarm rate for a
+  genuine rarity at seventeen to one. Nothing of that shape is here: the two
+  arms this amendment is about are *both* rare — 0 of 240 each — so neither is
+  drowning the other, and an eighth member would be minted for a population the
+  measurement could not distinguish from empty.
+- **The consumer half already has a wire answer.** `Retry-After`'s presence and
+  absence carry "a retry may work" and "a retry never will" in a standard,
+  machine-readable field that caches and retry layers already implement, and
+  that costs this record nothing. A `code` would be a second spelling of a
+  distinction the response already makes.
+- **The pinning is measured, not asserted.** C5's sweep found **both** halves
+  live: adding `Retry-After` to the malformed arm fails one case, removing it
+  from the transient arm fails one. The contract is enforced in both directions
+  today.
+- **And the cost of declining is real and is recorded rather than argued away.**
+  The residual arm's honest status *is* 502 (RFC 9110 §15.6.3) and it ships as a
+  503, so a client reading `status` rather than `Retry-After` is told an outage
+  where the truth is a permanently unusable answer. That is the price of a
+  closed vocabulary, paid knowingly. **What would reopen this is a named event,
+  not a mood:** the residual arm measured **at or above 1.25%** on any catalog —
+  most plausibly a second `MetadataProvider` whose CDN has no closed rung
+  allowlist, which is the same event that reopens ADR-0032 — or a consumer that
+  demonstrably branches on the two 503s and cannot use `Retry-After` to do it.
+
+`Retry-After` **is** the contract; `docs/prd/08-operations.md`'s degradation
+table carries both arms and says so.
 
 ### Amendment 2026-08-12 — `422 validation_failed` carries "well formed, but this deployment cannot serve it", and that is a second axis on one member
 

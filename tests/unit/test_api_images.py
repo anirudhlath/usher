@@ -510,7 +510,15 @@ async def test_an_id_no_row_carries_is_a_404_problem_document(
 async def test_an_upstream_that_did_not_answer_is_a_503_that_says_come_back(
     images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """`PortUnavailable` -- a timeout, a refused connection, a 429 or a 5xx.
+    """`PortUnavailable` -- a timeout, a refused connection, a 408 or a 5xx.
+
+    **Not a 429**, which this docstring claimed until 2026-08-20:
+    `port_error_for` answers 429 with `PortRateLimited` and 401/403 with
+    `PortAuthFailed`, neither of which subclasses `PortUnavailable`, so neither
+    reaches this arm or any other and both leave `GET /images/{id}` as a bare
+    500. Measured through a real `create_app()` on 2026-08-20 with this case's
+    own exception as the control; recorded in ADR-0030's image amendment and in
+    `api/routers/images.py`, and deliberately unfixed by M10's F3.
 
     Transient by construction, so the answer carries `Retry-After`. Every
     field of the envelope is asserted rather than only the status: a bare
@@ -536,26 +544,36 @@ async def test_an_upstream_that_did_not_answer_is_a_503_that_says_come_back(
 async def test_an_upstream_answer_this_proxy_will_not_serve_is_a_503_with_no_retry_after(
     images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """`PortDataMalformed` -- a 4xx, an SVG, or a body past the ceiling.
+    """`PortDataMalformed` -- a 4xx, a body past the ceiling, or an answer that
+    is not artwork at all.
 
     Asking again produces the same unusable answer, so this one is **not**
     retryable and carries no `Retry-After`. 🔴 Its honest status is a 502 and
     ADR-0030's closed seven-member vocabulary has no code for one -- its
     stability rule is that a code carries one status everywhere, so
     `source_unavailable` cannot be raised at 502, and its growth rule says a
-    member is minted by amending that record rather than by a route. C5 asks
-    rather than invents; `Retry-After`'s **absence** is what a client branches
-    on until the member lands, and this case is the pair to the one above
-    rather than a duplicate of it.
+    member is minted by amending that record rather than by a route.
+    `Retry-After`'s **absence** is what a client branches on, and this case is
+    the pair to the one above rather than a duplicate of it.
 
-    The SVG shape is the concrete one worth naming: C4 refuses `image/svg+xml`
-    at the fetcher because the CDN rasterises SVG logos at every sized rung and
-    this proxy never asks for `original`, so an SVG at a rung means something
-    other than the measured CDN answered -- and for an SVG the CDN ignores the
-    rung entirely, which means nothing this route does could bound its size.
+    ✅ **C5 asked and M10's F3 answered: `Declined`, on a measurement.** This
+    arm fired on **0 of 240** live fetches against the provider CDN on
+    2026-08-20 -- below 1.25% at 95% confidence -- so both 503 arms are rare,
+    neither sets the other's alarm rate, and `Retry-After` is the contract
+    rather than an interim. ADR-0030 carries the sample and the one population
+    it could not reach.
+
+    **The fixture is a captive portal's HTML under a 200, not an SVG**, and the
+    difference is the whole reason this case has a sibling: an `image/svg+xml`
+    logo raises `MediaTypeNotServable` and is a 404 one case down. An earlier
+    version of this docstring justified the SVG refusal with *"an SVG at a rung
+    means something other than the measured CDN answered"*, which C4's follow-up
+    measured false -- the CDN serves `image/svg+xml` at every rung, roughly one
+    title in seventeen -- and `.claude/rules/ports-and-error-taxonomy.md` keeps
+    that as the worked example of a refusal justified by "this cannot happen".
     """
     fetcher = FakeImageFetcher(
-        answers=[PortDataMalformed("an image proxy will not cache 'image/svg+xml'")]
+        answers=[PortDataMalformed("an image proxy will not cache 'text/html'")]
     )
     async with serving(ImageProxyService(images=images, fetcher=fetcher, store=store)) as client:
         response = await client.get(f"/images/{seeded}", params={"w": 780})

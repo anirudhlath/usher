@@ -84,7 +84,7 @@ vocabulary rather than FastAPI's default `{"detail": ...}` shape:
 |---|---|---|
 | no row carries the id | 404 | `not_found` |
 | artwork this deployment declines to carry (`MediaTypeNotServable`) | 404 | `not_found` |
-| the CDN timed out, refused, rate-limited or 5xx'd | 503 | `source_unavailable`, `Retry-After` |
+| the CDN timed out, refused, or answered 408 or 5xx | 503 | `source_unavailable`, `Retry-After` |
 | the CDN answered something else unusable | 503 | `source_unavailable`, **no** `Retry-After` |
 | `w` is not a positive integer | 422 | `validation_failed` |
 
@@ -116,6 +116,28 @@ So C5 asks rather than invents (the amendment is written into ADR-0030), and
 ships the arm it can: both are 503 `source_unavailable`, and `Retry-After`'s
 *presence* -- a standard, machine-readable field a client already branches on
 -- is what tells a retry that may work from one that never will.
+
+✅ **That amendment is answered and the answer is `Declined`**, so the sentence
+above is the contract rather than a stopgap. M10's F3 measured the residual arm
+on 2026-08-20 against the live CDN at **0 of 240** fetches -- below 1.25% at
+95% confidence, both controls firing -- so the two 503 arms are *both* rare and
+neither is setting the other's alarm rate, which is the frequency half of the
+test `.claude/rules/ports-and-error-taxonomy.md` states. ADR-0030 carries the
+sample, the populations it could not reach, and the named event that reopens it.
+
+⚠️ **Two upstream failures reach neither arm below, and this is a live gap
+rather than a design.** `port_error_for` answers a 429 with `PortRateLimited`
+and a 401/403 with `PortAuthFailed`, and **neither subclasses
+`PortUnavailable`**, so both escape `get_image` and Starlette answers a bare
+`500 text/plain` -- outside the envelope this module exists to keep. Measured
+2026-08-20 through a real `create_app()`, with `PortUnavailable`'s `503
+application/problem+json` as the control. Never observed live (0 in F3's
+250-request run; 130,750 requests to two upstreams have never produced a 429 at
+all), and deliberately **not** repaired by F3: what a CDN 401/403 deserves is
+its own question -- the CDN needs no credential, so one means something in
+front of it refused, which is the captive-portal population wearing a status --
+and answering it inside a task about the *vocabulary* is the fan-out ADR-0030
+exists to prevent.
 """
 
 import uuid
@@ -229,9 +251,15 @@ async def get_image(
     try:
         stored = await images.serve(image_id, width=rung)
     except PortUnavailable as exc:
-        # A timeout, a refused connection, a 429 or a 5xx. Transient by
+        # A timeout, a refused connection, a 408 or a 5xx. Transient by
         # construction, so the client is told to come back -- and the header
         # saying so is what separates this arm from the one below.
+        #
+        # **Not a 429**, and this comment said otherwise until 2026-08-20.
+        # `port_error_for` answers 429 with `PortRateLimited` and 401/403 with
+        # `PortAuthFailed`; neither subclasses `PortUnavailable`, so neither is
+        # caught here or anywhere below, and both leave as a bare 500. The
+        # module docstring carries the measurement and why F3 did not fix it.
         raise ProblemException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             code=ProblemCode.SOURCE_UNAVAILABLE,

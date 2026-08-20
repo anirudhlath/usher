@@ -383,8 +383,13 @@ class ImageFetcher(ABC):
     precedent), which is also why no message this port raises may carry a URL.
 
     Errors are `usher.ports.errors`, split the way `adapters/http.py`'s ladder
-    splits them: `PortUnavailable` for a 429, a 5xx, a timeout or an
-    unreachable host; `PortDataMalformed` for any other 4xx, for an answer that
+    splits them: `PortUnavailable` for a 5xx, a 408, a timeout or an
+    unreachable host -- **not** for a 429, which `port_error_for` answers with
+    `PortRateLimited`, nor for a 401/403, which it answers with
+    `PortAuthFailed`; this sentence claimed the 429 until 2026-08-20 and
+    ADR-0030's image amendment records what that costs
+    `GET /images/{image_id}`, which catches neither. `PortDataMalformed` for
+    any other 4xx, for an answer that
     is not artwork at all, and for a body past the configured ceiling; and
     `MediaTypeNotServable` — a *subclass* of the last, so nothing has to catch
     it — for artwork the provider really serves and this proxy declines. The
