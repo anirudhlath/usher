@@ -148,3 +148,90 @@ exists to prevent, and the bar says in terms: "Report the number, do not widen
 the rule." So the number is reported and the rule is not widened. The catalog
 is left in a coherent state -- imdb_* clean and populated, tmdb_* still mixed
 exactly as it was before this run -- with the backup intact.
+
+---
+
+# Addendum — the decontamination, applied 2026-08-19 by operator decision
+
+The rule was widened **after** the bar, on an explicit operator decision, and
+that sequence is recorded rather than smoothed over. The bar's instruction --
+"report the number, do not widen the rule" -- was followed: the numbers were
+reported, the rule was not changed unilaterally, and the decision was taken by
+a person with the measurements in front of them. What follows is the result.
+
+## The rule applied
+
+    UPDATE titles
+       SET tmdb_vote_count = NULL, tmdb_vote_average = NULL
+     WHERE enrichment_state <> 'enriched'
+       AND (tmdb_vote_count IS NOT NULL OR tmdb_vote_average IS NOT NULL)
+
+`enrichment_state` rather than exact-match, because the exact-match rule was
+measured to under-collect by 57,701 rows -- the IMDb dump moved eight days
+between the write and the re-import, so equality cannot hold for any title
+whose vote count changed. The evidence for enrichment_state, all measured:
+  - zero enriched rows matched the IMDb exact rule (no false positives)
+  - every enriched row is TMDb-scale (max 40,695)
+  - 350,131 of 407,860 non-enriched rows matched fresh IMDb values exactly,
+    and the other 57,701 sat within measured drift of them (95.9% old <= fresh)
+
+⚠️ The objection recorded in `m10a`'s docstring still stands and is not
+closed by this run: neither writer is gated on `enrichment_state`, so ordering
+alone could still produce an `enriched` row holding IMDb's numbers. This
+catalog has none -- measured -- but that is an observation about today, not a
+property of the schema. Issue #39 is where a cross-source figure belongs.
+
+## Cost, measured before it was authorised
+
+EXPLAIN (ANALYZE, BUFFERS) inside a rolled-back transaction: 60.4 s over
+407,860 rows, of which the `set_updated_at` trigger was 960 ms across 407,860
+calls. Seq scan, 865,010 rows filtered out. The real run took 59.3 s and
+reported `UPDATE 407860` -- the predicted population exactly.
+
+## Verdicts
+
+P3 HIT   max(tmdb_vote_count) = 40,695, equal to the enriched maximum and the
+         bar's ceiling. No IMDb-scale value survives in any tmdb_* column.
+         THIS IS THE ASSERTION THE WHOLE EXERCISE EXISTS FOR.
+         max(tmdb_vote_average) = 10, inside the 0-10 CHECK.
+         Non-enriched rows still carrying a tmdb_vote_count: 0.
+P6 HIT   titles = 1,272,870, unchanged. Nothing inserted or deleted.
+P8 REC   tmdb_popularity 292,320 | tmdb_vote_count 132,415 (from 540,275)
+         imdb_num_votes 540,850 (untouched by this statement)
+         Rows ordered by NEITHER tmdb_popularity NOR tmdb_vote_count, i.e.
+         falling through to `id ASC` in the type-ahead box: **980,550 of
+         1,272,870 (77.0%)**. That is the suggest tiebreak's new reach,
+         recorded as a number before any baseline reads it.
+
+## Spot checks, the two the plan named
+
+  Breaking Bad  series  skeleton  imdb_num_votes 2,661,404  tmdb_vote_count NULL
+  Inception     movie   enriched  imdb_num_votes 2,856,917  tmdb_vote_count 39,838
+
+Inception is the defect in one row: 71.7x apart, two sources that were
+previously fighting over a single column, now each in its own.
+(A second, skeleton "Inception" carries neither -- a shared lower(name), which
+is exactly the population the frame excludes.)
+
+## The frame is unaffected, confirmed rather than assumed
+
+pools 428 / 2,541 / 7,097 / 20,425 / 18,146, shared_lower_names 81,088,
+2,991 cases, `check_frame` PASSED -- byte-identical to the pre-decontamination
+reading, because the frame reads `imdb_num_votes` and this statement did not
+touch it.
+
+## Rollback
+
+`titles_rating_backup_20260819` still holds all 1,272,870 rows and is NOT
+dropped. Restoring is one UPDATE ... FROM joined on id.
+
+## Embedding impact: none, by two independent arguments
+
+1. The embedding source fingerprint (`_FINGERPRINT_SQL`) covers name,
+   original_name, credit_names, overview, tagline, genres and keywords. No
+   rating column appears in it, so no vector can be staled by this write.
+2. The embedding population is `enrichment_state <> 'skeleton'` and this
+   statement targets `<> 'enriched'`. They overlap on the 28 stub rows, which
+   carry no rating values at all.
+Checked because the `set_updated_at` trigger fires on all 407,860 rows;
+nothing keys staleness off `titles.updated_at`.

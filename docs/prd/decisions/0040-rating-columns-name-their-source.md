@@ -1,12 +1,20 @@
-# ADR-0040 — Rating columns name their source, and the decontamination they were split for is *not* applied
+# ADR-0040 — Rating columns name their source
 
 **Status:** Accepted — corrects PRD [02](../02-data-model.md), [04](../04-catalog-bootstrap.md)
 and [05](../05-search-and-similarity.md); amends [ADR-0002](0002-postgres-first-search.md)'s
-sampling frame and its suggest tiebreak. **One component of the approved design —
-the decontamination of the existing `tmdb_*` values — is recorded here as an
-open decision rather than shipped**, because its pre-registered rule was
-measured and does not hold.
+sampling frame and its suggest tiebreak.
 **Date:** 2026-08-19
+
+> **Amended the same day.** This document was first accepted with the
+> decontamination recorded as an **open decision**, because its pre-registered
+> exact-match rule was measured and does not hold. The numbers were reported to
+> the operator, who authorised the `enrichment_state` rule instead; it was
+> applied on 2026-08-19 and **P3 passed at exactly 40,695**. The sequence is
+> preserved below rather than rewritten, because *the order matters*: the bar
+> said "report the number, do not widen the rule", the number was reported, the
+> rule was not widened unilaterally, and a person decided with the measurements
+> in front of them. An ADR edited to look like it always said the right thing
+> is the artefact this project's rules exist to prevent.
 
 ## Refutations first
 
@@ -40,14 +48,21 @@ own numbers about its own headline finding.
    Measured on the deployed catalog after the re-import: **zero enriched rows
    match the IMDb-evidence rule** and **every enriched row is TMDb-scale**
    (max 40,695). `enrichment_state` **does** discriminate these two columns on
-   this catalog. It was still not used — see *The decision not taken* below.
+   this catalog. It was not used *in the first pass* — see *The decision not
+   taken* below — and was subsequently authorised and applied.
 4. 🔴 **The decontamination this whole design was built around does not work as
-   specified, and it was not applied.** The pre-registered exact-match rule
-   catches **350,131 of 407,860** contaminated rows and misses **57,701**, whose
-   maximum `tmdb_vote_count` is **2,656,080**. So P3 — `max(tmdb_vote_count) <=
-   40,695`, the assertion the exercise exists for — would have **failed** after
-   applying it. Prediction P4 (380,000–420,000 caught) is **MISSED**, and it is
-   reported rather than re-based.
+   specified.** The pre-registered exact-match rule catches **350,131 of
+   407,860** contaminated rows and misses **57,701**, whose maximum
+   `tmdb_vote_count` is **2,656,080**. So P3 — `max(tmdb_vote_count) <= 40,695`,
+   the assertion the exercise exists for — would have **failed** after applying
+   it. Prediction P4 (380,000–420,000 caught) is **MISSED**, and it is reported
+   rather than re-based. **The cause is that the repair rule assumed its source
+   was a fixed point**: the column held IMDb values from the 2026-08-11 dump and
+   the re-import brought 2026-08-19 ones, so exact equality cannot hold for any
+   title whose vote count moved in eight days. Measured across the 57,701
+   misses: every one has a fresh IMDb row, **95.9%** have `old <= fresh` and
+   **91.5%** sit within 10% below it. They are stale IMDb values, not a second
+   phenomenon.
 5. 🔴 **`adapters/search/postgres.py` justifies the type-ahead box's second sort
    key with a measurement this ADR's own Task 2 made false.** Its comment reads
    *"`tmdb_vote_count` — written by the bootstrap on 539,350 rows — is what
@@ -224,7 +239,7 @@ Changing a rule after seeing the numbers it produced is precisely what a bar
 exists to prevent, and a rule widened under that pressure is not evidence even
 when it is right.
 
-So this is recorded as **open**, with the three things a decision needs:
+So this was recorded as **open**, with the three things a decision needs:
 
 1. The `enrichment_state` rule is sound **on this catalog, measured today**. It
    is not sound *by construction* — neither writer is gated on that column, so a
@@ -236,8 +251,59 @@ So this is recorded as **open**, with the three things a decision needs:
    `titles_rating_backup_20260819` holds all six rating columns plus
    `field_provenance` for all 1,272,870 rows, with a unique index on `id`.
 
-The catalog is therefore left coherent and honest: `imdb_*` clean and populated,
-`tmdb_*` still mixed **exactly as it was before this run**.
+### The decision, taken
+
+The numbers above were reported to the operator, who authorised the
+`enrichment_state` rule. It was applied on 2026-08-19:
+
+```sql
+UPDATE titles
+   SET tmdb_vote_count = NULL, tmdb_vote_average = NULL
+ WHERE enrichment_state <> 'enriched'
+   AND (tmdb_vote_count IS NOT NULL OR tmdb_vote_average IS NOT NULL)
+```
+
+**Cost was measured before it was authorised**, by `EXPLAIN (ANALYZE, BUFFERS)`
+inside a rolled-back transaction: 60.4 s over 407,860 rows, of which the
+`set_updated_at` trigger was 960 ms across 407,860 calls. The real run took
+**59.3 s** and reported `UPDATE 407860` — the predicted population exactly.
+
+| assertion | result |
+|---|---|
+| **P3** `max(tmdb_vote_count) <= 40,695` | **HIT — 40,695**, equal to the enriched maximum |
+| `max(tmdb_vote_average)` inside 0–10 | 10 |
+| non-enriched rows still carrying a `tmdb_vote_count` | **0** |
+| `tmdb_vote_count` populated | 540,275 → **132,415** (the enriched tier) |
+| **P6** row count | 1,272,870, unchanged |
+| `imdb_num_votes` | 540,850, max 3,225,810 — untouched |
+| the sampling frame | byte-identical, `check_frame` still passes |
+
+**P8, recorded because a baseline will read it:** rows ordered by neither
+`tmdb_popularity` nor `tmdb_vote_count` — i.e. falling through to `id ASC` in
+the type-ahead box — are **980,550 of 1,272,870 (77.0%)**.
+
+Two spot checks, which are the defect and its repair in two rows:
+
+| title | state | `imdb_num_votes` | `tmdb_vote_count` |
+|---|---|---|---|
+| Breaking Bad | skeleton | 2,661,404 | NULL |
+| Inception | enriched | 2,856,917 | 39,838 |
+
+Inception is 71.7× apart on one row — two sources that were previously
+overwriting each other in a single column, now each in its own.
+
+**No embedding was staled, and that was checked rather than assumed**, because
+the trigger fired on all 407,860 rows. Two independent arguments: the embedding
+source fingerprint covers `name`, `original_name`, `credit_names`, `overview`,
+`tagline`, `genres` and `keywords` and no rating column appears in it; and the
+embedding population is `enrichment_state <> 'skeleton'` while this statement
+targets `<> 'enriched'`, so they overlap only on the 28 stub rows, which carry
+no rating values. Nothing keys staleness off `titles.updated_at`.
+
+**What is still open:** point 1 above. This catalog has no `enriched` row
+holding IMDb's numbers, and that remains an observation about today rather than
+a property of the schema. A cross-source figure belongs in
+[#39](https://github.com/anirudhlath/usher/issues/39).
 
 ## Consequences
 
@@ -409,7 +475,7 @@ were written for: `vote_count` 540,275, `community_rating` 540,275, `popularity`
 |---|---|
 | **P1** `imdb_num_votes` NOT NULL in 500,000–600,000 | **HIT** — 540,850 (and `imdb_average_rating` the same population) |
 | **P2** `max(imdb_num_votes)` > 2,000,000 | **HIT** — 3,225,810. Note it *exceeds* the old contaminated max of 2,656,080: the fresh dump is 8 days newer than the one that wrote the column |
-| **P3** after decontamination, `max(tmdb_vote_count) <= 40,695` | **NOT REACHED** — the decontamination was not applied, and had it been, this would have failed |
+| **P3** after decontamination, `max(tmdb_vote_count) <= 40,695` | **HIT — 40,695.** Not reached by the pre-registered rule, which would have failed it; reached by the `enrichment_state` rule the operator authorised after the miss was reported |
 | **P4** decontamination NULLs 380,000–420,000 rows | **MISSED** — the rule catches 350,131 |
 | **P5** eligible movies within 10% of 48,549 | **HIT** decisively — 48,639, +0.19% |
 | **P6** row count unchanged at 1,272,870 | **HIT** |
