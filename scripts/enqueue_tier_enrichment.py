@@ -16,9 +16,11 @@ assigns no such command, and `CLAUDE.md` forbids inventing tooling. The
 capability ships as an operations script, the shape `scripts/measure_rows.py`
 already has.
 
-**The tier is `kind = 'movie' AND vote_count >= 100 AND tmdb_id IS NOT NULL`,
+**The tier is `kind = 'movie' AND tmdb_vote_count >= 100 AND tmdb_id IS NOT
+NULL`,
 and the third conjunct is a correctness property rather than an
-optimisation.** 161,789 movies carry `vote_count >= 100`; only **130,806**
+optimisation.** 161,789 movies carried `>= 100` votes when this was
+measured; only **130,806**
 also carry a `tmdb_id` (measured 2026-08-11 on the M9 catalog). For the other
 30,983, `EnrichService._ref_for` raises `PortDataMalformed`, whose contract in
 queue form is `retryable=False` — the job parks on its **first** attempt and
@@ -59,9 +61,14 @@ zero outbound requests.
 
 ⚠️ **The predicate is not stationary: enriching a title can remove it from the
 tier, so a second run of this script does not select the same rows.**
-`vote_count` is in `EnrichService._ENRICHABLE`; the bulk loader writes IMDb
-`numVotes` into that column and enrichment overwrites it with TMDb's own
-`vote_count`, which is a different electorate. Measured 2026-08-11 over 537
+`tmdb_vote_count` is in `EnrichService._ENRICHABLE`; the bulk loader writes
+IMDb `numVotes` into that column through `apply_ratings` and enrichment
+overwrites it with TMDb's own `vote_count`, which is a different electorate.
+**That dual write is what ADR-0040 is about, and the column's name is now the
+only part of it that has been fixed** -- `m10a` renamed `vote_count` to
+`tmdb_vote_count`, which makes an IMDb writer landing there legible without
+stopping it; Task 2 of `docs/plans/2026-08-19-rating-provenance-split.md`
+redirects `apply_ratings` onto `imdb_num_votes` and is what ends it. Measured 2026-08-11 over 537
 enriched tier movies: **80 still carry `>= 100` (14.9%)**, median TMDb count
 16 against a median IMDb 581. **The keyset cursor is what makes that safe** —
 a row can leave the tier only by being enriched, which happens only after the

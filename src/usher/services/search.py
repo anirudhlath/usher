@@ -1078,7 +1078,8 @@ def _dense_ranks(hits: Sequence[SearchHit]) -> list[int]:
 def _popularity_term(popularity: float | None) -> float | None:
     """`p / (p + midpoint)`, or `None` when nobody has measured it.
 
-    **`None` is not 0.0** -- ADR-0014, in a fourth place. `titles.popularity`
+    **`None` is not 0.0** -- ADR-0014, in a fourth place.
+    `titles.tmdb_popularity`
     is null for every title TMDb's daily export has never described: **all**
     of a `--phase imdb` catalog and **~77%** of a `--phase all` one (Task 36
     measured 291,584 of 1,271,570 titles carrying a popularity, 2026-08-05).

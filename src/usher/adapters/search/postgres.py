@@ -748,7 +748,8 @@ scored AS (
 SELECT id, dist, sim
 FROM scored
 WHERE dist <= :max_distance
--- Distance first, then popularity, then vote count, then id. Popularity is
+-- Distance first, then `tmdb_popularity`, then `tmdb_vote_count`, then id.
+-- Popularity is
 -- what stops the type-ahead box's first row from being arbitrary among
 -- equally-good matches; NULLS LAST because `titles.tmdb_popularity` is
 -- nullable and a descending sort puts NULLs first by default, which would
@@ -758,8 +759,9 @@ WHERE dist <= :max_distance
 -- **`tmdb_vote_count` is here because `tmdb_popularity` is sparse, and both
 -- the claim and M6's old wording of it are measured rather than suspected.**
 -- (Both columns were spelled without the `tmdb_` prefix until ADR-0040 gave
--- every rating column its source; the measurements are unaffected.) M6
--- wrote here that the popularity column is NULL on **all 1,271,138 rows --
+-- every rating column its source; every measurement below was taken against
+-- the same bytes and is restated in the new spelling, never re-derived.) M6
+-- wrote here that `titles.tmdb_popularity` is NULL on **all 1,271,138 rows --
 -- nothing in `src/` writes it except TMDb enrichment**; Task 36 re-measured
 -- that on a realistic catalog (2026-08-05) and both halves were wrong:
 --   * "NULL on all rows" is true of a **`--phase imdb`** catalog only, which
@@ -771,21 +773,22 @@ WHERE dist <= :max_distance
 --     (22.9%) carry a popularity, of which exactly 3 are 0.0** -- the daily
 --     export ships real values, not the `NOT NULL DEFAULT 0` filler the
 --     column permits. On the ~77% that stay NULL this clause degenerates to
---     `dist ASC, id ASC` (a UUIDv7, i.e. insertion order), and the vote count
---     -- written by the bootstrap on 539,350 rows -- is what orders them.
+--     `dist ASC, id ASC` (a UUIDv7, i.e. insertion order), and
+--     `tmdb_vote_count` -- written by the bootstrap on 539,350 rows -- is
+--     what orders them.
 -- **The shipped ordering was re-measured and deliberately kept.** Same 2,993
 -- typo cases, same seed, the populated arm against the all-NULL one: the
 -- populated catalog costs **1.3 pts overall (83.4 -> 82.1)**, entirely
--- out-ranked misses where a real popularity promotes a wrong candidate --
+-- out-ranked misses where a real `tmdb_popularity` promotes a wrong candidate --
 -- inside Task 36's 2.0-pt regression bar, so `CLAUDE.md`'s "partial catalog
 -- is worse than either extreme" is **refuted**. Making `tmdb_vote_count` the
--- primary key (dropping popularity) recovers all 1.3 pts and does not hurt
+-- primary key (dropping `tmdb_popularity`) recovers all 1.3 pts and does not hurt
 -- the all-NULL arm, but its behaviour on a *genuinely enriched* tier --
 -- boundary call 4's population -- could not be measured on this skeleton
 -- catalog, so it is an M9 change to re-measure, not shipped here.
--- `NULLIF(tmdb_popularity, 0)` recovers nothing: only 3 zeros exist. The vote
--- count remains a tiebreak *under* popularity, so an enriched catalog is
--- unaffected.
+-- `NULLIF(tmdb_popularity, 0)` recovers nothing: only 3 zeros exist.
+-- `tmdb_vote_count` remains a tiebreak *under* `tmdb_popularity`, so an
+-- enriched catalog is unaffected.
 ORDER BY dist ASC, tmdb_popularity DESC NULLS LAST, tmdb_vote_count DESC NULLS LAST, id ASC
 LIMIT :limit
 """  # noqa: S608 - every interpolated fragment is a module constant

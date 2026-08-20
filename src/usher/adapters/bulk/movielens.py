@@ -563,7 +563,7 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
                 ) from exc
             # A value outside [0, 1] is deliberately NOT rejected, and the
             # asymmetry with `parse_ratings_row` is the point: IMDb's rating is
-            # bounded by `Title.community_rating`'s `Field(ge=0, le=10)` and a
+            # bounded by `Title`'s rating fields (`Field(ge=0, le=10)`) and a
             # matching CHECK, so an out-of-range value would abort a COPY
             # anyway. Nothing in `halfvec` or in cosine depends on the genome's
             # range, so rejecting on a measured [0.00024999999999997247, 1.0]

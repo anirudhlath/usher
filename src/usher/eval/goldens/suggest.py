@@ -6,7 +6,10 @@ constant makes E1's numbers incomparable with the 2026-08-03 run and with
 ADR-0031 -- and the whole reason E1 measures suggest first is that those
 numbers exist.
 
-Movies only, `vote_count >= 500`, names not unique in the catalog excluded at
+Movies only, `tmdb_vote_count >= 500` (the gate wrote `vote_count`; ADR-0040
+renamed the column and Task 5 of the rating-provenance plan re-anchors the
+frame onto `imdb_num_votes`, which is a *different* population and will be
+recorded as one), names not unique in the catalog excluded at
 sampling time, five equal draws of 150 over `char_length(name)` bands, four
 typo classes at a uniformly random position, `random.Random(20260803)`.
 **2,993 rather than 3,000 because seven two-character names admit no

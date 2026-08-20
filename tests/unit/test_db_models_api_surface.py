@@ -188,11 +188,12 @@ def test_title_search_names_has_five_columns_and_popularity_is_not_one_of_them()
     decoration: IMDb `title.akas` is the alias source, and without them a
     French and a Brazilian alias for the same film are indistinguishable rows.
 
-    **And `popularity` is refused with a number.** `titles.popularity` is NULL
-    on all 1,271,138 rows, which is why M6's shipped suggest ordering was
-    inert and why the vote-count tiebreak was added. Copying a 100%-NULL
+    **And `popularity` is refused with a number.** `titles.tmdb_popularity`
+    is NULL on all 1,271,138 rows, which is why M6's shipped suggest ordering
+    was inert and why the vote-count tiebreak was added. Copying a 100%-NULL
     column into a narrow table is precisely the duplication M6's boundary call
-    3 refused; the re-rank reads `titles.vote_count`, as it already does."""
+    3 refused; the re-rank reads `titles.tmdb_vote_count`, as it already
+    does."""
     table = cast(Table, TitleSearchNameRow.__table__)
     assert {c.name for c in table.columns} == {
         "id",

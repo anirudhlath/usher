@@ -279,8 +279,16 @@ class BulkCatalogRepository(ABC):
 
     @abstractmethod
     async def apply_ratings(self, rows: Sequence[ImdbRating]) -> int:
-        """Set `community_rating`/`vote_count` on titles that already exist,
-        returning how many rows changed.
+        """Set `tmdb_vote_average`/`tmdb_vote_count` on titles that already
+        exist, returning how many rows changed.
+
+        ⚠️ **Those are the TMDb-named columns and this is IMDb's data, which
+        is the bug ADR-0040 names rather than a description of intent.** The
+        rename made the dual write legible; redirecting this method onto
+        `imdb_average_rating`/`imdb_num_votes` is a behaviour change and is
+        Task 2 of `docs/plans/2026-08-19-rating-provenance-split.md`. Stated
+        here because an ABC that described the write it *should* make would
+        leave the implementation looking like the defect.
 
         Never creates a title: `title.ratings.tsv.gz` covers `titleType`s
         this milestone drops, and a rating with no title is not a catalog
@@ -441,14 +449,17 @@ class BulkCatalogRepository(ABC):
         independently of whether the incoming pair agrees with what is
         already stored: a title that already carries a *different* value
         does not get overwritten either, and is reported as `conflicted`,
-        not `linked`. Copies `popularity` across from the TMDb id universe
-        at the same time.
+        not `linked`. Copies `tmdb_ids.popularity` across into
+        `titles.tmdb_popularity` at the same time -- which makes this
+        statement that column's **second** writer beside TMDb enrichment, and
+        is why a populated `tmdb_popularity` says nothing about whether a row
+        was enriched (ADR-0040).
 
         **That last clause used to continue "…which is what makes
         `ix_titles_popularity` usable and gives M4's enrichment queue a real
         ordering", and both halves were false.** The enrichment queue is
         `jobs`, claimed through `ix_jobs_claim` (`priority DESC, created_at`);
-        no statement anywhere orders it by `titles.popularity`, so the named
+        no statement anywhere orders it by `titles.tmdb_popularity`, so the named
         consumer never existed. And the index could not have served one
         anyway — it was declared `(popularity DESC)`, i.e. NULLS FIRST, while
         every consumer in `src/` asks `DESC NULLS LAST`, which is a different

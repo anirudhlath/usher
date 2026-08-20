@@ -95,8 +95,16 @@ class ImdbRating:
     """One row of IMDb's `title.ratings.tsv.gz`.
 
     `community_rating` is IMDb's `averageRating`, already on the 0-10 scale
-    `Title.community_rating` promises (`Field(ge=0, le=10)`), so no
-    rescaling happens anywhere.
+    every rating field on `Title` promises (`Field(ge=0, le=10)`, on
+    `tmdb_vote_average` and `imdb_average_rating` alike), so no rescaling
+    happens anywhere.
+
+    ⚠️ **These two field names are IMDb's data under TMDb-shaped names, and
+    that is the defect rather than the design.** ADR-0040 renames them to
+    `average_rating`/`num_votes` in Task 2 of
+    `docs/plans/2026-08-19-rating-provenance-split.md`, alongside redirecting
+    `apply_ratings` onto the `imdb_*` columns; the source file this row is
+    parsed from already carries IMDb's own `averageRating`/`numVotes` header.
     """
 
     imdb_id: str

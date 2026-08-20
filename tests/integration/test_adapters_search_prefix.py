@@ -92,6 +92,14 @@ async def _given_title(
     title_id = new_id()
     await session.execute(
         text(
+            # **The bind names are not the column names and only the columns
+            # moved.** ADR-0040 renamed `popularity`/`vote_count` to
+            # `tmdb_popularity`/`tmdb_vote_count`; `:popularity` and
+            # `:vote_count` stay because they are this helper's own keyword
+            # arguments, which are test-local vocabulary. Its sibling
+            # `test_adapters_search_postgres.py::_insert_title` draws the same
+            # line for a sharper reason -- there the bind is read off a
+            # `SearchDocument` attribute that deliberately did not move.
             "INSERT INTO titles (id, kind, name, sort_name, tmdb_popularity, "
             "tmdb_vote_count, enrichment_state) VALUES (CAST(:id AS uuid), :kind, :name, "
             ":sort_name, :popularity, :vote_count, :state)"

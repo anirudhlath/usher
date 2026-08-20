@@ -47,7 +47,7 @@ from pydantic import AwareDatetime
 from usher.domain.enums import ENRICHMENT_RANK, EnrichmentState
 from usher.domain.episode import Episode
 from usher.domain.jobs import JobKind, JobPriority
-from usher.domain.title import Title
+from usher.domain.title import Title, wire_field_name
 from usher.ports.errors import PortDataMalformed, UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.ingest import ProviderRef
@@ -294,7 +294,22 @@ class EnrichService:
                 # title (PRD 07: "Title id + changed fields | Patch in
                 # place"). `["*"]` turns "patch in place" back into
                 # "refetch", one request later.
-                data={"fields": [*sorted(changed), "enrichment_state"]},
+                #
+                # **`wire_field_name`, because `_ENRICHABLE` holds domain
+                # attribute names and this list is read by a deployed
+                # client.** ADR-0040 renamed three `Title` attributes and
+                # froze every DTO field name, which quietly made the two
+                # vocabularies diverge exactly here -- the one place a field
+                # name travels as *data* rather than as a key, so no DTO and
+                # no OpenAPI schema constrains it. Sorted after the mapping
+                # and not before: the order a client sees is the order of the
+                # names it is actually given.
+                data={
+                    "fields": [
+                        *sorted(wire_field_name(field) for field in changed),
+                        "enrichment_state",
+                    ]
+                },
             )
         )
         return enriched
@@ -361,7 +376,7 @@ class EnrichService:
 
         `.evolve()`, never `model_copy(update=)`: every `usher.domain` model
         is frozen and `model_copy` skips validation entirely, so it can hand
-        back a `Title` carrying an out-of-range `community_rating` that
+        back a `Title` carrying an out-of-range `tmdb_vote_average` that
         pydantic then serialises without complaint.
         """
         return title.evolve(

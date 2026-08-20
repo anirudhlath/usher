@@ -114,10 +114,14 @@ class TitleRow(Base):
     # writers each and no way to say which one wrote a row.** `bulk/imdb.py`
     # wrote IMDb's `numVotes`/`averageRating` here and `tmdb/mapping.py` wrote
     # TMDb's `vote_count`/`vote_average` over the top, into the same column,
-    # on a scale ~50-100x apart. Measured on the deployed catalog: skeleton
-    # rows reached 2,656,080 and enriched movies topped out at 40,695. The
-    # ranges *overlap* among movies (40,518 against 40,695), so nothing
-    # downstream could have separated them by magnitude. ADR-0040.
+    # counted over different electorates -- ~36x apart on the only *paired*
+    # sample taken (median TMDb 16 against median IMDb 581 over 537 enriched
+    # tier movies, `scripts/enqueue_tier_enrichment.py`). The load-bearing
+    # measurement is not that gap but the overlap: on the deployed catalog
+    # skeleton rows reached 2,656,080 while enriched movies topped out at
+    # 40,695, and among movies the two ranges *overlap* (40,518 against
+    # 40,695) -- so nothing downstream could have separated them by
+    # magnitude, whatever the typical ratio. ADR-0040.
     tmdb_vote_average: Mapped[float | None] = mapped_column(Float)
     tmdb_vote_count: Mapped[int | None] = mapped_column(Integer)
     tmdb_popularity: Mapped[float | None] = mapped_column(Float)

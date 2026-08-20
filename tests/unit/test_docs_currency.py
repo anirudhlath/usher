@@ -77,14 +77,26 @@ _IMPLEMENTATION_PLAN_TABLE = "## Implementation plans"
 # **What every widening has had to keep is the spec exclusion**, because both
 # status tables name their own spec in their own heading and a PRD row links
 # one inside a table cell. The narrowness cannot carry that any more, so it is
-# now carried explicitly: every spec this project has written ends
+# now carried explicitly: all **four** specs this project has written end
 # `-design.md` (`2026-07-28-usher-v1-design.md`,
+# `2026-08-10-m9-api-surface-design.md`,
 # `2026-08-18-usher-quality-evals-design.md`,
 # `2026-08-19-rating-provenance-split-design.md`), and the lookahead refuses
-# exactly those. It is spelled `[a-z0-9-]*` rather than `.*` deliberately: a
-# greedy `.*` would reach a *later* `-design.md` on the same line and refuse
-# the plan named beside its own spec, which is precisely the row the rating
-# split's table carries.
+# exactly those.
+#
+# ⚠️ **The second of those four is the one that matters, and an earlier
+# spelling of this comment omitted it while claiming to enumerate them all.**
+# `2026-08-10-m9-api-surface-design.md` is the single spec the *old*
+# `[a-z]+\d+` pattern did **not** exclude -- `m9` is letters-then-digits and
+# `-api-surface-design.md` follows it -- so a narrowness described as
+# refusing every spec was in fact harvesting one of them as a plan. Measured:
+# it was being counted as a line of prose naming a plan file by the floor case
+# below, which is why that floor's number moves in this commit.
+#
+# The lookahead is spelled `[a-z0-9-]*` rather than `.*` deliberately: a greedy
+# `.*` would reach a *later* `-design.md` on the same line and refuse the plan
+# named beside its own spec, which is precisely the row the rating split's
+# table carries.
 # `test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec`
 # asserts every half.
 _PLAN_FILENAME = re.compile(r"20\d\d-\d\d-\d\d-(?![a-z0-9-]*-design\.md)[a-z0-9-]+\.md")
@@ -225,10 +237,15 @@ def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() 
         "2026-08-18-e1-eval-skeleton-and-suggest.md"
     }
 
+    # All four, and the second is the one with teeth: `m9` is
+    # letters-then-digits, so the *old* pattern harvested that spec as a plan
+    # and the exclusion was never as complete as its comment claimed.
     specs = (
         "## Quality-eval phases (from docs/specs/2026-08-18-usher-quality-evals-design.md)\n"
         "| — | — | docs/specs/2026-07-28-usher-v1-design.md | — |\n"
+        "| — | — | docs/specs/2026-08-10-m9-api-surface-design.md | — |\n"
         "| — | — | docs/specs/2026-08-18-usher-quality-evals-design.md | — |\n"
+        "| — | — | docs/specs/2026-08-19-rating-provenance-split-design.md | — |\n"
     )
 
     assert _table_rows(specs, _EVAL_PHASE_TABLE) == set(), (
@@ -266,15 +283,25 @@ def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> Non
     milestone, and the claim being kept alive is *"this document's prose names
     plan files"*, not *"it names exactly six"*.
 
-    **Both** table sections are excluded, and the second one is why this
-    paragraph exists. `## Quality-eval phases` arrived on 2026-08-18 and its
-    rows are outside the *milestone* section, so a scan subtracting only that
-    one would have counted a table row as a line of prose -- and the floor
-    would have kept passing, on evidence it is written to exclude. A floor that
-    goes green because the thing it measures was diluted is worse than one that
-    fails: it reports that the scoping is still load-bearing while quietly
-    measuring something else. The count is 8 at E1's start, all eight genuinely
-    prose.
+    **All three** table sections are excluded, and the second and third are
+    why this paragraph exists. `## Quality-eval phases` arrived on 2026-08-18
+    and `## Rating provenance` on 2026-08-19, and the rows of both are outside
+    the *milestone* section -- so a scan subtracting only that one would have
+    counted a table row as a line of prose, and the floor would have kept
+    passing, on evidence it is written to exclude. A floor that goes green
+    because the thing it measures was diluted is worse than one that fails: it
+    reports that the scoping is still load-bearing while quietly measuring
+    something else.
+
+    **The count is 7, and it moved from 8 by getting more honest rather than
+    by anything being deleted.** The eighth line was
+    `docs/specs/2026-08-10-m9-api-surface-design.md`, harvested as a plan
+    because the old `[a-z]+\\d+` scope segment matched `m9` -- so *"all eight
+    genuinely prose"* was already one short of true when it was written, and
+    the widening that let `2026-08-19-rating-provenance-split.md` in is what
+    exposed it. All seven remaining are genuinely prose: six per-milestone
+    headings plus M2's fixture-leak note. Asserted as a floor and not an
+    equality for the reason above -- the number grows by one per milestone.
     """
     text = _PROGRESS.read_text()
     tabled = (

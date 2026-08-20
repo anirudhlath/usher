@@ -249,7 +249,7 @@ def _browse_order(key: ColumnElement[Any], *, descending: bool) -> tuple[ColumnE
     written.
 
     **The nullable sorts do not benefit yet and the reason is worth carrying.**
-    `year`, `popularity` and `vote_count` have no index at all, so all three
+    `year`, `tmdb_popularity` and `tmdb_vote_count` have no index at all, so all three
     stay a sequential scan (B7: 235.55 / 229.50 / 231.21 ms) -- but under the
     written-out spelling a `(col DESC NULLS LAST, id)` btree could not have
     been matched even if it existed, so this change is what makes such an index

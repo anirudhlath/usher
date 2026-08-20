@@ -223,8 +223,11 @@ def parse_ratings_row(line: str) -> ImdbRating | None:
     """One `title.ratings.tsv.gz` line, or `None` for the header.
 
     `averageRating` is already on IMDb's 0-10 scale, which is the scale
-    `Title.community_rating` promises (`Field(ge=0, le=10)`), so nothing is
-    rescaled. A value outside that range is malformed rather than clamped --
+    every rating field on `Title` promises (`Field(ge=0, le=10)`, on
+    `tmdb_vote_average` and `imdb_average_rating` alike -- ADR-0040 split the
+    column and did not move the bound, because both sources use 0-10, which is
+    exactly why the dual write was silent), so nothing is rescaled. A value
+    outside that range is malformed rather than clamped --
     the matching CHECK constraint would reject it during `COPY` anyway, and
     failing here names the offending row.
     """
@@ -245,8 +248,8 @@ def parse_ratings_row(line: str) -> ImdbRating | None:
         ) from exc
     if not 0.0 <= rating <= 10.0:
         raise PortDataMalformed(
-            f"IMDb averageRating {rating} is outside the 0-10 scale Title.community_rating "
-            "declares",
+            f"IMDb averageRating {rating} is outside the 0-10 scale every "
+            "Title rating field declares",
             detail=imdb_id,
         )
     count = _optional_int(votes, imdb_id=imdb_id, column="numVotes")

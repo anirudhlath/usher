@@ -72,7 +72,7 @@ async def run_suggest(
     if not any(pools.values()):
         return Report(
             Verdict.SKIPPED,
-            ("suggest: skipped -- no movie has vote_count >= 500; run `usher bootstrap`",),
+            ("suggest: skipped -- no movie has tmdb_vote_count >= 500; run `usher bootstrap`",),
         )
 
     frame = await read_frame(session)

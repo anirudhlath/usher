@@ -47,8 +47,8 @@ is simply not a fact TMDb has about a series any more. A test that asserts a
 series runtime is asserting about the 13% case.
 
 **Nothing TMDb can put in a payload may raise.** `Title` pattern-validates
-`imdb_id`, bounds `community_rating` to 0-10 and `year`/`runtime_minutes`/
-`vote_count`/`popularity` to non-negative, and a `pydantic.ValidationError`
+`imdb_id`, bounds `tmdb_vote_average` to 0-10 and `year`/`runtime_minutes`/
+`tmdb_vote_count`/`tmdb_popularity` to non-negative, and a `pydantic.ValidationError`
 is **not** a `UsherPortError` — so a single odd value would escape
 `EnrichService`'s except clause and crash the worker instead of parking the
 job. Every value is filtered to the shape the model accepts *before* the

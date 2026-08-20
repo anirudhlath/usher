@@ -536,7 +536,7 @@ class TitleRepositoryOwnedContract:
     async def test_vote_count_orders_titles_whose_popularity_is_unknown(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """`titles.popularity` was measured NULL on all 1,271,138 rows of a
+        """`titles.tmdb_popularity` was measured NULL on all 1,271,138 rows of a
         bootstrap-only catalog, so an ordering with only that key is an
         ordering by `id` on the deployment most likely to exist.
 
@@ -1091,7 +1091,7 @@ class TitleRepositoryCandidateContract:
         the enriched tier would have passed every case in the suite. That is
         the same shape as `media_items.available`, whose mutation survived
         everything until a fixture wrote the other value, and as
-        `titles.popularity` before it: **a predicate on a column no fixture
+        `titles.tmdb_popularity` before it: **a predicate on a column no fixture
         ever writes falsely is unobservable.**
 
         The defect is not hypothetical and it is quiet. M6 measured the
@@ -1390,8 +1390,9 @@ class TitleRepositoryBrowseContract:
     ) -> None:
         """**The NULL trap, and it is the quietest defect in this port.**
 
-        `titles.year`, `titles.popularity` and `titles.vote_count` are all
-        nullable, and `popularity` was measured NULL on all 1,271,138 rows of a
+        `titles.year`, `titles.tmdb_popularity` and `titles.tmdb_vote_count`
+        are all nullable, and the popularity column was measured NULL on all
+        1,271,138 rows of a
         bootstrap-only catalog -- so the unkeyed group is not an edge case,
         it is most of the catalog on a fresh install. A keyset that compares a
         NULL evaluates to NULL rather than to false, so once the cursor lands

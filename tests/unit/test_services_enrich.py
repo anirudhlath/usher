@@ -24,7 +24,7 @@ from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
-from usher.domain.title import Title
+from usher.domain.title import WIRE_FIELD_NAMES, Title
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.jobs import JobRequest
@@ -501,6 +501,49 @@ async def test_the_published_event_names_the_fields_that_changed(
     # "this response did not say", and naming it would send a client to
     # refetch a value that did not move.
     assert "end_year" not in fields
+
+
+async def test_no_domain_only_field_name_reaches_the_wire(
+    service: EnrichService, titles: FakeTitleRepository, events: FakeEventPublisher
+) -> None:
+    """**The case ADR-0040's rename needed and this file did not have.**
+
+    `title.updated`'s payload is the one place in the system where a field
+    *name* travels as data rather than as a key, so no DTO, no response model
+    and no OpenAPI schema constrains it -- and the rename's first commit
+    published `tmdb_vote_average`, `tmdb_vote_count` and `tmdb_popularity`,
+    three names that appear in no response body a client can refetch, while
+    every case in this file stayed green. The sibling above is why: it asserts
+    `"overview" in`, `"end_year" not in` and `"*" not in`, and all three are
+    true of a payload whose rating names moved.
+
+    **Derived from `WIRE_FIELD_NAMES` rather than naming the three**, because
+    the defect is *"a domain attribute reached the wire"* and not *"these
+    three did"*. A fourth entry added to that mapping is covered here on the
+    same commit that adds it, with nothing to remember; three literals would
+    be three literals plus whatever the fourth rename forgot.
+    """
+    title = await _given(titles, state=EnrichmentState.STUB)
+    await service.enrich(title.id)
+    fields = set(events.published[0].data["fields"])
+
+    assert WIRE_FIELD_NAMES, "the premise: at least one field's wire name is not its own"
+    leaked = fields & set(WIRE_FIELD_NAMES)
+    assert not leaked, f"domain attribute names reached the wire: {sorted(leaked)}"
+
+    # **The premise, and not decoration.** Without it the assertion above is
+    # satisfied by a fixture whose provider supplies none of the renamed
+    # fields at all -- an empty intersection reads identically to a correct
+    # mapping. Read off the *stored* title so it is derived too: `_given`
+    # seeds a stub carrying none of these, so a renamed field with a value
+    # after enrichment is one this provider really did supply.
+    stored = await titles.get(title.id)
+    assert stored is not None
+    moved = {field for field in WIRE_FIELD_NAMES if getattr(stored, field) is not None}
+    assert moved, "the premise: this fixture's provider really does supply a renamed field"
+    assert {WIRE_FIELD_NAMES[field] for field in moved} <= fields, (
+        "a renamed field the provider supplied is named on the wire under neither spelling"
+    )
 
 
 async def test_a_title_that_does_not_exist_publishes_nothing(

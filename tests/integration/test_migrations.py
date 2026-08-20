@@ -409,6 +409,101 @@ async def test_the_dropped_watch_state_index_is_gone(session: AsyncSession) -> N
     assert result.scalar_one() == 0
 
 
+async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url: str) -> None:
+    """**The one thing `m10a` does that no schema reader in this file can
+    see**, and the only statement in it that touches a row.
+
+    `field_provenance` is `field -> provider` and `adapters/tmdb/mapping.py`
+    derives its keys from the `Title` field names this revision renames, so a
+    revision that moved the columns and left the keys leaves every enriched
+    row carrying `"community_rating": "tmdb"` while its *next* enrichment adds
+    `"tmdb_vote_average": "tmdb"` beside it -- permanently, because
+    `services/enrich.py` merges provenance rather than assigning it. Nothing
+    else here would notice: `_column_set`, `_constraint_set`, `_index_set` and
+    `compare_metadata` all read the catalog, and this is data.
+
+    Seeded **below** the revision and read above it, then read again after the
+    downgrade, because a key rename is only observable across the boundary.
+    The third key is deliberately absent from the seeded row: `upgrade()`
+    builds its statement per key, and a wholesale spelling would give that row
+    a `tmdb_popularity` entry pointing at nothing -- an invented provenance
+    claim, which is exactly the inference this revision's docstring refuses.
+    """
+    admin = postgres_url.rsplit("/", 1)[0]
+    scratch = f"prov_{uuid.uuid4().hex[:12]}"
+    engine = build_engine(f"{admin}/postgres")
+    try:
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
+    finally:
+        await engine.dispose()
+
+    url = f"{admin}/{scratch}"
+    seeded = new_id()
+    try:
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m09f", direction="up"))
+        scratch_engine = build_engine(url)
+        try:
+            async with scratch_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO titles (id, kind, name, sort_name, field_provenance) "
+                        "VALUES (:id, 'movie', :name, :name, CAST(:provenance AS jsonb))"
+                    ),
+                    {
+                        "id": seeded,
+                        "name": "A Provenance Carrier",
+                        # `overview` is the control: a key nothing renames, so
+                        # a statement that rebuilt the whole object instead of
+                        # editing three keys drops it and fails here.
+                        "provenance": (
+                            '{"community_rating": "tmdb", "vote_count": "tmdb", "overview": "tmdb"}'
+                        ),
+                    },
+                )
+
+            await asyncio.to_thread(run_alembic, url, "head")
+            async with scratch_engine.connect() as conn:
+                above = (
+                    await conn.execute(
+                        text("SELECT field_provenance FROM titles WHERE id = :id"),
+                        {"id": seeded},
+                    )
+                ).scalar_one()
+
+            assert above == {
+                "tmdb_vote_average": "tmdb",
+                "tmdb_vote_count": "tmdb",
+                "overview": "tmdb",
+            }, "the keys moved, the untouched one survived, and no key was invented"
+
+            await asyncio.to_thread(functools.partial(run_alembic, url, "m09f", direction="down"))
+            async with scratch_engine.connect() as conn:
+                below = (
+                    await conn.execute(
+                        text("SELECT field_provenance FROM titles WHERE id = :id"),
+                        {"id": seeded},
+                    )
+                ).scalar_one()
+
+            assert below == {
+                "community_rating": "tmdb",
+                "vote_count": "tmdb",
+                "overview": "tmdb",
+            }, "the downgrade restored every key it renamed, and only those"
+        finally:
+            await scratch_engine.dispose()
+    finally:
+        engine = build_engine(f"{admin}/postgres")
+        try:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
+        finally:
+            await engine.dispose()
+
+
 async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) -> None:
     """`downgrade base` then `upgrade head`, on a throwaway database, with
     the index set compared before and after.

@@ -52,9 +52,8 @@ class BrowseSort(StrEnum):
 
     Four members, and three of the four keys are **nullable** —
     `titles.year`, `titles.tmdb_popularity` and `titles.tmdb_vote_count` all
-    are, and the popularity column
-    was measured NULL on all 1,271,138 rows of a bootstrap-only
-    catalog. That is why every order here is NULLS LAST and why the keyset
+    are, and `tmdb_popularity` was measured NULL on all 1,271,138 rows of a
+    bootstrap-only catalog. That is why every order here is NULLS LAST and why the keyset
     predicate carries an `IS NOT NULL` leg: see `TitleRepository.browse`.
 
     `name` sorts on `sort_name` rather than on `name`, which is the column
@@ -369,13 +368,13 @@ class TitleRepository(ABC):
         library ordered by popularity, which is the popular-titles fallback
         spelled as a query -- so the port declines to express it.
 
-        Ordered `popularity DESC NULLS LAST, vote_count DESC NULLS LAST, id`.
-        The second key is not decoration: `titles.popularity` was measured
-        NULL on all 1,271,138 rows of a bootstrap-only catalog and is
-        `NOT NULL DEFAULT 0` in `tmdb_ids`, so on a partially-linked catalog a
-        crosswalk-linked skeleton at 0.0 outranks an unlinked title with half
+        Ordered `tmdb_popularity DESC NULLS LAST, tmdb_vote_count DESC NULLS
+        LAST, id`. The second key is not decoration: `titles.tmdb_popularity`
+        was measured NULL on all 1,271,138 rows of a bootstrap-only catalog and
+        is `NOT NULL DEFAULT 0` in `tmdb_ids`, so on a partially-linked catalog
+        a crosswalk-linked skeleton at 0.0 outranks an unlinked title with half
         a million votes. That hazard is recorded rather than solved here --
-        it is the same one M6's suggest path took `vote_count` for -- and the
+        it is the same one M6's suggest path took the vote count for -- and the
         `id` tail is what makes two reads of one unchanged catalog agree.
 
         Nothing about *watched* is expressed here. `played_title_ids` answers
@@ -471,11 +470,12 @@ class TitleRepository(ABC):
         over the whole catalog, where a filter would narrow it to the owned
         library -- see the paragraph on the ranking projection below.
 
-        **Ordered `owned DESC, carries an affinity genre DESC, vote_count
-        DESC NULLS LAST, id`**, which is M8 boundary call 5's own enumeration
-        of the signals that need no model -- *"unwatched, owned or popular,
-        genre affinity, `titles.vote_count`"* -- read as the order it is
-        written in:
+        **Ordered `owned DESC, carries an affinity genre DESC,
+        tmdb_vote_count DESC NULLS LAST, id`**, which is M8 boundary call 5's
+        own enumeration of the signals that need no model -- *"unwatched,
+        owned or popular, genre affinity, `titles.vote_count`"*, quoted as
+        written and now spelled `titles.tmdb_vote_count` (ADR-0040) -- read as
+        the order it is written in:
 
         - **Owned first**, because a shelf the household can play tonight is
           worth more than one it has to go and find, and an unowned card
@@ -491,9 +491,10 @@ class TitleRepository(ABC):
           So it is a sort key and never a predicate -- as a predicate it would
           hand an empty pool to exactly those households, which is
           `GenreAffinityProvider`'s corrected failure arriving one layer down.
-        - **Then `vote_count`, and deliberately not `popularity`.**
-          `list_owned_by_tag` leads with `popularity` and this read does not,
-          which is a divergence rather than an oversight: `titles.popularity`
+        - **Then `tmdb_vote_count`, and deliberately not the popularity.**
+          `list_owned_by_tag` leads with `tmdb_popularity` and this read does
+          not, which is a divergence rather than an oversight:
+          `titles.tmdb_popularity`
           was measured NULL on all **1,271,138** rows of a `--phase imdb`
           catalog (M6, 2026-08-03) and is `NOT NULL DEFAULT 0` in `tmdb_ids`,
           so on a partially-linked catalog a crosswalk-linked skeleton at
@@ -513,8 +514,8 @@ class TitleRepository(ABC):
           This is the canonical statement of the tiebreak's argument; the
           contract case and PRD 06 point here rather than restating it.
 
-          The two keys above `vote_count` are **booleans**, so they partition
-          rather than order, and `vote_count` itself is NULL on **732,220 of a
+          The two keys above the vote count are **booleans**, so they
+          partition rather than order, and `tmdb_vote_count` itself is NULL on **732,220 of a
           measured 1,271,570-title catalog** -- the bootstrap writes it on
           539,350 through `BulkCatalogRepository.apply_ratings` (measured
           2026-08-05, M7 Task 36; the number is recorded in
@@ -529,13 +530,15 @@ class TitleRepository(ABC):
 
           ⚠️ **Not the argument `list_owned_by_tag` makes for its own `id`
           tail, and an earlier draft of this docstring made that one by
-          swapping the column into it.** It claimed `vote_count` is NULL on
-          *every* row of a bootstrap-only catalog, which the same measurement
-          refutes: under `NULLS LAST` the 539,350 voted rows sort **above**
-          every unvoted one, so on exactly that catalog `vote_count` is what
-          orders the head of the pool. The `popularity` sentence above is the
-          one that survives being read that way, because `popularity` really
-          is NULL until `link_crosswalk` runs.
+          swapping the column into it.** It claimed the vote count is NULL
+          on *every* row of a bootstrap-only catalog, which the same
+          measurement refutes: under `NULLS LAST` the 539,350 voted rows sort
+          **above** every unvoted one, so on exactly that catalog
+          `tmdb_vote_count` is what orders the head of the pool. The
+          popularity sentence above is the one that survives being read that
+          way, because `tmdb_popularity` really is NULL until `link_crosswalk`
+          runs -- that statement being its **second** writer, and the reason
+          the column says nothing about enrichment.
 
         **"Unwatched" is `played`, rolled up through `episodes.title_id`, and
         it is the same predicate `played_title_ids` spells.** Both halves are
