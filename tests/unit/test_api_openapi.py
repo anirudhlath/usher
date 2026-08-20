@@ -6,7 +6,7 @@ real shapes for all of them"*. Nothing ran that until this file, and a
 criterion nobody can run is a criterion that gets asserted at the end by
 reading.
 
-**Four claims, deliberately at different scopes.**
+**Five claims, deliberately at different scopes.**
 
 1. **PRD's endpoint tables ⊆ the app's routes**, compared as `(method, path)`
    pairs. Narrow on purpose, twice over: a table is a promise to a client, so
@@ -25,6 +25,10 @@ reading.
 4. **The `code` enum in the schema is `ProblemCode` as a set**, so a member
    added without regenerating the schema fails here as well as in
    `tests/unit/test_api_problem_vocabulary.py`.
+5. **Every problem body is described at the media type the wire sends**, and
+   no other body is. Keyed on the schema rather than on the status, which is
+   what excludes `GET /health/ready`'s 503 by construction rather than by a
+   second exemption list.
 
 **Every scan carries its positive control, and the control runs before any
 membership claim is read out of it.** An app that failed to build and a PRD
@@ -37,15 +41,6 @@ router rather than flattening, so a one-level `isinstance(route, APIRoute)`
 walk finds **zero** of Usher's routes and iterates an empty list happily.
 `tests/unit/test_api_problem.py::test_the_route_walk_finds_the_shipped_surface`
 is the premise for the descent; every case here carries one of its own too.
-
-**One bounded untruth is named rather than checked.** A problem document goes
-out as `application/problem+json`, and FastAPI renders a
-`responses={404: {"model": ProblemResponse}}` declaration under the route's own
-response media type, i.e. `application/json`. Spelling the media type into
-every declaration would fork `test_api_playback.py` and `test_api_watch.py`,
-which read the schema at `content["application/json"]`, and buys a client
-nothing it cannot read off the `type` member. So the shape is what is asserted
-here and the media type is not.
 """
 
 import ast
@@ -68,7 +63,7 @@ from fastapi.routing import APIRoute
 # whole reason it exists is that the obvious walk is silently wrong.
 from tests.unit.test_api_problem import _api_routes as api_routes
 from usher.api.app import create_app
-from usher.api.dto.problem import PROBLEM_EXEMPTIONS, ProblemCode
+from usher.api.dto.problem import PROBLEM_EXEMPTIONS, PROBLEM_MEDIA_TYPE, ProblemCode
 from usher.api.errors import _CODE_FOR_STATUS
 from usher.config import Settings
 
@@ -108,6 +103,19 @@ _ENDPOINTS_IN_THE_TABLES: Final = 29
 
 #: The anchor every non-2xx in `/openapi.json` has to point at.
 _PROBLEM_SCHEMA: Final = "ProblemResponse"
+
+#: A floor, for the reason `_ENDPOINTS_IN_THE_TABLES` is one: a walk that
+#: matched nothing passes every media-type claim below exactly as a walk that
+#: matched everything does, and on FastAPI 0.140 an empty walk is the *default*
+#: failure here. 56 at the time of writing.
+_PROBLEM_BODIES: Final = 50
+
+#: The non-problem bodies, and this one is an exact count rather than a floor
+#: on purpose: it is the arm that fails when a rewrite of the document moves a
+#: **200** as well as a problem, and a floor cannot see a body that left the
+#: set. Re-measure it when the surface grows -- 36 as of Group F, over 35
+#: operations and 92 response bodies.
+_NON_PROBLEM_BODIES: Final = 36
 
 #: Non-2xx responses that are deliberately **not** problem documents, each with
 #: the shape it keeps instead and the reason it keeps it. A bare skip list
@@ -309,6 +317,21 @@ def _schema_ref(response: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _bodies(document: Mapping[str, Any]) -> Iterator[tuple[str, str, str, str, str | None]]:
+    """Every response *body* the document describes, one per media type.
+
+    `(path, method, status, media type, $ref)`. One entry per media type
+    rather than per response, because the whole question below is which key a
+    body is filed under -- and `GET /images/{id}` really does describe one
+    response under three of them.
+    """
+    for path, method, operation in _operations(document):
+        for status, response in operation.get("responses", {}).items():
+            for media, body in response.get("content", {}).items():
+                reference = body.get("schema", {}).get("$ref")
+                yield path, method, status, media, reference if isinstance(reference, str) else None
+
+
 def _failures_a_route_can_raise(route: APIRoute) -> set[tuple[int, str | None]]:
     return _raised(route.endpoint.__module__, route.endpoint.__name__)
 
@@ -487,6 +510,73 @@ def test_every_failure_the_schema_describes_is_a_problem_document(
     assert seen >= 30, f"only {seen} non-2xx responses were examined; the walk found nothing"
     assert wrong == {}, (
         f"non-2xx responses described as something other than a problem document: {wrong}"
+    )
+
+
+def test_every_problem_response_is_described_at_the_media_type_the_wire_sends(
+    document: Mapping[str, Any],
+) -> None:
+    """Claim 5. `api/errors.py` sends every problem document as
+    `application/problem+json`; the document has to say so.
+
+    RFC 9457's media type is how a client tells a problem document from a
+    route's own body **before** it parses anything, which is the one thing a
+    generated client acts on that it cannot recover from the `type` member --
+    reaching `type` means having already decided to parse the body as a
+    problem. FastAPI renders `responses={404: {"model": ProblemResponse}}`
+    under the *route's* response media type and offers no per-response
+    override, so this is asserted against `UsherAPI.openapi`'s rewrite rather
+    than against a declaration.
+
+    **Two positive controls, and the second is the one this repository has
+    been bitten without.** A walk that matched nothing satisfies every claim
+    below exactly as a walk that matched everything does -- and on FastAPI
+    0.140 an empty walk is the default failure, not an exotic one. And
+    `ProblemResponse` has to still be a *component*: the spelling a reader
+    reaches for is `{"content": {PROBLEM_MEDIA_TYPE: {"schema": {"$ref":
+    "#/components/schemas/ProblemResponse"}}}}` in place of `model=`, which
+    renders the right key with the right `$ref` and, with no route naming the
+    model, never registers it -- measured, an app carrying only that spelling
+    publishes `components.schemas == ["Ok"]`. Every media-type assertion here
+    passes against that document while every `$ref` in it dangles.
+    """
+    assert _PROBLEM_SCHEMA in document["components"]["schemas"], (
+        f"`{_PROBLEM_SCHEMA}` is not a component, so every `$ref` naming it dangles -- which is "
+        "what hand-writing the `$ref` in place of `model=` produces, and it passes every "
+        f"media-type assertion below: {sorted(document['components']['schemas'])}"
+    )
+
+    # A list of pairs and never a mapping keyed by the response: one response
+    # can carry several bodies, and `GET /images/{id}`'s 200 really carries
+    # three. Collapsing them would take the non-problem count from 36 to 34 and
+    # the arm below would then be pinned to an artefact of the collapse.
+    problem: list[tuple[str, str]] = []
+    other: list[tuple[str, str]] = []
+    for path, method, status, media, reference in _bodies(document):
+        where = f"{method.upper()} {path} {status}"
+        target = problem if (reference or "").endswith(f"/{_PROBLEM_SCHEMA}") else other
+        target.append((where, media))
+    assert len(problem) >= _PROBLEM_BODIES, (
+        f"the walk found {len(problem)} problem responses against a floor of {_PROBLEM_BODIES} -- "
+        "it is measuring nothing"
+    )
+
+    at_json = sorted(where for where, media in problem if media == "application/json")
+    assert at_json == [], (
+        f"{len(at_json)} problem responses are described at `application/json`, which is not the "
+        f"media type the wire sends: {at_json}"
+    )
+    wrong = {where: media for where, media in problem if media != PROBLEM_MEDIA_TYPE}
+    assert wrong == {}, f"problem responses described at some other media type: {wrong}"
+
+    assert len(other) == _NON_PROBLEM_BODIES, (
+        f"the document describes {len(other)} non-problem bodies against {_NON_PROBLEM_BODIES} "
+        "measured -- the surface moved, so re-measure rather than relaxing this"
+    )
+    moved = sorted(where for where, media in other if media == PROBLEM_MEDIA_TYPE)
+    assert moved == [], (
+        f"the rewrite moved bodies that are not problem documents onto {PROBLEM_MEDIA_TYPE}: "
+        f"{moved}"
     )
 
 

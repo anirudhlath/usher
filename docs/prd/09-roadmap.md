@@ -1448,26 +1448,45 @@ suspicion.
   `(added_at DESC NULLS LAST, id DESC) WHERE title_id IS NULL` removes the sort.
   Not authorised in M9: 16.4 ms on an admin review queue is acceptable and a
   fourth migration for it is not worth the milestone.
-- **`/openapi.json` describes every problem response at `application/json`
-  while the wire sends `application/problem+json`** — measured by M9's H2 and
-  reported rather than closed, which is the disposition to keep. FastAPI renders
-  `responses={404: {"model": ProblemResponse}}` under the *route's* response
-  media type, so the document is wrong about the one header RFC 9457 makes
-  load-bearing. Spelling the media type in would fork `test_api_playback.py`'s
-  and `test_api_watch.py`'s assertions, which read `content["application/json"]`,
-  and buys a client nothing it cannot read off the `type` member — so H2's
-  conformance check asserts the response **shape** and not the media type, and
-  says so in its own docstring. The honest statement is that a generated client
-  will annotate these responses with the wrong content type until somebody takes
-  it.
-  ✅ **Both sites now say so where the fix would land** — the milestone's final
+- ✅ **`/openapi.json` described every problem response at `application/json`
+  while the wire sends `application/problem+json`** — measured by M9's H2,
+  carried rather than closed, **discharged 2026-08-20 by M10's F5**. Re-measured
+  at the fix: **56** problem bodies across **35** operations and **92** response
+  bodies, every one of them keyed `application/json` and none
+  `application/problem+json`. The mechanism is a custom `openapi()` on the app
+  (`UsherAPI`, `api/app.py`) that delegates to `super()` and moves any
+  `application/json` body whose `$ref` is `ProblemResponse` onto
+  `PROBLEM_MEDIA_TYPE` — **keyed on the schema and never on the status**, so
+  `GET /health/ready`'s 503 is excluded by construction (its model is
+  `ReadinessResponse`) rather than by a second exemption list beside
+  `PROBLEM_EXEMPTIONS`, and a route that adopts the envelope later adopts the
+  media type in the same act. `model=` stays at all 20 declaration sites across
+  14 router modules and no route decorator changed.
+  **The reason the debt was carried is the part that did not survive.** *"Buys a
+  client nothing it cannot read off the `type` member"* is a claim about a client
+  that has **already decided** to parse the body as a problem document; the media
+  type is what a generated client switches on before it parses anything, which is
+  the one thing `type` cannot tell it. And the cost was real but smaller than
+  stated: five assertions in two files, of which three move and two stay — a
+  **200** really is `application/json`, and `test_api_watch.py`'s case reads
+  better for saying so, since the 404 and the 200 on one operation are now two
+  different media types.
+  ⚠️ **Both known-wrong markers are deleted, and the second misnamed its own
+  twin.** The 2026-08-12 correction below put an identical marker in
+  `test_api_playback.py` and `test_api_watch.py`, each saying the fix *"would
+  fork this assertion and its twin in `test_api_watch.py`"* — correct in the
+  playback file and a self-reference in the watch file. **A marker that points at
+  itself is a marker that survives a grep for the thing it was meant to make
+  findable**, which is the failure mode the correction was written to prevent.
+  ✅ **Both sites said so where the fix would land** — the milestone's final
   review found the two assertions reading `content["application/json"]` with no
   comment naming why, so the *cost* of the fix was documented everywhere except
-  at the two places that have to change. Corrected 2026-08-12: each carries the
-  known-wrong marker and points at `tests/unit/test_api_openapi.py`. **A debt
+  at the two places that have to change. Corrected 2026-08-12: each carried the
+  known-wrong marker and pointed at `tests/unit/test_api_openapi.py`. **A debt
   recorded only in the roadmap is a debt the person editing the code does not
   see** — the same shape as the curation role sentence corrected in
-  `testing-discipline.md` this same day, one subsystem over.
+  `testing-discipline.md` this same day, one subsystem over. It worked: F5 found
+  both assertions from the markers.
 
 ## Post-v1 candidates
 

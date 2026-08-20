@@ -3,12 +3,14 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import Any, Final
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemResponse
 from usher.api.errors import (
     http_error_as_a_problem_document,
     validation_error_without_the_request_body,
@@ -48,6 +50,91 @@ from usher.db.base import build_engine, build_session_factory
 from usher.services.events import InMemoryEventBus
 from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
+
+#: The anchor `_problem_bodies_carry_their_media_type` matches on. Derived from
+#: the model rather than spelled, so a rename cannot leave the walk pointed at
+#: a component that no longer exists -- FastAPI names a component after the
+#: class, and every `model=ProblemResponse` declaration in `api/routers/` ends
+#: up under exactly this `$ref`.
+_PROBLEM_REF: Final = f"#/components/schemas/{ProblemResponse.__name__}"
+
+
+def _problem_bodies_carry_their_media_type(document: dict[str, Any]) -> dict[str, Any]:
+    """Move every `ProblemResponse` body from `application/json` to
+    `application/problem+json`, in place, and hand the document back.
+
+    **Keyed on the schema, never on the status**, and that is the whole design
+    rather than a convenience. `GET /health/ready`'s 503 is the one non-2xx in
+    this API that is deliberately not a problem document, and keying on the
+    schema excludes it *by construction* -- its declared model is
+    `ReadinessResponse`, which this predicate does not match. Keyed on a status
+    list it would have to be excluded by an exemption list instead, and
+    ADR-0030's exemption set already exists as data (`PROBLEM_EXEMPTIONS`); a
+    second, differently spelled copy of it is exactly the drift that record
+    exists to prevent. The same property is what makes a route added later
+    correct for free: adopting the envelope is the whole of adopting the media
+    type.
+
+    **Why a rewrite and not a declaration.** FastAPI renders an additional
+    response's `model=` under the *route's* own response media type
+    (`openapi/utils.py`) with no per-response override, and the two obvious
+    spellings are both wrong -- measured on a two-route probe against FastAPI
+    0.140.13 rather than reasoned about:
+
+    - `{"model": P, "content": {PROBLEM_MEDIA_TYPE: {}}}` renders **both**
+      keys, and the problem one carries no schema at all, so a route would
+      declare its 404 twice and only one of them truthfully;
+    - `{"content": {PROBLEM_MEDIA_TYPE: {"schema": {"$ref": ...}}}}` -- the
+      one a reader reaches for -- renders the right key with the right `$ref`
+      **and never registers the model**, because no route names it. An app
+      carrying only that spelling publishes `components.schemas == ["Ok"]`,
+      so the document ships a `$ref` pointing at nothing while an assertion
+      spelled `schema["$ref"].endswith("/ProblemResponse")` passes.
+
+    So `model=` stays at every `responses=` declaration in `api/routers/`,
+    registration is untouched, and the media type is corrected here.
+
+    Idempotent by construction: it removes the key it reads, so a second pass
+    over its own output finds nothing to move. That matters because
+    `FastAPI.openapi` caches into `app.openapi_schema` and `UsherAPI.openapi`
+    runs this over the cached document on every subsequent call.
+    """
+    for item in document.get("paths", {}).values():
+        for operation in item.values():
+            for response in operation.get("responses", {}).values():
+                content = response.get("content")
+                if not isinstance(content, dict):
+                    continue
+                body = content.get("application/json")
+                if not isinstance(body, dict) or body.get("schema", {}).get("$ref") != _PROBLEM_REF:
+                    continue
+                content[PROBLEM_MEDIA_TYPE] = content.pop("application/json")
+    return document
+
+
+class UsherAPI(FastAPI):
+    """`FastAPI`, with `/openapi.json` telling the truth about the media type a
+    problem document travels under.
+
+    **A subclass rather than `app.openapi = ...`**, which is the spelling
+    FastAPI's own "Extending OpenAPI" page shows. Two reasons and the first is
+    measured: the assignment is `error: Cannot assign to a method
+    [method-assign]` under this project's mypy settings, and would be the only
+    `type: ignore` in `src/usher/api/`. And a replacement function has to
+    re-implement both the `openapi_schema` cache and the
+    `_openapi_routes_version` invalidation `FastAPI.openapi` has since grown --
+    a copy that goes silently wrong the day either changes. Delegating to
+    `super()` keeps both and costs one idempotent walk of a 35-operation
+    document per call.
+
+    **Deliberately not an eager rewrite of `app.openapi_schema` in the
+    factory.** Generating the document at build time would make every
+    `create_app()` in the suite pay for a schema no case reads, and would turn
+    a schema-generation failure into a failure to boot.
+    """
+
+    def openapi(self) -> dict[str, Any]:
+        return _problem_bodies_carry_their_media_type(super().openapi())
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -167,7 +254,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await close_images()
             await engine.dispose()
 
-    app = FastAPI(
+    app = UsherAPI(
         title="Usher",
         version="0.1.0",
         description="A self-hosted media catalog backend.",
