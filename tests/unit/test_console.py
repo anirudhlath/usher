@@ -293,3 +293,61 @@ async def test_the_console_never_shadows_the_stream_route(built_bundle: Path) ->
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/problem+json")
     assert response.text != _INDEX_HTML
+
+
+def test_no_console_source_file_is_hidden_by_a_gitignore_pattern() -> None:
+    """Every source file the console needs is actually in the repository.
+
+    ⚠️ **This exists because `.gitignore` silently swallowed a whole component
+    group.** The pattern was `data/` — unanchored, so it matches a directory
+    named `data` at *any* depth — and
+    `web/src/design-system/components/data/` is the DataTable/LoadMore group.
+    The working tree had the files, so `npm test`, `tsc`, `oxlint`, the
+    Playwright suite and a local `vite build` all passed; the **first fresh
+    checkout of the branch** failed to compile, and it failed inside the
+    Docker build, which is the last place anyone wants to discover it.
+
+    The general shape is that an ignore rule is invisible to every check that
+    reads the working tree, which is all of them. Only something that asks git
+    what it is *tracking* can see it.
+
+    Scoped to `web/src` and `web/e2e` rather than the whole repository because
+    those are where a source file is a build input; `node_modules`, `dist` and
+    the report directories are ignored on purpose and are excluded by asking
+    git for the difference rather than by listing them again here.
+    """
+    import shutil
+    import subprocess
+
+    git = shutil.which("git")
+    assert git, "git is not on PATH -- this check cannot run"
+
+    # S603: a fixed argv built from `shutil.which` and literals, no shell, no
+    # caller-supplied input -- the same shape `test_embedder_contract.py` uses.
+    tracked = subprocess.run(  # noqa: S603
+        [git, "ls-files", "web/src", "web/e2e"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+
+    # `--others` is untracked; with `--exclude-standard` it is untracked *and
+    # not ignored*, which would be a file somebody forgot to `git add`. What
+    # this case is about is the other set: ignored files that are nonetheless
+    # imported. So ask for ignored files under the same roots.
+    ignored = subprocess.run(  # noqa: S603
+        [git, "ls-files", "--others", "--ignored", "--exclude-standard", "web/src", "web/e2e"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+
+    assert tracked, "git is tracking nothing under web/src -- this check has stopped looking"
+
+    source = {path for path in ignored if path.endswith((".ts", ".tsx", ".css"))}
+    assert not source, (
+        "console source files exist on disk and are ignored by git, so a fresh "
+        f"checkout will not have them: {sorted(source)}"
+    )

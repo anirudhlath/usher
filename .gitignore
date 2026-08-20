@@ -9,7 +9,14 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-data/
+# **Anchored.** `data/` unanchored matches a directory named `data` at *any*
+# depth, and it silently swallowed `web/src/design-system/components/data/` —
+# the DataTable/LoadMore component group. The working tree had the files, every
+# local gate passed, and the first fresh checkout of the branch failed to build.
+# The dataset directories this is for (`data/postgres`, `data/images`,
+# `data/bulk`) are all at the repository root, so the leading slash costs
+# nothing and is what was always meant.
+/data/
 
 # Per-worktree scratch written by the M9 execution harness
 .uvicorn-port
