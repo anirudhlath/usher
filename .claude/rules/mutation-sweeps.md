@@ -7098,18 +7098,30 @@ unintended survivors.**
 | C1 | CONTROL: one sentence of `_unmatched`'s docstring reworded | SURVIVED | equivalent, as predicted |
 
 **The control's condition was re-checked rather than inherited from M8 Task
-18's ledger**, and it still holds. `grep -rln
-"getdoc\|__doc__\|ast.unparse\|getsource" tests/` returns **31 files**; three
-of them mention `cli.py` at all, and none reads its prose:
-`tests/unit/test_cli.py` runs `ast.unparse` over a **docstring-stripped** tree
-(`_without_docstrings`, which exists for exactly this reason) and asserts on the
-identifier `BootstrapService`; `tests/unit/test_api_unmatched.py` scans the
-*router* module, also docstring-stripped; `tests/unit/test_composition.py` reads
-`inspect.getdoc(JobWorker.registered_kinds)`. So `cli.py`'s prose is unpinned
-and a reword is a legitimate control — but note it is a control about **prose**,
-not about `src/` docstrings in general: `api-telemetry-and-lanes.md`'s first
-entry is the case where a `src/` docstring *is* a wire artifact, and `cli.py` has
-no such surface.
+18's ledger**, and it holds — 🔴 **but the first version of this paragraph gave
+the wrong reason for one of three files, and the grep it rested on was too
+narrow.** `grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/` returns
+**31 files**, and that pattern misses `ast.parse` entirely. Re-derived properly
+(2026-08-20, fix round), **four** places parse `cli.py`:
+
+| where | how | why C1 survives it |
+|---|---|---|
+| `test_cli.py::test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one` | `ast.unparse` of a **docstring-stripped** tree (`_without_docstrings`) | prose is removed before the scan |
+| `test_cli_errors.py::_function_def` | `ast.walk(ast.parse(source))`, **un-stripped** | selects `ast.FunctionDef` by name; a docstring is not a node it looks at |
+| `test_composition.py:459` | `ast.parse` over every `src/usher/**/*.py`, **un-stripped** | counts `ast.Call` nodes named `DeferredEventPublisher` |
+| `test_composition.py:2292` | `ast.parse(cli.py)`, **un-stripped** | `_calls_of` counts `ast.Call` nodes only |
+
+The original entry named the last file and said it *"reads
+`inspect.getdoc(JobWorker.registered_kinds)`"* — true of one line in it and not
+the line that matters, which parses `cli.py` whole. **The conclusion is
+unchanged and the reason is not:** `cli.py`'s prose is unpinned because every
+scan of it is *structural*, not because every scan is docstring-stripped. Note
+it is a control about **prose**, not about `src/` docstrings in general:
+`api-telemetry-and-lanes.md`'s first entry is the case where a `src/` docstring
+*is* a wire artifact, and `cli.py` has no such surface. **And the transferable
+half is the grep: a docstring-scan census that greps for `getdoc|__doc__|
+ast.unparse|getsource` and not `ast.parse` undercounts by every structural
+walker in the suite.**
 
 🔴 **The finding is P2, and it is a refinement of the task's own prediction
 about which assertion fires.** The plan said the swallow *"must fail the unit
@@ -7145,19 +7157,72 @@ than as a survivor. Both were spelled in isort position and both ran
 `ruff check src/usher/cli.py` clean before their verdicts were written down
 (CLAUDE.md's careless/careful rule; third recorded instance).
 
-**The frame count the fix removes, measured on the integration case's own red
-run** (`--tb=native`, `/var/tmp/m10-f4/red-integration.log`): **62 `File` lines
-in total**, of which **32** are the exception chain from the failing `UPDATE`
-up to `RepositoryConflict` (asyncpg → SQLAlchemy → the repository) and 30 are
-pytest's harness, which in a real `usher unmatched` invocation is replaced by
-`main` → `_dispatch` → `asyncio.run` → `_unmatched`. PRD 09's *"sixty frames"*
-is the right order of magnitude and is now a measurement rather than an
-estimate.
+🔴 **The frame count: a pytest number was very nearly shipped as an operator's,
+and this entry was the one shipping it.** The first version read *"62 `File`
+lines … PRD 09's 'sixty frames' is the right order of magnitude and is now a
+measurement rather than an estimate"* — a conclusion its own arithmetic
+refutes, since the same paragraph had just said 30 of the 62 are pytest's
+harness. Measured properly on 2026-08-20 by running the **real console script**
+against a throwaway `pgvector/pgvector:pg17` (migrate, seed one source and one
+unmatched item, plant P1, `uv run usher unmatched --resolve … --title …`,
+restore, tear down):
 
-**Re-scored at `1aa84d9`** after both refusal cases gained an
-`isinstance(exit_info.value.code, str)` arm: identical verdicts, identical
-failing cases, baseline still 159. Recorded because a sweep's verdicts are a
-statement about the selection it ran against, and the selection changed.
+| | frames | note |
+|---|---|---|
+| `usher unmatched` at a terminal | **40** | four chained tracebacks, exit 1; 35 library, **5** in this project |
+| its entry block | 8 | console script → `main` → `_dispatch` → `asyncio.run` → 2 `asyncio` runner frames → `_unmatched` → `attach_title` |
+| the integration case's `--tb=native` run | 62 | of which **32** are the invocation-independent exception chain (asyncpg → SQLAlchemy → the repository) and **25** are `_pytest`/`pluggy`/`pytest_asyncio` |
+
+So the operator-facing number is **40**, the two runs agree on the 32 that
+travel with the exception, and the ~20 frames of difference are the harness.
+*"Sixty"* stood in four places — `cli.py`'s `_unmatched` docstring, `cli.py`'s
+`OPERATOR_ERRORS` comment (which predates F4), the integration case, and PRD 09
+— and all four now carry 40 with the decomposition. **The rule: a frame count
+taken from a pytest failure is a measurement of pytest. If the number is about
+what an operator sees, run the entry point the operator runs.**
+
+⚠️ **Two further *"sixty frames"* remain in the tree and were deliberately left
+alone**: `tests/unit/test_cli_curate.py` and `tests/integration/
+test_cli_pipeline.py`'s curate case, both describing `usher curate` against an
+empty candidate pool. That is a different command down a different stack, F4
+did not measure it, and replacing an unmeasured 60 with an unmeasured 40 would
+be worse than leaving it. Named here so the next reader does not assume the
+four corrected and the two surviving were one claim — **and so that anyone
+measuring the curate path knows there is a number waiting to be checked.**
+
+**Re-scored twice.** At `1aa84d9`, after both refusal cases gained an
+`isinstance(exit_info.value.code, str)` arm: identical verdicts, baseline 159.
+At `73ee0a0`, after the review round: baseline **160**, P1/P2/P3/C1 verdicts
+identical, plus the three plants below. Recorded because a sweep's verdicts are
+a statement about the selection it ran against, and the selection changed both
+times.
+
+## The three plants the review round added, and the one that found its own gap
+
+The ledger above identified an untouched region and did not close it:
+`attached == []` and `commits == 0` in the unit case had **no mutant reaching
+them**, because P2 dies an assertion earlier. Reviewers asked for a plant that
+does. It took two spellings, and the first one's failure is the finding.
+
+| # | mutation | verdict | fails |
+|---|---|---|---|
+| P4 | a redundant `attach_title` + `commit` **after** the pre-check | KILLED | **1** — `test_a_resolve_naming_no_media_item_still_says_so`, on `attached == [(missing, title.id)]`. **Not the case it was written for** |
+| P4b | the same redundant write **before** the pre-check | KILLED | **3** — including `test_resolving_to_a_title_that_does_not_exist…` on `assert harness.media_items.attached == []`, which is the target, plus the integration case (the write now reaches the FK first) |
+| P5 | the two `_as_uuid` conversions swapped | KILLED | **1** — `test_two_malformed_ids_name_the_media_item_first`, the case the fix round added for it. It was a surviving mutant before that |
+
+🔴 **P4 is the finding, and it is the "which input reaches this line?"
+question.** A redundant write placed *after* the pre-check is unreachable on
+the input the first case supplies — the `SystemExit` fires above it — so the
+plant sailed past `attached == []` and landed on the *sibling* assertion in the
+third-arm case, where the title exists and control does reach the write. It
+reads as a kill and it closed nothing. **A plant aimed at a specific assertion
+has to be placed where the case's own input executes it**, which for a guard
+means *in front of the guard*, not after it. P4b is that, and it fires on the
+intended assertion with the intended message.
+
+Both are kept in the ledger rather than only the one that worked, because the
+pair is the demonstration: two plants, one line apart, one of which measures
+what it claims to.
 
 `PYTHONDONTWRITEBYTECODE=1` throughout, `__pycache__` swept under `src/` and
 `tests/` before every run (27 directories on the baseline, **0** on every run
@@ -7167,3 +7232,30 @@ believed; each restore was a `cp` from `/var/tmp/m10-f4/cli.py.backup` verified
 against `git show "HEAD:src/usher/cli.py"`, with `git status --porcelain`
 asserted empty after every revert — never `git checkout`. Harness at
 `/var/tmp/m10-f4/sweep.py`, outside the working tree.
+
+## `cp -a` of a checkout copies a venv that points at the original source — three agents, one of them silently (2026-08-20)
+
+**Filed as harness mechanics rather than in a task ledger, because it has now
+cost three separate runs and CLAUDE.md's warning does not name the mechanism.**
+That rule says *"a reviewer needing concurrency takes a `git archive <sha> |
+tar -x` copy, never `cp -a`"*, which is correct and reads as being about
+tidiness. It is not:
+
+- `cp -a` copies `.venv/bin/*`, whose shebangs are **absolute paths into the
+  original venv**;
+- that venv's `.pth` / editable install points `usher` at the **original**
+  `src/`;
+- so `uv run pytest` inside the copy imports the original source, and every
+  mutation planted in the copy **appears to survive**.
+
+The failure is maximally quiet: a clean-looking `N passed` scored as "the
+suite cannot see this mutation". One of F4's two reviewers hit it without
+noticing until the verdicts were compared. **Two ways out, and prefer the
+first**: `git archive <sha> | tar -x` into the copy, or — if a copy already
+exists — `rm -rf .venv && uv sync --frozen` in it. `uv run python -m pytest`
+rather than `uv run pytest` avoids the *shebang* half but not the `.pth` half,
+so it is a mitigation and not a fix.
+
+Same family as *"a plant that did not land looks exactly like a check that
+passed"* in CLAUDE.md: here the plant lands perfectly and the **interpreter**
+never reads it.
