@@ -1207,6 +1207,35 @@ verbatim. Expected to match the bar's "Before" block exactly; if it does not,
 **stop** — the catalog moved and every prediction is against a population that
 no longer exists.
 
+- [ ] **Step 2b: Take a targeted backup, because every later step is destructive**
+
+The decontamination NULLs a predicted ~408,000 rows and the ratings import
+overwrites two columns on ~540,000. Neither is reversible from anything the
+plan otherwise produces, and this is the catalog the deployed backend and
+`usher-web` are serving. A whole-database dump is ~GB and slow; the six columns
+this plan can touch are small.
+
+```bash
+docker exec usher-postgres-1 psql -U usher -d usher -c "
+CREATE TABLE titles_rating_backup_20260819 AS
+SELECT id, tmdb_vote_average, tmdb_vote_count, tmdb_popularity,
+       imdb_average_rating, imdb_num_votes, field_provenance
+FROM titles;
+CREATE UNIQUE INDEX ON titles_rating_backup_20260819 (id);"
+
+docker exec usher-postgres-1 psql -U usher -d usher -c \
+  "SELECT count(*) FROM titles_rating_backup_20260819;"
+```
+
+⚠️ **Run this AFTER the migration** (Step 3), not before — the `imdb_*` columns
+do not exist at `m09f` and the `tmdb_*` ones are still called
+`community_rating`/`vote_count`/`popularity`. Renumbered deliberately: it sits
+between Steps 3 and 4.
+
+The count must equal 1,272,870. Restoring is then one statement per column
+joined on `id`, and the table is dropped by hand once the frame re-measure in
+Task 6 has passed — **not** by this plan, and not before an operator says so.
+
 - [ ] **Step 3: Apply the migration**
 
 ```fish
