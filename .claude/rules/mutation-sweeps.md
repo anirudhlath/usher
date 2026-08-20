@@ -7078,3 +7078,87 @@ already gets wrong at a boundary the suite never reaches.**
 
 `git status --porcelain` was read after every revert and each file compared
 against its `cp` backup in `/var/tmp/m10-f2/` — never `git checkout`.
+
+## M10 F4 — #5's "one-line change" refused, and a fake with no foreign key answering a prediction about which assertion fires (2026-08-20)
+
+Four mutations pre-registered in `/var/tmp/m10-f4/BAR.md`
+(`sha256:a797af2e184b5831849c663b6301932e7cd749cdecf32481967618790ed4ce17`,
+written and hashed before the first plant), scored against
+`tests/unit/test_cli.py tests/unit/test_cli_errors.py
+tests/integration/test_cli_pipeline.py` at `2abfbf8`. Baseline **159 passed in
+17.3 s**, and the collected total is 159 in every run below, so no plant moved
+what it was scored against. **3 killed, 1 control surviving as designed, 0
+unintended survivors.**
+
+| # | mutation | verdict | fails |
+|---|---|---|---|
+| P1 | `_unmatched`'s pre-check deleted (`if await pipeline.titles.get(title_id) is None: raise SystemExit(...)`) | KILLED | **2**, one per arm — `test_resolving_to_a_title_that_does_not_exist_names_the_id_and_keeps_the_stack_out_of_it` on `DID NOT RAISE SystemExit`, and `test_an_unknown_title_id_is_a_sentence_against_real_postgres` on an escaping `RepositoryConflict` (`fk_media_items_title_id_titles`) |
+| P2 | the pre-check respelled as `try: attach_title(...) except RepositoryConflict: raise SystemExit(...)` | KILLED | **1** — the unit case alone. The integration case **passes** under it |
+| P3 | `RepositoryConflict` added to `OPERATOR_ERRORS` | KILLED | **2**, both in `test_cli_errors.py`: `test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple` (now carrying the exclusion argument in its message) and `test_a_repository_conflict_keeps_its_traceback`. **No `unmatched` case moves**, which is the sweep saying out loud that the tuple change never fixed the defect it was proposed for |
+| C1 | CONTROL: one sentence of `_unmatched`'s docstring reworded | SURVIVED | equivalent, as predicted |
+
+**The control's condition was re-checked rather than inherited from M8 Task
+18's ledger**, and it still holds. `grep -rln
+"getdoc\|__doc__\|ast.unparse\|getsource" tests/` returns **31 files**; three
+of them mention `cli.py` at all, and none reads its prose:
+`tests/unit/test_cli.py` runs `ast.unparse` over a **docstring-stripped** tree
+(`_without_docstrings`, which exists for exactly this reason) and asserts on the
+identifier `BootstrapService`; `tests/unit/test_api_unmatched.py` scans the
+*router* module, also docstring-stripped; `tests/unit/test_composition.py` reads
+`inspect.getdoc(JobWorker.registered_kinds)`. So `cli.py`'s prose is unpinned
+and a reword is a legitimate control — but note it is a control about **prose**,
+not about `src/` docstrings in general: `api-telemetry-and-lanes.md`'s first
+entry is the case where a `src/` docstring *is* a wire artifact, and `cli.py` has
+no such surface.
+
+🔴 **The finding is P2, and it is a refinement of the task's own prediction
+about which assertion fires.** The plan said the swallow *"must fail the unit
+case's **nothing-was-written** arm alone, which is the assertion that separates
+a lookup from a swallow"*. Measured, the unit case dies at
+`pytest.raises(SystemExit)` — `DID NOT RAISE` — and `assert
+harness.media_items.attached == []` is never reached. **The reason is the same
+property the task relies on for the unit arm's honest red**:
+`FakeMediaItemRepository` has no foreign key *by construction* (its own
+divergence list says so), so under the swallow there is no `RepositoryConflict`
+to catch, the write lands, `resolved` is printed, and nothing raises at all.
+The two halves of the prediction cannot both hold against one fixture — a fake
+that raises the conflict would have made HEAD's red a *translation* red rather
+than the pre-check red the task asked for. The `attached == []` arm is still
+the assertion that states the property in the **pass** case, and it is what
+would fire against a store with the key; the sweep's verdict for P2 rests on
+the write having happened, which is the same claim by a different route.
+
+**What tells P1 from P2 is the integration arm, not the unit one.** P1 kills
+both; P2 kills only the unit case, because against real Postgres the swallow
+*does* print a sentence naming the id, with `attach_title`'s SAVEPOINT rolling
+the refused row back — so the integration case's four assertions (SystemExit,
+the id, no `Traceback`, the item still on the queue) are all satisfied by the
+swallow. **A sweep target that only one arm can see is not a weaker target; it
+is the arm the design argument lives in**, and a sweep scored against the
+integration file alone would have ratified the `except`.
+
+**Two plants needed the careful spelling.** P2 and P3 both add
+`RepositoryConflict` to `cli.py`'s `from usher.ports.errors import (...)`
+block, and the name sorts **after** `PortUnavailable` — an import added at the
+top of the block dies on ruff `I001`, which scores as a broken mutation rather
+than as a survivor. Both were spelled in isort position and both ran
+`ruff check src/usher/cli.py` clean before their verdicts were written down
+(CLAUDE.md's careless/careful rule; third recorded instance).
+
+**The frame count the fix removes, measured on the integration case's own red
+run** (`--tb=native`, `/var/tmp/m10-f4/red-integration.log`): **62 `File` lines
+in total**, of which **32** are the exception chain from the failing `UPDATE`
+up to `RepositoryConflict` (asyncpg → SQLAlchemy → the repository) and 30 are
+pytest's harness, which in a real `usher unmatched` invocation is replaced by
+`main` → `_dispatch` → `asyncio.run` → `_unmatched`. PRD 09's *"sixty frames"*
+is the right order of magnitude and is now a measurement rather than an
+estimate.
+
+`PYTHONDONTWRITEBYTECODE=1` throughout, `__pycache__` swept under `src/` and
+`tests/` before every run (27 directories on the baseline, **0** on every run
+after it, which is the flag proving itself). Each plant was verified to have
+landed by byte-equality against the intended mutant before its run was
+believed; each restore was a `cp` from `/var/tmp/m10-f4/cli.py.backup` verified
+against `git show "HEAD:src/usher/cli.py"`, with `git status --porcelain`
+asserted empty after every revert — never `git checkout`. Harness at
+`/var/tmp/m10-f4/sweep.py`, outside the working tree.
