@@ -91,7 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         session_factory = build_session_factory(engine)
         app.state.session_factory = session_factory
-        # The outbound rate gates, and the one place they can live (ADR-0039
+        # The outbound rate gates, and the one place they can live (ADR-0040
         # §4). Same argument as the TMDb token bucket below, one upstream over
         # and with the multiplier already measured rather than predicted: this
         # process runs a push lane and a worker lane, each with its own adapter

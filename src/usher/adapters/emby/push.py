@@ -45,7 +45,7 @@ unthrottled, and the sixth of M10's S3 declines** (the enumeration is
 `session.py` dials -- which is why a count of *hosts* and a count of *modules*
 give different answers there -- but it is reached over `websockets` rather
 than httpx, and the connection is **held open**. So `EmbySession`'s
-`_MinInterval` gate (ADR-0039, `USHER_SOURCE_REQUESTS_PER_SECOND`) has nothing
+`_MinInterval` gate (ADR-0040, `USHER_SOURCE_REQUESTS_PER_SECOND`) has nothing
 here to space: **a socket held open is not a request**, and a
 requests-per-second ceiling over one connect per lane per reconnect expresses
 no policy anybody asked for. What genuinely bounds this channel is the

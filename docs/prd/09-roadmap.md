@@ -1065,7 +1065,7 @@ suspicion.
   real one is **refused with a reason**: the only servers this project talks to
   are a household's own media server and the live TMDb API, and hammering
   either until it rate-limits is precisely what
-  [ADR-0039](decisions/0039-the-outbound-limiter-is-per-source-and-spaces-requests.md)'s
+  [ADR-0040](decisions/0040-the-outbound-limiter-is-per-source-and-spaces-requests.md)'s
   outbound gate exists to prevent, and what
   [ADR-0005](decisions/0005-bulk-bootstrap.md) declined when it sized the crawl
   below TMDb's *stated* "somewhere in the 40 requests per second range" rather

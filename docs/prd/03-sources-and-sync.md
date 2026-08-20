@@ -78,7 +78,7 @@ refresh-token flow; this pattern *is* the refresh mechanism.
   ceiling `4/9.1713 = 0.436` rps, with 0.4 below both. It is inert on a sequential
   walk (0.17 rps) and binds single-item reads; whether it binds a *concurrent*
   walk is **unmeasured and is S7's** to settle. Full argument in
-  [ADR-0039](decisions/0039-the-outbound-limiter-is-per-source-and-spaces-requests.md);
+  [ADR-0040](decisions/0040-the-outbound-limiter-is-per-source-and-spaces-requests.md);
   the seconds spent in the gate are the `usher.source.throttle.wait` histogram
   ([10](10-telemetry-and-dashboards.md)).
 

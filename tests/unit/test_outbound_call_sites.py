@@ -197,7 +197,7 @@ _SOURCE = _Decision(
     limiter=(
         "the per-source `_MinInterval` gate, taken in `EmbySession._send` immediately "
         "above `build_request`. Owned by `SourceGateRegistry` at the composition root "
-        "and keyed by `source.id`, so one source has one gate per process (ADR-0039)"
+        "and keyed by `source.id`, so one source has one gate per process (ADR-0040)"
     ),
     recorded_in="src/usher/adapters/emby/session.py",
     paced=True,
@@ -624,7 +624,7 @@ def test_the_module_census_is_the_one_the_records_quote() -> None:
 
     assert len(modules) == 9, (
         "the module census moved, so `docs/prd/01-architecture.md`'s table, this file's "
-        f"docstring and ADR-0039 are all now quoting a different tree: {sorted(modules)}"
+        f"docstring and ADR-0040 are all now quoting a different tree: {sorted(modules)}"
     )
     assert len(_call_sites()) == 16, (
         "the httpx call-site count moved -- PRD 01 prints it, so it is corrected there "

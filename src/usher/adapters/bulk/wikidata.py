@@ -62,7 +62,7 @@ few minutes, once per install. Three things already bound it and a
 requests-per-second gate would add nothing to any of them: the chunking itself
 (one query per `(property pair, IMDb prefix)`, issued strictly in sequence),
 WDQS's own ~65 s timeout, and `retry_after_seconds` on the 429 that endpoint
-really does send. ADR-0039's gate is for a household's media server, where the
+really does send. ADR-0040's gate is for a household's media server, where the
 failure is starving a person watching television; nobody is waiting behind
 this one.
 """

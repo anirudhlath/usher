@@ -369,7 +369,7 @@ async def _sync(
     count every state unmatched and merge nothing.
 
     **One pipeline for the whole command, which is also one outbound gate per
-    source for the whole command** (ADR-0039 §4). `build_pipeline` builds a
+    source for the whole command** (ADR-0040 §4). `build_pipeline` builds a
     `SourceGateRegistry` when nobody hands it one, and this command opens
     exactly one pipeline and loops the sources inside it -- so the walk and the
     watch lane below share a gate per source, and two sources get two.
@@ -638,7 +638,7 @@ async def _work(settings: Settings, *, once: bool) -> None:
     adapter. `unit_of_work` now resolves a `SourceGateRegistry` once and closes
     over it, so this process paces one source at
     `USHER_SOURCE_REQUESTS_PER_SECOND` however many jobs are in flight
-    (ADR-0039 §4). **A second `usher work` container is a second registry and
+    (ADR-0040 §4). **A second `usher work` container is a second registry and
     therefore twice the rate** -- a capacity decision an operator makes, and one
     nothing in a process can make for them.
 

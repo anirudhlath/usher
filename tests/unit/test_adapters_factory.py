@@ -79,7 +79,7 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
         assert adapter._client.timeout.read == 3.5
         assert adapter._session._reauth_cooldown == 7.25
         # The outbound gate reaches the session that sends through it
-        # (ADR-0039). A factory that dropped it would build an adapter that
+        # (ADR-0040). A factory that dropped it would build an adapter that
         # never paces a call, and the `usher.source.throttle.wait` panel would
         # be empty not because the limiter never binds but because it was never
         # wired. **The registry's gate, not a gate built from a rate**: that is
@@ -111,7 +111,7 @@ async def test_each_call_builds_a_new_adapter_and_every_one_shares_the_sources_g
     connection pool and a message ledger, so a fresh one per call is correct;
     the outbound rate gate is a *ceiling on a server somebody else owns*, so a
     fresh one per call multiplies the configured rate by the number of
-    adapters open. Two adapters for one source, one gate (ADR-0039 §4).
+    adapters open. Two adapters for one source, one gate (ADR-0040 §4).
     """
     factory = ConfiguredSourceAdapterFactory(gates=SourceGateRegistry(0.4))
     first = factory.build(SOURCE, CREDENTIALS)

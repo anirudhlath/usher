@@ -1,4 +1,4 @@
-# ADR-0039 — The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling
+# ADR-0040 — The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling
 
 **Status:** Accepted — adds the proactive half of [01](../01-architecture.md)'s
 *"retry/backoff, and rate-limit handling"* promise that
@@ -11,6 +11,13 @@ corrected in place. **Amended again the same day by S3's review**, which found
 that "in place" had reached only the *second* of the two instances: §2's
 opening sentence still described the superseded per-`EmbySession` gate. Both
 are corrected now, and §2 says what the miss was.
+**Renumbered from `0039` to `0040` on 2026-08-20.** This document was written on
+`milestone/m10-hardening` while `main` independently minted `0039` for the genre
+vocabulary; the merge brought both in and the limiter moved, on the *"the trunk
+keeps what the trunk published"* rule. The decision, its evidence and its
+section numbering are unchanged — only the number is. `docs/plans/2026-08-13-m10-hardening.md`
+still cites the old filename and is deliberately left alone as a historical
+record; `decisions/README.md` carries the rest of the account.
 
 **Line references in this document are measured at `8df11af`** unless the
 sentence carrying one says otherwise. They are given because the code they

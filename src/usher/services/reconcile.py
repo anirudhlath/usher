@@ -509,7 +509,7 @@ class ReconcileService:
         `source_name` is carried in for the metric's label rather than read off
         the run, which holds only a `source_id`: `usher.sync.run.duration`
         beside it is already labelled by name, and a second per-source identity
-        in telemetry is what ADR-0039 §2 refuses.
+        in telemetry is what ADR-0040 §2 refuses.
         """
         if kind is not SyncRunKind.FULL:
             return run

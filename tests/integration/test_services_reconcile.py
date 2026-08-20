@@ -192,7 +192,7 @@ def _fraction_points(reader: InMemoryMetricReader, *, outcome: str) -> list[tupl
     `{"source": str(run.source_id)}` in place of the source's name survived the
     whole of `tests/unit` and every reconcile case. `_sweep` takes `source_name`
     as a parameter for exactly one reason -- `usher.sync.run.duration` beside it
-    is labelled by name, and ADR-0039 §2 refuses a second per-source identity in
+    is labelled by name, and ADR-0040 §2 refuses a second per-source identity in
     telemetry -- so a mutation that puts the id on the wire is the ADR violation
     that argument exists to prevent, and it was invisible.
     """
@@ -284,7 +284,7 @@ async def test_a_refused_sweep_reports_both_numbers_where_an_operator_can_see_th
     assert swept == [("Reconcile Source", 0.0)], (
         "a full walk that retracted nothing must still record the series, "
         "under the source's name -- otherwise silence means both 'shed "
-        "nothing' and 'never ran', and ADR-0039 §2's one identity becomes two"
+        "nothing' and 'never ran', and ADR-0040 §2's one identity becomes two"
     )
 
     # Now approach the ceiling: 9 of 10 gone is 0.9 against the 0.25 default.

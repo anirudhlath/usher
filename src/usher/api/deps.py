@@ -313,7 +313,7 @@ def get_source_gates(request: Request) -> SourceGateRegistry:
     2026-08-15, one household one evening). It is on `app.state` for the reason
     the image fetcher and the TMDb provider are, and it is the *same* object
     the two lanes read through, so an admin status probe and a push lane pace
-    against one gate (ADR-0039 §4).
+    against one gate (ADR-0040 §4).
 
     Same defensive `getattr`/`cast` shape as `get_lane_supervisor` above and
     for the same reason -- `app.state` is typed `Any`.

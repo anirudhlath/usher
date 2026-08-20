@@ -279,7 +279,7 @@ class EmbyAdapter(SourceAdapter):
             # Passed through, never built here: the outbound gate is owned by
             # the composition root's `SourceGateRegistry` so that every adapter
             # this deployment opens for one source paces against one gate
-            # (ADR-0039 §4). `None` -- a directly-constructed adapter -- is
+            # (ADR-0040 §4). `None` -- a directly-constructed adapter -- is
             # unthrottled.
             limiter=limiter,
         )

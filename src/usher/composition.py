@@ -316,7 +316,7 @@ def source_gates(settings: Settings) -> SourceGateRegistry:
     """This process's outbound rate gates, one per source.
 
     **Built once at a composition root and handed down**, which is the whole
-    of ADR-0039 §4 and the reason `adapter_factory` below takes it rather than
+    of ADR-0040 §4 and the reason `adapter_factory` below takes it rather than
     reading the rate itself. `create_app`'s lifespan builds one and puts it on
     `app.state` so the two lanes and every request share it; `usher work` and
     `usher sync` each build one for the life of the command. `unit_of_work`
@@ -347,7 +347,7 @@ def adapter_factory(settings: Settings, gates: SourceGateRegistry) -> SourceAdap
     **`gates` is required rather than defaulted**, and that is the type
     checker doing the work a convention would not: this function is called
     once per unit of work, so a caller that forgot the registry would get a
-    fresh gate per pipeline and the multiplication ADR-0039 §4 records would
+    fresh gate per pipeline and the multiplication ADR-0040 §4 records would
     come straight back. There is no spelling of this call that silently
     re-introduces it.
 
@@ -356,7 +356,7 @@ def adapter_factory(settings: Settings, gates: SourceGateRegistry) -> SourceAdap
     `ConfiguredSourceAdapterFactory(gates=None)`, `EmbySession(limiter=None)`
     and `EmbyAdapter(limiter=None)` are all defaulted, deliberately: each means
     "nobody configured this" and gets a private registry at the unlimited rate,
-    which is what lets a test build one directly (ADR-0039's Consequences say
+    which is what lets a test build one directly (ADR-0040's Consequences say
     so). The cost of tightening the first of the three is small and measured --
     **2 edits**, `tests/unit/test_adapters_factory.py`'s two bare
     constructions, out of four sites there of which two already pass `gates=` --
@@ -1475,7 +1475,7 @@ def image_proxy(
     **M10's S3 re-examined this against `USHER_SOURCE_REQUESTS_PER_SECOND`'s
     new gate and confirmed it rather than reversing it.** That gate exists
     because a media *source* is a machine somebody is watching television on
-    (ADR-0039, issue #19); `image.tmdb.org` is a CDN and the argument above is
+    (ADR-0040, issue #19); `image.tmdb.org` is a CDN and the argument above is
     untouched by it. The decline is one of five the S3 enumeration recorded,
     and this paragraph is where the code says so -- `image.tmdb.org` is the
     upstream, the cache is the bound, and

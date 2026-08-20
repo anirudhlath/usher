@@ -154,7 +154,7 @@ seam would be spelled with.
 
 | module → upstream | limiter |
 |---|---|
-| the configured media source (`emby/session.py`) | the per-source minimum-interval gate, `USHER_SOURCE_REQUESTS_PER_SECOND` ([ADR-0039](decisions/0039-the-outbound-limiter-is-per-source-and-spaces-requests.md)) |
+| the configured media source (`emby/session.py`) | the per-source minimum-interval gate, `USHER_SOURCE_REQUESTS_PER_SECOND` ([ADR-0040](decisions/0040-the-outbound-limiter-is-per-source-and-spaces-requests.md)) |
 | `api.themoviedb.org` (`tmdb/client.py`) | `_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` ([ADR-0005](decisions/0005-bulk-bootstrap.md)) |
 | `api.themoviedb.org` (`tmdb/provider.py`, six call sites) | the bucket above — this module holds no client of its own |
 | `/embywebsocket` (`emby/push.py`) | **none** — a socket held open is not a request; the reconnect *backoff* is its limiter |

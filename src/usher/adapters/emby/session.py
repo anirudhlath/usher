@@ -288,14 +288,14 @@ class EmbySession:
         self._app_version = app_version
         self._reauth_cooldown = reauth_cooldown_seconds
         self._clock = clock
-        # The proactive outbound gate (ADR-0039), **handed in rather than
+        # The proactive outbound gate (ADR-0040), **handed in rather than
         # minted**. It used to be constructed here from a `requests_per_second`
         # scalar, which made it per *session* -- i.e. per adapter, i.e. per
         # pipeline, i.e. per request -- so one server process running both lanes
         # held >=2 gates for one source and ran it at twice the configured rate.
         # `SourceGateRegistry` (`usher.adapters.http`) owns it now, keyed by
         # `source.id` at the composition root, so every adapter for one source
-        # shares one gate however many pipelines exist (M10 S3; ADR-0039 §4).
+        # shares one gate however many pipelines exist (M10 S3; ADR-0040 §4).
         # This module is one row of the closed outbound table in
         # `tests/unit/test_outbound_call_sites.py`, which asserts that the row
         # and this paragraph do not outlive one another.

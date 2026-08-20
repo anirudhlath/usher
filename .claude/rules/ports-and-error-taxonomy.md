@@ -355,7 +355,7 @@ separate them is read as both. PRD 09's carried-debt entry for
 **And the corollary that decides what to do about it, because the obvious next
 move is wrong.** Some of these must not be closed by observation. A real 429
 from a household's own media server or from TMDb would be evidence that
-ADR-0039's outbound gate had *failed*, and ADR-0005 sized the crawl under
+ADR-0040's outbound gate had *failed*, and ADR-0005 sized the crawl under
 TMDb's stated ceiling rather than discovering the real one by hitting it — so
 provoking one is the behaviour the whole design exists to prevent. That makes
 the honest closing state **"pinned by construction, and deliberately never

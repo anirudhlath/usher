@@ -39,7 +39,7 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
     `usher.composition.adapter_factory` is called once per unit of work, that
     is a fresh gate per lane task and per request. So this holds the shared
     `SourceGateRegistry` and hands out **its** gate, which is what makes the
-    ceiling per source per process rather than per pipeline (ADR-0039 §4).
+    ceiling per source per process rather than per pipeline (ADR-0040 §4).
     """
 
     def __init__(
