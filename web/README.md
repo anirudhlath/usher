@@ -96,12 +96,13 @@ WORK` on screen**, with the missing routes in mono. Seven such surfaces are
 
 Four layers, each covering what the one below cannot:
 
-| Layer      | Tool                            | What it catches                                                                       |
-| ---------- | ------------------------------- | ------------------------------------------------------------------------------------- |
-| Component  | Vitest + Testing Library        | props → markup, keyboard models, ARIA, the anti-patterns each `.prompt.md` names      |
-| Screen     | + MSW over the real `client.ts` | RFC 9457 parsing, keyset paging, the five states per screen                           |
-| Gallery    | Playwright + axe                | colour contrast against the real stylesheet, and a pixel baseline per component group |
-| End to end | Playwright at 1440 / 834 / 390  | the built bundle, `base: '/console/'`, responsive markup switches                     |
+| Layer      | Tool                                   | What it catches                                                                  |
+| ---------- | -------------------------------------- | -------------------------------------------------------------------------------- |
+| Component  | Vitest + Testing Library               | props → markup, keyboard models, ARIA, the anti-patterns each `.prompt.md` names |
+| Screen     | + MSW over the real `client.ts`        | RFC 9457 parsing, keyset paging, the five states per screen                      |
+| Gallery    | Playwright + axe                       | colour contrast against the real stylesheet                                      |
+| End to end | Playwright at 1440 / 834 / 390         | the built bundle, `base: '/console/'`, responsive markup switches                |
+| Visual     | Playwright screenshots, **local only** | a pixel baseline per component group — see below                                 |
 
 MSW is used rather than a hand-stubbed `fetch` so tests exercise the real
 transport — its `problem+json` content-type sniff, its status-0 path for a
@@ -113,6 +114,36 @@ pair as failing; the browser layer is where the handoff's 103-pair ledger
 The e2e suite runs a `--mode fixtures` build, which starts MSW in the browser.
 The production build contains no mock server and CI asserts that rather than
 assuming tree-shaking handled it.
+
+**The 120 screenshot comparisons are tagged `@visual` and do not run in CI**,
+and that is a deliberate, stated reduction rather than a quiet one. A pixel
+baseline is only comparable within one rendering environment, measured three
+ways: on a bare runner all 120 failed; re-rendered inside the pinned
+`mcr.microsoft.com/playwright` image they came out **byte-identical** to a
+developer machine (120/120 by `cmp`); and running that same pinned image _on
+the runner_ all 120 failed again — every one with an identical width and a
+different height, which is text wrapping differently because glyph advance
+widths differ. CI reproduced each failure on its retry, so it is deterministic
+and simply renders differently.
+
+Adopting CI's pixels would pass and would leave nobody able to regenerate a
+baseline: an intentional design change would mean pushing, waiting for red,
+downloading a 409 MB artefact and committing its output. Loosening the
+threshold is not the lever either — the diffs are 2–9% against a 1% bar, and a
+tolerance that swallows a 33 px layout shift swallows a real regression.
+
+```bash
+npm run e2e                   # what CI runs: axe sweeps, tokens, behaviour
+npm run e2e:visual            # the 120 screenshots, serialised
+npm run e2e:visual:update     # regenerate them after an intentional change
+npm run e2e:visual:docker     # the same, inside the pinned image
+```
+
+`--workers=1` on the visual scripts is not caution: at three workers the
+`feedback` group flaked, and passed in isolation twice in a row. Three browsers
+racing one preview server for webfonts is enough to catch a screenshot
+mid-layout, and a deterministic 3.9 min beats a flaky 38 s for a suite whose
+whole job is to notice a changed pixel.
 
 ## Regenerating the API types
 

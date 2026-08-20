@@ -103,21 +103,35 @@ jobs:
           fi
           echo "production bundle is clean"
 
-  # End-to-end, accessibility and visual regression, in a **pinned container**.
+  # End-to-end and accessibility. **Not visual regression** — see below.
   #
-  # ⚠️ **This job exists as its own job, in an image, because a screenshot
-  # baseline is not portable.** Generated on a developer's machine and compared
-  # on `ubuntu-latest`, all 120 of them failed: same fonts (Playwright's own log
-  # says "fonts loaded"), same bundle, but glyph rasterisation differs by OS, so
-  # a section rendered 2249 px tall locally and 2277 px on the runner and 6% of
-  # pixels differed against a 1% threshold. Nothing was wrong with the product.
+  # Runs in Playwright's own image, tagged with the exact `@playwright/test`
+  # version from `package-lock.json`, so the browser and its system libraries
+  # are one pinned artefact and `npm run e2e:docker` reproduces this job exactly.
+  # It also skips `playwright install --with-deps`, which is an apt install on
+  # every run.
   #
-  # The threshold is not the lever — a 28 px layout shift is not noise to be
-  # tolerated, it is a different rendering. Pinning the environment is, and the
-  # image is tagged with the exact `@playwright/test` version from
-  # `package-lock.json` so the browser, its dependencies and the font stack are
-  # one artefact. `npm run e2e:docker` runs the identical image locally, which
-  # is how baselines are regenerated.
+  # ⚠️ **The 120 screenshot comparisons are tagged `@visual` and excluded here,
+  # and that is a stated reduction in coverage rather than a quiet one.**
+  # Measured three ways: on a bare runner all 120 failed; re-rendered inside
+  # this image they were byte-identical to a developer machine (120/120 by
+  # `cmp`); and running this image *on the runner* all 120 failed again, every
+  # one with an identical width and a different height — text wrapping
+  # differently because glyph advance widths differ. Reproduced identically on
+  # retry, so CI is deterministic and simply renders differently.
+  #
+  # Adopting CI's pixels would pass and would leave nobody able to regenerate a
+  # baseline: an intentional design change would mean pushing, waiting for red,
+  # downloading a 409 MB artefact and committing its output. A harness a
+  # developer cannot run is worse than none. Loosening the threshold is not the
+  # lever either — the diffs are 2–9% against a 1% bar, and a tolerance that
+  # swallows a 33 px layout shift swallows a real regression too.
+  #
+  # What stays in CI is the deterministic half and most of the value: twelve
+  # axe sweeps over every component in both themes and both densities (which is
+  # what catches a contrast regression), and `e2e/stylesheet.spec.ts` resolving
+  # real tokens in a real browser. The pixels run locally:
+  # `npm run e2e:visual`, or `e2e:visual:docker` to render in this same image.
   console-e2e:
     runs-on: ubuntu-latest
     container:
@@ -137,17 +151,19 @@ jobs:
         run: npm ci
 
       # Chromium only. The design is specified at three widths, not on three
-      # engines, and the accessibility sweep is against axe rather than against
-      # a browser's own behaviour -- so a second engine would triple the job for
-      # coverage this design does not claim.
-      - name: End-to-end, accessibility and visual regression
+      # engines, and the sweep is against axe rather than against a browser's
+      # own behaviour -- so a second engine would triple the job for coverage
+      # this design does not claim.
+      - name: End-to-end and accessibility
         run: npm run e2e
 
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: playwright-report
-          path: web/playwright-report/
+          path: |
+            web/playwright-report/
+            web/test-results/
           retention-days: 7
 
   # The one thing neither job above can prove: that the two build stages
