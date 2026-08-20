@@ -1753,7 +1753,7 @@ Create `src/usher/eval/schema.sql`:
 -- must never carry it, `alembic heads` must stay at one head, and a migration
 -- would create these tables in every deployment for a harness those
 -- deployments cannot run. Applied idempotently by `ledger.ensure_schema`.
--- ADR-0039.
+-- ADR-0041.
 --
 -- Every statement is `IF NOT EXISTS` or `OR REPLACE`, because this runs at the
 -- start of every eval run rather than once.
@@ -1842,7 +1842,7 @@ Append to `tests/unit/test_eval_contract.py`:
 
 ```python
 def test_the_eval_schema_is_not_in_the_alembic_chain() -> None:
-    """ADR-0039. A migration would create these tables in every deployment,
+    """ADR-0041. A migration would create these tables in every deployment,
     for a harness those deployments cannot run because the `eval` extra is
     not installed -- and a dev-only branch is the standard way `alembic
     heads` stops being one head.
@@ -2077,7 +2077,7 @@ async def ensure_schema(session: AsyncSession) -> None:
 
     Runs at the start of every eval run rather than once, which is why every
     statement in that file is `IF NOT EXISTS` or `OR REPLACE`. **Not an
-    alembic migration** -- ADR-0039.
+    alembic migration** -- ADR-0041.
     """
     await session.execute(text(_SCHEMA_SQL.read_text()))
 
@@ -3463,7 +3463,7 @@ digest**, and only then let them gate. Do not do it in the other order.
 **Files:**
 - Modify: `docs/evals/bars.toml` (pending → real, with the digest)
 - Modify: `docs/evals/ledger.jsonl` (the baseline line)
-- Create: `docs/prd/decisions/0039-the-eval-schema-is-not-a-migration.md`
+- Create: `docs/prd/decisions/0041-the-eval-schema-is-not-a-migration.md`
 - Modify: `docs/prd/05-search-and-similarity.md`, `docs/prd/10-telemetry-and-dashboards.md`
 - Modify: `CLAUDE.md` (the Commands section)
 
@@ -3544,9 +3544,9 @@ Expected: every `all` row reads `pass`, and the exit code is 0. This is the run
 that proves the bars are satisfiable by the system that produced them —
 a bar nobody has ever passed is indistinguishable from a broken check.
 
-- [ ] **Step 5: Write ADR-0039**
+- [ ] **Step 5: Write ADR-0041**
 
-Create `docs/prd/decisions/0039-the-eval-schema-is-not-a-migration.md`:
+Create `docs/prd/decisions/0041-the-eval-schema-is-not-a-migration.md`:
 
 ```markdown
 # 39. The eval schema is applied by the harness, not by alembic
@@ -3629,7 +3629,7 @@ visible as a catalog that keeps moving rather than as a quality problem.
 
 **Backed by real data as of E1** for the suggest surface: `eval.v_trend`,
 which the harness creates outside the alembic chain
-([ADR-0039](decisions/0039-the-eval-schema-is-not-a-migration.md)). The other
+([ADR-0041](decisions/0041-the-eval-schema-is-not-a-migration.md)). The other
 three surfaces arrive with E2 and E3.
 ```
 
@@ -3663,10 +3663,10 @@ Expected: `OK`.
 
 ```bash
 git add docs/evals/bars.toml docs/evals/ledger.jsonl \
-        docs/prd/decisions/0039-the-eval-schema-is-not-a-migration.md \
+        docs/prd/decisions/0041-the-eval-schema-is-not-a-migration.md \
         docs/prd/05-search-and-similarity.md docs/prd/10-telemetry-and-dashboards.md \
         CLAUDE.md
-git commit -m "feat(eval): the suggest baseline, its bars, and ADR-0039
+git commit -m "feat(eval): the suggest baseline, its bars, and ADR-0041
 
 Baseline log /var/tmp/e1-baseline.log sha256 <...>. tier 1 recall@5 reproduced
 ADR-0031's 1.9% window; tier 2's bars are set from this run's digest and were

@@ -46,8 +46,8 @@ otherwise be lost and re-litigated in six months.
 | [0036](0036-the-imdb-tmdb-provenance-rule.md) | Two bulk sources over one entity: `credits.source`, wholesale arbitration, and *not* merging people yet | Accepted — corrects PRD 02 and 08; supersedes M9 T4's withdrawal |
 | [0037](0037-the-worker-is-a-bounded-pool-of-scopes.md) | The job worker is a bounded pool, and a job's scope is a session | Accepted — corrects PRD 01's concurrency table and PRD 08's recovery rule |
 | [0038](0038-the-embedding-width-is-deployment-wide-ddl.md) | The embedding width is deployment-wide DDL, and the fingerprint's "no migration" stops at it | Accepted — **narrows 0020 and 0022**; corrects PRD 02, 04, 05 and 08 |
-| [0039](0039-the-eval-schema-is-not-a-migration.md) | The eval schema is applied by the harness, not by alembic | Accepted — dev-only DDL kept out of every deployment, and `alembic heads` kept at one |
 | [0040](0040-rating-columns-name-their-source.md) | Rating columns name their source (`tmdb_*` / `imdb_*`), IMDb's values re-imported rather than inferred, and the eval frame re-anchored on `imdb_num_votes` | Accepted — corrects PRD 02, 04 and 05; amends 0002's frame and its suggest tiebreak. ⚠️ **One component is deliberately open, not shipped**: the decontamination of the existing `tmdb_*` values, whose pre-registered rule was measured and misses 57,701 of 407,860 rows |
+| [0041](0041-the-eval-schema-is-not-a-migration.md) | The eval schema is applied by the harness, not by alembic | Accepted — dev-only DDL kept out of every deployment, and `alembic heads` kept at one |
 
 Format: context → decision → consequences → evidence. Short is fine.
 

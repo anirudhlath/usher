@@ -73,7 +73,7 @@ class RunRecord:
 
 
 async def ensure_schema(session: AsyncSession) -> None:
-    """Apply `schema.sql`, whole and idempotently. Not an alembic migration -- ADR-0039.
+    """Apply `schema.sql`, whole and idempotently. Not an alembic migration -- ADR-0041.
 
     Runs at the start of every eval run, which is why every statement in that
     file is `IF NOT EXISTS` or `OR REPLACE`.

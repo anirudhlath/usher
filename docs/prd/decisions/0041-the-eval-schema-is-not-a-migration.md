@@ -1,9 +1,18 @@
-# ADR-0039 — The eval schema is applied by the harness, not by alembic
+# ADR-0041 — The eval schema is applied by the harness, not by alembic
 
 **Status:** Accepted. Implemented in E1 — scopes
 [ADR-0020](0020-derived-state-carries-its-fingerprint.md)'s "derived state is
 re-derivable" to a schema that carries no product data at all.
 **Date:** 2026-08-18
+
+⚠️ **Numbered 0041 but dated before 0040, because it was written as 0039 and
+renumbered on 2026-08-20.** `main` had meanwhile merged its own **0039** (the
+genre vocabulary), so the two branches claimed one slot — and because the two
+files have *different names*, a merge keeps both and resolves no conflict: the
+collision is silent, and every bare `ADR-0039` reference on either side stops
+naming one document. The already-merged number won.
+`tests/unit/test_decision_register.py::test_no_two_adrs_claim_the_same_number`
+is what makes the next one loud instead.
 
 ## Context
 

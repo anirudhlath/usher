@@ -4,7 +4,7 @@
 -- must never carry it, `alembic heads` must stay at one head, and a migration
 -- would create these tables in every deployment for a harness those
 -- deployments cannot run. Applied idempotently by `ledger.ensure_schema`.
--- ADR-0039.
+-- ADR-0041.
 --
 -- Every statement is `IF NOT EXISTS` or `OR REPLACE`, because this runs at the
 -- start of every eval run rather than once. **`DROP ... CASCADE` is the other

@@ -309,7 +309,7 @@ is a hypothesis and nothing here measures it.**
   hash is only useful while the file it names can still be produced. Adding a
   comment explaining why the bars stay pending would have moved it for no
   functional gain, so the explanation lives here instead.
-- **Task 14 Steps 3 and 4 are not done**, so nothing gates yet. Step 5 (ADR-0039)
+- **Task 14 Steps 3 and 4 are not done**, so nothing gates yet. Step 5 (ADR-0041)
   and Step 6 (the PRD corrections) were independent of the outcome and are done.
 
 ## Recorded in passing

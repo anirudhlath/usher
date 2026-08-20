@@ -913,7 +913,7 @@ catalog that keeps moving rather than as a quality problem.
 
 ✅ **Backed by real data as of E1** for the suggest surface: `eval.v_trend`,
 which the harness creates outside the alembic chain
-([ADR-0039](decisions/0039-the-eval-schema-is-not-a-migration.md)). The other
+([ADR-0041](decisions/0041-the-eval-schema-is-not-a-migration.md)). The other
 three surfaces arrive with E2 and E3.
 
 🔶 **One recorded run so far, on 2026-08-19, and it is a failing one** — the

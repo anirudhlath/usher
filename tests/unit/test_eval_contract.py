@@ -446,7 +446,7 @@ def _statements(sql: str) -> list[str]:
 
 
 def test_the_eval_schema_is_not_in_the_alembic_chain() -> None:
-    """ADR-0039. A migration would create these tables in every deployment,
+    """ADR-0041. A migration would create these tables in every deployment,
     for a harness those deployments cannot run because the `eval` extra is
     not installed -- and a dev-only branch is the standard way `alembic
     heads` stops being one head.
@@ -498,7 +498,7 @@ def test_no_orm_model_puts_a_table_in_the_eval_schema() -> None:
 
 
 def test_the_migration_chain_still_has_exactly_one_head() -> None:
-    """The third way, and the one ADR-0039 names as its second reason.
+    """The third way, and the one ADR-0041 names as its second reason.
 
     A dev-only migration branch is the standard way `alembic heads` stops
     being one head, and a second head is not a red anywhere else: `alembic

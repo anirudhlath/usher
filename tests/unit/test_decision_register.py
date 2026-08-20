@@ -50,6 +50,39 @@ def test_every_adr_file_is_listed_in_the_decisions_register() -> None:
     assert linked - files == set(), f"register rows pointing at nothing: {sorted(linked - files)}"
 
 
+def test_no_two_adrs_claim_the_same_number() -> None:
+    """**The register check above cannot see this one, and 2026-08-20 is how we
+    found that out.** `spec/quality-evals` wrote `0039-the-eval-schema-is-not-a-
+    migration.md` while `main` merged `0039-the-genre-vocabulary-is-usher-
+    owned.md`. Two *different filenames*, so git resolves no conflict and a
+    merge simply keeps both — and every one of the 14 bare `ADR-0039`
+    references on one side and 16 on the other silently stops naming one
+    document.
+
+    It passes `test_every_adr_file_is_listed_in_the_decisions_register` too:
+    both files exist, both get a row, both directions of that set comparison
+    are clean. A register can be complete and still ambiguous, which is why
+    this is a second case rather than a third assertion in that one.
+
+    The check only fires once both files are in one tree — i.e. after the
+    merge, not before it. That is the whole point: the merge is the moment the
+    collision becomes real and the moment nothing else reports it.
+
+    Same non-emptiness control as its neighbour, and for the same reason: a
+    glob that finds nothing has no duplicates either.
+    """
+    numbers = [path.name[:4] for path in _DECISIONS.glob("0*.md")]
+
+    assert len(numbers) >= 35, f"the register scan found only {len(numbers)} ADRs"
+
+    duplicated = sorted({number for number in numbers if numbers.count(number) > 1})
+    assert duplicated == [], (
+        f"these ADR numbers are claimed by more than one file: {duplicated} — "
+        f"a merge that kept both sides of a number collision, which resolves "
+        f"no conflict because the filenames differ"
+    )
+
+
 def test_the_provider_proposal_adr_is_reachable_from_prd_06() -> None:
     """An ADR the PRD does not link is one the next person composing rows
     will not read, and this is the decision they are most likely to

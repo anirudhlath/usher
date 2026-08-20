@@ -1253,7 +1253,7 @@ the live catalog under seed 20260803 and scores both ADR-0031 tiers separately
 against pre-registered bars in `docs/evals/bars.toml`, recording each run in the
 `eval` schema and in `docs/evals/ledger.jsonl`. Design:
 `docs/specs/2026-08-18-usher-quality-evals-design.md`;
-[ADR-0039](decisions/0039-the-eval-schema-is-not-a-migration.md) for why that
+[ADR-0041](decisions/0041-the-eval-schema-is-not-a-migration.md) for why that
 schema is not a migration.
 
 🔶 **Its first run disagrees with the 1.9% above, and the disagreement is open.**
