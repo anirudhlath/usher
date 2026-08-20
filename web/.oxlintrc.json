@@ -1,0 +1,75 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "react-perf", "typescript", "unicorn", "oxc", "jsx-a11y", "vitest"],
+  "env": { "browser": true, "es2024": true },
+  "ignorePatterns": ["dist", "coverage", "node_modules", "src/api/schema.d.ts"],
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/exhaustive-deps": "error",
+    "react/jsx-key": "error",
+    "react/no-array-index-key": "warn",
+    "react/only-export-components": "warn",
+
+    "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/consistent-type-imports": "error",
+
+    "oxc/no-async-await": "off",
+    "no-console": ["error", { "allow": ["warn", "error"] }],
+    "eqeqeq": ["error", "smart"],
+
+    "jsx-a11y/alt-text": "error",
+    "jsx-a11y/anchor-has-content": "error",
+    "jsx-a11y/anchor-is-valid": "error",
+    "jsx-a11y/aria-props": "error",
+    "jsx-a11y/aria-role": "error",
+    "jsx-a11y/aria-unsupported-elements": "error",
+    "jsx-a11y/role-has-required-aria-props": "error",
+    "jsx-a11y/role-supports-aria-props": "error",
+    "jsx-a11y/no-redundant-roles": "error",
+    "jsx-a11y/tabindex-no-positive": "error",
+    "jsx-a11y/heading-has-content": "error",
+    "jsx-a11y/label-has-associated-control": "error",
+    "jsx-a11y/click-events-have-key-events": "error",
+    "jsx-a11y/no-noninteractive-element-interactions": "error",
+    "jsx-a11y/no-static-element-interactions": "error",
+    "jsx-a11y/autocomplete-valid": "error",
+
+    /* Off, and it is the one accessibility rule this codebase overrules.
+       `role="progressbar"` on a `<div>` is required rather than lazy: a native
+       `<progress>` cannot express "alive, no denominator" — patterns.md §8
+       forbids inventing one, so the element has `aria-valuetext` in words and
+       no `aria-valuenow`, which `<progress>` has no way to render. The same
+       applies to `role="status"` on the two absent-state components, whose
+       tokenised borders and fills the design system styles as plain elements. */
+    "jsx-a11y/prefer-tag-over-role": "off",
+
+    /* Off for the same reason, and it is the rule being wrong rather than us.
+       The only `role="option"` in this codebase is `SearchCombobox`, and the
+       ARIA 1.2 combobox pattern requires its options to be **un**focusable:
+       focus stays in the input and `aria-activedescendant` moves. Adding the
+       `tabIndex` this rule asks for is the defect, not the fix. */
+    "jsx-a11y/interactive-supports-focus": "off",
+
+    /* The accessibility assertion for every component is
+       `await expectNoViolations(container)`, and the `expect` inside it lives
+       in `@/test/axe`. Without naming it here, the one assertion this codebase
+       makes most often reads to the linter as a test with no assertions. */
+    "vitest/expect-expect": [
+      "error",
+      { "assertFunctionNames": ["expect", "expectNoViolations", "expectNoTicketUrl"] }
+    ]
+  },
+  "overrides": [
+    {
+      /* `scripts/**` joins the harness list for the same reason `e2e/**` is on it: nothing here
+         ships. `contrast-probe.mjs` is a diagnostic whose entire output is `console.log`, so
+         `no-console` reports the tool working as a defect. */
+      "files": ["**/*.test.ts", "**/*.test.tsx", "src/test/**", "e2e/**", "scripts/**"],
+      "rules": {
+        "typescript/no-non-null-assertion": "off",
+        "no-console": "off"
+      }
+    }
+  ]
+}

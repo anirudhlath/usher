@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Usher">
+  <!--
+    The wordmark is the brand mark — `usher.` in Instrument Sans 600 with a teal
+    terminal dot — and there is no logo. At 16 px a five-letter wordmark is a
+    smear, so the favicon is the mark's two distinguishing parts: the `u` and
+    the dot. Drawn as paths rather than as <text>, because a favicon renders in
+    contexts that have never loaded the webfont.
+
+    Colours are the token values, written literally: an SVG in `public/` is
+    copied verbatim and never sees the stylesheet. --n-900 and --teal-400.
+  -->
+  <rect width="32" height="32" rx="7" fill="#0e0c0a" />
+  <path
+    d="M9 11.5v6.2c0 2.2 1.5 3.6 3.7 3.6 2.2 0 3.7-1.4 3.7-3.6v-6.2"
+    fill="none"
+    stroke="#f3efed"
+    stroke-width="2.6"
+    stroke-linecap="round"
+  />
+  <circle cx="22" cy="19.6" r="1.9" fill="#1ad1d1" />
+</svg>

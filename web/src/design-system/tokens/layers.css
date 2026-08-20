@@ -1,0 +1,20 @@
+/* Z-index layers. Nothing in the product may write a numeric z-index; use a token or add one here.
+   The developer drawer deliberately outranks modals: you must be able to read the request journal
+   for the failed call that put the modal on screen. Tooltips outrank the drawer. */
+:root{
+  --z-base:0; /* @kind other */
+  --z-artwork-overlay:1; /* @kind other */ /* protection gradients, progress bars over a card */
+  --z-rail-control:20; /* @kind other */ /* carousel arrows, edge fades */
+  --z-sticky-table-head:60; /* @kind other */
+  --z-header:100; /* @kind other */
+  --z-sidebar:110; /* @kind other */
+  --z-dropdown:200; /* @kind other */ /* select menus, suggest combobox listbox */
+  --z-drawer-sheet:300; /* @kind other */ /* phone nav sheet, filter sheet */
+  --z-scrim:400; /* @kind other */
+  --z-modal:410; /* @kind other */ /* confirm dialogs, connection wizard */
+  --z-popover:500; /* @kind other */
+  --z-toast:600; /* @kind other */
+  --z-devdrawer:700; /* @kind other */
+  --z-tooltip:800; /* @kind other */
+  --z-skip-link:900; /* @kind other */
+}

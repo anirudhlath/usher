@@ -1,0 +1,41 @@
+/* Motion.
+   This is a media app that also runs a control room. Two rules:
+   1. Nothing that reports state animates for longer than 180 ms — an operator reading a queue depth
+      should never wait on a transition to know a number changed.
+   2. Live data arrives with a 1-second highlight fade, not a slide or a bounce. A row patched by an
+      SSE title.updated frame lights up and settles; it never moves, because moving it under a
+      pointer that is about to click is hostile.
+   Reduced motion collapses every duration to 1 ms and disables the shimmer sweep. It does not
+   remove the highlight fade — opacity change with no travel is the accessible fallback. */
+:root{
+  --dur-instant:80ms; /* @kind other */
+  --dur-fast:120ms; /* @kind other */
+  --dur-base:180ms; /* @kind other */
+  --dur-slow:240ms; /* @kind other */
+  --dur-sheet:320ms; /* @kind other */
+  --dur-highlight:1000ms; /* @kind other */
+  --dur-shimmer:1400ms; /* @kind other */
+
+  --ease-standard:cubic-bezier(0.2,0,0.2,1); /* @kind other */
+  --ease-out:cubic-bezier(0,0,0.2,1); /* @kind other */
+  --ease-in:cubic-bezier(0.4,0,1,1); /* @kind other */
+  --ease-emphasis:cubic-bezier(0.2,0,0,1); /* @kind other */
+
+  --transition-control:background-color var(--dur-fast) var(--ease-standard),border-color var(--dur-fast) var(--ease-standard),color var(--dur-fast) var(--ease-standard),box-shadow var(--dur-fast) var(--ease-standard); /* @kind other */
+  --transition-surface:opacity var(--dur-base) var(--ease-out),transform var(--dur-base) var(--ease-out); /* @kind other */
+  --transition-card:transform var(--dur-base) var(--ease-standard),box-shadow var(--dur-base) var(--ease-standard); /* @kind other */
+
+  /* interaction feel — cards lift, controls do not move at all */
+  --hover-card-lift:translateY(-2px); /* @kind other */
+  --hover-card-scale:scale(1.015); /* @kind other */
+  --press-scale:scale(0.985); /* @kind other */
+  --hover-overlay:oklch(1 0 0/0.06);
+  --press-overlay:oklch(0 0 0/0.14);
+}
+[data-theme="light"]{--hover-overlay:oklch(0.235 0.008 60/0.05);--press-overlay:oklch(0.235 0.008 60/0.10);}
+@media (prefers-reduced-motion:reduce){
+  :root{
+    --dur-instant:1ms; /* @kind other */ --dur-fast:1ms;/* @kind other */--dur-base:1ms;/* @kind other */--dur-slow:1ms;/* @kind other */--dur-sheet:1ms;/* @kind other */--dur-shimmer:0ms;/* @kind other */
+    --hover-card-lift:none; /* @kind other */ --hover-card-scale:none;/* @kind other */--press-scale:none;/* @kind other */
+  }
+}

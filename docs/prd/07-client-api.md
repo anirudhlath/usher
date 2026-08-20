@@ -1039,6 +1039,60 @@ nullable key — a row comparison evaluates to **NULL, not false**, when the
 first differing pair involves one, so resuming from an unkeyed row silently
 drops the whole unkeyed tail with every page still full.
 
+### Correlation: `traceresponse` on every response
+
+Every response carries the id of the server span that produced it, in a W3C
+Trace Context response header:
+
+```
+traceresponse: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
+```
+
+`version-traceid-spanid-flags`, lowercase hex, 2/32/16/2 characters. This is
+what turns a screen into something an operator can act on: Usher Console renders
+it as `Problem`'s "Open trace" link into Tempo, and the dev drawer carries it per
+journal entry so a call that went wrong can be pasted into a trace search
+([10](10-telemetry-and-dashboards.md) has the browser-to-Tempo path).
+
+Four properties, each a rule rather than a detail:
+
+- **A header, not a member of the problem envelope**, and the reason is what
+  each of the two things *is*. `ProblemResponse` is a closed contract that a
+  generated client's types are derived from, and a trace id is not part of what
+  went wrong; it is a fact about the exchange that carried the answer. The
+  header is also the only spelling available on a **200**, and "why did this
+  succeed slowly" is the question Tempo is best at.
+- **Absent, never zeroed.** A span that is not recording, and the all-zero
+  `INVALID_SPAN`, both emit **no header at all** rather than
+  `00-000…0-000…0-00`. That value is well-formed to every regex, names a trace
+  nobody can open, and is forbidden by the grammar in as many words. Same rule
+  this project applies to a gauge with no reader and to a job enqueued outside a
+  span: an absence has to be distinguishable from a value.
+- **A malformed header is `null` to a client, never a throw and never a partial
+  id.** The one situation a defensive parse exists for is the one where the wire
+  is not what the spec says, and a console that fell over reading a *diagnostic*
+  header would be worse than one with no link.
+- **No `Access-Control-Expose-Headers`, because the console is same-origin.**
+  Usher's own app serves the bundle at `/console/`, so `fetch` can read every
+  response header without an expose list, and Usher still ships no CORS
+  middleware. A future client on another origin needs that list adding; that is
+  the one thing about this contract that is a consequence of the deployment
+  rather than of the header.
+
+⚠️ **The one gap, named rather than hidden:** an unhandled exception answers
+Starlette's bare `500` from outside the middleware that adds this, so that
+response carries no `traceresponse`. Measured, with the alternatives priced, in
+`api/trace_response.py` and in `.claude/rules/api-telemetry-and-lanes.md`.
+
+**On the name.** `traceresponse` is a *withdrawn draft* header. The published
+Trace Context Level 2 Recommendation defines no response header at all, and the
+current draft carries this exact grammar on a `Server-Timing` metric named
+`trace` instead. The **value** is unchanged between them, and `traceresponse` is
+what the OpenTelemetry ecosystem already emits — so it is what Usher sends, and
+adding the `Server-Timing` spelling beside it is one line over the same value if
+a consumer ever wants it. Recorded here so the next reader does not take the
+header name for a settled standard.
+
 ### Errors
 
 RFC 9457 problem details, with a machine-readable `code`:

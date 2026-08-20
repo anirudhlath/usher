@@ -1,0 +1,70 @@
+/* Forms. Every control has a --border-control boundary (3:1) and a 2px focus ring at 2px offset. */
+.u-field{display:flex;flex-direction:column;gap:var(--space-1)}
+.u-field__label{font:var(--text-label);color:var(--text-secondary)}
+.u-field__hint{font:var(--text-body-xs);color:var(--text-muted)}
+/* Added here rather than inline: the handoff's Checkbox and Switch carry these two declarations
+   as `style={{...}}` because the prototype had nowhere else to put them. Same tokens, same
+   result — a hint that sits on its own line under a control's label. */
+.u-field__hint--block{display:block}
+.u-field__error{font:var(--text-body-xs);color:var(--bad-text);display:flex;align-items:flex-start;gap:var(--space-1)}
+.u-input{height:var(--density-control-h);padding:0 var(--density-pad-x);background:var(--bg-inset);color:var(--text-primary);border:1px solid var(--border-control);border-radius:var(--radius-control);font:var(--text-body-sm);transition:var(--transition-control);width:100%}
+.u-input::placeholder{color:var(--text-muted)}
+.u-input:hover:not(:disabled){border-color:var(--border-strong)}
+.u-input:focus-visible{outline:var(--ring-width) solid var(--border-focus);outline-offset:var(--ring-offset);border-color:var(--border-focus)}
+.u-input:disabled{color:var(--text-disabled);border-color:var(--border-default);background:transparent;cursor:not-allowed}
+.u-input[aria-invalid=true]{border-color:var(--bad-border)}
+.u-input--mono{font:var(--text-mono-sm);letter-spacing:var(--track-mono)}
+.u-input--textarea{height:auto;padding:var(--density-pad-y) var(--density-pad-x);min-height:5rem;resize:vertical;font:var(--text-body-sm)}
+.u-inputwrap{position:relative;display:flex;align-items:center}
+.u-inputwrap__lead,.u-inputwrap__trail{position:absolute;display:flex;align-items:center;color:var(--text-muted);pointer-events:none}
+.u-inputwrap__lead{left:var(--space-2x)}
+.u-inputwrap__trail{right:var(--space-2x)}
+.u-inputwrap--lead .u-input{padding-left:calc(var(--space-2x) + 20px + var(--space-2x))}
+.u-inputwrap--trail .u-input{padding-right:calc(var(--space-2x) + 20px + var(--space-2x))}
+.u-select{appearance:none;background-image:none}
+.u-select__wrap{position:relative;display:inline-flex;width:100%}
+.u-select__chev{position:absolute;right:var(--space-2x);top:50%;transform:translateY(-50%);color:var(--text-muted);pointer-events:none;font:var(--text-mono-xs)}
+.u-check{display:inline-flex;align-items:flex-start;gap:var(--space-2x);cursor:pointer;font:var(--text-body-sm);color:var(--text-secondary)}
+.u-check input{appearance:none;width:16px;height:16px;margin:2px 0 0;border:1px solid var(--border-control);border-radius:var(--radius-xs);background:var(--bg-inset);flex:none;display:grid;place-content:center;cursor:pointer;transition:var(--transition-control)}
+.u-check input[type=radio]{border-radius:50%}
+.u-check input:checked{background:var(--action-primary-bg);border-color:var(--action-primary-bg)}
+.u-check input:checked::after{content:'';width:9px;height:5px;border-left:2px solid var(--action-primary-text);border-bottom:2px solid var(--action-primary-text);transform:rotate(-45deg) translate(1px,-1px)}
+.u-check input[type=radio]:checked::after{content:'';width:6px;height:6px;border:none;border-radius:50%;background:var(--action-primary-text);transform:none}
+.u-check input:indeterminate{background:var(--action-primary-bg);border-color:var(--action-primary-bg)}
+.u-check input:indeterminate::after{content:'';width:9px;height:2px;border:none;background:var(--action-primary-text);transform:none}
+.u-check input:focus-visible{outline:var(--ring-width) solid var(--border-focus);outline-offset:var(--ring-offset)}
+.u-check input:disabled{border-color:var(--border-default);cursor:not-allowed}
+.u-check--disabled{color:var(--text-disabled);cursor:not-allowed}
+.u-switch{display:inline-flex;align-items:center;gap:var(--space-3);cursor:pointer}
+.u-switch__track{width:34px;height:20px;border-radius:var(--radius-pill);background:var(--bg-inset);border:1px solid var(--border-control);position:relative;transition:var(--transition-control);flex:none}
+.u-switch__knob{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--text-muted);transition:transform var(--dur-fast) var(--ease-standard),background-color var(--dur-fast) var(--ease-standard)}
+.u-switch__label{font:var(--text-label);color:var(--text-primary)}
+.u-switch[aria-checked=true] .u-switch__track{background:var(--good-quiet);border-color:var(--good-border)}
+.u-switch[aria-checked=true] .u-switch__knob{transform:translateX(14px);background:var(--good-text)}
+.u-switch:focus-visible{outline:none}
+.u-switch:focus-visible .u-switch__track{outline:var(--ring-width) solid var(--border-focus);outline-offset:var(--ring-offset)}
+.u-switch[aria-disabled=true]{cursor:not-allowed;opacity:.6}
+.u-chip{display:inline-flex;align-items:center;gap:var(--space-1);height:var(--density-control-h-sm);padding:0 var(--space-3);border-radius:var(--radius-pill);border:1px solid var(--border-control);background:transparent;color:var(--text-secondary);font:var(--text-label-sm);cursor:pointer;transition:var(--transition-control);white-space:nowrap}
+.u-chip:hover{background:var(--bg-hover);color:var(--text-primary)}
+.u-chip[aria-pressed=true]{background:var(--accent-quiet);border-color:var(--border-accent);color:var(--accent-text)}
+.u-chip__x{font:var(--text-mono-xs);opacity:.7}
+.u-chip--tri{gap:var(--space-2x)}
+.u-chip__state{font:var(--text-mono-xs);color:var(--text-muted)}
+/* Pressed, the chip's ground is --accent-quiet rather than the canvas, and the muted tone falls
+   from 6.00:1 to 4.12:1 on it. One tone up, only where the fill is tinted — the state word stays
+   quieter than the teal label, which is the hierarchy this suffix is for. */
+.u-chip[aria-pressed=true] .u-chip__state{color:var(--text-secondary)}
+.u-combo{position:relative;width:100%}
+.u-combo__list{position:absolute;top:calc(100% + var(--space-1));left:0;right:0;z-index:var(--z-dropdown);background:var(--bg-raised);border:1px solid var(--border-default);border-radius:var(--radius-card);box-shadow:var(--shadow-3);padding:var(--space-1);max-height:20rem;overflow-y:auto}
+.u-combo__group{font:var(--text-eyebrow);letter-spacing:var(--track-eyebrow);text-transform:uppercase;color:var(--text-muted);padding:var(--space-2x) var(--space-2x) var(--space-1)}
+.u-combo__opt{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2x);border-radius:var(--radius-md);cursor:pointer;color:var(--text-secondary)}
+.u-combo__opt[aria-selected=true]{background:var(--bg-hover);color:var(--text-primary)}
+.u-combo__opt em{font-style:normal;color:var(--text-primary);font-weight:var(--weight-semibold)}
+.u-combo__meta{margin-left:auto;font:var(--text-mono-xs);color:var(--text-muted);flex:none}
+.u-combo__empty{padding:var(--space-3);font:var(--text-body-sm);color:var(--text-muted)}
+.u-combo__tier{font:var(--text-mono-xs);color:var(--text-muted);flex:none}
+/* The active option adds --bg-hover over --bg-raised, and --text-muted on --bg-raised is already
+   the thinnest sanctioned pair in the ledger (5.04:1) — the overlay takes it to 4.32:1. The row
+   the caret is on lifts its metadata one tone; the rest of the list keeps the muted tone. */
+.u-combo__opt[aria-selected=true] .u-combo__meta,
+.u-combo__opt[aria-selected=true] .u-combo__tier{color:var(--text-secondary)}

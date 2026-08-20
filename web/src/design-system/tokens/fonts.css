@@ -1,0 +1,16 @@
+/* Webfonts.
+   Usher has no prior brand typeface — the server is backend-only and there was never a client — so
+   these two families ARE the brand's type, chosen for this system rather than inherited. Instrument Sans is a low-contrast grotesque
+   with a tall x-height that holds up at 12 px in a dense operator table and at 56 px over a backdrop.
+   JetBrains Mono is the identifier/measurement face: unambiguous 0/O and 1/l/I, which matters when
+   an operator is comparing a UUIDv7 on screen against one in Emby's dashboard.
+   Both are open-licence (SIL OFL) and self-hostable, which suits an MIT-licensed self-hosted product:
+   nothing here depends on a commercial licence. If the type direction ever changes, replace this file
+   and the two --font-* tokens — nothing else in the system references a family name.
+
+   **The handoff's `@import` of fonts.googleapis.com is deliberately not here.** Its own README says
+   "Serve them from the app, not a CDN — this is a self-hosted product", and a CDN import would also
+   be the one third-party runtime request the console makes: a LAN-only, air-gappable server that
+   phones Google on first paint is a worse failure than an unstyled heading. The two `@fontsource`
+   packages carry the same SIL OFL files; `src/main.tsx` imports them so Vite fingerprints and
+   self-hosts the woff2 under /console/assets/. `font-display: swap` comes from those packages. */

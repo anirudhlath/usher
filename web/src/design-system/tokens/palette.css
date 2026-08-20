@@ -1,0 +1,93 @@
+/* Usher Console — base palette.
+   Authored in oklch; sRGB hex in comments. Warm neutral ramp (hue 60) + four hued ramps + two
+   data-visualisation sets. Every pair this system sanctions is measured in guidelines/contrast.md.
+   Do not use a base token directly in product code — use the semantic aliases in tokens/semantic.css. */
+:root{
+
+  /* neutral — warm charcoal, hue 60. Dark theme reads up from n-950; light theme reads down from n-0. */
+  --n-1000: oklch(0.075 0.006 60); /* #020101 */
+  --n-950: oklch(0.122 0.006 60); /* #070604 */
+  --n-900: oklch(0.155 0.006 60); /* #0e0c0a */
+  --n-850: oklch(0.198 0.006 60); /* #181513 */
+  --n-800: oklch(0.242 0.007 60); /* #221f1c */
+  --n-750: oklch(0.285 0.008 60); /* #2d2926 */
+  --n-700: oklch(0.345 0.009 60); /* #3d3835 */
+  --n-600: oklch(0.46 0.01 60); /* #5c5753 */
+  --n-500: oklch(0.53 0.012 60); /* #716a65 */
+  --n-400: oklch(0.65 0.014 60); /* #968d87 */
+  --n-350: oklch(0.74 0.012 60); /* #b1a9a3 */
+  --n-300: oklch(0.8 0.01 60); /* #c3bcb7 */
+  --n-200: oklch(0.865 0.008 60); /* #d7d1cd */
+  --n-150: oklch(0.915 0.006 60); /* #e6e2df */
+  --n-100: oklch(0.955 0.005 60); /* #f3efed */
+  --n-50: oklch(0.982 0.004 60); /* #fbf8f6 */
+  --n-0: oklch(1 0 60); /* #ffffff */
+
+  /* teal — hue 195. Accent, links, focus, and the info semantic. */
+  --teal-50: oklch(0.968 0.018 195); /* #e7f9f8 */
+  --teal-100: oklch(0.945 0.03 195); /* #d7f4f3 */
+  --teal-200: oklch(0.895 0.055 195); /* #b2e8e8 */
+  --teal-300: oklch(0.82 0.095 195); /* #72d8d7 */
+  --teal-400: oklch(0.78 0.13 195); /* #1ad1d1 */
+  --teal-500: oklch(0.68 0.13 195); /* #00b0b1 */
+  --teal-600: oklch(0.495 0.125 195); /* #007678 */
+  --teal-700: oklch(0.4 0.11 195); /* #00585a */
+  --teal-800: oklch(0.3 0.05 195); /* #023536 */
+  --teal-900: oklch(0.225 0.04 195); /* #002121 */
+
+  /* green — hue 150. good / healthy / owned. */
+  --green-50: oklch(0.968 0.018 150); /* #ecf8ee */
+  --green-100: oklch(0.945 0.03 150); /* #dff3e2 */
+  --green-200: oklch(0.895 0.055 150); /* #c4e7ca */
+  --green-300: oklch(0.82 0.095 150); /* #97d6a4 */
+  --green-400: oklch(0.78 0.13 150); /* #76cf8a */
+  --green-500: oklch(0.68 0.13 150); /* #56ae6c */
+  --green-600: oklch(0.495 0.125 150); /* #197539 */
+  --green-700: oklch(0.4 0.11 150); /* #005725 */
+  --green-800: oklch(0.3 0.05 150); /* #1a3520 */
+  --green-900: oklch(0.225 0.04 150); /* #0d2111 */
+
+  /* amber — hue 80. warn / stalled / degraded. */
+  --amber-50: oklch(0.968 0.018 80); /* #fbf3e7 */
+  --amber-100: oklch(0.945 0.03 80); /* #f8ebd7 */
+  --amber-200: oklch(0.895 0.055 80); /* #f0d9b4 */
+  --amber-300: oklch(0.82 0.095 80); /* #e5be7c */
+  --amber-400: oklch(0.78 0.13 80); /* #e3ad4b */
+  --amber-500: oklch(0.68 0.13 80); /* #c28e24 */
+  --amber-600: oklch(0.495 0.125 80); /* #865700 */
+  --amber-700: oklch(0.4 0.11 80); /* #663e00 */
+  --amber-800: oklch(0.3 0.05 80); /* #3b2b0d */
+  --amber-900: oklch(0.225 0.04 80); /* #251904 */
+
+  /* red — hue 25. bad / failed / parked. */
+  --red-50: oklch(0.968 0.018 25); /* #fff0ee */
+  --red-100: oklch(0.945 0.03 25); /* #ffe6e3 */
+  --red-200: oklch(0.895 0.055 25); /* #ffcfca */
+  --red-300: oklch(0.82 0.095 25); /* #fcaca5 */
+  --red-400: oklch(0.78 0.13 25); /* #ff958d */
+  --red-500: oklch(0.68 0.13 25); /* #dd766f */
+  --red-600: oklch(0.495 0.125 25); /* #9c403c */
+  --red-700: oklch(0.4 0.11 25); /* #782a28 */
+  --red-800: oklch(0.3 0.05 25); /* #442321 */
+  --red-900: oklch(0.225 0.04 25); /* #2c1412 */
+
+  /* data visualisation — dark-theme marks. Okabe–Ito derived; order is the series order. */
+  --viz-blue-dark: oklch(0.68 0.13 250); /* #549de5 */
+  --viz-orange-dark: oklch(0.78 0.14 55); /* #fb9d59 */
+  --viz-green-dark: oklch(0.76 0.14 150); /* #68ca80 */
+  --viz-magenta-dark: oklch(0.71 0.18 340); /* #e86ec4 */
+  --viz-yellow-dark: oklch(0.88 0.15 95); /* #f6d653 */
+  --viz-cyan-dark: oklch(0.81 0.11 205); /* #5ad5e3 */
+  --viz-violet-dark: oklch(0.66 0.16 295); /* #9b7be9 */
+  --viz-brick-dark: oklch(0.64 0.16 30); /* #dc5f4e */
+
+  /* data visualisation — light-theme marks. Same hues, darkened for white panels. */
+  --viz-blue-light: oklch(0.52 0.16 250); /* #006ac0 */
+  --viz-orange-light: oklch(0.58 0.14 55); /* #b75f0b */
+  --viz-green-light: oklch(0.53 0.14 150); /* #11813c */
+  --viz-magenta-light: oklch(0.5 0.19 340); /* #a32384 */
+  --viz-yellow-light: oklch(0.6 0.13 95); /* #997e00 */
+  --viz-cyan-light: oklch(0.54 0.11 205); /* #00808d */
+  --viz-violet-light: oklch(0.48 0.19 295); /* #693abb */
+  --viz-brick-light: oklch(0.48 0.17 30); /* #a82418 */
+}

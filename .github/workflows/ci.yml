@@ -44,3 +44,181 @@ jobs:
       # rootdir + this package's src/usher import path.
       - name: Tests
         run: uv run pytest --cov=usher --cov-report=term-missing
+
+  # Usher Console. A job of its own rather than steps on `check`, so a broken
+  # component does not hide a broken migration and the two report separately --
+  # and so this one can be skipped by a change that touches no TypeScript.
+  #
+  # `ruff` does not walk web/ (pyproject.toml says why), so nothing in `check`
+  # can see this directory at all. These five steps ARE the gate for it.
+  console:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+
+      # Exact release tag rather than the floating `v7`, which does exist here
+      # (verified with `gh api repos/actions/setup-node/git/ref/tags/v7`) --
+      # but this repository has already lost a CI run to a floating major that
+      # did not, and an exact tag needs no such check.
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # `ci`, not `install`: it installs exactly the lockfile and fails if the
+      # two disagree, which is what makes this job and the Dockerfile's
+      # `console` stage build the same tree.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Unit and component tests
+        run: npm run test -- --coverage
+
+      - name: Build
+        run: npm run build
+
+      # The production bundle must contain no mock server and no fixtures.
+      # `main.tsx` guards that import with `import.meta.env.MODE === 'fixtures'`,
+      # which Vite replaces with a literal so rollup drops the branch -- but
+      # "tree-shaking probably handled it" is not evidence, and shipping a mock
+      # network to a self-hosted product would be a genuinely bad outcome.
+      - name: No fixtures in the production bundle
+        run: |
+          if grep -rlE 'mockServiceWorker|msw/browser|setupWorker' dist/assets/; then
+            echo "::error::the production bundle carries the mock service worker"
+            exit 1
+          fi
+          echo "production bundle is clean"
+
+  # End-to-end and accessibility. The pixels are the `console-visual` job below.
+  #
+  # Runs in Playwright's own image, tagged with the exact `@playwright/test`
+  # version from `package-lock.json`, so the browser and its system libraries
+  # are one pinned artefact and `npm run e2e:docker` reproduces this job exactly.
+  # It also skips `playwright install --with-deps`, which is an apt install on
+  # every run.
+  #
+  # This is where `e2e/stylesheet.spec.ts` runs, and that file is load-bearing
+  # rather than decorative: it asserts the design system actually reached the
+  # browser — tokens resolving to real values, a component rule with a real
+  # height, and a `FontFace` reaching `loaded`. Each of those three exists
+  # because the corresponding thing silently did not happen and every cheaper
+  # layer passed anyway.
+  console-e2e:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      # Chromium's default /dev/shm inside a container is 64 MB and it crashes
+      # on a large page rather than failing an assertion.
+      options: --ipc=host
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `setup-node`: the image ships the Node the browser was built against,
+      # and installing another one is how the two drift apart.
+      - name: Install dependencies
+        run: npm ci
+
+      # Chromium only. The design is specified at three widths, not on three
+      # engines, and the sweep is against axe rather than against a browser's
+      # own behaviour -- so a second engine would triple the job for coverage
+      # this design does not claim.
+      - name: End-to-end and accessibility
+        run: npm run e2e
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 7
+
+  # The 120 screenshot comparisons.
+  #
+  # These were red for a long time and the diagnosis was wrong twice. The
+  # signature — identical width, different height, every time, reproducible on
+  # retry — was read as "a pixel baseline is only comparable within one
+  # rendering environment", and the job was moved first into this pinned image
+  # and then onto a self-hosted runner to chase it. Neither helped, because the
+  # environment was never the variable.
+  #
+  # The variable was a **product bug the screenshots were correctly reporting**:
+  # `--font-sans` named `Instrument Sans`, but `@fontsource-variable` registers
+  # the family as `Instrument Sans Variable`, so no `@font-face` ever matched
+  # and every environment rendered in *its own* system fallback. Different
+  # fallback, different wrapping, different height. With the family name fixed a
+  # bare host and this image agree to the byte, so the baselines are portable
+  # and this runs on a hosted runner like everything else.
+  #
+  # The lesson worth keeping: a test that fails everywhere is evidence about the
+  # code, not about the runners. Moving it is not fixing it.
+  console-visual:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      options: --ipc=host
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `--workers=1`, from the script. At three workers the `feedback` group
+      # failed and then passed twice in isolation: three browsers racing one
+      # preview server for webfonts is enough to catch a screenshot mid-layout.
+      - name: Visual regression
+        run: npm run e2e:visual
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: visual-diff
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 7
+
+  # The one thing neither job above can prove: that the two build stages
+  # compose. `check` never runs node and `console` never runs Python, so a
+  # Dockerfile that copies from the wrong stage path, or a `.dockerignore` that
+  # excludes something the `console` stage needs, is green in both and broken
+  # on `docker compose up`. That is the failure this repository is least able
+  # to catch anywhere else, since it has never had a container-build job.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the image
+        run: docker build -t usher:ci .
+
+      # Proves the bundle is where `Settings.console_dist_dir` looks for it,
+      # inside the image, without needing a database to start the app.
+      - name: The console bundle is in the image
+        run: |
+          docker run --rm usher:ci sh -c '
+            test -f /app/web/dist/index.html &&
+            test -d /app/web/dist/assets &&
+            echo "console bundle present"
+          '

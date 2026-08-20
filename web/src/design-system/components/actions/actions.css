@@ -1,0 +1,34 @@
+/* Actions — Button, IconButton, TextLink.
+   Hover never changes hue and never moves the control. Press is an 80 ms 0.985 scale. */
+.u-btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--space-2x);border:1px solid transparent;border-radius:var(--radius-control);font:var(--text-label);letter-spacing:var(--track-label);height:var(--density-control-h);padding:0 var(--density-pad-x);cursor:pointer;position:relative;white-space:nowrap;transition:var(--transition-control),transform var(--dur-instant) var(--ease-standard);user-select:none;text-decoration:none}
+.u-btn:active:not(:disabled){transform:var(--press-scale)}
+.u-btn:disabled,.u-btn[aria-disabled=true]{cursor:not-allowed;color:var(--text-disabled);background:transparent;border-color:var(--border-default);box-shadow:none}
+.u-btn--primary{background:var(--action-primary-bg);color:var(--action-primary-text);font-weight:var(--weight-semibold)}
+.u-btn--primary:hover:not(:disabled):not([aria-disabled=true]){background:var(--action-primary-bg-hover)}
+.u-btn--secondary{background:var(--action-secondary-bg);color:var(--action-secondary-text);border-color:var(--border-control)}
+.u-btn--secondary:hover:not(:disabled):not([aria-disabled=true]){background:var(--action-secondary-bg-hover);border-color:var(--border-strong)}
+.u-btn--ghost{background:transparent;color:var(--text-secondary)}
+.u-btn--ghost:hover:not(:disabled):not([aria-disabled=true]){background:var(--bg-hover);color:var(--text-primary)}
+.u-btn--danger{background:transparent;color:var(--bad-text);border-color:var(--bad-border)}
+.u-btn--danger:hover:not(:disabled):not([aria-disabled=true]){background:var(--bad-quiet)}
+.u-btn--danger-solid{background:var(--bad-solid);color:var(--text-on-danger);border-color:var(--bad-border);font-weight:var(--weight-semibold)}
+.u-btn--danger-solid:hover:not(:disabled):not([aria-disabled=true]){filter:brightness(1.08)}
+.u-btn--sm{height:var(--density-control-h-sm);padding:0 var(--space-2x);font:var(--text-label-sm)}
+.u-btn--lg{height:2.75rem;padding:0 var(--space-4);font:var(--text-heading-sm)}
+.u-btn--block{width:100%}
+.u-btn__spinner{width:14px;height:14px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:u-spin 700ms linear infinite;flex:none}
+@keyframes u-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.u-btn__spinner{animation-duration:1600ms}}
+.u-btn__pending{opacity:.9}
+.u-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:var(--density-control-h);height:var(--density-control-h);border-radius:var(--radius-control);border:1px solid transparent;background:transparent;color:var(--text-secondary);cursor:pointer;transition:var(--transition-control),transform var(--dur-instant) var(--ease-standard);flex:none}
+.u-iconbtn:hover:not(:disabled){background:var(--bg-hover);color:var(--text-primary)}
+.u-iconbtn:active:not(:disabled){transform:var(--press-scale)}
+.u-iconbtn--outlined{border-color:var(--border-control)}
+.u-iconbtn--sm{width:var(--density-control-h-sm);height:var(--density-control-h-sm)}
+.u-iconbtn--touch{width:var(--target-touch);height:var(--target-touch)}
+.u-iconbtn:disabled{color:var(--text-disabled);cursor:not-allowed}
+.u-link{color:var(--text-link);text-decoration:underline;text-decoration-color:oklch(from currentColor l c h/0.38);text-underline-offset:2px;border-radius:2px}
+.u-link:hover{color:var(--text-link-hover);text-decoration-color:currentColor}
+.u-link--quiet{color:var(--text-secondary);text-decoration:none}
+.u-link--quiet:hover{color:var(--text-primary);text-decoration:underline}
+.u-btngroup{display:inline-flex;gap:var(--space-2x);align-items:center}

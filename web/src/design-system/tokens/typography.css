@@ -1,0 +1,54 @@
+/* Type. Two families, one scale, line heights baked into the step.
+   Rule: monospace is for identifiers and measurements only — UUIDs, external_ids, cursors, codecs,
+   counts, latencies, timestamps. Never for prose, never for a label. */
+:root{
+  /* The `Variable` suffix is load-bearing: it is the family name the two
+     @fontsource-variable packages register in their own @font-face, and asking
+     for 'Instrument Sans' alone matched nothing — the woff2 shipped in the
+     bundle and no glyph ever came from it. The unsuffixed name stays after it
+     so a locally installed copy still wins over the system stack. */
+  --font-sans:'Instrument Sans Variable','Instrument Sans','Helvetica Neue',system-ui,sans-serif;
+  --font-mono:'JetBrains Mono Variable','JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;
+
+  /* weights — Instrument Sans variable 400–700 */
+  --weight-regular:400; /* @kind font */ --weight-medium:500;--weight-semibold:600;--weight-bold:700;
+
+  /* display — title heroes and empty-state headlines only */
+  --text-display-lg:600 3.5rem/1.02 var(--font-sans);   /* 56 / 57 */
+  --text-display:600 2.75rem/1.05 var(--font-sans);     /* 44 / 46 */
+  --text-display-sm:600 2.125rem/1.1 var(--font-sans);  /* 34 / 37 */
+
+  /* titles — screen and section headings */
+  --text-title-lg:600 1.625rem/1.2 var(--font-sans);    /* 26 / 31 */
+  --text-title:600 1.375rem/1.25 var(--font-sans);      /* 22 / 28 */
+  --text-title-sm:600 1.125rem/1.35 var(--font-sans);   /* 18 / 24 */
+
+  /* headings — card titles, row headers, panel headers */
+  --text-heading:600 1rem/1.4 var(--font-sans);         /* 16 / 22 */
+  --text-heading-sm:600 0.875rem/1.4 var(--font-sans);  /* 14 / 20 */
+
+  /* body */
+  --text-body-lg:400 1.0625rem/1.55 var(--font-sans);   /* 17 / 26 — overview prose */
+  --text-body:400 0.9375rem/1.5 var(--font-sans);       /* 15 / 22 — default */
+  --text-body-sm:400 0.875rem/1.5 var(--font-sans);     /* 14 / 21 — dense tables, captions */
+  --text-body-xs:400 0.8125rem/1.45 var(--font-sans);   /* 13 / 19 — compact density floor */
+
+  /* labels — form labels, badge text, row meta. 12 px is the absolute floor for sans. */
+  --text-label:500 0.8125rem/1.35 var(--font-sans);     /* 13 / 18 */
+  --text-label-sm:500 0.75rem/1.35 var(--font-sans);    /* 12 / 16 */
+  --text-eyebrow:600 0.6875rem/1.3 var(--font-sans);    /* 11 / 14 — uppercase + tracking only */
+
+  /* mono — identifiers and measurements */
+  --text-mono:400 0.875rem/1.45 var(--font-mono);       /* 14 / 20 */
+  --text-mono-sm:400 0.8125rem/1.4 var(--font-mono);    /* 13 / 18 */
+  --text-mono-xs:400 0.75rem/1.4 var(--font-mono);      /* 12 / 17 */
+  --text-metric:500 1.75rem/1.1 var(--font-mono);       /* 28 — the big number on an Insights panel */
+  --text-metric-sm:500 1.25rem/1.15 var(--font-mono);   /* 20 */
+
+  /* tracking */
+  --track-display:-0.022em; /* @kind font */ --track-title:-0.014em;--track-body:0em;
+  --track-label:0.005em; /* @kind font */ --track-eyebrow:0.075em;--track-mono:-0.01em;
+
+  /* numeric behaviour: tabular everywhere a number can change in place */
+  --numeric-tabular:tabular-nums; /* @kind other */
+}

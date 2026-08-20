@@ -1,0 +1,34 @@
+/* Charts — panel chrome for the native Insights surface. */
+.u-panel{display:flex;flex-direction:column;gap:var(--space-3);border:1px solid var(--border-default);border-radius:var(--radius-card);background:var(--bg-surface);padding:var(--space-4)}
+.u-panel__head{display:flex;align-items:baseline;gap:var(--space-3)}
+.u-panel__title{font:var(--text-heading-sm);color:var(--text-primary)}
+.u-panel__metric{font:var(--text-mono-xs);letter-spacing:var(--track-mono);color:var(--text-muted);margin-left:auto;text-align:right}
+.u-panel__value{font:var(--text-metric);color:var(--text-primary);font-variant-numeric:tabular-nums;letter-spacing:-0.01em}
+.u-panel__unit{font:var(--text-metric-sm);color:var(--text-muted)}
+.u-panel__sub{font:var(--text-body-xs);color:var(--text-muted)}
+.u-panel__foot{display:flex;gap:var(--space-4);flex-wrap:wrap;align-items:center;border-top:1px solid var(--border-subtle);padding-top:var(--space-2x)}
+.u-panel__legend{display:flex;align-items:center;gap:6px;font:var(--text-mono-xs);letter-spacing:var(--track-mono);color:var(--text-secondary)}
+.u-panel__key{width:14px;height:2px;flex:none;border-radius:1px}
+.u-panel--never{border-style:dashed;border-color:var(--state-never-border)}
+.u-panel__never{border:1px dashed var(--state-never-border);border-radius:var(--radius-md);padding:var(--space-4);color:var(--text-muted);font:var(--text-body-xs);font-style:italic;display:flex;flex-direction:column;gap:var(--space-1)}
+.u-panel__never code{font-style:normal;font:var(--text-mono-xs);color:var(--text-secondary)}
+.u-panel--stale{border-color:var(--warn-border)}
+.u-spark{display:flex;align-items:flex-end;gap:2px;height:34px}
+.u-spark__bar{flex:1;background:var(--viz-1);border-radius:1px;min-height:2px}
+.u-panel__grafana{margin-left:auto;font:var(--text-label-sm)}
+/* Inline SVG chart marks — no charting library. Colour comes from the viz tokens so a series keeps
+   its identity across themes and between panels. */
+.u-spark__svg{width:100%;height:100%;display:block;overflow:visible}
+.u-spark__rect{fill:var(--viz-1)}
+.u-spark__band{fill:var(--viz-band);stroke:none}
+.u-spark__line{fill:none;stroke:var(--viz-1);stroke-width:1.25;vector-effect:non-scaling-stroke}
+.u-spark__never{stroke:var(--viz-never-fired);stroke-width:1;stroke-dasharray:3 3;vector-effect:non-scaling-stroke}
+.u-spark__svg--never{height:12px}
+/* A measured zero says so in hue *and* in words: the two states this panel exists to separate must
+   not be separated by colour alone. */
+.u-panel__value{display:flex;align-items:baseline;gap:var(--space-2x)}
+.u-panel__value--zero{color:var(--viz-zero)}
+.u-panel__zero{font:var(--text-mono-xs);letter-spacing:var(--track-mono);color:var(--text-muted)}
+.u-panel__never-head{display:flex;align-items:center;gap:var(--space-2x)}
+.u-panel__sub--stale{color:var(--warn-text);display:inline-flex;align-items:center;gap:var(--space-1)}
+.u-panel__loading{display:flex;flex-direction:column;gap:var(--space-3)}

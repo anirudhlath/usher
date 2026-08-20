@@ -1,0 +1,70 @@
+/* Feedback — the one problem component at four scales, toasts, confirms, skeletons. */
+.u-problem{display:flex;gap:var(--space-3);border-radius:var(--radius-card);text-align:left}
+.u-problem__icon{flex:none;color:var(--bad-text);margin-top:1px}
+.u-problem__body{display:flex;flex-direction:column;gap:var(--space-2x);min-width:0}
+.u-problem__title{font:var(--text-heading-sm);color:var(--text-primary)}
+.u-problem__detail{font:var(--text-body-sm);color:var(--text-secondary);max-width:60ch;text-wrap:pretty}
+.u-problem__meta{display:flex;gap:var(--space-3);flex-wrap:wrap;font:var(--text-mono-xs);letter-spacing:var(--track-mono);color:var(--text-muted)}
+.u-problem__actions{display:flex;gap:var(--space-2x);flex-wrap:wrap;margin-top:var(--space-1)}
+.u-problem--inline{gap:var(--space-1);color:var(--bad-text);font:var(--text-body-xs);align-items:flex-start}
+.u-problem--panel{border:1px solid var(--bad-border);background:var(--bad-quiet);padding:var(--space-4)}
+/* A panel is the one scale that puts the meta line on a tinted fill: --text-muted measures
+   4.28:1 on --bad-quiet and 4.19:1 on --warn-quiet, against 5.04:1 on --bg-raised where the
+   toast scale puts it. The code / status / instance / retry facts are the operator's evidence,
+   so on a tinted ground they get the next tone up. Toast, inline and page keep the muted tone. */
+.u-problem--panel .u-problem__meta{color:var(--text-secondary)}
+.u-problem--panel-warn{border-color:var(--warn-border);background:var(--warn-quiet)}
+.u-problem--panel-warn .u-problem__icon{color:var(--warn-text)}
+.u-problem--page{flex-direction:column;align-items:center;text-align:center;padding:var(--space-20) var(--space-4);gap:var(--space-4)}
+.u-problem--page .u-problem__detail{max-width:46ch}
+.u-problem--page .u-problem__title{font:var(--text-title);color:var(--text-primary)}
+.u-problem--toast{border:1px solid var(--border-default);background:var(--bg-raised);box-shadow:var(--shadow-3);padding:var(--space-3);min-width:20rem;max-width:26rem}
+.u-toasts{position:fixed;right:var(--space-6);bottom:var(--space-6);z-index:var(--z-toast);display:flex;flex-direction:column;gap:var(--space-2x);max-width:26rem}
+.u-toast{border:1px solid var(--border-default);background:var(--bg-raised);border-radius:var(--radius-card);box-shadow:var(--shadow-3);padding:var(--space-3);display:flex;gap:var(--space-3);align-items:flex-start;animation:u-toast-in var(--dur-base) var(--ease-out)}
+@keyframes u-toast-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.u-toast__body{display:flex;flex-direction:column;gap:var(--space-1);min-width:0;flex:1}
+.u-toast__title{font:var(--text-label);color:var(--text-primary)}
+.u-toast__text{font:var(--text-body-xs);color:var(--text-secondary)}
+.u-toast__key{font:var(--text-mono-xs);letter-spacing:var(--track-mono);color:var(--text-muted);word-break:break-all}
+.u-scrim{position:fixed;inset:0;background:var(--scrim-modal);z-index:var(--z-scrim);display:grid;place-items:center;padding:var(--space-4)}
+.u-dialog{background:var(--bg-raised);border:1px solid var(--border-default);border-radius:var(--radius-sheet);box-shadow:var(--shadow-4);max-width:34rem;width:100%;z-index:var(--z-modal);display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-6)}
+.u-dialog__title{font:var(--text-title-sm);color:var(--text-primary)}
+.u-dialog__body{font:var(--text-body-sm);color:var(--text-secondary);display:flex;flex-direction:column;gap:var(--space-3);text-wrap:pretty}
+.u-dialog__facts{display:grid;grid-template-columns:auto 1fr;gap:var(--space-2x) var(--space-4);border:1px solid var(--border-subtle);border-radius:var(--radius-md);padding:var(--space-3);background:var(--bg-sunken)}
+.u-dialog__k{font:var(--text-eyebrow);letter-spacing:var(--track-eyebrow);text-transform:uppercase;color:var(--text-muted);padding-top:2px}
+.u-dialog__v{font:var(--text-mono-sm);letter-spacing:var(--track-mono);color:var(--text-primary)}
+.u-dialog__foot{display:flex;justify-content:flex-end;gap:var(--space-2x)}
+.u-skel{background:var(--bg-skeleton);border-radius:var(--radius-sm);background-image:var(--gradient-skeleton);background-size:220% 100%;animation:u-sweep var(--dur-shimmer) linear infinite}
+@media (prefers-reduced-motion:reduce){.u-skel{animation:none}}
+.u-skel--text{height:0.75em;border-radius:var(--radius-pill)}
+.u-skel--poster{aspect-ratio:var(--aspect-poster);border-radius:var(--radius-artwork);width:100%}
+.u-skel--backdrop{aspect-ratio:var(--aspect-backdrop);border-radius:var(--radius-artwork);width:100%}
+.u-skel-rail{display:flex;gap:var(--gutter-rail)}
+.u-skel-rail>*{width:var(--card-poster-w);flex:none;display:flex;flex-direction:column;gap:var(--space-2x)}
+.u-skel-table{display:flex;flex-direction:column;gap:1px}
+.u-skel-table__row{display:flex;gap:var(--space-4);align-items:center;min-height:var(--density-row-h);padding:0 var(--density-cell-pad-x)}
+.u-skel-text{display:flex;flex-direction:column;gap:var(--space-2x)}
+.u-skel-hero{display:flex;gap:var(--space-6)}
+.u-skel-hero__poster{width:var(--card-poster-w);flex:none}
+.u-skel-hero__body{display:flex;flex-direction:column;gap:var(--space-3);flex:1;padding-top:var(--space-4)}
+/* Rules the components need that the handoff's reference set as inline styles. Same values,
+   same idiom — a class so nothing in a component carries a literal. */
+.u-problem__errors{margin:0;padding-left:1.1em;font:var(--text-body-xs);color:var(--text-secondary)}
+.u-problem__loc{font:var(--text-mono-xs);letter-spacing:var(--track-mono)}
+/* No `opacity` here. The trace id is a receipt an operator reads and pastes, and an opacity group
+   dims it against whatever is behind — on --bad-quiet in light that made 4.06:1. The mono face and
+   the letter-spacing are what set it apart from the word "Open trace"; it keeps the ghost button's
+   --text-secondary. */
+.u-problem__trace{font:var(--text-mono-xs);letter-spacing:var(--track-mono)}
+.u-toast__icon{flex:none;margin-top:1px}
+.u-toast__icon--info{color:var(--info-text)}
+.u-toast__icon--good{color:var(--good-text)}
+.u-toast__icon--warn{color:var(--warn-text)}
+.u-toast__icon--bad{color:var(--bad-text)}
+.u-toast__text--warn{color:var(--warn-text)}
+/* The 202 key is a receipt an operator pastes into a log search: one click takes all of it. */
+.u-toast__key{user-select:all;-webkit-user-select:all}
+.u-dialog__facts dd{margin:0}
+.u-dialog__typed{font:var(--text-mono-sm);letter-spacing:var(--track-mono)}
+/* An unmeasured duration is prose, not a measurement — §14 keeps mono off prose. */
+.u-dialog__v--unmeasured{font:var(--text-body-sm);font-style:italic;color:var(--text-muted)}
