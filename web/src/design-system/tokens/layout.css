@@ -1,0 +1,21 @@
+/* Layout constants. Breakpoints are the three designed widths: 390 phone, 834 tablet, 1440 desktop. */
+:root{
+  --bp-phone:390px; /* @kind other */ --bp-tablet:834px;--bp-desktop:1440px;
+  --width-content:76rem;        /* 1216 — operator content column at 1440 */
+  --width-prose:40rem;          /* 640 — overview / attribution prose */
+  --width-sidebar:15rem;        /* 240 — operator nav */
+  --width-sidebar-collapsed:3.5rem;
+  --width-drawer:34rem;         /* 544 — developer drawer, docked right */
+  --height-header:3.5rem;       /* 56 */
+  --height-tabbar:3.25rem;      /* 52 — phone bottom nav, + safe area */
+  --gutter-page:var(--space-6);
+  --gutter-page-phone:var(--space-4);
+  --gutter-rail:var(--space-4);         /* carousel card gap */
+  --bleed-rail:var(--gutter-page);      /* carousel peeks past the gutter */
+  --card-poster-w:10.5rem;      /* 168 — portrait rail card at desktop */
+  --card-landscape-w:17.5rem;   /* 280 — landscape / wide rail card */
+  --grid-poster-min:9rem;       /* 144 — browse grid auto-fill floor */
+  --aspect-poster:2/3; /* @kind other */ --aspect-backdrop:16/9;/* @kind other */--aspect-still:16/9;/* @kind other */--aspect-square:1/1;/* @kind other */
+  /* image proxy width ladder — exactly these four, anything else snaps up */
+  --img-w-1:154px; /* @kind other */ --img-w-2:342px;--img-w-3:780px;--img-w-4:1280px;
+}

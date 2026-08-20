@@ -203,7 +203,14 @@ src = ["src", "tests"]
 # them had its fence rewritten by `ruff format --check` the first time it ran.
 # The rules files are evidence — a fence reshaped to satisfy a formatter is a
 # quotation that no longer matches what was measured.
-extend-exclude = ["docs", ".claude"]
+#
+# `web/` is the console, and it is excluded for a different reason from the two
+# above: ruff has nothing to say about TypeScript, but `ruff check .` and
+# `ruff format --check .` both walk `web/node_modules/` — tens of thousands of
+# files, some of them Markdown carrying Python fences from unrelated projects —
+# and would lint a dependency tree this repository does not own. `oxlint` and
+# `prettier` are that directory's gate; `npm run verify` runs them.
+extend-exclude = ["docs", ".claude", "web"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]

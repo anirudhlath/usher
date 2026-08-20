@@ -18,11 +18,11 @@ Four seams, each with a reason:
    a wrapper has to exist -- and the wrapper is where the exception
    translation lives. That matters more here than anywhere else in this
    package: `websockets.exceptions.InvalidURI.__str__` contains the URI, and
-   this channel's URI contains the session token. `EmbySession` interpolates
-   `{exc}` into its own messages and explains why that is safe *there*
-   (httpx exceptions carry a method and a URL, and Usher's own outbound URLs
-   carry no token -- the session rides in the `X-Emby-Token` header). It is
-   not safe here, and nothing but the wrapper stands between the two.
+   this channel's URI contains the session token. `EmbySession` reached the
+   same conclusion from the other end and now shares the spelling: its
+   `failure_detail` names the exception's type and nothing else, because
+   `{exc}` was empty for every httpx timeout (issue #35). Nothing but the
+   wrapper stands between this URI and a message.
 2. **`recv(timeout)` raises `TimeoutError` for "nothing arrived yet"**,
    which the caller treats as a *tick* rather than a failure. That is what
    lets the staleness watchdog run on an injected clock instead of on real
@@ -491,9 +491,7 @@ class EmbyPushChannel:
             #
             # `type(exc).__name__`, never `{exc}`. The connector's own
             # exceptions can carry the URI (`websockets.exceptions.InvalidURI`
-            # does), and that URI carries the session token. `EmbySession`
-            # interpolates `{exc}` and explains why that is safe there;
-            # nothing about that argument transfers to this URL.
+            # does), and that URI carries the session token.
             raise PortUnavailable(
                 f"{WEBSOCKET_PATH} could not be opened: {type(exc).__name__}"
             ) from exc
@@ -617,13 +615,11 @@ class _WebsocketsConnection(PushConnection):
     `f"{self.uri} isn't a valid URI: {self.msg}"` -- read from the installed
     library, not assumed -- and this channel's URI carries the session
     token; `InvalidProxy` has the same shape for a proxy URL, and
-    `InvalidStatus` carries the response. `EmbySession` interpolates `{exc}`
-    into its own messages and explains why that is safe *there* (httpx
-    exceptions carry a method and a URL, and Usher's own outbound URLs carry
-    no token -- the session rides in the `X-Emby-Token` header). Nothing
-    about that argument transfers here, and the difference is the kind of
-    thing a later reader would "unify". Every translation below names the
-    exception's *type* and nothing else.
+    `InvalidStatus` carries the response. Every translation below therefore
+    names the exception's *type* and nothing else -- the same spelling
+    `usher.adapters.http.failure_detail` now gives `EmbySession`, which had
+    interpolated `{exc}` until issue #35 measured that empty for every httpx
+    timeout.
     """
 
     def __init__(self, connection: "ClientConnection") -> None:

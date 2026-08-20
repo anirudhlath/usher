@@ -1,0 +1,203 @@
+/* Semantic aliases. Product code uses ONLY these — never a --n-* or --teal-* directly.
+   Dark is the default theme (this app runs on a TV-adjacent screen). [data-theme="light"] is a
+   complete, equally-supported theme, not a courtesy: operator surfaces get used in daylight. */
+:root{
+  color-scheme:dark;
+
+  /* ---- surfaces ---- */
+  --bg-canvas:var(--n-900);
+  --bg-sunken:var(--n-950);        /* rail troughs, code blocks, table zebra */
+  --bg-letterbox:var(--n-1000);    /* player pillarbox — darker than the app */
+  --bg-surface:var(--n-850);       /* cards, panels, table surface */
+  --bg-raised:var(--n-800);        /* popovers, dropdowns, sheets, hovered rows */
+  --bg-inset:var(--n-950);         /* input wells, meter troughs */
+  --bg-hover:oklch(1 0 0/0.055);
+  --bg-active:oklch(1 0 0/0.09);
+  --bg-selected:var(--teal-900);
+  --bg-skeleton:var(--n-800);
+
+  /* ---- text ---- */
+  --text-primary:var(--n-50);
+  --text-secondary:var(--n-300);
+  --text-muted:var(--n-400);       /* the lowest sanctioned text tone — 4.5:1 on every surface */
+  --text-disabled:var(--n-600);    /* only ever on a disabled control, paired with aria-disabled */
+  --text-accent:var(--teal-400);
+  --text-link:var(--teal-400);
+  --text-link-hover:var(--teal-300);
+  --text-on-accent:var(--n-950);
+  --text-on-solid:var(--n-950);
+  --text-on-danger:var(--n-50);
+  --text-inverse:var(--n-900);
+
+  /* ---- borders ---- */
+  --border-subtle:var(--n-750);    /* decorative dividers */
+  --border-default:var(--n-700);   /* card and panel edges */
+  --border-strong:var(--n-600);    /* emphasis dividers, table header rule */
+  --border-control:var(--n-500);   /* the only border allowed to identify a control — 3:1 */
+  --border-accent:var(--teal-500);
+  --border-focus:var(--teal-400);
+
+  /* ---- accent / interactive ---- */
+  --accent-quiet:var(--teal-800);
+  --accent-quiet-hover:var(--teal-700);
+  --accent-solid:var(--teal-500);
+  --accent-solid-hover:var(--teal-400);
+  --accent-text:var(--teal-400);
+  --focus-ring:0 0 0 var(--ring-offset) var(--bg-canvas),0 0 0 calc(var(--ring-offset) + var(--ring-width)) var(--border-focus);
+  --focus-ring-on-surface:0 0 0 var(--ring-offset) var(--bg-surface),0 0 0 calc(var(--ring-offset) + var(--ring-width)) var(--border-focus);
+  --focus-ring-inset:inset 0 0 0 var(--ring-width) var(--border-focus);
+
+  /* ---- primary action is monochrome ----
+     A play button, a Connect button and a Resolve button are all high-contrast neutral. The teal is
+     reserved for links, focus, selection and the info semantic, so it never competes with a state. */
+  --action-primary-bg:var(--n-50);
+  --action-primary-bg-hover:var(--n-0);
+  --action-primary-text:var(--n-900);
+  --action-secondary-bg:var(--n-800);
+  --action-secondary-bg-hover:var(--n-750);
+  --action-secondary-text:var(--text-primary);
+
+  /* ---- semantic: good / warn / bad / info ----
+     info is deliberately the same hue as the accent: an informational note and a link are the same
+     register of voice. good/warn/bad are three separate hues AND three separate icons AND three
+     separate words — colour is never the only carrier. */
+  --good-text:var(--green-400);--good-solid:var(--green-500);--good-quiet:var(--green-800);--good-border:var(--green-600);
+  --warn-text:var(--amber-400);--warn-solid:var(--amber-500);--warn-quiet:var(--amber-800);--warn-border:var(--amber-600);
+  --bad-text:var(--red-400);--bad-solid:var(--red-600);--bad-quiet:var(--red-800);--bad-border:var(--red-600);
+  --info-text:var(--teal-400);--info-solid:var(--teal-500);--info-quiet:var(--teal-800);--info-border:var(--teal-600);
+
+  /* ---- epistemic states: absent ≠ null ≠ empty ----
+     The API distinguishes "we have never computed this", "we computed this and it is empty", and
+     "this does not apply". Three tokens, three treatments, never one grey dash.
+       never   — dashed hairline + muted italic sentence. The value has never been computed.
+       empty   — solid hairline + muted sentence. Computed, genuinely nothing there.
+       n/a     — no border, no fill, em dash. Not applicable to this kind of title.
+       stale   — amber hairline. Computed, but the inputs changed since (similar.stale).
+     All four sentences are real content, so all four sit at --text-muted, the lowest tone §12
+     permits for prose. n/a used to be --text-disabled, which measured 2.73:1 dark / 2.18:1 light
+     on the canvas and broke §12's own rule that the disabled tone appears only on an
+     aria-disabled control. The em dash and the missing border are what distinguish it; the
+     tone never was. */
+  --state-never-border:var(--n-600);
+  --state-never-text:var(--text-muted);
+  --state-never-bg:transparent;
+  --state-empty-border:var(--border-default);
+  --state-empty-text:var(--text-muted);
+  --state-empty-bg:var(--bg-sunken);
+  --state-na-text:var(--text-muted);
+  --state-stale-border:var(--warn-border);
+  --state-stale-text:var(--warn-text);
+  --state-stale-bg:var(--warn-quiet);
+
+  /* ---- enrichment tiers — skeleton is the majority of 1.27M titles, so it reads legitimate ---- */
+  --tier-skeleton-text:var(--text-muted);--tier-skeleton-bg:var(--n-800);
+  --tier-stub-text:var(--text-secondary);--tier-stub-bg:var(--n-750);
+  --tier-enriched-text:var(--good-text);--tier-enriched-bg:var(--good-quiet);
+  --tier-failed-text:var(--bad-text);--tier-failed-bg:var(--bad-quiet);
+
+  /* ---- ownership: owned copy vs catalog-only vs remembered-but-missing ---- */
+  --owned-mark:var(--good-text);
+  --unowned-opacity:0.55; /* @kind other */ /* dimmed collection members, un-owned neighbours */
+  --missing-mark:var(--warn-text); /* availability.available === false */
+
+  /* ---- progress / watch state ---- */
+  --progress-track:oklch(1 0 0/0.22);
+  --progress-fill:var(--n-0);
+  --progress-played:var(--good-text);
+  --progress-height:3px; /* @kind other */
+
+  /* ---- live / SSE ---- */
+  --live-connected:var(--good-text);
+  --live-idle:var(--text-muted);     /* quiet is healthy */
+  --live-reconnecting:var(--warn-text);
+  --live-off:var(--text-disabled);
+  --live-patch-flash:oklch(0.78 0.13 195/0.20);
+
+  /* ---- data visualisation ---- */
+  --viz-1:var(--viz-blue-dark);--viz-2:var(--viz-orange-dark);--viz-3:var(--viz-green-dark);
+  --viz-4:var(--viz-magenta-dark);--viz-5:var(--viz-yellow-dark);--viz-6:var(--viz-cyan-dark);
+  --viz-7:var(--viz-violet-dark);--viz-8:var(--viz-brick-dark);
+  --viz-grid:var(--n-750);
+  --viz-axis:var(--n-600);
+  --viz-axis-text:var(--text-muted);
+  --viz-threshold:var(--warn-border);
+  --viz-threshold-critical:var(--bad-border);
+  --viz-annotation:var(--teal-600);
+  --viz-p50:var(--viz-blue-dark);--viz-p95:var(--viz-orange-dark);--viz-p99:var(--viz-magenta-dark);
+  --viz-band:oklch(0.68 0.13 250/0.18);   /* p50–p95 band fill */
+  --viz-never-fired:var(--n-750);         /* a metric that has never produced a sample */
+  --viz-zero:var(--n-500);                /* a real, measured zero */
+}
+[data-theme="light"]{
+  color-scheme:light;
+  --bg-canvas:var(--n-50);
+  --bg-sunken:var(--n-100);
+  --bg-letterbox:var(--n-1000);
+  --bg-surface:var(--n-0);
+  --bg-raised:var(--n-0);
+  --bg-inset:var(--n-100);
+  --bg-hover:oklch(0.235 0.008 60/0.045);
+  --bg-active:oklch(0.235 0.008 60/0.08);
+  --bg-selected:var(--teal-50);
+  --bg-skeleton:var(--n-150);
+
+  --text-primary:var(--n-800);
+  --text-secondary:var(--n-600);
+  --text-muted:var(--n-500);
+  --text-disabled:var(--n-350);
+  --text-accent:var(--teal-600);
+  --text-link:var(--teal-600);
+  --text-link-hover:var(--teal-700);
+  --text-on-accent:var(--n-0);
+  --text-on-solid:var(--n-0);
+  --text-on-danger:var(--n-0);
+  --text-inverse:var(--n-50);
+
+  --border-subtle:var(--n-150);
+  --border-default:var(--n-200);
+  --border-strong:var(--n-350);
+  --border-control:var(--n-400);
+  --border-accent:var(--teal-600);
+  --border-focus:var(--teal-600);
+
+  --accent-quiet:var(--teal-50);
+  --accent-quiet-hover:var(--teal-100);
+  --accent-solid:var(--teal-600);
+  --accent-solid-hover:var(--teal-700);
+  --accent-text:var(--teal-600);
+
+  --action-primary-bg:var(--n-800);
+  --action-primary-bg-hover:var(--n-900);
+  --action-primary-text:var(--n-50);
+  --action-secondary-bg:var(--n-0);
+  --action-secondary-bg-hover:var(--n-100);
+  --action-secondary-text:var(--text-primary);
+
+  --good-text:var(--green-600);--good-solid:var(--green-600);--good-quiet:var(--green-50);--good-border:var(--green-600);
+  --warn-text:var(--amber-600);--warn-solid:var(--amber-600);--warn-quiet:var(--amber-50);--warn-border:var(--amber-600);
+  --bad-text:var(--red-600);--bad-solid:var(--red-600);--bad-quiet:var(--red-50);--bad-border:var(--red-600);
+  --info-text:var(--teal-600);--info-solid:var(--teal-600);--info-quiet:var(--teal-50);--info-border:var(--teal-600);
+
+  --state-never-border:var(--n-400);
+  --state-empty-border:var(--border-default);
+  --state-empty-bg:var(--bg-sunken);
+
+  --tier-skeleton-text:var(--text-muted);--tier-skeleton-bg:var(--n-100);
+  --tier-stub-text:var(--text-secondary);--tier-stub-bg:var(--n-150);
+  --tier-enriched-text:var(--good-text);--tier-enriched-bg:var(--good-quiet);
+  --tier-failed-text:var(--bad-text);--tier-failed-bg:var(--bad-quiet);
+
+  --progress-track:oklch(0.235 0.008 60/0.18);
+  --progress-fill:var(--n-800);
+  --live-patch-flash:oklch(0.52 0.115 195/0.14);
+
+  --viz-1:var(--viz-blue-light);--viz-2:var(--viz-orange-light);--viz-3:var(--viz-green-light);
+  --viz-4:var(--viz-magenta-light);--viz-5:var(--viz-yellow-light);--viz-6:var(--viz-cyan-light);
+  --viz-7:var(--viz-violet-light);--viz-8:var(--viz-brick-light);
+  --viz-grid:var(--n-150);
+  --viz-axis:var(--n-350);
+  --viz-p50:var(--viz-blue-light);--viz-p95:var(--viz-orange-light);--viz-p99:var(--viz-magenta-light);
+  --viz-band:oklch(0.52 0.16 250/0.14);
+  --viz-never-fired:var(--n-200);
+  --viz-zero:var(--n-400);
+}

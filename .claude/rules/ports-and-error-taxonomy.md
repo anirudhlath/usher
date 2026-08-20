@@ -21,6 +21,153 @@ lives in, and nothing loaded when you wrote a *new* adapter's translation. The
 subsystem files keep their per-upstream tables; this one holds the rules that
 are true of all of them.
 
+## `f"…: {exc}"` is an empty message for every httpx timeout, and the common path through a transport handler is the empty one
+
+**Found 2026-08-19 on a live deployment against a real Emby 4.9.5.0 (issue
+#35), and measured against httpx 0.28.1 rather than reasoned about.** A
+`watch_state` sync ran **57 minutes**, walked **121,000 items**, failed, and
+the whole of `sync_runs.error` was:
+
+```
+GET /Users/{id}/Items failed:
+```
+
+The message ended at the colon. `str(exc)` was the entire payload.
+
+**The emptiness is a property of the wrapping, not of any one class**, which
+is what makes it a rule rather than five special cases.
+`httpcore.map_exceptions` re-raises as `to_exc(exc)` around **the object it
+caught** — a bare `TimeoutError()` for every timeout, an
+`anyio.EndOfStream()` for a read error, both of which stringify to `""` — and
+httpx's `map_httpcore_exceptions` then re-raises with `message = str(exc)`.
+So a `TimeoutException` subclass added by a later httpx will be empty too.
+
+Provoked against real sockets, one row per way it was provoked:
+
+| how it was provoked | class | `str(exc)` |
+|---|---|---|
+| a server that accepts and never answers | `ReadTimeout` | `''` |
+| the blackholed TEST-NET-1 address `192.0.2.1` | `ConnectTimeout` | `''` |
+| a pool of one with a request already in flight | `PoolTimeout` | `''` |
+| `httpcore.ReadError(anyio.EndOfStream())`, the wrapping shown directly | `ReadError` | `''` |
+| TCP abort after the request | `RemoteProtocolError` | `'Server disconnected without sending a response.'` |
+| a garbage status line | `RemoteProtocolError` | `"illegal status line: bytearray(b'NOT-HTTP')"` |
+| a body cut short of `Content-Length` | `RemoteProtocolError` | `'peer closed connection without sending complete message body …'` |
+| nothing listening on the port | `ConnectError` | `'All connection attempts failed'` |
+| a closed `httpx.AsyncClient` | `RuntimeError` | `'Cannot send a request, as the client has been closed.'` |
+
+⚠️ **Two rows refute the issue that reported this**, which listed
+`RemoteProtocolError` among the empty five: it carries h11's own text in all
+three ways it could be provoked here, and so does `ConnectError`. The empty
+family is the **timeouts plus `ReadError`/`WriteError`** — which is still the
+common path, because a timeout is what an unreachable or overloaded upstream
+produces and a protocol error is not.
+
+**`usher.adapters.http.failure_detail` is the one definition**, and the
+`type(exc).__name__` half of it was already spelled inline at five sites
+(`EmbyPushChannel` twice, `TmdbClient`, `OpenAICompatibleClient`, the
+embedding client, `TmdbImageProvider`) before `EmbySession` and the two bulk
+adapters were found still interpolating `{exc}`. It adds the **timeout budget**,
+recovered rather than invented: `build_request` writes
+`extensions["timeout"]` from the client default *or* from a per-request
+`timeout=` kwarg, and httpx sets `.request` on every `RequestError`, so
+`ReadTimeout after 30.0s (read budget)` is available at the handler with no
+new plumbing. That is the fact an operator acts on — whether to raise
+`USHER_SOURCE_TIMEOUT_SECONDS` or go and look at the network — and the empty
+message answered neither.
+
+**Reading it needs four guards, because it runs while formatting an
+exception message.** `RequestError.request` is a property that *raises*
+`RuntimeError` when unset rather than answering `None`; `RuntimeError` and
+`CookieConflict`/`InvalidURL` have no `.request` attribute at all;
+`extensions` is caller-supplied; and a transport may put a non-number under
+`timeout`. A guard that missed would replace a recorded sync failure with an
+unrelated crash — strictly worse than the empty message.
+
+**What the fix gives up, deliberately: `str(exc)` where it was non-empty.**
+`RemoteProtocolError`'s h11 text is genuinely informative and is now lost.
+It is not worth keeping, because httpx's messages belong to a third party
+and nothing promises what a later version puts in one — which is the reason
+`TmdbClient` and `OpenAICompatibleClient` excluded `str(exc)` in the first
+place, `Settings.tmdb_base_url` and `Settings.llm_base_url` both being URLs
+an operator may point at a provider carrying a token in a path segment.
+
+**The general shape, which is the reason this is filed here rather than in
+`emby-push-and-ingest.md`: an error path's payload has a *common* case and a
+*flattering* case, and the one that gets read at review time is the
+flattering one.** `HTTPStatusError` and `InvalidURL` carry text, which is
+presumably why `{exc}` read as adequate for three milestones. Ask which
+member of the caught tuple actually fires in production — the same question
+the alarm-rate rule below asks about a *type* — and check that one's payload,
+not the tuple's best member.
+
+## "Carries no credential" is not the same test as "carries no identifier", and the weaker one was written down and believed for three milestones
+
+**Found 2026-08-19 alongside the entry above, and it cost more than that one
+did.** `EmbySession.decode_json` justified interpolating the request path
+into both an exception message and its RFC 9457 `detail` like this:
+
+> the request path is both the subject of the message and its `detail`,
+> which is safe because **an Emby URL carries no credential**
+
+Every word of that is true. It is also not the test that was owed.
+`CLAUDE.md`'s live-verification rule lists four things — *"a credential, a
+token, **a user id** or a host"* — and the sentence above checks exactly one
+of them. Emby's routes are all under `/Users/{userId}/`, so **every message
+this session raised carried the household's Emby user id**: into
+`sync_runs.error`, into a CLI line, and — via `SourceStatus.detail`, which is
+`str(exc)` on `GET /admin/sources/{id}/status` — into an RFC 9457 body.
+
+🔴 **The cost was realised, not hypothetical.** The bug report for the empty
+message pasted a real `sync_runs.error` row, so a live user id was published
+on a public repository. Editing the issue would not have undone it — GitHub's
+issue-body edit history is public — so #33 was deleted and refiled as **#35**.
+
+**The repair is `redact_path`, and three of its choices are the transferable
+part:**
+
+- **It classifies by a closed vocabulary of *route words*, never by the shape
+  of an id.** "32 hex characters is a GUID" is a guess about one server
+  build; an `external_id` is whatever the source last called an item, and
+  this adapter has already been surprised twice by a live Emby's id spellings
+  (`ProviderIds` casing, `MediaSourceId`'s own namespace). The set of words
+  the adapter *issues* is something this project controls.
+- **The default is to redact, so a stale vocabulary loses a word rather than
+  an id** — and the route root is kept regardless, on the asserted premise
+  that no route this adapter issues begins with an identifier, because
+  without that exception an unlearned path collapses to `{id}` and the
+  redaction becomes the second blindfold it exists not to be.
+- **It is a redaction, not a blindfold.** `/Users/{user_id}/Items` still
+  reads differently from `/Users/{user_id}/Items/{item_id}` and from
+  `/Users/{user_id}/PlayedItems/{item_id}`. A message saying only "a request
+  failed" trades one missing fact for another, which is the same failure as
+  the empty message in the entry above.
+
+**The vocabulary and the issued routes must move together**, so the case that
+guards it does not transcribe a table: it drives the real `EmbyAdapter`
+against `FakeEmbyServer` through a recording transport, reads the paths **off
+the wire**, and pins the redacted set. Its control asserts the raw recording
+genuinely contains both ids first — a redaction checked against a recording
+that never held one passes trivially.
+
+**Where it lives, and the argument for not sharing it.** In
+`adapters/emby/session.py`, not beside `failure_detail` in
+`usher.adapters.http`, because the vocabulary is Emby's own words and PRD 01's
+rule is that no source-specific concept escapes its adapter. Checked rather
+than assumed for the neighbours: TMDb's paths are `/movie/{tmdb_id}`,
+`/tv/{tmdb_id}`, `/search/movie` and `/tv/changes` — a public catalog id
+Usher's own API already returns as an attribute, and the key travels in
+`params` or an `Authorization` header, never in the interpolated `path` — and
+the bulk adapters interpolate a **public dataset URL** with no account in it.
+Neither shares this defect.
+
+**The general form: an error path's redaction argument names the thing its
+author was afraid of and stops there.** When a comment justifies
+interpolating something by naming *one* class of secret it does not contain,
+read the project's own list of what must never be logged and check the
+sentence against all of it. The gap survives review precisely because the
+sentence carrying it is true.
+
 ## A refusal and a fault raised as the same type are indistinguishable to every consumer downstream, and the commonest one sets the alarm rate
 
 **Found 2026-08-11 in M9's image proxy, and it is a rule about naming rather

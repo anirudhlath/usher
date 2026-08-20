@@ -123,6 +123,70 @@ curl -sf http://localhost:8100/health/ready  # adds database + migration state,
                                              # and reports the background lanes
 ```
 
+Then open **<http://localhost:8100/>**, which redirects to the console.
+
+## Usher Console
+
+The web client ships in this repository, in `web/`, and is served by the same
+process as the API — one container, one origin, no reverse proxy. It has two
+halves for the same person: a **viewer** for browsing, searching and playing,
+and an **operator** console for connecting a media server, running imports,
+draining the review queue and reading metrics.
+
+It lives at **`/console`** rather than at `/`, and that is not a preference.
+All seventeen routers are mounted with no prefix, so the API already owns
+`/titles`, `/search`, `/home`, `/browse`, `/admin`, `/stream` and thirteen more
+root segments — a client-side route for a title detail page would collide with
+the operation that answers it. Giving the API an `/api` prefix instead would be
+a breaking change to a public contract for the benefit of the client generated
+from it. Plex and Emby both put their web app on a subpath for the same reason.
+`GET /` redirects, so the bare host still works.
+
+**What serving it in-process buys, beyond one fewer container.** Usher mints
+playback ticket URLs from the incoming `Host` header and ships no CORS
+middleware. The previous client ran behind its own nginx rewriting `/api/*` to
+`/*`, and a proxy that dropped the port from that header produced ticket URLs
+pointing at a different service — invisibly, because a browser re-issues them
+same-origin and only an external player following the `deep_link` ever noticed.
+With no proxy there is no header to get wrong and no origin to allow.
+
+Two settings, both optional, both `null` by default and both rendered as
+*absent* rather than as a dead link when unset: `USHER_GRAFANA_URL` for the
+Insights screen's "Open in Grafana", and `USHER_TEMPO_URL` for the "Open trace"
+link on a failed request. Neither is proxied through Usher; the browser follows
+them directly. `USHER_CONSOLE_ENABLED=false` turns the whole thing off, which is
+the right answer for a worker-only container or a household running its own
+client.
+
+### Developing it
+
+```bash
+cd web
+npm ci
+npm run dev          # Vite on :5173, proxying the API to $USHER_ORIGIN (default :8100)
+npm run verify       # typecheck, lint, format, unit tests, production build
+npm run e2e          # Playwright at 1440 / 834 / 390, with an axe sweep at each
+```
+
+The design system it implements is a handoff bundle: tokens, 28 components in
+ten groups, and 18 screens. `web/CONVENTIONS.md` is the contract between that
+bundle and this codebase, and `web/docs/patterns.md` is the behavioural
+authority — fifteen sections of redlines covering loading, the four absent
+states, the seven-code error taxonomy, keyset pagination, confirms, 202
+receipts, live data, cursor progress, keyboard, density, responsive,
+accessibility and security. Read it before changing a screen.
+
+Three of its rules are correctness rules rather than style, and are the ones
+most likely to be lost: **the UI never lies about what it knows** ("we have
+never computed this" is drawn differently from "we computed this and it is
+empty"); **no number ships without its denominator**, which is why bootstrap
+progress is a cursor and a throughput and never a percentage; and **a playback
+ticket URL is a secret** — never displayed, copied, shared or logged.
+
+A backend checkout with no `npm run build` is a normal state. The app logs the
+missing bundle once and serves the API alone, so `uv run pytest` never needs
+node.
+
 `USHER_SECRET_KEY` is the one value you must fill in: `.env.example` ships it
 empty, it has no default, and compose refuses to start without it. It encrypts
 stored source credentials, so changing it later makes existing ones unreadable
@@ -301,6 +365,20 @@ whole library unavailable in one run
 ([ADR-0015](docs/prd/decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)).
 Only use it for a library the operator really did remove.
 
+⚠️ **A new source needs this command once, and that is deliberate.** With the
+push lane on (the default) the running server holds a channel per source and
+closes the gap after a reconnect with a *delta* walk — but a delta resumes from
+your last completed walk, and a source that has never had one has nothing to
+resume from, so that "delta" would read **every item your server has**. Usher
+will not do that to a media server on its own: it logs a warning naming the
+source and pointing back here, and waits for you to run `usher sync`. Once one
+walk has completed, every later reconnect takes the small delta it was designed
+to take. `USHER_PUSH_GAP_CLOSE` is the switch — `always` restores the old
+behaviour (still warning first), `never` turns gap-closing walks off entirely,
+at the cost of not seeing what changed while a socket was down until your next
+sync. Full reasoning in
+[08 — Operations](docs/prd/08-operations.md#starting-the-app-is-not-a-command-to-walk-your-library).
+
 **Inspect and repair**
 
 ```bash
@@ -355,10 +433,42 @@ uv run usher derive             # cached payloads, titles with credits, people, 
 uv run usher derive --backfill  # walk the cache and re-derive inline; idempotent
 ```
 
+`usher genres` normalises `titles.genres` into Usher's own vocabulary
+([ADR-0039](docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)).
+The column is written by two importers that share no alphabet — IMDb's bulk
+phase writes `Sci-Fi`, TMDb's enrichment writes `Science Fiction` — and
+`usher.domain.genres` is the map between them. `/browse` expands the two at
+read time; this rewrites the column, which is what also fixes
+`search_document`'s weight class D, the embedded documents and every row
+provider that reads the raw array.
+
+**It is a command rather than a migration because the vocabulary is data.** It
+will grow, `canonicalise_genres` is idempotent, and re-running is free: the
+write is guarded by `IS DISTINCT FROM`, so a second sweep over a normalised
+catalog reports zero rows. The bare form only reads.
+
+```bash
+uv run usher genres                            # rows scanned / to rewrite / already canonical
+uv run usher genres --backfill                 # rewrite, batched; prints a resume cursor
+uv run usher genres --backfill --batch-size 5000
+uv run usher genres --backfill --limit 100000  # bounded; resume with --after <id>
+uv run usher genres --backfill --after 01a01b35-3380-77e4-909a-9588c7b1056d
+```
+
+Rewriting a genre changes segment 6 of the embedding document, so
+`_FINGERPRINT_SQL` restales exactly the affected titles and the report says how
+many. **Expect that number to be far smaller than the rewrite count**: the
+embedded population is the enriched tier and the source spellings are almost
+entirely on skeletons. Measured on a 1,272,869-title catalog: **79,913 rows
+rewritten, 304 embeddings staled.** Follow it with `usher index --backfill`,
+`usher work`, and — if you keep `title_neighbors` — `usher similar --rebuild`.
+
 **Order matters after a fresh upgrade**: `alembic upgrade head` → `usher derive
---backfill` → `usher index --backfill` → `usher work`. Indexing before deriving
-embeds every title with an empty weight class B and then re-claims all of them
-once `credit_names` is populated, which is the wasted pass twice over.
+--backfill` → `usher genres --backfill` → `usher index --backfill` → `usher
+work`. Indexing before deriving embeds every title with an empty weight class B
+and then re-claims all of them once `credit_names` is populated, which is the
+wasted pass twice over; normalising after indexing re-claims the affected
+titles a second time for the same reason.
 
 Embedding is optional and off by default. The model lives behind an extra
 (`uv sync --extra embedding`, 167 MiB, no torch) and `USHER_EMBEDDING_ENABLED`
@@ -370,7 +480,12 @@ and trigram still serve the whole catalog. `usher index` itself loads no model
 route — the CLI delivered the whole capability, exactly as `bootstrap` and the
 ingest commands do. **M9 shipped the routers** (`GET /search`,
 `GET /search/suggest?tier=`) and the CLI is still the second composition root
-rather than a thin client of them: both build the same `SearchService`.
+rather than a thin client of them: both build the same `SearchService`. **They
+also now build it the same way** — the server keeps one embedding model per
+process and `GET /search?mode=semantic` uses it, so the route and the command
+answer the same question with the same lanes (issue #31). Until that landed
+the HTTP surface was lexical-only on every deployment however it was
+configured, and only `usher search` could reach the vector lane.
 
 ```bash
 uv run usher search "the quiet vacuum"                 # hybrid by default
@@ -382,7 +497,12 @@ uv run usher suggest "the quie" --limit 5              # type-ahead, typo-tolera
 
 **`usher search` prints `semantic_coverage` on every run, not only when it is
 low**, and that line is the reason the command has a human-readable mode at
-all. A `--mode fused` search against a catalog with no embeddings degrades to
+all. ⚠️ **Read it as *"has the backfill drained?"*, not as *"how much of my
+catalog can the vector lane see?"*** — its denominator is the enriched tier,
+which excludes the skeleton titles nothing ever embeds, while the lexical lane
+searches them anyway. On the catalog this project measures, 130,720 vectors
+over ~130,647 enriched titles prints `1.000` against 1,271,138 rows in
+`titles`. A `--mode fused` search against a catalog with no embeddings degrades to
 full-text — correctly, because a title with no vector is *absent from the
 semantic candidate list* rather than ranked last — and the result looks
 exactly like a working hybrid search: no error, no empty result, no log line.
@@ -432,10 +552,15 @@ including the ones that failed; an unreachable endpoint or an unusable answer
 leaves the search to run on the words you typed **and is still billed**, so an
 absent `expanded:` line says nothing about whether money was spent.
 
-⚠️ **Run `usher index --backfill` before turning it on.** The guard in front of
-the completion is *"this deployment has an embedding model"*, not *"anything is
-actually embedded"* — so with a model installed and nothing indexed yet, every
-fused search buys a rewrite and then reports `semantic_coverage=0.000`.
+✅ **The guard in front of the completion asks whether the semantic lane can
+*answer*, not merely whether a model exists** (issue #16). It used to be
+*"this deployment has an embedding model"*, so with a model installed and
+nothing indexed yet every fused search bought a rewrite and *then* reported
+`semantic_coverage=0.000` — the warning arriving after the money. It is now
+the coverage of the request's own filtered population, measured before the
+embed, so a not-yet-backfilled deployment spends nothing. Running `usher index
+--backfill` first is still the right order; it is no longer something you are
+billed for forgetting.
 
 Every `SearchFilters` field has a flag and no filter has two, which is
 deliberate: an engine that cannot express a filter raises rather than ignoring

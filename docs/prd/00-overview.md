@@ -45,7 +45,17 @@ client against, with no client ever needing to know Emby exists.
 
 - **Not a media server.** Usher does not transcode, stream, or manage files.
   Playback is delegated to a source or a player.
-- **Not a UI.** Reference clients may follow; they are separate projects.
+- **Not a UI framework.** Usher ships exactly one client — **Usher Console**,
+  in `web/`, served by this process at `/console` — and it is a consumer of the
+  HTTP contract like any other, generated from `/openapi.json` and holding no
+  private route. ⚠️ **This non-goal read "Not a UI. Reference clients may
+  follow; they are separate projects" until 2026-08-19, and the second half was
+  true for nine milestones.** What changed the call was not ambition: a
+  self-hosted product whose only interface is `curl` is not one, and a client
+  in a second repository could not be shipped, versioned or tested with the API
+  it generates from. The boundary the non-goal was protecting still holds and
+  is now structural — no route exists for the console that does not exist for
+  everyone, and `USHER_CONSOLE_ENABLED=false` is a supported deployment.
 - **Not multi-tenant.** Designed for a household. User records exist so watch
   state and taste are per-person, not so it can be run as a service.
 - **Not collaborative filtering.** With household-scale usage there is no

@@ -554,3 +554,29 @@ is three read-only measurements — the `>= 1` rate over *distinct* tags, the
 empty-overlap share at whatever threshold clears, and whether TF-IDF over the
 tag strings or an embedding of the joined tag text puts the median firing pair
 above zero — and no build.
+
+## Every row provider here reads the split genre vocabulary, and none of them was fixed
+
+`titles.genres` unions two importers' vocabularies and zero of 1,272,866 titles
+carry both spellings of any concept (2026-08-19,
+[ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)).
+That ADR fixed `/browse`'s filter and facets at read time and reached **none**
+of `GenreAffinityProvider`, `TasteService`, `CurationPool`,
+`BecauseYouWatched`, `Seasonal` or `SimilarityService` — all six read the raw
+column, and `TitleRepository.list_owned_by_tag` is deliberately still exact
+containment. So `library_genre_counts()` still offers a household two shelves
+for one concept, and a `Sci-Fi` shelf cannot reach an enriched title.
+
+**Effect size unmeasured, and the denominator is why**: this household owns 180
+titles, which is too few to say anything, and the honest version of the
+question is a catalog-scale sample rather than a live A/B.
+
+⚠️ **The similarity Jaccard term is the one to watch.** `_jaccard(seed.genres,
+candidate.genres)` scores a skeleton science-fiction film against an enriched
+one at a hard **0** while both are science fiction, and cannot tell that from
+"we do not know either one's genres" — the exact ambiguity this file already
+records for the tag term. It costs nothing **today** because `_POPULATION`
+excludes skeletons, so both sides of every stored pair speak TMDb's vocabulary.
+It becomes real the moment the embedded population widens past the enriched
+tier. That is a trap that is not sprung, written down as unsprung on purpose:
+whoever widens `_POPULATION` owns this term.

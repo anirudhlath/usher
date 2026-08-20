@@ -479,17 +479,15 @@ async def test_all_four_routes_are_in_the_openapi_document_with_real_shapes(
     ):
         operation = paths[path][method]
         assert set(operation["responses"]) >= {"200", "404", "422"}, (path, method)
-        # 🔴 `application/json`, not `application/problem+json`, and that is the
-        # known-wrong half. The wire really answers `application/problem+json`
-        # (`api/errors.py`); FastAPI renders a `{"model": ProblemResponse}`
-        # declaration under the route's own response media type, so
-        # `/openapi.json` describes the schema at the wrong key. H2 measured it
-        # and reported it rather than fixing it, precisely because **this
-        # assertion and its twin in `test_api_watch.py` are what a fix would
-        # fork.** Read here so the cost is visible at the site that has to
-        # change: spelling the media type in means editing both, not one config
-        # line. See `tests/unit/test_api_openapi.py`'s module docstring.
-        schema = operation["responses"]["404"]["content"]["application/json"]["schema"]
+        # The two media types differ on purpose and that is the assertion: the
+        # 404 is `PROBLEM_MEDIA_TYPE` and the 200 is `application/json` on the
+        # same operation, which is what a generated client needs in order to
+        # branch. It was `application/json` on both until issue #6 was taken --
+        # FastAPI renders a `{"model": ProblemResponse}` declaration under the
+        # *route's* response media type -- and `api/app.py`'s
+        # `UsherAPI.openapi` corrects it in a post-pass. This assertion and its
+        # twin in `test_api_playback.py` are the fork H2 named as the cost.
+        schema = operation["responses"]["404"]["content"][PROBLEM_MEDIA_TYPE]["schema"]
         assert schema["$ref"].endswith("ProblemResponse"), (path, method)
         assert operation["responses"]["200"]["content"]["application/json"]["schema"][
             "$ref"

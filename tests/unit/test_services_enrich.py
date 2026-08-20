@@ -181,6 +181,59 @@ async def test_a_field_the_provider_did_not_supply_is_left_alone(
     assert stored.enrichment_state is EnrichmentState.ENRICHED
 
 
+async def test_a_genre_the_provider_s_vocabulary_cannot_express_survives_enrichment(
+    service: EnrichService, titles: FakeTitleRepository
+) -> None:
+    """**Issue #30's larger half, and it is measured rather than inferred.**
+    `genres` is in `_ENRICHABLE`, so a provider that supplies any genre at all
+    replaced the whole array -- and IMDb's `Biography`, `Film-Noir`,
+    `Game-Show`, `Musical`, `Short`, `Sport` and `Adult` have **no TMDb
+    equivalent in either id space**, so enrichment did not re-spell them, it
+    deleted them.
+
+    Measured against the real `title.basics.tsv.gz` and the live catalog on
+    2026-08-19: of 132,116 enriched titles the dump also gives genres for,
+    **53,724 (40.7%) lost at least one IMDb label** -- 69,160 deletions, of
+    which **11,466** are of a concept TMDb cannot express. `Film-Noir` was
+    deleted 827 times and survived **0**. The control is what makes it the
+    enrichment boundary and not something else: **0 of 1,021,623** skeletons
+    lost a label.
+
+    `Sci-Fi` is the distractor and it must *not* survive: TMDb's `Science
+    Fiction` is the same concept in the canonical vocabulary, so keeping both
+    would give one title two spellings of one thing -- exactly what the read
+    side is entitled to assume no title carries.
+    """
+    title = await _given(
+        titles,
+        state=EnrichmentState.SKELETON,
+        genres=("Biography", "Film-Noir", "Sci-Fi"),
+    )
+
+    await service.enrich(title.id)
+
+    stored = await titles.get(title.id)
+    assert stored is not None
+    assert stored.genres == ("Drama", "Thriller", "Biography", "Film-Noir")
+
+
+async def test_a_provider_that_supplied_no_genre_at_all_still_blanks_nothing(
+    service: EnrichService, titles: FakeTitleRepository, provider: FakeMetadataProvider
+) -> None:
+    """The pre-existing rule this change must not disturb: `_changes` skips an
+    empty tuple, so a payload with no genres leaves every label alone --
+    including the ones TMDb *could* have expressed. 1,581 of the live
+    catalog's enriched titles are in exactly that state."""
+    title = await _given(titles, state=EnrichmentState.SKELETON, genres=("Sci-Fi", "Biography"))
+    provider.return_partial()
+
+    await service.enrich(title.id)
+
+    stored = await titles.get(title.id)
+    assert stored is not None
+    assert stored.genres == ("Sci-Fi", "Biography")
+
+
 async def test_the_service_commits_what_it_wrote(
     service: EnrichService, titles: FakeTitleRepository, commits: list[int]
 ) -> None:

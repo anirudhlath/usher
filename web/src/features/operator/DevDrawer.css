@@ -1,0 +1,222 @@
+/* Developer drawer — 544 px docked right, a full-screen sheet at phone width.
+   Written in the design system's own idiom (plain CSS over semantic tokens)
+   rather than in Tailwind utilities, and with no numeric z-index anywhere:
+   `--z-devdrawer` is 700 and sits **above** `--z-modal` at 410 on purpose. */
+
+.u-devdrawer {
+  position: fixed;
+  inset-block: 0;
+  right: 0;
+  width: min(var(--width-drawer), 100%);
+  z-index: var(--z-devdrawer);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-raised);
+  border-left: 1px solid var(--border-default);
+  box-shadow: var(--shadow-4);
+
+  /* Closed: off-canvas rather than `display: none`, so opening it animates and
+     so the journal it holds is not remounted on every toggle. `inert` is what
+     takes its controls out of the tab order — see the component. */
+  transform: translateX(101%);
+  transition: transform var(--dur-sheet) var(--ease-emphasis);
+}
+.u-devdrawer[data-open] {
+  transform: none;
+}
+
+/* At 390 it is a full-screen sheet. The boundary is the phone breakpoint, so
+   834 still gets the 544 px docked drawer. */
+@media (max-width: 833px) {
+  .u-devdrawer {
+    width: 100%;
+  }
+}
+
+.u-devdrawer__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2x);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  flex: none;
+}
+.u-devdrawer__title {
+  font: var(--text-heading-sm);
+  color: var(--text-primary);
+}
+.u-devdrawer__hint {
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-muted);
+}
+.u-devdrawer__close {
+  margin-left: auto;
+}
+
+.u-devdrawer__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 var(--space-3) var(--space-4);
+}
+
+.u-devdrawer__list {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.u-devdrawer__list > li + li {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.u-devdrawer__entry {
+  appearance: none;
+  border: none;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  background: none;
+  padding: 4px var(--space-2x);
+  display: flex;
+  gap: var(--space-2x);
+  align-items: center;
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+}
+.u-devdrawer__entry:hover {
+  background: var(--bg-hover);
+}
+.u-devdrawer__entry[aria-current='true'] {
+  background: var(--bg-selected);
+}
+.u-devdrawer__t {
+  color: var(--text-muted);
+  flex: none;
+  font-variant-numeric: var(--numeric-tabular);
+}
+.u-devdrawer__method {
+  color: var(--text-secondary);
+  flex: none;
+}
+.u-devdrawer__path {
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.u-devdrawer__ms {
+  color: var(--text-muted);
+  flex: none;
+  text-align: right;
+  font-variant-numeric: var(--numeric-tabular);
+}
+
+.u-devdrawer__detail {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+}
+.u-devdrawer__detail-head {
+  display: flex;
+  gap: var(--space-2x);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.u-devdrawer__template {
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.u-devdrawer__pre {
+  margin: 0;
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-secondary);
+  background: var(--bg-sunken);
+  padding: var(--space-2x);
+  border-radius: var(--radius-sm);
+  overflow: auto;
+  max-height: 220px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.u-devdrawer__shield {
+  font: var(--text-body-xs);
+  color: var(--warn-text);
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.u-devdrawer__trace {
+  display: flex;
+  gap: var(--space-2x);
+  align-items: center;
+  flex-wrap: wrap;
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-muted);
+}
+.u-devdrawer__trace-absent {
+  font: var(--text-body-xs);
+  color: var(--text-muted);
+}
+
+.u-devdrawer__note {
+  font: var(--text-body-xs);
+  color: var(--text-muted);
+  text-wrap: pretty;
+}
+
+.u-devdrawer__coverage {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.u-devdrawer__op {
+  display: flex;
+  gap: var(--space-2x);
+  align-items: center;
+  padding: 2px var(--space-2x);
+  border-radius: var(--radius-xs);
+}
+.u-devdrawer__op--hit {
+  background: var(--good-quiet);
+}
+.u-devdrawer__op-icon {
+  display: flex;
+  flex: none;
+  color: var(--text-disabled);
+}
+.u-devdrawer__op--hit .u-devdrawer__op-icon {
+  color: var(--good-text);
+}
+.u-devdrawer__op-name {
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-muted);
+}
+.u-devdrawer__op--hit .u-devdrawer__op-name {
+  color: var(--text-primary);
+}
+.u-devdrawer__op-note {
+  font: var(--text-body-xs);
+  color: var(--text-muted);
+  margin-left: auto;
+}

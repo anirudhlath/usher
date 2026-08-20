@@ -1099,3 +1099,114 @@ The fake now records the argument as well as counting the call. Same shape as
 *"a rejection is not an assertion"* one file over: when a call's correctness
 lives in **what it was passed** rather than in how often it happened, a
 call-count spy is a spy on the wrong thing.
+
+## `ANALYZE` outlives the transaction that ran it, and that is what issues #7 and #26 called a "load-sensitivity class" (2026-08-19, issues #7 + #26)
+
+**`pg_class.reltuples` and `relpages` are written with an in-place catalog
+update, so `session`'s rollback does not take them back.** Measured on
+`pgvector/pgvector:pg17`: `test_adapters_search_postgres.py`'s
+`_seed_embedded_catalog` inserts 26,624 titles and embeddings and `ANALYZE`s
+both tables; the *next* test in the session reads `pg_class` at **26,624 rows /
+8,875 pages** for `title_embeddings` and 26,624 / 701 for `titles`, while
+`SELECT count(*)` on both answers **0**. The rows are gone. The statistics
+describing them, the dead heap tuples, and the HNSW index entries pointing at
+them are not. One test changed the planner for the whole session.
+
+**The consequence is that an exact question is asked of an approximate
+index.** With those statistics in place the semantic lane's plan flips from
+`Hash Join` → `Seq Scan` → `Sort` (exact) to `Index Scan using
+ix_title_embeddings_hnsw` → `Nested Loop` → `Incremental Sort`, which is
+*approximate* under `hnsw.iterative_scan = relaxed_order` and `hnsw.ef_search =
+40`, over a graph still physically holding the seed's 26,624 dead entries. Both
+plans read off `EXPLAIN`; `VACUUM (ANALYZE)` on a connection of its own puts
+both the statistics and the exact plan back, measured.
+
+**#26's three cases are these, named by measuring both sides.** The same
+six-case selection, twelve runs each under concurrent load on 2026-08-19:
+unrepaired, **3 runs of 12 failed**; repaired, **0 of 12**. The losers are
+exactly the three the issue could not name —
+`test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found`,
+`test_a_row_only_one_lane_found_is_still_returned` and
+`test_a_title_deep_in_both_lanes_still_reaches_the_first_page`. In the worst
+run the semantic lane returned **nothing at all** (`assert [] == [3 items]`);
+in another it lost the row at distance **0.0**. **Every one of the three
+reported it as a fusion defect — a missing `COALESCE`, an `INNER JOIN` — and
+none of them was one.** A case that does not assert its lane premises cannot
+tell a lane that lost a row from a join that dropped one, and it will name the
+wrong culprit in the message a reader trusts.
+
+**The causal link is still not closed all the way, and this entry says so on
+purpose.** A directed probe that left the statistics leaked and re-ran the deep
+case's fixture 25 times got the correct three rows **25 of 25** — so the plan
+flip is a necessary condition for a short lane and is *not* shown to be a
+sufficient one. The remaining variable, most plausibly autovacuum pruning the
+seed's dead HNSW entries under a live scan, was not isolated.
+
+**And a case's non-vacuity can be *borrowed from the leak*, which is how the
+first version of this repair broke a neighbour.** Cleaning up after all three
+seeding cases made `test_the_default_guc_is_what_makes_that_fail` fire its own
+vacuity guard — `assert 100 < 100`, *"this fixture is not reaching the HNSW
+index at all"* — in **2 runs of 12** where the unrepaired file failed it in **0
+of 12**. It seeds into a table the previous case has already left 26,624 dead
+tuples and 26,624 dead HNSW entries in, and a graph that dense is part of what
+exhausts `ef_search = 40` with the GUC off. The cleanup therefore runs **once,
+after the last seed** — the point where every remaining case needs the truth
+and no seeding case is relying on the lie. *A fixture-isolation repair can take
+a case's teeth with it; measure the neighbours, not just the target.*
+
+`restores_the_statistics_this_seed_leaks` in that file is the repair, and its
+own guard is the point: a `VACUUM` that ran before the test's transaction
+rolled back looks exactly like one that worked, so it asserts the pages shrank
+**and** that `reltuples` now equals `count(*)`. Planted by replacing the
+`VACUUM` with `SELECT 1` and watched to fail: `{'titles': (0, 701),
+'title_embeddings': (0, 8875)}`.
+
+**The class is wider than the file that was repaired.** Six other integration
+files `ANALYZE` a shared table inside the rolled-back `session` and put nothing
+back — `test_title_match_repository.py` (`titles`, twice, at 200,000 rows),
+`test_ingest_end_to_end.py` (`media_items`), `test_job_queue.py` (`jobs`,
+twice), `test_raw_payload_store.py`, `test_sync_run_repository.py`, and the
+`ANALYZE` behind `test_api_surface_schema.py`'s 200,000 images. Not repaired
+here and not measured; recorded so the next person does not rediscover the
+mechanism from a symptom.
+
+## An `id()` is a reusable address, so a test that identifies objects by one is identifying nothing (2026-08-19, issue #7)
+
+`test_rows_refresh.py` classified sessions by `id(session)` inside two
+`time.monotonic()` windows, and both halves are races.
+
+**Measured on this host: eight `Session`s opened back to back through one
+`after_begin` listener produced five distinct `id()` values.** CPython reuses
+addresses, and the request's `Session` is unreachable long before the refresh
+opens one — measured in **40 of 40** request/refresh cycles through the real
+app. So the address the case called "the request's session" is free for the
+refresh's session to land on, and
+`refresh_sessions.isdisjoint(request_sessions)` would then report *"the refresh
+reused the request's session"* about two different objects. Holding a strong
+reference to every observed session is what makes the identity unique by
+construction rather than by luck.
+
+**And a wall-clock window is not an owner.** `asyncio.current_task().get_name()`
+*is* readable inside SQLAlchemy's sync ORM events — verified directly: the
+greenlet bridge runs them on the awaiting task, so a session opened by the
+`rows.refresh` lane reports `usher.lane.rows.refresh`, the name
+`LaneSupervisor.start` gave the task. That turns *"a session began between
+these two readings, therefore it is the request's"* into an observation of
+which side opened it, and the ordering assertion moves from two floats to the
+log's own event counter. Planted by pointing `_REFRESH_TASK` at a name nothing
+uses, and watched to fail with the observed owners in the message:
+`['Task-12', 'Task-15', 'the-request-under-test', 'usher.lane.rows.refresh']`.
+
+**What this did *not* establish, stated because #7 records the project being
+wrong about load twice before.** The recycling hazard is demonstrated in both
+halves — addresses are reused, and the request's session is dead in time — but
+**no collision was caught in the act across that boundary in 40 cycles**, and
+`test_rows_refresh.py` passed **25 of 25** whole-file runs before the repair
+and **30 of 30** after, at load averages of 8–22. The repair is a soundness
+repair, not a reproduction. **No run at any point
+produced evidence of a defect in serve-stale itself**, and none produced
+evidence of a defect in RRF fusion: the fused SQL is totally ordered at both
+levels, `uuid6.uuid7()` is strictly monotonic within a process (0 non-monotonic
+batches in 200 batches of 8, measured — so the `id` tiebreak is stable and the
+UUIDv7 trap is *not* what these cases had), and forcing the planner off seq
+scans changed the plan without changing one hit or one score.

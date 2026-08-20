@@ -303,6 +303,8 @@ uv run usher similar <title id>
 uv run usher similar --rebuild               # recompute title_neighbors
 
 uv run usher derive                          # re-derive people/credits/collections
+uv run usher genres                          # rows to normalise in titles.genres
+uv run usher genres --backfill               # rewrite the column; batched, resumable, free to re-run
 uv run usher home                            # compose the home screen
 uv run usher curate                          # one LLM generation; pool, rows, drops, tokens, cost
 
@@ -328,6 +330,18 @@ the other; it stales no embedding in either, the embedded population being the
 exact complement of what it writes). One vocabulary rather than two:
 `POST /admin/bootstrap/{phase}` and `argparse`'s `choices=` are the same enum,
 so a phase cannot exist on one boundary and not the other.
+
+**`usher genres --backfill` is the only command here that rewrites a catalog
+column in place, and it is deliberately not an Alembic migration.** The genre
+vocabulary (`usher/domain/genres.py`) is *data* — it will grow, and a one-shot
+migration cannot be re-run when it does. `canonicalise_genres` is idempotent and
+the write is guarded by `IS DISTINCT FROM`, so a second sweep costs one index
+probe per row and reports 0. It stales exactly the affected embeddings through
+`_FINGERPRINT_SQL` and nothing else — **79,913 rows rewritten, 304 embeddings
+staled** on the 1,272,869-title catalog, against
+[ADR-0039](docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)'s
+original estimate of ~1.8 h of re-embedding, which priced the whole embedded
+population rather than the 0.2% of it a genre rewrite touches.
 
 **Nothing runs `usher similar --rebuild` for you**, and that is the one
 freshness gap in the project: a title's neighbours go stale when some *other*

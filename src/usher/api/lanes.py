@@ -405,8 +405,67 @@ class LaneSupervisor:
         order: `WatchStateSyncService` resolves each state against a
         `MediaItem`, so a watch walk that ran first would count every state
         unmatched and merge nothing.
+
+        **A delta with no cursor is a full walk, and until 2026-08-19 this
+        method performed one on startup without saying so.** `reconcile` reads
+        its `since` from the newest *completed* item-lane run; with none there
+        is no `since`, so `list_items(since=None)` walks the entire library --
+        1,126,789 items on the household this project measures -- issued by
+        `uvicorn` with default settings and no operator command, against a
+        server the operator may not own. `push_gap_min_interval_seconds` does
+        not cover it: that bounds how *often* a gap is closed and says nothing
+        about how large the walk is.
+
+        So the decision is `USHER_PUSH_GAP_CLOSE`, defaulting to `cursored`:
+        close a gap that is a *gap*, refuse one that is the whole catalog, and
+        leave the first walk to `usher sync`, which is a command an operator
+        issued. A deployment past its first walk has a cursor and is
+        unaffected.
+
+        **Every arm logs, and this is the only place that may.** The line
+        belongs here rather than in `refresh()` or `_start_lane`, which the
+        refresher calls once per `push_source_refresh_seconds` forever -- a
+        per-lane fact logged in a per-poll function is the ~17,280 warnings a
+        day `.claude/rules/config-cli-and-deployment.md` records against
+        `build_worker`. A gap is closed on reconnect and rate-limited by
+        `PushSupervisor._gap`, so this is once per close.
         """
+        if self._settings.push_gap_close == "never":
+            # Before the unit of work: there is nothing to ask a database.
+            logger.info(
+                "not closing {source}'s push gap: USHER_PUSH_GAP_CLOSE=never, so anything "
+                "that changed while the channel was down waits for the next `usher sync`",
+                source=source.name,
+            )
+            return
         async with self._work() as pipeline:
+            # The walk's own question, asked by the walk's own method, so the
+            # size this logs and the size it then performs cannot disagree.
+            cursor = await pipeline.reconcile.cursor_for(source, SyncRunKind.DELTA)
+            if cursor is None:
+                if self._settings.push_gap_close == "cursored":
+                    logger.warning(
+                        "not closing {source}'s push gap: no item sync has ever completed "
+                        "for this source, so the reconnect delta would walk its entire "
+                        'library rather than a gap. Run `usher sync --source "{source}"` '
+                        "when you are ready for that walk, or set "
+                        "USHER_PUSH_GAP_CLOSE=always to have this lane do it unasked",
+                        source=source.name,
+                    )
+                    return
+                logger.warning(
+                    "closing {source}'s push gap by walking its entire library: no item "
+                    "sync has ever completed for this source, so this delta has no cursor "
+                    "and reads every item the source has. USHER_PUSH_GAP_CLOSE=cursored "
+                    "refuses this and leaves the first walk to `usher sync`",
+                    source=source.name,
+                )
+            else:
+                logger.info(
+                    "closing {source}'s push gap: a delta walk of everything changed since {since}",
+                    source=source.name,
+                    since=cursor.isoformat(),
+                )
             await pipeline.reconcile.reconcile(source, SyncRunKind.DELTA, adapter)
             await pipeline.watch.sync(source, adapter, user_id=await self._user_id())
 

@@ -191,6 +191,53 @@ healthcheck all assume) and `USHER_SECRET_KEY` (substituted as `${...:?}` so a
 missing key fails at `docker compose up` with a sentence rather than as a
 container that starts and dies on validation).
 
+### Starting the app is not a command to walk your library
+
+🔴 **It was one until 2026-08-19, and nothing said so** (issue #9). With
+`USHER_PUSH_ENABLED=true` — the shipped default — the server starts a push lane
+per **enabled** source, and the lane closes its reconnect gap with a delta
+walk. A delta resumes from the newest **completed** item walk; a deployment
+that has never completed one has no cursor, so the "delta" reads every item the
+source has. On the household this project measures that is **1,126,789 items**,
+performed by `uvicorn` with default settings, on a media server the operator
+may not own, with no command issued. An earlier probe ran exactly that walk
+before someone killed it, and M9's live run had to set
+`USHER_PUSH_ENABLED=false` and `USHER_WORKER_ENABLED=false` to keep its request
+budget statable.
+
+**The decision: the lane closes gaps, and the first walk is a command.** A gap
+is the window a socket was down; with no completed walk the window is the
+entire catalog, and importing a catalog is `usher sync`'s job. So
+`USHER_PUSH_GAP_CLOSE` is a closed vocabulary, defaulting to a refusal:
+
+| Value | The lane does |
+|---|---|
+| **`cursored`** (default) | Closes a gap that has a cursor. With none, logs a `WARNING` naming the source and pointing at `usher sync`, and walks nothing |
+| `always` | The pre-2026-08-19 behaviour. Walks the whole library when there is no cursor — and logs a `WARNING` naming the source and saying it is about to, *before* it starts |
+| `never` | No gap-closing walk at all, logged at `INFO` each time. **This has a cost**: Emby does not re-deliver what a disconnected client missed, so a change made during an outage waits for the next `usher sync` |
+
+**What changes for an existing deployment:** only one that has never completed
+an item walk for a source. Every source past its first `usher sync` (or its
+first `POST /admin/sources/{id}/sync`, or one nightly cron run) has a cursor,
+takes the same bounded delta it always took, and sees no change at all. A
+brand-new source no longer populates itself as a side effect of the push lane
+reconnecting — run `usher sync --source "<name>"` once, which is the step
+[the README](../../README.md) already documents.
+
+**Neither the rate limit nor a truncation was the answer, and both were
+considered.** `USHER_PUSH_GAP_MIN_INTERVAL_SECONDS` bounds how *often* a gap is
+closed and says nothing about how large the walk is — it was already at its
+default of 60 s while the unbounded walk ran. And a cap on items would end a
+run that then records `COMPLETED`, whose `started_at` becomes the floor for
+every later delta: everything the truncated walk never reached would be skipped
+silently and permanently. A walk of this kind is performed whole or refused
+whole, so the setting is a decision rather than a limit.
+
+**A commanded walk is never gated by this.** `usher sync`,
+`POST /admin/sources/{id}/sync` and the nightly cron entry all reach
+`ReconcileService` directly; the setting governs `LaneSupervisor._close_gap`
+alone, which is the one caller no operator asked for.
+
 ### Secrets
 
 Source credentials are **encrypted at rest in Postgres**, using a key supplied
@@ -295,7 +342,7 @@ local state can answer.**
 |---|---|
 | Source unreachable | Catalog fully browsable. Playback → 503 `source_unavailable`. Availability goes stale, not wrong. |
 | Source credentials rejected | `GET /admin/sources/{id}/status` reports `authenticated: false`; re-authentication is retried after a cooldown rather than on every call. Catalog unaffected. |
-| Push socket drops | Backoff reconnect; delta reconcile on reconnect; after N failures mark `supports_push = false` and lean on the nightly walk. **The failure counter resets on delivery, not on connection** — a proxy that upgrades and then buffers connects perfectly every time, so a counter reset by connecting never reaches the ceiling and this row silently never fires ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). |
+| Push socket drops | Backoff reconnect; delta reconcile on reconnect — ✅ **only when a completed walk gives that delta a cursor** (`USHER_PUSH_GAP_CLOSE`, above): with none the "delta" is the whole library, so the lane logs a `WARNING` and leaves the first walk to `usher sync`; after N failures mark `supports_push = false` and lean on the nightly walk. **The failure counter resets on delivery, not on connection** — a proxy that upgrades and then buffers connects perfectly every time, so a counter reset by connecting never reaches the ceiling and this row silently never fires ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). |
 | TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected. |
 | TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades. |
 | Provider image CDN unreachable | ✅ M9: catalog and every rendered card unaffected — an artwork reference is a row, not a fetch, so browsing, search and the home screen never touch the CDN. A **cold** image (no entry for that `(image id, rung)`) answers `503 source_unavailable` with `Retry-After`; a **cached** one still serves, because `GET /images/{id}` reads the disk before the network. The CDN needs no credential, so this row has no authentication arm. An answer the proxy cannot serve splits in two: artwork this deployment declines to carry (an `image/svg+xml` logo, ~1 title in 17) is an ordinary `404 not_found`, and everything else — a 4xx, a body past `image_max_bytes`, a captive portal's HTML under a 200 — is `503 source_unavailable` with **no** `Retry-After`, since re-asking produces the same answer. That second one's honest status is a 502 and [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s closed vocabulary has no code for one. |
@@ -561,12 +608,18 @@ unreachable.
   answering an unreachable database with sixty lines of asyncpg and greenlet
   frames whose only operator-facing content was the last one. `main` has a
   single `try` around the whole dispatch which names the families an operator
-  can act on — `OSError`, `SQLAlchemyError`, `httpx.HTTPError`,
+  can act on — `OSError`, `DBAPIError`, `httpx.HTTPError`,
   `ValidationError`, and since M8 the port taxonomy's transport half
   (`PortUnavailable`, `PortAuthFailed`, `PortRateLimited`) — and answers each
   with one line and exit 1; `usher --traceback <command>` re-raises.
   **`Exception` is deliberately not among them**, so a bug still gets its full
-  traceback, and Ctrl-C exits 130 rather than printing one. Neither is
+  traceback — and **`DBAPIError` reads `SQLAlchemyError` in every version of
+  this document before 2026-08-19**, which was the same mistake one family
+  narrower: `SQLAlchemyError` is also the base of `InvalidRequestError`, so the
+  boundary answered `MissingGreenlet`, `PendingRollbackError` and
+  `ObjectDeletedError` — bugs, all of them — with one line and no stack. It
+  cost the diagnosis of the crash in issue #8 for a week. Ctrl-C exits 130
+  rather than printing one. Neither is
   `UsherPortError` itself: an adapter translates its transport's failures
   before they cross, so `httpx.HTTPError` is unreachable behind a port and the
   three transport members had to be named — but `RepositoryConflict`,

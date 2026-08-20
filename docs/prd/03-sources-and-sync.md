@@ -330,7 +330,7 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 | Lane | Trigger | Work |
 |---|---|---|
 | **Push** | WebSocket event | **Apply it inline when it is small; defer to a delta when it is large.** A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk instead, because a request per item against a 1,126,789-item library is a design defect rather than a slow path |
-| **Reconnect delta** | Socket re-established | Items changed since the last cursor. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds |
+| **Reconnect delta** | Socket re-established, **and a previous item walk completed** | Items changed since the last cursor. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds. ✅ **With no cursor there is no gap and the lane refuses rather than walking the library** — `USHER_PUSH_GAP_CLOSE`, see below |
 | **Full reconcile** | Nightly, or an operator's `POST /admin/sources/{id}/sync` (M9) | Walk the source; upsert everything; mark unseen items `available = false` |
 
 Polling is the backstop, not the design.
@@ -382,6 +382,28 @@ goes stale, not wrong". **Emby does not re-deliver what a disconnected client
 missed** — measured 2026-08-02, over a 61 s outage with a real change made
 inside it and 90 s of listening afterwards — so the gap-closing delta is not
 belt-and-braces, it is the only cover there is.
+
+🔴 **A delta with no cursor is a full walk, and until 2026-08-19 the lane
+performed one on startup without saying so.** The gap-closer reads its `since`
+from the newest *completed* item-lane run; a deployment that has never
+completed one has no `since`, so `list_items(since=None)` reads **every item
+the source has** — 1,126,789 on the household this project measures — issued by
+`uvicorn` with default settings and no operator command, against a media server
+the operator may not own. `push_gap_min_interval_seconds` never covered this:
+it bounds how *often* a gap is closed, not how large the walk is.
+
+The fix is a decision rather than a limit, because **there is no honest way to
+truncate this walk**. A bound in the iterator would end a run that then records
+`COMPLETED`, and `latest_completed_cursor` reads that run's `started_at` — so
+every item the truncated walk never reached would be silently skipped by every
+later delta, forever. So the walk is either performed whole or refused whole,
+and `USHER_PUSH_GAP_CLOSE` (`cursored` by default) is where the operator says
+which: a *gap* is the window a socket was down, and with no completed walk the
+window is the entire catalog, which is `usher sync`'s job. Every arm logs
+before it acts — the uncursored ones at `WARNING`, naming the source and the
+size — because an operator who learns about the walk from their media server's
+access log has learned too late. [08](08-operations.md) has the operator-facing
+version.
 
 **Retraction is a separate step, and it can decline.** Marking unseen items
 unavailable is a distinct call the reconciler makes only after the walk
@@ -740,6 +762,31 @@ raises it through `ENRICHMENT_RANK`
 ([ADR-0008](decisions/0008-enrichment-tier-vs-failure.md)). A failed
 enrichment records `Title.enrichment_error` and leaves the tier exactly where
 it was.
+
+**`genres` is the one replaced field where the merge asks a second question,
+and it is the one that was destroying data —
+[ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md).** Every
+field in `_ENRICHABLE` is replaced wholesale when the provider supplies it, and
+for a *set* that means a title whose only IMDb label was `Biography` came out of
+enrichment with the label **gone** rather than re-spelled: TMDb has no
+`Biography` in either id space, so there was nothing for it to become. Measured
+2026-08-19 by joining the real `title.basics.tsv.gz` to the live catalog:
+**53,724 of 132,116 enriched titles lost at least one IMDb label — 69,160
+deletions**, 11,466 of them of a concept TMDb cannot express, `Film-Noir`
+deleted 827 times and surviving 0. Control: **0 of 1,021,623** skeletons lost
+one, which is what makes it the enrichment boundary and nothing else.
+`MetadataProvider.genre_vocabulary` now names the canonical concepts a provider
+can express — **the set it is entitled to delete** — and a label outside it
+survives. What still gets overwritten is a label the provider *could* have said
+and did not: 13,141 of those deletions were `Drama`, which is TMDb disagreeing
+about a film and is usually right.
+
+⚠️ **The 53,724 titles already enriched keep their deletions, and `usher genres
+--backfill` does not repair them.** That command normalises *spellings* — it
+maps `Sci-Fi` onto `Science Fiction` — and a deleted label is not a spelling,
+it is gone. Restoring one needs `title.basics.tsv.gz` re-joined to the catalog,
+which is a bootstrap-shaped operation and not a vocabulary one. **Normalisation
+is not restoration**, and this is the part of issue #30 neither change closes.
 
 **A successful enrichment now does one more thing:** after the commit, beside
 the `title.updated` publish, it enqueues exactly one `index` job for the title

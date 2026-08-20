@@ -104,6 +104,61 @@ _STATUS: dict[str, ProductionStatus] = {
 # rendering it as an end year shows "2011-2026" for a show still on the air.
 _FINISHED = (ProductionStatus.ENDED, ProductionStatus.CANCELED)
 
+# TMDb's whole genre vocabulary — `/genre/movie/list` (19) and
+# `/genre/tv/list` (16), transcribed rather than fetched. **A list of names,
+# not of ids**, because `title_from_payload` reads `genres[].name` and the
+# question this answers is about the *words* TMDb has.
+#
+# Transcribed and not fetched for the reason `_STATUS` is: two extra HTTP
+# calls per process to learn a list that has not moved in a decade, on a path
+# whose whole cost model is request budget. All seven of the television-only
+# names are in this catalog (`Sci-Fi & Fantasy` 165, `Action & Adventure` 154,
+# `Reality` 57, `War & Politics` 25, `Kids` 19, `Soap` 19, `Talk` 4, measured
+# 2026-08-19), so this is not a vocabulary the adapter maps away — it reaches
+# `titles.genres` verbatim.
+#
+# **It is not the vocabulary `EnrichService` asks about.** That is
+# `genre_vocabulary`, which is this list run through
+# `usher.domain.genres.canonicalise_genres` — 35 TMDb names collapse to 24
+# canonical concepts, and the 7 canonical concepts *not* in that set
+# (`Adult`, `Biography`, `Film-Noir`, `Game-Show`, `Musical`, `Short`,
+# `Sport`) are the ones enrichment must stop deleting. A genre TMDb mints
+# after this was written is simply stored: it is outside `CANONICAL_GENRES`,
+# so it is its own concept and nothing here has an opinion about it.
+TMDB_GENRE_NAMES: frozenset[str] = frozenset(
+    {
+        # /genre/movie/list
+        "Action",
+        "Adventure",
+        "Animation",
+        "Comedy",
+        "Crime",
+        "Documentary",
+        "Drama",
+        "Family",
+        "Fantasy",
+        "History",
+        "Horror",
+        "Music",
+        "Mystery",
+        "Romance",
+        "Science Fiction",
+        "TV Movie",
+        "Thriller",
+        "War",
+        "Western",
+        # /genre/tv/list — the seven that are not also movie genres
+        "Action & Adventure",
+        "Kids",
+        "News",
+        "Reality",
+        "Sci-Fi & Fantasy",
+        "Soap",
+        "Talk",
+        "War & Politics",
+    }
+)
+
 # Which crew jobs become `credits` rows. **The filter is the load-bearing
 # half of the derivation's bound.** Unfiltered crew is every gaffer, best boy
 # and assistant art director, and both consumers of that table --

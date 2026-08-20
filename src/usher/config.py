@@ -14,6 +14,26 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #: a secret.
 _SHORTEST_REDACTABLE = 4
 
+#: What `LaneSupervisor._close_gap` is allowed to do on a reconnect, and the
+#: one setting in this file whose *default* is a refusal rather than a limit.
+#:
+#: The gap-closer runs `reconcile(source, DELTA, adapter)`, and a DELTA reads
+#: its `since` from the newest **completed** item-lane run. With none there is
+#: no `since`, so the "delta" is `list_items(since=None)` -- the whole library,
+#: 1,126,789 items on the household this project measures -- performed by
+#: `uvicorn` on startup with no operator command. A gap is the window a socket
+#: was down; with no completed walk the window is the entire catalog, which is
+#: `usher sync`'s job.
+#:
+#: - ``cursored`` -- close the gap only when a completed walk gives a `since`.
+#:   Shipped default. A deployment that has synced even once is unaffected.
+#: - ``always`` -- the pre-2026-08-19 behaviour, walking the whole library when
+#:   there is no cursor. Logged at WARNING before the walk starts, every time.
+#: - ``never`` -- no gap-closing walk at all. Costly and deliberate: Emby does
+#:   not re-deliver what a disconnected client missed, so whatever changed
+#:   during an outage waits for the operator's next walk.
+PushGapClose = Literal["cursored", "always", "never"]
+
 
 def settings_rejection(exc: ValidationError, *, entry_point: str) -> str:
     """pydantic's diagnosis with every rejected value stripped out.
@@ -601,7 +621,28 @@ class Settings(BaseSettings):
     # query at 40 returned 0.88 rows of a requested 10. Larger is more accurate
     # and linearly slower. `ge=1` is pgvector's floor; `le=1000` because beyond
     # that the index is a scan with extra steps.
-    search_hnsw_ef_search: int = Field(default=100, ge=1, le=1000)
+    #
+    # **200 since 2026-08-19, and it is the first value of this constant with a
+    # recall figure from a real index under it** (issue #32). 132,409 real
+    # 1024-lane `bge-m3` vectors, 12 typed plot queries, recall@10 against an
+    # exact scan over the whole embedded population, 120 gold slots per
+    # condition, `relaxed_order` on, unfiltered:
+    #
+    #   ef  40 -> 0.700   p50  3.21 ms   p95  4.75 ms
+    #   ef 100 -> 0.858   p50  4.77 ms   p95  7.30 ms   <- the old default
+    #   ef 200 -> 0.917   p50 10.59 ms   p95 16.18 ms   <- ships
+    #   ef 400 -> 0.967   p50 20.13 ms   p95 29.90 ms
+    #   ef 1000 -> 0.992  p50 45.46 ms   p95 67.50 ms
+    #
+    # 400 and 1000 buy more and are refused on cost, not on recall: the
+    # recorded query-side budget is a p50 of 5.7 ms for the embed, and a scan
+    # whose p50 is 20 ms makes the vector half of a search four times the
+    # model's. 200 doubles the scan and keeps the pair inside ~16 ms at p50.
+    # Under a 4.8%-selectivity genre filter the same sweep is 0.783 -> 0.808,
+    # so this is not a filtered-path fix and does not pretend to be one; see
+    # `.claude/rules/search-and-embeddings.md`, which records what over-fetch
+    # and re-rank does there instead.
+    search_hnsw_ef_search: int = Field(default=200, ge=1, le=1000)
     # `pg_trgm`'s `similarity()` floor for the suggest path. Bounded to (0, 1]
     # because that is `similarity()`'s own range: 0 admits every row in
     # `titles` as a candidate, which is the latency cliff PRD 05 says the
@@ -672,6 +713,17 @@ class Settings(BaseSettings):
     # reconnect", which is expensive and correct, unlike every other zero
     # here.
     push_gap_min_interval_seconds: float = Field(default=60.0, ge=0)
+    # What the gap-closer may do when the delta has no cursor -- see
+    # `PushGapClose` above for the vocabulary and the measurement. **The one
+    # default in this block that changes behaviour for an existing
+    # deployment**, and only for one that has never completed an item walk:
+    # such a deployment used to have its whole library walked by the push lane
+    # on startup, and now gets a WARNING naming the source and pointing at
+    # `usher sync` instead. Everything past its first walk has a `since` and
+    # behaves exactly as before. The rate limit beside it is not a substitute:
+    # `push_gap_min_interval_seconds` bounds how *often* the walk happens and
+    # says nothing about how large it is.
+    push_gap_close: PushGapClose = "cursored"
     # How often the lane supervisor re-reads the source list, so a source
     # added through `POST /admin/sources` gets a lane without a restart.
     push_source_refresh_seconds: float = Field(default=60.0, gt=0)
@@ -753,6 +805,53 @@ class Settings(BaseSettings):
     # `.env.example` documents it — `config.py` imports nothing from `usher`
     # and this setting is not the thing to change that for.
     image_cdn_base_url: str = Field(default="https://image.tmdb.org/t/p/", min_length=1)
+
+    # Whether this process also serves Usher Console at `/console` (see
+    # `usher.api.console`). On by default because a self-hosted product whose
+    # only interface is `curl` is not one, and because the console is built
+    # into the image rather than fetched — turning it off saves nothing at
+    # runtime but a `StaticFiles` mount.
+    #
+    # **Off is a real deployment, not a debugging aid.** A worker-only or
+    # push-only container (`USHER_WORKER_ENABLED` / `USHER_PUSH_ENABLED`) has
+    # no browser pointed at it, and a household that puts its own client in
+    # front of this API does not want a second one answering `/`.
+    console_enabled: bool = True
+    # Where the built bundle lives, relative to the working directory exactly
+    # as `image_cache_dir` is.
+    #
+    # **`web/dist` in both places on purpose.** It is where `vite build` writes
+    # in a checkout, and the Dockerfile copies the `console` stage's output to
+    # `/app/web/dist` so the container agrees rather than needing an override —
+    # which is the difference between a setting an operator never touches and
+    # one `.env.example` has to explain. `image_cache_dir` is the counterexample
+    # and it earns its divergence: that path is a bind mount, so it is a
+    # topology fact. This one is just where a build lands.
+    #
+    # A missing bundle is **not** a configuration error: `mount_console` logs
+    # and serves the API alone. A backend running from a checkout with no
+    # `npm run build` has to boot, or `uv run pytest` would need node.
+    console_dist_dir: Path = Path("web/dist")
+    # The deployment's Grafana, for the Insights screen's "Open in Grafana".
+    #
+    # `None` by default and **rendered as absent rather than as a dead link**
+    # when unset, which is the same distinction the rest of this product makes
+    # between never computed and computed and empty. There is no default value
+    # to guess: PRD 10's stack is a sibling compose project, its host is a
+    # deployment fact, and a wrong guess is worse than a stated absence.
+    #
+    # Deliberately **not** proxied through this app. The design forbids
+    # iframing Grafana (its own frame-ancestors policy would refuse anyway),
+    # so this is a link the browser follows directly and Usher never sees.
+    grafana_url: str | None = None
+    # The deployment's Tempo, for the "Open trace" link on a rendered problem
+    # document. Same rules as `grafana_url`: unset means the link is absent,
+    # and this app never proxies it.
+    #
+    # That one link is what PRD 10's telemetry is *for* on a failure path —
+    # every response already carries a trace id, and without somewhere to open
+    # it the id is a string an operator cannot act on.
+    tempo_url: str | None = None
 
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
@@ -869,7 +968,9 @@ class Settings(BaseSettings):
             )
         return self
 
-    @field_validator("tmdb_api_key", "otlp_endpoint", "llm_api_key", mode="before")
+    @field_validator(
+        "tmdb_api_key", "otlp_endpoint", "llm_api_key", "grafana_url", "tempo_url", mode="before"
+    )
     @classmethod
     def _blank_to_none(cls, value: object) -> object:
         """An env var that is present but empty (as `.env.example` ships

@@ -620,16 +620,25 @@ def build_search_service(
     of the request, and a `SearchService` built around one would be a
     per-household object on a per-session factory.
 
-    `embedder` is `None` for every caller but `usher search --mode
-    semantic|fused`, and that is ADR-0022 at the wiring layer rather than an
-    omission. It is a once-per-*process* resource -- a 65 MB ONNX session and
-    a ~4.8 s cold load -- and this function runs once per session, so it is
-    never built here. **On the API that has a consequence a client can see**:
-    `create_app`'s lifespan builds a model only when `worker_enabled` and does
-    not expose it, so `api/deps.get_search_service` passes `None` and
-    `?mode=semantic` cannot succeed on an API-only deployment. Flagged in
-    `/openapi.json` and in PRD 07; resolving it is a new capability rather
-    than a route (M9 group B's open question 4).
+    `embedder` is **passed and never built here**, and that is ADR-0022 at the
+    wiring layer rather than an omission: it is a once-per-*process* resource
+    and this function runs once per *session*, so a model constructed here
+    would be one per request on the route and one per command on the CLI.
+
+    ✅ **Both roots now pass one, which is issue #31** (M9 group B's open
+    question 4, closed). `usher search --mode semantic|fused` builds one for
+    the command and closes it in the same `finally`; `create_app`'s lifespan
+    builds one per process and parks it on `app.state`, and
+    `api/deps.get_search_service` reads it from there. `None` is still the
+    default and still the whole answer for a deployment that configured no
+    model -- `?mode=semantic` is then a 422 naming the missing capability and
+    `?mode=fused` narrows.
+
+    *(This paragraph read "`None` for every caller but `usher search`" and gave
+    a 65 MB ONNX session as the reason the API had none. The size is real and
+    is an argument about **building**, not about passing; it is also
+    runtime-dependent and predates the second runtime -- `openai:` is an HTTP
+    client holding no model.)*
 
     `expander` is passed rather than built for the reason above it: it needs a
     `LLMCallRepository` and a commit on *this* session plus an `LLMClient`
@@ -1214,11 +1223,17 @@ async def embedder(
     drains has to be able to see why, and a per-pass warning is how an
     operator learns to ignore warnings.
 
-    **`report=False` is for the one caller that is not a worker root**, and it
-    was found by an operator smoke run rather than by the suite. The sentence
-    below is about a *lane* -- "index jobs will not be claimed" -- which is
-    exactly right for `usher work`, the server's worker lane and `usher push`,
-    and is wrong twice over for `usher search`: it advises about work that
+    **`report=False` is for the callers that are not a worker root**, and the
+    first of them was found by an operator smoke run rather than by the suite.
+    The sentences below are about a *lane* -- "index jobs will not be claimed"
+    -- which is exactly right for `usher work`, the server's worker lane and
+    `usher push`, and wrong for a process that claims nothing. There are two
+    such callers now: `usher search`, and `create_app`'s lifespan under
+    `USHER_WORKER_ENABLED=false`, which since issue #31 builds a model for the
+    *search routes* rather than for a lane (`report=settings.worker_enabled`
+    there, so the one server shape that does claim index jobs still says so).
+    Against `usher search` the sentence is wrong twice over: it advises about
+    work that
     process does not do, and `cli._print_home_report`'s rule says an operator's
     report is printed rather than logged, so with `USHER_LOG_JSON=true` (the
     default) it is a JSON envelope in front of the search results. That rule

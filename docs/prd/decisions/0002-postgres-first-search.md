@@ -177,10 +177,19 @@ correction that is recorded where it belongs rather than here.
   the default returns **0.88 rows on average against a request for ten** —
   HNSW visits `ef_search` candidates, the filter kills them, and the scan is
   already over. That is an empty endpoint, not a degraded ranking, and
-  `ef_search` is the wrong lever (40 → 200 with the GUC off still yields
-  4.24 of 10). `relaxed_order` beats `strict_order` on recall, 0.508 against
-  0.100, because strict ordering terminates earlier to buy a guarantee RRF
-  re-ranking does not need. ⏳ **A cheaper answer exists and is not built**:
+  `ef_search` is the wrong lever **for that failure** (40 → 200 with the GUC
+  off still yields 4.24 of 10). `relaxed_order` beats `strict_order` on recall,
+  0.508 against 0.100, because strict ordering terminates earlier to buy a
+  guarantee RRF re-ranking does not need. ⚠️ **"`ef_search` is the wrong lever"
+  was written without that qualifier and read as a fact about the shipped
+  configuration, which it is not** — the sentence is about `iterative_scan =
+  off` at 2% selectivity on uniform-random 384-lane vectors. With the GUC on,
+  on 132,409 real 1024-lane vectors, unfiltered, `ef_search` is precisely the
+  lever: recall@10 against an exact scan is 0.858 at 100 and 0.917 at 200 over
+  12 typed plot queries, monotone at every one of them, and
+  `Settings.search_hnsw_ef_search` moved to 200 on 2026-08-19 (issue #32). The
+  decision this ADR records — `relaxed_order`, set with `SET LOCAL` — is
+  unchanged and was not in question. ⏳ **A cheaper answer exists and is not built**:
   at high filter selectivity a plain btree on the filter column lets the
   planner abandon HNSW and answer exactly, which would make the ANN question
   exist only inside a selectivity band. Recorded here rather than shipped —

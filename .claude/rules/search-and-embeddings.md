@@ -593,33 +593,55 @@ and means nothing is the failure `extra="forbid"` exists to prevent. M8 Task
 first'"* was sound while expansion was believed to help and is superseded by
 this measurement, not deleted.
 
-**And expansion is billed on searches the semantic lane cannot serve, which
-this run also found and which is not fixed.** The guard is `embedder is None`,
-not *"anything is embedded"*. Measured with `USHER_EMBEDDING_ENABLED=true` and
-`title_embeddings` empty: `usher search --mode fused` bought a completion,
-printed `expanded: …`, returned `semantic_coverage=0.000`, and *then* printed
-*"no title in the filtered population has an embedding"* — **the warning
-arrives after the money**, on every fused search of every not-yet-backfilled
-deployment. `--mode full_text` correctly bought nothing. Not repaired here
-because the correct predicate — *does any title in the **filtered** population
-have a vector* — is not answerable before the vector that does the filtering
-exists, and the cheap global stand-in (`SELECT 1 FROM title_embeddings LIMIT
-1`) is a different guard costing a new `TitleEmbeddingRepository` port method,
-two implementations, a contract case and a read on every fused search. The new
-setting reduces the exposure to deployments that opted in; it does not close
-it.
+**And expansion was billed on searches the semantic lane cannot serve, which
+this run also found — issue #16, closed 2026-08-19.** The guard was `embedder
+is None`, not *"anything is embedded"*. Measured with
+`USHER_EMBEDDING_ENABLED=true` and `title_embeddings` empty: `usher search
+--mode fused` bought a completion, printed `expanded: …`, returned
+`semantic_coverage=0.000`, and *then* printed *"no title in the filtered
+population has an embedding"* — **the warning arrives after the money**, on
+every fused search of every not-yet-backfilled deployment. `--mode full_text`
+correctly bought nothing.
 
-**Its position is the whole cost argument.**
-`QueryExpansionService.expand` is called from exactly one
+🔴 **Both halves of the reason it was left open were wrong, and the shape of
+the error is what transfers.** The entry said the correct predicate — *does any
+title in the **filtered** population have a vector* — *"is not answerable
+before the vector that does the filtering exists"*. Nothing in a
+`SearchFilters` is derived from a query vector, and `PostgresSearchIndex`'s
+`_COVERAGE` already took `predicates` and no vector: **the strong predicate was
+already computed, in the same class, and only its callability was missing.**
+Having convinced itself the strong form was impossible, the entry then priced
+the weak one (`SELECT 1 FROM title_embeddings LIMIT 1`) at *"a new
+`TitleEmbeddingRepository` port method, two implementations, a contract case
+and a read on every fused search"* — and paid for the weak answer at the strong
+answer's price. What shipped is `SearchIndex.semantic_coverage(filters)`,
+delegating to the same `_predicates`/`_coverage` pair, so the guard and the
+reported number cannot drift. **Before pricing a fix as needing a weaker
+predicate, look for the strong one already being computed a few lines away.**
+
+The remaining cost — *"a read on every fused search"* — is a fact about where
+the read is put rather than about having one. It sits behind `expander is not
+None`, which is false on every shipped deployment, so nothing pays for it
+except the deployments that were about to buy a completion, and those trade one
+count over the enriched tier for one 1.4 s call.
+`test_the_shipped_default_probes_nothing_before_embedding` pins the ordering,
+because hoisting the probe above the expander check is the tidier-looking
+version and is the one that costs everybody.
+
+**Its position is *most* of the cost argument, and this said "the whole"
+until #16.** `QueryExpansionService.expand` is called from exactly one
 line -- the line before `SearchService`'s `self._embedder.embed([...])`, inside
-the `else` of the `embedder is None` branch. Four things follow and each is a
-case: a `full_text` search buys no completion (no embed to sit in front of), a
-deployment with no embedder buys none (`semantic` raises and `fused` narrows
-before reaching it), a blank query buys none (refused before the model), and
-**`usher suggest` buys none** -- `SuggestIndex` is its own port with no
-semantic lane, which is what keeps a completion off the path a client drives
-per keystroke. The unit of spend is one search that was going to embed
-something.
+the `else` of the `embedder is None` branch. Four things follow from the
+position and each is a case: a `full_text` search buys no completion (no embed
+to sit in front of), a deployment with no embedder buys none (`semantic` raises
+and `fused` narrows before reaching it), a blank query buys none (refused
+before the model), and **`usher suggest` buys none** -- `SuggestIndex` is its
+own port with no semantic lane, which is what keeps a completion off the path a
+client drives per keystroke. The fifth follows from the *probe* and no position
+could have supplied it: a population with no vectors buys none. **A guard in
+front of a cost says the cost is not paid on the paths that never reach it, and
+says nothing about the paths that reach it and cannot benefit.** The unit of
+spend is one search whose semantic lane was going to be able to answer.
 
 Three decisions worth not re-deriving. **Only the vector comes from the
 rewrite**: `SearchRequest.query` stays the typed string, so under RRF the
@@ -848,6 +870,131 @@ any cosine gap. It overturns one relevance step only where
 and k ≥ 25 at a realistic 0.2. Where it decides is where the other five have
 tied — which `_dense_ranks` makes ordinary rather than rare, because equal
 index scores share a rank and the relevance term then cancels exactly.
+
+🔴 **The ceiling survives issue #25 unchanged, and the section below is what it
+was protecting the wrong row from.** Nothing in the table above moved: the
+bound is still `0.70` against `0.35 + 0.15 + 0.15 + 0.02 + 0.02 + w`, the
+margin is still **0.009615** over all five non-relevance signals, `w` is still
+0.005, and `test_no_combination_of_the_other_five_can_displace_an_exact_match`
+is unedited. What changed is *which* hit occupies dense rank 0 — see the next
+section — which is the one thing this bound never said anything about. **Read
+those two sections together before touching either**: capping the relevance
+decay, the obvious alternative fix, is exactly the change that would have
+invalidated this table, and it was declined for that reason among others.
+
+## An exact name match now leads the lexical lane, and 29.3% of the catalog could not be found by its own name (2026-08-19, issue #25)
+
+**The defect, reproduced byte for byte through the live API** at 1,272,866
+titles: `GET /search?q=The Matrix` put the 1999 film **5th** at
+`0.35007068764143234`, behind three 2018 video essays at `0.8032` that carry no
+popularity at all. Both scores reproduce from the shipped constants, and
+popularity was *applied and helped* — dropping it scores the film 0.2729. The
+mechanism is rank-0 dominance, which is the section above working as designed
+over a lexical lane that had the wrong row at rank 0: `ts_rank_cd` rewards a
+document that repeats the query and cannot know that the query **is** a title's
+whole name.
+
+**It generalises, and this is the number that says so.** The issue itself named
+the sampleable version — *"how often a title's exact name is outscored by a
+longer document repeating it"* — and it had never been run. 800 titles drawn
+from the live catalog (400 `skeleton`, 400 `enriched`, frozen to a file so both
+arms are paired), each queried by its own name through the shipped path at
+`mode=full_text, limit=20` with the singleton household:
+
+| | before | after |
+|---|---|---|
+| **miss rate, pooled (n=800)** | **38.4%** (307) | **20.8%** (166) |
+| skeleton (n=400) | 29.5% (118) | 15.8% (63) |
+| enriched (n=400) | 47.3% (189) | 25.8% (103) |
+| — of which **outranked** (retrievable, uniquely named, lost anyway) | **234** | **0** |
+| — of which **namesake** (rank 1 carries the identical name) | 62 | 155 |
+| — of which **not retrieved** (own name does not match own document) | 11 | 11 |
+
+Transitions, per title: `hit → hit` **493**, `outranked → hit` **141**,
+`outranked → namesake` **93**, `namesake → namesake` 62, `not_retrieved →
+not_retrieved` 11. **Zero regressions** — no title that was rank 1 stopped
+being rank 1 — and `outranked → outranked` is empty. Bar written first at
+`/var/tmp/usher-i25-bar/BAR.md`, `sha256
+4729d7eb2c7491b94e9029ee554b8e92ec0cfde7753cc92687f106f92d28d21f`; sample
+`sha256 3a03cfeeea65de38f4c7134c6734694b60a76d5b1259216fe5a6191736036d73`;
+harness `scripts/measure_exact_name_rank.py`, read-only through
+`postgresql_readonly=True` and assembled with no `SearchAnalytics` so a
+measurement writes no `search_queries` row.
+
+**The enriched tier is the *worse* half, which inverts the intuition.** 47.3%
+against skeleton's 29.5% before, 25.8% against 15.8% after — enriched titles
+carry overviews, taglines, keywords and credit names, so there is far more
+document for a query to match twice, and far more competition from other
+enriched rows. A fix aimed only at the long tail would have missed the tier
+where the miss rate is highest.
+
+**Why candidate 1 and not the other two**, in the issue's own numbering. (2)
+Capping the relevance decay converts rank-0 dominance from exact to
+contestable, which invalidates the taste-weight ceiling above — a bound argued
+to four decimal places, in exchange for making *every* strong match
+displaceable by popularity, which is the failure this project already refused
+when it kept popularity a hard key above `vote_count` in the suggest statement.
+(3) Breaking ties inside the lexical lane is narrower than the defect: the
+essays do not tie *The Matrix*, they **outscore** it, so a tiebreak never runs.
+
+**Two halves, and each kills a different failure.** The SQL key (`lower(t.name)
+= lower(btrim(:query))`, ordered ahead of `score` in `_FULL_TEXT` and in
+`_FUSED`'s lexical CTE) is what gets the row into the candidate window at all —
+it is ahead of the `LIMIT`, and no re-weighting can rank a row the lane never
+returned. The service key (`_dense_ranks` grouping on `(exact_name, score)`) is
+what makes rank 0 a group of **one**: `ts_rank_cd` ties are pervasive — the
+tie-group-of-498 figure this file already carried — and a shared rank 0 cancels
+the relevance term and hands the decision straight back to popularity, which is
+the same defect wearing a different hat. Shipping either half alone leaves a
+measurable hole.
+
+**The prefix half of tier 1's signal was declined, and the argument is the
+defect's own shape.** Tier-1 suggest computes `lower(name) LIKE 'typed%'` and
+already ranked this query correctly, which is what identified the signal — but
+the three essays are *themselves* prefix matches of `The Matrix`, so a prefix
+key flags all four rows alike and separates none. It also costs something real
+in the other direction (every `Matrix Warrior` above `The Matrix` on the query
+`Matrix`) with nothing measured behind it. On tier 1 the whole candidate set is
+prefix matches, so the key is a filter and popularity does the ordering; in the
+search lane the set is mixed. Equality is the part of the rule that transfers.
+`title_search_names` is not joined either — 10.9M person rows and an alias
+table, a second scan on the one statement with a latency figure to keep — and
+that is the obvious next measurement rather than an omission.
+
+**Latency: the paired measurement is the honest one, and the arm-against-arm
+number failed the bar.** Scored as written (after p95 ≤ 1.25 × before p95 over
+the two whole-service arms) it is 19.31 → 24.42 ms = **1.265×**, a fail by
+0.28 ms — and the two arms ran twenty minutes apart on a box running fourteen
+containers. Running the **two statements** back to back over the same 800
+names, alternating which goes first: old p50 0.596 / p95 13.42 ms, new p50
+0.627 / p95 14.84 ms = **1.106×**, paired delta p50 **+0.013 ms**, mean +0.099
+ms, and the new statement is *faster* on 357 of 800 queries. `EXPLAIN` confirms
+there is no plan change to explain — Bitmap Index Scan → Bitmap Heap Scan →
+Sort → Limit on both, differing by one sort key. **A p95 taken from two runs
+minutes apart on a shared box measures the box as much as the change**; an
+interleaved pair is what the difference is small enough to need.
+
+### Two ways a title cannot be found by its own name, both unfixed and neither a ranking problem
+
+The 11 `not_retrieved` misses are the same 11 before and after, and they split
+into two shapes worth knowing before anyone reads the residual rate as ranking
+quality:
+
+- **`websearch_to_tsquery` reads ` - ` as negation.** `Regret - Cherie Laurent`
+  compiles to `'regret' & !'cheri' & 'laurent'` — the title's own name excludes
+  the title. `Die 90er - Jahrzehnt der Chancen` → `'die' & '90er' &
+  !'jahrzehnt' & 'der' & 'chancen'`. A hyphen surrounded by spaces is ordinary
+  punctuation in a film title and a **NOT operator** in the websearch grammar,
+  and 8 of the 11 are this. It is the reason to be careful about `plainto_` vs
+  `websearch_to_` rather than a defect in either.
+- **A name of nothing but stop words** produces an empty tsquery and a `NOTICE:
+  text-search query contains only stop words`. `In Between` is a real title in
+  this catalog and matches nothing, including itself.
+
+Both are **retrieval** failures — the row is not a candidate, so no ranking
+change reaches them — and both would be answered by the same thing: a name
+arm that does not go through the English text-search parser at all. Not built
+here; the bar declared them out of reach before the run rather than after.
 
 ## The two-tier suggest reached a request boundary, and the boundary is where the keystroke defect is answered (2026-08-12, M9 B5)
 
@@ -1365,3 +1512,474 @@ person fails to find it. Whoever takes it should note that it also makes the
 model swap a *third* cause of neighbour staleness in ADR-0020's terms, beside
 the blend change (closed) and *some other title was embedded since* (still
 undecidable per row).
+
+## `semantic_coverage`'s denominator is the enriched tier, not the catalog (2026-08-19)
+
+**It reports `1.000` on a deployment where the vector lane can answer for about
+10% of what the lexical lane searches, and three docstrings plus PRD 07 called
+it "the fraction of the *filtered* population".** `_COVERAGE` is
+`count(*) FILTER (WHERE e.embedding IS NOT NULL) / count(*)` over
+`t.enrichment_state <> 'skeleton'` **and** the request's predicates; `_FULL_TEXT`
+and `_FUSED` carry the predicates and **not** the skeleton restriction. So the
+two lanes of one fused search do not see the same population, and the number
+answers *"has the backfill drained?"* rather than *"can the vector lane see this
+catalog?"*. Measured on this project's own catalog: **130,720** vectors over
+**~130,647** enriched titles is `1.000`, against **1,271,138** rows in `titles`
+— which is exactly what issue #31's live `usher search --mode semantic` printed
+while the same catalog was 89.7% invisible to that lane.
+
+**The number was not changed and the sentence was.** The denominator is
+boundary call 4 with an argument behind it — skeletons are never embedded, so
+counting them reports ~0.008 on a healthy catalog and reads as a broken
+subsystem forever — and swapping a measured denominator for an unmeasured one
+is not a repair. What was wrong was a field describing itself in terms of a
+population it does not use, on the wire, where a client renders it.
+
+**The general form, and it is the second time this file has recorded it:** a
+ratio is only as honest as its denominator's name, and *"the filtered
+population"* is the kind of name that survives review because every word in it
+is true of something. Say which rows are in the bottom, at every site that
+quotes the number — here that was `SearchOutcome`, `SearchResponse`, PRD 07,
+the README and `usher search`'s own printed line.
+## `ef_search` priced against a real index: 200 ships, the non-monotonicity did not reproduce, and over-fetch is a *filtered*-path lever only (2026-08-19, issue #32)
+
+**The first recall figure this constant has ever had from a real index.** Every
+`ef_search` number above it was taken on uniform-random 384-lane vectors at 2%
+filter selectivity with `hnsw.iterative_scan` **off** — a configuration this
+project has not shipped since M6.
+
+*Sample and denominators.* 132,409 real `openai:BAAI/bge-m3` vectors
+(`halfvec(1024)`, `PLAIN`, `m=16, ef_construction=64`, pgvector 0.8.6 on
+PostgreSQL 17.10), the live `usher-postgres-1`, **read only** — no reindex, no
+rebuild. **12 typed plot queries, embedded once through the deployment's own
+endpoint and frozen**, so every condition scores the identical vectors. Gold is
+the **exact top 10 per query per arm** under `enable_indexscan = off,
+enable_bitmapscan = off` — the two GUCs `nearest_for` forces — so recall@10 has
+a denominator of **10 per query, 120 per condition per arm**. Latency is **288
+observations per condition per arm** (12 queries × 12 scored rounds × 2 runs,
+round 0 discarded as warm-up), with conditions **interleaved** rather than
+blocked so a burst of foreign load cannot tax one of them. Bar, sample and
+decision rule were written down before anything ran, at
+`/var/tmp/i32-measure/PREREGISTRATION.md`, sha256
+`0be3c3504a44c11cb37484c0a0d8f4f0f792bf73025a5dfb26fc1d4bbb59ed6c`.
+
+| `ef_search` | recall@10 unfiltered | p50 | p95 | recall@10 filtered (4.8%) | p50 | p95 |
+|---|---|---|---|---|---|---|
+| 40 | 0.700 | 3.21 ms | 4.75 ms | 0.733 | 16.11 ms | 57.48 ms |
+| **100** — the old default | **0.858** | **4.77 ms** | **7.30 ms** | **0.783** | 18.15 ms | 58.50 ms |
+| **200** — ships | **0.917** | **10.59 ms** | **16.18 ms** | **0.808** | 22.56 ms | 57.45 ms |
+| 400 | 0.967 | 20.13 ms | 29.90 ms | 0.817 | 23.53 ms | 57.80 ms |
+| 1000 | 0.992 | 45.46 ms | 67.50 ms | 0.958 | 49.09 ms | 67.54 ms |
+
+Driver floor (`SELECT 1` through the same connection) p50 **0.095 ms**, so none
+of this is round trip. Beside the recorded query-side budget — embed p50 **5.7
+ms**, p95 9.9 ms — the shipped pair is now ~16 ms at p50 rather than ~10.5.
+**400 and 1000 are refused on cost, not on recall.**
+
+**The filtered arm's spread is a property of the queries, not of a busy box.**
+Per-query p50 there runs 6.0–59.5 ms while the *round*-level median is flat at
+15–19 ms across all 26 rounds of both runs — some queries simply need far more
+traversal to find ten Fantasy titles. The unfiltered arm's round medians span
+4.2–5.9 ms. This host's postgres was **not** quiet (the shipped worker's own
+gauge refreshes plus other agents' harnesses), which is exactly why the
+interleaving and the round-level control are here.
+
+🔴 **The 8-query non-monotonicity did not reproduce, under four readings, and
+the harness is where to look.** Recall@10 is **non-decreasing in `ef_search`
+for every one of 12 queries** on (1) the semantic lane unfiltered, (2) the
+semantic lane filtered, (3) the *first ten rows emitted* by a LIMIT-60 scan —
+the truncation reading, which is the one `relaxed_order` could plausibly break
+— and (4) the **fused** answer scored against the exact vector top 10, which is
+what a harness driving `usher search` without `--mode semantic` measures. Zero
+non-monotone pairs in any of the four. The measurement is also **exactly
+deterministic**: 216 (arm, condition, query) cells × 26 repetitions across two
+independent runs produced byte-identical id lists, gold included, and
+`SHOW hnsw.ef_search` read back inside each scored transaction returned the
+value set. Two candidate harness faults were eliminated by measurement rather
+than by argument — the endpoint returns **bit-identical** vectors across 5
+calls and across batch composition, and no `title_embeddings` row was written
+during the run. What is left as the likely cause is the measured object: the
+CLI and the API return `SearchService._rank`'s **blended** order, not the
+lane's, and the fused mode dilutes the whole ef effect (a query capped at 5 of
+10 there reaches 10 of 10 on the semantic lane).
+
+**`relaxed_order` and `LIMIT` do interact, the boundary is exactly
+`ef_search`, and the consequence is not recall.** The scan emits in exact
+distance order while the row count asked for is ≤ `ef_search`, and breaks the
+moment it passes it — at `ef_search = 100`: 10/50 rows sorted on 12 of 12
+queries, 100 rows unsorted on 1, **200 rows unsorted on 12 of 12 with a row
+displaced by up to 96 positions**, 1000 rows by up to 885. At 200 the same
+break moves to 250 rows. The planner does not repair it: it treats the index's
+order as a presorted key and puts an **Incremental Sort** on top, which sorts
+only within equal-distance groups. So `_SEMANTIC` is always inside the exact
+region (its LIMIT is the caller's, capped at `search_result_limit` = 50) and
+**`_FUSED`'s lanes are not** — `limit * _LANE_MULTIPLIER` is 250 at that cap,
+so the vector lane truncates an approximately ordered stream and *which* 250
+candidates reach RRF is approximate. The `row_number()` window's own `ORDER BY`
+re-sorts what survives, so the ranks are right for the set that arrived.
+**Found, not fixed**, and no non-monotonicity in recall@10 follows from it.
+
+🔴 **Over-fetch-and-re-rank buys nothing unfiltered, and the two controls say
+why before the recall table does.** The distances HNSW returns are
+**bit-identical** to the exact scan's for the same rows (max |delta| exactly
+0.0 over 60 rows) — pgvector approximates *which* vectors it visits, never the
+distance to one — so "re-score the candidates exactly" is arithmetically a
+no-op, and the re-sort is a second no-op wherever the emission was already
+ordered. Measured at the shipped `ef_search = 100`, fetching `10 × N` and
+cutting back to 10:
+
+| N | recall@10 unfiltered | p50 | recall@10 filtered | p50 |
+|---|---|---|---|---|
+| 1 (no over-fetch) | 0.858 | 4.77 ms | 0.783 | 18.15 ms |
+| 2 | 0.858 | 6.14 ms | 0.858 | 26.05 ms |
+| 5 | 0.858 | 5.71 ms | **0.892** | 37.66 ms |
+| 10 | 0.858 | 6.08 ms | 0.892 | 38.75 ms |
+| 20 | 0.858 | 5.88 ms | 0.892 | 38.35 ms |
+
+Unfiltered it is **identical per query at every factor** — the deeper rows the
+iterative scan yields are all farther than the tenth already found. Filtered it
+is worth **+10.9 points**, more than `ef_search` 200 buys there (+2.5), because
+under a predicate the extra rows force real traversal. So the issue's argument
+that over-fetch "makes recall a property of the over-fetch factor rather than
+of graph traversal" is **false on the unfiltered path and true on the filtered
+one**, and it is not built: it loses to `ef_search = 200` on the unfiltered arm
+(0.858 against 0.917) at a similar p50, and it is a second statement shape.
+Whoever takes the filtered path should start here.
+
+⚠️ **The issue's own single case had already decayed when this ran, and that
+is the argument for the sweep rather than a quibble.** *Harry Potter and the
+Philosopher's Stone* is **not** absent from the shipped lane's top 60 today: at
+`ef_search = 100` it is returned at rank **8**, and the row the lane loses is
+*Help! I'm a Boy (2002)*. Its exact rank moved 8 → **9** because a title named
+*Harry Potter (2026)* was embedded at **06:35Z that same morning**, 1,689 rows
+having landed in the previous three hours. Everything else in the issue's table
+reproduces — at 200 the top 12 matches the exact scan row for row. **A default
+argued from one film would have been argued from a rank that changed overnight**;
+the twelve-query curve is what it rests on instead.
+
+**And an exact scan of this table needs its parallelism turned off in a
+container.** `usher-postgres-1` has the Docker default 64 MB `/dev/shm`, and a
+Parallel Hash over 132,409 × 1024-lane vectors exhausts it —
+`DiskFullError: could not resize shared memory segment ... No space left on
+device`, mid-run, on the *gold* half of a measurement. `SET LOCAL
+max_parallel_workers_per_gather = 0` returns identical rows. `nearest_for` does
+not set it and has never hit this, because its own statement is a nested-loop
+over seeds rather than a hash join to `titles`.
+
+**Not measured, and named rather than implied:** real typed queries
+(`search_queries`, still synthetic); any filter other than one 4.8% genre
+overlap; whether the fused lane's approximate truncation is visible to a user;
+whether 200 still clears its bar as the embedded population grows past 132k;
+and everything the issue already lists — document length, neighbourhood
+density, `m = 16` at this width.
+
+## Weight class D and segment 6 both carried two spellings of one concept, and the deferral that left them there was priced on the wrong denominator (2026-08-19)
+
+`titles.genres` unions IMDb's vocabulary and TMDb's, and no title carries both
+spellings of any concept — 20,051 `Sci-Fi` against 6,223 `Science Fiction`,
+zero overlap on 1,272,866 rows (2026-08-19).
+[ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)
+fixed `/browse`'s filter and facets at **read** time and deliberately left both
+of this subsystem's genre readers split:
+
+- **`search_document` weight class D.** The two spellings share no lexemes:
+  `to_tsvector('english','Sci-Fi')` is `'fi':3 'sci':2 'sci-fi':1` against
+  `'fiction':2 'scienc':1`. A query reaching the genres segment matches one
+  half of the catalog.
+- **`compose_document` segment 6 of 7**, so every stored vector carries
+  whichever spelling its tier had.
+
+🔴 **The arithmetic that justified leaving them was wrong, and this file
+carried it.** The figure was *"**~1.8 h** plus a **3.3 h** `usher similar
+--rebuild` on this catalog by the 2026-08-13 run"*. That is the cost of
+re-embedding **the whole embedded population**, and it is the wrong population:
+what a genre rewrite stales is the intersection of "carries a source spelling"
+and "carries a vector", and this file's own `_POPULATION` note (`enrichment_state
+<> 'skeleton'`) plus ADR-0039's "the split follows the enrichment boundary
+exactly" say those two barely overlap.
+
+**Re-derived 2026-08-19 with the predicate taken from `GENRE_ALIASES` rather
+than hand-listed** — *affected* spelled as `genres IS DISTINCT FROM
+canonicalise_genres(genres)`:
+
+| | count |
+|---|---|
+| titles | 1,272,869 |
+| carrying at least one genre | 1,153,968 |
+| **rewritten by the sweep** | **79,913** |
+| **…of those, embedded** | **304** |
+| total embedded | 132,440 |
+| stale under `openai:BAAI/bge-m3` before the sweep | **0** |
+
+So the re-embed is **304 documents**, seconds, and `usher genres --backfill`
+ships. `search_document` is a **stored generated column**, so weight class D is
+fixed by the same `UPDATE` with no job at all; segment 6 costs one `usher index
+--backfill` pass over 304 titles.
+
+**Two ways to get the affected set wrong, both hit while re-deriving it.** A
+hand-listed array of "non-TMDb labels" gives **158,632** — more than double —
+because Usher's vocabulary *keeps* `Biography`, `Sport`, `Musical`, `Short`,
+`Game-Show`, `Film-Noir` and `Adult` verbatim, so those rows are already
+canonical and `canonicalise_genres` leaves them alone. Only `GENRE_ALIASES`'
+six rows rewrite anything. And counting only the *movie* aliases gives **108**
+embedded instead of 304, because the three **fused television labels** —
+`Sci-Fi & Fantasy` (165), `Action & Adventure` (154), `War & Politics` (25) —
+are TMDb's own spellings and therefore exist *only* on the enriched tier, which
+is 100% embedded. **The general form: when a population is defined by a map,
+derive it from the map. A transcription of a map is a second map.**
+
+**And 12 titles are affected by no alias at all** (`{Drama,Drama}`,
+`{Action,Drama,Romance,Action,Drama,Romance}`) — `canonicalise_genres`
+deduplicates, so they normalise to a shorter array. A SQL predicate naming the
+alias spellings cannot see them, which is why the shipped sweep canonicalises
+every row in Python and filters nothing in SQL.
+
+**The fingerprint really does the staling, verified by mutation rather than
+assumed.** `tests/integration/test_genre_backfill.py::
+test_the_rewrite_stales_the_embedding_through_the_shipped_fingerprint` embeds a
+title at its own document, asserts as a **premise** that it is not stale, runs
+the backfill, and asserts `usher index --backfill` then enqueues it. The
+careless plant — deleting the genres segment from `_FINGERPRINT_SQL` alone —
+fails the *premise*, because SQL then assembles six segments against the
+composer's seven. The careful one — the segment emptied on **both** sides, so
+the two still agree — passes the premise and fails the assertion the case is
+named for. Same pair, same lesson, as
+`test_a_title_embedded_before_its_credits_landed_is_stale_again`.
+
+Still unmeasured, and sampleable with no user traffic: how many `Sci-Fi` titles
+change position in a `/search` for a science-fiction query now that they carry
+the other label.
+
+## RRF's absent-lane `COALESCE` costs the typed title its own top row, and the bar written to refute it CONFIRMED it (2026-08-19, issue #21)
+
+**Issue #21 is CONFIRMED and not refuted, by a bar written to be capable of
+refuting it.** The bar is `/var/tmp/usher-i21-bar/BAR.md`,
+`sha256 0687983a9ec4d41f275c7b6b273b29d734ab44e5eef51f269654631bf348bc62`,
+written 2026-08-19T01:52:51-05:00 — **before the first query was issued** — and
+its digest was re-read at run time and matched. Harness
+`scripts/measure_fusion_coverage_bias.py`; frozen results
+`/var/tmp/usher-i21-bar/run-full.json`
+(`sha256 e4323414ca5fd3bc8c1c317af75ca8b4a189a2726e6f733c366d35939414a3e4`).
+Live catalog: **1,272,866 titles, 132,409 `title_embeddings`**, alembic `m09f`,
+`openai:BAAI/bge-m3`, shipped `rrf_k = 60`, `limit = 20`, `lane_limit = 100`.
+`skeleton` and *has no `title_embeddings` row* were **verified to coincide
+exactly** (0 skeletons carry a vector) rather than assumed, so the frame is the
+population the issue names.
+
+**The sample.** Exact-name known-item queries, deterministic draw
+(`ORDER BY md5(id::text || '20260819-i21')`). **Stratum A, n = 1,000**, uniform
+over the 1,140,433-row skeleton frame — the honest population and the one the
+bars score. **Stratum B, n = 300**, uniform over the 98,467 skeletons whose
+`lower(name)` is also borne by an embedded title — the adversarial stratum. Two
+arms per query on one query vector: the **index arm** (`PostgresSearchIndex`
+alone, isolating `_FUSED`) and the **service arm** (through
+`SearchService._blend`, i.e. what a viewer sees). Denominators are stated on
+every number; **999 of 1,000 stratum-A names produce a non-empty
+`websearch_to_tsquery`**, so the answerable subset moves nothing.
+
+| stratum A, n = 1,000 | recall@1 `full_text` | recall@1 `fused` | delta |
+|---|---|---|---|
+| index arm (`_FUSED` alone) | **72.2%** | **20.1%** | **−52.1 points** |
+| service arm (through `_blend`) | **71.8%** | **54.8%** | **−17.0 points** |
+| index arm, *name*-level rank 1 | 79.4% | 26.5% | −52.9 points |
+| service arm, *name*-level rank 1 | 78.5% | 61.9% | −16.6 points |
+
+**Bar 1 fails by 51 points against a 1-point tolerance. Bar 2 fails at
+`p = 1.5e-157`** (index) and `2.9e-35` (service), and the discordant pairs are
+one-sided to a degree no sampling story survives: **521 queries lose a rank-1
+`full_text` hit to an *embedded* row under `fused`, 0 lose one to another
+skeleton, and 0 queries go the other way** — in 1,000 tries the semantic lane
+never once rescued a query the lexical lane got wrong. Bar 3 fails too (stratum
+B, −5.0 points index / −7.0 service, `p = 3.1e-05` / `1.0e-05`). **The power
+control is satisfied and it is what licenses reading a null as a refutation had
+one appeared**: all 300 stratum-B fused results contain at least one embedded
+title, against a floor of 100.
+
+**The displacement is the issue's own arithmetic, to the row. 521 of 521
+index-arm displacements had the typed title as the *uncapped* #1 lexical
+match** — the `1/61` ceiling in the issue's table, exactly — and **88.5% landed
+it at fused rank 2**, one place below the enriched near-match. `Grandma's Tea`
+→ *Grandma's Boy*; `The 17 Year Feast` → *17 Again*; `Choinka strachu` →
+*Curse of Chucky*; `Dendy Memories` → *Dear Wendy*; `Jallad No. 1` → *Jallaad*.
+The predicted failure — *"a viewer types an obscure title exactly, and an
+enriched near-match takes the top row"* — is the observed one.
+
+**Miss split, in the recorded idiom** (below the floor / truncated / dropped /
+out-ranked, against the shipped suggest row's `82.8 / 0.0 / 0.0 / 17.2`). The
+search path's analogues are stage for stage: *below the floor* = no
+`search_document @@ websearch_to_tsquery` match, so the row is in no lane at all
+(a skeleton has no vector, so the lexical predicate is its only candidacy);
+*truncated* = matched, but its uncapped lexical rank exceeds the mode's cap
+(20 for `full_text`, `lane_limit = 100` for `fused`); *dropped* = inside the cap
+and absent from the answer, i.e. **the fusion lost it**; *out-ranked* =
+returned, below rank 1.
+
+| stratum A, service arm | below the floor | truncated | dropped | out-ranked | misses |
+|---|---|---|---|---|---|
+| `full_text` | 8.2 | 28.4 | **0.0** | 63.5 | 282 |
+| `fused` | 5.1 | 9.7 | **14.8** | 70.4 | 452 |
+
+**`dropped` is 0.0 for `full_text` structurally and 14.8% for `fused`, and that
+column is the finding.** Every one of those is a title the lexical lane had
+inside its 100-row window and the fusion pushed out of a 20-row answer. It is
+the first non-zero `dropped` this file has ever recorded — the suggest path's
+`levenshtein` re-rank scores 0.0% in *every* configuration measured. **The
+competitor stratification is equally one-sided**: of 452 service-arm fused
+misses, **402 were out-ranked by an embedded row and 50 by a skeleton**; the
+`full_text` arm's 282 misses split 68 / 192 the other way.
+
+**`coverage_t` is ~0.10 and the issue's null holds — which makes the bonus
+worse, not better.** `semantic_coverage`, which the CLI prints, **is not this
+quantity**: `_COVERAGE` counts `embedded / total` over
+`enrichment_state <> 'skeleton'`, the enriched tier's own embedding
+completeness, and it reads **1.000** on every query here while the number that
+matters is a tenth of that. Four estimators, each with its denominator:
+**uniform 132,409/1,272,866 = 0.1040**; **`vote_count`-weighted
+26,382,667/246,921,814 = 0.1068** (a named *proxy* for demand — `search_queries`
+has no typed workload to average over); **exact-name relevant sets over stratum
+A, pooled 216/2,359 = 0.0916**, or 216/1,359 = 0.1589 with the drawn target
+excluded from its own relevant set, and **791 of 1,000 queries have no relevant
+document in the enriched tier at all**; and of the embedded relevant documents
+that exist, the lexical lane already finds **44.9% (97/216)** in its own top 20.
+
+⚠️ **REFUTED, and it is the issue's own supporting claim: enrichment on this
+catalog is not a popularity proxy — it is anti-correlated with votes.** #21
+argues the bias is *"a second popularity bias, stacked on the declared one"*
+because the enriched tier was selected by vote count. Measured: embedded titles
+average **199** votes against **541** for the rest, median **15** against
+**29**, and by vote decile the coverage curve runs **23.9% in the top decile,
+14.2% in the middle, 72.3% in the bottom**. So lane membership is not a proxy
+for anything a viewer wants; it is an arbitrary tenth of the catalog carrying a
+rank bonus. That makes the defect *worse* than #21 states it, not milder.
+
+**The trade, both signs, because the effect has both.** *Not pre-registered* —
+stratum C was drawn after the verdict above was computed and frozen, enters no
+bar, and exists because half a trade is not a number. **Stratum C, n = 300,
+drawn from the embedded tier**: `fused` **beats** `full_text` 68.3% against
+59.0% (service arm), +9.3 points, 49 queries gained against 21 lost. The same
+`COALESCE` that costs 17 points when the typed title is a skeleton buys 9 when
+it is enriched — and lane membership carries no information about which case a
+query is. At the catalog's own 89.6/10.4 composition that is
+`0.896 × −17.0 + 0.104 × +9.3` = **−14.3 points net** on known-item lookup.
+This is also why a single spot check proves nothing about the sign: `The Matrix`
+under `fused` correctly promotes the 1999 film over three 2018 video essays,
+and it is the 10.4% case.
+
+⚠️ **The fused ordering is limit-dependent, and a wider request can give a worse
+first row.** `lane_limit = limit * _LANE_MULTIPLIER`, so the semantic candidate
+pool grows with the request. `usher search "The Lost Pass" --mode fused` returns
+the typed title at **rank 1 at `--limit 3` and rank 2 at `--limit 20`**, behind
+*The Forward Pass* (1929). Any spot check of this defect must state its limit;
+`--limit 3` hides it.
+
+**Two controls, because a harness that agrees with nothing is not evidence.**
+(1) The shipped CLI reproduces the service arm at the same limit — `Choinka
+strachu` and `Jallad No. 1` are displaced through `python -m usher search` at
+`--limit 20` exactly as recorded. (2) **The harness wrote nothing, proven by
+arithmetic rather than asserted**: `search_queries` went 47 → 67 across the
+whole session and 20 is exactly the number of *CLI control* invocations, so the
+3,200 index-and-service searches the harness itself issued (it passes
+`user_id=None`) left zero rows.
+
+**Not settled by this run, named rather than implied.** Only exact-name
+known-item queries were scored — mood, discovery and partial-title queries are
+untouched, and the semantic lane is likelier to earn its keep there. Only
+recall@1; nDCG and recall@5 are unmeasured. `hnsw.iterative_scan`'s interaction
+with the bias is unmeasured, so the semantic lane's row count remains
+configuration-dependent. And **no fix is measured here**: convex fusion is
+#21's proposal, it replaces a parameter-free rule with one that must be tuned,
+and this run establishes only that the change is warranted — not what its
+weights should be.
+
+## Issue #25's exact-name key closes most of #21, and the residual is the tie it cannot break (2026-08-19, issues #21 + #25 re-run)
+
+**The same bar, re-run unchanged against merged code.** Same harness
+(`scripts/measure_fusion_coverage_bias.py`), same pre-registration
+(`/var/tmp/usher-i21-bar/BAR.md`, digest re-read at run time and matched:
+`0687983a9ec4d41f275c7b6b273b29d734ab44e5eef51f269654631bf348bc62`), same seed
+`20260819-i21`, same strata, same denominators, same thresholds. Nothing was
+edited — the only difference is the code under it. Results
+`/var/tmp/i21-rerun/post25-ef100-full.json` (and `-ef200-` for the shipped
+`ef_search`).
+
+**That the run used merged code is proven, not asserted.** A read-only
+`before_cursor_execute` listener recorded every statement the run sent to
+PostgreSQL: **3,200 of 3,200 fused statements and 3,200 of 3,200 `full_text`
+statements carried `lower(t.name) = lower(btrim(:query))` together with
+`ORDER BY exact_name DESC`** (3,200 = 1,600 queries x 2 arms). `main` contains
+zero occurrences of `_EXACT_NAME` and its `_FUSED` outer sort is
+`ORDER BY score DESC, id`, so the two branches are distinguishable from the SQL
+alone and the run is on the right side of the difference.
+
+| stratum A, n = 1,000 | `full_text` | `fused` | delta |
+|---|---|---|---|
+| index arm, pre-#25 | 72.2% | 20.1% | **-52.1** |
+| index arm, post-#25 | 82.5% | 81.6% | **-0.9** |
+| service arm, pre-#25 | 71.8% | 54.8% | **-17.0** |
+| service arm, post-#25 | 83.4% | 81.6% | **-1.8** |
+
+**The mechanism #21 named is gone.** Discordant pairs where an *embedded* row
+took rank 1 from the typed skeleton fell **521 -> 9** on the index arm (98.3%)
+and **172 -> 10** on the service arm (94.2%). The `dropped` bucket — #21's
+first-ever non-zero, and the one an `ORDER BY` was not obviously able to rescue
+— went **8.4% -> 0.0%** (index) and **14.8% -> 0.0%** (service), **67 rows ->
+0**. It was rescuable after all: the key sorts inside the lexical CTE ahead of
+the lane's own `LIMIT`, so the row is no longer truncated out of the lane
+before fusion sees it.
+
+**Read the miss split in absolute rows, not percentages.** Stratum-A fused
+misses fell 799 -> 184 (index), so every surviving bucket's *share* rose while
+its count did not: `below the floor` 23 -> 23 rows, `truncated` 44 -> 31,
+`out-ranked` 665 -> 130, `dropped` 67 -> 0. A split whose denominator moved by
+4.3x cannot be compared bucket-share to bucket-share.
+
+⚠️ **Stratum B got worse, and that is the honest residual.** On the 300
+skeletons whose name is *also* borne by an embedded title, the delta widened
+**-5.0 -> -8.7** (index) and **-7.0 -> -14.3** (service) — both arms improved
+in absolute terms (service `full_text` 7.7% -> 18.0%, `fused` 0.7% -> 3.7%) but
+`full_text` improved more. The reason is structural: when the competitor is
+*also* an exact name match, `exact_name DESC` **ties**, the sort falls through
+to `score DESC`, and there the enriched row's two-lane sum wins exactly as #21
+described. **289 of 289 stratum-B fused misses are to a same-name row.** #25's
+key breaks the ordering only when the competitor is *not* an exact match; it
+cannot break a tie it creates.
+
+**The catalog-composition net, recomputed.** `(1 - t) x delta_A + t x delta_C`
+at `t = 0.104`, with stratum C (n = 300, drawn from the embedded tier, not
+pre-registered) supplying the other side of the trade:
+
+| | delta A | delta C | net |
+|---|---|---|---|
+| service arm, pre-#25 | -17.0 | +9.3 | **-14.3 pts** |
+| service arm, post-#25 | -1.8 | +11.0 | **-0.47 pts**, 95% CI [-1.96, +1.02] |
+| index arm, post-#25 | -0.9 | +7.7 | **-0.01 pts**, 95% CI [-0.63, +0.61] |
+
+**Both nets straddle zero.** Fused went from decisively net-negative on this
+catalog to statistically indistinguishable from `full_text`, while winning
+outright on the 10.4% of the catalog that carries a vector (service arm stratum
+C **75.7% -> 86.7%**, +11.0).
+
+**`ef_search` is not a confound.** The pre-#25 run recorded 100; the shipped
+default is now 200 (issue #32). Re-running the whole bar at both gives nets of
+-0.47 (100) and -0.49 (200) on the service arm — the comparison survives the
+parameter change.
+
+**The bar's own verdict is still CONFIRMED, and the arithmetic says why.**
+B1 now *passes* on the index arm (-0.9 is inside the 1.0-point tolerance) and
+B2 now *passes* on the service arm (`p = 0.995` — by the issue's own accounting,
+which excludes misses to another skeleton, fused wins 24 and loses 10). B3
+fails on both arms, which is the stratum-B tie above. So the verdict is carried
+entirely by the adversarial stratum: **#21 is narrowed to same-name
+collisions, not closed.**
+
+**The harness still wrote nothing.** `search_queries` 67 -> 78 across the
+session, and all 11 rows are `The Matrix`/`space opera` from a *different*
+agent's live-container work on issue #31 — none is a skeleton name from either
+draw. The 6,400 searches this run issued (it passes `user_id=None`) left zero
+rows, and the live catalog was read-only throughout.
+
+**Not settled by this run.** Still only exact-name known-item queries and still
+only recall@1 — mood and partial-title queries, where the semantic lane should
+earn most, remain unmeasured. And the stratum-B tie has no measured fix: the
+obvious one (break the `exact_name` tie on popularity rather than on the fused
+score) is a proposal, not a result.

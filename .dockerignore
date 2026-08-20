@@ -17,6 +17,15 @@
 !src
 !src/**
 
+# The console's sources, for the `console` build stage. Everything the stage
+# needs and nothing else: `npm ci` reconstructs `node_modules` from the
+# lockfile inside the image, and `vite build` reconstructs `dist`, so sending
+# either would upload hundreds of megabytes to produce bytes the build is about
+# to overwrite -- and a host-built `dist` sneaking into an image is the same
+# class of leak as the stale `__pycache__` below.
+!web
+!web/**
+
 # Re-exclude, evaluated after the allowlist above: .dockerignore patterns
 # are last-match-wins, so these still win against `!src/**`. Without them,
 # verified directly, host-local __pycache__/*.pyc under src/ (created by
@@ -31,3 +40,10 @@
 # happened to have lying around.
 **/__pycache__
 **/*.py[cod]
+web/node_modules
+web/dist
+web/dist-fixtures
+web/coverage
+web/test-results
+web/playwright-report
+web/.vite

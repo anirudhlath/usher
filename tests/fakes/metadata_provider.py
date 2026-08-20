@@ -1,11 +1,11 @@
 """In-memory `MetadataProvider`, for `EnrichService` to be unit-tested
 against.
 
-**Where this is more forgiving than the real TMDb, on purpose.** Six places.
-The first three are closed by `tests/unit/test_adapters_tmdb_*.py`, which
-drive `TmdbMetadataProvider` over `httpx.MockTransport`; the last three are
-closed by nothing in this repository and are on Task 26's live-verification
-list.
+**Where this is more forgiving than the real TMDb, on purpose.** Seven places.
+The first three and the seventh are closed by `tests/unit/test_adapters_tmdb_*.py`,
+which drive `TmdbMetadataProvider` over `httpx.MockTransport`; the fourth
+through sixth are closed by nothing in this repository and are on Task 26's
+live-verification list.
 
 - **It never rate-limits, never times out, and answers instantly.** Nothing
   here exercises the token-bucket throttle, the 429 path, or
@@ -35,6 +35,12 @@ list.
   provider's own relevance ordering" is whatever a test wrote down. It
   cannot show that TMDb's ordering puts the obvious answer first, which is
   the assumption every "pick a confident candidate" rule rests on.
+- **Its `genre_vocabulary` is TMDb's set transcribed a second time, not
+  read off `TMDB_GENRE_NAMES`.** So an `EnrichService` case proves the rule —
+  a concept the provider cannot name survives enrichment — and proves nothing
+  about whether TMDb's real vocabulary is that set. ADR-0039 and the
+  `test_adapters_tmdb_provider.py` case named on the property close the other
+  half.
 """
 
 import copy
@@ -143,6 +149,53 @@ class FakeMetadataProvider(MetadataProvider):
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def genre_vocabulary(self) -> frozenset[str]:
+        """The 24 canonical concepts TMDb's 35 genre names collapse to.
+
+        **Written out rather than read off `TMDB_GENRE_NAMES`**, and that is
+        the seventh entry in this module's list of ways it is more forgiving
+        than the real provider — restating it here means `EnrichService`'s
+        cases prove the *rule* (a concept the vocabulary lacks survives) and
+        say nothing about whether TMDb's real set is this one.
+        `test_adapters_tmdb_provider.py::
+        test_the_genre_vocabulary_is_every_tmdb_name_as_a_canonical_concept`
+        is what pins that half, and the two together are what make issue #30's
+        deletion actually fixed rather than fixed against a fixture.
+
+        The seven canonical concepts deliberately absent — `Adult`,
+        `Biography`, `Film-Noir`, `Game-Show`, `Musical`, `Short`, `Sport` —
+        are IMDb's vocabulary gap and the whole subject.
+        """
+        return frozenset(
+            {
+                "Action",
+                "Adventure",
+                "Animation",
+                "Comedy",
+                "Crime",
+                "Documentary",
+                "Drama",
+                "Family",
+                "Fantasy",
+                "History",
+                "Horror",
+                "Kids",
+                "Music",
+                "Mystery",
+                "News",
+                "Reality",
+                "Romance",
+                "Science Fiction",
+                "Soap",
+                "Talk",
+                "TV Movie",
+                "Thriller",
+                "War",
+                "Western",
+            }
+        )
 
     def seed(self, ref: ProviderRef, payload: dict[str, Any]) -> None:
         self._payloads[ref] = copy.deepcopy(payload)

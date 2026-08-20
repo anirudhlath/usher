@@ -47,6 +47,7 @@ from usher.domain.enums import TitleKind
 from usher.domain.title import Title
 from usher.ports.search import (
     SearchDocument,
+    SearchFilters,
     SearchHit,
     SearchIndex,
     SearchOutcome,
@@ -83,6 +84,15 @@ class _DeadIndex(SearchIndex):
 
     async def search(self, request: SearchRequest) -> SearchOutcome:
         raise AssertionError("the suggest route must not reach the search index")
+
+    async def semantic_coverage(self, filters: SearchFilters) -> float:
+        # Dead on the same terms as `search`, and it carries a claim of its own
+        # rather than only satisfying the ABC: since #16 the coverage probe is
+        # bought by a search that is about to expand, and type-ahead has no
+        # embed for an expansion to sit in front of. An expansion factored to
+        # the top of `SearchService` -- the tidy-looking version -- reaches
+        # this line before it reaches anything else.
+        raise AssertionError("the suggest route must not measure semantic coverage")
 
 
 class _RecordingPrefix(FakePrefixSuggestIndex):
