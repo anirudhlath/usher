@@ -38,6 +38,17 @@ enriched ones. **Among movies the two ranges overlap** — 40,518 against
 step 5 separates them by evidence instead. The IMDb-scale outliers are all
 series, which TMDb enrichment never reached.
 
+**The ~38× figure is the paired one, and that qualifier is load-bearing.**
+`.claude/rules/tmdb-and-enrichment.md` records median TMDb `vote_count` **15**
+against median frozen IMDb `numVotes` **576** over *the same* 130,647 enriched
+rows. This plan said `~50-100x` in eight places until 2026-08-19, inferred from
+an all-kinds skeleton maximum over an enriched-movie maximum — two disjoint
+populations. A near neighbour in the same rules file (median 16 against median
+581) is **also** unpaired: the 16 is over 537 enriched titles and the 581 over
+the unenriched tier. Both mistakes are this project's signature failure, made
+inside the document arguing against it, which is the reason the correction is
+recorded here rather than quietly applied.
+
 ADR-0002's frame expects 48,549 eligible unique-named movies and this catalog
 presents **8,523**, so `usher eval suggest --full` refuses with
 `baseline-invalid`.
@@ -147,7 +158,7 @@ with:
     # writers each and no way to say which one wrote a row.** `bulk/imdb.py`
     # wrote IMDb's `numVotes`/`averageRating` here and `tmdb/mapping.py` wrote
     # TMDb's `vote_count`/`vote_average` over the top, into the same column,
-    # on a scale ~50-100x apart. Measured on the deployed catalog: skeleton
+    # on a scale ~38x apart. Measured on the deployed catalog: skeleton
     # rows reached 2,656,080 and enriched movies topped out at 40,695. The
     # ranges *overlap* among movies (40,518 against 40,695), so nothing
     # downstream could have separated them by magnitude. ADR-0040.
@@ -219,7 +230,8 @@ Create Date: 2026-08-19
 
 `titles.vote_count` was written by `adapters/bulk/imdb.py` with IMDb's
 `numVotes` and by `adapters/tmdb/mapping.py` with TMDb's `vote_count`, which
-are the same concept on scales ~50-100x apart. `community_rating` was
+are the same concept on scales ~38x apart (paired: median TMDb 15 against
+median IMDb 576 over the same 130,647 frozen enriched rows). `community_rating` was
 dual-written the same way and **silently**, because IMDb's `averageRating` and
 TMDb's `vote_average` are both 0-10 and no value is ever out of range.
 
@@ -595,7 +607,7 @@ async def test_apply_ratings_writes_only_the_imdb_columns(session: AsyncSession)
     """**The whole of ADR-0040 in one assertion.** Before it, this same call
     wrote `vote_count`/`community_rating` -- the columns TMDb enrichment also
     writes -- so an IMDb import silently overwrote a TMDb figure with a number
-    on a 50-100x different scale, and nothing recorded which had won. The
+    on a ~38x different scale, and nothing recorded which had won. The
     `tmdb_*` half of this assertion is the load-bearing half: a writer that
     filled the IMDb columns *and* left its old write in place would satisfy
     every assertion about `imdb_*` and change nothing at all.
@@ -655,7 +667,7 @@ class ImdbRating:
 
     **The names carry the source because the columns do.** These were
     `community_rating` and `vote_count` until ADR-0040, which is how an IMDb
-    import came to overwrite TMDb's figures on a 50-100x different scale with
+    import came to overwrite TMDb's figures on a ~38x different scale with
     nothing recording which source had won.
     """
 
@@ -705,7 +717,7 @@ made legible rather than fixed) with:
         # **The two columns named here are IMDb's own, and that is ADR-0040.**
         # This statement used to write `community_rating`/`vote_count`, which
         # `adapters/tmdb/mapping.py` also writes -- so whichever ran last won,
-        # on scales ~50-100x apart, with nothing recording the winner.
+        # on scales ~38x apart, with nothing recording the winner.
         return await self._rowcount("""
             UPDATE titles t
             SET imdb_average_rating = s.imdb_average_rating,
@@ -821,7 +833,7 @@ git add -A
 git commit -m "fix(bulk): IMDb ratings land in the IMDb columns
 
 apply_ratings wrote community_rating/vote_count, which TMDb enrichment
-also writes, so an import overwrote TMDb figures on a ~50-100x scale."
+also writes, so an import overwrote TMDb figures on a ~38x scale."
 git log -1 --pretty='%(trailers)'   # must print nothing
 ```
 
@@ -1083,7 +1095,7 @@ and extend the comment block above `_ELIGIBLE` with:
 ```python
 # **The threshold is ADR-0002's and the column is not.** The gate was written
 # against `titles.vote_count` when only the IMDb bulk import wrote it; TMDb
-# enrichment later wrote the same column with a figure ~50-100x smaller, so by
+# enrichment later wrote the same column with a figure ~38x smaller, so by
 # 2026-08-19 `vote_count >= 500` selected 8,523 unique-named movies where the
 # gate recorded 48,549 and `check_frame` refused. `imdb_num_votes` is
 # single-source, catalog-wide, and no TMDb crawl can move it -- so this restores
@@ -1108,7 +1120,7 @@ Task 6, **after** the data exists, and never edited to make a run green.
 git add -A
 git commit -m "fix(eval): the sampling frame anchors on imdb_num_votes
 
-vote_count acquired a second writer on a ~50-100x different scale, which
+vote_count acquired a second writer on a ~38x different scale, which
 took the frame from 48,549 eligible movies to 8,523."
 git log -1 --pretty='%(trailers)'   # must print nothing
 ```
