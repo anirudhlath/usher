@@ -646,13 +646,114 @@ async def test_unmatched_lists_and_resolves_through_the_real_repository(
     assert "nothing unmatched" in capsys.readouterr().out
 
 
+async def _an_unmatched_item(settings: Settings) -> uuid.UUID:
+    """One source and one item on the review queue, committed. The id is what
+    `--resolve` is given, so a case can name a *held* item and vary only the
+    title -- which is what tells the two refusals below apart."""
+    async with _session_for(settings) as own:
+        source = Source(
+            kind=SourceKind.EMBY,
+            name=f"cli-source-{new_id()}",
+            base_url="https://emby.invalid",
+            credentials_ref=f"ref-{new_id()}",
+            device_id=str(new_id()),
+        )
+        await PostgresSourceRepository(own).add(source)
+        pipeline = build_pipeline(own, settings)
+        await pipeline.media_items.upsert_many(
+            [
+                MediaItemUpsert(
+                    source_id=source.id,
+                    external_id="unmatched-1",
+                    title_id=None,
+                    episode_id=None,
+                    container="mkv",
+                    video_codec=None,
+                    audio_codec=None,
+                    width=None,
+                    height=None,
+                    hdr_format=None,
+                    audio_channels=None,
+                    file_size_bytes=None,
+                    runtime_seconds=None,
+                    added_at=None,
+                    last_seen_at=source.created_at,
+                )
+            ]
+        )
+        await own.commit()
+        stored = await pipeline.media_items.get_by_external_id(source.id, "unmatched-1")
+    assert stored is not None, "the premise: the item being resolved is on the queue"
+    return stored.id
+
+
+async def _a_title(settings: Settings) -> uuid.UUID:
+    """A `titles` row `--title` can legitimately name."""
+    title_id = new_id()
+    async with _session_for(settings) as own:
+        await own.execute(
+            text(
+                "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
+                "VALUES (:id, 'movie', 'cli-orphan', 'cli-orphan', 'skeleton')"
+            ),
+            {"id": title_id},
+        )
+        await own.commit()
+    return title_id
+
+
 async def test_resolving_an_item_that_does_not_exist_says_so(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """**The title is real and the media item is not**, which is the only
+    fixture that keeps this a test of `attach_title`'s `rowcount == 0`.
+
+    It named neither until M10's F4. That was answered by the same
+    `no such media item` for as long as nothing checked the title -- and once
+    something does, a case naming neither is answered by whichever check runs
+    first, so it would have gone on reading as coverage of this arm while
+    silently testing the one below it.
+    """
+    title_id = await _a_title(cli_settings)
     await _unmatched(
-        cli_settings, limit=50, offset=0, resolve=str(uuid.uuid4()), title=str(new_id())
+        cli_settings, limit=50, offset=0, resolve=str(uuid.uuid4()), title=str(title_id)
     )
     assert "no such media item" in capsys.readouterr().out
+
+
+async def test_an_unknown_title_id_is_a_sentence_against_real_postgres(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**Issue #5 against the foreign key that produces it**, which is the half
+    no fake can exhibit -- `FakeMediaItemRepository`'s own divergence list says
+    it has no foreign keys, so the unit twin proves the pre-check and this
+    proves what the pre-check is standing in front of.
+
+    Before M10's F4 this reached `fk_media_items_title_id_titles`,
+    `PostgresMediaItemRepository.attach_title` translated it to
+    `RepositoryConflict`, and `main` re-raised it because that family is
+    deliberately out of `OPERATOR_ERRORS` -- **60 frames** for a mistyped
+    UUID, measured on this case's own red run.
+
+    The last assertion is what stops the fix being a `try/except` around the
+    write: the item is still on the review queue, so the refusal happened
+    before the statement rather than after it.
+    """
+    media_item_id = await _an_unmatched_item(cli_settings)
+    unknown = new_id()
+
+    with pytest.raises(SystemExit) as exit_info:
+        await _unmatched(
+            cli_settings, limit=50, offset=0, resolve=str(media_item_id), title=str(unknown)
+        )
+
+    message = str(exit_info.value)
+    assert str(unknown) in message, message
+    assert "Traceback" not in message, message
+    assert "resolved" not in capsys.readouterr().out
+
+    await _unmatched(cli_settings, limit=50, offset=0, resolve=None, title=None)
+    assert str(media_item_id) in capsys.readouterr().out
 
 
 async def test_a_disabled_source_is_never_walked(session: AsyncSession) -> None:

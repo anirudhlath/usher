@@ -1423,6 +1423,21 @@ suspicion.
   question ADR-0026 asks before adding a member is how often an operator hits
   it, and answering that for a *refusal* type whose other raise sites are
   genuine conflicts is the work.
+  ✅ **Discharged 2026-08-20 by M10's F4, and the answer refused the one-line
+  change.** The question was answered by reading every raise site: **22 across
+  14 modules**, of which **exactly one is reachable from a CLI argument** —
+  this one. `usher bootstrap --phase` can reach `ImportRunRepository.start`'s
+  uniqueness conflict, but by racing another bootstrap rather than by a typo,
+  and `BootstrapService._concede_to_other_owner` answers it without raising;
+  every other site is reached only by a walk (`similar --rebuild`, `derive`,
+  `curate`, `search`/`suggest`, `work`, `sync`), and
+  `db/repositories/source.py`'s two only from `POST /admin/sources`, since no
+  subcommand adds a source. So widening the tuple would mute 22 sites to fix
+  one, several of them the deliberate bug tripwires the amendment names. **The
+  fix is a lookup at the call site** — `cli._unmatched` reads the title before
+  it writes, as `POST /admin/unmatched/{id}/resolve` has since E4 — and the
+  count lives in ADR-0026's Consequences, because a count nobody wrote down is
+  a count somebody re-derives wrongly.
 - **A covering index for `GET /admin/unmatched` is measured, requested, and
   declined** — M9's E4, over 200,000 items / 70,000 unmatched / 23,333 undated.
   `ix_media_items_unmatched` is `(source_id) WHERE title_id IS NULL` and carries

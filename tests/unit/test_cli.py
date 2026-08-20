@@ -29,6 +29,8 @@ from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.genome_repository import FakeGenomeRepository
 from tests.fakes.import_run_repository import FakeImportRunRepository
 from tests.fakes.llm_client import FakeLLMClient
+from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.title_repository import FakeTitleRepository
 from usher.adapters.bulk.imdb import parse_akas_row
 from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.cli import (
@@ -40,6 +42,7 @@ from usher.cli import (
     _print_search_answer,
     _run_lanes,
     _search,
+    _unmatched,
     _vocabulary_line,
     build_parser,
     parse_args,
@@ -56,9 +59,12 @@ from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.ids import new_id
 from usher.domain.search import SearchResult
+from usher.domain.title import Title
 from usher.ports.bulk import GENOME_TAG_COUNT, ImdbTitle
 from usher.ports.events import NullEventPublisher
+from usher.ports.ingest import MediaItemUpsert
 from usher.ports.repository import GenomeCoverage
 from usher.ports.search import SearchFilters, SearchMode
 from usher.services.bootstrap import (
@@ -168,6 +174,189 @@ def test_resolving_an_unmatched_item_needs_both_ids() -> None:
         parse_args(["unmatched", "--resolve", "x"])
     with pytest.raises(SystemExit):
         parse_args(["unmatched", "--title", "x"])
+
+
+# -- `--resolve --title`'s three answers ---------------------------------------
+#
+# `--title` has three bad values and they are three different conditions.
+# A value that is not a UUID never reaches a port -- `_as_uuid` refuses it
+# (`test_resolving_an_unmatched_item_needs_both_ids`' neighbours). The other
+# two both reach `attach_title`, and until M10's F4 only one of them had an
+# answer: a `--resolve` naming no media item is `rowcount == 0` and prints
+# `no such media item`, while a well-formed `--title` naming no row is a
+# foreign key -- `RepositoryConflict`, which is deliberately **not** in
+# `OPERATOR_ERRORS` (ADR-0026's amendment), so `main` re-raises it and the
+# operator gets the stack. The fix is a lookup here rather than a tenth
+# member of that tuple, and the enumeration that argues for it is in
+# ADR-0026's Consequences.
+#
+# These two cases are the fake-backed half. The fake has **no foreign key**
+# (see its own divergence list), so it cannot exhibit the defect at all --
+# what it can pin, and what a `try/except RepositoryConflict` around the
+# write would fail, is that nothing was attempted and nothing was committed.
+# `tests/integration/test_cli_pipeline.py::
+# test_an_unknown_title_id_is_a_sentence_against_real_postgres` is where the
+# FK actually exists.
+
+
+@dataclasses.dataclass
+class _ResolveSession:
+    """`_session_for`'s yield, narrowed to the one method `_unmatched` calls
+    on it. The counter is an assertion rather than a stub's convenience: a
+    refusal that committed is a refusal that arrived too late."""
+
+    commits: int = 0
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+class _RecordingMediaItems(FakeMediaItemRepository):
+    """The fake plus the one thing these cases have to know -- whether the
+    write was *attempted*. `attach_title`'s return value cannot say so: `False`
+    is also what a call that found no row produces."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attached: list[tuple[uuid.UUID, uuid.UUID]] = []
+
+    async def attach_title(
+        self, media_item_id: uuid.UUID, *, title_id: uuid.UUID, episode_id: uuid.UUID | None
+    ) -> bool:
+        self.attached.append((media_item_id, title_id))
+        return await super().attach_title(media_item_id, title_id=title_id, episode_id=episode_id)
+
+
+@dataclasses.dataclass
+class _ResolveHarness:
+    """What `usher unmatched --resolve` runs against, with no database."""
+
+    media_items: _RecordingMediaItems
+    titles: FakeTitleRepository
+    session: _ResolveSession
+    #: A media item the fake genuinely holds, so "nothing was written" is a
+    #: statement about the pre-check rather than about a missing row.
+    held: uuid.UUID
+
+
+async def _resolve_harness(monkeypatch: pytest.MonkeyPatch) -> _ResolveHarness:
+    media_items = _RecordingMediaItems()
+    source_id = new_id()
+    await media_items.upsert_many(
+        [
+            MediaItemUpsert(
+                source_id=source_id,
+                external_id="unmatched-1",
+                title_id=None,
+                episode_id=None,
+                container="mkv",
+                video_codec=None,
+                audio_codec=None,
+                width=None,
+                height=None,
+                hdr_format=None,
+                audio_channels=None,
+                file_size_bytes=None,
+                runtime_seconds=None,
+                added_at=None,
+                last_seen_at=datetime(2026, 8, 20, tzinfo=UTC),
+            )
+        ]
+    )
+    stored = await media_items.get_by_external_id(source_id, "unmatched-1")
+    assert stored is not None, "the premise: the fake holds the item being resolved"
+    harness = _ResolveHarness(
+        media_items=media_items,
+        titles=FakeTitleRepository(),
+        session=_ResolveSession(),
+        held=stored.id,
+    )
+
+    @contextlib.asynccontextmanager
+    async def _session(_: Settings) -> AsyncIterator[_ResolveSession]:
+        yield harness.session
+
+    def _build(_session: object, _settings: Settings, **_rest: object) -> _ResolveHarness:
+        return harness
+
+    monkeypatch.setattr(usher.cli, "_session_for", _session)
+    monkeypatch.setattr(usher.cli, "build_pipeline", _build)
+    return harness
+
+
+async def test_resolving_to_a_title_that_does_not_exist_names_the_id_and_keeps_the_stack_out_of_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**Issue #5, and the reason the fix is here rather than in
+    `OPERATOR_ERRORS`.**
+
+    An operator resolving a review-queue line reads a listing and pastes an
+    id; pasting the wrong *column* of it is a well-formed UUID naming no
+    title. Against Postgres that is `fk_media_items_title_id_titles`,
+    translated to `RepositoryConflict` by
+    `PostgresMediaItemRepository.attach_title`, and re-raised by `main`
+    because the family is deliberately out of the tuple -- so the answer to a
+    typo was sixty frames.
+
+    Widening the tuple would answer this by muting every raise site of that
+    family, of which exactly one is reachable from a CLI argument -- this one
+    (ADR-0026's Consequences carries the enumeration and the count). So the
+    answer is a lookup at the call site, which is what issue #5's own *Done
+    when* asks for and what `POST /admin/unmatched/{id}/resolve` has done
+    since M9's E4.
+
+    **The third assertion is the one that separates a lookup from a swallow.**
+    `except RepositoryConflict` around the write reads the same way to an
+    operator and is not the same thing: the row is refused by Postgres
+    *after* the statement ran, inside a SAVEPOINT this command then has to
+    unwind. `attach_title` is never called here, and nothing is committed.
+
+    The *stack* half of the claim is the integration twin's -- this fake has
+    no foreign key, so the message below is the whole of what an operator
+    sees here either way.
+    """
+    harness = await _resolve_harness(monkeypatch)
+    unknown = new_id()
+
+    with pytest.raises(SystemExit) as exit_info:
+        await _unmatched(
+            _cli_settings(), limit=50, offset=0, resolve=str(harness.held), title=str(unknown)
+        )
+
+    message = str(exit_info.value)
+    assert str(unknown) in message, message
+    assert "Traceback" not in message, message
+    assert harness.media_items.attached == [], harness.media_items.attached
+    assert harness.session.commits == 0
+    # Not "resolved", and not "no such media item" either -- one message per
+    # condition is the whole point of the case below.
+    assert capsys.readouterr().out == ""
+
+
+async def test_a_resolve_naming_no_media_item_still_says_so(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The third arm, pinned so the fix above cannot quietly make one message
+    serve two conditions.
+
+    The title exists here and the media item does not, which is the *only*
+    fixture that can tell the two apart: a case naming neither is answered by
+    whichever check runs first, and would have gone on reading as coverage of
+    this arm while testing the one above.
+    """
+    harness = await _resolve_harness(monkeypatch)
+    title = Title(kind=TitleKind.MOVIE, name="A Held Title", sort_name="A Held Title")
+    await harness.titles.add(title)
+    missing = new_id()
+
+    await _unmatched(_cli_settings(), limit=50, offset=0, resolve=str(missing), title=str(title.id))
+
+    assert "no such media item" in capsys.readouterr().out
+    # The write *was* attempted, which is what makes this arm `attach_title`'s
+    # answer rather than a second pre-check: the port returns whether a row
+    # changed precisely so a caller can say this.
+    assert harness.media_items.attached == [(missing, title.id)]
+    assert harness.session.commits == 1
 
 
 def test_similar_is_a_read_form_and_a_write_form_of_one_subcommand() -> None:

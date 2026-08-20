@@ -503,6 +503,24 @@ def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> 
     # observed in the field, and it is still unreachable here because
     # `reconcile` promises never to raise it. `_sync` reports it off the run row
     # and exits non-zero -- see the three cases at the end of this module.
+    #
+    # 🔴 **`RepositoryConflict`'s exclusion carries its own measurement since
+    # M10's F4**, because it is the member somebody keeps arriving here to add
+    # -- PRD 09 carried *"a one-line change"* for it from M9 to M10 -- and an
+    # omission with no number beside it reads as an oversight. The reason
+    # travels in the assertion messages below rather than only in this comment,
+    # so a widening meets the argument at the point it fails.
+    exclusion = (
+        "RepositoryConflict stays out: 22 raise sites across 14 modules "
+        "(re-derived 2026-08-20, M10 F4), of which exactly ONE is reachable "
+        "from a CLI argument -- `usher unmatched --title` naming no title, "
+        "fixed by a lookup in `cli._unmatched` rather than by muting the other "
+        "21. Several of those are deliberate tripwires for bugs in this "
+        "project's own code (`title_neighbors`' bounds, the credits delete's "
+        "scope, a curated batch this project assembled wrong), and ADR-0026's "
+        "bar is that a family belongs here when an operator can act on it. "
+        "1-of-22 is not a family. See ADR-0026's Consequences."
+    )
     assert everything_else == {
         RepositoryConflict,
         RepositoryNotFound,
@@ -510,14 +528,14 @@ def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> 
         SourceNotSupported,
         FilterNotSupported,
         AvailabilitySweepRefused,
-    }
+    }, exclusion
 
     assert UsherPortError not in usher_cli.OPERATOR_ERRORS
     assert not issubclass(UsherPortError, usher_cli.OPERATOR_ERRORS)
     for family in reaching:
         assert issubclass(family, usher_cli.OPERATOR_ERRORS), family
     for family in everything_else:
-        assert not issubclass(family, usher_cli.OPERATOR_ERRORS), family
+        assert not issubclass(family, usher_cli.OPERATOR_ERRORS), f"{family}\n{exclusion}"
 
 
 def test_an_unreachable_llm_endpoint_is_a_message_rather_than_a_traceback(

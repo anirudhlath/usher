@@ -495,13 +495,47 @@ async def _unmatched(
     Listing and resolving are one command rather than two because they are
     one loop: an operator reads a page, resolves one line of it, and reads
     the next.
+
+    **`--title` has three bad values and each gets its own sentence, which is
+    why the title is read before anything is written** (M10's F4, closing
+    issue #5). A value that is not a UUID is `_as_uuid`'s; a `--resolve`
+    naming no media item is `attach_title`'s `rowcount == 0`; and a
+    well-formed UUID naming no title used to be
+    `fk_media_items_title_id_titles`, translated to `RepositoryConflict` and
+    re-raised by `main` -- sixty frames for pasting the wrong column of the
+    listing above, which prints a *media item* id and no title id at all.
+
+    **The lookup is here rather than in `OPERATOR_ERRORS`, and that is the
+    argued half.** Adding `RepositoryConflict` to the tuple is the one-line
+    version, and every raise site of that family was read before it was
+    refused: this is the **only** one an operator's own CLI argument reaches.
+    ADR-0026's bar is *"a family belongs in the tuple when an operator can act
+    on it"*, and one site out of that census is not a family. **The census
+    itself lives in ADR-0026's Consequences and nowhere else in `src/`**, so
+    there is one copy of a grep-checkable number rather than one per reader.
+
+    **Not `except RepositoryConflict` around the write either**, which reads
+    identically to an operator and is not the same thing: Postgres refuses
+    the row *after* the statement has run, inside a SAVEPOINT this command
+    would then have to unwind, and the same handler would swallow the other
+    conflicts `attach_title` can raise. `POST /admin/unmatched/{id}/resolve`
+    has read the title first since M9's E4 for the same reason, and its own
+    docstring states the rule: everything the request names is checked before
+    anything is written.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if resolve is not None and title is not None:
+            # Both conversions before the read, in the order the arguments
+            # were written, so a run with two malformed ids still names the
+            # first one rather than the one the new check happens to want.
+            media_item_id = _as_uuid(resolve, "media item id")
+            title_id = _as_uuid(title, "title id")
+            if await pipeline.titles.get(title_id) is None:
+                raise SystemExit(f"no such title: {title_id}")
             attached = await pipeline.media_items.attach_title(
-                _as_uuid(resolve, "media item id"),
-                title_id=_as_uuid(title, "title id"),
+                media_item_id,
+                title_id=title_id,
                 # `None`, deliberately: a hand resolution names a `Title`.
                 # An episode-level resolution needs an `Episode.id` an
                 # operator has no way to read off this listing, and M9's
