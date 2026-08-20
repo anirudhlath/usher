@@ -61,7 +61,11 @@ from usher.ports.events import ClientEventKind
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
-from usher.services.reconcile import CEILING_ERROR_CODE, ReconcileService
+from usher.services.reconcile import (
+    CEILING_ERROR_CODE,
+    RETRACTION_ERROR_CODE,
+    ReconcileService,
+)
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
 # After every run's `started_at`, which defaults to `now()`. A "changed
@@ -896,3 +900,43 @@ async def test_a_failed_walk_still_reported_the_batches_it_did_finish(
         event for event in fixture.events.published if event.kind is ClientEventKind.SYNC_PROGRESS
     ]
     assert [event.data["items_seen"] for event in progress] == [2]
+
+
+def test_the_two_error_codes_are_pinned_by_value_because_they_are_wire_artefacts() -> None:
+    """These strings leave the process, so no in-repo reader can guard them.
+
+    🔴 **Found 2026-08-19 by S9's own positive control failing to be one.** The
+    control changed `RETRACTION_ERROR_CODE`'s value and expected a kill; it
+    survived, because *every* reader imports the constant -- the service that
+    writes it, the CLI that matches it, and the case that asserts it all moved
+    together. Re-measured against `CEILING_ERROR_CODE`, shipped one token
+    earlier by S6: `grep gap_delta_ceiling` over `src/`, `tests/`, `docs/` and
+    `.claude/` returns **exactly one line**, its own definition. So neither
+    value was pinned by anything, and S9 inherited the hole by copying the
+    precedent.
+
+    **They are not internal names.** Both are prefixes on `sync_runs.error`, a
+    durable column that `usher sync-status` prints and `GET /admin/sync`
+    serves, and `CEILING_ERROR_CODE`'s own comment states the purpose: *"a
+    dashboard, an alert rule, or the next reader of this file has to be able to
+    tell the two apart without parsing English"*. A consumer keying on one is
+    outside this repository by construction, exactly like a metric name in PRD
+    10's catalogue -- which is pinned by literal for the same reason.
+
+    So the literal is the assertion, and this is the one place in the project
+    where changing one of these strings is supposed to be inconvenient: a
+    rename is a breaking change to an artefact somebody may be alerting on, and
+    it should cost a deliberate edit here rather than passing silently.
+
+    They must also be **distinct**, which is the whole point of having two: a
+    bounded walk and a refused sweep both land in this column and an operator
+    acts on them differently.
+    """
+    assert CEILING_ERROR_CODE == "gap_delta_ceiling"
+    assert RETRACTION_ERROR_CODE == "availability_ceiling"
+    assert CEILING_ERROR_CODE != RETRACTION_ERROR_CODE
+    # Neither may be a prefix of the other: both are matched with `startswith`
+    # or `in` against the same column, so an overlap would make one answer for
+    # the other on the surface an operator reads.
+    assert not CEILING_ERROR_CODE.startswith(RETRACTION_ERROR_CODE)
+    assert not RETRACTION_ERROR_CODE.startswith(CEILING_ERROR_CODE)

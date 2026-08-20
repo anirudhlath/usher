@@ -660,23 +660,39 @@ class _StubAdapter:
 
 
 def _sync_against(
-    monkeypatch: pytest.MonkeyPatch, *, walk: SyncRun, watch: SyncRun
-) -> _StubAdapter:
-    """Wire `_sync` to two given run rows and nothing else.
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    walk: SyncRun,
+    watch: SyncRun,
+    second: tuple[SyncRun, SyncRun] | None = None,
+) -> list[_StubAdapter]:
+    """Wire `_sync` to given run rows and nothing else.
 
     Deliberately not a fake pipeline with behaviour: the property under test is
     what the command does with `run.status`, and a stub that could itself fail
     would make a red ambiguous.
+
+    ⚠️ **`second` is not a convenience.** With one source, *"collect the
+    failures and exit after the loop"* and *"exit on the first failing source"*
+    are the same program -- measured, in S9's own sweep, where moving the
+    `raise` inside the loop survived every case in this module. One source
+    cannot see the difference and `_sync`'s docstring calls it load-bearing, so
+    a second one is what makes the claim checkable.
     """
     _configured(monkeypatch)
-    source = Source(
-        kind=SourceKind.EMBY,
-        name="Shared Emby",
-        base_url="https://emby.invalid",
-        credentials_ref="ref-1",
-        device_id="device-1",
-    )
-    adapter = _StubAdapter()
+    sources = [
+        Source(
+            kind=SourceKind.EMBY,
+            name=name,
+            base_url="https://emby.invalid",
+            credentials_ref=f"ref-{index}",
+            device_id=f"device-{index}",
+        )
+        for index, name in enumerate(["Shared Emby", "Second Emby"][: 2 if second else 1])
+    ]
+    adapters = [_StubAdapter() for _ in sources]
+    walks = [walk, second[0]] if second else [walk]
+    watches = [watch, second[1]] if second else [watch]
 
     @asynccontextmanager
     async def session_for(_settings: object) -> AsyncIterator[object]:
@@ -686,33 +702,36 @@ def _sync_against(
 
         yield _Session()
 
+    # Indexed off the adapter the loop is holding rather than off a counter, so
+    # a plant that walks one source twice is not silently handed the second
+    # source's rows.
     class _Reconcile:
-        async def reconcile(self, *args: object, **kwargs: object) -> SyncRun:
-            return walk
+        async def reconcile(self, _source: Source, _kind: object, adapter: object) -> SyncRun:
+            return walks[adapters.index(adapter)]  # type: ignore[arg-type]
 
     class _Watch:
-        async def sync(self, *args: object, **kwargs: object) -> SyncRun:
-            return watch
+        async def sync(self, _source: Source, adapter: object, **kwargs: object) -> SyncRun:
+            return watches[adapters.index(adapter)]  # type: ignore[arg-type]
 
     class _Pipeline:
         reconcile = _Reconcile()
         watch = _Watch()
 
     async def selected(*args: object, **kwargs: object) -> list[Source]:
-        return [source]
+        return sources
 
     async def default_user_id(*args: object, **kwargs: object) -> uuid.UUID:
         return new_id()
 
-    async def open_adapter(*args: object, **kwargs: object) -> _StubAdapter:
-        return adapter
+    async def open_adapter(_pipeline: object, source: Source) -> _StubAdapter:
+        return adapters[sources.index(source)]
 
     monkeypatch.setattr(usher_cli, "_session_for", session_for)
     monkeypatch.setattr(usher_cli, "build_pipeline", lambda *a, **k: _Pipeline())
     monkeypatch.setattr(usher_cli, "selected_sources", selected)
     monkeypatch.setattr(usher_cli, "ensure_default_user", default_user_id)
     monkeypatch.setattr(usher_cli, "_open_adapter", open_adapter)
-    return adapter
+    return adapters
 
 
 def test_a_refused_sweep_is_reported_at_the_boundary_the_operator_actually_watches(
@@ -788,7 +807,7 @@ def test_a_sync_whose_runs_all_completed_still_exits_zero(
     same wiring with two completed runs, and it must reach the end of `main`
     without raising at all.
     """
-    adapter = _sync_against(
+    adapters = _sync_against(
         monkeypatch,
         walk=_run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
         watch=_run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
@@ -797,7 +816,54 @@ def test_a_sync_whose_runs_all_completed_still_exits_zero(
     usher_cli.main(["sync"])
 
     assert "completed" in capsys.readouterr().out
-    assert adapter.closed == 1, "the premise: the body ran and closed its adapter"
+    assert [one.closed for one in adapters] == [1], (
+        "the premise: the body ran and closed its adapter"
+    )
+
+
+def test_a_source_that_failed_does_not_stop_the_next_source_being_walked(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The exit is collected after the loop, and one source cannot end the run.
+
+    🔴 **Nothing pinned this until S9's own sweep said so.** Moving the `raise`
+    inside the loop -- the obvious spelling, and the one somebody reaches for
+    when adding the exit -- survived every case in this module, because each
+    wired exactly **one** source and the two programs are then identical. The
+    claim was load-bearing and lived only in `_sync`'s docstring, which is the
+    shape `.claude/rules/testing-discipline.md` calls a deleted guard.
+
+    It matters because it is the same property `ReconcileService.reconcile`
+    swallows the exception for in the first place: a household with a laptop
+    that is asleep and a NAS that is up must still get the NAS walked. Exiting
+    on the first failure would put that back one layer up, having removed it
+    one layer down.
+
+    The premise is asserted before the conclusion: **both** adapters must have
+    been opened and closed, or "the second source was walked" is a claim about
+    a loop that never reached it.
+    """
+    adapters = _sync_against(
+        monkeypatch,
+        walk=_run(SyncRunKind.FULL, SyncRunStatus.FAILED, error="source went away mid-walk"),
+        watch=_run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
+        second=(
+            _run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
+            _run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync"])
+
+    output = capsys.readouterr().out
+    assert [one.closed for one in adapters] == [1, 1], (
+        "the premise: both sources were opened and both adapters released"
+    )
+    assert "Second Emby: full completed" in output, (
+        "the second source is walked even though the first one failed"
+    )
+    assert exit_info.value.code != 0, "and the run still ends non-zero"
 
 
 def test_a_failed_watch_lane_is_a_non_zero_exit_without_the_retraction_hint(
