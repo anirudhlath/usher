@@ -166,6 +166,60 @@ jobs:
             web/test-results/
           retention-days: 7
 
+  # The 120 screenshot comparisons, on a runner that renders like the baselines.
+  #
+  # A pixel baseline is only comparable within one rendering environment, and
+  # that was measured three ways: on a hosted runner all 120 failed; re-rendered
+  # inside the pinned Playwright image on the machine this runner lives on they
+  # were **byte-identical** to the committed files (120/120 by `cmp`); and the
+  # same pinned image *on a hosted runner* failed all 120 again, every one with
+  # an identical width and a different height. So the image was necessary and
+  # not sufficient — the host is the variable.
+  #
+  # This job closes that: the baselines were generated in this image on this
+  # machine, so this is the one place the comparison is meaningful. A developer
+  # regenerates them with `npm run e2e:visual:docker:update`, which is the
+  # identical image and the identical command.
+  #
+  # ⚠️ **`if:` is a security control, not a filter.** `anirudhlath/usher` is a
+  # PUBLIC repository and this runner is a systemd service on a machine that is
+  # internet-facing, holds real media-server credentials and a 1.27M-title
+  # database, and serves the deployed console. A pull request from a **fork**
+  # must never execute on it. Same-repo pushes and same-repo pull requests only;
+  # a fork PR skips this job and still gets `check`, `console`, `console-e2e`
+  # and `image` on hosted runners.
+  console-visual:
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, usher-ci]
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      options: --ipc=host
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `--workers=1`, from the script. At three workers the `feedback` group
+      # failed and then passed twice in isolation: three browsers racing one
+      # preview server for webfonts is enough to catch a screenshot mid-layout.
+      - name: Visual regression
+        run: npm run e2e:visual
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: visual-diff
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 7
+
   # The one thing neither job above can prove: that the two build stages
   # compose. `check` never runs node and `console` never runs Python, so a
   # Dockerfile that copies from the wrong stage path, or a `.dockerignore` that

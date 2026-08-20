@@ -115,22 +115,31 @@ The e2e suite runs a `--mode fixtures` build, which starts MSW in the browser.
 The production build contains no mock server and CI asserts that rather than
 assuming tree-shaking handled it.
 
-**The 120 screenshot comparisons are tagged `@visual` and do not run in CI**,
-and that is a deliberate, stated reduction rather than a quiet one. A pixel
-baseline is only comparable within one rendering environment, measured three
-ways: on a bare runner all 120 failed; re-rendered inside the pinned
-`mcr.microsoft.com/playwright` image they came out **byte-identical** to a
-developer machine (120/120 by `cmp`); and running that same pinned image _on
-the runner_ all 120 failed again — every one with an identical width and a
-different height, which is text wrapping differently because glyph advance
-widths differ. CI reproduced each failure on its retry, so it is deterministic
-and simply renders differently.
+**The 120 screenshot comparisons are tagged `@visual` and run on a self-hosted
+runner**, in the `console-visual` job, because a pixel baseline is only
+comparable within one rendering environment. Measured three ways: on a hosted
+runner all 120 failed; re-rendered inside the pinned
+`mcr.microsoft.com/playwright` image on a developer machine they came out
+**byte-identical** to the committed files (120/120 by `cmp`); and that same
+pinned image _on a hosted runner_ failed all 120 again — every one with an
+identical width and a different height, which is text wrapping differently
+because glyph advance widths differ, reproduced on every retry.
 
-Adopting CI's pixels would pass and would leave nobody able to regenerate a
-baseline: an intentional design change would mean pushing, waiting for red,
-downloading a 409 MB artefact and committing its output. Loosening the
-threshold is not the lever either — the diffs are 2–9% against a 1% bar, and a
-tolerance that swallows a 33 px layout shift swallows a real regression.
+So the image was necessary and not sufficient: the **host** is the variable.
+The self-hosted runner is the machine the baselines were generated on, which
+makes it the one place the comparison means anything.
+
+The two alternatives were both worse. Adopting a hosted runner's pixels would
+pass and leave nobody able to regenerate a baseline — an intentional design
+change would mean pushing, waiting for red, downloading a 409 MB artefact and
+committing its output. And loosening the threshold is not the lever: the diffs
+are 2–9% against a 1% bar, and a tolerance that swallows a 33 px layout shift
+swallows a real regression.
+
+⚠️ **That job is guarded to same-repo events.** This repository is public and
+the runner is a systemd service on a machine that is internet-facing and holds
+real credentials, so a fork's pull request must never execute on it. A fork PR
+skips `console-visual` and still gets every other job on hosted runners.
 
 ```bash
 npm run e2e                   # what CI runs: axe sweeps, tokens, behaviour
