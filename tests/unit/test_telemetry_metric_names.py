@@ -15,19 +15,20 @@ open, and they are independent of each other:
   `http.server.request.duration` at unit `s` instead. Nothing raises. The
   measured half drives one real request and reads the name and the unit back.
 
-**The counts are 35 and 36 and neither is a typo.** The catalogue has **36**
-rows; the AST scan finds **35** declared instrument names; the difference is
+**The counts are 36 and 37 and neither is a typo.** The catalogue has **37**
+rows; the AST scan finds **36** declared instrument names; the difference is
 exactly `http.server.duration`, which Usher does not declare because
 `FastAPIInstrumentor` emits it (`src/usher/api/app.py:168`). Asserting
 `declared == catalogue - {"http.server.duration"}` is what states that in a
 form that cannot go stale silently. *(34/35 until M10's S2 added
-`usher.source.throttle.wait`, the outbound rate gate's own series.)*
+`usher.source.throttle.wait`, the outbound rate gate's own series, and 35/36
+until its S8 added `usher.sync.retraction.fraction`.)*
 
 **Both halves are scans, and a scan that globs nothing passes exactly like a
 scan that found nothing to report** -- CLAUDE.md's *"a run that did not run is
 not a pass"*. So each carries a premise guard placed *before* the value it
 protects: the instrument walk must find something and must find a named
-anchor; the table parse must find 36 rows, which is the premise a Markdown
+anchor; the table parse must find 37 rows, which is the premise a Markdown
 regex loses the moment the table is reformatted; and the request must have
 produced points before any unit is read off one.
 
@@ -88,11 +89,11 @@ _PRD_10 = _REPO_ROOT / "docs" / "prd" / "10-telemetry-and-dashboards.md"
 
 # The seven factories on `opentelemetry.metrics.Meter`. Filtering on the
 # *factory* name and never on a `usher.` prefix is deliberate and measured: a
-# naive walk for any attribute starting with `create_` finds 121 call sites in
+# naive walk for any attribute starting with `create_` finds 122 call sites in
 # `src/usher/`, of which 79 are Alembic's `op.create_table`/`create_index`/
 # `create_foreign_key` under `db/migrations/versions/`, one is
 # `sa_asyncio.create_async_engine` (`db/base.py:110`) and six are
-# `asyncio.create_task` -- 79 + 35 + 1 + 6 = 121, with no overlap.
+# `asyncio.create_task` -- 79 + 36 + 1 + 6 = 122, with no overlap.
 # **All six tasks carry a `name=`, and every one of them renders `usher.*`.**
 # Four are string literals: `usher.lane.worker`, `usher.lane.refresh`,
 # `usher.lane.rows.refresh` (`api/lanes.py:204-208`) and `usher.jobs.heartbeat`
@@ -123,7 +124,7 @@ _INHERITED = "http.server.duration"
 # merged: `tests/unit/test_telemetry_search.py:_ROW` parses the same rows with
 # its own regex, capturing the *type* and *milestone* columns to assert M6's
 # "documented as a histogram, not a counter" claim, while this one captures
-# only the name for the 35-vs-36 census. Merging them would collapse two
+# only the name for the 36-vs-37 census. Merging them would collapse two
 # different questions into one and destroy the independence — measured, in M10
 # O4's sweep: deleting one catalogue row kills a case in *both* files, and that
 # second cover is only visible to a sweep run over the whole of `tests/unit`.
@@ -141,8 +142,8 @@ def _declared_instrument_names() -> set[str]:
     caller's premise guard on the anchor is what would notice a wholesale move
     to that spelling.
 
-    ⚠️ **The `name=` branch is dead code today**: all 34 sites pass the name
-    positionally, so 0 of 34 exercise it. It is here because `Meter`'s
+    ⚠️ **The `name=` branch is dead code today**: all 36 sites pass the name
+    positionally, so 0 of 36 exercise it. It is here because `Meter`'s
     signatures accept the keyword and one future call site spelling it that way
     would otherwise vanish from the comparison silently -- but do not read its
     presence as evidence that anything covers it.
@@ -275,7 +276,7 @@ async def test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue(
     assert "usher.jobs.queued" in declared, "the instrument scan missed a known instrument"
 
     catalogue = _catalogue_names()
-    assert len(catalogue) == 36, f"the catalogue table parse found {len(catalogue)} rows"
+    assert len(catalogue) == 37, f"the catalogue table parse found {len(catalogue)} rows"
     assert len(set(catalogue)) == len(catalogue), "the catalogue names are not distinct"
 
     assert declared == set(catalogue) - {_INHERITED}

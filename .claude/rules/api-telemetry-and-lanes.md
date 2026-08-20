@@ -1081,13 +1081,22 @@ honest sentence is **34 instruments Usher declares plus one it inherits,
 against 35 documented rows**, and PRD 10's preamble now carries it so the next
 reader counts the right thing.
 
-⚠️ **The count moved on 2026-08-18: M10's S2 added `usher.source.throttle.wait`
-(the outbound rate gate's own series, `usher.adapters.http`), so it is now
-**35 declared plus one inherited against 36 rows** — `assert len(catalogue) ==
-36` and `35 == 35` in `test_telemetry_metric_names.py`. The *mechanism* above is
-unchanged; only the two numbers moved, and both live-assertion sites (the census
-test and PRD 10's preamble) were updated in S2's commit. The "34 and 35" prose
-here is the reading as of 2026-08-14 and is left dated rather than rewritten.
+⚠️ **The count has moved twice since, both times inside M10.** S2 added
+`usher.source.throttle.wait` (the outbound rate gate's own series,
+`usher.adapters.http`) on 2026-08-18, and S8 added
+`usher.sync.retraction.fraction` (`usher.services.reconcile`) on 2026-08-19, so
+it is now **36 declared plus one inherited against 37 rows** — `assert
+len(catalogue) == 37` in `test_telemetry_metric_names.py`. The *mechanism* above
+is unchanged; only the two numbers moved, and each time all four sites (the
+census assertion, that file's docstring and its `create_*` arithmetic,
+`test_telemetry_search.py`'s cross-reference comment, and PRD 10's preamble)
+were updated in the same commit as the instrument. The "34 and 35" prose here is
+the reading as of 2026-08-14 and is left dated rather than rewritten.
+
+**Four sites, and the census assertion is the only one that fails.** The other
+three are prose, so an instrument added without touching them leaves the file
+asserting one number and explaining a different one — which is why they are
+listed here rather than left to a grep for `36`.
 
 **The scan has a trap that manufactures plausible missing metrics, and the
 filter is the factory name — never the prefix.** Re-measured 2026-08-14 at

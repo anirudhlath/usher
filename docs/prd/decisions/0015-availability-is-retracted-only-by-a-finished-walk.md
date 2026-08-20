@@ -105,6 +105,30 @@ and its real-Postgres twin in `tests/integration/test_services_reconcile.py`
 are both built to that arithmetic, and both fail under the mutation on the
 assertion they were written to make.
 
+**The ceiling has fired on a real deployment, and not for the reason this ADR
+argues it would.** Measured 2026-08-19 (M10 S8). Issue #20 asked for a reading
+*"across at least one genuine churn event"*; the operator's own `sync_runs`
+already held one, from 2026-08-13 — a `full` run recording `FAILED` with
+*"refusing to mark 60 of 180 items unavailable in one run (33% exceeds the 25%
+ceiling); nothing was retracted"*. **Nobody had deleted anything.** The walk was
+*bounded* and saw 120 of the 180 items Usher held, which is the *Context*
+section's "a walk that succeeds and returns far less than the library holds"
+arriving from Usher's own tooling rather than from the source. The refusal was
+correct; what it caught was **partial coverage, not churn**, and the two are
+indistinguishable from inside the guard.
+
+A one-request bounded probe (`scripts/measure_source_drift.py`, ≤ 6 requests,
+read-only, no walk) reads the source's live `TotalRecordCount` against
+`count(media_items WHERE available)` for the same source. On that deployment:
+**1,137,502 live against 11,851 available, a would-retract lower bound of 0.**
+⚠️ **That 0 is not evidence the guard would not fire** — a count is not a set,
+and with Usher holding 1.04% of the source the clamped difference is zero by
+construction. The probe is informative only where Usher's available count is at
+or above the source's total, i.e. after a walk that finished; no walk of this
+library ever has. `usher.sync.retraction.fraction` (`source`, `outcome`) is what
+makes the number visible on every finished full walk rather than only when this
+guard raises.
+
 **A refusal must leave the session usable**, because `reconcile` writes the
 `FAILED` run row that explains it *afterwards*. It does — the guard is
 evaluated in Python after a successful `SELECT`, not by a statement that

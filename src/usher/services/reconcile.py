@@ -88,6 +88,40 @@ _run_duration = _meter.create_histogram(
     "usher.sync.run.duration", unit="s", description="Wall time per sync run"
 )
 
+#: What fraction of a source a finished full walk retracted, or would have.
+#:
+#: **Recorded on every finished full walk, including the ones that retract
+#: nothing**, and that is the whole design rather than completeness for its own
+#: sake: *"this library shed nothing"* and *"this guard never ran"* are the same
+#: silence, and a series that only appears on a refusal is one an operator
+#: cannot tell from an absent exporter. `ports-and-error-taxonomy.md`'s *"a
+#: filter is invisible without a counter"*, arriving at a sweep.
+#:
+#: `outcome` is `swept` or `refused`, and the two need different numerators.
+#: On a refusal the sweep retracted **nothing**, so `SweepResult.retracted`
+#: would record 0.0 for the one state this metric exists to make visible; the
+#: refusal's own `would_retract` is what the walk would have done, which is the
+#: number an operator has to see to decide whether the ceiling is right. They
+#: differ *only* when the guard fires (ADR-0015).
+_retraction_fraction = _meter.create_histogram(
+    "usher.sync.retraction.fraction",
+    unit="1",
+    description="Fraction of a source's items a full walk retracted, or would have",
+)
+
+
+def _fraction(part: int, whole: int) -> float:
+    """`part / whole`, with an empty source recording a real 0.0.
+
+    The guard itself is a **count comparison rather than a division** for this
+    reason (`db/repositories/media_item.py:482-485`) -- an empty source divides
+    by zero -- and a metric that skipped the record instead would reintroduce
+    the silence the instrument exists to remove: a source with no items would
+    publish nothing, which reads exactly like a source that was never swept.
+    """
+    return part / whole if whole else 0.0
+
+
 # The two lanes that walk `list_items`. A delta resumes from whichever of them
 # last completed: they differ only in whether a `since` was passed, so a full
 # walk that finished at 03:00 is a perfectly good floor for a delta at noon --
@@ -244,7 +278,7 @@ class ReconcileService:
                     # `try` boundary wide, and the ceiling is inside it: a
                     # bounded walk has items it never looked at, so a sweep
                     # after one would retract every one of them.
-                    run = await self._sweep(progress.run, kind)
+                    run = await self._sweep(progress.run, kind, source.name)
                     run = run.evolve(status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC))
             except UsherPortError as exc:
                 # `progress.run`, never the pre-walk `run`: the batches this
@@ -438,9 +472,15 @@ class ReconcileService:
             )
         )
 
-    async def _sweep(self, run: SyncRun, kind: SyncRunKind) -> SyncRun:
+    async def _sweep(self, run: SyncRun, kind: SyncRunKind, source_name: str) -> SyncRun:
         """Retract availability -- full walks only, and only after one
-        finished."""
+        finished.
+
+        `source_name` is carried in for the metric's label rather than read off
+        the run, which holds only a `source_id`: `usher.sync.run.duration`
+        beside it is already labelled by name, and a second per-source identity
+        in telemetry is what ADR-0039 §2 refuses.
+        """
         if kind is not SyncRunKind.FULL:
             return run
         try:
@@ -450,6 +490,14 @@ class ReconcileService:
                 max_retract_fraction=self._max_retract_fraction,
             )
         except AvailabilitySweepRefused as exc:
+            # The refusal's own numerator, never `SweepResult.retracted` --
+            # which is what a refused sweep did, i.e. nothing. See the
+            # instrument's own comment: the two differ exactly when the guard
+            # fires, which is the one state this series exists for.
+            _retraction_fraction.record(
+                _fraction(exc.would_retract, exc.total),
+                {"source": source_name, "outcome": "refused"},
+            )
             logger.error(
                 "availability sweep refused for source {source_id}: {error}",
                 source_id=run.source_id,
@@ -460,4 +508,8 @@ class ReconcileService:
             # `AvailabilitySweepRefused` is a `UsherPortError`, so it lands
             # in the same branch a transport failure does.
             raise
+        _retraction_fraction.record(
+            _fraction(result.retracted, result.total),
+            {"source": source_name, "outcome": "swept"},
+        )
         return run.evolve(items_retracted=result.retracted)

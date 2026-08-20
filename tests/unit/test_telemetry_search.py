@@ -80,7 +80,7 @@ _PRD_10 = Path(__file__).resolve().parents[2] / "docs" / "prd" / "10-telemetry-a
 # ⚠️ **This table has a second reader**, and the two are deliberately not
 # merged: `tests/unit/test_telemetry_metric_names.py:_ROW` parses the same rows
 # for the *name* alone, to census the catalogue against what `src/usher/` hands
-# to a `Meter` factory (35 declared vs 36 rows). This one is the only reader of
+# to a `Meter` factory (36 declared vs 37 rows). This one is the only reader of
 # the *type* column. Merging them would collapse two different questions into
 # one — measured, in M10 O4's sweep: deleting one catalogue row kills a case in
 # *both* files, and that independence is what made the blast radius

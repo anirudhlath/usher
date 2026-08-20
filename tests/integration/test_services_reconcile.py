@@ -18,11 +18,14 @@ defeat that. The property under test is the *ordering* of the writes, not
 their durability.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.event_publisher import FakeEventPublisher
@@ -160,6 +163,41 @@ def adapter() -> _Adapter:
     return _Adapter()
 
 
+@pytest.fixture
+def meter_reader() -> Iterator[InMemoryMetricReader]:
+    """A provider of this test's own, because `set_meter_provider` is set-once.
+
+    `tests/conftest.py::reset_otel_meter_provider` is what makes a second
+    installation take at all -- see `.claude/rules/api-telemetry-and-lanes.md`.
+    """
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    yield reader
+
+
+def _fraction_points(reader: InMemoryMetricReader, *, outcome: str) -> list[float]:
+    """Every `usher.sync.retraction.fraction` sum recorded under `outcome`.
+
+    A list rather than a single value, so a case can assert on *how many*
+    records happened: a metric published twice per walk and a metric published
+    once are indistinguishable from a lookup that returns the first match.
+    """
+    data = reader.get_metrics_data()
+    found: list[float] = []
+    if data is None:
+        return found
+    for resource in data.resource_metrics:
+        for scope in resource.scope_metrics:
+            for metric in scope.metrics:
+                if metric.name != "usher.sync.retraction.fraction":
+                    continue
+                for point in metric.data.data_points:
+                    attrs = dict(point.attributes or {})
+                    if attrs.get("outcome") == outcome:
+                        found.append(round(float(getattr(point, "sum", 0.0) or 0.0), 6))
+    return found
+
+
 async def test_a_refused_sweep_still_records_a_failed_run(
     service: ReconcileService,
     runs: PostgresSyncRunRepository,
@@ -184,6 +222,71 @@ async def test_a_refused_sweep_still_records_a_failed_run(
     assert stored.status is SyncRunStatus.FAILED
     survivor = await media_items.get_by_external_id(source.id, "m5")
     assert survivor is not None and survivor.available is True
+
+
+async def test_a_refused_sweep_reports_both_numbers_where_an_operator_can_see_them(
+    service: ReconcileService,
+    media_items: PostgresMediaItemRepository,
+    source: Source,
+    adapter: _Adapter,
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """The refusal's numbers reach a series, and the clean sweep reaches it too.
+
+    🔴 **At HEAD the exception carried `would_retract`, `total` and `ceiling`
+    and nothing published any of them.** `sync_runs.items_retracted` stores the
+    numerator alone, and PRD 10's catalogue had no retraction series at all --
+    so *"this library shed nothing"* and *"this guard refused a walk"* were the
+    same silence to every dashboard.
+
+    **The clean-sweep arm is not decoration.** A histogram published only on a
+    refusal is one an operator cannot distinguish from an exporter that stopped,
+    which is the whole reason `usher.sync.retraction.fraction` is recorded on
+    every finished full walk. A case that seeded only the refusal would pass
+    against exactly that defect.
+
+    **And the refused arm's numerator is `would_retract`, never
+    `SweepResult.retracted`.** A refused sweep retracts nothing, so a fraction
+    computed from what it *did* would record 0.0 for the one state this series
+    exists to make visible. The two differ only when the guard fires.
+    """
+    for index in range(10):
+        adapter.items[f"m{index}"] = _item(f"m{index}")
+    first = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+    assert first.status is SyncRunStatus.COMPLETED
+
+    # The clean-sweep arm, and the positive control: a walk that retracts
+    # nothing must still publish, and it must publish a real zero.
+    swept = _fraction_points(meter_reader, outcome="swept")
+    assert swept == [0.0], (
+        "a full walk that retracted nothing must still record the series -- "
+        "otherwise silence means both 'shed nothing' and 'never ran'"
+    )
+
+    # Now approach the ceiling: 9 of 10 gone is 0.9 against the 0.25 default.
+    for index in range(1, 10):
+        del adapter.items[f"m{index}"]
+    refused = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+
+    assert refused.status is SyncRunStatus.FAILED
+    message = refused.error or ""
+    # All three numbers, in the form an operator reads them: the ceiling is
+    # rendered as a **percentage**, not as the `0.25` the setting is spelled
+    # with, so an assertion against the raw fraction fails on a correct
+    # message. Asserted as substrings of the rendered sentence rather than
+    # against a format string, so a reword that keeps the numbers passes.
+    assert "9 of 10" in message and "25% ceiling" in message, (
+        f"the refusal must carry would_retract, total and ceiling: {message!r}"
+    )
+    survivor = await media_items.get_by_external_id(source.id, "m5")
+    assert survivor is not None and survivor.available is True, (
+        "the premise: a refusal retracts nothing, so a fraction read off what "
+        "it did would be 0.0 and the series would be a lie"
+    )
+
+    assert _fraction_points(meter_reader, outcome="refused") == [0.9], (
+        "the refused arm records what the walk *would* have retracted"
+    )
 
 
 async def test_a_full_walk_retracts_and_restores_against_real_sql(
