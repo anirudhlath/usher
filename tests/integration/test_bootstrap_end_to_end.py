@@ -119,11 +119,15 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
     assert linked.linked == 2
 
     # `imdb_average_rating` beside `tmdb_vote_average`, and the NULL is the
-    # assertion ADR-0040 bought: the ratings phase above ran *after* the id
-    # export wrote `tmdb_popularity`, and before the split it would have
-    # written IMDb's `averageRating` into the TMDb column with nothing
-    # recording the swap. This is the whole fix seen from the bootstrap it
-    # ships in, rather than from one repository call.
+    # assertion ADR-0040 bought. Nothing in phases 0-2 enriches, so the IMDb
+    # ratings import above is the only writer of a rating figure anywhere in
+    # this bootstrap -- and before the split it wrote that figure into
+    # `tmdb_vote_average`, so this same projection read 7.4 in the TMDb column
+    # and NULL in the IMDb one, exactly inverted, with nothing recording the
+    # swap. No claim about phase *ordering* is involved: it is the pair of
+    # columns that carries the provenance, which is why both are selected.
+    # This is the whole fix seen from the bootstrap it ships in, rather than
+    # from one repository call.
     result = await session.execute(
         text(
             "SELECT imdb_id, tmdb_id, tvdb_id, tmdb_popularity, imdb_average_rating, "

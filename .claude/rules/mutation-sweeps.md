@@ -4906,38 +4906,82 @@ spelled as **byte equality with the intended mutant** (F3's repair), a 900 s
 per-plant timeout, a signal handler restoring from the `cp` backups, and no
 second `-q`.
 
-**Selection:** `test_adapters_bulk_imdb.py`, `test_ports_bulk.py`,
-`test_bulk_repository_contracts.py` (unit) and `test_bulk_repository.py`
-(integration) — **189 cases, ~9 s a run**, green before and after. The flake
-check this file's rules require was *done rather than inherited*:
+🔴 **The selection is every test file the commit touches, and round 1's was
+not — which is how this ledger came to state an absolute it had not
+measured.** Round 1 named `test_adapters_bulk_imdb.py`, `test_ports_bulk.py`,
+`test_bulk_repository_contracts.py` and `test_bulk_repository.py` (189 cases)
+while the commit *also* edited `tests/integration/test_bootstrap_end_to_end.py`,
+adding an assertion to it. So a plant that fails there was invisible, and the
+write-up then generalised a four-file result into a claim about the repository
+(see the corrected paragraph below). Round 2 adds that file — **198 cases,
+~10 s a run**, green before and after — and **four of the six counts change**.
+**The floor to carry: a sweep's selection must include every test file its own
+commit touches.** M5's entry reached the same place from the other direction by
+sweeping the whole suite; this is the cheap version of that rule, and the reason
+it is cheap is that the list is `git show --stat`.
+
+The flake check this file's rules require was *done rather than inherited*:
 `test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_
 session_of_its_own` lives in `tests/integration/test_rows_refresh.py`, which is
-not in this selection.
+in neither selection.
 
-| plant | verdict | cases failed |
+| plant | verdict | cases failed (round 2 / round 1) |
 |---|---|---|
-| P1 the `UPDATE` writes `tmdb_vote_average`/`tmdb_vote_count` again (the whole regression) | KILLED | **1**, on the **`imdb_*` arm** — `assert None == 2900000` |
-| P2 the `UPDATE` writes **both** pairs (the "defensive" half-fix) | KILLED | **1**, on the **`tmdb_*` arm** — `assert 2900000 == 42` |
-| P3 the `IS DISTINCT FROM` guard deleted | KILLED | 1 — `test_apply_ratings_is_a_no_op_when_nothing_changed`, Postgres arm alone |
-| P4 `parse_ratings_row` swaps `average_rating` and `num_votes` | KILLED | 1 — `test_ratings_parse_on_imdbs_own_scale` |
-| C1 the staging **DDL**'s two column definitions written in the other order | SURVIVED all five gate steps | — |
-| C1-literal the plan's own spelling of C1 — DDL **and** the `("imdb_id", …)` tuple swapped together, records unchanged | KILLED | 3 |
+| P1 the `UPDATE` writes `tmdb_vote_average`/`tmdb_vote_count` again (the whole regression) | KILLED | **2** / 1 — the new case on its **`imdb_*` arm** (`assert None == 613004`), **and** `test_phases_zero_to_two_produce_a_linked_skeleton_catalog` at `At index 4 diff: None != 7.4` |
+| P2 the `UPDATE` writes **both** pairs (the "defensive" half-fix) | KILLED | **2** / 1 — the new case on its **`tmdb_*` arm** (`assert 613004 == 42`), **and** the same bootstrap case at `At index 5 diff: 7.4 != None` |
+| P3 the `IS DISTINCT FROM` guard deleted | KILLED | 1 / 1 — `test_apply_ratings_is_a_no_op_when_nothing_changed`, Postgres arm alone |
+| P4 `parse_ratings_row` swaps `average_rating` and `num_votes` | KILLED | **2** / 1 — `test_ratings_parse_on_imdbs_own_scale` (`assert 12345 == 7.4`) **and** the bootstrap case |
+| C1 the staging **DDL**'s two column definitions written in the other order | SURVIVED all five gate steps | — / — |
+| C1-literal the plan's own spelling of C1 — DDL **and** the `("imdb_id", …)` tuple swapped together, records unchanged | KILLED | **4** / 3 |
 
 **P1 and P2 are the round's subject and they die on two different assertions
 of one case, which is the whole argument for writing both.** The dispatch
 predicted both would die on the `tmdb_*` arm; measured, only P2 does, and the
 reason is assertion *order* rather than coverage. Under P1 the IMDb columns are
-never written at all, so `assert row.imdb_num_votes == 2_900_000` is reached
-first and fails at `None` — the row reads `(None, None, 2900000, 9.3)`, i.e.
+never written at all, so `assert row.imdb_num_votes == 613_004` is reached
+first and fails at `None` — the row reads `(None, None, 613004, 4.7)`, i.e.
 IMDb's figures sitting in TMDb's columns, which is precisely the defect, caught
 one assertion earlier than predicted. Under P2 every `imdb_*` assertion passes
-(the row reads `(2900000, 9.3, 2900000, 9.3)`) and the `tmdb_*` arm is the only
-thing in the repository that can see it. **So the two arms are each
-load-bearing and each is load-bearing against a different mutant — which is a
-stronger result than the prediction, and a summary saying "both killed by the
-new case" would have hidden it.** Nearest relative is M9 D3's *"killed by a
-different assertion than predicted"*, arriving at a case whose two halves were
-written for two different regressions rather than at one assertion pair.
+(the row reads `(613004, 4.7, 613004, 4.7)`) and **within this selection the
+`tmdb_*` arm is one of exactly two assertions that can see it** — the other
+being the bootstrap case's `tmdb_vote_average` column, added by the same
+commit. **So the two arms are each load-bearing and each is load-bearing
+against a different mutant — which is a stronger result than the prediction,
+and a summary saying "both killed by the new case" would have hidden it.**
+Nearest relative is M9 D3's *"killed by a different assertion than predicted"*,
+arriving at a case whose two halves were written for two different regressions
+rather than at one assertion pair.
+
+🔴 **And the sentence that stood here before this correction is the finding
+worth more than the round.** It read *"the `tmdb_*` arm is the only thing in
+the repository that can see it"* — a claim about the **repository**, drawn from
+a run over **four files**, and false: P2 fails two cases, and the second is one
+this very commit added. Nothing about the measurement was wrong; the
+quantifier was. **A sweep measures its selection and licenses statements about
+its selection only. Every "the only", "nothing else" and "anywhere" in a sweep
+write-up is a claim about the tree, so either scope it to the selection with
+its count or go and measure the tree.** This repository's own CLAUDE.md files
+it as the signature failure — *"a negative established by looking in the one
+place the answer was expected is not a negative"* — and it was committed here
+inside the artefact whose purpose is to catch it, three entries below M8 Task
+13's *"a survivor list is only true of the selection it was measured against"*.
+Found in review, not by the round.
+
+⚠️ **Round 2 could not run in the working tree, and the tree-pin check is what
+said so.** A second implementer was writing `src/usher/composition.py`,
+`src/usher/domain/bootstrap.py`, `tests/unit/test_cli.py` and
+`tests/unit/test_composition.py` into the same checkout while this round ran —
+CLAUDE.md is absolute that a sweep mutates in place so nothing else may use the
+tree, and that **disjoint file sets are not enough**. The harness aborted after
+P1 on its post-restore tree-pin assertion (both mutated files were
+`md5sum`-clean; the pin fired on the *other* agent's files appearing), and the
+round was moved to a disposable `git archive HEAD | tar -x` copy at
+`/var/tmp/adr40-sweep-tree` carrying only this task's own patch — the mechanism
+CLAUDE.md names, and never `cp -a`. **Two things to carry: the concurrency rule
+needs a check that enforces it, because "I am the only one in this tree" is an
+assumption a sweep silently rests on for its whole run; and a `git status`-empty
+assertion is that check only for a committed tree, so for an uncommitted one pin
+every reachable file by digest instead of weakening the check to fit.**
 
 🔴 **The plan's own equivalence argument for C1 is false, and C1-literal is the
 measurement rather than the claim.** The plan says *"`_stage`'s column tuple

@@ -99,8 +99,14 @@ class ImdbRating:
 
     **The names carry the source because the columns do.** These were
     `community_rating` and `vote_count` until ADR-0040, which is how an IMDb
-    import came to overwrite TMDb's figures on a 50-100x different scale with
-    nothing recording which source had won.
+    import came to overwrite TMDb's figures with nothing recording which
+    source had won. **The gap is ~38x, over one identified population counted
+    both ways**: of the frozen tier's 130,647 enriched rows, median TMDb
+    `vote_count` **15** against a median frozen IMDb `numVotes` of **576**
+    (`.claude/rules/tmdb-and-enrichment.md`, group S3). That pairing is
+    before-and-after over one frozen set of ids rather than two columns read
+    off one row -- no row could hold both until `m10a` and this port's own
+    redirect, which is the entire defect.
     """
 
     imdb_id: str

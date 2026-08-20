@@ -212,16 +212,32 @@ async def test_apply_ratings_upsert_tmdb_ids_upsert_crosswalk_accept_empty_batch
 async def test_apply_ratings_writes_only_the_imdb_columns(session: AsyncSession) -> None:
     """**The whole of ADR-0040 in one assertion.** Before it, this same call
     wrote `vote_count`/`community_rating` -- the columns TMDb enrichment also
-    writes -- so an IMDb import silently overwrote a TMDb figure with a number
-    on a 50-100x different scale, and nothing recorded which had won. The
-    `tmdb_*` half of this assertion is the load-bearing half: a writer that
-    filled the IMDb columns *and* left its old write in place would satisfy
-    every assertion about `imdb_*` and change nothing at all.
+    writes -- so an IMDb import silently overwrote a TMDb figure and nothing
+    recorded which had won. **The gap is ~38x, over one identified population
+    counted both ways**: of the frozen tier's 130,647 enriched rows, median
+    TMDb `vote_count` **15** against a median frozen IMDb `numVotes` of
+    **576** (`.claude/rules/tmdb-and-enrichment.md`, group S3) -- a
+    before-and-after over one frozen set of ids rather than two columns read
+    off one row, because no row could hold both until `m10a` and the redirect
+    this case pins, which is the entire defect.
+
+    The `tmdb_*` half of this assertion is the load-bearing half: a writer
+    that filled the IMDb columns *and* left its old write in place would
+    satisfy every assertion about `imdb_*` and change nothing at all.
 
     Seeded through raw SQL rather than `upsert_titles`, because the only
     column set that can state the premise -- a title already carrying TMDb's
     own figures -- is one the IMDb loader deliberately never writes (see
     `upsert_titles`' `DO UPDATE` omissions).
+
+    ⚠️ **All four numbers here are invented, and that is the licence rule
+    rather than a style choice.** `tests/fixtures/README.md` requires every
+    rating and vote count in this repository to be made up, and ratings and
+    vote counts are the most licence-restricted part of IMDb's dataset. A
+    real title's real pair would pass `test_no_third_party_data.py`, which is
+    scoped to identifiers and TSV shapes -- so this one is on the author. The
+    only property the case needs is that the two counts differ by a lot, in
+    the direction the medians above record.
     """
     title_id = new_id()
     await session.execute(
@@ -235,7 +251,7 @@ async def test_apply_ratings_writes_only_the_imdb_columns(session: AsyncSession)
     repository = PostgresBulkCatalogRepository(session)
 
     written = await repository.apply_ratings(
-        [ImdbRating(imdb_id="tt99000210", average_rating=9.3, num_votes=2_900_000)]
+        [ImdbRating(imdb_id="tt99000210", average_rating=4.7, num_votes=613_004)]
     )
 
     assert written == 1
@@ -248,8 +264,8 @@ async def test_apply_ratings_writes_only_the_imdb_columns(session: AsyncSession)
             {"id": title_id},
         )
     ).one()
-    assert row.imdb_num_votes == 2_900_000
-    assert row.imdb_average_rating == pytest.approx(9.3)
+    assert row.imdb_num_votes == 613_004
+    assert row.imdb_average_rating == pytest.approx(4.7)
     # Untouched, and this is the assertion the old code fails.
     assert row.tmdb_vote_count == 42
     assert row.tmdb_vote_average == pytest.approx(7.5)

@@ -285,9 +285,22 @@ class BulkCatalogRepository(ABC):
         **Those are IMDb's own columns, and ADR-0040 is why they exist.**
         This method wrote `community_rating`/`vote_count` until then — the
         columns `adapters/tmdb/mapping.py` also writes — so whichever writer
-        ran last won, on scales ~50-100x apart, with nothing recording the
-        winner. The write is now single-source in both directions: nothing
-        else writes these two, and this writes nothing else.
+        ran last won, with nothing recording the winner. **The gap is ~38x,
+        over one identified population counted both ways**: of the frozen
+        tier's 130,647 enriched rows, median TMDb `vote_count` **15** against
+        a median frozen IMDb `numVotes` of **576**
+        (`.claude/rules/tmdb-and-enrichment.md`, group S3) — before-and-after
+        over one frozen set of ids rather than two columns read off one row,
+        because no row could hold both until `m10a` and this redirect, which
+        is the entire defect.
+
+        The write is now single-**source** in both directions, which is a
+        weaker and truer claim than single-*writer*: no other writer
+        originates values for these two, and this originates values for
+        nothing else. `PostgresTitleRepository.add`/`update` do carry them to
+        storage — every non-derived column goes through `TitleRow(**model_dump)`
+        and the `setattr` loop — but only as an entity round-trip of values
+        this method put there.
 
         Never creates a title: `title.ratings.tsv.gz` covers `titleType`s
         this milestone drops, and a rating with no title is not a catalog

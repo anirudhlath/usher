@@ -640,7 +640,13 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         # **The two columns named here are IMDb's own, and that is ADR-0040.**
         # This statement used to write `community_rating`/`vote_count`, which
         # `adapters/tmdb/mapping.py` also writes -- so whichever ran last won,
-        # on scales ~50-100x apart, with nothing recording the winner.
+        # with nothing recording the winner. The gap is ~38x, over one
+        # identified population counted both ways: of the frozen tier's
+        # 130,647 enriched rows, median TMDb `vote_count` 15 against a median
+        # frozen IMDb `numVotes` of 576 (`.claude/rules/tmdb-and-enrichment.md`,
+        # group S3). Before-and-after over one frozen set of ids rather than
+        # two columns read off one row -- no row could hold both until `m10a`
+        # and this statement's redirect, which is the entire defect.
         return await self._rowcount("""
             UPDATE titles t
             SET imdb_average_rating = s.imdb_average_rating,
