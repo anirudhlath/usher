@@ -10,6 +10,18 @@ package-lock.json
 # on every regeneration that says nothing about the API.
 src/api/schema.d.ts
 
+# MSW's service worker, vendored by `msw init` and rewritten by msw's own
+# postinstall. Its header says "Please do NOT modify this file" and it carries
+# an INTEGRITY_CHECKSUM msw verifies at runtime.
+#
+# ⚠️ **This was a real CI failure, and the mechanism is worth knowing.** A
+# `prettier --write .` reformatted 25 lines of it. Locally that stuck, because
+# npm had *blocked* msw's postinstall script; in CI `npm ci` runs it, msw
+# restores its own copy, and `prettier --check` then fails on a file no human
+# touched. The result was a check that passed on every developer machine and
+# failed on every push. The committed copy is now msw's, byte for byte.
+public/mockServiceWorker.js
+
 # Ported verbatim from the design handoff. These are the contract every screen
 # is built against, and a formatter reflowing them makes them stop matching
 # their source -- the same reason ruff excludes docs/ and .claude/ upstream.
