@@ -479,13 +479,17 @@ async def test_all_four_routes_are_in_the_openapi_document_with_real_shapes(
     ):
         operation = paths[path][method]
         assert set(operation["responses"]) >= {"200", "404", "422"}, (path, method)
-        # The fork M9's H2 named as the cost of naming the media type, and the
-        # pair below is the whole point of paying it: **one operation, two
-        # media types**. The 404 is a problem document and says so; the 200 is
-        # this route's own body and stays `application/json`. That is the
-        # branch a generated client makes before it parses anything, and it is
-        # the one thing about a problem document that cannot be recovered from
-        # the `type` member -- reaching `type` means having already decided.
+        # The two media types differ on purpose and that is the assertion:
+        # **one operation, two media types**. The 404 is `PROBLEM_MEDIA_TYPE`
+        # and the 200 is this route's own body at `application/json`, which is
+        # the branch a generated client makes before it parses anything -- and
+        # it is the one thing about a problem document that cannot be recovered
+        # from the `type` member, since reaching `type` means having already
+        # decided. It was `application/json` on both until issue #6 was taken
+        # -- FastAPI renders a `{"model": ProblemResponse}` declaration under
+        # the *route's* response media type -- and `api/app.py`'s
+        # `UsherAPI.openapi` corrects it in a post-pass. This assertion and its
+        # twin in `test_api_playback.py` are the fork M9's H2 named as the cost.
         schema = operation["responses"]["404"]["content"][PROBLEM_MEDIA_TYPE]["schema"]
         assert schema["$ref"].endswith("ProblemResponse"), (path, method)
         assert "application/json" not in operation["responses"]["404"]["content"], (path, method)

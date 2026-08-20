@@ -318,33 +318,38 @@ async def test_resolving_to_a_title_that_does_not_exist_names_the_id_and_keeps_t
 
     Note what this fake can and cannot show. It has **no foreign key** (its
     own divergence list says so), so it cannot produce the conflict at all:
-    at HEAD before F4 this case failed on `DID NOT RAISE SystemExit` having
-    printed `resolved`, which is the honest red for a *pre-check*. The same
-    property means the swallow plant also dies here on `DID NOT RAISE` rather
+    at HEAD before the pre-check existed this case failed having printed
+    `resolved`, which is the honest red for a *pre-check*. The same property
+    means the swallow plant also dies here on the printed sentence rather
     than on `attached == []` -- see the F4 ledger in
     `.claude/rules/mutation-sweeps.md`, which records that as a refinement of
     the plan's prediction rather than a match to it.
+
+    ⚠️ **It prints and returns; it does not exit 1**, and this branch's own
+    F4 spelled it as `SystemExit`. `main`'s implementation is the one that
+    shipped and its argument is stated in `_unmatched`: one command naming
+    two things that do not exist owes them one exit code, and `no such media
+    item` -- the arm below -- has printed and returned since M4. The
+    assertion that used to read `isinstance(exit_info.value.code, str)` is
+    therefore gone rather than inverted, because there is no exit status left
+    to state.
     """
     harness = await _resolve_harness(monkeypatch)
     unknown = new_id()
 
-    with pytest.raises(SystemExit) as exit_info:
-        await _unmatched(
-            _cli_settings(), limit=50, offset=0, resolve=str(harness.held), title=str(unknown)
-        )
+    await _unmatched(
+        _cli_settings(), limit=50, offset=0, resolve=str(harness.held), title=str(unknown)
+    )
 
-    message = str(exit_info.value)
-    # A `str` code is what makes this exit 1 rather than 0 -- `SystemExit(0)`
-    # renders as "0" and would satisfy nothing else here, but stating it is
-    # cheaper than leaving the exit status to be inferred from the message.
-    assert isinstance(exit_info.value.code, str)
-    assert str(unknown) in message, message
-    assert "Traceback" not in message, message
+    printed = capsys.readouterr().out
+    assert str(unknown) in printed, printed
+    assert "Traceback" not in printed, printed
     assert harness.media_items.attached == [], harness.media_items.attached
     assert harness.session.commits == 0
     # Not "resolved", and not "no such media item" either -- one message per
     # condition is the whole point of the case below.
-    assert capsys.readouterr().out == ""
+    assert "resolved" not in printed, printed
+    assert "no such media item" not in printed, printed
 
 
 async def test_a_resolve_naming_no_media_item_still_says_so(

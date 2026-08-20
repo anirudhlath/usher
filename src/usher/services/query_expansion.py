@@ -35,10 +35,28 @@ as a list rather than leaving to be inferred:
 - **A deployment with no embedder buys nothing**, because there is nothing to
   embed: `semantic` raises and `fused` narrows to full-text before reaching
   here.
+- **A population with no vectors buys nothing** — issue #16, and the one this
+  list did not cover until 2026-08-19. *"This deployment has a model"* and
+  *"this search's lane has something to rank"* are different facts, and only
+  the second is one a rewrite can improve: against an empty
+  `title_embeddings` the vector lane returns nothing however the query is
+  worded, so a rewrite was billed on every semantic and fused search until the
+  backfill drained. `SearchService` now asks
+  `SearchIndex.semantic_coverage(filters)` -- the number the answer already
+  reports, over the same filters, asked before the embed -- and calls `expand`
+  only above zero.
 
-So the unit of spend is *one search that was going to embed something*, which
-is the same shape as curation's *one generation*: one completion per unit of
-work, never a completion per event.
+So the unit of spend is *one search whose semantic lane was going to be able to
+answer*, which is the same shape as curation's *one generation*: one completion
+per unit of work, never a completion per event.
+
+**Placement is not the whole of the cost argument, and this section used to
+imply it was.** Four of the five entries above are properties of *where* the
+call sits; the fifth is a property of what is asked before it, and no position
+inside `search` could have supplied it. The general form is worth the sentence:
+*a guard placed in front of a cost tells you the cost is not paid on the paths
+that never reach it, and says nothing about the paths that reach it and cannot
+benefit.*
 
 ## The lexical lane keeps the words the viewer typed
 

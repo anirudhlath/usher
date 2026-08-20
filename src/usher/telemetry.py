@@ -9,7 +9,7 @@ import logging
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from loguru import logger
 from opentelemetry import metrics, trace
@@ -48,6 +48,76 @@ def current_traceparent() -> str | None:
     carrier: dict[str, str] = {}
     TraceContextTextMapPropagator().inject(carrier)
     return carrier.get("traceparent")
+
+
+#: The response header carrying the server span, and the reason it is spelled
+#: this way rather than `X-Trace-Id`.
+#:
+#: **`traceresponse` is a *withdrawn draft* name that the OpenTelemetry
+#: ecosystem shipped anyway, and reading the spec is what says so.** Checked
+#: 2026-08-19 against three documents rather than from memory:
+#:
+#: * `https://www.w3.org/TR/trace-context-2/` — the published Trace Context
+#:   Level 2 Candidate Recommendation — defines `traceparent` and `tracestate`
+#:   and **no response header at all**. The string `traceresponse` does not
+#:   occur in it.
+#: * `w3c/trace-context`'s `spec/21-http_response_header_format.md` on `main`
+#:   is now titled *Trace Context Server Timing Metric Format*: the response
+#:   binding moved onto `Server-Timing` under the metric name `trace`, e.g.
+#:   `server-timing: trace;desc=00-<trace-id>-<span-id>-<flags>`.
+#: * The **value grammar did not move with it**, and that is the half that
+#:   matters here. Verbatim from that file:
+#:
+#:       value            = version "-" version-format
+#:       version          = 2HEXDIGLC   ; version ff is forbidden
+#:       version-format   = trace-id "-" child-id "-" trace-flags
+#:       trace-id         = 32HEXDIGLC  ; All zeroes forbidden
+#:       child-id         = 16HEXDIGLC  ; All zeroes forbidden
+#:       trace-flags      = 2HEXDIGLC
+#:
+#: So the bytes below are exactly what the current spec specifies; only the
+#: field they are carried in is contested. `traceresponse` is kept because it
+#: is what `opentelemetry.instrumentation.propagators.TraceResponsePropagator`
+#: emits — i.e. what *this* stack already speaks — and because a
+#: `Server-Timing` entry is a shared, comma-joined namespace a proxy also
+#: writes to. Adding the `Server-Timing` spelling later is one more `setter.set`
+#: over the same value; nothing here would change.
+TRACERESPONSE_HEADER: Final = "traceresponse"
+
+
+def traceresponse(span: trace.Span | None = None) -> str | None:
+    """The active server span as a `traceresponse` value, or `None`.
+
+    `None` — meaning **no header at all** — in exactly two situations, and the
+    distinction is the same one `current_traceparent` above draws and the same
+    one `_observations` draws for a gauge that has no reader:
+
+    * **the span is not recording.** A dropped span's id names a trace that was
+      never exported, so a link built from it opens an empty Tempo page. "This
+      response has no trace" and "this response has a trace you cannot find"
+      are different facts and only the first one is honest.
+    * **the context is invalid** — `INVALID_SPAN`'s all-zero trace id, which is
+      what `get_current_span()` answers outside any span. A header reading
+      `00-000…0-000…0-00` is syntactically well-formed, passes every regex, and
+      is a lie; the spec forbids it in as many words (*"All zeroes forbidden"*,
+      for both ids).
+
+    Takes the span rather than always reading the ambient one so the format is
+    testable against a span a test constructed, which is what separates "the
+    header matches a real span id" from "the header matches a regex" — a
+    hard-coded constant satisfies the second.
+    """
+    span = trace.get_current_span() if span is None else span
+    if not span.is_recording():
+        return None
+    context = span.get_span_context()
+    if not context.is_valid:
+        return None
+    return (
+        f"00-{trace.format_trace_id(context.trace_id)}"
+        f"-{trace.format_span_id(context.span_id)}"
+        f"-{context.trace_flags:02x}"
+    )
 
 
 def inject_trace_context(record: Mapping[str, Any]) -> None:

@@ -46,7 +46,34 @@ otherwise be lost and re-litigated in six months.
 | [0036](0036-the-imdb-tmdb-provenance-rule.md) | Two bulk sources over one entity: `credits.source`, wholesale arbitration, and *not* merging people yet | Accepted — corrects PRD 02 and 08; supersedes M9 T4's withdrawal |
 | [0037](0037-the-worker-is-a-bounded-pool-of-scopes.md) | The job worker is a bounded pool, and a job's scope is a session | Accepted — corrects PRD 01's concurrency table and PRD 08's recovery rule |
 | [0038](0038-the-embedding-width-is-deployment-wide-ddl.md) | The embedding width is deployment-wide DDL, and the fingerprint's "no migration" stops at it | Accepted — **narrows 0020 and 0022**; corrects PRD 02, 04, 05 and 08 |
-| [0039](0039-the-outbound-limiter-is-per-source-and-spaces-requests.md) | The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling | Accepted — adds the proactive half of PRD 01's rate-limit promise; PRD 03 and 10 |
+| [0039](0039-the-genre-vocabulary-is-usher-owned.md) | The genre vocabulary is Usher's own; `/browse` is fixed at read time, enrichment stops deleting what TMDb cannot name, and `usher genres --backfill` normalises the column | Accepted — closes issue #30; corrects PRD 02, 03, 05 and 07. **Amended 2026-08-19**: the write-time deferral was priced at ~1.8 h against a real 304 embeddings and is withdrawn |
+| [0039](0039-the-outbound-limiter-is-per-source-and-spaces-requests.md) ⚠️ | The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling | Accepted — adds the proactive half of PRD 01's rate-limit promise; PRD 03 and 10 |
+
+⚠️ **`0039` is assigned twice and one of the two has to be renumbered — this
+row is the record that it is known, not a decision to leave it.** The two ADRs
+were written in parallel: the genre vocabulary landed on `main` in the post-M9
+issue sweep, the outbound limiter on `milestone/m10-hardening` as M10's S2/S3,
+and neither branch could see the other take the number. Both documents are
+whole and correct; what is broken is that **`ADR-0039` in prose no longer names
+one decision** — `CLAUDE.md` alone uses the bare string for the limiter at
+`:30` and `:46` and links the genre one at `:355`.
+
+**It is deliberately not renumbered in the merge commit.** The bare string
+appears at roughly forty sites for the limiter and fifteen for the vocabulary,
+interleaved across `src/`, `tests/`, `docs/prd/` and `.claude/rules/`, so the
+rename is a per-site disambiguation rather than a substitution, and doing it
+inside a merge would bury fifty-odd unreviewable edits among the conflict
+resolutions. It is a task of its own. **`0040` is the free number** and the
+limiter is the one to move, on the same "the trunk keeps what the trunk
+published" rule the rest of this merge used — `docs/plans/` cites the limiter's
+current filename and, per `.claude/rules/prd-maintenance.md`, a historical plan
+is not retro-edited, so that citation is expected to go stale rather than be
+rewritten.
+
+`tests/unit/test_decision_register.py` stays green throughout: it compares
+*filenames* against the links in this table in both directions, and both files
+are listed. The duplicate **number** is precisely what it cannot see, which is
+why this paragraph is here rather than only in a commit message.
 
 Format: context → decision → consequences → evidence. Short is fine.
 

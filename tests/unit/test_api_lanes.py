@@ -178,16 +178,25 @@ class _Adapters(SourceAdapterFactory):
         self.built: dict[str, FakeSourceAdapter] = {}
         self.crashing: set[str] = set()
         self.slow: set[str] = set()
-        # Applied to every adapter at construction, which is the only moment
-        # a case can reach: `_start_lane` builds the adapter and hands it
-        # straight to `PushSupervisor.run`, whose first act after connecting
-        # is to close the gap. Seeding off `built` afterwards races that
-        # walk, and a case that lost the race would assert against a library
-        # of zero items -- which is exactly what a broken ceiling produces.
+        # Two spellings of one precondition, kept because each side's cases
+        # use its own: `_start_lane` builds the adapter and hands it straight
+        # to `PushSupervisor.run`, whose first act after connecting is to
+        # close the gap, so seeding off `built[...]` afterwards races the
+        # very walk the case is trying to observe -- and a case that lost the
+        # race would assert against a library of zero items, which is exactly
+        # what a broken ceiling produces.
+        #
+        # `library` is the declarative form (a list of items to seed);
+        # `prepare` is the general one (any set-up a case wants), and it runs
+        # first so a case can use both.
         self.prepare: Callable[[FakeSourceAdapter], None] | None = None
+        self.library: list[tuple[SourceItem, datetime]] = []
 
     def crash(self, name: str) -> None:
         self.crashing.add(name)
+
+    def stock(self, item: SourceItem, changed_at: datetime) -> None:
+        self.library.append((item, changed_at))
 
     def build(self, source: Source, credentials: SourceCredentials) -> SourceAdapter:
         if source.name in self.crashing:
@@ -199,6 +208,8 @@ class _Adapters(SourceAdapterFactory):
         adapter = kind(source)
         if self.prepare is not None:
             self.prepare(adapter)
+        for item, changed_at in self.library:
+            adapter.seed(item, changed_at)
         self.built[source.name] = adapter
         return adapter
 
@@ -337,6 +348,12 @@ class _Fakes:
     # table refuses `Cellar` too, `watch_synced` never fills, and the
     # second `_drain` expires. So the shared table is load-bearing for the
     # *positive control*, and the positive control is what reports.
+    #
+    # Put another way: `sync_runs` is where a *cursor* lives, so a fresh one
+    # per unit of work models a database that forgets every completed walk the
+    # instant the session closes -- under which no delta ever has a `since`
+    # and "the gap-closer is bounded once a walk has completed" is
+    # unobservable.
     runs: FakeSyncRunRepository
     queue: _CountingQueue
     adapters: _Adapters
@@ -844,8 +861,18 @@ async def test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator
     assert named == {"Atrium", "Belfry"}, f"the refusal names the source it refused: {refusals}"
     for line in refusals:
         assert line.startswith("WARNING|"), f"the refusal is a WARNING, not an ERROR: {line}"
-        assert "usher sync --kind full" in line, (
+        # The command and nothing more specific. This branch's own S5 spelled
+        # the remedy `usher sync --kind full`; the implementation that shipped
+        # is `main`'s (issue #9), whose line names `usher sync --source "..."`
+        # and the `USHER_PUSH_GAP_CLOSE=always` escape beside it. The claim
+        # worth pinning is neither spelling -- it is that **a refusal that does
+        # not say what to run is a dead end**, so the assertion is on the
+        # command an operator types.
+        assert "usher sync" in line, (
             f"a refusal that does not say what to run is a dead end: {line}"
+        )
+        assert "USHER_PUSH_GAP_CLOSE" in line, (
+            f"the refusal names the setting that lifts it, or it reads as a wall: {line}"
         )
         # PRD 08's credentials rule, and `reconcile.py`'s own failure line is
         # the local precedent: the *name* is what an operator typed, and it
@@ -961,7 +988,7 @@ async def test_an_operators_delta_on_a_fresh_source_still_walks(fakes: _Fakes) -
     # reaching into its private for a `Pipeline` that `_pipeline` hands out
     # in one call couples the case to a name it has no claim on.
     pipeline = _pipeline(fakes, _settings())
-    assert await pipeline.reconcile.delta_cursor(source) is None, (
+    assert await pipeline.reconcile.cursor_for(source, SyncRunKind.DELTA) is None, (
         "the premise: this source has no cursor, which is what the lane refuses"
     )
     run = await pipeline.reconcile.reconcile(source, SyncRunKind.DELTA, adapter)
@@ -1276,6 +1303,187 @@ async def test_push_snapshots_report_the_adapters_own_ledger(fakes: _Fakes) -> N
         assert snapshots["A"].delivering is adapter.supports_push
     finally:
         await supervisor.stop()
+
+
+# -- the reconnect gap-closer -------------------------------------------
+#
+# The gap-closer runs `reconcile(source, DELTA, adapter)` on every reconnect,
+# and a DELTA with no cursor is `list_items(since=None)` -- the whole library.
+# So on a deployment that has never completed an item walk, starting the
+# process is a full walk of a server the operator may not own, issued by
+# `uvicorn` with default settings and no command. `USHER_PUSH_GAP_CLOSE` is
+# the switch and `cursored` is the shipped answer; these cases are the three
+# arms plus the log-rate one.
+
+# Before any run these cases create, so a stocked item is inside the window a
+# completed run's cursor opens.
+_SYNCED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+_CHANGED_AT = datetime(2026, 1, 2, tzinfo=UTC)
+# Every gap-close line carries this, so a case can count *the* lines rather
+# than every warning the lane happens to emit.
+_GAP_MARKER = "push gap"
+
+
+async def _completed_walk(fakes: _Fakes, source: Source) -> None:
+    """What `usher sync` leaves behind: one completed item-lane run, whose
+    `started_at` is the floor every later delta resumes from."""
+    await fakes.runs.add(
+        SyncRun(
+            source_id=source.id,
+            kind=SyncRunKind.FULL,
+            status=SyncRunStatus.COMPLETED,
+            started_at=_SYNCED_AT,
+            finished_at=_SYNCED_AT,
+        )
+    )
+
+
+async def _walked(fakes: _Fakes, source: Source) -> list[SyncRunKind]:
+    return [run.kind for run in await fakes.runs.list_for_source(source.id)]
+
+
+async def test_a_gap_close_with_no_cursor_does_not_walk_the_whole_library(
+    fakes: _Fakes,
+) -> None:
+    """The shipped default, and the defect it closes.
+
+    `reconcile(source, DELTA, adapter)` reads its `since` from the newest
+    *completed* item-lane run; with none, `since` is `None` and the "delta" is
+    `list_items(since=None)` -- 1,126,789 items on the household this project
+    measures. That is not a gap: a gap is the window a socket was down, and
+    with no completed walk the window is the entire library, which is
+    `usher sync`'s job rather than a reconnect handler's.
+
+    Asserted on both the walk and the log, and drained on *either* arriving,
+    so the case fails on what happened rather than on a timeout.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    fakes.adapters.stock(_item("emby-1"), _CHANGED_AT)
+    sink = io.StringIO()
+    supervisor = _supervisor(fakes, worker_enabled=False)
+    logger.remove()
+    try:
+        logger.add(sink, level="WARNING")
+        await supervisor.start()
+        await _drain(lambda: bool(sink.getvalue()) or bool(_stored(fakes.media_items)))
+    finally:
+        logger.remove()
+        await supervisor.stop()
+    assert _stored(fakes.media_items) == [], "the lane walked a library nobody asked it to walk"
+    assert await _walked(fakes, source) == [], "the lane opened a sync run for the refused walk"
+    logged = sink.getvalue()
+    assert _GAP_MARKER in logged, logged
+    assert "A" in logged, "the refusal does not name the source it refused"
+    assert "usher sync" in logged, "the refusal does not say what to run instead"
+
+
+async def test_a_gap_close_walks_the_delta_once_a_walk_has_completed(fakes: _Fakes) -> None:
+    """And the bound is not "never walk".
+
+    A source with a completed run has a real `since`, so the reconnect delta
+    is the bounded thing PRD 03 designed -- Emby does not re-deliver what a
+    disconnected client missed, so this is the only cover there is. A fix that
+    turned the gap-closer off would break that; this is the case that fails if
+    it does.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    await _completed_walk(fakes, source)
+    fakes.adapters.stock(_item("emby-1"), _CHANGED_AT)
+    supervisor = _supervisor(fakes, worker_enabled=False)
+    await supervisor.start()
+    try:
+        await _drain(lambda: _stored(fakes.media_items) == ["emby-1"])
+    finally:
+        await supervisor.stop()
+    assert SyncRunKind.DELTA in await _walked(fakes, source)
+
+
+async def test_push_gap_close_always_walks_uncursored_and_says_so_first(fakes: _Fakes) -> None:
+    """The escape hatch for an operator who wants the old behaviour back --
+    and it is not silent. The line goes out *before* the walk starts, at
+    WARNING, naming the source and naming the size, because an operator who
+    finds out from their media server's access log has found out too late."""
+    source = _source("A")
+    await _seed(fakes, source)
+    fakes.adapters.stock(_item("emby-1"), _CHANGED_AT)
+    sink = io.StringIO()
+    supervisor = _supervisor(fakes, worker_enabled=False, push_gap_close="always")
+    logger.remove()
+    try:
+        logger.add(sink, level="WARNING")
+        await supervisor.start()
+        await _drain(lambda: _stored(fakes.media_items) == ["emby-1"])
+    finally:
+        logger.remove()
+        await supervisor.stop()
+    logged = sink.getvalue()
+    assert _GAP_MARKER in logged, logged
+    assert "A" in logged, "the warning does not name the source it is about to walk"
+    assert "entire library" in logged, "the warning does not say how big the walk is"
+
+
+async def test_push_gap_close_never_closes_no_gap_at_all(fakes: _Fakes) -> None:
+    """The other end of the switch: a deployment pointed at a household it
+    does not own, whose walks are an operator's cron and nothing else.
+
+    Costly and stated rather than hidden -- with no gap-closer, a change made
+    while the socket was down is not seen until the next walk -- so the line
+    is emitted every time the lane declines, at INFO rather than WARNING,
+    because it is an answer the operator configured.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    await _completed_walk(fakes, source)
+    fakes.adapters.stock(_item("emby-1"), _CHANGED_AT)
+    sink = io.StringIO()
+    supervisor = _supervisor(fakes, worker_enabled=False, push_gap_close="never")
+    logger.remove()
+    try:
+        logger.add(sink, level="INFO")
+        await _drain_lane(supervisor, sink, fakes)
+    finally:
+        logger.remove()
+        await supervisor.stop()
+    assert _stored(fakes.media_items) == [], "`never` still walked"
+    assert await _walked(fakes, source) == [SyncRunKind.FULL], "`never` still opened a run"
+    assert _GAP_MARKER in sink.getvalue(), sink.getvalue()
+
+
+async def _drain_lane(supervisor: LaneSupervisor, sink: io.StringIO, fakes: _Fakes) -> None:
+    await supervisor.start()
+    await _drain(lambda: _GAP_MARKER in sink.getvalue() or bool(_stored(fakes.media_items)))
+
+
+async def test_the_gap_close_is_logged_per_close_and_not_per_supervisor_poll(
+    fakes: _Fakes,
+) -> None:
+    """A per-lane fact logged in a per-poll function is the ~17,280 warnings a
+    day `config-cli-and-deployment.md` records against `build_worker`.
+
+    The refresher re-reads the source list every `push_source_refresh_seconds`
+    and the lanes it finds are already running, so a line written there would
+    repeat forever while the gap is closed exactly once. Asserting after one
+    poll cannot tell "once" from "per poll", so this drains until the
+    refresher has demonstrably polled several times -- every one of those
+    opens a unit of work -- and asserts the *count*.
+    """
+    source = _source("A")
+    await _seed(fakes, source)
+    sink = io.StringIO()
+    supervisor = _supervisor(fakes, worker_enabled=False, push_source_refresh_seconds=0.001)
+    logger.remove()
+    try:
+        logger.add(sink, level="WARNING")
+        await supervisor.start()
+        await _drain(lambda: len(fakes.units_of_work) >= 12)
+    finally:
+        logger.remove()
+        await supervisor.stop()
+    logged = sink.getvalue()
+    polls = len(fakes.units_of_work)
+    assert logged.count(_GAP_MARKER) == 1, f"logged once per poll over {polls} of them: {logged}"
 
 
 # -- the worker lane ----------------------------------------------------

@@ -1079,3 +1079,205 @@ is *scripts and manual runs*, not CI.
 throwaway `pgvector/pgvector:pg17` for exactly this reason and would have been
 right to even without the incident: a run whose numbers have to be reproducible
 must not share a database with whatever else is in flight.
+
+## A caught `RepositoryConflict` leaves an expired row behind, and touching it synchronously is `MissingGreenlet` (2026-08-19, issue #8)
+
+**What was investigated:** issue #8 — one of three `usher work` daemons died
+78 minutes and ~92,000 jobs into M9's S3 crawl on an unhandled
+`MissingGreenlet`, with the crash's last two log records both on the
+`ix_titles_imdb_id` conflict path, 19 ms and 24 ms before death.
+
+### The stack was not missing; it was discarded, and this file's own subsystem is where
+
+**The dead worker's log survived** (`/tmp/m9-exec/S3/w1.log`, pid 2348601,
+last record `2026-08-11 18:26:32.053-05:00` = `23:26:32Z`). Its final two
+lines are:
+
+```
+usher work: MissingGreenlet: greenlet_spawn has not been called; can't call await_only() here. ...
+(the stack is one flag away: `usher --traceback work`)
+```
+
+That is `cli._operator_problem`. **`MissingGreenlet` → `InvalidRequestError`
+→ `SQLAlchemyError`, and `SQLAlchemyError` was a member of
+`cli.OPERATOR_ERRORS`** — so the CLI's error boundary classified a programming
+error as an operator error and replaced the traceback with one line. 🔴 The
+issue's own premise (*"the run used bare `usher work`, so no stack was
+recorded"*) is **refuted**: `--traceback` would have helped, but nothing the
+operator did or failed to do is why there is no stack. Narrowed to
+`DBAPIError`, which is what that member's comment already claimed to admit;
+ADR-0026 carries the argument and PRD 08's own copy of the family list is
+corrected in the same commit.
+
+### The mechanism the conflict path really does create, reproduced
+
+Measured on `pgvector/pgvector:pg17` through the shipped
+`PostgresTitleRepository`:
+
+**A caught `IntegrityError` inside `begin_nested()` leaves the conflicted
+`TitleRow` in the session's identity map, `state.expired is True`, every one
+of its 33 attributes unloaded.** `SessionTransaction._restore_snapshot`
+expires every dirty state in the identity map when a SAVEPOINT rolls back, and
+`expire_on_commit=False` does nothing about it — this is a *rollback*-driven
+expiry, not a commit-driven one. In an async session an expired attribute is a
+**lazy load**, so a synchronous frame reading one — an f-string, a `__repr__`,
+a pydantic validator, a log line, `_to_domain`'s `getattr` loop — raises
+exactly `MissingGreenlet: greenlet_spawn has not been called`. Demonstrated
+accidentally on the first probe: the diagnostic that printed the identity
+map's contents crashed on its own `r.name`.
+
+**The row is reachable only through a reference cycle** (`state.dict` *is*
+`obj.__dict__`, which holds `_sa_instance_state`), so it survives until
+CPython's **cyclic** collector runs — `gc.collect()` empties the map. That is
+the only nondeterminism in the loop, and it is the right shape for a fault
+that fired once in 92,000 jobs while ~30 earlier conflicts on the same process
+did not.
+
+Pinned by `tests/integration/test_title_repository.py::
+test_a_caught_conflict_leaves_an_expired_row_and_every_read_refreshes_it`,
+which asserts the premise (the row is there and expired) before asserting the
+hazard, then asserts the closure. Teeth verified by planting a
+`session.refresh(poisoned)` after the premise guard: the case fails.
+
+### 🔴 Refuted: that mechanism reaching a shipped read
+
+**Every read `PostgresTitleRepository` ships refreshes the expired row inside
+its own `await`** — `get`, `get_by_tmdb_id`, `get_by_imdb_id`, `list_by_ids`,
+`count_by_state` all answer normally against a poisoned session.
+`Session.get()` calls `state._load_expired` from inside `greenlet_spawn`, and
+the ORM loader repopulates an expired instance from a result row. So the
+hazard is **live and currently unreached**, not the crash's proven cause.
+
+Two reproduction runs, both on ONE `AsyncSession` (the pre-W1 shape), the real
+`EnrichService` and the real repositories against real Postgres:
+
+| run | jobs | conflicts | outcome |
+|---|---|---|---|
+| every job conflicts | 399 | 399 | survived; 6–17 expired rows held at a time |
+| 1-in-8 conflicts, successes running the staged `enqueue` COPY | 1,199 | 149 | survived; expired-in-map 0 at every sample |
+
+So **"did not reproduce" is again not "cannot happen"**, and the honest
+statement is the one S3 already made: what a single-session worker was doing
+that needed IO outside a greenlet is still not named. What *is* now named is
+the family, the artefact it leaves in the identity map, and the fact that the
+next occurrence self-reports.
+
+### What the next occurrence records without anyone remembering a flag
+
+- `cli.OPERATOR_ERRORS` no longer swallows it: the process dies with a real
+  traceback on stderr.
+- `JobWorker._run` logs `logger.opt(exception=True).error(...)` naming the
+  job's kind and key **before** re-raising. Property 3 (a bug propagates) is
+  unchanged; what is added is that the log holds the two facts a stack cannot
+  supply once the process is gone. S3 had neither — its last records name a
+  job that failed *cleanly*, and the job that died appears nowhere.
+- This also covers `usher serve`, whose `api/lanes.py::_run_worker` catches
+  `Exception` and logs `str(exc)` with no stack, deliberately (a database
+  outage must slow the lane, not end it). It is left alone: the crash now
+  arrives at that handler already written down with its traceback.
+
+### The refuted shared-session premise, re-checked against today's `main`
+
+**The refutation holds; the premise it rested on does not.** Issue #8 says
+`usher work` *"holds one `AsyncSession` and runs one job at a time, and
+`asyncio.run` creates no tasks"*. Since W1 that is false on all three counts:
+`JobWorker` runs up to `USHER_JOB_CONCURRENCY` (12) jobs at once, `run_once`
+spawns an `asyncio.create_task` per job plus a heartbeat task, and `_pass`
+claims continuously. What still holds is the conclusion — `composition.
+unit_of_work` opens a **fresh session per scope**, and `_claim`, `_heartbeat`
+and each `_run_in_scope` take one each, so no `AsyncSession` is reachable from
+two coroutines. Anyone re-deriving this must check the scope factory, not the
+sentence.
+
+## `/browse`'s genre filter is an overlap over a concept, not containment of a string (2026-08-19)
+
+`titles.genres` holds 37 labels from two importers that share no vocabulary,
+and the two alphabets are **disjoint on every concept they both name**:
+`Sci-Fi` 20,051 titles, `Science Fiction` 6,223, **zero with both**, and the
+same zero for all nine alias pairs on 1,272,866 rows. `TitleRow.genres @>
+ARRAY[:genre]` therefore answered half a concept under either spelling and
+looked entirely right doing it.
+[ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md).
+
+- **`&&` over `usher.domain.genres.genre_spellings(genre)`.** For an unmapped
+  label the expansion is one element and `a && ARRAY[x]` **is** `a @>
+  ARRAY[x]`, so the open-vocabulary behaviour is unchanged rather than
+  approximately unchanged. Written out for the reason `@>` was: the *generic*
+  `ARRAY` these columns are declared with implements neither operator through
+  SQLAlchemy's helpers, and the failure is at statement-build time in the
+  integration run and **never at all against the fake**.
+- **The facet collapse is a sum, and the exact spelling was measured and
+  declined.** `SELECT canon, count(*) FROM (SELECT DISTINCT t.id,
+  COALESCE(a.canon, g) FROM titles t CROSS JOIN LATERAL unnest(t.genres) g LEFT
+  JOIN alias a ON a.src = g)` is correct with no premise at all and ran at
+  **1,789 ms** against the shipped `GROUP BY unnest(genres)`'s **199 ms** on
+  the live catalog — a 9× regression on a facet block already missing its B7
+  bar (p95 ≤ 200 ms) at 330.81 ms. Summing is exact while no title carries two
+  spellings of one concept, which is *measured* zero rather than assumed, and
+  `EnrichService` cannot create one because a concept with no TMDb name has
+  exactly one spelling.
+- **The fake sums too, per raw label rather than per title.** Deduping in
+  Python and not in SQL is how the two arms of a contract suite come to
+  disagree on the exact population that distinguishes them — and the fake is
+  the arm where the divergence would be invisible.
+- **A collation trap the contract suite walked into.** `sort_name` ordering is
+  **not** the same on the two arms: Python compares `"a "` before `"an"`, and
+  Postgres's default collation ignores the space at the primary level, so
+  `"A Fused…"` / `"A Skeleton…"` / `"An Enriched…"` is one order in the fake
+  and another in Postgres. A browse contract case that asserts on position must
+  seed names distinct in their **first word**.
+
+## A batched in-place rewrite of a catalog column: `UPDATE … FROM (VALUES …)`, and the guard is the whole design (2026-08-19, issue #30)
+
+`usher genres --backfill` rewrites `titles.genres` through
+`usher.domain.genres.canonicalise_genres` over 1.27M rows.
+`PostgresTitleRepository.replace_genres` is the write, and three of this file's
+existing entries decide its shape between them:
+
+```sql
+UPDATE titles SET genres = v.genres
+FROM (VALUES (…), (…)) AS v (id, genres)
+WHERE titles.id = v.id AND titles.genres IS DISTINCT FROM v.genres
+```
+
+- **No staging table, and that is a decision rather than an omission.**
+  `usher.db.staging` exists for `COPY`-sized batches and costs transactional
+  DDL; an `UPDATE` keyed on the primary key has **no conflict target**, so none
+  of the three `ON CONFLICT` traps above apply — no partial-index predicate to
+  repeat, no `SELECT DISTINCT ON` needed, no `xmax = 0` to interpret because
+  every row is an update by construction. A `VALUES` join is the whole
+  statement.
+- **`IS DISTINCT FROM` is load-bearing and the `WHERE id =` is not.** Without
+  it every row named is rewritten: `rowcount` becomes the batch size rather
+  than the change count, so a second sweep reports work it did not do, and
+  1.15M dead row versions are produced for no state change — each of which also
+  **re-evaluates the `search_document` generated column and writes its GIN
+  index entry**, which is this table's most expensive write. Exactly
+  `_ENQUEUE`'s `AND jobs.priority < excluded.priority` argument, on a bigger
+  column. Planted: removing the clause fails
+  `test_replacing_genres_with_what_the_row_already_holds_writes_nothing` and
+  `test_a_batch_writes_only_its_changed_members` in
+  `TitleRepositoryGenreSweepContract`, on the Postgres arm and on the fake.
+- **`rowcount` needs the `CursorResult` cast**, which `bulk.py:_rowcount` and
+  `PostgresCollectionRepository.link_title` both already record: `rowcount`
+  lives on `CursorResult`, not on the `Result[Any]` that `session.execute` is
+  annotated to return.
+- **`synchronize_session=False` is required**, not tidy: a multi-row `UPDATE`
+  through the ORM otherwise tries to match the session's identity map against
+  rows it cannot resolve. Nothing above the call holds a `TitleRow` — the sweep
+  reads a two-column projection (`TitleGenres`), not an entity.
+- **The stored generated column pays the rewrite back.** `search_document` is
+  `GENERATED ALWAYS AS (…) STORED` over `usher_array_text(genres)`, so weight
+  class D is corrected *by the same statement* with no job, no second pass and
+  no fingerprint. That is the one place in this schema where a data repair is
+  free on the full-text side and costs a re-embed on the vector side, and the
+  asymmetry is the generated column earning its 4.06× insert cost back.
+
+**And the read is unfiltered on purpose.** `list_genres_page` walks *every*
+title by keyset rather than selecting the rows that look wrong. A `WHERE`
+naming the alias spellings would be a second definition of the vocabulary
+living in SQL beside the one in `usher.domain.genres` — `_FINGERPRINT_SQL`'s
+failure shape one column over — and it would also miss the 12 live titles whose
+`genres` merely contains a **duplicate** (`{Drama,Drama}`), which normalise to
+a shorter array with no alias involved. Filtering saves a tenth of a scan and
+costs a predicate nobody can keep in step.

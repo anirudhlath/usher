@@ -90,6 +90,22 @@ services:
       # Dockerfile's `chown` reaches the image's own /data and a bind mount's
       # host-side ownership wins once mounted. README.md carries the line.
       - ./data/images:/data/images
+    networks:
+      # Two networks, and the second is why this key exists at all. `default`
+      # is what compose would have given implicitly -- it has to be named
+      # once anything else is. `observability` is the external stack at
+      # ~/code/observability, and joining it is the only route to the OTel
+      # collector: that stack publishes every port on 127.0.0.1 deliberately
+      # (this box is internet-facing), so there is no host-side address a
+      # container can reach 4317 on. `usher-postgres-1` is already joined to
+      # it for Grafana's datasource, by the same reasoning.
+      #
+      # `OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` is the reader. It stays in
+      # `.env` rather than the `environment:` block below because the
+      # endpoint is an operator's choice -- a deployment with no collector
+      # leaves it empty and the exporter is never built.
+      - default
+      - observability
     depends_on:
       postgres:
         condition: service_healthy
@@ -154,3 +170,23 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
+
+networks:
+  # Pinned so the name is a contract rather than a consequence of the
+  # directory this file happens to sit in -- compose derives an unnamed
+  # default network from the project name, so a rename or a worktree would
+  # move it.
+  #
+  # It was named for `usher-web`, a client in a sibling repository that joined
+  # this as an external network to reach `usher:8000`. **That client is gone
+  # and the name still matters**: it is what any future sidecar joins by, and
+  # renaming it now would be a silent breaking change for anything already
+  # holding it.
+  default:
+    name: usher_default
+  # The shared telemetry stack, created by ~/code/observability. `external`
+  # because this compose project must not own its lifecycle: a
+  # `docker compose down` here would otherwise try to remove a network
+  # Grafana, Prometheus, Loki, Tempo and the collector are all on.
+  observability:
+    external: true

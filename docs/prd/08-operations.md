@@ -191,6 +191,58 @@ healthcheck all assume) and `USHER_SECRET_KEY` (substituted as `${...:?}` so a
 missing key fails at `docker compose up` with a sentence rather than as a
 container that starts and dies on validation).
 
+### Starting the app is not a command to walk your library
+
+🔴 **It was one until 2026-08-19, and nothing said so** (issue #9). With
+`USHER_PUSH_ENABLED=true` — the shipped default — the server starts a push lane
+per **enabled** source, and the lane closes its reconnect gap with a delta
+walk. A delta resumes from the newest **completed** item walk; a deployment
+that has never completed one has no cursor, so the "delta" reads every item the
+source has. On the household this project measures that is **1,126,789 items**
+as counted on 2026-08-02 — re-measured at **1,134,919 items over 5,675 pages**
+on 2026-08-15 by M10's S1, which also priced the walk at **~9.5 h** at its
+6.04 s pooled mean per page. The library grows, so both are right on their
+dates and the later one is the one to quote;
+`.claude/rules/emby-push-and-ingest.md` carries the series. Either way it is a
+walk performed by `uvicorn` with default settings, on a media server the
+operator may not own, with no command issued. An earlier probe ran exactly that walk
+before someone killed it, and M9's live run had to set
+`USHER_PUSH_ENABLED=false` and `USHER_WORKER_ENABLED=false` to keep its request
+budget statable.
+
+**The decision: the lane closes gaps, and the first walk is a command.** A gap
+is the window a socket was down; with no completed walk the window is the
+entire catalog, and importing a catalog is `usher sync`'s job. So
+`USHER_PUSH_GAP_CLOSE` is a closed vocabulary, defaulting to a refusal:
+
+| Value | The lane does |
+|---|---|
+| **`cursored`** (default) | Closes a gap that has a cursor. With none, logs a `WARNING` naming the source and pointing at `usher sync`, and walks nothing |
+| `always` | Walks when there is no cursor — and logs a `WARNING` naming the source and saying it is about to, *before* it starts. ⚠️ **Not quite the pre-2026-08-19 behaviour**: the walk still passes through `USHER_PUSH_GAP_MAX_ITEMS` (M10 S6), so at its default it stops after 20,000 items and records `FAILED`. `USHER_PUSH_GAP_MAX_ITEMS=0` alongside is what restores an unbounded gap close. The two settings compose rather than override: one decides whether a cursorless walk happens, the other bounds how large any gap close may get |
+| `never` | No gap-closing walk at all, logged at `INFO` each time. **This has a cost**: Emby does not re-deliver what a disconnected client missed, so a change made during an outage waits for the next `usher sync` |
+
+**What changes for an existing deployment:** only one that has never completed
+an item walk for a source. Every source past its first `usher sync` (or its
+first `POST /admin/sources/{id}/sync`, or one nightly cron run) has a cursor,
+takes the same bounded delta it always took, and sees no change at all. A
+brand-new source no longer populates itself as a side effect of the push lane
+reconnecting — run `usher sync --source "<name>"` once, which is the step
+[the README](../../README.md) already documents.
+
+**Neither the rate limit nor a truncation was the answer, and both were
+considered.** `USHER_PUSH_GAP_MIN_INTERVAL_SECONDS` bounds how *often* a gap is
+closed and says nothing about how large the walk is — it was already at its
+default of 60 s while the unbounded walk ran. And a cap on items would end a
+run that then records `COMPLETED`, whose `started_at` becomes the floor for
+every later delta: everything the truncated walk never reached would be skipped
+silently and permanently. A walk of this kind is performed whole or refused
+whole, so the setting is a decision rather than a limit.
+
+**A commanded walk is never gated by this.** `usher sync`,
+`POST /admin/sources/{id}/sync` and the nightly cron entry all reach
+`ReconcileService` directly; the setting governs `LaneSupervisor._close_gap`
+alone, which is the one caller no operator asked for.
+
 ### Secrets
 
 Source credentials are **encrypted at rest in Postgres**, using a key supplied
@@ -300,7 +352,7 @@ local state can answer.**
 | Source unreachable | Catalog fully browsable. Playback → 503 `source_unavailable`. Availability goes stale, not wrong. |
 | A refused availability sweep (a source that churns, or one Usher has only partly ingested) | ✅ M10 S8/S9: the sweep retracts **nothing** and the run records `FAILED` with the two numbers and the ceiling ([ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)); the catalog is unaffected and availability goes stale rather than wrong. `usher sync` now **exits non-zero** on any failed run and names `usher sync --allow-full-retraction`, which is the operator's action *if the removal was intended* — until 2026-08-19 the command printed the word `failed` and exited 0, so cron and CI saw success. `usher.sync.retraction.fraction{outcome="refused"}` is the series; it is recorded on **every** finished full walk, so a flat zero means "nothing was shed" rather than "no sweep ran". ⚠️ **On a *view* of somebody else's library a refusal can be the steady state rather than an incident** — refusing nightly is indistinguishable from having no sweep — and the thing that trips it first is Usher's own partial coverage, not the owner's deletions (measured: this deployment's one firing refused 60 of 180 at 33% after a bounded walk, with nothing deleted). If it recurs, check that the last full walk **completed** before reaching for the flag. |
 | Source credentials rejected | `GET /admin/sources/{id}/status` reports `authenticated: false`; re-authentication is retried after a cooldown rather than on every call. Catalog unaffected. |
-| Push socket drops | Backoff reconnect; delta reconcile on reconnect **unless that source has no cursor**, in which case the lane refuses the walk, logs a WARNING naming the source and `usher sync --kind full`, and keeps the socket up (M10 S5 — a source with no completed item-lane run has no cursor, so its "delta" is a walk of the whole library that nobody asked for; see [03](03-sources-and-sync.md)'s Reconnect-delta row). The same refusal covers a push event **deferred** to a delta, so on such a source an oversized event is applied neither inline nor by a walk until that full sync has run. After N failures (`USHER_PUSH_MAX_CONSECUTIVE_FAILURES`, default 5) mark `supports_push = false` and lean on the nightly walk. **The failure counter resets on delivery, not on connection**, and the reason is a design that was *not* taken: **if** it reset on connection, a proxy that upgrades and then buffers would connect perfectly every time, a counter reset by connecting would never reach the ceiling, and this row would silently never fire ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). ⚠️ **That clause is a counterfactual about the rejected design and the M10 spec read it as a description of shipping code** (`docs/specs/2026-08-13-m10-hardening-design.md:155-157`, struck by S10). The row **does** fire, and the evidence is two-sided: `tests/unit/test_services_push.py`'s ceiling case drives the whole path end to end (`push_available == [False]` after `sleeps == [5.0, 10.0]`, the last failure hitting the ceiling without sleeping), and M5's final sweep measured the **inverse** mutation — `failures = 0` moved from delivery to connection — as failing **4** cases. ✅ **M10 S10**: when the ceiling is reached the lane's task finishes and the next `refresh()` **releases the adapter**, so the socket against a server this deployment does not own is closed rather than held for the process lifetime, `usher.source.push.delivering` stops publishing for that lane, and `GET /admin/sources/{id}/status` answers `push_available: null` ("not probed") rather than `false` off a dead ledger. The lane is deliberately **not** restarted — a refresh that replaced it would reconnect forever against exactly the buffering proxy this ceiling exists for. |
+| Push socket drops | Backoff reconnect; delta reconcile on reconnect — ✅ **only when a completed walk gives that delta a cursor** (`USHER_PUSH_GAP_CLOSE`, above; issue #9). With none the lane refuses the walk, logs a WARNING naming the source and `usher sync`, and keeps the socket up ( a source with no completed item-lane run has no cursor, so its "delta" is a walk of the whole library that nobody asked for; see [03](03-sources-and-sync.md)'s Reconnect-delta row). The same refusal covers a push event **deferred** to a delta, so on such a source an oversized event is applied neither inline nor by a walk until that full sync has run. After N failures (`USHER_PUSH_MAX_CONSECUTIVE_FAILURES`, default 5) mark `supports_push = false` and lean on the nightly walk. **The failure counter resets on delivery, not on connection**, and the reason is a design that was *not* taken: **if** it reset on connection, a proxy that upgrades and then buffers would connect perfectly every time, a counter reset by connecting would never reach the ceiling, and this row would silently never fire ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). ⚠️ **That clause is a counterfactual about the rejected design and the M10 spec read it as a description of shipping code** (`docs/specs/2026-08-13-m10-hardening-design.md:155-157`, struck by S10). The row **does** fire, and the evidence is two-sided: `tests/unit/test_services_push.py`'s ceiling case drives the whole path end to end (`push_available == [False]` after `sleeps == [5.0, 10.0]`, the last failure hitting the ceiling without sleeping), and M5's final sweep measured the **inverse** mutation — `failures = 0` moved from delivery to connection — as failing **4** cases. ✅ **M10 S10**: when the ceiling is reached the lane's task finishes and the next `refresh()` **releases the adapter**, so the socket against a server this deployment does not own is closed rather than held for the process lifetime, `usher.source.push.delivering` stops publishing for that lane, and `GET /admin/sources/{id}/status` answers `push_available: null` ("not probed") rather than `false` off a dead ledger. The lane is deliberately **not** restarted — a refresh that replaced it would reconnect forever against exactly the buffering proxy this ceiling exists for. |
 | Gap-closing delta larger than `USHER_PUSH_GAP_MAX_ITEMS` | ✅ M10 S6: the item walk stops at the ceiling (default **20,000 items** — 100 pages at `USHER_SOURCE_PAGE_SIZE`'s 200, ~10 minutes at the 6.04 s/page mean measured 2026-08-15, and under the 28,934 items a 30-day delta returned on the measured library; `0` is unlimited). The run records **`FAILED`**, never `COMPLETED`: `latest_completed_cursor` reads only completed runs, so a truncated run that completed would advance the cursor to its own start instant and everything past the ceiling would never be requested by any delta again — and **nothing in `src/` schedules the nightly full reconcile** that would otherwise cover it. **Nothing the walk saw is lost** (`_flush` commits per batch); what a ceiling costs is the cursor advance. One WARNING names the source, how far it got, the setting and `usher sync --kind full`, whose walk is what closes the rest. `usher sync --kind delta` and `POST /admin/sources/{id}/sync` are unbounded — the ceiling is the lane's, and the lane is the caller nobody typed a command for. **The item lane only**: the watch lane owns its own cursor and still walks whole after a truncated item walk, so this bounds one of the two lanes (see [03](03-sources-and-sync.md)). |
 | TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected. |
 | TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades. |
@@ -582,12 +634,18 @@ unreachable.
   answering an unreachable database with sixty lines of asyncpg and greenlet
   frames whose only operator-facing content was the last one. `main` has a
   single `try` around the whole dispatch which names the families an operator
-  can act on — `OSError`, `SQLAlchemyError`, `httpx.HTTPError`,
+  can act on — `OSError`, `DBAPIError`, `httpx.HTTPError`,
   `ValidationError`, and since M8 the port taxonomy's transport half
   (`PortUnavailable`, `PortAuthFailed`, `PortRateLimited`) — and answers each
   with one line and exit 1; `usher --traceback <command>` re-raises.
   **`Exception` is deliberately not among them**, so a bug still gets its full
-  traceback, and Ctrl-C exits 130 rather than printing one. Neither is
+  traceback — and **`DBAPIError` reads `SQLAlchemyError` in every version of
+  this document before 2026-08-19**, which was the same mistake one family
+  narrower: `SQLAlchemyError` is also the base of `InvalidRequestError`, so the
+  boundary answered `MissingGreenlet`, `PendingRollbackError` and
+  `ObjectDeletedError` — bugs, all of them — with one line and no stack. It
+  cost the diagnosis of the crash in issue #8 for a week. Ctrl-C exits 130
+  rather than printing one. Neither is
   `UsherPortError` itself: an adapter translates its transport's failures
   before they cross, so `httpx.HTTPError` is unreachable behind a port and the
   three transport members had to be named — but `RepositoryConflict`,

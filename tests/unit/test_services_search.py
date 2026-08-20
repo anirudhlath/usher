@@ -68,6 +68,7 @@ from usher.services.search import (
     SemanticSearchUnavailable,
     SuggestTier,
     _blend,
+    _dense_ranks,
 )
 
 # Fixed ids, ordered on purpose. `_UNOWNED < _OWNED` and `_ZERO_POP <
@@ -96,6 +97,12 @@ _UNDATED = uuid.UUID(int=0x0D)
 # and the tiebreak then puts the *far* one first.
 _FAR = uuid.UUID(int=0x0E)
 _NEAR = uuid.UUID(int=0x0F)
+# Issue #25's own pair, and `_ESSAY < _NAMED` for the reason every pair above
+# is ordered that way: the exact-name signal is the *only* thing separating
+# these two rows, so an implementation that drops it ties them and the
+# id tiebreak puts the essay -- the wrong one -- first.
+_ESSAY = uuid.UUID(int=0x10)
+_NAMED = uuid.UUID(int=0x11)
 _SOURCE = uuid.UUID(int=0xFF)
 _HOUSEHOLD = uuid.UUID(int=0xA1)
 _OTHER_HOUSEHOLD = uuid.UUID(int=0xA2)
@@ -140,6 +147,13 @@ _CATALOG: dict[uuid.UUID, tuple[str, float | None]] = {
     _UNDATED: ("Vacuum, Undated", None),
     _FAR: ("Vacuum, Unlike Yours", None),
     _NEAR: ("Vacuum, Like Yours", None),
+    # Issue #25's shape, popularity included: the video essay repeating the
+    # query in its own name carries **no** popularity (so `_blend` drops the
+    # term and renormalises over a smaller denominator, which is what makes
+    # its score *larger*), and the title the query actually is carries the
+    # 1999 film's real 42.0757.
+    _ESSAY: ("Vacuum for Realists (aka Reviewing Vacuum in Terms of One Cypher)", None),
+    _NAMED: ("Vacuum", 42.0757),
 }
 
 # The model the household's stored centroid and the stored vectors were both
@@ -170,6 +184,7 @@ class _ScriptedIndex(SearchIndex):
     def __init__(self, outcome: SearchOutcome) -> None:
         self.outcome = outcome
         self.requests: list[SearchRequest] = []
+        self.coverage_probes: list[SearchFilters] = []
 
     async def index_many(self, documents: Sequence[SearchDocument]) -> None:
         return None
@@ -180,6 +195,22 @@ class _ScriptedIndex(SearchIndex):
     async def search(self, request: SearchRequest) -> SearchOutcome:
         self.requests.append(request)
         return self.outcome
+
+    async def semantic_coverage(self, filters: SearchFilters) -> float:
+        """**Derived from the scripted outcome rather than scripted
+        separately**, because it is the same question asked a moment earlier:
+        what fraction of the filtered population has a vector. Two knobs would
+        let a case arrange a service whose probe and whose answer disagree --
+        a deployment that cannot exist -- and every expansion case in this file
+        would then be silently about whichever of the two the implementation
+        happened to read.
+
+        The consequence is that `SearchOutcome()`'s default `0.0` means *no
+        title in this population has a vector*, so a case that wants a
+        completion bought has to say so.
+        """
+        self.coverage_probes.append(filters)
+        return self.outcome.semantic_coverage
 
 
 class _ScriptedSuggest(SuggestIndex):
@@ -661,7 +692,9 @@ async def test_the_expansion_is_what_gets_embedded_and_the_answer_reports_it() -
     assertion that the field is merely populated.
     """
     embedder = FakeEmbedder()
-    index = _ScriptedIndex(SearchOutcome())
+    # A backfilled catalog, stated rather than defaulted: the expansion is
+    # bought only where the semantic lane has something to answer with.
+    index = _ScriptedIndex(SearchOutcome(semantic_coverage=1.0))
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(index, embedder=embedder, expander=expander)
 
@@ -684,7 +717,7 @@ async def test_the_full_text_lane_still_sees_the_words_the_viewer_typed() -> Non
     exact-title search into a search for something else, with a `tsquery` full
     of words the viewer never wrote and nothing to notice it.
     """
-    index = _ScriptedIndex(SearchOutcome())
+    index = _ScriptedIndex(SearchOutcome(semantic_coverage=1.0))
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(index, embedder=FakeEmbedder(), expander=expander)
 
@@ -718,7 +751,9 @@ async def test_an_expansion_that_produced_nothing_leaves_the_query_as_typed() ->
     """
     embedder = FakeEmbedder()
     expander = _Expander(PortUnavailable("the endpoint refused the connection"))
-    service = await _service(_ScriptedIndex(SearchOutcome()), embedder=embedder, expander=expander)
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(semantic_coverage=1.0)), embedder=embedder, expander=expander
+    )
 
     answer = await service.search("movies about isolation in space", mode=SearchMode.SEMANTIC)
 
@@ -734,7 +769,9 @@ async def test_one_search_buys_exactly_one_completion() -> None:
     thing that states it."""
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(
-        _ScriptedIndex(SearchOutcome()), embedder=FakeEmbedder(), expander=expander
+        _ScriptedIndex(SearchOutcome(semantic_coverage=1.0)),
+        embedder=FakeEmbedder(),
+        expander=expander,
     )
 
     await service.search("movies about isolation in space", mode=SearchMode.FUSED)
@@ -804,6 +841,63 @@ async def test_a_semantic_search_with_no_embedder_buys_no_completion() -> None:
 
     assert expander.client.calls == []
     assert expander.ledger.calls == []
+
+
+@pytest.mark.parametrize("mode", [SearchMode.SEMANTIC, SearchMode.FUSED])
+async def test_a_search_over_a_population_with_no_vectors_buys_no_completion(
+    mode: SearchMode,
+) -> None:
+    """**Issue #16.** The guard used to be `embedder is None` rather than
+    *"anything is embedded"*, so a deployment that had configured a model and
+    not yet backfilled bought a completion, embedded the rewrite, and got
+    `semantic_coverage=0.000` back -- the warning arriving after the money, on
+    every semantic or fused search until the backfill drained.
+
+    **The probe is the number the answer already reports**, asked one statement
+    earlier: `SearchIndex.semantic_coverage` takes filters and no vector, which
+    is what makes the *filtered* predicate answerable before the embed rather
+    than only after it.
+
+    Fails against the shipped guard on the count, never on the results -- the
+    search below answers correctly either way, which is exactly why this is a
+    case about `client.calls` and not about `answer.results`.
+    """
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    index = _ScriptedIndex(SearchOutcome(semantic_coverage=0.0))
+    service = await _service(index, embedder=FakeEmbedder(), expander=expander)
+
+    answer = await service.search("movies about isolation in space", mode=mode)
+
+    assert expander.client.calls == [], "a completion was bought for a lane with nothing to rank"
+    assert expander.ledger.calls == []
+    assert answer.expanded_query is None
+    # The premise, and the half a count cannot state: the lane still *ran* and
+    # the query was still embedded as typed. A guard that narrowed the mode
+    # instead of declining the rewrite would also spend nothing here.
+    assert answer.mode is mode
+    assert index.requests[0].query_vector is not None
+
+
+async def test_the_shipped_default_probes_nothing_before_embedding() -> None:
+    """The cost of the guard above, stated as an absence.
+
+    `USHER_QUERY_EXPANSION_ENABLED` is `false` on every shipped deployment, so
+    there is no completion to decline and the probe would be a read bought for
+    nobody -- which is the objection `docs/prd/09-roadmap.md` recorded against
+    fixing #16 at all (*"a read on every fused search"*). It is answered by
+    ordering rather than by argument: the probe sits behind `expander is not
+    None`, so the deployments that never expand never pay for it.
+
+    Fails: a probe hoisted above the expander check, which reads as tidier and
+    puts a `count(*)` over the enriched tier in front of every fused search on
+    every deployment.
+    """
+    index = _ScriptedIndex(SearchOutcome(semantic_coverage=1.0))
+    service = await _service(index, embedder=FakeEmbedder(), expander=None)
+
+    await service.search("movies about isolation in space", mode=SearchMode.FUSED)
+
+    assert index.coverage_probes == []
 
 
 @pytest.mark.parametrize("tier", list(SuggestTier))
@@ -1522,6 +1616,77 @@ def test_no_combination_of_the_other_five_can_displace_an_exact_match() -> None:
     # And the measurement that closed the interval, asserted rather than
     # described: the value this table's headroom appeared to permit inverts it.
     assert 0.35 + 0.15 + 0.15 + 0.02 + 0.02 + 0.01 > 0.70
+
+
+def test_an_exact_name_match_takes_dense_rank_zero_alone_even_at_an_equal_index_score() -> None:
+    """Issue #25's mechanism, at the one function that decides it.
+
+    **`ts_rank_cd` ties are pervasive rather than occasional** -- `adapters/
+    search/postgres.py` records a tie group of 498 among the top 500 values for
+    one query -- so ordering the exact match first in the lane is not enough on
+    its own: tied with the row behind it, it *shares* dense rank 0, the
+    relevance term cancels, and popularity decides between a film and a video
+    essay named after it. The exact-name key is what makes rank 0 a group of
+    one, which is the only state
+    `test_no_combination_of_the_other_five_can_displace_an_exact_match`'s bound
+    protects.
+
+    **The control is the premise**: the identical hits without the flag share
+    rank 0. Without it this case would pass against a `_dense_ranks` that had
+    simply become strictly positional -- which would break the owned, played
+    and taste cases above, but silently pass this one.
+    """
+    tied = (
+        SearchHit(title_id=_NAMED, score=_STRONG, exact_name=True),
+        SearchHit(title_id=_ESSAY, score=_STRONG),
+    )
+    assert {hit.score for hit in tied} == {_STRONG}, (
+        "the premise: equal index scores, so nothing but the exact-name key can separate them"
+    )
+
+    assert _dense_ranks(tied) == [0, 1]
+    assert _dense_ranks([dataclasses.replace(hit, exact_name=False) for hit in tied]) == [0, 0], (
+        "the control: without the flag these two tie, which is the state the defect lives in"
+    )
+
+
+async def test_a_title_named_exactly_the_query_is_not_displaced_by_a_longer_document() -> None:
+    """**Issue #25 end to end, through the blend that produced it.**
+
+    `GET /search?q=The Matrix` put the 1999 film **5th**, behind three 2018
+    video essays repeating the phrase in their own names -- 0.8032 against
+    0.3501 -- and *popularity was applied and helped*: without it the film
+    scores 0.2729. The defect is not a missing term, it is that no combination
+    of the other five can overturn what the lexical lane put at dense rank 0
+    (margin 0.009615), and the lexical lane had the wrong row there.
+
+    Arranged at the hardest configuration rather than the observed one: the two
+    hits carry **equal** index scores, so the relevance term cancels unless the
+    exact-name key separates them, and at one shared rank the essay is the row
+    `_blend` prefers -- it has no popularity at all, so an absent signal leaves
+    the denominator and it scores **0.82223** against the named title's
+    **0.81994** (2019 on both, `_NOW`'s clock, computed before this case was
+    written). Both wrong implementations therefore fail: no exact-name key at
+    all, and a key set on every hit alike -- which ties them, and `_ESSAY <
+    _NAMED` puts the essay first.
+    """
+    hits = (
+        SearchHit(title_id=_NAMED, score=_STRONG, exact_name=True),
+        SearchHit(title_id=_ESSAY, score=_STRONG),
+    )
+    assert {hit.score for hit in hits} == {_STRONG}, (
+        "the premise: equal index scores, so the relevance term cancels unless the "
+        "exact-name key separates them"
+    )
+    service = await _service(_ScriptedIndex(SearchOutcome(hits=hits)))
+
+    answer = await service.search("vacuum")
+
+    assert [result.title_id for result in answer.results] == [_NAMED, _ESSAY]
+    assert answer.results[0].score > answer.results[1].score, (
+        "the win has to be on score: at equal scores the id tiebreak decides, and "
+        "`_ESSAY < _NAMED` would then have put the essay first anyway"
+    )
 
 
 async def test_with_no_household_and_no_year_the_score_is_the_one_m6_computed() -> None:

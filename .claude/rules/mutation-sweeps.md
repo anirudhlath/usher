@@ -6177,6 +6177,25 @@ deselected in 201.45 s**.
 | C1 **control** — one sentence of `_close_gap`'s docstring reworded | SURVIVED all five | — | — |
 | **C2** **control** — `delta_cursor`'s comprehension rewritten as its loop | SURVIVED all five | — | — |
 
+⚠️ **The targets of `T1`-`T5`, `F1` and `C2` moved on 2026-08-20, when
+`milestone/m10-hardening` merged `origin/main`.** `main` had independently
+closed the same defect as issue #9 (`8ee22c6`), and per the merge's
+main-implementation-wins rule its spelling is the one that shipped: the
+gap-closer now reads `ReconcileService.cursor_for(source, SyncRunKind.DELTA)`
+rather than the `delta_cursor(source)` this sweep planted against, and the
+cursorless arm is governed by `USHER_PUSH_GAP_CLOSE` (`cursored` | `always` |
+`never`) rather than being unconditional. **The verdicts above are not
+re-scored and are not withdrawn** — they were measured at `3f74777` against the
+code that existed then, and this ledger is a record of that run. What a reader
+must not do is re-apply `C2` to `delta_cursor` and report it missing: the
+method it names is `cursor_for` now, and it absorbed `_cursor_for`'s `kind`
+check, so the comprehension C2 rewrote sits under one more branch than it did.
+`T3`'s WARNING and `T5`'s source-name assertion both survive the merge intact;
+the refusal's *wording* changed (it names `usher sync --source "..."` and
+`USHER_PUSH_GAP_CLOSE` where S5's named `usher sync --kind full`), so the case
+now asserts on `usher sync` rather than on the flag.
+
+
 **Why re-run at all: a control measured against a tree that has since changed
 is not evidence for the tree that ships.** Round two ran at `30e7871`; `483fae6`
 and `3f74777` both edited `_close_gap`'s docstring afterwards. What was
@@ -7107,6 +7126,26 @@ unintended survivors.**
 | P3 | `RepositoryConflict` added to `OPERATOR_ERRORS` | KILLED | **2**, both in `test_cli_errors.py`: `test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple` (now carrying the exclusion argument in its message) and `test_a_repository_conflict_keeps_its_traceback`. **No `unmatched` case moves**, which is the sweep saying out loud that the tuple change never fixed the defect it was proposed for |
 | C1 | CONTROL: one sentence of `_unmatched`'s docstring reworded | SURVIVED | equivalent, as predicted |
 
+⚠️ **`P1` and `P2`'s plant text quotes a spelling that did not ship.** Both are
+written against `raise SystemExit(f"no such title: {title_id}")`, and both kill
+modes above (`DID NOT RAISE SystemExit`) are properties of it. On 2026-08-20
+this branch merged `origin/main`, which had independently closed issue #5
+(`4eef36f`) with the same `SELECT`-before-the-write design but a **`print` and
+`return`** rather than a `SystemExit` — one command naming two things that do
+not exist owing them one exit code, `no such media item` having printed and
+returned since M4. Per the merge's main-implementation-wins rule that is the
+spelling in `cli.py` now. **The verdicts are not re-scored and are not
+withdrawn**: they were measured at `2abfbf8` against the code that existed
+then, and P1's and P3's findings are about the pre-check's *presence* and about
+`OPERATOR_ERRORS` respectively, neither of which the merge touched. What moved
+is only how the two cases fail — on the printed sentence rather than on
+`DID NOT RAISE` — and the branch's `isinstance(exit_info.value.code, str)`
+assertions are gone rather than inverted, there being no exit status left to
+state. **P2's finding survives unchanged and is the one worth carrying**: a
+fake with no foreign key cannot produce the conflict, so a swallow plant dies
+on the printed sentence and never reaches `attached == []`.
+
+
 **The control's condition was re-checked rather than inherited from M8 Task
 18's ledger**, and it holds — 🔴 **but the first version of this paragraph gave
 the wrong reason for one of three files, and the grep it rested on was too
@@ -7287,6 +7326,23 @@ BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.
 | P3 | `model=` deleted from **one** `_*_FAILURES` constant (`_PLAY_FAILURES`'s `404`) | KILLED | **3** — the completeness case, the every-failure-is-a-problem case, and playback's own openapi case. **The components assertion stays green** |
 | P3b | `model=` deleted from **all 20** declaration sites across the 14 router modules | KILLED | **6**, including the new case on the **components assertion** (`test_api_openapi.py:543`), which is the assertion P3 was written to reach |
 | C1 | CONTROL: `_PLAY_FAILURES`'s `404` and `409` entries swapped in the dict literal | SURVIVED all five gate steps | equivalent, as predicted |
+
+⚠️ **`P1`'s target was renamed on 2026-08-20 by the merge of `origin/main`.**
+`main` had independently closed issue #6 (`6941dd4`) with the same design, and
+its spelling shipped: the walk is `api/errors.py`'s
+`problem_responses_carry_their_media_type`, called from the identical
+`UsherAPI.openapi` override, and `api/app.py`'s
+`_problem_bodies_carry_their_media_type` — the function this sweep planted
+against — no longer exists. **The verdict stands as measured at `8cb299b` and
+is not re-scored**; what transfers is the finding, which is about the *design*
+rather than the function name: keying on the status rather than on the schema
+is caught by the `moved` arm naming `GET /health/ready 503`, and that arm is
+one of the two F5 assertions the merge deliberately kept on top of `main`'s
+implementation (the other is the `ProblemResponse in components/schemas`
+control `P3b` reaches). The line citation `test_api_openapi.py:543` moved when
+the two files' cases were reconciled; the assertion is in
+`test_the_rewrite_registers_its_component_and_leaves_every_other_body_alone`.
+
 
 🔴 **Both of the plan's predictions about *which assertion* a plant fires on
 were wrong, and both were registered as disagreements before the runs rather

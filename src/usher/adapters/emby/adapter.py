@@ -137,6 +137,7 @@ from usher.adapters.emby.session import (
     SYSTEM_INFO_PATH,
     EmbySession,
     decode_json,
+    redact_path,
 )
 from usher.adapters.http import SourceGate
 from usher.domain.source import Source
@@ -509,7 +510,11 @@ class EmbyAdapter(SourceAdapter):
         if response.status_code == 404:
             return None
         if response.status_code >= 400:
-            raise PortUnavailable(f"GET {path} returned HTTP {response.status_code}")
+            # `redact_path`, not `path`: this is `get_item`'s own raise
+            # site rather than `EmbySession.ok`'s, so the session's redaction
+            # does not cover it -- and the path holds a user id and an item
+            # id (issue #35).
+            raise PortUnavailable(f"GET {redact_path(path)} returned HTTP {response.status_code}")
         payload = decode_json(response, path)
         # Some builds answer an unknown id with 200 and an empty object
         # rather than 404. An item with no `Id` is not an item.

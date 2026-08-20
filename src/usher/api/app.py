@@ -3,16 +3,17 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemResponse
+from usher.api.console import mount_console
 from usher.api.errors import (
     http_error_as_a_problem_document,
+    problem_responses_carry_their_media_type,
     validation_error_without_the_request_body,
 )
 from usher.api.lanes import LaneSupervisor
@@ -35,6 +36,7 @@ from usher.api.routers import (
     unmatched,
     watch,
 )
+from usher.api.trace_response import TraceResponseMiddleware
 from usher.composition import (
     DefaultUserId,
     embedder,
@@ -51,81 +53,20 @@ from usher.services.events import InMemoryEventBus
 from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
 
-#: The anchor `_problem_bodies_carry_their_media_type` matches on. Derived from
-#: the model rather than spelled, so a rename cannot leave the walk pointed at
-#: a component that no longer exists -- FastAPI names a component after the
-#: class, and every `model=ProblemResponse` declaration in `api/routers/` ends
-#: up under exactly this `$ref`.
-_PROBLEM_REF: Final = f"#/components/schemas/{ProblemResponse.__name__}"
-
-
-def _problem_bodies_carry_their_media_type(document: dict[str, Any]) -> dict[str, Any]:
-    """Move every `ProblemResponse` body from `application/json` to
-    `application/problem+json`, in place, and hand the document back.
-
-    **Keyed on the schema, never on the status**, and that is the whole design
-    rather than a convenience. `GET /health/ready`'s 503 is the one non-2xx in
-    this API that is deliberately not a problem document, and keying on the
-    schema excludes it *by construction* -- its declared model is
-    `ReadinessResponse`, which this predicate does not match. Keyed on a status
-    list it would have to be excluded by an exemption list instead, and
-    ADR-0030's exemption set already exists as data (`PROBLEM_EXEMPTIONS`); a
-    second, differently spelled copy of it is exactly the drift that record
-    exists to prevent. The same property is what makes a route added later
-    correct for free: adopting the envelope is the whole of adopting the media
-    type.
-
-    **Why a rewrite and not a declaration.** FastAPI renders an additional
-    response's `model=` under the *route's* own response media type
-    (`openapi/utils.py`) with no per-response override, and the two obvious
-    spellings are both wrong -- measured on a two-route probe against FastAPI
-    0.140.13 rather than reasoned about:
-
-    - `{"model": P, "content": {PROBLEM_MEDIA_TYPE: {}}}` renders **both**
-      keys, and the problem one carries no schema at all, so a route would
-      declare its 404 twice and only one of them truthfully;
-    - `{"content": {PROBLEM_MEDIA_TYPE: {"schema": {"$ref": ...}}}}` -- the
-      one a reader reaches for -- renders the right key with the right `$ref`
-      **and never registers the model**, because no route names it. An app
-      carrying only that spelling publishes `components.schemas == ["Ok"]`,
-      so the document ships a `$ref` pointing at nothing while an assertion
-      spelled `schema["$ref"].endswith("/ProblemResponse")` passes.
-
-    So `model=` stays at every `responses=` declaration in `api/routers/`,
-    registration is untouched, and the media type is corrected here.
-
-    Idempotent by construction: it removes the key it reads, so a second pass
-    over its own output finds nothing to move. That matters because
-    `FastAPI.openapi` caches into `app.openapi_schema` and `UsherAPI.openapi`
-    runs this over the cached document on every subsequent call.
-    """
-    for item in document.get("paths", {}).values():
-        for operation in item.values():
-            for response in operation.get("responses", {}).values():
-                content = response.get("content")
-                if not isinstance(content, dict):
-                    continue
-                body = content.get("application/json")
-                if not isinstance(body, dict) or body.get("schema", {}).get("$ref") != _PROBLEM_REF:
-                    continue
-                content[PROBLEM_MEDIA_TYPE] = content.pop("application/json")
-    return document
-
 
 class UsherAPI(FastAPI):
-    """`FastAPI`, with `/openapi.json` telling the truth about the media type a
-    problem document travels under.
+    """`FastAPI` with one override: `/openapi.json` tells the truth about the
+    media type of a problem document.
 
-    **A subclass rather than `app.openapi = ...`**, which is the spelling
-    FastAPI's own "Extending OpenAPI" page shows. Two reasons and the first is
-    measured: the assignment is `error: Cannot assign to a method
-    [method-assign]` under this project's mypy settings, and would be the only
-    `type: ignore` in `src/usher/api/`. And a replacement function has to
-    re-implement both the `openapi_schema` cache and the
-    `_openapi_routes_version` invalidation `FastAPI.openapi` has since grown --
-    a copy that goes silently wrong the day either changes. Delegating to
-    `super()` keeps both and costs one idempotent walk of a 35-operation
-    document per call.
+    A subclass rather than `app.openapi = …`, which is the spelling FastAPI's
+    own "Extending OpenAPI" page shows. Two reasons, the first measured:
+    `app.openapi = custom` is `error: Cannot assign to a method
+    [method-assign]` under this project's mypy settings and would need the
+    only `type: ignore` in `src/usher/api/`; and a replacement function has to
+    re-implement the caching *and* the `_openapi_routes_version` invalidation
+    `FastAPI.openapi` has since grown, which is a copy that goes silently
+    wrong the day either changes. Delegating to `super()` keeps both and costs
+    one idempotent walk of a 35-operation document per call.
 
     **Deliberately not an eager rewrite of `app.openapi_schema` in the
     factory.** Generating the document at build time would make every
@@ -134,7 +75,7 @@ class UsherAPI(FastAPI):
     """
 
     def openapi(self) -> dict[str, Any]:
-        return _problem_bodies_carry_their_media_type(super().openapi())
+        return problem_responses_carry_their_media_type(super().openapi())
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -173,12 +114,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         provider, close_provider = (
             await metadata_provider(settings) if settings.worker_enabled else (None, nothing)
         )
-        # The embedding model, on the same terms and for the same reason: one
-        # per process, built only where a worker will use it. Not built at all
-        # in a push-only deployment -- a 65 MB ONNX session with no reader.
-        model, close_model = (
-            await embedder(settings) if settings.worker_enabled else (None, nothing)
-        )
+        # The embedding model. **One per process, and -- unlike the provider
+        # above and the client below -- built whatever the lane switches say
+        # (issue #31).** The other two are worker capabilities; this one has a
+        # second reader on a request path, because `api/deps.get_search_service`
+        # hands it to `SearchService` and `?mode=semantic` is unservable
+        # without it. Gated on `worker_enabled` it was absent from exactly the
+        # deployment `.claude/rules/api-telemetry-and-lanes.md` recommends -- a
+        # server beside a `usher work` container, `USHER_WORKER_ENABLED=false`
+        # on the server -- which then had a configured model, a backfilled
+        # catalog, and a 422 on every semantic search.
+        #
+        # **Nothing had to be decoupled to do it: `composition.embedder`
+        # already answers `(None, no-op)` unless `embedding_enabled`**, which
+        # is `false` by default and is an operator naming a model. So the lane
+        # switch was standing in for a setting that says the same thing more
+        # precisely, and the deployment that now pays something it did not --
+        # `embedding_enabled` on, `worker_enabled` off, the `fastembed:`
+        # runtime -- pays a 65 MB / 4.84 s load at startup for the capability
+        # it configured a model to get. On the `openai:` runtime it is an
+        # `httpx.AsyncClient`.
+        #
+        # `report=` is the lane switch's remaining job, and it is the whole of
+        # it: `embedder`'s warnings all end *"index jobs will not be claimed"*,
+        # which is true of a process running the worker lane and false of one
+        # that claims nothing. Silence is right there -- what a push-only
+        # deployment loses is legible on the wire instead, as the 422 naming
+        # the missing capability.
+        model, close_model = await embedder(settings, report=settings.worker_enabled)
+        # **Parked, and that is the line issue #31 is about.** Held only by
+        # `LaneSupervisor` it is a process resource with one reader; on
+        # `app.state` it is the one `api/deps.get_search_service` reads, which
+        # is what makes `?mode=semantic` and the vector half of `?mode=fused`
+        # reachable from the HTTP surface at all. `None` here is not an
+        # absence to be guarded against -- it is `build_search_service`'s own
+        # default for the parameter, so a deployment with no model serves
+        # exactly what it served before.
+        app.state.embedder = model
         # The completion client, on the same terms again: one per process,
         # built only where a worker will use it. `USHER_LLM_ENABLED=false` is
         # the shipped default and answers `(None, no-op)`, which is what
@@ -268,6 +240,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # call on every create_app(): instrument_app marks the app object
     # itself, not a process-global singleton (verified directly).
     FastAPIInstrumentor.instrument_app(app)
+    # …and this is what lets that span leave the process. `traceresponse` on
+    # every response with a live span, so `Problem`'s "Open trace" — the single
+    # link `web/docs/patterns.md` §3 says separates a console from a settings
+    # page — has an id to build a Tempo URL from. **Added after the
+    # instrumentor on purpose**: `instrument_app` rebuilds the whole middleware
+    # stack around this one, and reading `trace.get_current_span()` from the
+    # user-middleware slot is only the *server* span because
+    # `OpenTelemetryMiddleware` ends up outside it. `api/trace_response.py`
+    # carries the measured stack and the one response this does not reach.
+    app.add_middleware(TraceResponseMiddleware)
     # The configuration handlers read, via `deps.get_app_settings`. Set here
     # rather than in the lifespan because it is not a resource with a
     # lifetime -- and because `create_app(settings)`'s whole point is that
@@ -337,4 +319,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(titles.router)
     app.include_router(unmatched.router)
     app.include_router(watch.router)
+    # **Last, and that ordering is the whole safety argument.** The console's
+    # mount answers `/console/*` and its history fallback answers any
+    # navigation-shaped miss underneath it -- but Starlette matches routes in
+    # registration order, so every route above is reached first and an
+    # unrouted path outside `/console` still falls through to
+    # `http_error_as_a_problem_document`'s 404. Mounting before the routers
+    # would not shadow them either (the mount's own path is a prefix match on
+    # `/console`), but the register-last rule is what keeps that true when
+    # someone adds the next route.
+    mount_console(app, settings)
     return app

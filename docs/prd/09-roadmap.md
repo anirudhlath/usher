@@ -1243,18 +1243,27 @@ suspicion.
   **Post-v1 unless M9's `search_queries` supplies a real evaluation set** —
   which is the thing that would actually settle it, and is the reason not to
   re-litigate it on five queries.
-- **Expansion is billed on searches the semantic lane cannot serve** — the guard
-  is `embedder is None`, not "anything is embedded". Measured: with
-  `USHER_EMBEDDING_ENABLED=true` and `title_embeddings` empty, `usher search`
-  bought a completion, printed the rewrite, returned `semantic_coverage=0.000`,
-  and *then* said no title had an embedding — **the warning arrives after the
-  money**, on every fused search of a not-yet-backfilled deployment. The honest
-  predicate ("does any title in the *filtered* population have a vector") is
-  unanswerable before the vector that does the filtering exists, and the cheap
-  global stand-in is a weaker guard costing a port method, an implementation, a
-  fake, a contract case and a read on every fused search. Mitigated but not
-  closed by the new default: it now takes two opt-ins rather than one. **Goes
-  with whoever takes the entry above.**
+- ✅ **Expansion is billed on searches the semantic lane cannot serve —
+  issue #16, closed.** The guard was `embedder is None`, not "anything is
+  embedded". Measured: with `USHER_EMBEDDING_ENABLED=true` and
+  `title_embeddings` empty, `usher search` bought a completion, printed the
+  rewrite, returned `semantic_coverage=0.000`, and *then* said no title had an
+  embedding — **the warning arrives after the money**, on every fused search of
+  a not-yet-backfilled deployment. It is now
+  `SearchIndex.semantic_coverage(filters) > 0.0`, asked in front of the
+  expansion.
+
+  ⚠️ **This entry's own pricing was wrong twice, and that is the transferable
+  part.** *"The honest predicate is unanswerable before the vector that does
+  the filtering exists"* — it is answerable: nothing in a `SearchFilters` is
+  derived from a query vector, and `PostgresSearchIndex._COVERAGE` already
+  took predicates and no vector. So the strong predicate was already computed,
+  a few lines away, and only the *callability* was missing; the entry costed
+  the weak stand-in it thought it was reduced to. And *"a read on every fused
+  search"* is a consequence of where the read is put, not of having one: behind
+  `expander is not None` it is bought only by deployments that expand, which is
+  none by default. **A carried-debt entry that prices a fix is a claim, and it
+  ages exactly like any other claim in this repository.**
 - ✅ **The candidate pool has no ownership *filter*, only an `ORDER BY` key** —
   while the curation prompt asserted *"one household's **own** library"*.
   Reachable on any library with fewer than `USHER_CURATION_POOL_SIZE` unwatched
@@ -1410,32 +1419,54 @@ suspicion.
   is the fix for both**; until then this path is the one to name first, because
   it is the deployment shape `docker compose up` gives you by default.
 - ✅ **`usher unmatched --resolve` stack-traced on an unknown `--title`** —
-  found by M9's E4, **discharged 2026-08-20 by M10's F4**, and the entry is
-  retired rather than deleted because the answer refused the fix this entry
-  proposed. It read *"it is a one-line change and it is carried rather than
-  taken because the family is an argued taxonomy, not a list — the question
-  ADR-0026 asks before adding a member is how often an operator hits it"*.
-  That question was answered by reading every raise site, and **the answer
-  refuses the one-line change**: **22 raise sites across 14 modules**, of which
-  **exactly one is reachable from a CLI argument** — this one. `usher bootstrap
-  --phase` can reach `ImportRunRepository.start`'s uniqueness conflict, but by
-  racing another bootstrap rather than by a typo, and
-  `BootstrapService._concede_to_other_owner` answers it without raising; every
-  other site is reached only by a walk (`similar --rebuild`, `derive`,
+  found by M9's E4, which fixed the *route* and could not fix the CLI because
+  `cli.py` is not that task's file. The route read the title first and answered
+  a problem document; the command handed the id straight to `attach_title`, and
+  against Postgres that is a foreign-key violation translated to
+  `RepositoryConflict` — which is **not** in `cli.OPERATOR_ERRORS` (verified:
+  no member of that tuple is a base of it), so an operator who mistyped a UUID
+  got a stack instead of a sentence.
+  ✅ **Paid on 2026-08-18 (issue #5), and the taxonomy question this entry was
+  waiting on was the wrong one to have been waiting on.** The entry read *"it
+  is a one-line change and it is carried rather than taken because the family
+  is an argued taxonomy, not a list — the question ADR-0026 asks before adding
+  a member is how often an operator hits it"*. The fix is **not** a tenth
+  member of `OPERATOR_ERRORS`: it is the route's own `SELECT` in front of the
+  write, so the command answers `no such title: <id>` and `RepositoryConflict`
+  keeps every stack it had. That leaves
+  [ADR-0026](decisions/0026-the-cli-boundary-names-families.md)'s line exactly
+  where it was, which is why this cost no argument about the family — the entry
+  sized the work as "decide whether a refusal type is operator-facing" when the
+  available fix was "do not raise one".
+  **Reproduced before it was fixed**, against `pgvector/pgvector:pg17` at
+  `alembic head` with one seeded source and one unmatched item: the traceback
+  ended in `RepositoryConflict: cannot attach media item <media item id>` —
+  **naming the id that was correct**, which the entry above did not record and
+  which is half of why the shipped output diagnosed nothing.
+  **The other arm of that branch was checked and needed nothing.** An unknown
+  `--resolve` is not symmetric with an unknown `--title`: the `UPDATE` matches
+  no row, so the foreign key is never evaluated, and `attach_title`'s boolean
+  has answered `no such media item` since M4. Confirmed on the same database.
+  Both refusals therefore print and return rather than raising `SystemExit` —
+  one command naming two things that do not exist owes them one exit code.
+  📎 **M10's F4 answered the frequency question anyway, on 2026-08-20, and the
+  answer is kept because it is what ADR-0026's Consequences now carries.** It
+  refuses the one-line change on its own terms: **22 raise sites across 14
+  modules**, of which **exactly one is reachable from a CLI argument** — this
+  one. `usher bootstrap --phase` can reach `ImportRunRepository.start`'s
+  uniqueness conflict, but by racing another bootstrap rather than by a typo,
+  and `BootstrapService._concede_to_other_owner` answers it without raising;
+  every other site is reached only by a walk (`similar --rebuild`, `derive`,
   `curate`, `search`/`suggest`, `work`, `sync`, and `push`/`serve`, which run
   the lanes). `db/repositories/source.py`'s two split across those groups:
   `add` only from `POST /admin/sources`, since no subcommand adds a source, but
   **`update` is not reachable from that route at all** — its one caller is
   `api/lanes.py`'s `_write_push_available`, so it is CLI-reachable and not
   argument-reachable. So widening the tuple would mute 22 sites to fix one,
-  several of them the deliberate bug tripwires
-  [ADR-0026](decisions/0026-the-cli-boundary-names-families.md)'s amendment
-  names. **The fix is a lookup at the call site** — `cli._unmatched` reads the
-  title before it writes, as `POST /admin/unmatched/{id}/resolve` has since
-  E4 — and the count lives in that ADR's Consequences, because a count nobody
-  wrote down is a count somebody re-derives wrongly. *(This entry also said
-  "sixty frames"; measured at a real terminal it is **40**, and the 60 came
-  from a pytest run's 62 with 25 harness frames in it.)*
+  several of them the deliberate bug tripwires that ADR's amendment names.
+  *(F4 also measured the frame count this entry used to quote as "sixty": at a
+  real terminal it is **40**, and the 60 came from a pytest run's 62 with 25
+  `_pytest`/`pluggy`/`pytest_asyncio` harness frames in it.)*
 - **A covering index for `GET /admin/unmatched` is measured, requested, and
   declined** — M9's E4, over 200,000 items / 70,000 unmatched / 23,333 undated.
   `ix_media_items_unmatched` is `(source_id) WHERE title_id IS NULL` and carries
@@ -1448,36 +1479,16 @@ suspicion.
   `(added_at DESC NULLS LAST, id DESC) WHERE title_id IS NULL` removes the sort.
   Not authorised in M9: 16.4 ms on an admin review queue is acceptable and a
   fourth migration for it is not worth the milestone.
-- ✅ **`/openapi.json` described every problem response at `application/json`
-  while the wire sends `application/problem+json`** — measured by M9's H2,
-  carried rather than closed, **discharged 2026-08-20 by M10's F5**. Re-measured
-  at the fix: **56** problem bodies across **35** operations and **92** response
-  bodies, every one of them keyed `application/json` and none
-  `application/problem+json`. The mechanism is a custom `openapi()` on the app
-  (`UsherAPI`, `api/app.py`) that delegates to `super()` and moves any
-  `application/json` body whose `$ref` is `ProblemResponse` onto
-  `PROBLEM_MEDIA_TYPE` — **keyed on the schema and never on the status**, so
-  `GET /health/ready`'s 503 is excluded by construction (its model is
-  `ReadinessResponse`) rather than by a second exemption list beside
-  `PROBLEM_EXEMPTIONS`, and a route that adopts the envelope later adopts the
-  media type in the same act. `model=` stays at all 20 declaration sites across
-  14 router modules and no route decorator changed.
-  **The reason the debt was carried is the part that did not survive.** *"Buys a
-  client nothing it cannot read off the `type` member"* is a claim about a client
-  that has **already decided** to parse the body as a problem document; the media
-  type is what a generated client switches on before it parses anything, which is
-  the one thing `type` cannot tell it. And the cost was real but smaller than
-  stated: five assertions in two files, of which three move and two stay — a
-  **200** really is `application/json`, and `test_api_watch.py`'s case reads
-  better for saying so, since the 404 and the 200 on one operation are now two
-  different media types.
-  ⚠️ **Both known-wrong markers are deleted, and the second misnamed its own
-  twin.** The 2026-08-12 correction below put an identical marker in
-  `test_api_playback.py` and `test_api_watch.py`, each saying the fix *"would
-  fork this assertion and its twin in `test_api_watch.py`"* — correct in the
-  playback file and a self-reference in the watch file. **A marker that points at
-  itself is a marker that survives a grep for the thing it was meant to make
-  findable**, which is the failure mode the correction was written to prevent.
+- ~~**`/openapi.json` describes every problem response at `application/json`
+  while the wire sends `application/problem+json`**~~ — measured by M9's H2 and
+  reported rather than closed. FastAPI renders
+  `responses={404: {"model": ProblemResponse}}` under the *route's* response
+  media type, so the document was wrong about the one header RFC 9457 makes
+  load-bearing. Spelling the media type in forks `test_api_playback.py`'s and
+  `test_api_watch.py`'s assertions, which read `content["application/json"]`,
+  and H2 judged that it "buys a client nothing it cannot read off the `type`
+  member" — so its conformance check asserted the response **shape** and not
+  the media type, and said so in its own docstring.
   ✅ **Both sites said so where the fix would land** — the milestone's final
   review found the two assertions reading `content["application/json"]` with no
   comment naming why, so the *cost* of the fix was documented everywhere except
@@ -1485,8 +1496,43 @@ suspicion.
   known-wrong marker and pointed at `tests/unit/test_api_openapi.py`. **A debt
   recorded only in the roadmap is a debt the person editing the code does not
   see** — the same shape as the curation role sentence corrected in
-  `testing-discipline.md` this same day, one subsystem over. It worked: F5 found
-  both assertions from the markers.
+  `testing-discipline.md` this same day, one subsystem over. **It worked**:
+  the fix below found both assertions from the markers.
+  ⚠️ **And the second marker misnamed its own twin**, which is worth keeping
+  because it is the failure mode the correction was written to prevent. Both
+  markers said the fix *"would fork this assertion and its twin in
+  `test_api_watch.py`"* — correct in the playback file and a **self-reference**
+  in the watch file, whose twin is in the playback file. A marker that points at
+  itself is a marker that survives a grep for the thing it was meant to make
+  findable. Both are deleted now that the fix has landed.
+  ✅ **Taken 2026-08-19 (issue #6), and the reason it was carried is the part
+  that did not hold.** *"Buys a client nothing it cannot read off the `type`
+  member"* is a claim about a client that has already decided to parse the body
+  as a problem document; a generated one decides that from the **declared media
+  type**, before it parses anything — and the console that ships in this
+  repository generates against this document with `openapi-typescript`
+  (`web/package.json`'s `gen:types`). Measured before: **56** responses across
+  **35** operations and **92** response bodies carried a `ProblemResponse`,
+  every one of them declared `application/json` and none
+  `application/problem+json`, against a wire that answered
+  `application/problem+json` on all five vocabulary members reachable without a
+  database. The fix is `UsherAPI.openapi` in `api/app.py` — a post-pass over the
+  generated document, keyed off the `$ref` rather than off a status list,
+  because FastAPI offers no per-response media type and dropping `model=` to
+  hand-write `content` would leave `ProblemResponse` out of `components` and
+  every ref dangling. **Keying on the schema is also what excludes
+  `GET /health/ready`'s 503 by construction** — its model is
+  `ReadinessResponse` — rather than by a second exemption list beside
+  ADR-0030's `PROBLEM_EXEMPTIONS`; `model=` stays at all 20 declaration sites
+  across 14 router modules and no route decorator changed.
+  `test_api_openapi.py` enumerates rather than samples, over a floor and an
+  exact non-problem count so that a walk which matched nothing and a rewrite
+  that moved a **200** both fail; a second case compares the declared type to
+  the one three real routes actually send. The cost was real but smaller than
+  stated: five assertions in two files, of which three move and two stay — a
+  **200** really is `application/json`, and `test_api_watch.py`'s case reads
+  better for saying so, since the 404 and the 200 on one operation are now two
+  different media types.
 
 ## Post-v1 candidates
 
@@ -1512,7 +1558,17 @@ Not committed; recorded so the design keeps room for them.
   that write path is the dual write
   [ADR-0002](decisions/0002-postgres-first-search.md) refused — which is
   exactly why the port has no write method today.
-- **Reference client** — separate repository.
+- ~~**Reference client** — separate repository.~~ **Done, and not as written.**
+  Shipped 2026-08-19 as **Usher Console** in `web/`, in *this* repository and in
+  the same container, served at `/console` by `usher.api.console`. The candidate
+  said "separate repository" and that was tried: `usher-web` existed for a day
+  and its whole nginx layer was a `/api/*` → `/*` rewrite, which is what made
+  `POST /play`'s ticket URL — minted from the incoming `Host` header — point at
+  the wrong port for an external player. **A client in another repository cannot
+  be versioned with the API it generates from, and the proxy that a second
+  origin needs is where the defect lived.** The design system it implements is a
+  handoff bundle (28 components, 18 screens, a 103-pair contrast ledger); the
+  behavioural authority is `web/docs/patterns.md`.
 - **Request/wanted list** — titles in the catalog but on no source.
 
 ## Explicitly out of scope

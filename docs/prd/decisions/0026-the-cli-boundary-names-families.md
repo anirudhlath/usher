@@ -322,3 +322,55 @@ Exception` will look like an improvement to whoever writes it, pass review,
 pass the ordinary suite, and go unnoticed until the first defect it hides.
 That is why the refusal lives in a numbered decision and in a case rather than
 in a comment above the handler.
+
+## Amendment, 2026-08-19 — the tuple hid a defect for a week, and it was not `except Exception`
+
+**The one-line fix this ADR guards against had already shipped in the
+opening entry, spelled `SQLAlchemyError`.** That name reads as "the database
+family" and is in fact the root of *every* error SQLAlchemy raises — including
+`InvalidRequestError`, which is `MissingGreenlet`, `PendingRollbackError`,
+`ObjectDeletedError`, `ArgumentError` and `CompileError`. Not one of those is
+a condition an operator can act on; every one of them is a bug in this project
+wearing the database's clothes.
+
+Measured, not argued. One of three `usher work` daemons died 78 minutes into
+M9's S3 enrichment crawl on an unhandled `MissingGreenlet`, and the entire
+record it left behind in `w1.log` was
+
+```
+usher work: MissingGreenlet: greenlet_spawn has not been called; can't call await_only() here. ...
+(the stack is one flag away: `usher --traceback work`)
+```
+
+— this boundary's own two lines. Issue #8 was then filed reading *"the run
+used bare `usher work`, so no stack was recorded"*, which put the fault on the
+operator for not passing a flag when the fault was this tuple. A stack that
+would have named the frame was caught here and thrown away, and the bug stayed
+unexplained for a week over ~92,000 jobs nobody could re-run.
+
+**The repair is `DBAPIError`, which is what the member's own comment already
+claimed** — *"everything the driver does wrap"*. `OperationalError`,
+`ProgrammingError` and `InterfaceError` are all `DBAPIError` subclasses, so a
+missing table, a dead pool and a rejected permission are unaffected;
+`test_a_database_error_the_driver_does_wrap_is_operator_facing` passes
+unchanged. `RepositoryConflict` is still outside the tuple (no member is a
+base of it), so the carried `usher unmatched --resolve` item above is
+untouched.
+
+**The general form, and it is worth more than the fix.** *A family named by
+the library that raises it is not a family; a family named by who can act on
+it is.* `SQLAlchemyError`, `httpx.HTTPError` and `OSError` are all
+library-shaped names, and only the last two happen to coincide with "the
+operator can fix this" — `OSError` because a refused socket is a refused
+socket, `httpx.HTTPError` because an adapter has already translated everything
+that was not transport. SQLAlchemy is the one dependency here that raises
+*both* kinds under one root, so it is the one that needed the narrower name.
+Check any future member against that question rather than against the package
+it comes from.
+
+`tests/unit/test_cli_errors.py::test_a_missing_greenlet_keeps_its_traceback`
+is the behavioural case, and
+`test_the_operator_database_family_is_what_the_driver_wraps` is the membership
+one — it asserts no member of the tuple is a base of `MissingGreenlet`, so a
+future widening back to `SQLAlchemyError` fails rather than quietly restoring
+the blindfold.

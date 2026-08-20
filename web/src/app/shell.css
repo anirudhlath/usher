@@ -1,0 +1,431 @@
+/* App chrome — viewer header and tab bar, operator sidebar and page header.
+   Written in the design system's own idiom (plain CSS over semantic tokens,
+   `u-`-prefixed classes) rather than in Tailwind utilities, because these
+   surfaces are colour, type and elevation — all of which are tokens, and a
+   literal in a utility class is exactly the drift the token layer prevents.
+   The handoff's shells express the same rules as inline styles; that is a
+   prototype mechanism, not a design decision. */
+
+/* ---- shared -------------------------------------------------------------- */
+
+.u-shell {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+.u-wordmark {
+  font-family: var(--font-sans);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.03em;
+  color: var(--text-primary);
+  line-height: 1;
+  white-space: nowrap;
+}
+/* The mark is the word. The terminal dot is the only teal in it, and it steps
+   darker in the light theme so it clears 3:1 on a near-white surface. */
+.u-wordmark__dot {
+  color: var(--teal-400);
+}
+[data-theme='light'] .u-wordmark__dot {
+  color: var(--teal-600);
+}
+.u-wordmark--lg {
+  font-size: 20px;
+}
+.u-wordmark--sm {
+  font-size: 18px;
+}
+.u-wordmark--sidebar {
+  font-size: 17px;
+}
+
+/* ---- viewer -------------------------------------------------------------- */
+
+/* Glass appears in exactly two places in this product, and this is one of them
+   (the other is a phone sheet). Never on a card, a table, or behind body text. */
+.u-vheader {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-header);
+  height: var(--height-header);
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: 0 var(--gutter-page);
+  background: var(--glass-header);
+  backdrop-filter: blur(var(--blur-header));
+  border-bottom: 1px solid var(--border-subtle);
+}
+/* At the top of a title screen the header sits over a full-bleed backdrop, so
+   it stays transparent until something has scrolled under it. */
+.u-vheader--transparent {
+  background: transparent;
+  backdrop-filter: none;
+  border-bottom-color: transparent;
+}
+.u-vheader__nav {
+  display: flex;
+  gap: var(--space-1);
+}
+.u-vheader__spacer {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.u-vheader__actions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.u-navlink {
+  appearance: none;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font: var(--text-label);
+  letter-spacing: var(--track-label);
+  padding: 0 var(--space-3);
+  height: 32px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+  transition: var(--transition-control);
+}
+.u-navlink:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.u-navlink[aria-current='page'] {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.u-tabbar {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--z-header);
+  display: flex;
+  background: var(--glass-header);
+  backdrop-filter: blur(var(--blur-header));
+  border-top: 1px solid var(--border-subtle);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.u-tabbar__item {
+  flex: 1;
+  appearance: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  min-height: var(--height-tabbar);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+.u-tabbar__item[aria-current='page'] {
+  color: var(--text-primary);
+}
+.u-tabbar__label {
+  font: var(--text-label-sm);
+  font-size: 11px;
+}
+
+/* ---- operator ------------------------------------------------------------ */
+
+.u-ops {
+  display: flex;
+  align-items: flex-start;
+  flex: 1;
+  min-height: 0;
+}
+.u-ops__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.u-ops__body {
+  padding: var(--space-5) var(--gutter-page) var(--space-10);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  width: 100%;
+  max-width: var(--width-content);
+}
+
+.u-sidebar {
+  width: var(--width-sidebar);
+  flex: none;
+  border-right: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-2x);
+  position: sticky;
+  top: 0;
+  align-self: stretch;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+.u-sidebar--collapsed {
+  width: var(--width-sidebar-collapsed);
+}
+.u-sidebar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2x);
+  padding: var(--space-2x);
+}
+.u-sidebar__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.u-sidebar__foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+  padding: var(--space-2x);
+}
+.u-sidebar__version {
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-muted);
+}
+
+.u-sidelink {
+  appearance: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-align: left;
+  background: none;
+  color: var(--text-secondary);
+  font: var(--text-label);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2x);
+  padding: 6px var(--space-2x);
+  border-radius: var(--radius-control);
+  min-height: 30px;
+  text-decoration: none;
+  transition: var(--transition-control);
+}
+.u-sidelink:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.u-sidelink[aria-current='page'] {
+  background: var(--bg-selected);
+  color: var(--text-primary);
+}
+.u-sidelink--collapsed {
+  justify-content: center;
+}
+.u-sidelink__count {
+  margin-left: auto;
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-muted);
+  font-variant-numeric: var(--numeric-tabular);
+}
+.u-sidelink__alarm {
+  margin-left: auto;
+  display: inline-flex;
+}
+
+.u-opsheader {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--gutter-page);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-canvas);
+  position: sticky;
+  top: 0;
+  z-index: var(--z-header);
+  flex-wrap: wrap;
+}
+.u-opsheader__title {
+  font: var(--text-title);
+  letter-spacing: var(--track-title);
+  color: var(--text-primary);
+}
+.u-opsheader__subtitle {
+  font: var(--text-body-sm);
+  color: var(--text-muted);
+  margin-top: 2px;
+  max-width: 76ch;
+  text-wrap: pretty;
+}
+.u-opsheader__actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--space-2x);
+  flex-wrap: wrap;
+}
+
+.u-opssection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.u-opssection__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.u-opssection__title {
+  font: var(--text-title-sm);
+  letter-spacing: var(--track-title);
+  color: var(--text-primary);
+}
+.u-opssection__note {
+  font: var(--text-body-xs);
+  color: var(--text-muted);
+  max-width: 70ch;
+  text-wrap: pretty;
+}
+.u-opssection__action {
+  margin-left: auto;
+}
+
+/* "Requires backend work" is a label on the screen, not a comment in a spec.
+   Dashed, because the surface is real and the route behind it is not. */
+.u-backendwork {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding: var(--space-3);
+  border: 1px dashed var(--warn-border);
+  border-radius: var(--radius-card);
+  background: var(--warn-quiet);
+}
+.u-backendwork__icon {
+  color: var(--warn-text);
+  flex: none;
+  margin-top: 1px;
+}
+.u-backendwork__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.u-backendwork__eyebrow {
+  font: var(--text-eyebrow);
+  letter-spacing: var(--track-eyebrow);
+  text-transform: uppercase;
+  color: var(--warn-text);
+}
+.u-backendwork__text {
+  font: var(--text-body-xs);
+  color: var(--text-secondary);
+  max-width: 78ch;
+  text-wrap: pretty;
+}
+.u-backendwork__routes {
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+/* ---- rails --------------------------------------------------------------- */
+
+/* Rails bleed past the page gutter so the next card peeks; the padding is on
+   the track rather than on the section so that bleed survives. */
+.u-railset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-7);
+  padding-block: var(--space-5) var(--space-10);
+}
+.u-sectionhead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding-inline: var(--gutter-page);
+}
+.u-sectionhead__title {
+  font: var(--text-title-sm);
+  letter-spacing: var(--track-title);
+  color: var(--text-primary);
+}
+.u-sectionhead__action {
+  margin-left: auto;
+}
+
+/* ---- responsive ---------------------------------------------------------- */
+
+@media (max-width: 833px) {
+  .u-ops__body {
+    padding-inline: var(--gutter-page);
+  }
+}
+
+@media (max-width: 599px) {
+  .u-shell {
+    --gutter-page: 16px;
+  }
+  .u-opsheader {
+    padding-inline: var(--gutter-page);
+  }
+}
+
+/* ---- phone sheet --------------------------------------------------------- */
+
+/* The operator nav at 390. Blur appears in exactly two places in this product
+   and this is the second (the first is the viewer header over a scrolled
+   backdrop) — never on a card, a table, or behind body text. */
+.u-sheet__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-scrim);
+  background: var(--scrim-modal);
+}
+.u-sheet {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: var(--z-drawer-sheet);
+  max-height: 80dvh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+  padding: var(--space-3) var(--space-3) calc(var(--space-5) + env(safe-area-inset-bottom));
+  background: var(--glass-header);
+  backdrop-filter: blur(var(--blur-sheet));
+  border-top: 1px solid var(--border-default);
+  border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
+  box-shadow: var(--shadow-4);
+}
+.u-sheet__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2x);
+  border-bottom: 1px solid var(--border-subtle);
+}
+/* Touch overrides density: a sheet only exists on a touch surface, so its rows
+   stay at the 44 px target regardless of the operator half's compact tokens. */
+.u-sheet .u-sidelink {
+  min-height: var(--target-touch);
+  font: var(--text-body);
+  gap: var(--space-3);
+}

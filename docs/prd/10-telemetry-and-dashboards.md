@@ -131,6 +131,38 @@ reader would assume:
 Spans carry `title_id`, `source`, and `trigger` (`demand` vs `background`) as
 attributes, so "why did the title I just opened take 45 seconds" is one query.
 
+#### How a trace gets from a browser to Tempo
+
+The traces above are only reachable by somebody who already knows a trace id,
+and until M10 nothing told anybody one. Every request has had a real server span
+since M1 — `FastAPIInstrumentor` is wired unconditionally and
+`configure_tracing` installs a real `TracerProvider` whether or not there is an
+OTLP endpoint — but the id never left the process, so the console's "Open trace"
+affordance was a control that could not fire on any deployment there was.
+
+Three links, and all three have to exist or the chain is decorative:
+
+1. **`traceresponse` on the response.** The server span as
+   `00-<trace-id>-<span-id>-<flags>`, on every response with a live span, on
+   successes as well as failures. [07](07-client-api.md)'s *Correlation* section
+   is the contract — including the two cases that emit **no header rather than a
+   zeroed one**, and the bare-500 gap.
+2. **`tempoUrl` on `GET /console/config.json`**, from `USHER_TEMPO_URL`. A
+   deployment fact the bundle cannot know at build time, and **deliberately
+   nullable**: an unconfigured Tempo makes the link *absent*, never dead. This
+   is the same never-computed-versus-computed-and-empty rule the rest of the
+   product follows, and it is why the console renders no `<a href="">` when the
+   id is known and the base URL is not.
+3. **The console's own rendering.** `Problem` shows "Open trace" whenever it has
+   both; the dev drawer carries the id per journal entry, which is the one an
+   operator pastes into a trace search for a call that has already scrolled away.
+
+So `USHER_TEMPO_URL` is what makes Loki's `trace_id` patch and this project's
+span tree reachable from a screen rather than only from a query bar. Unset, the
+traces are all still emitted and still exported; there is simply no link from a
+browser to them, and the console says so in words instead of offering a control
+that does nothing.
+
 ### Metrics — OpenTelemetry → Prometheus
 
 Emitted today (✅) or owned by a later milestone (named). A documented metric

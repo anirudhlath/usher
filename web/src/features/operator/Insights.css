@@ -1,0 +1,98 @@
+/* Insights — screen-local chrome, written in the design system's own idiom
+   (plain CSS over semantic tokens, `u-`-prefixed classes) rather than in
+   Tailwind utilities. Tailwind here is layout only: colour and type are tokens,
+   and a literal in a utility class is exactly the drift the token layer exists
+   to prevent. The class prefix is screen-local so two operator screens cannot
+   collide on a name. */
+
+.u-ins__note {
+  font: var(--text-body-sm);
+  color: var(--text-secondary);
+  max-width: 84ch;
+  text-wrap: pretty;
+}
+
+.u-ins__fine {
+  font: var(--text-body-xs);
+  color: var(--text-muted);
+  max-width: 84ch;
+  text-wrap: pretty;
+}
+
+/* auto-fill rather than a fixed column count: the panel grid reflows at every
+   width without a JavaScript breakpoint that can disagree with the stylesheet. */
+.u-ins__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--space-3);
+}
+
+.u-ins__ledger {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  background: var(--bg-surface);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.u-ins__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  flex-wrap: wrap;
+}
+.u-ins__row + .u-ins__row {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.u-ins__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.u-ins__name {
+  font: var(--text-heading-sm);
+  color: var(--text-primary);
+}
+
+.u-ins__what {
+  font: var(--text-body-xs);
+  color: var(--text-muted);
+}
+
+.u-ins__cond {
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-secondary);
+}
+
+.u-ins__bell {
+  display: flex;
+  flex: none;
+  color: var(--warn-text);
+}
+.u-ins__bell--bad {
+  color: var(--bad-text);
+}
+
+.u-ins__hazards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-width: 84ch;
+}
+.u-ins__hazards > li {
+  font: var(--text-body-sm);
+  color: var(--text-secondary);
+  border-left: 2px solid var(--border-default);
+  padding-left: var(--space-3);
+  text-wrap: pretty;
+}

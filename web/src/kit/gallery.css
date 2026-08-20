@@ -1,0 +1,223 @@
+/* The gallery's own furniture — written in the design system's idiom (plain CSS
+   over semantic tokens) for the same reason `app/shell.css` is: this is colour,
+   type and elevation, all of which are tokens, and a literal in a utility class
+   is exactly the drift the token layer prevents.
+
+   `k-` rather than `u-`: none of this is part of the library. A component must
+   look here identical to how it looks on a screen, so the stage carries the
+   canvas background and adds nothing but a hairline and a label. */
+
+.k-gallery {
+  min-height: 100dvh;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  padding: var(--space-6) var(--gutter-page) var(--space-16);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+@media (max-width: 599px) {
+  .k-gallery {
+    padding-left: var(--gutter-page-phone);
+    padding-right: var(--gutter-page-phone);
+  }
+}
+
+/* ---- masthead and the appearance strip ----------------------------------- */
+
+.k-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+}
+.k-head__title {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+.k-head__blurb {
+  font: var(--text-body-sm);
+  color: var(--text-secondary);
+  max-width: var(--width-prose);
+  text-wrap: pretty;
+}
+
+/* Deliberately not sticky. A sticky bar is baked into every element screenshot
+   it happens to overlap, which would put the control strip inside the visual
+   baseline of whichever section was scrolled under it. */
+.k-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  align-items: flex-start;
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+}
+.k-bar__set {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+}
+.k-bar__legend {
+  font: var(--text-eyebrow);
+  letter-spacing: var(--track-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0;
+}
+.k-bar__options {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+/* ---- index --------------------------------------------------------------- */
+
+.k-index {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* ---- a group ------------------------------------------------------------- */
+
+.k-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--border-subtle);
+  /* The heading is not hidden under anything, but a linked jump lands nicer. */
+  scroll-margin-top: var(--space-4);
+}
+.k-group__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.k-group__title {
+  font: var(--text-heading);
+  color: var(--text-primary);
+}
+.k-group__blurb {
+  font: var(--text-body-sm);
+  color: var(--text-secondary);
+  max-width: var(--width-prose);
+  text-wrap: pretty;
+}
+.k-group__grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+
+/* ---- one specimen -------------------------------------------------------- */
+
+.k-spec {
+  flex: 1 1 20rem;
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2x);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  background: var(--bg-canvas);
+}
+.k-spec--wide {
+  flex-basis: 100%;
+}
+.k-spec__label {
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-muted);
+}
+.k-spec__stage {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-start;
+  max-width: 100%;
+}
+/* The scrim and the toast stack are `position: fixed`. Paint containment makes
+   this stage their containing block, so an open dialog stays inside its own
+   specimen instead of covering the page — nothing about the component changes,
+   and the axe sweep still sees a real open dialog. */
+.k-spec__stage--overlay {
+  contain: layout paint;
+  display: block;
+  min-height: 26rem;
+}
+.k-spec__note {
+  font: var(--text-body-xs);
+  color: var(--text-secondary);
+  text-wrap: pretty;
+}
+
+/* ---- small helpers used by the specimens themselves ---------------------- */
+
+.k-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+.k-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  width: 100%;
+}
+.k-fill {
+  width: 100%;
+}
+.k-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  width: 5rem;
+  color: var(--text-secondary);
+}
+.k-cell__label {
+  font: var(--text-mono-xs);
+  letter-spacing: var(--track-mono);
+  color: var(--text-muted);
+  text-align: center;
+  word-break: break-word;
+}
+.k-pair {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2x);
+  font: var(--text-label-sm);
+}
+
+/* Hue plus icon plus word — the state glyph sheet says the word out loud, so
+   these classes carry only the hue half of §12's three. */
+.k-tone--good {
+  color: var(--good-text);
+}
+.k-tone--warn {
+  color: var(--warn-text);
+}
+.k-tone--bad {
+  color: var(--bad-text);
+}
+.k-tone--info {
+  color: var(--info-text);
+}
+.k-tone--muted {
+  color: var(--text-muted);
+}

@@ -509,40 +509,58 @@ class LaneSupervisor:
         `MediaItem`, so a watch walk that ran first would count every state
         unmatched and merge nothing.
 
-        **A delta with no cursor is not a delta, and this is where it is
-        refused.** `ReconcileService.delta_cursor` answers `None` for a
-        source with no completed item-lane run, and a delta started from it
-        walks `list_items(since=None)` -- the whole library, measured at
-        1,134,919 items over 5,675 pages on the one household this project
-        has: **~9.5 hours** at that run's 6.04 s pooled mean per page, and
-        7.3-11.8 h across its two `list` classes' means (M10 S1,
-        2026-08-15; `.claude/rules/emby-push-and-ingest.md`). One household,
-        one evening, sequential.
+        **A delta with no cursor is a full walk, and until 2026-08-19 this
+        method performed one on startup without saying so.** `reconcile`
+        reads its `since` from the newest *completed* item-lane run; with
+        none there is no `since`, so `list_items(since=None)` walks the
+        entire library, issued by `uvicorn` with default settings and no
+        operator command, against a server the operator may not own.
+        `push_gap_min_interval_seconds` does not cover it: that bounds how
+        *often* a gap is closed and says nothing about how large the walk is,
+        and `_Gate.at` is `None` until a gap has run, so the *first* one is
+        never skipped (`services/push.py`).
+
+        **The size of that walk, on the one household this project has, and
+        the two figures in this repository are a series rather than a
+        disagreement.** Issue #9 quoted **1,126,789 items**, which is the
+        2026-08-02 count and the one most of `src/` still cites; M10 S1
+        re-measured **1,134,919 items over 5,675 pages** on 2026-08-15 and
+        priced the walk at **~9.5 hours** at that run's 6.04 s pooled mean
+        per page (7.3-11.8 h across its two `list` classes' means).
+        `.claude/rules/emby-push-and-ingest.md` carries the whole series --
+        1,126,674 on 2026-07-31, 1,126,789 on 2026-08-02, 1,134,919 on
+        2026-08-15 -- so the library is growing and neither number is wrong,
+        but **2026-08-15 is the most recent count and issue #9's is 13 days
+        stale**. One household, sequential -- re-derive before quoting.
+
+        So the decision is `USHER_PUSH_GAP_CLOSE`, defaulting to `cursored`:
+        close a gap that is a *gap*, refuse one that is the whole catalog,
+        and leave the first walk to `usher sync`, which is a command an
+        operator issued. `always` is the old behaviour; `never` turns
+        gap-closing walks off entirely. A deployment past its first walk has
+        a cursor and is unaffected.
 
         **This is the one caller of `reconcile` nobody typed a command
-        for**, which is the whole reason the refusal is here.
-        `_start_lane` runs for every enabled source before the refresher's
-        first sleep and `PushSupervisor.run` closes the gap immediately
-        after every successful connection, so on a fresh deployment the
-        first thing `uvicorn usher.api.app:create_app --factory` does with
-        default settings is this walk, against every source at once.
-        `push_gap_min_interval_seconds` bounds *cadence* and nothing else --
-        `_Gate.at` is `None` until a gap has run, so the first one is never
-        skipped (`services/push.py`).
+        for**, which is the whole reason the refusal is here. `_start_lane`
+        runs for every enabled source before the refresher's first sleep and
+        `PushSupervisor.run` closes the gap immediately after every
+        successful connection, so on a fresh deployment the first thing
+        `uvicorn usher.api.app:create_app --factory` does with default
+        settings is this walk, against every source at once.
 
         **There is a second caller, and it is on the delivery path rather
-        than the reconnect path.** `PushSupervisor.run` closes the gap
-        again whenever an applied event comes back `deferred_to_delta` --
-        an event naming more than `push_max_items_per_event` items with no
-        payload (`services/push.py`), deferred precisely *because* a
-        request per item is worse than a paged walk. Against a cursorless
-        source that walk is refused too, so those items are applied
-        **neither inline nor by a walk**: the event is discarded, and stays
-        discarded until an operator runs the full sync the line names. That
+        than the reconnect path.** `PushSupervisor.run` closes the gap again
+        whenever an applied event comes back `deferred_to_delta` -- an event
+        naming more than `push_max_items_per_event` items with no payload
+        (`services/push.py`), deferred precisely *because* a request per item
+        is worse than a paged walk. Against a cursorless source under the
+        `cursored` default that walk is refused too, so those items are
+        applied **neither inline nor by a walk**: the event is discarded, and
+        stays discarded until an operator runs the sync the line names. That
         is the deliberate trade and not an oversight -- the alternative is
-        the whole-library walk above, triggered by an event -- and it is
-        the reason the WARNING carries a remedy rather than only a
-        diagnosis. `tests/unit/test_api_lanes.py::
+        the whole-library walk above, triggered by an event -- and it is the
+        reason the WARNING carries a remedy rather than only a diagnosis.
+        `tests/unit/test_api_lanes.py::
         test_a_deferred_push_event_on_a_cursorless_source_is_refused_and_its_items_are_dropped`
         is where that half is pinned.
 
@@ -552,9 +570,15 @@ class LaneSupervisor:
         `ReconcileService` is deliberately left able to do it.
 
         Refusing returns rather than raising and leaves the socket up: the
-        push lane goes on delivering, which is the point of the lane. What
-        the operator has to run is in the line, because a refusal that does
-        not say what to do is a dead end.
+        push lane goes on delivering, which is the point of the lane.
+
+        **Every arm logs, and this is the only place that may.** The line
+        belongs here rather than in `refresh()` or `_start_lane`, which the
+        refresher calls once per `push_source_refresh_seconds` forever -- a
+        per-lane fact logged in a per-poll function is the ~17,280 warnings a
+        day `.claude/rules/config-cli-and-deployment.md` records against
+        `build_worker`. A gap is closed on reconnect and rate-limited by
+        `PushSupervisor._gap`, so this is once per close.
 
         **A delta that does have a cursor can still be large, and
         `USHER_PUSH_GAP_MAX_ITEMS` is where that is bounded (M10 S6).** A
@@ -580,46 +604,66 @@ class LaneSupervisor:
         signature for a cursor that fails the same way, and is a task of its
         own.
         """
+        if self._settings.push_gap_close == "never":
+            # Before the unit of work: there is nothing to ask a database.
+            logger.info(
+                "not closing {source}'s push gap: USHER_PUSH_GAP_CLOSE=never, so anything "
+                "that changed while the channel was down waits for the next `usher sync`",
+                source=source.name,
+            )
+            return
         async with self._work() as pipeline:
-            # Bound rather than tested inline, and **the reason S5 gave for
-            # binding it did not survive S6**, which is recorded here rather
-            # than quietly deleted. That reason was: *"the value is what a
-            # bound on a delta that does have a cursor (S6) would be
-            # computed from, so that bound needs no read of `sync_runs` of
-            # its own"*. S6's ceiling is a count of **items**, evaluated in
-            # `ReconcileService`'s own walk loop where `run.items_seen`
-            # already lives; it is computed from nothing about the cursor,
-            # so this binding buys it nothing. It is a refusal rather than a
-            # clamp, which is the other half of the same prediction and is
-            # the half that held: `reconcile()` still takes no `since`
-            # override.
+            # The walk's own question, asked by the walk's own method, so
+            # the size this logs and the size it then performs cannot
+            # disagree, and one reader of `None` is shared with `reconcile()`
+            # instead of two.
             #
-            # It is **not** a saving on the shipped path either, and an
-            # earlier version of this comment claimed it was. `reconcile()`
-            # derives the identical cursor again through `_cursor_for`
+            # It is **not** a saving on the shipped path, and an earlier
+            # version of this comment claimed it was. `reconcile()` derives
+            # the identical cursor again through `cursor_for`
             # (`services/reconcile.py`), so a gap close that *does* run
             # issues `latest_completed_cursor` four times where it used to
             # issue two. Negligible -- two indexed reads on `sync_runs`
             # against a walk of a library -- but the binding is not what
             # makes it negligible.
             #
-            # What it does buy is the refusal below, which needs the value
-            # and not merely its absence-or-presence, and one reader of
-            # `None` shared with `reconcile()` instead of two.
-            cursor = await pipeline.reconcile.delta_cursor(source)
+            # S6's ceiling below is computed from nothing about the cursor:
+            # it is a count of **items**, evaluated in `ReconcileService`'s
+            # own walk loop where `run.items_seen` already lives. S5
+            # predicted the binding would save that read; it does not. What
+            # did hold is the other half of the prediction -- the ceiling is
+            # a refusal rather than a clamp, so `reconcile()` still takes no
+            # `since` override.
+            cursor = await pipeline.reconcile.cursor_for(source, SyncRunKind.DELTA)
             if cursor is None:
                 # The source's **name**, never its base URL and never
                 # anything from its credential row -- PRD 08's
-                # credentials-are-never-logged rule, and
-                # `ReconcileService`'s own failure line is the local
-                # precedent for spelling it this way.
+                # credentials-are-never-logged rule, and `ReconcileService`'s
+                # own failure line is the local precedent for spelling it
+                # this way.
+                if self._settings.push_gap_close == "cursored":
+                    logger.warning(
+                        "not closing {source}'s push gap: no item sync has ever completed "
+                        "for this source, so the reconnect delta would walk its entire "
+                        'library rather than a gap. Run `usher sync --source "{source}"` '
+                        "when you are ready for that walk, or set "
+                        "USHER_PUSH_GAP_CLOSE=always to have this lane do it unasked",
+                        source=source.name,
+                    )
+                    return
                 logger.warning(
-                    "not closing {source}'s gap: it has no completed item-lane sync run, so a "
-                    "delta has no cursor and would walk the whole library. Run "
-                    "`usher sync --kind full` for it once; push stays connected meanwhile",
+                    "closing {source}'s push gap by walking its entire library: no item "
+                    "sync has ever completed for this source, so this delta has no cursor "
+                    "and reads every item the source has. USHER_PUSH_GAP_CLOSE=cursored "
+                    "refuses this and leaves the first walk to `usher sync`",
                     source=source.name,
                 )
-                return
+            else:
+                logger.info(
+                    "closing {source}'s push gap: a delta walk of everything changed since {since}",
+                    source=source.name,
+                    since=cursor.isoformat(),
+                )
             await pipeline.reconcile.reconcile(
                 source,
                 SyncRunKind.DELTA,

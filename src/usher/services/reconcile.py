@@ -50,7 +50,7 @@ cursor".** `latest_completed_cursor` is `started_at` of the newest
 stopped at a ceiling and recorded `COMPLETED` would move the cursor to its
 own start instant and *everything past the ceiling would never be requested
 by any delta again*. The cover would be the nightly full reconcile, which
-`_cursor_for` correctly makes cursorless -- except that **nothing in `src/`
+`cursor_for` correctly makes cursorless -- except that **nothing in `src/`
 schedules anything** (M9's boundary call 6) and `usher sync --kind` defaults
 to `full` precisely because a human runs it. So on a shipped deployment with
 no cron, a truncated-and-completed delta is a hole with no closer. A fourth
@@ -267,7 +267,7 @@ class ReconcileService:
         with _tracer.start_as_current_span("sync.reconcile") as span:
             span.set_attribute("usher.source", source.name)
             span.set_attribute("usher.sync.kind", kind.value)
-            cursor = await self._cursor_for(source, kind)
+            cursor = await self.cursor_for(source, kind)
             run = SyncRun(source_id=source.id, kind=kind, cursor_at=cursor)
             # Inserted and committed before the walk begins, `RUNNING`: an
             # operator watching a six-hour sync needs a row to watch, and a
@@ -369,45 +369,47 @@ class ReconcileService:
             f"run `usher sync --kind full` for this source to close the rest"
         )
 
-    async def delta_cursor(self, source: Source) -> AwareDatetime | None:
-        """The instant a delta walk of `source` would resume from, or `None`
-        when this source has no completed item-lane run to resume from.
+    async def cursor_for(self, source: Source, kind: SyncRunKind) -> AwareDatetime | None:
+        """`None` for a full walk; the newest completed item-lane run's start
+        instant for a delta.
+
+        **Public because `None` is the answer to "how big is this walk", and a
+        caller has to be able to ask before committing to one.**
+        `LaneSupervisor._close_gap` asks exactly this before it decides whether
+        a reconnect delta is a bounded window or the entire library
+        (`USHER_PUSH_GAP_CLOSE`). Reusing this method rather than reading
+        `latest_completed_cursor` at the call site is what keeps the answer the
+        lane logs and the answer the walk uses from drifting: the "later of
+        both item lanes" rule below is stated once.
+
+        A full walk must ignore every cursor: one that inherited a `since`
+        would return only what changed and then sweep, which is the exact
+        combination ADR-0015 exists to make unreachable.
 
         A delta reads *both* item lanes and takes the later. Only completed
         runs count -- resuming from a run that failed halfway skips
         everything it never reached, and does it silently -- which is why
         `latest_completed_cursor` is the method rather than "the newest run".
 
-        **Public because `None` is a question this service must not answer,
-        and its two callers answer it differently.** A delta with no cursor
-        walks `list_items(since=None)`, i.e. the whole library, and whether
-        that is right depends entirely on who asked. `usher sync --kind
-        delta` against a fresh source is an operator asking for exactly that
-        and gets it -- `reconcile` below passes the `None` straight through.
-        `LaneSupervisor._close_gap` refuses it, because a push lane starts
-        itself for every enabled source and nobody typed anything. Deciding
-        here would take the operator's command away to protect the lane; the
-        refusal therefore lives at the caller that needs it, and this method
-        is what stops the two of them holding two different ideas of what a
-        delta's cursor is.
+        **The two callers answer `None` differently, and that is why the
+        decision is not taken here.** A delta with no cursor walks
+        `list_items(since=None)`, i.e. the whole library, and whether that is
+        right depends entirely on who asked. `usher sync --kind delta`
+        against a fresh source is an operator asking for exactly that and
+        gets it -- `reconcile` below passes the `None` straight through.
+        `LaneSupervisor._close_gap` refuses it under the `cursored` default,
+        because a push lane starts itself for every enabled source and nobody
+        typed anything. Deciding here would take the operator's command away
+        to protect the lane.
         """
+        if kind is not SyncRunKind.DELTA:
+            return None
         cursors = [
             cursor
             for lane in _ITEM_LANES
             if (cursor := await self._runs.latest_completed_cursor(source.id, lane)) is not None
         ]
         return max(cursors) if cursors else None
-
-    async def _cursor_for(self, source: Source, kind: SyncRunKind) -> AwareDatetime | None:
-        """`None` for a full walk; `delta_cursor` for a delta.
-
-        A full walk must ignore every cursor: one that inherited a `since`
-        would return only what changed and then sweep, which is the exact
-        combination ADR-0015 exists to make unreachable.
-        """
-        if kind is not SyncRunKind.DELTA:
-            return None
-        return await self.delta_cursor(source)
 
     async def _walk(
         self,

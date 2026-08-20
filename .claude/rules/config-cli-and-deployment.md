@@ -503,6 +503,30 @@ needs it (`WatchStateSyncService` takes a `user_id` per call), and an ABC
 plus a fake plus a contract suite for one `SELECT` is a port with nothing on
 the other side.
 
+**And the blindfold this file warns about had already been on, spelled
+`SQLAlchemyError` rather than `Exception`.** The entry above is right that
+`except Exception` at a CLI boundary trades a wart for a blindfold, and
+`test_a_programming_error_keeps_its_traceback` does fail anyone who widens the
+tuple that way. What neither caught is that `SQLAlchemyError` — a member since
+M1, whose comment reads *"everything the driver does wrap"* — is also the base
+of `InvalidRequestError`, and therefore of `MissingGreenlet`,
+`PendingRollbackError`, `ObjectDeletedError`, `ArgumentError` and
+`CompileError`. Measured: M9's S3 lost a `usher work` daemon to an unhandled
+`MissingGreenlet` and the whole of what it left in its log was
+`_operator_problem`'s two lines (`/tmp/m9-exec/S3/w1.log`, 2026-08-11
+23:26:32Z). Issue #8 was filed blaming the missing `--traceback` flag. Narrowed
+to `DBAPIError` on 2026-08-19 — `OperationalError`/`ProgrammingError`/
+`InterfaceError` are all subclasses, so the missing-table case is unaffected —
+plus `test_the_operator_database_family_is_what_the_driver_wraps`, which
+asserts no member of the tuple is a base of `MissingGreenlet`. **The general
+form: a family named by the library that raises it is not a family. Name it by
+who can act on it.** SQLAlchemy is this project's one dependency that raises an
+operator's problem and a programmer's under a single root, which is why it is
+the one that needed the narrower name. Full evidence and the
+identity-map artefact the same conflict path leaves behind:
+`.claude/rules/db-and-sql.md`; the decision is ADR-0026's 2026-08-19
+amendment.
+
 ## `OTEL_SEMCONV_STABILITY_OPT_IN` cannot be set from anything this repository ships (2026-08-14, M10 O3)
 
 **Why this is filed here rather than beside the telemetry it affects.** Setting

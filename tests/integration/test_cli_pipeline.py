@@ -144,7 +144,17 @@ async def _purge(settings: Settings) -> None:
             "DELETE FROM search_queries",
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM sources WHERE name LIKE 'cli-%'",
-            "DELETE FROM titles WHERE sort_name = 'cli-orphan'",
+            # `LIKE 'cli-%'`, not `= 'cli-orphan'`, and the difference is a
+            # whole-suite outage. This file commits through its own sessions
+            # rather than the rolled-back one, so a title it seeds under any
+            # other name survives every later case in the session and inflates
+            # their counts -- `titles` is read by the candidate pool, by
+            # `count_by_state`, and by the curate cases' own premise guards.
+            # Adding one `cli-real` row for a case that needs a title that
+            # *exists* turned 1 failure into 43, none of them in the file that
+            # wrote the row. Matching the prefix the `sources` line above
+            # already uses covers whatever the next case needs to seed.
+            "DELETE FROM titles WHERE sort_name LIKE 'cli-%'",
             # M9's overrides table. It ships **empty** and is never seeded, so
             # `DELETE FROM` restores the shipped state exactly -- and it is what
             # makes `usher home`'s provider count a fact rather than a hope
@@ -670,13 +680,17 @@ async def test_resolving_an_item_that_does_not_exist_says_so(
     """**The title is real and the media item is not**, which is the only
     fixture that keeps this a test of `attach_title`'s `rowcount == 0`.
 
-    It named neither until M10's F4, and the repair was **mandatory rather
-    than prophylactic**: with the title pre-check in place the old fixture
-    stops reaching this arm at all and the case goes *loudly* red --
-    `E SystemExit: no such title: …`, measured by restoring its pre-F4 form
-    against the fixed `cli.py`. So there was never a window in which it
-    silently changed subject; what the two ids bought was an answer that
-    happened to be right for a reason the case did not name.
+    It named a random uuid for *both* ids until 2026-08-19, which made it a
+    test of check order wearing the name of a test about a missing item: the
+    title lookup issue #5 added runs first, so the old fixture is answered by
+    the *other* true fact. The repair was **mandatory rather than
+    prophylactic** -- with the pre-check in place the old fixture stops
+    reaching this arm at all and the case goes *loudly* red on
+    `no such title: ...` where it asserts `no such media item`. There was
+    never a window in which it silently changed subject; what the two random
+    ids bought was an answer that happened to be right for a reason the case
+    did not name. Each absence now gets its own case, and each seeds the id it
+    is not testing.
     """
     title_id = await _a_title(cli_settings)
     await _unmatched(
@@ -720,20 +734,37 @@ async def test_an_unknown_title_id_is_a_sentence_against_real_postgres(
     media_item_id = await _an_unmatched_item(cli_settings)
     unknown = new_id()
 
-    with pytest.raises(SystemExit) as exit_info:
-        await _unmatched(
-            cli_settings, limit=50, offset=0, resolve=str(media_item_id), title=str(unknown)
-        )
+    await _unmatched(
+        cli_settings, limit=50, offset=0, resolve=str(media_item_id), title=str(unknown)
+    )
 
-    message = str(exit_info.value)
-    # `str` rather than an int, which is what makes this exit 1.
-    assert isinstance(exit_info.value.code, str)
-    assert str(unknown) in message, message
-    assert "Traceback" not in message, message
-    assert "resolved" not in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert str(unknown) in printed, printed
+    assert "Traceback" not in printed, printed
+    assert "resolved" not in printed, printed
 
     await _unmatched(cli_settings, limit=50, offset=0, resolve=None, title=None)
     assert str(media_item_id) in capsys.readouterr().out
+
+
+async def test_resolving_to_a_title_that_does_not_exist_says_so(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #5: a well-formed `--title` naming no row used to reach the
+    write and come back as a `RepositoryConflict` stack, whose message
+    named the *media item* id -- the one the operator got right.
+
+    The media item is absent here too, and that is deliberate: the point
+    is that the title check runs *before* the write, so it does not need
+    a media item to exist in order to refuse.
+    """
+    missing = new_id()
+    await _unmatched(
+        cli_settings, limit=50, offset=0, resolve=str(uuid.uuid4()), title=str(missing)
+    )
+    out = capsys.readouterr().out
+    assert "no such title" in out
+    assert str(missing) in out
 
 
 async def test_a_disabled_source_is_never_walked(session: AsyncSession) -> None:

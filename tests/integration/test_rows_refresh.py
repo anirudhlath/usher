@@ -18,6 +18,15 @@ session had already committed and closed before the refresh opened one"* is
 guaranteed rather than usually true. Restarting the lane afterwards is the same
 `LaneSupervisor` the lifespan built, over the same queue and the same cache.
 
+**Stopping the lane makes the ordering true; it does not make it observable,
+and issue #7 is the difference.** A held-back lane guarantees the refresh
+happens after the request -- but the first version of the case then *read* that
+ordering off two `time.monotonic()` windows over `id(session)`, which is a
+guess about ownership dressed as a measurement. `_SessionLog` below records
+which `asyncio` task opened each session and orders the boundaries by its own
+counter, so claim 3 is checked against what was observed rather than against
+when it happened.
+
 **Both cases commit for real and clean up after themselves.** Their footprint
 is the two titles they insert, deleted by id; the `users` row is a singleton
 reached by `ON CONFLICT (name) DO NOTHING` and is left standing, as
@@ -202,29 +211,107 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
             yield c
 
 
+# The name `LaneSupervisor.start` gives the `rows.refresh` lane's task, and
+# `_run_row_refresh` is the only thing that ever runs on it. Reading it back
+# off `asyncio.current_task()` at the moment a session opens is therefore an
+# **observation** of which side opened that session, which is what claim 3
+# below needs and what a wall-clock window only approximates.
+_REFRESH_TASK = "usher.lane.rows.refresh"
+
+# The name this file gives the task it runs the request on, for the same
+# reason. `ASGITransport` calls the app inline, so the route, its dependencies
+# and `get_session`'s commit all run on whatever task awaited the response --
+# so naming that task is enough to attribute the request's session to the
+# request, with no clock in it.
+_REQUEST_TASK = "the-request-under-test"
+
+
+@dataclass(frozen=True, slots=True)
+class _Boundary:
+    """One observed transaction boundary.
+
+    `seq` is the log's own counter and is what the ordering assertion reads:
+    a total order over *recorded events*, which cannot be inverted by two
+    boundaries landing in the same clock tick. `at` is carried for the failure
+    message only -- CLAUDE.md's overlap rule wants the interval each side
+    occupied stated, and a bare sequence number states nothing a reader can
+    size.
+    """
+
+    seq: int
+    kind: str
+    session: int
+    owner: str
+    at: float
+
+
 @dataclass(slots=True)
 class _SessionLog:
-    """Every ORM session's transaction boundaries, with the wall clock.
+    """Every ORM session's transaction boundaries, attributed to the task that
+    opened it.
 
     Registered on `sqlalchemy.orm.Session` itself rather than on one factory,
     because the claim is about *two* factories: the app's, which the request
-    and the lane both draw from, and this file's own. Classified by time
-    rather than by identity, which is only sound because the lane is stopped
-    across the request -- see the module docstring.
+    and the lane both draw from, and this file's own.
+
+    **Two things this deliberately does not do, and both were how the previous
+    version was a race rather than an observation.**
+
+    It does not classify a session by *when* it began. A wall-clock window
+    says "some session started while the request was in flight", which is a
+    statement about the clock; `asyncio.current_task().get_name()` at
+    `after_begin` says which side opened it, which is the statement claim 3
+    actually makes. Verified directly that the name is readable there:
+    SQLAlchemy's greenlet bridge runs the sync event on the awaiting task, so
+    a session opened under `usher.lane.rows.refresh` reports that name.
+
+    And it does not let `id(session)` be recycled. **`id()` is a CPython
+    address and CPython reuses addresses**: measured on this host on
+    2026-08-19, eight sessions opened back to back through this same listener
+    produced **five distinct `id()` values**. The request's `Session` is
+    unreachable long before the refresh opens one -- measured in **40 of 40**
+    request/refresh cycles -- so its address is free for the refresh's session
+    to land on, and `refresh_sessions.isdisjoint(request_sessions)` would then
+    report *"the refresh reused the request's session"* about two different
+    objects. `held` keeps every observed session alive for the length of the
+    case, which makes the identity unique by construction instead of by luck.
     """
 
-    begins: list[tuple[int, float]] = field(default_factory=list)
-    ends: list[tuple[int, float]] = field(default_factory=list)
+    boundaries: list[_Boundary] = field(default_factory=list)
     commits: set[int] = field(default_factory=set)
+    owners: dict[int, str] = field(default_factory=dict)
+    held: list[Session] = field(default_factory=list)
 
-    def between(self, after: float, before: float) -> set[int]:
-        return {sid for sid, at in self.begins if after < at < before}
+    def record(self, kind: str, session: Session) -> None:
+        identity = id(session)
+        if identity not in self.owners:
+            self.held.append(session)
+            task = asyncio.current_task()
+            self.owners[identity] = task.get_name() if task is not None else "<no task>"
+        self.boundaries.append(
+            _Boundary(
+                seq=len(self.boundaries),
+                kind=kind,
+                session=identity,
+                owner=self.owners[identity],
+                at=time.monotonic(),
+            )
+        )
 
-    def last_end(self, sessions: set[int]) -> float:
-        return max(at for sid, at in self.ends if sid in sessions)
+    def opened_by(self, owner: str) -> set[int]:
+        return {identity for identity, name in self.owners.items() if name == owner}
 
-    def first_begin(self, sessions: set[int]) -> float:
-        return min(at for sid, at in self.begins if sid in sessions)
+    def last_end(self, sessions: set[int]) -> _Boundary:
+        return max(
+            (one for one in self.boundaries if one.kind == "end" and one.session in sessions),
+            key=lambda one: one.seq,
+        )
+
+    def first_begin(self, sessions: set[int]) -> _Boundary:
+        return min(
+            (one for one in self.boundaries if one.kind == "begin" and one.session in sessions),
+            key=lambda one: one.seq,
+        )
 
 
 @pytest.fixture
@@ -232,10 +319,10 @@ def session_log() -> Iterator[_SessionLog]:
     log = _SessionLog()
 
     def began(session: Session, transaction: object, connection: object) -> None:
-        log.begins.append((id(session), time.monotonic()))
+        log.record("begin", session)
 
     def ended(session: Session, transaction: object) -> None:
-        log.ends.append((id(session), time.monotonic()))
+        log.record("end", session)
 
     def committed(session: Session) -> None:
         log.commits.add(id(session))
@@ -314,15 +401,26 @@ async def test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_o
        request's last transaction end strictly before the refresh's first
        begin. A refresh sharing the request's session satisfies claims 1 and
        2 exactly as well.
+
+    **Claim 3 is read off a session log, not off the clock, and issue #7 is
+    why.** Both halves of it used to be inferred from wall-clock windows over
+    `id(session)`: *"a session began between these two `time.monotonic()`
+    readings, therefore it is the request's"*. That is a race twice over --
+    `id()` is a reusable address, and a window is not an owner -- and the
+    repair is to observe both. Each session carries the name of the
+    `asyncio` task that opened it, and the ordering is asserted over the log's
+    own event counter rather than over two floats. See `_SessionLog`.
     """
     await owned("A Film That Arrived Before The Request")
     await app.state.lanes.stop()
     assert app.state.lanes.rows_refreshing() is False, "the lane must really be held back"
     _plant(app, household, (PLANTED,))
 
-    began_at = time.monotonic()
-    response = await client.get("/home")
-    served_at = time.monotonic()
+    # A task of its own, and named, because the name is the whole of how the
+    # sessions below are attributed. `await client.get(...)` would run on
+    # pytest-asyncio's task, whose name this file does not choose and which
+    # every other `await` in the case shares.
+    response = await asyncio.create_task(client.get("/home"), name=_REQUEST_TASK)
 
     assert response.status_code == 200
     assert [row["slug"] for row in response.json()["rows"]] == ["planted-stale"]
@@ -331,21 +429,29 @@ async def test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_o
     )
     assert app.state.row_refreshes.pending == frozenset({household})
 
-    request_sessions = session_log.between(began_at, served_at)
+    request_sessions = session_log.opened_by(_REQUEST_TASK)
     assert request_sessions, "the request opened no session at all, so this proves nothing"
     assert request_sessions <= session_log.commits, "get_session is the commit boundary"
 
-    resumed_at = time.monotonic()
     await app.state.lanes.start()
     await _drain(lambda: app.state.row_refreshes.pending == frozenset())
 
-    refresh_sessions = session_log.between(resumed_at, time.monotonic())
-    assert refresh_sessions, "the refresh opened no session"
+    refresh_sessions = session_log.opened_by(_REFRESH_TASK)
+    assert refresh_sessions, (
+        f"no session was opened on {_REFRESH_TASK!r}, so either the refresh never ran "
+        f"or it ran somewhere this case cannot see: observed owners "
+        f"{sorted(set(session_log.owners.values()))}"
+    )
     assert refresh_sessions.isdisjoint(request_sessions), (
         "the refresh reused the request's session -- the AsyncSession hazard "
         "that usually works, which is how it ships"
     )
-    assert session_log.last_end(request_sessions) < session_log.first_begin(refresh_sessions)
+    closed = session_log.last_end(request_sessions)
+    opened = session_log.first_begin(refresh_sessions)
+    assert closed.seq < opened.seq, (
+        "the refresh's session began before the request's had ended, so the two "
+        f"overlapped rather than followed: request closed {closed}, refresh opened {opened}"
+    )
 
     read = app.state.row_cache.read_screen(household)
     assert read.freshness is Freshness.FRESH, "the stale entry was replaced"

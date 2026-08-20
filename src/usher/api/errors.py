@@ -55,9 +55,19 @@ from the pre-envelope shape -- measured while the playback route was being
 built, where it presented as `KeyError: 'code'`. ADR-0030 ruling 4 decides
 that the answer is *not* to widen `_CODE_FOR_STATUS`; it is group H's "every
 route that can fail declares its problem responses" scan.
+
+**The schema half of the same fact lives here too, because FastAPI cannot
+state it at the declaration site.** `problem_responses_carry_their_media_type`
+is the counterpart to `problem_response`'s `media_type=PROBLEM_MEDIA_TYPE`
+below: the wire has sent `application/problem+json` since the envelope
+landed, and until issue #6 `/openapi.json` described **56** of those
+responses, across 35 operations, at `application/json`. The two are
+deliberately adjacent -- the media type is a contract with a generated client,
+and a contract written in two files that do not mention each other is the
+drift this module already exists to prevent.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from typing import Any, Final
 
 from fastapi import HTTPException, Request
@@ -99,6 +109,18 @@ _CODE_FOR_STATUS: Final[Mapping[int, ProblemCode]] = {
     405: ProblemCode.METHOD_NOT_ALLOWED,
     422: ProblemCode.VALIDATION_FAILED,
 }
+
+# The `$ref` every problem response in the generated document points at.
+# Derived from the model rather than typed out, so the rename this project
+# has already argued about once -- `ProblemDetail` -> `ProblemResponse`, for
+# `test_api_dto.py`'s credential scan -- cannot leave the relabelling below
+# quietly matching nothing. `#/components/` is OpenAPI 3.1's own prefix and
+# is FastAPI's `REF_TEMPLATE`, not a Usher choice.
+_PROBLEM_SCHEMA_REF: Final = f"#/components/schemas/{ProblemResponse.__name__}"
+
+# The key FastAPI puts a `{"model": …}` declaration's schema under: the
+# *route's* response media type, or this when a route has not named one.
+_DEFAULT_MEDIA_TYPE: Final = "application/json"
 
 
 class ProblemException(HTTPException):
@@ -153,6 +175,67 @@ def problem_response(
         media_type=PROBLEM_MEDIA_TYPE,
         headers=headers,
     )
+
+
+def problem_responses_carry_their_media_type(document: dict[str, Any]) -> dict[str, Any]:
+    """Move every `ProblemResponse` in `/openapi.json` to
+    `application/problem+json`, in place.
+
+    **A post-pass rather than a declaration, because FastAPI has no
+    declaration for it.** `openapi/utils.py` renders an additional response's
+    model under ``route_response_media_type or "application/json"`` -- the
+    *route's* own media type, read off its `response_class` -- and there is no
+    per-response override: spelling `content` into the `responses=` dict adds
+    a second entry beside the generated one rather than replacing it, so a
+    route would declare its 404 twice, once truthfully. Read from FastAPI
+    0.140's source and measured against it.
+
+    So the choice is a post-pass or a hand-written `$ref` per response with no
+    model behind it, and the second is worse in the way that matters here: with
+    no `model=` on any route, `ProblemResponse` stops being a component at all
+    and every one of those refs dangles. **Measured on a two-route probe
+    against the installed FastAPI 0.140.13**, because a dangling ref is the one
+    failure that looks like a success: an app carrying only that spelling
+    publishes `components.schemas == ["Ok"]`, so the document ships a `$ref`
+    pointing at nothing while an assertion spelled
+    `schema["$ref"].endswith("/ProblemResponse")` passes. That is why
+    `ProblemResponse in components/schemas` is an assertion in
+    `test_api_openapi.py` and not a note. This walk keeps the declarations
+    exactly as they are and corrects the one thing FastAPI gets wrong about
+    them.
+
+    **Keyed off the schema, never off the status.** A route added later, a
+    status nobody has minted a code for, a 4xx a future group invents -- all of
+    them are covered by declaring `ProblemResponse`, which is the same act that
+    adopts the envelope. Nothing here enumerates statuses, so nothing here goes
+    stale. It is also what excludes `GET /health/ready`'s 503 -- the one non-2xx
+    in this API that is deliberately not a problem document -- **by
+    construction** rather than by an exemption list: its declared model is
+    `ReadinessResponse`, which this predicate does not match. Keyed on a status
+    it would need a second, differently spelled copy of ADR-0030's
+    `PROBLEM_EXEMPTIONS`, which is exactly the drift that record exists to
+    prevent.
+
+    **Idempotent, and that is load-bearing rather than tidy.** `app.openapi()`
+    caches into `app.openapi_schema` and invalidates on a route change, so this
+    runs again over a document it has already corrected; a second pass finds no
+    `application/json` problem body and changes nothing.
+    """
+    for item in document.get("paths", {}).values():
+        for operation in item.values():
+            if not isinstance(operation, MutableMapping):
+                continue
+            for response in operation.get("responses", {}).values():
+                content = response.get("content")
+                if not isinstance(content, MutableMapping):
+                    continue
+                described = content.get(_DEFAULT_MEDIA_TYPE)
+                if described is None:
+                    continue
+                if described.get("schema", {}).get("$ref") != _PROBLEM_SCHEMA_REF:
+                    continue
+                content[PROBLEM_MEDIA_TYPE] = content.pop(_DEFAULT_MEDIA_TYPE)
+    return document
 
 
 async def validation_error_without_the_request_body(

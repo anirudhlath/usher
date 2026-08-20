@@ -550,6 +550,38 @@ escapes only characters illegal in a URI anyway (`a b.mkv?q=1|2` →
 `a%20b.mkv?q=1%7C2`). `%` is in the safe set, so there is no double-encoding
 hazard for a URL that already carries an escape.
 
+**FastAPI has no per-response media type, so `/openapi.json` described 56
+problem responses at `application/json` while the wire sent
+`application/problem+json`.** Measured 2026-08-19 taking issue #6, against the
+whole document rather than a sample: 56 responses over 35 operations carry a
+`ProblemResponse`, and every one of them was filed under the wrong key.
+`openapi/utils.py` renders an additional response's model under
+``route_response_media_type or "application/json"`` — the *route's* own type,
+read off its `response_class` — and there is no override: adding `content` to
+the `responses=` dict **appends** an entry beside the generated one
+(`deep_dict_update` merges), so a route would declare its 404 twice, once
+truthfully. Dropping `model=` to hand-write the `$ref` is worse: with no route
+naming the model, `ProblemResponse` stops being a component and every ref
+dangles. What works is a post-pass — `UsherAPI.openapi` (`api/app.py`)
+delegates to `super()`, then moves any `application/json` body whose `$ref` is
+`ProblemResponse` onto `PROBLEM_MEDIA_TYPE`. **Key it off the `$ref`, never off
+a status list**, so a route added later is covered by the same act that adopts
+the envelope; and it must be idempotent, because `app.openapi()` caches into
+`app.openapi_schema` and the override runs again over its own output. A
+subclass rather than `app.openapi = …`, which is FastAPI's own documented
+spelling: the assignment needs a `type: ignore[method-assign]` under mypy
+strict *and* obliges the override to re-implement both the cache and the
+`_openapi_routes_version` invalidation `FastAPI.openapi` has since grown.
+
+**The debt was carried for a year on a reason that reads well and is wrong.**
+M9's H2 recorded that spelling the media type in "buys a client nothing it
+cannot read off the `type` member" — true of a client that has already decided
+to parse the body as a problem document, and a generated one decides that from
+the **declared media type**, before it parses anything. The distinction to keep:
+*what a document contains* and *what a consumer is told it contains* are
+different claims, and a conformance check that asserts the first passes on a
+document that lies about the second.
+
 **`api/dto/` names every model `…Response`, nested ones included, and that is
 load-bearing.** `tests/unit/test_api_dto.py` discovers response models by
 `name.endswith("Response")` and asserts none declares a credential-shaped field
@@ -566,20 +598,53 @@ URL. Shipped as `PlayTargetResponse`/`PlaySourceResponse`, for the reason
 The Emby half of that run is in `.claude/rules/emby-push-and-ingest.md`; these
 three are about the *route* and belong here.
 
-🔴 **Starting the shipped app against a real source is itself an unbounded
-walk, and nothing warns you.** `LaneSupervisor` starts a push lane per **enabled**
-source, and the lane's reconnect gap-closer calls
-`reconcile(source, SyncRunKind.DELTA, adapter)`. Against a real household —
-1,126,789 items on the one this project measures — that is exactly the walk
-`emby-push-and-ingest.md` forbids, issued by a bare
+✅ **Starting the shipped app against a real source was itself an unbounded
+walk with nothing warning you — closed 2026-08-19 (issue #9).**
+`LaneSupervisor` starts a push lane per **enabled** source, and the lane's
+reconnect gap-closer calls `reconcile(source, SyncRunKind.DELTA, adapter)`.
+Against a real household — 1,126,789 items on the one this project measures —
+that was exactly the walk `emby-push-and-ingest.md` forbids, issued by a bare
 `uvicorn usher.api.app:create_app --factory` with default settings and no
 command of its own. H4/H5's run set `USHER_PUSH_ENABLED=false` and
 `USHER_WORKER_ENABLED=false` for that reason (and the second is required anyway,
-because H5's worker pass has to be a real `usher work --once`). **Any live HTTP
-run against a real source must set both, or budget for a delta walk it did not
-ask for.** The two settings are also what make such a run's request budget
-*statable*: with the lanes on, the count is whatever a websocket and a gap
-closer decide.
+because H5's worker pass has to be a real `usher work --once`). **Those two
+settings are still what make such a run's request budget *statable*** — with
+the lanes on, the count is whatever a websocket and a gap closer decide — so a
+live HTTP run still sets both.
+
+**`push_gap_min_interval_seconds` looks like the bound and is not.** It was at
+its shipped 60 s throughout: it rate-limits how *often* the gap is closed and
+says nothing about how large the walk is. The size lives in
+`ReconcileService.cursor_for` — public since this fix, for exactly this reason —
+because a DELTA resumes from the newest *completed* item-lane run, so with none
+there is no `since` and `list_items(since=None)` reads the whole library.
+`LaneSupervisor._close_gap` now asks that method before committing to a walk,
+and `USHER_PUSH_GAP_CLOSE` (`cursored` | `always` | `never`, default
+`cursored`) is what it does with the answer. **The cursorless bound is a refusal rather
+than a cap, and that is not squeamishness**: a truncated walk that recorded
+`COMPLETED` would have `latest_completed_cursor` read its `started_at`, so
+every item the truncation never reached would be skipped by every later delta,
+silently and permanently. ⚠️ **What that argument rules out is a cap recording
+`COMPLETED`, not a cap** — M10's S6 adds `USHER_PUSH_GAP_MAX_ITEMS`, which
+stops a gap close after N items and records **`FAILED`** with a
+`gap_delta_ceiling:` token, advancing no cursor. The two settings compose on
+different axes: `USHER_PUSH_GAP_CLOSE` decides whether a walk with *no cursor*
+happens at all, the ceiling bounds how large *any* gap close may get. One
+consequence worth knowing before quoting the vocabulary: `always` is no longer
+literally the pre-2026-08-19 behaviour, because the walk it starts still passes
+through the ceiling — that needs `USHER_PUSH_GAP_MAX_ITEMS=0` beside it.
+
+**Every arm logs, and the log lives in `_close_gap` rather than in `refresh()`
+or `_start_lane`** — the refresher calls those once per
+`push_source_refresh_seconds` forever, which is the ~17,280-warnings-a-day shape
+`config-cli-and-deployment.md` records against `build_worker`.
+`test_the_gap_close_is_logged_per_close_and_not_per_supervisor_poll` drains
+twelve units of work and asserts the sink holds **one** line, because a case
+that asserted after a single poll cannot tell "once" from "per poll". The lane
+cases also needed a harness change to be writable at all: `FakeSyncRunRepository`
+was constructed *per unit of work* in `tests/unit/test_api_lanes.py`, i.e. a
+database that forgot every completed walk when the session closed, under which
+no delta ever has a cursor. It is on `_Fakes` now, beside the queue.
 
 **`quote(ticket, safe="=")` is a no-op at the length the shipped path actually
 produces, confirmed live.** D1 measured the encoding question over synthetic
@@ -1180,3 +1245,143 @@ series at all*, because Prometheus's instant lookback is ~5 minutes and those
 samples are a day old — indistinguishable, at a glance, from data that was
 never written. Query `/api/v1/series` over an explicit range before concluding
 that a recorded series is gone.
+
+## Issue #31 — a lane switch was gating a request-path resource (2026-08-19)
+
+**`create_app`'s lifespan built the embedding model under
+`settings.worker_enabled` and parked it nowhere, so `GET /search?mode=semantic`
+answered `422` on every deployment there was** — including one with a live
+`openai:BAAI/bge-m3` endpoint and 130,720 vectors, where the identical query
+through `usher search` returned coherent results at the same moment.
+`?mode=fused` narrowed to `full_text` and said so, which is the degradation
+working; what nothing said was that the narrowing was unconditional.
+
+**The lane switch was standing in for a setting that already says the same
+thing more precisely.** `composition.embedder` answers `(None, no-op)` unless
+`embedding_enabled`, which is off by default and is an operator naming a model,
+so `worker_enabled` was adding nothing except an exclusion — and it excluded
+exactly the split deployment this file recommends four entries up
+(`USHER_WORKER_ENABLED=false` on a server beside a `usher work` container).
+The model is now built whatever the lane switches say and parked on
+`app.state.embedder`, and `api/deps.get_search_service` reads it.
+`report=settings.worker_enabled` is the switch's remaining job and the whole of
+it: every warning in `embedder` ends *"index jobs will not be claimed"*, which
+is false of a process that claims none.
+
+**Two arguments in the old docstrings, and only one of them was ever true.**
+
+- *"Would work in development and 500 in exactly the push-only deployment PRD
+  08 describes."* Never reachable: no model is `None`, `None` is
+  `build_search_service`'s own default, and the answer is the 422 naming the
+  missing capability. What made it *look* reachable is that a conditionally
+  built resource parked nowhere leaves the attribute **absent** rather than
+  `None` — so the fix and the fear are the same line. Pinned by
+  `test_a_deployment_with_no_embedding_model_exposes_none_rather_than_nothing`.
+- *"A once-per-process 65 MB resource."* Real, **runtime-dependent, and an
+  argument about the wrong verb.** It is `fastembed:`'s ONNX session (65 MB,
+  4.84 s cold); `openai:` is an `httpx.AsyncClient` holding no model, and the
+  prefix has selected between them since 2026-08-13 — the sentence predates it
+  and never said which runtime it was about. It argues against *building* a
+  model per API process, which is the other option issue #31 names, and not
+  against *reading* one the process built anyway. Nothing in the fix is
+  conditional on the prefix, because reading an attribute costs the same under
+  both.
+
+**The general form: a cost sentence with no date and no runtime named is a
+measurement of one configuration wearing the grammar of a rule.** Both these
+docstrings were written when there was one runtime, and neither said so, so the
+number went on being quoted through the release that made it optional.
+
+## `traceresponse` — the id leaves the process, and three things about it were not what they looked like (2026-08-19)
+
+**The console was built for a link the backend could not supply, and both halves
+looked finished.** `web/docs/patterns.md` §3 makes *"`Problem` MUST render 'Open
+trace' into Tempo"* a MUST; `Problem` takes `traceId`/`traceHref`,
+`Settings.tempo_url` exists, `/console/config.json` serves it and
+`useTraceUrl()` formats the URL. **No response carried a trace id**, so the
+whole chain was inert on every deployment — the dev drawer even shipped a
+`BackendWork` note saying so. Every request has had a real server span since M1
+(`FastAPIInstrumentor` is unconditional and `configure_tracing` installs a real
+provider with or without an OTLP endpoint), so nothing had to be *built*; the id
+had to be **sent**. `api/trace_response.py` is one ASGI middleware and
+`telemetry.traceresponse` is one formatter.
+
+**The header name is not the settled standard the obvious reading suggests, and
+checking cost one fetch.** Read 2026-08-19 rather than recalled:
+`https://www.w3.org/TR/trace-context-2/` — the *published* Trace Context Level 2
+Recommendation — defines `traceparent` and `tracestate` and **no response header
+at all**; the string `traceresponse` does not occur in it. On `w3c/trace-context`
+`main`, `spec/21-http_response_header_format.md` is now titled *Trace Context
+Server Timing Metric Format* and the binding has moved onto `Server-Timing` under
+the metric name `trace`. **The value grammar did not move** —
+`version "-" trace-id "-" child-id "-" trace-flags`, 2/32/16/2 lowercase hex,
+*"All zeroes forbidden"* on both ids, `ff` a forbidden version — so the bytes are
+current and only the field carrying them is contested. Shipped as `traceresponse`
+because that is what `opentelemetry.instrumentation.propagators.
+TraceResponsePropagator` emits, i.e. what this stack already speaks; the
+`Server-Timing` spelling is one more `set` over the same value if anything ever
+wants it. **The general form: "prefer the standard header" is not a decision
+until you have read which document is current, because a header can be
+implemented everywhere and specified nowhere.**
+
+**Where an `add_middleware` actually lands under the instrumentor, measured.**
+`FastAPIInstrumentor.instrument_app` monkey-patches `build_middleware_stack` and
+rebuilds it as `ServerErrorMiddleware → OpenTelemetryMiddleware →
+ServerErrorMiddleware → ExceptionHandlerMiddleware → [user middleware] →
+ExceptionMiddleware → router`. Two consequences and one gap:
+
+- **The server span is current in the user slot**, because
+  `OpenTelemetryMiddleware` holds it open with `trace.use_span` around
+  everything inside. So `trace.get_current_span()` read at
+  `http.response.start`, *before* delegating, is the SERVER span and not the
+  `http send` span the ASGI instrumentation opens inside its own `send`.
+- **`ExceptionMiddleware` is inside it**, so both of `api/errors.py`'s handlers —
+  the 404/405 problem document and the 422 — carry the header. A 404 is exactly
+  when somebody wants the link.
+- ⚠️ **A bare 500 does not.** `ServerErrorMiddleware` sends its synthesised
+  response through the `send` it was *given* rather than the one it passed down,
+  and both of its instances are outside the user slot. Measured against a real
+  app: `/health` 200 ✓, `/no-such-route` 404 ✓, `/images/nope` 422 ✓, an
+  unhandled `RuntimeError` 500 ✗. **Both alternatives are worse and were priced
+  rather than assumed.** OTel's own `set_global_response_propagator` does reach
+  it — `otel_send` injects for every message including that one — but it is a
+  *process* global (the shape `_queue_reader`/`_push_reader` and both provider
+  installs already exist to defend against), it does not honour
+  `is_recording()`, it adds an `Access-Control-Expose-Headers` this deployment
+  does not need, and its own module docstring calls it experimental. And
+  overriding `build_middleware_stack` to wrap the finished stack makes
+  `instrument_app`'s `isinstance(inner, ServerErrorMiddleware)` check fail, at
+  which point it **logs one line and skips FastAPI instrumentation entirely** —
+  trading the header on a 500 for the span on every request. Read from the
+  installed package's source, not inferred.
+
+**A raw ASGI middleware rather than `BaseHTTPMiddleware`**, because `GET /events`
+is a live `text/event-stream` and `BaseHTTPMiddleware` runs the downstream app in
+its own task and wraps `receive` — the exact machinery this file's first entry
+records `StreamingResponse`'s disconnect handling depending on.
+
+**The absence rule, in its third subsystem.** `traceresponse()` answers `None` —
+no header at all — for a span that is not recording and for an invalid context,
+and `00-000…0-000…0-00` is precisely the value the guardless version emits:
+well-formed to every regex, matching the shipped one field-for-field in shape,
+and naming nothing. Same rule as `_observations`' "no reader means no
+observation, never a zero" and `current_traceparent`'s `NULL` for a job enqueued
+outside a span. The *sampled-out* case is the half an all-zero check misses: a
+dropped span has a perfectly valid trace id and no exported trace, so a link
+built from it opens an empty Tempo page — "no trace" and "a trace you cannot
+find" are different facts and only the first is one this product may state.
+
+**And the test-side finding, which is this repository's standing rule arriving in
+a new place: a regex is not an identity test.** Planted a hard-coded
+`00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01` in the middleware, in
+place of the live read. The three shape cases — a well-formed header on a 200, on
+a 404 problem document and on a 422 — **all passed**, because a constant has a
+shape. What killed it was reading the request's own SERVER span back out of the
+tracer through a span processor and comparing the whole header against it (plus
+the cheap control that two requests differ, which catches a *cached* read the
+identity case would not, since the cache is populated by the very request that
+case makes). Nearest relatives: *a membership assertion is not an ordering test*,
+and the `sitecustomize.py` proof. The mirror plant — deleting the two guards from
+`traceresponse()` — left all six shape/identity cases green and killed exactly
+the three absence cases, which is the measurement saying the two halves of this
+file cover different things.

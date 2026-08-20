@@ -25,10 +25,11 @@ reading.
 4. **The `code` enum in the schema is `ProblemCode` as a set**, so a member
    added without regenerating the schema fails here as well as in
    `tests/unit/test_api_problem_vocabulary.py`.
-5. **Every problem body is described at the media type the wire sends**, and
-   no other body is. Keyed on the schema rather than on the status, which is
-   what excludes `GET /health/ready`'s 503 by construction rather than by a
-   second exemption list.
+5. **Every problem response is declared at `application/problem+json`**, the
+   media type the document declares is the one the wire really sends, and no
+   other body was moved onto it. Keyed on the schema rather than on the
+   status, which is what excludes `GET /health/ready`'s 503 by construction
+   rather than by a second exemption list.
 
 **Every scan carries its positive control, and the control runs before any
 membership claim is read out of it.** An app that failed to build and a PRD
@@ -41,6 +42,19 @@ router rather than flattening, so a one-level `isinstance(route, APIRoute)`
 walk finds **zero** of Usher's routes and iterates an empty list happily.
 `tests/unit/test_api_problem.py::test_the_route_walk_finds_the_shipped_surface`
 is the premise for the descent; every case here carries one of its own too.
+
+**The bounded untruth this file used to name is now checked, and the reason it
+was tolerated did not survive being written down.** A problem document goes out
+as `application/problem+json`; FastAPI rendered every
+`responses={404: {"model": ProblemResponse}}` declaration under the route's own
+response media type, i.e. `application/json`, so the document was wrong about
+the one header RFC 9457 makes load-bearing. The old note said the media type
+"buys a client nothing it cannot read off the `type` member", which is a claim
+about a client that has already decided to parse the body as a problem
+document -- and a generated client decides that from the declared media type,
+before it parses anything. Issue #6, and `api/app.py`'s `UsherAPI.openapi` is
+the fix. The two assertions it forks (`test_api_playback.py`,
+`test_api_watch.py`) each say so where they stand.
 """
 
 import ast
@@ -104,11 +118,13 @@ _ENDPOINTS_IN_THE_TABLES: Final = 29
 #: The anchor every non-2xx in `/openapi.json` has to point at.
 _PROBLEM_SCHEMA: Final = "ProblemResponse"
 
-#: A floor, for the reason `_ENDPOINTS_IN_THE_TABLES` is one: a walk that
-#: matched nothing passes every media-type claim below exactly as a walk that
-#: matched everything does, and on FastAPI 0.140 an empty walk is the *default*
-#: failure here. 56 at the time of writing.
-_PROBLEM_BODIES: Final = 50
+#: A floor under the media-type walk, for the reason `_ENDPOINTS_IN_THE_TABLES`
+#: is one: **56** responses across 35 operations carried a `ProblemResponse`
+#: when issue #6 was measured, and a route added later only raises that. What
+#: it guards is the vacuous pass -- a walk that matched nothing satisfies
+#: `wrong == {}` exactly as well as a document that is right, and on FastAPI
+#: 0.140 an empty walk is the *default* failure here.
+_PROBLEM_RESPONSES: Final = 50
 
 #: The non-problem bodies, and this one is an exact count rather than a floor
 #: on purpose: it is the arm that fails when a rewrite of the document moves a
@@ -513,37 +529,30 @@ def test_every_failure_the_schema_describes_is_a_problem_document(
     )
 
 
-def test_every_problem_response_is_described_at_the_media_type_the_wire_sends(
+def test_the_rewrite_registers_its_component_and_leaves_every_other_body_alone(
     document: Mapping[str, Any],
 ) -> None:
-    """Claim 5. `api/errors.py` sends every problem document as
-    `application/problem+json`; the document has to say so.
+    """The two arms the media-type case below cannot state, both of them
+    positive controls over `UsherAPI.openapi`'s rewrite.
 
-    RFC 9457's media type is how a client tells a problem document from a
-    route's own body **before** it parses anything, which is the one thing a
-    generated client acts on that it cannot recover from the `type` member --
-    reaching `type` means having already decided to parse the body as a
-    problem. FastAPI renders `responses={404: {"model": ProblemResponse}}`
-    under the *route's* response media type and offers no per-response
-    override, so this is asserted against `UsherAPI.openapi`'s rewrite rather
-    than against a declaration.
-
-    **Two positive controls, and the second is the one this repository has
-    been bitten without.** A walk that matched nothing satisfies every claim
-    below exactly as a walk that matched everything does -- and on FastAPI
-    0.140 an empty walk is the default failure, not an exotic one. And
-    `ProblemResponse` has to still be a *component*: the spelling a reader
+    **`ProblemResponse` has to still be a *component*.** The spelling a reader
     reaches for is `{"content": {PROBLEM_MEDIA_TYPE: {"schema": {"$ref":
     "#/components/schemas/ProblemResponse"}}}}` in place of `model=`, which
     renders the right key with the right `$ref` and, with no route naming the
-    model, never registers it -- measured, an app carrying only that spelling
-    publishes `components.schemas == ["Ok"]`. Every media-type assertion here
+    model, never registers it -- measured on a two-route probe against FastAPI
+    0.140.13, where an app carrying only that spelling publishes
+    `components.schemas == ["Ok"]`. Every media-type assertion in this file
     passes against that document while every `$ref` in it dangles.
+
+    **And the count of non-problem bodies is exact rather than a floor**,
+    because that is the arm a rewrite which moved a **200** dies on: a floor
+    cannot see a body that left the set. `moved == []` is the same claim from
+    the other side.
     """
     assert _PROBLEM_SCHEMA in document["components"]["schemas"], (
         f"`{_PROBLEM_SCHEMA}` is not a component, so every `$ref` naming it dangles -- which is "
         "what hand-writing the `$ref` in place of `model=` produces, and it passes every "
-        f"media-type assertion below: {sorted(document['components']['schemas'])}"
+        f"media-type assertion in this file: {sorted(document['components']['schemas'])}"
     )
 
     # A list of pairs and never a mapping keyed by the response: one response
@@ -556,18 +565,10 @@ def test_every_problem_response_is_described_at_the_media_type_the_wire_sends(
         where = f"{method.upper()} {path} {status}"
         target = problem if (reference or "").endswith(f"/{_PROBLEM_SCHEMA}") else other
         target.append((where, media))
-    assert len(problem) >= _PROBLEM_BODIES, (
-        f"the walk found {len(problem)} problem responses against a floor of {_PROBLEM_BODIES} -- "
+    assert len(problem) >= _PROBLEM_RESPONSES, (
+        f"the walk found {len(problem)} problem bodies against a floor of {_PROBLEM_RESPONSES} -- "
         "it is measuring nothing"
     )
-
-    at_json = sorted(where for where, media in problem if media == "application/json")
-    assert at_json == [], (
-        f"{len(at_json)} problem responses are described at `application/json`, which is not the "
-        f"media type the wire sends: {at_json}"
-    )
-    wrong = {where: media for where, media in problem if media != PROBLEM_MEDIA_TYPE}
-    assert wrong == {}, f"problem responses described at some other media type: {wrong}"
 
     assert len(other) == _NON_PROBLEM_BODIES, (
         f"the document describes {len(other)} non-problem bodies against {_NON_PROBLEM_BODIES} "
@@ -577,6 +578,95 @@ def test_every_problem_response_is_described_at_the_media_type_the_wire_sends(
     assert moved == [], (
         f"the rewrite moved bodies that are not problem documents onto {PROBLEM_MEDIA_TYPE}: "
         f"{moved}"
+    )
+
+
+def test_every_problem_response_is_declared_at_the_problem_media_type(
+    document: Mapping[str, Any],
+) -> None:
+    """RFC 9457's media type is the half a generated client switches on.
+
+    Enumerated rather than sampled, and keyed off the *schema* rather than off
+    a list of statuses: any response in the document whose body is a
+    `ProblemResponse` is in scope, so a route added later is covered without
+    this file being edited. The `content` map must hold
+    `application/problem+json` **and nothing else** -- a document declaring
+    both would let a client keyed on `application/json` keep parsing a problem
+    document as the route's own body, which is the defect rather than half of
+    it.
+    """
+    seen = 0
+    wrong: dict[str, list[str]] = {}
+    for path, method, operation in _operations(document):
+        for status, response in operation.get("responses", {}).items():
+            content = response.get("content", {})
+            declared = sorted(
+                media
+                for media, body in content.items()
+                if (body.get("schema", {}).get("$ref") or "").endswith(f"/{_PROBLEM_SCHEMA}")
+            )
+            if not declared:
+                continue
+            seen += 1
+            if sorted(content) != [PROBLEM_MEDIA_TYPE]:
+                wrong[f"{method.upper()} {path} {status}"] = sorted(content)
+    assert seen >= _PROBLEM_RESPONSES, (
+        f"only {seen} problem responses were examined against a floor of {_PROBLEM_RESPONSES}; "
+        "the walk found nothing and every claim below it is vacuous"
+    )
+    assert wrong == {}, (
+        f"problem responses declared at the wrong media type: {wrong}. The wire sends "
+        f"{PROBLEM_MEDIA_TYPE} (`api/errors.py`), so a client switching on the declared type "
+        "does not recognise a problem document."
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "path", "status", "code"),
+    [
+        pytest.param("/browse?cursor=not-a-cursor", "/browse", "400", "invalid_cursor", id="400"),
+        pytest.param("/stream/not-a-ticket", "/stream/{ticket}", "404", "ticket_invalid", id="404"),
+        pytest.param(
+            "/seasons/not-a-uuid/episodes",
+            "/seasons/{season_id}/episodes",
+            "422",
+            "validation_failed",
+            id="422",
+        ),
+    ],
+)
+async def test_the_media_type_the_schema_declares_is_the_one_the_wire_sends(
+    client: httpx.AsyncClient,
+    document: Mapping[str, Any],
+    url: str,
+    path: str,
+    status: str,
+    code: str,
+) -> None:
+    """The two halves compared against each other, on a real response.
+
+    The case above pins what the document says; this pins that what it says is
+    *true*, which is the whole of the defect -- a document and a server can
+    agree on a wrong string as easily as on a right one. Three routes rather
+    than one, and three of the seven vocabulary members, chosen because each
+    answers before its handler reaches Postgres: this file's app points at a
+    port nothing listens on.
+
+    `code` is asserted first as the premise. A 404 from an unrouted path and a
+    404 from a refused ticket carry the same status and the same media type,
+    and only one of them is this route answering.
+    """
+    response = await client.get(url)
+    assert response.status_code == int(status), response.text
+    assert response.json()["code"] == code, (
+        f"{url} did not reach the failure this case is about: {response.text}"
+    )
+    assert response.headers["content-type"] == PROBLEM_MEDIA_TYPE
+
+    described = document["paths"][path]["get"]["responses"][status]
+    assert sorted(described["content"]) == [response.headers["content-type"]], (
+        f"`/openapi.json` describes GET {path} {status} at {sorted(described['content'])} and the "
+        f"wire sends {response.headers['content-type']}"
     )
 
 

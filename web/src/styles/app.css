@@ -1,0 +1,55 @@
+/* The one stylesheet the app links.
+   Order is load-bearing and comes from `implementation/tailwind-theme.css`'s header:
+   Tailwind first, then the token layer (which owns the themes), then the @theme mapping
+   that turns those tokens into utilities. Reversing the last two makes `light:` silently
+   resolve against dark values.
+
+   ⚠️ **Every file is listed here rather than reached through the handoff's own
+   `design-system/styles.css`, and that is a workaround for a real defect rather
+   than a preference.** CSS requires `@import` to precede all other rules. Once
+   `@import "tailwindcss"` is inlined, an imported file whose *content is itself
+   nothing but `@import` rules* has those rules sitting after thousands of lines
+   of Tailwind, so they are dropped — silently, as eleven build warnings nobody
+   reads, leaving the whole product unstyled: no `--bg-canvas`, no `.u-btn`,
+   every `var()` invalid at computed-value time. Measured before the fix:
+   24,900 bytes of emitted CSS containing **zero** design-system rules.
+
+   The two files this replaces — `design-system/styles.css` and
+   `components/components.css` — are kept exactly as the handoff shipped them,
+   because they are that bundle's own contract and a consumer outside Vite links
+   them and they work. `e2e/kit.spec.ts` asserts a token actually resolves in a
+   real browser, so a regression here fails a test rather than a screenshot
+   review. */
+@import 'tailwindcss';
+
+/* ---- the token layer: themes, ramps, type, space, elevation, motion, z ---- */
+@import '../design-system/tokens/fonts.css';
+@import '../design-system/tokens/palette.css';
+@import '../design-system/tokens/semantic.css';
+@import '../design-system/tokens/typography.css';
+@import '../design-system/tokens/spacing.css';
+@import '../design-system/tokens/layout.css';
+@import '../design-system/tokens/elevation.css';
+@import '../design-system/tokens/motion.css';
+@import '../design-system/tokens/layers.css';
+@import '../design-system/tokens/base.css';
+
+/* ---- the component layer: one file per group, ten groups ---- */
+@import '../design-system/components/icon/icon.css';
+@import '../design-system/components/actions/actions.css';
+@import '../design-system/components/forms/forms.css';
+@import '../design-system/components/navigation/navigation.css';
+@import '../design-system/components/media/media.css';
+@import '../design-system/components/data/data.css';
+@import '../design-system/components/status/status.css';
+@import '../design-system/components/feedback/feedback.css';
+@import '../design-system/components/playback/playback.css';
+@import '../design-system/components/charts/charts.css';
+
+/* ---- the @theme mapping, which must follow both ---- */
+@import '../design-system/styles/tailwind-theme.css';
+
+/* Tailwind v4 scans source files for class names. The design system's own classes live in
+   plain CSS (`u-*`), not in utilities, so they need no scanning — but the screens use
+   utilities heavily and Vite's default detection stops at the package boundary. */
+@source '../';

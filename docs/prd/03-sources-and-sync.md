@@ -358,7 +358,7 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 | Lane | Trigger | Work |
 |---|---|---|
 | **Push** | WebSocket event | **Apply it inline when it is small; defer to a delta when it is large.** A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk instead, because a request per item against a 1,126,789-item library is a design defect rather than a slow path |
-| **Reconnect delta** | Socket re-established, **or a push event deferred to a delta** | Items changed since the last cursor — and **refused outright when there is no cursor**, because a source with no completed item-lane run has none and the "delta" is then a walk of the whole library that nobody asked for (M10 S5; the lane starts itself for every enabled source, so on a fresh deployment that walk is the first thing the server does). The lane logs a WARNING naming the source and `usher sync --kind full`, and keeps the socket up. `usher sync --kind delta` on such a source still walks: the refusal is the *lane's*, not `ReconcileService`'s. **The refusal covers the deferral trigger too, and that is a real cost**: an oversized event on a cursorless source is applied neither inline nor by a walk, so it is discarded until the full sync runs — deliberate, because the alternative is that walk of everything on the strength of one event. **And "the catalog is empty anyway" is not the premise**: a deployment bootstrapped in bulk ([04](04-catalog-bootstrap.md)) has a populated catalog and no `sync_runs` row at all — `BootstrapService` writes `import_runs` — so it is refused indefinitely, with the remedy in the line. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds — but that limit is a bound on *cadence* only, and the first gap after a restart is never skipped. **And a delta that *does* have a cursor is bounded in size** (M10 S6): the item walk stops at `USHER_PUSH_GAP_MAX_ITEMS` and the run records **`FAILED`**, never `COMPLETED`, because `latest_completed_cursor` reads `started_at` of the newest *completed* run — so a truncated run that completed would advance the cursor to its own start instant and everything past the ceiling would never be requested by any delta again, with no scheduled full reconcile anywhere in `src/` to cover it. Nothing the bounded walk saw is lost (`_flush` commits per batch); what it costs is the cursor advance, and the WARNING names `usher sync --kind full`. **The ceiling bounds the item lane only** — the watch lane owns its own cursor under `MinDateLastSavedForUser` and still walks whole after a truncated item walk, which is a stated cost rather than an oversight |
+| **Reconnect delta** | Socket re-established, **or a push event deferred to a delta** — and, under `USHER_PUSH_GAP_CLOSE`'s `cursored` default, **only when a previous item walk completed** | Items changed since the last cursor — and **refused outright when there is no cursor**, because a source with no completed item-lane run has none and the "delta" is then a walk of the whole library that nobody asked for (issue #9; the lane starts itself for every enabled source, so on a fresh deployment that walk is the first thing the server does). The lane logs a WARNING naming the source and `usher sync`, and keeps the socket up. `usher sync --kind delta` on such a source still walks: the refusal is the *lane's*, not `ReconcileService`'s, and `USHER_PUSH_GAP_CLOSE=always` restores the old behaviour (warning first) while `never` turns gap-closing walks off entirely. **The refusal covers the deferral trigger too, and that is a real cost**: an oversized event on a cursorless source is applied neither inline nor by a walk, so it is discarded until the sync runs — deliberate, because the alternative is that walk of everything on the strength of one event. **And "the catalog is empty anyway" is not the premise**: a deployment bootstrapped in bulk ([04](04-catalog-bootstrap.md)) has a populated catalog and no `sync_runs` row at all — `BootstrapService` writes `import_runs` — so it is refused indefinitely, with the remedy in the line. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds — but that limit is a bound on *cadence* only, and the first gap after a restart is never skipped. **And a delta that *does* have a cursor is bounded in size** (M10 S6): the item walk stops at `USHER_PUSH_GAP_MAX_ITEMS` and the run records **`FAILED`**, never `COMPLETED`, because `latest_completed_cursor` reads `started_at` of the newest *completed* run — so a truncated run that completed would advance the cursor to its own start instant and everything past the ceiling would never be requested by any delta again, with no scheduled full reconcile anywhere in `src/` to cover it. Nothing the bounded walk saw is lost (`_flush` commits per batch); what it costs is the cursor advance, and the WARNING names `usher sync --kind full`. **The ceiling bounds the item lane only** — the watch lane owns its own cursor under `MinDateLastSavedForUser` and still walks whole after a truncated item walk, which is a stated cost rather than an oversight |
 | **Full reconcile** | Nightly, or an operator's `POST /admin/sources/{id}/sync` (M9) | Walk the source; upsert everything; mark unseen items `available = false` |
 
 Polling is the backstop, not the design.
@@ -386,8 +386,9 @@ no cursor, which is the one thing it will not do.** It is the only caller of
 enabled source by the refresher before its first sleep, so a source that has
 never completed an item-lane run would otherwise get a full walk under a
 delta's name as the first act of a freshly started server. The gap-closer
-reads `ReconcileService.delta_cursor(source)` and returns on `None`, logging
-one WARNING that names the source and the command that fixes it. The socket
+reads `ReconcileService.cursor_for(source, DELTA)` and, under
+`USHER_PUSH_GAP_CLOSE`'s `cursored` default, returns on `None`, logging one
+WARNING that names the source and the command that fixes it. The socket
 stays up and the push lane keeps delivering, which is the point of the lane;
 the walk is the operator's to schedule. **`_close_gap` has two triggers, not
 one** — `PushSupervisor.run` calls it on reconnect and again whenever an
@@ -459,6 +460,38 @@ goes stale, not wrong". **Emby does not re-deliver what a disconnected client
 missed** — measured 2026-08-02, over a 61 s outage with a real change made
 inside it and 90 s of listening afterwards — so the gap-closing delta is not
 belt-and-braces, it is the only cover there is.
+
+🔴 **A delta with no cursor is a full walk, and until 2026-08-19 the lane
+performed one on startup without saying so.** The gap-closer reads its `since`
+from the newest *completed* item-lane run; a deployment that has never
+completed one has no `since`, so `list_items(since=None)` reads **every item
+the source has** — 1,126,789 on the household this project measures — issued by
+`uvicorn` with default settings and no operator command, against a media server
+the operator may not own. `push_gap_min_interval_seconds` never covered this:
+it bounds how *often* a gap is closed, not how large the walk is.
+
+The fix for the *cursorless* walk is a decision rather than a limit, because
+**a truncation that records `COMPLETED` is not honest**. A bound in the
+iterator that ended a run as completed would have `latest_completed_cursor`
+read that run's `started_at` — so every item the truncated walk never reached
+would be silently skipped by every later delta, forever. So the cursorless walk
+is either performed whole or refused whole, and `USHER_PUSH_GAP_CLOSE`
+(`cursored` by default) is where the operator says which: a *gap* is the window
+a socket was down, and with no completed walk the window is the entire catalog,
+which is `usher sync`'s job. Every arm logs before it acts — the uncursored
+ones at `WARNING`, naming the source and the size — because an operator who
+learns about the walk from their media server's access log has learned too
+late. [08](08-operations.md) has the operator-facing version.
+
+⚠️ **A truncation that records `FAILED` *is* honest, and that is what bounds
+the other half** (M10 S6). `USHER_PUSH_GAP_MAX_ITEMS` stops a gap-closing delta
+that *does* have a cursor after that many items and records the run `FAILED`
+with a `gap_delta_ceiling:` token, so no cursor advances and nothing the walk
+never reached is skipped — everything it *did* see is already committed by
+`_flush`, and the rest is what `usher sync --kind full` closes. The two are one
+hazard answered on two axes: `USHER_PUSH_GAP_CLOSE` decides whether a walk with
+no cursor happens at all, `USHER_PUSH_GAP_MAX_ITEMS` bounds how large one with
+a cursor may get. Neither bounds the watch lane, which owns its own cursor.
 
 **Retraction is a separate step, and it can decline.** Marking unseen items
 unavailable is a distinct call the reconciler makes only after the walk
@@ -838,6 +871,31 @@ raises it through `ENRICHMENT_RANK`
 ([ADR-0008](decisions/0008-enrichment-tier-vs-failure.md)). A failed
 enrichment records `Title.enrichment_error` and leaves the tier exactly where
 it was.
+
+**`genres` is the one replaced field where the merge asks a second question,
+and it is the one that was destroying data —
+[ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md).** Every
+field in `_ENRICHABLE` is replaced wholesale when the provider supplies it, and
+for a *set* that means a title whose only IMDb label was `Biography` came out of
+enrichment with the label **gone** rather than re-spelled: TMDb has no
+`Biography` in either id space, so there was nothing for it to become. Measured
+2026-08-19 by joining the real `title.basics.tsv.gz` to the live catalog:
+**53,724 of 132,116 enriched titles lost at least one IMDb label — 69,160
+deletions**, 11,466 of them of a concept TMDb cannot express, `Film-Noir`
+deleted 827 times and surviving 0. Control: **0 of 1,021,623** skeletons lost
+one, which is what makes it the enrichment boundary and nothing else.
+`MetadataProvider.genre_vocabulary` now names the canonical concepts a provider
+can express — **the set it is entitled to delete** — and a label outside it
+survives. What still gets overwritten is a label the provider *could* have said
+and did not: 13,141 of those deletions were `Drama`, which is TMDb disagreeing
+about a film and is usually right.
+
+⚠️ **The 53,724 titles already enriched keep their deletions, and `usher genres
+--backfill` does not repair them.** That command normalises *spellings* — it
+maps `Sci-Fi` onto `Science Fiction` — and a deleted label is not a spelling,
+it is gone. Restoring one needs `title.basics.tsv.gz` re-joined to the catalog,
+which is a bootstrap-shaped operation and not a vocabulary one. **Normalisation
+is not restoration**, and this is the part of issue #30 neither change closes.
 
 **A successful enrichment now does one more thing:** after the commit, beside
 the `title.updated` publish, it enqueues exactly one `index` job for the title
