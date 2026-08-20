@@ -103,7 +103,7 @@ jobs:
           fi
           echo "production bundle is clean"
 
-  # End-to-end and accessibility. **Not visual regression** — see below.
+  # End-to-end and accessibility. The pixels are the `console-visual` job below.
   #
   # Runs in Playwright's own image, tagged with the exact `@playwright/test`
   # version from `package-lock.json`, so the browser and its system libraries
@@ -111,27 +111,12 @@ jobs:
   # It also skips `playwright install --with-deps`, which is an apt install on
   # every run.
   #
-  # ⚠️ **The 120 screenshot comparisons are tagged `@visual` and excluded here,
-  # and that is a stated reduction in coverage rather than a quiet one.**
-  # Measured three ways: on a bare runner all 120 failed; re-rendered inside
-  # this image they were byte-identical to a developer machine (120/120 by
-  # `cmp`); and running this image *on the runner* all 120 failed again, every
-  # one with an identical width and a different height — text wrapping
-  # differently because glyph advance widths differ. Reproduced identically on
-  # retry, so CI is deterministic and simply renders differently.
-  #
-  # Adopting CI's pixels would pass and would leave nobody able to regenerate a
-  # baseline: an intentional design change would mean pushing, waiting for red,
-  # downloading a 409 MB artefact and committing its output. A harness a
-  # developer cannot run is worse than none. Loosening the threshold is not the
-  # lever either — the diffs are 2–9% against a 1% bar, and a tolerance that
-  # swallows a 33 px layout shift swallows a real regression too.
-  #
-  # What stays in CI is the deterministic half and most of the value: twelve
-  # axe sweeps over every component in both themes and both densities (which is
-  # what catches a contrast regression), and `e2e/stylesheet.spec.ts` resolving
-  # real tokens in a real browser. The pixels run locally:
-  # `npm run e2e:visual`, or `e2e:visual:docker` to render in this same image.
+  # This is where `e2e/stylesheet.spec.ts` runs, and that file is load-bearing
+  # rather than decorative: it asserts the design system actually reached the
+  # browser — tokens resolving to real values, a component rule with a real
+  # height, and a `FontFace` reaching `loaded`. Each of those three exists
+  # because the corresponding thing silently did not happen and every cheaper
+  # layer passed anyway.
   console-e2e:
     runs-on: ubuntu-latest
     container:
@@ -166,33 +151,27 @@ jobs:
             web/test-results/
           retention-days: 7
 
-  # The 120 screenshot comparisons, on a runner that renders like the baselines.
+  # The 120 screenshot comparisons.
   #
-  # A pixel baseline is only comparable within one rendering environment, and
-  # that was measured three ways: on a hosted runner all 120 failed; re-rendered
-  # inside the pinned Playwright image on the machine this runner lives on they
-  # were **byte-identical** to the committed files (120/120 by `cmp`); and the
-  # same pinned image *on a hosted runner* failed all 120 again, every one with
-  # an identical width and a different height. So the image was necessary and
-  # not sufficient — the host is the variable.
+  # These were red for a long time and the diagnosis was wrong twice. The
+  # signature — identical width, different height, every time, reproducible on
+  # retry — was read as "a pixel baseline is only comparable within one
+  # rendering environment", and the job was moved first into this pinned image
+  # and then onto a self-hosted runner to chase it. Neither helped, because the
+  # environment was never the variable.
   #
-  # This job closes that: the baselines were generated in this image on this
-  # machine, so this is the one place the comparison is meaningful. A developer
-  # regenerates them with `npm run e2e:visual:docker:update`, which is the
-  # identical image and the identical command.
+  # The variable was a **product bug the screenshots were correctly reporting**:
+  # `--font-sans` named `Instrument Sans`, but `@fontsource-variable` registers
+  # the family as `Instrument Sans Variable`, so no `@font-face` ever matched
+  # and every environment rendered in *its own* system fallback. Different
+  # fallback, different wrapping, different height. With the family name fixed a
+  # bare host and this image agree to the byte, so the baselines are portable
+  # and this runs on a hosted runner like everything else.
   #
-  # ⚠️ **`if:` is a security control, not a filter.** `anirudhlath/usher` is a
-  # PUBLIC repository and this runner is a systemd service on a machine that is
-  # internet-facing, holds real media-server credentials and a 1.27M-title
-  # database, and serves the deployed console. A pull request from a **fork**
-  # must never execute on it. Same-repo pushes and same-repo pull requests only;
-  # a fork PR skips this job and still gets `check`, `console`, `console-e2e`
-  # and `image` on hosted runners.
+  # The lesson worth keeping: a test that fails everywhere is evidence about the
+  # code, not about the runners. Moving it is not fixing it.
   console-visual:
-    if: >-
-      github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64, usher-ci]
+    runs-on: ubuntu-latest
     container:
       image: mcr.microsoft.com/playwright:v1.62.1-noble
       options: --ipc=host

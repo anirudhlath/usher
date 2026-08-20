@@ -55,4 +55,10 @@ export async function freeze(page: Page): Promise<void> {
       caret-color: transparent !important;
     }`,
   })
+  // The webfonts ship `font-display: swap`, so a screenshot taken before they
+  // arrive is a picture of the fallback stack — same viewport width, different
+  // wrapping, a page tens of pixels taller or shorter. That is a race the
+  // baselines cannot absorb, and it is the likelier explanation for the
+  // `feedback` group flaking at three workers than webfont *bandwidth* was.
+  await page.evaluate(() => document.fonts.ready)
 }

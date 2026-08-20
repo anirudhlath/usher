@@ -96,13 +96,13 @@ WORK` on screen**, with the missing routes in mono. Seven such surfaces are
 
 Four layers, each covering what the one below cannot:
 
-| Layer      | Tool                                   | What it catches                                                                  |
-| ---------- | -------------------------------------- | -------------------------------------------------------------------------------- |
-| Component  | Vitest + Testing Library               | props → markup, keyboard models, ARIA, the anti-patterns each `.prompt.md` names |
-| Screen     | + MSW over the real `client.ts`        | RFC 9457 parsing, keyset paging, the five states per screen                      |
-| Gallery    | Playwright + axe                       | colour contrast against the real stylesheet                                      |
-| End to end | Playwright at 1440 / 834 / 390         | the built bundle, `base: '/console/'`, responsive markup switches                |
-| Visual     | Playwright screenshots, **local only** | a pixel baseline per component group — see below                                 |
+| Layer      | Tool                            | What it catches                                                                  |
+| ---------- | ------------------------------- | -------------------------------------------------------------------------------- |
+| Component  | Vitest + Testing Library        | props → markup, keyboard models, ARIA, the anti-patterns each `.prompt.md` names |
+| Screen     | + MSW over the real `client.ts` | RFC 9457 parsing, keyset paging, the five states per screen                      |
+| Gallery    | Playwright + axe                | colour contrast against the real stylesheet                                      |
+| End to end | Playwright at 1440 / 834 / 390  | the built bundle, `base: '/console/'`, responsive markup switches                |
+| Visual     | Playwright screenshots          | a pixel baseline per component group — see below                                 |
 
 MSW is used rather than a hand-stubbed `fetch` so tests exercise the real
 transport — its `problem+json` content-type sniff, its status-0 path for a
@@ -115,44 +115,55 @@ The e2e suite runs a `--mode fixtures` build, which starts MSW in the browser.
 The production build contains no mock server and CI asserts that rather than
 assuming tree-shaking handled it.
 
-**The 120 screenshot comparisons are tagged `@visual` and run on a self-hosted
-runner**, in the `console-visual` job, because a pixel baseline is only
-comparable within one rendering environment. Measured three ways: on a hosted
-runner all 120 failed; re-rendered inside the pinned
-`mcr.microsoft.com/playwright` image on a developer machine they came out
-**byte-identical** to the committed files (120/120 by `cmp`); and that same
-pinned image _on a hosted runner_ failed all 120 again — every one with an
-identical width and a different height, which is text wrapping differently
-because glyph advance widths differ, reproduced on every retry.
+**The 120 screenshot comparisons are tagged `@visual` and run as their own CI
+job**, `console-visual`, in the same pinned `mcr.microsoft.com/playwright`
+image `console-e2e` uses.
 
-So the image was necessary and not sufficient: the **host** is the variable.
-The self-hosted runner is the machine the baselines were generated on, which
-makes it the one place the comparison means anything.
+⚠️ **They caught a real defect and were disbelieved for it — read this before
+distrusting the suite again.** All 120 failed with one signature: identical
+width, different height (919→886, 823→801, 653→633), reproducing byte-for-byte
+on every retry and on three separate machines. That was diagnosed as "a pixel
+baseline is only comparable within one rendering environment", and the job was
+moved into a pinned container, then out of CI entirely, then onto a self-hosted
+runner. Three changes to the harness, none to the code.
 
-The two alternatives were both worse. Adopting a hosted runner's pixels would
-pass and leave nobody able to regenerate a baseline — an intentional design
-change would mean pushing, waiting for red, downloading a 409 MB artefact and
-committing its output. And loosening the threshold is not the lever: the diffs
-are 2–9% against a 1% bar, and a tolerance that swallows a 33 px layout shift
-swallows a real regression.
+The screenshots were right. `--font-sans` named `Instrument Sans`, but
+`@fontsource-variable` registers the family as **`Instrument Sans Variable`**,
+so no `@font-face` ever matched: the woff2 shipped in the bundle, was
+fingerprinted and served, and never rendered a glyph. Every environment fell
+through to its own system stack — the same page measured 18,666 px tall on a
+bare host and 18,540 in the container, from byte-identical CSS. With the family
+name corrected both give 18,568, and baselines generated in the container pass
+on a bare host unchanged.
 
-⚠️ **That job is guarded to same-repo events.** This repository is public and
-the runner is a systemd service on a machine that is internet-facing and holds
-real credentials, so a fork's pull request must never execute on it. A fork PR
-skips `console-visual` and still gets every other job on hosted runners.
+Two things generalise. **A test failing identically everywhere is evidence
+about the code, not about the runners** — the non-portability theory predicted
+flakiness and then explained away perfect reproducibility, which should have
+killed it. And **the pixels were the only layer that could see this**: jsdom has
+no font stack, axe reads contrast rather than metrics, and the computed
+`font-family` string reads back the same whether the family resolved or fell
+through. `e2e/stylesheet.spec.ts` now asserts a `FontFace` actually reaches
+`loaded`, so the cheap layer catches it next time.
+
+The threshold is deliberately not a lever — 1% is what let a 33 px shift
+register as a failure rather than as noise.
 
 ```bash
-npm run e2e                   # what CI runs: axe sweeps, tokens, behaviour
-npm run e2e:visual            # the 120 screenshots, serialised
-npm run e2e:visual:update     # regenerate them after an intentional change
-npm run e2e:visual:docker     # the same, inside the pinned image
+npm run e2e                        # axe sweeps, tokens, fonts, behaviour
+npm run e2e:visual                 # the 120 screenshots, serialised
+npm run e2e:visual:docker          # the same, in the pinned image CI uses
+npm run e2e:visual:docker:update   # regenerate after an intentional change
 ```
 
 `--workers=1` on the visual scripts is not caution: at three workers the
-`feedback` group flaked, and passed in isolation twice in a row. Three browsers
-racing one preview server for webfonts is enough to catch a screenshot
-mid-layout, and a deterministic 3.9 min beats a flaky 38 s for a suite whose
-whole job is to notice a changed pixel.
+`feedback` group flaked and then passed in isolation twice in a row. The
+explanation recorded at the time — browsers racing the preview server for
+webfonts — cannot have been right, because no webfont was loading at all then;
+it is left unexplained rather than re-rationalised. `freeze()` now awaits
+`document.fonts.ready` before every screenshot, which closes the race that
+genuinely does exist now that `font-display: swap` has a real face to swap in.
+A deterministic 4.2 min still beats a flaky 38 s for a suite whose whole job is
+to notice a changed pixel.
 
 ## Regenerating the API types
 

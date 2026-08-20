@@ -126,37 +126,35 @@ test.describe('component gallery', () => {
 
       for (const group of GROUPS) {
         /**
-         * **Tagged `@visual`, and excluded from CI. This is a real reduction in
-         * coverage and it is stated rather than hidden.**
+         * **Tagged `@visual` so the pixels run as their own CI job**, and
+         * regenerated with `npm run e2e:visual:docker:update` — the pinned
+         * `mcr.microsoft.com/playwright` image, which is what CI runs too.
          *
-         * A pixel baseline is only comparable within one rendering
-         * environment. Measured three ways: on `ubuntu-latest` all 120 failed;
-         * re-rendered inside the pinned `mcr.microsoft.com/playwright` image
-         * they came out **byte-identical** to a developer machine (120/120 by
-         * `cmp`); and running that same pinned image *on the runner* all 120
-         * failed again — every one with an identical width and a different
-         * **height** (653→633, 823→801, 919→886), which is text wrapping
-         * differently because glyph advance widths differ. CI is not flaky
-         * about it: every failure reproduced identically on its retry.
+         * **These caught a real defect and were disbelieved for it, which is
+         * the thing to remember about this file.** All 120 failed with the
+         * same signature — identical width, different **height** (919→886,
+         * 823→801, 653→633), reproducing exactly on retry. That was read as a
+         * rendering-environment difference, and the job was moved into a
+         * pinned container and then onto a self-hosted runner to chase it.
          *
-         * So the baselines could be adopted from CI and would match — and then
-         * nobody could ever regenerate one. An intentional design change would
-         * mean pushing, waiting for a red build, downloading a 409 MB artefact
-         * and committing its pixels. A harness a developer cannot run is worse
-         * than no harness.
+         * It was none of those. `--font-sans` asked for `Instrument Sans`
+         * while `@fontsource-variable` registers `Instrument Sans Variable`,
+         * so no `@font-face` matched, the bundled woff2 was never used, and
+         * every machine rendered in whatever its own system stack resolved —
+         * 18,666 px of document on the bare host, 18,540 in the container,
+         * from byte-identical CSS. With the family name corrected both give
+         * 18,568 and all 120 pass in either place.
          *
-         * The threshold is deliberately *not* the lever. The diffs are 2–9%
-         * against a 1% bar, and a tolerance wide enough to swallow a 33 px
-         * layout shift is wide enough to swallow a real regression.
+         * Two things follow. **A test that fails identically in every
+         * environment is evidence about the code**, and "the baseline is not
+         * portable" was a hypothesis that predicted flakiness and then
+         * explained away perfect reproducibility. And **the pixels were the
+         * only layer that could see this**: jsdom has no font stack, axe reads
+         * contrast rather than metrics, and the computed `font-family` string
+         * reads back identically whether the family resolved or fell through.
          *
-         * **What CI keeps is the deterministic half, and it is most of the
-         * value**: twelve axe sweeps over every component in both themes and
-         * both densities — which is what catches a contrast regression —
-         * `e2e/stylesheet.spec.ts` resolving real tokens in a real browser, and
-         * 1,044 component tests asserting exact class lists. The pixels catch
-         * what none of those do, and they catch it locally:
-         * `npm run e2e:visual`, or `npm run e2e:visual:docker` to render in the
-         * pinned image.
+         * The threshold is deliberately not a lever. 1% is what let a 33 px
+         * layout shift register as a failure instead of noise.
          */
         test(`${group} matches its baseline`, { tag: '@visual' }, async ({ page }) => {
           await openGallery(page, appearance)

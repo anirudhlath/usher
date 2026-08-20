@@ -2,8 +2,13 @@
    Rule: monospace is for identifiers and measurements only — UUIDs, external_ids, cursors, codecs,
    counts, latencies, timestamps. Never for prose, never for a label. */
 :root{
-  --font-sans:'Instrument Sans','Helvetica Neue',system-ui,sans-serif;
-  --font-mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;
+  /* The `Variable` suffix is load-bearing: it is the family name the two
+     @fontsource-variable packages register in their own @font-face, and asking
+     for 'Instrument Sans' alone matched nothing — the woff2 shipped in the
+     bundle and no glyph ever came from it. The unsuffixed name stays after it
+     so a locally installed copy still wins over the system stack. */
+  --font-sans:'Instrument Sans Variable','Instrument Sans','Helvetica Neue',system-ui,sans-serif;
+  --font-mono:'JetBrains Mono Variable','JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;
 
   /* weights — Instrument Sans variable 400–700 */
   --weight-regular:400; /* @kind font */ --weight-medium:500;--weight-semibold:600;--weight-bold:700;

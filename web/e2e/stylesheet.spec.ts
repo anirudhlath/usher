@@ -83,4 +83,51 @@ test.describe('the design system reaches the browser', () => {
     expect(height, '.u-btn has no height: the component layer did not load').not.toBe('auto')
     expect(parseFloat(height)).toBeGreaterThan(20)
   })
+
+  /**
+   * The brand typefaces are the ones actually rendering.
+   *
+   * Same defect class as the dropped `@import` above, and it shipped for the
+   * same reason: the woff2 files were in the bundle, fingerprinted and served,
+   * so every check that asked "are the fonts there" said yes. Nothing asked
+   * whether a glyph had ever come from one. `@fontsource-variable` registers
+   * its family as **`Instrument Sans Variable`**; `--font-sans` named
+   * `Instrument Sans`, which matched no `@font-face` at all, so the whole
+   * product rendered in each machine's system fallback.
+   *
+   * That is invisible to every other layer. jsdom has no font stack, axe reads
+   * contrast rather than metrics, and the computed `font-family` string is the
+   * *declaration* — it reads back exactly the same whether the family resolved
+   * or fell through. The only evidence that separates the two is a `FontFace`
+   * reaching `loaded`, which happens only when the page actually demanded it.
+   *
+   * It surfaced as 120 red screenshots that I misread as a CI rendering
+   * quirk. It was not: the fallback simply differs per machine, and once the
+   * real face loads a bare host and the pinned container agree to the pixel.
+   */
+  test('the brand typefaces are the ones rendering, not a system fallback', async ({ page }) => {
+    await page.goto('/console/kit')
+    await expect(page.getByRole('heading', { name: /component gallery/i })).toBeVisible()
+
+    const faces = await page.evaluate(async () => {
+      await document.fonts.ready
+      return [...document.fonts].map((face) => ({ family: face.family, status: face.status }))
+    })
+
+    // Only the subsets a page actually needs are fetched, so this asserts "at
+    // least one face of this family loaded" rather than all of them. Latin is
+    // the one every screen demands; cyrillic and vietnamese legitimately stay
+    // `unloaded` forever.
+    for (const family of ['Instrument Sans Variable', 'JetBrains Mono Variable']) {
+      const declared = faces.filter((face) => face.family === family)
+      expect(
+        declared.length,
+        `no @font-face declared for ${family}: the package import is gone`,
+      ).toBeGreaterThan(0)
+      expect(
+        declared.some((face) => face.status === 'loaded'),
+        `${family} is declared but no subset ever loaded: --font-sans/--font-mono names a family no @font-face provides, so this page is rendering in a system fallback`,
+      ).toBe(true)
+    }
+  })
 })
