@@ -81,6 +81,7 @@ from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.domain.source import Source
 from usher.domain.title import Title
+from usher.ports.bulk import ImdbTitle
 from usher.ports.embedding import Embedder
 from usher.ports.errors import PortUnavailable
 from usher.ports.events import ClientEvent, EventPublisher, NullEventPublisher
@@ -1471,6 +1472,22 @@ class _JournallingRuns(FakeImportRunRepository):
         await super().save(run)
 
 
+#: One title, invented, so a phase that refuses an empty catalog will proceed.
+#: Every value here is synthetic (`tests/fixtures/README.md`'s rule) and none
+#: of them is read by anything below -- the only property under test is that
+#: `count_titles()` answers non-zero, which is the whole of what the four
+#: `imdb_id`-joining phases guard on.
+_A_SEEDED_TITLE = ImdbTitle(
+    imdb_id="tt99000101",
+    kind=TitleKind.MOVIE,
+    name="The Quiet Vacuum",
+    original_name=None,
+    year=1994,
+    end_year=None,
+    runtime_minutes=101,
+)
+
+
 def _offline_client(*_: object, **__: object) -> httpx.AsyncClient:
     def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("the bootstrap dispatch reached the network")
@@ -1484,6 +1501,7 @@ async def _journal_of_a_full_bootstrap(
     *,
     through_the_worker: bool,
     phase: BootstrapPhase = BootstrapPhase.ALL,
+    over_a_populated_catalog: bool = False,
 ) -> list[str]:
     """One bootstrap run's datasets and window edges, driven either the way
     `usher bootstrap` drives it or the way the `bootstrap` job handler does,
@@ -1494,12 +1512,25 @@ async def _journal_of_a_full_bootstrap(
     goes through the identical fakes rather than a second set, which is what
     makes *"this phase imports one file and opens no window"* an assertion
     about the same dispatch the parity case walks.
+
+    `over_a_populated_catalog` seeds **one** title, and it defaults to `False`
+    because an empty catalog is what makes the `--phase all` journal legible
+    at all: `credit-names`, `aliases` and `movielens` each answer an empty
+    `titles` with a refusal *sentence* rather than a dataset name, which is how
+    all six phases show up in one run whose transport refuses everything.
+    `ratings` refuses the same way and for a worse reason (its checkpoint is
+    shared with `imdb`), so a journal of what that phase *imports* has to be
+    taken over a catalog it will not refuse. The seed is invisible to the
+    journal -- neither fake records an `upsert_titles` -- so it changes what
+    the dispatch does and not what is written down.
     """
     journal: list[str] = []
     catalog = _JournallingCatalog(journal)
     runs = _JournallingRuns(journal)
     settings = _settings(bulk_data_dir=tmp_path)
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    if over_a_populated_catalog:
+        await catalog.upsert_titles([_A_SEEDED_TITLE])
 
     if not through_the_worker:
         # Byte for byte what `cli._bootstrap` calls, minus the engine it owns
@@ -1635,6 +1666,14 @@ async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
     assert inside == ["imdb.title.basics", "imdb.title.ratings"]
     assert through_cli.count("window-open") == 1
     assert through_cli.count("window-close") == 1
+    # **"the ratings file is imported once" is deliberately *not* asserted
+    # here**, and the reason is this case's own fixture. Its catalog is empty,
+    # so a `RATINGS` arm wrongly reached by `--phase all` refuses instead of
+    # importing, and `journal.count("imdb.title.ratings") == 1` would hold
+    # against the very defect it looks like it is for -- an assertion that
+    # cannot fail, on the line most likely to be trusted. It lives in
+    # `test_a_full_run_imports_the_ratings_file_exactly_once`, over a seeded
+    # catalog, which is the only fixture in which the doubling is reachable.
 
     assert through_cli[through_cli.index("wikidata.crosswalk") + 1] == "link-crosswalk"
     assert _phases_in(through_cli) == list(FULL_SEQUENCE)
@@ -1662,10 +1701,21 @@ def test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias() -> N
     # The premise: both halves are non-empty, so the equality above is not
     # satisfied by an empty set on either side.
     assert FULL_SEQUENCE and PHASE_ALIASES
+    # **And the two orders are one order.** The three assertions above are
+    # about *membership* and cannot see a permutation, so the enum's
+    # declaration order and `FULL_SEQUENCE`'s could drift apart in green:
+    # measured 2026-08-19 by swapping `CROSSWALK` and `TMDB_IDS` in the enum
+    # *and* in `test_cli`'s `PHASES` literal -- a coherent-looking edit -- and
+    # leaving `FULL_SEQUENCE` and the dispatch alone: 4,237 passed. The damage
+    # is that `--help` derives its `choices=` from the enum and would then
+    # advertise, to an operator reading it as the run order, a sequence
+    # `--phase all` does not execute.
+    assert tuple(one for one in BootstrapPhase if one not in PHASE_ALIASES) == FULL_SEQUENCE
 
 
+@pytest.mark.parametrize("through_the_worker", [False, True])
 async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, through_the_worker: bool
 ) -> None:
     """**The point of the phase, asserted rather than described.**
 
@@ -1682,11 +1732,149 @@ async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
     over `"imdb.title.basics" not in journal`: it also fails on
     `window-open`/`window-close`, which is the second defect and the one no
     membership test aimed at basics would catch.
+
+    **Both drivers, because only the worker arm can see the `Job.key`.**
+    `usher bootstrap` hands `run_bootstrap` a `BootstrapPhase` directly; the
+    `bootstrap` job handler reads `Job.key` and converts. The parity case above
+    drives only `ALL`, for which `phase.value` is indistinguishable from the
+    literal `"all"` that used to be there -- measured: reverting that site to
+    `BootstrapPhase.ALL.value` leaves the whole unit suite green. This arm is
+    what makes the threading observable, since a handler that ignored the key
+    would run `--phase all` here and journal seven datasets.
     """
     journal = await _journal_of_a_full_bootstrap(
-        monkeypatch, tmp_path, through_the_worker=False, phase=BootstrapPhase.RATINGS
+        monkeypatch,
+        tmp_path,
+        through_the_worker=through_the_worker,
+        phase=BootstrapPhase.RATINGS,
+        over_a_populated_catalog=True,
     )
     assert journal == ["imdb.title.ratings"]
+
+
+async def test_a_full_run_imports_the_ratings_file_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """**The forbidden edit, over the only fixture that can see it.**
+
+    `run_bootstrap`'s ratings arm is spelled `is BootstrapPhase.RATINGS` and
+    not `in (BootstrapPhase.RATINGS, BootstrapPhase.ALL)`, because `--phase
+    all` already imports that file inside its IMDb arm -- so the second
+    spelling downloads 8.2 MiB twice and rewrites the same rows twice. That
+    was held by a **comment** until 2026-08-19, when the edit was planted and
+    the whole suite came back 5,479 passed, byte-identical to clean:
+    `_phases_in` collapses the duplicate onto `IMDB`, both window counts are
+    unmoved because the second import lands outside the window, the parity
+    equality holds because both drivers double it identically, and the
+    integration case drives `IMDB` and never `ALL`.
+
+    **The seeded catalog is what gives this case teeth, and it is the whole
+    difference from the parity case above.** Against an *empty* catalog the
+    wrongly-reached arm hits `_ratings`' refusal and imports nothing, so the
+    count is 1 under the defect too -- the fixture repairs the bug on the
+    test's behalf. One title is enough, since the refusal is
+    `count_titles() == 0`.
+
+    **And the seeding is why this drives `run_bootstrap` here rather than
+    calling `_journal_of_a_full_bootstrap`**, over the same two fakes rather
+    than a second set. With `titles` non-empty, `_movielens` no longer refuses
+    at its own guard and reaches `await dataset.revision()`, which it resolves
+    **outside** `import_dataset` -- so it is not covered by that method's
+    `except UsherPortError` and the offline transport ends the run by raising.
+    That happens in the last phase, long after both arms this case is about,
+    so the journal is complete for the claim; the `raises` is stated rather
+    than worked around because a run that ended some other way would satisfy
+    a bare `count(...) == 1` by never having got there at all -- which is what
+    the membership premise on the line above is for.
+    """
+    journal: list[str] = []
+    catalog = _JournallingCatalog(journal)
+    runs = _JournallingRuns(journal)
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+
+    with pytest.raises(PortUnavailable):
+        await run_bootstrap(
+            catalog,
+            runs,
+            _nothing,
+            _settings(bulk_data_dir=tmp_path),
+            BootstrapPhase.ALL,
+            report=journal.append,
+            events=NullEventPublisher(),
+        )
+
+    assert "imdb.title.ratings" in journal, "the premise: a full run reaches the ratings file"
+    assert journal.count("imdb.title.ratings") == 1, journal
+
+
+async def test_the_ratings_phase_refuses_an_empty_catalog_before_downloading(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """**The damage lands on a phase other than the one mis-run, which is what
+    makes this the worst outcome available here.**
+
+    `apply_ratings` is an `UPDATE titles ... WHERE t.imdb_id = s.imdb_id`, so
+    against an empty catalog the phase matches nothing -- and matching nothing
+    is not an error. It would stream the file to EOF, write 0 rows, and
+    checkpoint `imdb.title.ratings` **COMPLETED at the end**. That row is
+    deliberately the same one `--phase imdb` checkpoints against, so the next
+    real bootstrap resumes at EOF and imports no ratings *ever*, on that run
+    and on every later one. Measured end to end against real Postgres with the
+    committed fixtures, before the guard existed:
+
+        after --phase ratings on an empty catalog:
+            status=completed rows_seen=3 rows_written=0 position=4
+        after --phase imdb:
+            status=completed rows_seen=3 rows_written=0 position=4
+        titles: 5      titles carrying imdb_num_votes: 0
+
+    Five titles, zero ratings, and `bootstrap-status` green. `ratings` is the
+    **fourth** phase joining `titles` on `imdb_id` and was the only one without
+    the refusal `_credit_names`, `_aliases` and `_movielens` each carry; the
+    precedent is
+    `tests/unit/test_cli.py::test_the_genome_phase_refuses_an_empty_catalog_before_downloading`
+    and this is worse than the case that one guards, because the phase it
+    sterilises is a different one and it is reachable from
+    `POST /admin/bootstrap/ratings` on the serving box rather than only from a
+    CLI. It was stated as a precondition in a comment -- *"this phase only ever
+    runs against a populated catalog"* -- which is not a thing that runs.
+
+    Three assertions, one per property, following the genome case's shape.
+    **No request of any kind**: the transport fails this test if reached, which
+    pins "before the download" rather than merely "before the write". **No
+    `ImportRun` at all** -- this is the assertion that carries the finding,
+    because a FAILED row would be a lie and a COMPLETED one is precisely the
+    poison above; the absence of a row is what `bootstrap-status` renders as
+    "this phase has not run". **A message naming the reason and the fix**,
+    because PRD 08 requires every operator command to work against an empty
+    database, and "work" means saying why.
+    """
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"the ratings phase reached the network: {request.url}")
+
+    def refusing_client(*_: object, **__: object) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+
+    monkeypatch.setattr(usher.composition, "bulk_client", refusing_client)
+    catalog = FakeBulkCatalogRepository()
+    runs = FakeImportRunRepository()
+    printed: list[str] = []
+
+    await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.RATINGS,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert await catalog.count_titles() == 0, "the premise: the catalog under test is empty"
+    assert await runs.list_runs() == []
+    assert [one for one in printed if "titles is empty" in one and "--phase imdb" in one], printed
 
 
 async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(

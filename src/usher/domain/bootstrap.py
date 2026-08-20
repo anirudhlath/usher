@@ -12,8 +12,10 @@ from usher.domain.ids import new_id
 
 
 class BootstrapPhase(StrEnum):
-    """What one bulk-import run does, and **the members are in execution
-    order** (PRD 04's phased import).
+    """What one bulk-import run does. **The members that are *steps* are in
+    execution order** (PRD 04's phased import) -- `FULL_SEQUENCE` names them;
+    `ALL` and `RATINGS` are aliases and take no position in it, which the
+    paragraph before the members works through.
 
     One vocabulary rather than two, and that is the whole reason it is here
     rather than a tuple in `usher.cli`. Until M9 the set lived as
@@ -50,8 +52,8 @@ class BootstrapPhase(StrEnum):
     longest in this system), and a nullable path parameter would make the
     route's own vocabulary a different set from the CLI's.
 
-    ⚠️ **Two of these members are not steps, and "the members are in
-    execution order" is a claim about the other six.** `ALL` and `RATINGS`
+    ⚠️ **Two of these members are not steps, which is why the summary line
+    above is scoped to the other six.** `ALL` and `RATINGS`
     are *aliases*: each selects a subset of the sequence rather than taking a
     position in it -- `ALL` selects every step, `RATINGS` selects the second
     half of `IMDB` -- so neither is a phase `--phase all` ever emits. That

@@ -86,10 +86,22 @@ from usher.telemetry import (
     register_search_gauges,
 )
 
-# `--phase all` runs `BootstrapPhase` in order, so the enum *is* the
-# execution order an operator reads it as, and three of its edges are
-# measured rather than stylistic -- `usher.domain.bootstrap.BootstrapPhase`
-# carries the argument and the numbers.
+# `--phase all` runs `FULL_SEQUENCE` in order -- the six members of
+# `BootstrapPhase` that are *steps* -- and three of its edges are measured
+# rather than stylistic; `usher.domain.bootstrap.BootstrapPhase` carries the
+# argument and the numbers.
+#
+# ⚠️ **The enum is not the execution order, and this comment said it was until
+# ADR-0040.** Two members are aliases rather than steps (`PHASE_ALIASES`):
+# `all`, and `ratings`, which is declared immediately after `imdb` because
+# that is the phase whose second half it re-runs. `PHASES` is derived from the
+# enum, so `--help` lists `ratings` second -- and the sentence this replaces
+# told an operator reading that list that `--phase all` therefore runs it
+# second. It does not dispatch it at all; a full run reaches those rows inside
+# the `imdb` arm. The steps' own order is still the measured one and
+# `tests/unit/test_composition.py` asserts the enum's declaration order and
+# `FULL_SEQUENCE` agree, so this list cannot advertise an order the dispatch
+# does not run.
 #
 # **Derived, never restated.** This was a literal tuple until M9's E5, when
 # `POST /admin/bootstrap/{phase}` gave the set a second reader: two
@@ -1629,13 +1641,23 @@ def build_parser() -> argparse.ArgumentParser:
         # recoverable by re-running the phase. `PHASES` is `BootstrapPhase`'s
         # own order and that enum's docstring carries the measurement.
         #
+        # **The help text says "a full run walks them in this order" and not
+        # "the choices are in execution order", because two of the choices are
+        # not steps.** `all` and `ratings` are aliases
+        # (`domain.bootstrap.PHASE_ALIASES`), and `ratings` is declared beside
+        # the phase whose second half it is -- so `--help` renders it second,
+        # where the older sentence told an operator `--phase all` runs it
+        # second. It runs it inside `imdb` and never dispatches it.
+        #
         # `%%`, not `%`: argparse interpolates a help string against its own
         # parameter dict, so a bare `%` raises `TypeError` from `--help` and
         # from nothing else. Found by running it -- ruff, mypy and every
         # existing case pass against the broken spelling, because none of them
         # renders help.
         help=(
-            "which bulk datasets to import; the choices are in execution order. "
+            "which bulk datasets to import; a full run walks the steps in the "
+            "order listed, and ratings is not one of them -- it re-imports IMDb "
+            "ratings alone, which --phase all already does inside imdb. "
             "Run credit-names BEFORE the TMDb enrichment crawl: it defers to TMDb "
             "on every enriched title, so afterwards 99.82%% of the priority tier "
             "never gains IMDb names and re-running does not repair it"

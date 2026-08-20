@@ -205,7 +205,7 @@ and it continues from its own checkpoint. See
 ```bash
 uv run usher bootstrap                       # every phase, in the order below
 uv run usher bootstrap --phase imdb          # one at a time: imdb | credit-names | aliases
-uv run usher bootstrap --phase credit-names  #              | tmdb-ids | crosswalk | movielens | all
+uv run usher bootstrap --phase credit-names  #     | tmdb-ids | crosswalk | movielens | ratings | all
 uv run usher bootstrap --phase aliases       # IMDb title.akas -> searchable aliases, ~487 MB
 uv run usher bootstrap --phase movielens     # the MovieLens tag genome (M7), ~335 MB, ~10 min
 uv run usher bootstrap --phase ratings       # IMDb ratings alone, ~8 MiB -- see below

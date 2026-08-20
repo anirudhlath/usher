@@ -90,8 +90,9 @@ them in the other. It stales no embedding in either order: the embedded
 population is the exact complement of what the fill writes. And Phase 4's genome last, for Phase 0's reason.
 
 `--phase` names them `imdb`, `credit-names`, `aliases`, `tmdb-ids`,
-`crosswalk` and `movielens`; the tuple in `usher.cli.PHASES` is in
-execution order and carries the same three reasons.
+`crosswalk` and `movielens`; `usher.cli.PHASES` lists **those six in execution
+order**, carrying the same three reasons, and then the two aliases below —
+so the tuple has eight entries and only six of them are positions in a run.
 
 **Two further members are *aliases* rather than steps**, and
 `usher.domain.bootstrap` says which is which — `FULL_SEQUENCE` holds the six
