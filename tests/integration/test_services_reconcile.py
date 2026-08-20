@@ -175,15 +175,25 @@ def meter_reader() -> Iterator[InMemoryMetricReader]:
     yield reader
 
 
-def _fraction_points(reader: InMemoryMetricReader, *, outcome: str) -> list[float]:
-    """Every `usher.sync.retraction.fraction` sum recorded under `outcome`.
+def _fraction_points(reader: InMemoryMetricReader, *, outcome: str) -> list[tuple[str, float]]:
+    """Every `usher.sync.retraction.fraction` point under `outcome`, as
+    `(source label, sum)`.
 
-    A list rather than a single value, so a case can assert on *how many*
+    A **list** rather than a single value, so a case can assert on *how many*
     records happened: a metric published twice per walk and a metric published
     once are indistinguishable from a lookup that returns the first match.
+
+    And the **label travels with the value**, because a sweep measured 2026-08-19
+    found that nothing in the repository asserted it: planting
+    `{"source": str(run.source_id)}` in place of the source's name survived the
+    whole of `tests/unit` and every reconcile case. `_sweep` takes `source_name`
+    as a parameter for exactly one reason -- `usher.sync.run.duration` beside it
+    is labelled by name, and ADR-0039 §2 refuses a second per-source identity in
+    telemetry -- so a mutation that puts the id on the wire is the ADR violation
+    that argument exists to prevent, and it was invisible.
     """
     data = reader.get_metrics_data()
-    found: list[float] = []
+    found: list[tuple[str, float]] = []
     if data is None:
         return found
     for resource in data.resource_metrics:
@@ -194,7 +204,8 @@ def _fraction_points(reader: InMemoryMetricReader, *, outcome: str) -> list[floa
                 for point in metric.data.data_points:
                     attrs = dict(point.attributes or {})
                     if attrs.get("outcome") == outcome:
-                        found.append(round(float(getattr(point, "sum", 0.0) or 0.0), 6))
+                        value = round(float(getattr(point, "sum", 0.0) or 0.0), 6)
+                        found.append((str(attrs.get("source")), value))
     return found
 
 
@@ -249,6 +260,11 @@ async def test_a_refused_sweep_reports_both_numbers_where_an_operator_can_see_th
     `SweepResult.retracted`.** A refused sweep retracts nothing, so a fraction
     computed from what it *did* would record 0.0 for the one state this series
     exists to make visible. The two differ only when the guard fires.
+
+    **Both arms assert the `source` label as well as the value**, which the
+    first draft of this case did not -- see `_fraction_points`. The premise that
+    makes it a real assertion is the fixture's own: the source is named
+    `Reconcile Source`, which no rendering of a UUID can equal.
     """
     for index in range(10):
         adapter.items[f"m{index}"] = _item(f"m{index}")
@@ -257,10 +273,14 @@ async def test_a_refused_sweep_reports_both_numbers_where_an_operator_can_see_th
 
     # The clean-sweep arm, and the positive control: a walk that retracts
     # nothing must still publish, and it must publish a real zero.
+    assert source.name == "Reconcile Source", (
+        "the premise for both label assertions: a name a stringified UUID cannot accidentally equal"
+    )
     swept = _fraction_points(meter_reader, outcome="swept")
-    assert swept == [0.0], (
-        "a full walk that retracted nothing must still record the series -- "
-        "otherwise silence means both 'shed nothing' and 'never ran'"
+    assert swept == [("Reconcile Source", 0.0)], (
+        "a full walk that retracted nothing must still record the series, "
+        "under the source's name -- otherwise silence means both 'shed "
+        "nothing' and 'never ran', and ADR-0039 §2's one identity becomes two"
     )
 
     # Now approach the ceiling: 9 of 10 gone is 0.9 against the 0.25 default.
@@ -284,8 +304,52 @@ async def test_a_refused_sweep_reports_both_numbers_where_an_operator_can_see_th
         "it did would be 0.0 and the series would be a lie"
     )
 
-    assert _fraction_points(meter_reader, outcome="refused") == [0.9], (
+    assert _fraction_points(meter_reader, outcome="refused") == [("Reconcile Source", 0.9)], (
         "the refused arm records what the walk *would* have retracted"
+    )
+
+
+async def test_a_full_walk_of_a_source_holding_nothing_records_a_real_zero(
+    service: ReconcileService,
+    source: Source,
+    adapter: _Adapter,
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """A source with no `media_items` at all is a **division**, not an edge case.
+
+    🔴 `_fraction`'s `if whole else 0.0` guard was unpinned when it was written,
+    and a sweep on 2026-08-19 proved it: deleting the guard survived every
+    reconcile case and the whole of `tests/unit`, because no case anywhere ran a
+    full walk against a source holding nothing. It is not a defensive guard
+    against an impossible state -- **an empty source is the ordinary state of
+    one that has just been registered**, `_SWEEP_COUNTS` answers
+    `total = 0, stale = 0`, `mark_unseen_unavailable` returns
+    `SweepResult(retracted=0, total=0)`, and without the guard the *first*
+    nightly walk of a new source dies of `ZeroDivisionError` inside the
+    instrument rather than completing.
+
+    The guard in `db/repositories/media_item.py:482-485` is a **count
+    comparison rather than a division** for the same reason, so the repository
+    reaches this state happily and hands it on; the metric is the one place the
+    division actually happens.
+
+    Two assertions, because either alone is satisfied by the wrong thing: the
+    run must **complete** (a crash inside the instrument fails it), and the
+    series must carry a **real 0.0** (a service that skipped the record on an
+    empty source would complete too, and would reintroduce exactly the silence
+    the instrument exists to remove).
+    """
+    assert not adapter.items, "the premise: this walk yields nothing at all"
+
+    run = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
+
+    assert run.status is SyncRunStatus.COMPLETED, (
+        f"a full walk of an empty source must finish, not raise: {run.error!r}"
+    )
+    assert run.items_seen == 0
+    assert _fraction_points(meter_reader, outcome="swept") == [("Reconcile Source", 0.0)], (
+        "an empty source publishes a real zero -- skipping the record would "
+        "make a source with no items look exactly like one never swept"
     )
 
 

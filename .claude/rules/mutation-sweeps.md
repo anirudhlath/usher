@@ -6708,3 +6708,118 @@ reconnects forever against the buffering proxy the ceiling exists for — and (b
 leave `crashed_sources()` nothing to read, which is the state F2 is scheduled to
 report. The release path therefore pops **`_open_adapters`** and leaves `_lanes`
 alone; P2 and P3 are the plants that target what it actually does.
+
+## M10 Task S8 — the retraction instrument, and two guards nothing had ever reached (2026-08-19)
+
+**7 plants over two rounds. Round 1: 5 agreed with the pre-registration, 2
+survived exactly as predicted. Round 2, after the repairs those two bought:
+5 KILLED, 1 designed survivor, 0 unintended survivors.** Subject:
+`usher.sync.retraction.fraction` and the `_fraction` helper beside it, both new
+in `src/usher/services/reconcile.py` at `c95a401`.
+
+Pre-registered plant list at `/var/tmp/m10-gate/SWEEP-S8.md`
+(`sha256 b8dbe48ffefe2e098b485002d9d0eae3e0d7c7b4c5aa826a567b88240a8f94bd`),
+written before the first plant and re-checked by the harness at the top of every
+round — both rounds printed the matching digest. Harness at
+`/var/tmp/m10-gate/sweep_s8.py`, outside the working tree.
+
+| plant | what it breaks | round 1 | round 2 |
+|---|---|---|---|
+| **W1** | the counter published only on a refusal | KILLED | KILLED |
+| **W2** | `outcome` collapsed to one label | KILLED | KILLED |
+| **W3** | the fraction from what a refused sweep *did*, not what it *would have* | KILLED | KILLED |
+| **W4** | the `source` label is the run's id, not the source's name | **SURVIVED** | KILLED |
+| **W5** | `_fraction`'s empty-source guard deleted | **SURVIVED** | KILLED |
+| **P1** | positive control — the metric renamed | KILLED ×2 | KILLED ×3 |
+| **C1** | designed survivor — the `description=` string | SURVIVED | SURVIVED |
+
+W1–W3 are the three the plan named, and all three died on the case written for
+them. The two the plan did **not** name are the ones worth the entry.
+
+### 🔴 W4 — a telemetry *label* is an artefact no assertion about a *value* can see
+
+`_sweep` takes `source_name` as a parameter rather than reading the run's
+`source_id`, and its docstring says why: `usher.sync.run.duration` beside it is
+already labelled by name, and **ADR-0039 §2 refuses a second per-source identity
+in telemetry**. So the parameter exists entirely to serve the label — and
+planting `{"source": str(run.source_id)}` **survived every reconcile case and
+the whole of `tests/unit`**. The helper reading the points filtered on
+`outcome` and returned bare floats, so the label was never in the comparison at
+all; the argument for the parameter was in prose and nothing checked it.
+
+Repaired by making the helper return `(source label, sum)` pairs, so the label
+travels with the value and every existing assertion carries it for free. The
+premise is asserted first and it is a real one: the fixture's source is named
+`Reconcile Source`, which no rendering of a UUID can equal — without that line
+the pair assertion would be satisfied by a fixture that happened to name its
+source after its id.
+
+**The general form, and it is `testing-discipline.md`'s *"a rejection is not an
+assertion"* arriving at telemetry: a metric point is a *value plus a set of
+attributes*, and the reader everybody writes projects it down to the value.
+Every label a dashboard groups by is then unpinned.** PRD 10's catalogue lists
+labels per row precisely because panels are written against them, so the
+catalogue is the list of things to assert — ask of each row whether any case
+reads that attribute, not merely whether the series exists. Nearest relative is
+*"a count and an argument are two assertions"*: same shape, one layer out.
+
+### 🔴 W5 — a division guard whose defect is reachable on the *first* walk of a new source
+
+`_fraction` is `part / whole if whole else 0.0`, and deleting the guard
+survived every reconcile case and the whole of `tests/unit`. Predicted, because
+no case anywhere ran a full walk against a source holding no `media_items` —
+but the prediction understated it, and the understatement is the finding.
+
+**This is not a guard against an impossible state.** An empty source is the
+*ordinary* state of one just registered: `_SWEEP_COUNTS` answers
+`total = 0, stale = 0`, `mark_unseen_unavailable` returns
+`SweepResult(retracted=0, total=0)` without ever consulting the ceiling (the
+guard at `db/repositories/media_item.py:482-485` is a **count comparison rather
+than a division**, deliberately), and the division then happens in the
+*instrument*. Without the guard the **first nightly walk of every new source
+dies of `ZeroDivisionError` inside a metric** — a run that should have recorded
+`COMPLETED` recording `FAILED`, caused by the observability code rather than by
+anything the walk did. `test_a_full_walk_of_a_source_holding_nothing_records_a_
+real_zero` seeds exactly that and kills the plant on `ZeroDivisionError:
+division by zero`.
+
+Two assertions in it, because either alone is satisfied by the wrong thing: the
+run must **complete** (a crash inside the instrument fails it) *and* the series
+must carry a real **0.0** (a service that skipped the record on an empty source
+completes too, and reintroduces precisely the silence the instrument exists to
+remove). Same family as `testing-discipline.md`'s *"a guard against a promise
+nobody breaks is a guard nothing exercises"* — except here nobody had asked
+whether the promise was even made. **When a repository deliberately avoids a
+division, check whether anything downstream reintroduced it.**
+
+### The positive control earned its keep twice, and `-x` hid half of it
+
+P1 renames the metric and the pre-registration required it to fail **two
+independent cases** — the reconcile case, whose point lookup is by name, and
+`test_telemetry_metric_names.py`'s declared-vs-catalogue census. The scored run
+uses `-x`, which stops at the first failure and reports one. Re-run with `-x`
+dropped, P1 fails both in round 1 and all three in round 2.
+
+**A positive control that is only ever observed under `-x` is a control that
+proves the harness landed *a* plant, not that it landed the plant you described.**
+Cheap repair: the harness now also harvests pytest's `FAILED <nodeid>` short-
+summary lines, so a plant that dies on one case and a plant that dies on three
+are different readings. Nearest relative is S10's *"an assertion is only a
+positive control if some plant reaches it"* and the `-q`/`-qq` trap above: all
+three are a harness reading less than it reports.
+
+### Scope, stated because a survivor list is only true of what it was measured against
+
+Scored against `tests/unit/test_services_reconcile.py`,
+`tests/integration/test_services_reconcile.py`,
+`tests/unit/test_telemetry_metric_names.py` and
+`tests/integration/test_media_item_repository.py` — chosen to exclude all six
+known-intermittent cases, since a sweep scored on *"did the run fail"* cannot
+run against a flaky suite. **Both round-1 survivors were then re-run against the
+whole of `tests/unit` and survived that too**, which is what the pre-registration
+required before either could be written down. A grep first confirmed nothing
+else in `tests/` reads the series or the label.
+
+Restoration verified both ways after every round — byte-identical to the `cp`
+backup **and** to `git show "HEAD:src/usher/services/reconcile.py"` — never with
+`git checkout`.
