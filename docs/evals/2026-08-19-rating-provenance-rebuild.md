@@ -235,3 +235,46 @@ dropped. Restoring is one UPDATE ... FROM joined on id.
    carry no rating values at all.
 Checked because the `set_updated_at` trigger fires on all 407,860 rows;
 nothing keys staleness off `titles.updated_at`.
+
+## Addendum, same day: this catalog moved to `usher_m10a`
+
+**Every measurement above was taken against the database named `usher`, and it
+is no longer there.** Read the numbers against `usher_m10a`.
+
+`m10a` exists only on `spec/quality-evals`. Applying it to the shared dev
+database put that database one revision ahead of every other checkout on this
+box -- `usher` (`deploy/post-m9-issue-sweep`), `usher-m10`
+(`milestone/m10-hardening`) and `usher-wt-bgem3`
+(`followup/fingerprint-covers-the-model`) are all at `m09f` and all point at
+`usher`. The running API said so for three and a half hours and nobody read it:
+
+    readiness check failed: migration mismatch (database at 'm10a', code
+    expects 'm09f')
+
+`usher-usher-1` was unhealthy with a failing streak of **1250**. There was no
+lock and nothing to release -- `pg_stat_activity` showed zero waiters. A shared
+database is a shared resource whether or not two writers ever collide on a row,
+and one branch's migration is enough to take it away from everyone else.
+
+**The branch that diverged is the branch that moved.** `usher` is restored to
+exactly the state this work found it in; `usher_m10a` carries the rebuild.
+
+| step | result |
+|---|---|
+| `CREATE DATABASE usher_m10a TEMPLATE usher` | 23.4 s, 6,039 MB |
+| restore ratings in `usher` from the backup table | `UPDATE 540878` |
+| verify against the backup | **0 rows differing** on all six columns and `field_provenance` |
+| `alembic downgrade m09f` | `m10a -> m09f` |
+| `usher` after | `community_rating` 540,275, `vote_count` 540,275, `popularity` 292,320 -- the pre-`m10a` readings |
+| `field_provenance` keys | 132,415 rows carry the three old names; **0** carry a `tmdb_*` name |
+| `docker start usher-usher-1` | healthy |
+
+**The backup table paid for itself the same day it was written.** It made
+"put the shared database back exactly" one `UPDATE ... FROM` with a zero-row
+verification, instead of a re-bootstrap -- which could not have worked anyway,
+since P4 measured that today's IMDb dump reproduces only 350,131 of those
+407,860 values. The rollback path was load-bearing for a reason nobody
+anticipated when it was written, which is the argument for writing them.
+
+`titles_rating_backup_20260819` is present in **both** databases, because the
+clone was taken before the restore. Still not dropped.
