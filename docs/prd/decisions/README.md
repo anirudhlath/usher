@@ -9,7 +9,7 @@ otherwise be lost and re-litigated in six months.
 | ADR | Decision | Status |
 |---|---|---|
 | [0001](0001-abc-over-protocol.md) | ABCs, not Protocols, for ports | Accepted |
-| [0002](0002-postgres-first-search.md) | Postgres-first search; Meilisearch gated | Accepted — reverses an earlier call; **gate run 2026-08-03 and failed**, follow-up owned by M9 |
+| [0002](0002-postgres-first-search.md) | Postgres-first search; Meilisearch gated | Accepted — reverses an earlier call; **gate run 2026-08-03 and failed**, follow-up owned by M9; **amended 2026-08-19 by [0040](0040-rating-columns-name-their-source.md)** — its sampling frame is re-anchored on `imdb_num_votes` and its vote-count tiebreak lost its writer |
 | [0003](0003-own-uuid-identity.md) | Usher-owned UUIDs, provider IDs as attributes | Accepted |
 | [0004](0004-push-over-polling.md) | Push events primary, reconcile as backstop | Accepted |
 | [0005](0005-bulk-bootstrap.md) | Pre-build the catalog from bulk datasets | Accepted |
@@ -46,6 +46,7 @@ otherwise be lost and re-litigated in six months.
 | [0036](0036-the-imdb-tmdb-provenance-rule.md) | Two bulk sources over one entity: `credits.source`, wholesale arbitration, and *not* merging people yet | Accepted — corrects PRD 02 and 08; supersedes M9 T4's withdrawal |
 | [0037](0037-the-worker-is-a-bounded-pool-of-scopes.md) | The job worker is a bounded pool, and a job's scope is a session | Accepted — corrects PRD 01's concurrency table and PRD 08's recovery rule |
 | [0038](0038-the-embedding-width-is-deployment-wide-ddl.md) | The embedding width is deployment-wide DDL, and the fingerprint's "no migration" stops at it | Accepted — **narrows 0020 and 0022**; corrects PRD 02, 04, 05 and 08 |
+| [0040](0040-rating-columns-name-their-source.md) | Rating columns name their source (`tmdb_*` / `imdb_*`), IMDb's values re-imported rather than inferred, and the eval frame re-anchored on `imdb_num_votes` | Accepted — corrects PRD 02, 04 and 05; amends 0002's frame and its suggest tiebreak. ⚠️ **One component is deliberately open, not shipped**: the decontamination of the existing `tmdb_*` values, whose pre-registered rule was measured and misses 57,701 of 407,860 rows |
 
 Format: context → decision → consequences → evidence. Short is fine.
 

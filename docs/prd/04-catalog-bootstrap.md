@@ -360,16 +360,29 @@ enqueue wrote all 130,804 enrich rows inside 1.3 s. Outcome: **130,647 of
 995 MB of `raw_payloads`, and 261,294 follow-up jobs left to drain at ~1.9 h.
 
 ⚠️ **And the tier is not a fixed population, because enriching a title can
-remove it from the tier.** `vote_count` is enrichable, the bulk loader writes
-IMDb `numVotes` into it and TMDb's own `vote_count` overwrites that on
-enrichment — a different electorate entirely. Measured over 537 enriched tier
-movies: **80 still satisfy `>= 100` (14.9%)**, median TMDb vote count **16**
-against a median IMDb `numVotes` of **581** on the unenriched tier. The
+remove it from the tier.** `vote_count` is enrichable, and until `m10a` the
+bulk loader wrote IMDb `numVotes` into it while TMDb's own `vote_count`
+overwrote that on enrichment — a different electorate entirely. Measured over
+537 enriched tier movies: **80 still satisfy `>= 100` (14.9%)**. The
 keyset walk is unaffected (a row leaves the tier only after the cursor has
 passed it), but **any tier statistic re-derived from the predicate after the
 crawl answers about a population roughly a seventh the size**. The enriched
-row records `"vote_count": "tmdb"` in `field_provenance`; no predicate reads
-it.
+row records `"tmdb_vote_count": "tmdb"` in `field_provenance` (`"vote_count"`
+below `m10a`); no predicate reads it.
+
+⚠️ **The scale gap this paragraph used to quote was measured across two
+populations, and the corrected figure is here rather than swapped in silently.**
+It read *"median TMDb vote count 16 against a median IMDb `numVotes` of 581 on
+the unenriched tier"* — the 16 over the 537 titles this task enriched and the
+581 over the tier it had *not* enriched, so the two numbers describe different
+films. **The paired figure is ≈38×**: median TMDb `vote_count` **15** against
+median frozen IMDb `numVotes` **576**, over *the same* 130,647 enriched rows
+counted before and after (M9 S3). A bounded measurement restated as an absolute
+is this project's signature failure, so the mislabelling is recorded.
+[ADR-0040](decisions/0040-rating-columns-name-their-source.md) is what stopped
+the two writers sharing a column: the loader now writes `imdb_num_votes` and
+`imdb_average_rating`, so **enrichment no longer moves the column a tier
+predicate reads** — the eviction above is a fact about the pre-`m10a` schema.
 
 **"One request per title" holds for a series too now, and it did not until
 M9.** A series used to cost one request plus one per season, because TMDb's

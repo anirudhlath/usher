@@ -65,6 +65,19 @@ _LIKE_SPECIALS = (_LIKE_ESCAPE, "%", "_")
 # on 539,350 rows -- is what orders them. The id makes the order total, so a
 # tie cannot come back differently on two runs.
 #
+# ⚠️ **That 539,350 is dated 2026-08-05 and ADR-0040's Task 2 moved the writer
+# it names (2026-08-19).** `apply_ratings` now fills `imdb_num_votes`, so
+# nothing but TMDb enrichment reaches `tmdb_vote_count` and a bootstrap-only
+# catalog leaves it NULL on **every** row -- at which point, on the rows where
+# `tmdb_popularity` is absent too (all of a `--phase imdb` catalog, ~77% of a
+# `--phase all` one), this `ORDER BY` is `id ASC` alone: insertion order over a
+# UUIDv7 key, which is the state ADR-0002 measured costing 4.2 points of
+# recall@5 overall and 8.3 on the 2-4-character band. The measurement
+# stands for the catalog it was taken on. **Not repaired here**: pointing the
+# key at `imdb_num_votes` is a ranking change owing its own measurement, and it
+# is issue #39. `adapters/search/postgres.py` carries the long form of this
+# note, and `ports/repository/title.py` the third copy.
+#
 # **The union reads `titles` and `title_search_names` as one set, so a
 # director's name reaches their films from the first keystroke.** That is the
 # second of the two things PRD 05 says the narrow table exists for, and the arm

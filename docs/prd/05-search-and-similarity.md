@@ -208,6 +208,13 @@ table is precisely the duplication boundary call 3 refused; the re-rank reads
 `titles.vote_count`, as it already does. Correspondingly, *"ordered by
 popularity"* in the sketch above is aspirational rather than shipped.
 
+*(Those two columns are `titles.tmdb_popularity` and `titles.tmdb_vote_count`
+since `m10a` / [ADR-0040](decisions/0040-rating-columns-name-their-source.md).
+The measurements are restated in the new spelling, never re-derived. ⚠️ The
+tiebreak's premise moved with the rename and the sentence above no longer
+describes a fresh catalog — see the dated note under **The result is ordered by
+popularity and then by vote count** below.)*
+
 **Two tier-1 indexes, not one, and the pre-existing `ix_titles_name_lower_year`
 is neither.** That index is `(lower(name), year)` with the *default* opclass,
 which under this database's collation cannot answer `LIKE 'pre%'` at all —
@@ -355,6 +362,30 @@ LAST, id ASC` degenerates to ordering equal-distance candidates by a UUIDv7
 worth **+4.2 points of recall@5 overall and +8.3 on 2–4-character names** when
 M6 shipped it 2026-08-03.
 
+🔴 **⚠️ That last clause stopped being true on 2026-08-19, and the +4.2/+8.3 it
+justifies is now the size of what a fresh catalog has lost.** The bootstrap
+filled `vote_count` because the IMDb bulk loader wrote IMDb's `numVotes` into
+the column TMDb enrichment also wrote — **the tiebreak was resting on the
+contaminating write.** [ADR-0040](decisions/0040-rating-columns-name-their-source.md)
+split the two: the loader now writes `imdb_num_votes`, nothing but TMDb
+enrichment reaches `tmdb_vote_count`, and on a bootstrap-only catalog the column
+is NULL on **every** row rather than on 732,220 of 1,271,570. So
+`ORDER BY dist ASC, tmdb_popularity DESC NULLS LAST, tmdb_vote_count DESC NULLS
+LAST, id ASC` degenerates all the way to `dist ASC, id ASC` — insertion order —
+wherever popularity is absent too, i.e. on **every** row of a `--phase imdb`
+catalog and ~77% of a `--phase all` one, which is precisely the state M6
+measured at −4.2 points overall and −8.3 on 2–4-character names. **Both keys are
+`NULLS LAST`, so the loss is completely silent**: no error, and a result set
+indistinguishable from a well-ordered one. The same key feeds
+`TitleRepository.list_unwatched_candidates`, where the `id` tail decides
+*membership* rather than only order.
+
+**Deliberately not repaired.** Pointing the key at `imdb_num_votes` would
+restore its reach and is the obvious move, but the two columns count different
+electorates, so it is a ranking change owing its own measurement — that is
+[#39](https://github.com/anirudhlath/usher/issues/39). All three call sites
+carry the dated warning in their own comments.
+
 **Task 36 re-measured the ordering on the populated catalog and kept it
 unchanged (2026-08-05).** Same 2,993 typo cases at seed 20260803, the
 populated arm against the all-NULL one: the populated catalog costs **1.3
@@ -382,8 +413,8 @@ It was not merely unused: it was **unusable as declared** — a `DESC` btree,
 which Postgres builds NULLS FIRST, while every consumer asks
 `DESC NULLS LAST`, a different pathkey the planner can never satisfy from it.
 `list_owned_by_tag`, added in M7 and the one statement that genuinely orders by
-`titles.popularity`, plans as a Merge Semi Join over `pk_titles` and never
-touches it. 9,536 kB of index that no statement could take; the migration's
+`titles.popularity` (`titles.tmdb_popularity` since `m10a`), plans as a Merge
+Semi Join over `pk_titles` and never touches it. 9,536 kB of index that no statement could take; the migration's
 docstring carries the `EXPLAIN`.
 
 **`<%` (`word_similarity`) was measured and not taken.** It separates
@@ -1105,7 +1136,8 @@ service reads the outcome as an *ordering* and derives `1 / (1 + rank)` from
 the position, with equal index scores sharing a rank.
 
 **An absent signal is excluded from the blend, not scored zero.**
-`titles.popularity` is null for every title TMDb has never described — **77.1%
+`titles.tmdb_popularity` (`titles.popularity` before `m10a`) is null for every
+title TMDb has never described — **77.1%
 of a `--phase all` catalog and 100% of a `--phase imdb` one**, measured above
 rather than described as "most of it" — and `popularity or 0.0` would rank a
 title nobody measured
@@ -1163,7 +1195,19 @@ add Meilisearch for the instant-search box only.
 it failed.** 2,993 single-edit typo cases over 750 real movie names — five
 equal-sized length bands, `vote_count ≥ 500`, 81,054 non-unique lower-cased
 names excluded, four typo classes at a uniformly random position, seed
-20260803 — driven through the shipped `PostgresSuggestIndex`. Full tables,
+20260803 — driven through the shipped `PostgresSuggestIndex`.
+
+⚠️ **That frame stopped reproducing, and re-anchoring it is what uncovered the
+dual write.** `vote_count` acquired TMDb enrichment as a second writer, so by
+2026-08-19 the same predicate selected **8,523** unique-named movies rather than
+48,549 and `usher eval suggest --full` refused with `baseline-invalid`. The
+threshold is kept and only the column moves — `imdb_num_votes >= 500`, which no
+TMDb crawl can touch — and it answers **48,639, +0.19%**, with
+`shared_lower_names` 81,088 against 81,054 and 2,991 cases rather than 2,993.
+The residual is an eight-day-newer IMDb dump, not a different frame. So E1's
+cases are the *observed* frame and no longer literally the gate's; that caveat,
+the per-band deltas and the moved `GATE_DIGEST` are in
+[ADR-0040](decisions/0040-rating-columns-name-their-source.md). Full tables,
 the bar as it was written down beforehand, the miss diagnosis and the
 regeneration procedure are in
 [ADR-0002](decisions/0002-postgres-first-search.md)'s "Evidence — the gate,
@@ -1207,9 +1251,11 @@ at any setting.
 (`adapters/search/prefix.py`) is the probe: `lower(name) LIKE 'typed%'` over
 `titles` **and** `title_search_names` as one `UNION`, so a person's name
 reaches their films from the first keystroke, ordered by the same three keys
-tier 2 uses under its distance (`popularity DESC NULLS LAST, vote_count DESC
-NULLS LAST, id ASC`) so the box does not reshuffle when the debounced tier
-arrives behind it. It reads the two `text_pattern_ops` indexes `m09a` ships and
+tier 2 uses under its distance (`tmdb_popularity DESC NULLS LAST,
+tmdb_vote_count DESC NULLS LAST, id ASC` — both columns unprefixed until `m10a`
+/ [ADR-0040](decisions/0040-rating-columns-name-their-source.md), which is also
+where the note above about the second key's reach applies) so the box does not
+reshuffle when the debounced tier arrives behind it. It reads the two `text_pattern_ops` indexes `m09a` ships and
 **writes nothing**, so ADR-0021's dual-write cost is still unpaid by a second
 implementation of that port.
 

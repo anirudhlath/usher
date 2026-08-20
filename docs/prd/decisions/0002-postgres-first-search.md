@@ -9,6 +9,15 @@ recommendation; implemented in M6. **M6 adds no Meilisearch either way**
 amended, and a scoped follow-up with an owner. See "Evidence — the gate,
 measured".
 
+⚠️ **Amended again 2026-08-19 by
+[ADR-0040](0040-rating-columns-name-their-source.md), in two places, both marked
+inline below.** The gate's sampling frame no longer reproduces on
+`vote_count` — that column acquired a second writer — and is re-anchored on
+`imdb_num_votes`, where it reproduces to **+0.19%**. And the vote-count tiebreak
+this ADR added was resting on that same dual write, so it now reaches nothing on
+a bootstrap-only catalog. Neither is a reversal of this decision; both are facts
+it rested on that stopped being true.
+
 **✅ That follow-up is discharged, and its outcome is
 [ADR-0031](0031-the-two-tier-suggest.md) — the two-tier suggest.** M9 built
 tier 1 (`PostgresPrefixSuggestIndex`), measured it at catalog scale against a
@@ -240,6 +249,22 @@ catalog's own distribution (39.4% of it is 12–19 characters and 34.4% is
 | 12–19 | 20,520 | 150 |
 | 20+ | 17,887 | 150 |
 
+⚠️ **Amended 2026-08-19: the frame is now `imdb_num_votes >= 500`, and the
+threshold is the only part of this paragraph that did not have to move.**
+`titles.vote_count` acquired a second writer — TMDb enrichment, counting a
+different electorate — so by 2026-08-19 this predicate selected **8,523**
+unique-named movies rather than 48,549, and `usher eval suggest --full` refused
+to record a baseline against it. The column was split by source
+([ADR-0040](0040-rating-columns-name-their-source.md)) and the frame re-anchored
+on the IMDb half, which no TMDb crawl can move. **It reproduces to +0.19%** —
+428 / 2,541 / 7,097 / 20,425 / 18,146 = **48,639**, `shared_lower_names`
+**81,088** against 81,054, and **2,991** cases rather than 2,993 (the 2–4 band
+now draws nine names admitting no deletion where it drew seven). The residual is
+an eight-day-newer IMDb dump moving titles across the threshold in both
+directions, not a different frame — so a run comparing new numbers with the ones
+below carries that caveat, alongside the one this section already carries about
+the 750 drawn names never having been recorded.
+
 Four typo classes per name — substitution, deletion, transposition, doubled
 letter — one mutation each at a uniformly random position, `random.Random`
 **seed 20260803**. 750 names × 4 = **2,993 cases** (seven two-character names
@@ -338,6 +363,21 @@ Three things follow, and two of them contradict what this project assumed.
   overall and +8.3 on the 2–4 band at unchanged latency, and it shipped with
   this run**, pinned by
   `tests/integration/test_adapters_search_postgres.py::test_vote_count_orders_the_box_when_every_popularity_is_null`.
+
+  🔴 **⚠️ Amended 2026-08-19: *"a column the bootstrap itself fills"* is no
+  longer true, so this +4.2/+8.3 is now the size of what a fresh catalog has
+  lost.** The bootstrap filled it because the IMDb bulk loader wrote IMDb's
+  `numVotes` into the same column TMDb enrichment wrote — **this tiebreak was
+  resting on the dual write that
+  [ADR-0040](0040-rating-columns-name-their-source.md) exists to end.** The
+  loader now writes `imdb_num_votes`; nothing but enrichment reaches
+  `tmdb_vote_count`, and on a bootstrap-only catalog it is NULL on every row, so
+  wherever popularity is absent too — all of the `--phase imdb` catalog this
+  gate ran against, ~77% of a `--phase all` one — the `ORDER BY` falls back to
+  exactly the `dist ASC, id ASC` this bullet measured as the defect. Both keys
+  are `NULLS LAST`, so the regression is silent. **Deliberately not repaired**: re-pointing the key at `imdb_num_votes`
+  is a ranking change owing its own measurement, and it is
+  [#39](https://github.com/anirudhlath/usher/issues/39).
 
   **Re-measured 2026-08-05 (M7 Task 36), and both the finding and its scope
   are now sharper.** "NULL on all 1,271,138 rows" was true of the gate's

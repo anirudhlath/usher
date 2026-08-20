@@ -830,13 +830,13 @@ Generation runs nightly and on demand:
      that `owned DESC` being the *first* key makes the owned titles a prefix,
      so no ownership filter could ever add a candidate this read does not
      already return. The order is `owned DESC,
-     carries an affinity genre DESC, vote_count DESC NULLS LAST, id` — and
+     carries an affinity genre DESC, tmdb_vote_count DESC NULLS LAST, id` — and
      the `id` tail decides **membership** rather than only order, because the
      `LIMIT` falls inside a tie: losing it makes two reads of one unchanged
      household return different *sets*, so
      [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s integer handles
      stop naming the same films. The measurement behind that — how much of a
-     real catalog carries no `vote_count` at all — is stated once, on
+     real catalog carries no `tmdb_vote_count` at all — is stated once, on
      `TitleRepository.list_unwatched_candidates`, and deliberately not
      repeated here.
    - **`vote_count`, not `popularity`.** `titles.popularity` was measured NULL
@@ -845,6 +845,19 @@ Generation runs nightly and on demand:
      crosswalk-linked skeleton at `0.0` outrank an unlinked title with half a
      million votes — bounded where `list_owned_by_tag` uses it (owned titles
      only) and unbounded over the whole catalog.
+
+     ⚠️ **Both columns are `tmdb_*` since `m10a`, and the key's *reach* moved
+     with the rename (2026-08-19).** The vote count was chosen because the
+     bootstrap filled it — but it filled it with IMDb's `numVotes`, into the
+     column TMDb enrichment also wrote.
+     [ADR-0040](decisions/0040-rating-columns-name-their-source.md) split the
+     two, so `tmdb_vote_count` is now NULL on every row of a bootstrap-only
+     catalog and this key selects nothing there: the pool falls back to
+     `owned DESC, affinity DESC, id`, and the `id` tail then decides
+     **membership** rather than only order for a much larger tie than the one
+     measured. Not repaired here — pointing it at `imdb_num_votes` is a ranking
+     change owing its own measurement,
+     [#39](https://github.com/anirudhlath/usher/issues/39).
    - **The re-rank permutes the embedded members among the positions they
      already occupy**, so a candidate the centroid cannot speak about — no
      vector, a NULL one, or one of another model's width — keeps its exact

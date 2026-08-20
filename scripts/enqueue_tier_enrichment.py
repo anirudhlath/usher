@@ -64,13 +64,42 @@ tier, so a second run of this script does not select the same rows.**
 `tmdb_vote_count` is in `EnrichService._ENRICHABLE`; the bulk loader writes
 IMDb `numVotes` into that column through `apply_ratings` and enrichment
 overwrites it with TMDb's own `vote_count`, which is a different electorate.
-**That dual write is what ADR-0040 is about, and the column's name is now the
-only part of it that has been fixed** -- `m10a` renamed `vote_count` to
-`tmdb_vote_count`, which makes an IMDb writer landing there legible without
-stopping it; Task 2 of `docs/plans/2026-08-19-rating-provenance-split.md`
-redirects `apply_ratings` onto `imdb_num_votes` and is what ends it. Measured 2026-08-11 over 537
-enriched tier movies: **80 still carry `>= 100` (14.9%)**, median TMDb count
-16 against a median IMDb 581. **The keyset cursor is what makes that safe** —
+**That dual write is what ADR-0040 is about**, and `m10a` renamed `vote_count`
+to `tmdb_vote_count`, which made an IMDb writer landing there legible without
+stopping it.
+
+🔴 **ADR-0040's Task 2 then stopped it, and in doing so emptied this script's
+predicate on any catalog that has not been enriched yet. Read this before
+running it on a new deployment (2026-08-19).** `apply_ratings` now writes
+`imdb_num_votes`/`imdb_average_rating`, and nothing else fills
+`tmdb_vote_count`: `upsert_titles` omits it from its `DO UPDATE` list and
+`link_crosswalk` writes only `tmdb_popularity`. So after a fresh
+`usher bootstrap --phase all`, `tmdb_vote_count` is **NULL on every row**, the
+tier is `kind = 'movie' AND NULL >= 100 AND ...` — **zero rows** — and the
+enrichment crawl this script exists to start cannot start itself. On a catalog
+bootstrapped before `m10a` the column still holds its pre-existing mixed values
+(540,275 rows on the deployed one, measured 2026-08-19), so the tier still
+selects there; the break is a fresh-install one, which is the direction hardest
+to notice.
+
+**Not repaired in the commit that found it, deliberately.** The tier this script
+has always *meant* is "movies a lot of people on IMDb have voted on", which is
+`imdb_num_votes >= 100` — the same restoration ADR-0040 made for the eval
+sampling frame, one predicate over. But that is a behaviour change to what a
+crawl fetches, it moves the population every downstream tier statistic in
+`.claude/rules/tmdb-and-enrichment.md` is quoted against, and it deserves the
+failing test and the re-measurement the frame re-anchor got rather than a
+docstring edit. It is owed, it is named here and in ADR-0040's Consequences, and
+until it lands **an operator bootstrapping a new catalog must not expect this
+script to enqueue anything.**
+
+Measured 2026-08-11 over 537
+enriched tier movies: **80 still carry `>= 100` (14.9%)**. ⚠️ The scale gap this
+paragraph used to quote beside that — *"median TMDb count 16 against a median
+IMDb 581"* — was two populations, the 16 over the 537 enriched here and the 581
+over the tier that was *not* enriched; the paired figure is ~38x (median TMDb 15
+against median frozen IMDb 576 over the same 130,647 rows, M9 S3).
+**The keyset cursor is what makes that safe** —
 a row can leave the tier only by being enriched, which happens only after the
 cursor passed it, so nothing is skipped and the walk still terminates. An
 `OFFSET` walk over the same shrinking population would skip rows silently.
