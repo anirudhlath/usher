@@ -788,9 +788,11 @@ follow-up to this one.
 
 ## Dashboards
 
-Five, shipped as provisioned JSON in this repository so a fresh deploy has them
-without clicking. They live with the code that emits the data, so they version
-together.
+Six. **Specified here, and not yet built** — no dashboard JSON exists in this
+repository and no Grafana service is in `compose.yml`; the sentence that said
+they were shipped as provisioned JSON "so a fresh deploy has them without
+clicking" was aspirational and is corrected here (2026-08-19). They live with
+the code that emits the data when they land, so they version together.
 
 ### 1 — Library & Catalog
 
@@ -900,6 +902,27 @@ anything"* is live and the one that answers *"was it worth it"* is not — which
 is the same asymmetry [06](06-rows-and-recommendations.md) records at the
 product level, where 88% of one live run's headings were the genre labels the
 prompt forbids and nothing in this stack could have told an operator so.
+
+### 6 — Quality evals
+
+Recall and MRR per surface, per tier, per stratum, over time · bar pass/fail
+per run · catalog-input digest beside every point, so a step change that
+coincides with a re-index is visible as one · judge calibration agreement
+(E3) · run verdict mix, which is where `baseline-invalid` becomes visible as a
+catalog that keeps moving rather than as a quality problem.
+
+✅ **Backed by real data as of E1** for the suggest surface: `eval.v_trend`,
+which the harness creates outside the alembic chain
+([ADR-0039](decisions/0039-the-eval-schema-is-not-a-migration.md)). The other
+three surfaces arrive with E2 and E3.
+
+🔶 **One recorded run so far, on 2026-08-19, and it is a failing one** — the
+`prefix recall_at_5` window `[0.016, 0.022]` was inherited from
+[ADR-0031](decisions/0031-the-two-tier-suggest.md) and the re-anchored frame
+measures 0.0237 against it. The trend panel therefore has a single point and
+its bar-status series starts red. See
+[the baseline disagreement](../evals/2026-08-19-e1-baseline-window-disagreement.md);
+the window has deliberately **not** been widened to make it green.
 
 ## Where the stack lives
 

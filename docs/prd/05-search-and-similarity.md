@@ -1247,6 +1247,29 @@ inside a keystroke — with the trigram + `levenshtein_less_equal` path
 tolerance at all (1.9%) and the trigram path cannot meet a keystroke budget
 at any setting.
 
+🔶 **The typo-tolerance gate is now a standing measurement rather than a
+one-off.** `usher eval suggest --full` regenerates the gate's own cases from
+the live catalog under seed 20260803 and scores both ADR-0031 tiers separately
+against pre-registered bars in `docs/evals/bars.toml`, recording each run in the
+`eval` schema and in `docs/evals/ledger.jsonl`. Design:
+`docs/specs/2026-08-18-usher-quality-evals-design.md`;
+[ADR-0039](decisions/0039-the-eval-schema-is-not-a-migration.md) for why that
+schema is not a migration.
+
+🔶 **Its first run disagrees with the 1.9% above, and the disagreement is open.**
+The E1 baseline of 2026-08-19 measures tier 1 at **2.37%** over 2,991 cases —
+outside the `[0.016, 0.022]` window pre-registered from this section's number —
+so the run failed and the harness's three pending bars were left unfilled rather
+than set from a frame under suspicion. The number decomposes exactly: tier 1's
+recall is **entirely the deletion class** (9.45%), with substitution and doubling
+at exactly 0.0% because an exact-prefix probe cannot survive either. The
+candidate causes are draw variance (the window's half-width is ~1.2 standard
+errors of one draw) and tier 1's `ORDER BY`, which reads two columns
+[ADR-0040](decisions/0040-rating-columns-name-their-source.md) rewrote and has
+not finished decontaminating. Write-up and the experiment that separates them:
+[the baseline disagreement](../evals/2026-08-19-e1-baseline-window-disagreement.md).
+**The window has not been widened to accommodate the number.**
+
 ✅ **Tier 1 is built.** `PostgresPrefixSuggestIndex`
 (`adapters/search/prefix.py`) is the probe: `lower(name) LIKE 'typed%'` over
 `titles` **and** `title_search_names` as one `UNION`, so a person's name

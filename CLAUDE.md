@@ -295,6 +295,10 @@ uv run usher index                           # model, stale count, refused count
 uv run usher index --backfill                # enqueue one index job per stale title
 uv run usher search "the quiet vacuum"       # hybrid; prints semantic_coverage
 uv run usher suggest "the quie" --limit 5    # type-ahead, typo-tolerant
+
+uv run usher eval                            # every surface, quick, no bar enforced
+uv run usher eval suggest --full             # full goldens, bars enforced, ledger written
+uv sync --extra eval                         # optional: ranx, ~30 packages, dev only
 uv run usher similar <title id>
 uv run usher similar --rebuild               # recompute title_neighbors
 
