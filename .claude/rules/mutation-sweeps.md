@@ -6928,3 +6928,94 @@ never with `git checkout`. The harness is S8's with the plant list swapped —
 declared because `mutation-sweeps.md` records that copying a sweep harness
 inherits its defects; S8's had been validated over two rounds, and P2 is what
 re-establishes that this copy lands plants.
+
+## M10 Phase 1 — the whole-phase sweep, and a flake that ate three verdicts (2026-08-19)
+
+**12 plants over two rounds. Final: 9 behavioural targets KILLED, 2
+equivalent-mutant controls SURVIVING as designed, 0 unintended survivors.**
+Pre-registered at `/var/tmp/m10-gate/SWEEP-PHASE1.md`
+(`sha256 cb41bb7f3cb543a68da1ca400b1c66083eaec91f1cba2224db479c68889380ae`),
+digest matching in both rounds. Harness `/var/tmp/m10-gate/sweep_phase1.py`,
+**outside the tree** — V1's finding, since `ruff check .` and `mypy src tests`
+walk the whole repository and a harness at the root makes every control FAIL.
+
+**The question a per-task sweep cannot ask.** S6–S10 each swept their own change
+against a scoped selection. This one asks whether each task's invariant is caught
+by the suite *as a whole*, now that nine tasks' code sits in one tree.
+
+| plant | task | what it breaks | verdict |
+|---|---|---|---|
+| **B1** | S2 | the gate's lock released across the wait | KILLED |
+| **B2** | S2 | the shipped `0.4` rate default | KILLED |
+| **B3** | S3 | the registry mints a gate per call, not per source | KILLED |
+| **B4** | S5 | the cursorless-delta refusal deleted | KILLED |
+| **B5** | S6 | `0` stops meaning unlimited | KILLED |
+| **B6** | S7 | a measured concurrency entry | KILLED |
+| **B7** | S8 | the retraction fraction's swept arm | KILLED |
+| **B8** | S9 | the failed-run exit | KILLED |
+| **B9** | S10 | the finished lane's adapter never released | KILLED |
+| **C1** | — | control: a docstring reword | SURVIVED as designed |
+| **C2** | — | control: the histogram's `unit` string | SURVIVED as designed |
+| **P1** | — | positive control: `usher.jobs.queued` renamed | KILLED ×4 |
+
+### 🔴 `-x` and a flaky suite together destroy a verdict, and they destroyed the positive control's
+
+**Round 1 scored B1, C1 and P1 as `VOID-FLAKY`** — the run failed, but *every*
+failing node was one of the six historically-intermittent cases, so the harness
+correctly refused to call it a kill. The cause was `-x`: pytest stopped at the
+first failure, which was the flake, **before reaching the case each plant
+targets**. P1 among them, and by this round's own bar an unresolved positive
+control voids everything — so eight clean kills sat unusable behind one flake.
+
+Re-run without `-x`, all three resolve immediately and agree with the
+pre-registration: B1 dies on
+`test_two_calls_are_spaced_and_a_burst_is_not_permitted_after_an_idle_period`,
+C1 survives, and **P1 dies on four cases** including
+`test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue`.
+
+**The general form, and it is the fourth control-failure this phase has paid
+for:** *`-x` is an optimisation on the assumption that the first failure is the
+one you planted.* Against a suite with any intermittent case that assumption is
+false, and the failure mode is not a wrong verdict but an **absent** one — which
+is worse, because it looks like caution. Score a sweep with `-x` only where the
+suite is known-deterministic; otherwise take the wall-clock cost and read the
+whole failure list. Nearest relatives: S8's `-x` hiding half of P1's kills,
+S9's control that was an equivalent mutant, and S10's assertion no plant reached.
+
+### 🔴 And the flakes recurred under sweep load, after three clean runs
+
+Whole-suite runs at `cbf2450`, `c3fac30` and `744102e` each passed **exit 0 with
+no deselections and all six intermittent cases green** — and then two of the six
+fired during round 1 of this sweep. Both are the `EXPLAIN` plan-shape family and
+the serve-stale session case, i.e. the ones already recorded as sensitive to
+planner statistics and to load.
+
+**So "three consecutive clean runs" and "the suite is stable under a sweep" are
+different claims, and this round measured the difference.** A sweep is sustained
+parallel load on the same box for hours; the ordinary suite is one pass. Nothing
+here is a diagnosis of the flakes — per S5's ledger, a rate on one host on one
+evening is not one — but the *scoring* has to survive them, and `VOID-FLAKY`
+plus no `-x` is what makes it survive them.
+
+### What the cross-task question actually turned up
+
+**Every one of the nine is caught, and two are caught somewhere their own task's
+sweep would not have looked.** B3 — the registry minting a fresh gate per call,
+which is the measured defect `SourceGateRegistry` exists for (one process held
+two gates for one source, 0.4 × 2 lanes = 0.8 rps) — dies on
+`tests/unit/test_adapters_factory.py::test_the_deployment_tuning_reaches_the_adapter`,
+a file S3 did not own. B5 — S6's `0`-means-unlimited spelling — dies on
+`tests/integration/test_admin_sources.py`, likewise. **A per-task sweep scoped to
+its own files would have recorded both as uncovered, and both are covered.**
+
+### The controls, measured against all five gate steps separately
+
+Both C1 and C2 pass `ruff check`, `ruff format --check`, `mypy src tests` and
+`lint-imports` before their pytest verdict is read. **A control that fails a
+non-pytest step is not an equivalent mutant; it is a plant that would never have
+landed**, and scoring it as a survivor would overstate what the suite tolerates.
+This is the fifth gate step measured *as its own observation* rather than folded
+into a pass/fail, which is what the plan asked for.
+
+`git status --porcelain` asserted empty after every revert, and every file
+compared byte-for-byte against `git show "HEAD:<path>"` — never `git checkout`.
