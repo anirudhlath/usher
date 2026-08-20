@@ -1858,6 +1858,16 @@ async def run_bootstrap(
     browse ordering away from every reader for the length of a rebuild.
     Asserted in `tests/integration/test_admin_bootstrap.py`, not assumed.
 
+    **`RATINGS` is an arm of its own and deliberately opens no window.** It
+    is an alias rather than a step (`usher.domain.bootstrap.PHASE_ALIASES`):
+    `--phase all` reaches those rows through the IMDb arm above, so this arm
+    tests `is BootstrapPhase.RATINGS` and names no `ALL`, which is what keeps
+    a full run from importing the same 8.2 MiB twice. Its reason for existing
+    is what `--phase imdb` costs a *live* catalog -- 214.4 MiB of
+    `title.basics.tsv.gz` downloaded to rewrite every name and year, and a
+    changed name stales that title's embedding -- against 8.2 MiB that touches
+    two columns nothing embeds (ADR-0040).
+
     Nothing here raises for an upstream failure: `BootstrapService.
     import_dataset` records a `FAILED` `ImportRun` and returns, which is what
     lets `--phase all` continue past one dead upstream and what makes
@@ -1895,6 +1905,29 @@ async def run_bootstrap(
                     ),
                     catalog.apply_ratings,
                 )
+        if phase is BootstrapPhase.RATINGS:
+            # No `bulk_load_window()`: it declines on a non-empty `titles`
+            # anyway, and `.claude/rules/bootstrap-and-datasets.md` records a
+            # race where it drops `ix_titles_sort_name` under a SHARE lock.
+            # This phase only ever runs against a populated catalog.
+            #
+            # The dataset's `name` is `imdb.title.ratings`, the same
+            # `import_runs` row `--phase imdb` checkpoints against --
+            # deliberately, so the two cannot disagree about what revision this
+            # catalog holds. The cost is that a completed run at an unchanged
+            # upstream revision resumes at the end and writes nothing;
+            # ADR-0040's runbook deletes the row first and asserts on
+            # `rows_written`.
+            #
+            # `is`, not `in (..., BootstrapPhase.ALL)`: `--phase all` already
+            # imports this file inside the IMDb arm above, and naming `ALL`
+            # here would import 8.2 MiB twice and write the same rows twice.
+            await service.import_dataset(
+                IMDbRatingDataset(
+                    client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
+                ),
+                catalog.apply_ratings,
+            )
         if phase in (BootstrapPhase.CREDIT_NAMES, BootstrapPhase.ALL):
             await _credit_names(settings, client, catalog, service, report)
         if phase in (BootstrapPhase.ALIASES, BootstrapPhase.ALL):

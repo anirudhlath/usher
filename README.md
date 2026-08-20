@@ -208,6 +208,7 @@ uv run usher bootstrap --phase imdb          # one at a time: imdb | credit-name
 uv run usher bootstrap --phase credit-names  #              | tmdb-ids | crosswalk | movielens | all
 uv run usher bootstrap --phase aliases       # IMDb title.akas -> searchable aliases, ~487 MB
 uv run usher bootstrap --phase movielens     # the MovieLens tag genome (M7), ~335 MB, ~10 min
+uv run usher bootstrap --phase ratings       # IMDb ratings alone, ~8 MiB -- see below
 uv run usher bootstrap-status                # progress per dataset, and catalog size
 ```
 
@@ -243,6 +244,18 @@ freshly bootstrapped catalog the count of newly-stale embeddings is
 are never embedded — so the obligation is real but the bill is nil until the
 catalog has been enriched. `usher index` prints the stale count either way, so
 the number is checkable rather than taken on trust.
+
+**`ratings` is an alias rather than a step, and `--phase all` never dispatches
+it.** A full run already imports `title.ratings.tsv.gz` inside its IMDb arm;
+this member exists for the *refresh*, against a catalog that is already
+serving. `--phase imdb` would pull **214.4 MiB** of `title.basics.tsv.gz`
+first and rewrite every name and year, and a changed name stales that title's
+embedding — so refreshing ratings that way buys a re-index nobody asked for.
+`--phase ratings` reads **8.2 MiB** and touches two columns nothing embeds. It
+checkpoints against the same `imdb.title.ratings` row `--phase imdb` uses, so
+the two cannot disagree about which revision this catalog holds — which also
+means a completed run at an unchanged upstream revision resumes at the end and
+writes nothing (delete the checkpoint first if that is not what you wanted).
 
 `movielens` runs **last** under `--phase all`, and refuses outright against an
 empty catalog: the genome joins `titles` on `imdb_id`, so there is nothing to

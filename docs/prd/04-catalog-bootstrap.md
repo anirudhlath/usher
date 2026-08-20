@@ -90,8 +90,20 @@ them in the other. It stales no embedding in either order: the embedded
 population is the exact complement of what the fill writes. And Phase 4's genome last, for Phase 0's reason.
 
 `--phase` names them `imdb`, `credit-names`, `aliases`, `tmdb-ids`,
-`crosswalk`, `movielens` and `all`; the tuple in `usher.cli.PHASES` is in
+`crosswalk` and `movielens`; the tuple in `usher.cli.PHASES` is in
 execution order and carries the same three reasons.
+
+**Two further members are *aliases* rather than steps**, and
+`usher.domain.bootstrap` says which is which — `FULL_SEQUENCE` holds the six
+above, `PHASE_ALIASES` holds `all` and `ratings`, and the two are asserted to
+partition the enum rather than each being maintained by hand. `all` selects
+every step. **`ratings` selects the second half of `imdb`**: it re-imports
+`title.ratings.tsv.gz` (8.2 MiB) alone, because `--phase imdb` first
+downloads `title.basics.tsv.gz` (214.4 MiB) and rewrites every name and year,
+and a changed name stales that title's embedding — a cost a *rating* refresh
+against a live catalog should not pay. It opens no `bulk_load_window()` (that
+window declines on a non-empty `titles` anyway) and it is never dispatched by
+`--phase all`, which reaches the same rows inside its IMDb arm. ADR-0040.
 
 ### Phase 0 — IMDb skeleton (~30 min)
 

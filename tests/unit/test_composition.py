@@ -74,7 +74,7 @@ from usher.composition import (
 )
 from usher.config import Settings
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
-from usher.domain.bootstrap import BootstrapPhase, ImportRun
+from usher.domain.bootstrap import FULL_SEQUENCE, PHASE_ALIASES, BootstrapPhase, ImportRun
 from usher.domain.curation import LLMPurpose
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
@@ -1479,10 +1479,22 @@ def _offline_client(*_: object, **__: object) -> httpx.AsyncClient:
 
 
 async def _journal_of_a_full_bootstrap(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *, through_the_worker: bool
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    *,
+    through_the_worker: bool,
+    phase: BootstrapPhase = BootstrapPhase.ALL,
 ) -> list[str]:
-    """`--phase all` driven either the way `usher bootstrap` drives it or the
-    way the `bootstrap` job handler does, over the same fakes."""
+    """One bootstrap run's datasets and window edges, driven either the way
+    `usher bootstrap` drives it or the way the `bootstrap` job handler does,
+    over the same fakes.
+
+    `phase` defaults to `ALL` because that is what every caller wanted until
+    ADR-0040's `RATINGS` arm needed a journal of its own; a single-phase run
+    goes through the identical fakes rather than a second set, which is what
+    makes *"this phase imports one file and opens no window"* an assertion
+    about the same dispatch the parity case walks.
+    """
     journal: list[str] = []
     catalog = _JournallingCatalog(journal)
     runs = _JournallingRuns(journal)
@@ -1500,7 +1512,7 @@ async def _journal_of_a_full_bootstrap(
             runs,
             _nothing,
             settings,
-            BootstrapPhase.ALL,
+            phase,
             report=journal.append,
             events=NullEventPublisher(),
         )
@@ -1519,11 +1531,7 @@ async def _journal_of_a_full_bootstrap(
         user_id=uuid.uuid4(),
     )
     await queue.enqueue(
-        [
-            JobRequest(
-                kind=JobKind.BOOTSTRAP, key=BootstrapPhase.ALL.value, priority=JobPriority.DEMAND
-            )
-        ]
+        [JobRequest(kind=JobKind.BOOTSTRAP, key=phase.value, priority=JobPriority.DEMAND)]
     )
     assert await worker.run_once() == 1, "the premise: the worker claimed the bootstrap job"
     return journal
@@ -1589,8 +1597,17 @@ async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
       (`.claude/rules/bootstrap-and-datasets.md`).
     - **`link-crosswalk` immediately after the crosswalk import.** The import
       stores pairs; the link is what attaches them to `titles`.
-    - **Every phase in `BootstrapPhase`'s declared order**, asserted against
-      the enum rather than against the other driver. **A parity assertion
+    - **Every step of the full run, in `FULL_SEQUENCE`'s declared order**,
+      asserted against that tuple rather than against the other driver. It
+      read `[one for one in BootstrapPhase if one is not BootstrapPhase.ALL]`
+      until ADR-0040 added `RATINGS`, at which point the expectation demanded
+      a phase `--phase all` never emits -- because `--phase all` reaches those
+      rows *inside* its IMDb arm -- and this case went red on a correct
+      implementation. The repair is not a second name in the exclusion: the
+      enum holds steps and aliases, `FULL_SEQUENCE` and `PHASE_ALIASES` say
+      which is which in the domain, and
+      `test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias`
+      is what stops that pair drifting from the enum. **A parity assertion
       cannot see a permutation** -- both roots call one function, so a
       reordered dispatch reorders both journals identically and they still
       match. Measured: moving the `credit-names` arm in front of the `imdb`
@@ -1620,9 +1637,56 @@ async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
     assert through_cli.count("window-close") == 1
 
     assert through_cli[through_cli.index("wikidata.crosswalk") + 1] == "link-crosswalk"
-    assert _phases_in(through_cli) == [
-        one for one in BootstrapPhase if one is not BootstrapPhase.ALL
-    ]
+    assert _phases_in(through_cli) == list(FULL_SEQUENCE)
+
+
+def test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias() -> None:
+    """**The partition, asserted rather than maintained.**
+
+    `BootstrapPhase` holds steps and aliases, and the dispatch case above can
+    only assert the steps. A member added to neither collection is exactly the
+    defect that reads as working: the CLI offers it (`cli.PHASES` is derived
+    from the enum), the parser accepts it, `run_bootstrap` has no arm for it,
+    and it silently does nothing.  Spelling the two collections as a partition
+    is what makes that a red instead.
+
+    ⚠️ **What this cannot see: a member added to `PHASE_ALIASES` with no arm
+    in `run_bootstrap`.** An alias legitimately has no place in the sequence,
+    so the partition holds either way.  That half is covered for `RATINGS`
+    specifically by
+    `test_the_ratings_phase_imports_the_ratings_file_and_nothing_else` below,
+    and it is stated here rather than left as an implied guarantee.
+    """
+    assert set(FULL_SEQUENCE) | PHASE_ALIASES == set(BootstrapPhase)
+    assert set(FULL_SEQUENCE).isdisjoint(PHASE_ALIASES)
+    # The premise: both halves are non-empty, so the equality above is not
+    # satisfied by an empty set on either side.
+    assert FULL_SEQUENCE and PHASE_ALIASES
+
+
+async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """**The point of the phase, asserted rather than described.**
+
+    `--phase imdb` imports `title.basics.tsv.gz` (214.4 MiB) before
+    `title.ratings.tsv.gz` (8.2 MiB) and rewrites every name and year; a name
+    change stales that title's embedding, and this phase exists to be run
+    against a live catalog that the deployed backend is serving.
+
+    The equality is against the whole journal rather than a membership test,
+    because the two defects this is for are both *additions*: an arm that
+    reused the IMDb arm's body pulls basics as well, and one that opened
+    `bulk_load_window()` would drop and rebuild two `titles` indexes under a
+    SHARE lock on a catalog nobody asked it to reindex.  Note what that buys
+    over `"imdb.title.basics" not in journal`: it also fails on
+    `window-open`/`window-close`, which is the second defect and the one no
+    membership test aimed at basics would catch.
+    """
+    journal = await _journal_of_a_full_bootstrap(
+        monkeypatch, tmp_path, through_the_worker=False, phase=BootstrapPhase.RATINGS
+    )
+    assert journal == ["imdb.title.ratings"]
 
 
 async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
