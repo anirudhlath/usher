@@ -571,85 +571,10 @@ async def _until(
     raise AssertionError(f"{note}; stdout was {seen!r}")
 
 
-async def test_unmatched_lists_and_resolves_through_the_real_repository(
-    cli_settings: Settings,
-    clean_slate: None,
-    capsys: pytest.CaptureFixture[str],
-    session: AsyncSession,
-) -> None:
-    """The review queue's two halves, against real SQL. `--resolve` writes
-    `title_id` and leaves `episode_id` null, which `attach_title` documents
-    as the deliberate act of a human rather than a walk's "I did not look".
-    """
-    title_id = new_id()
-    async with _session_for(cli_settings) as own:
-        source = Source(
-            kind=SourceKind.EMBY,
-            name="cli-source",
-            base_url="https://emby.invalid",
-            credentials_ref=f"ref-{new_id()}",
-            device_id=str(new_id()),
-        )
-        await PostgresSourceRepository(own).add(source)
-        await own.execute(
-            text(
-                "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
-                "VALUES (:id, 'movie', 'cli-orphan', 'cli-orphan', 'skeleton')"
-            ),
-            {"id": title_id},
-        )
-        pipeline = build_pipeline(own, cli_settings)
-        await pipeline.media_items.upsert_many(
-            [
-                MediaItemUpsert(
-                    source_id=source.id,
-                    external_id="unmatched-1",
-                    title_id=None,
-                    episode_id=None,
-                    container="mkv",
-                    video_codec=None,
-                    audio_codec=None,
-                    width=None,
-                    height=None,
-                    hdr_format=None,
-                    audio_channels=None,
-                    file_size_bytes=None,
-                    runtime_seconds=None,
-                    added_at=None,
-                    last_seen_at=source.created_at,
-                )
-            ]
-        )
-        await own.commit()
-        stored = await pipeline.media_items.get_by_external_id(source.id, "unmatched-1")
-    assert stored is not None
-
-    await _unmatched(cli_settings, limit=50, offset=0, resolve=None, title=None)
-    assert "unmatched-1" in capsys.readouterr().out
-
-    await _unmatched(cli_settings, limit=50, offset=0, resolve=str(stored.id), title=str(title_id))
-    assert "resolved" in capsys.readouterr().out
-
-    async with _session_for(cli_settings) as own:
-        row = (
-            await own.execute(
-                text("SELECT title_id, episode_id FROM media_items WHERE id = :id"),
-                {"id": stored.id},
-            )
-        ).one()
-    assert row.title_id == title_id
-    assert row.episode_id is None
-
-    # And it leaves the review queue: `list_unmatched` is `title_id IS NULL`,
-    # so a resolution that wrote nothing would still list here.
-    await _unmatched(cli_settings, limit=50, offset=0, resolve=None, title=None)
-    assert "nothing unmatched" in capsys.readouterr().out
-
-
 async def _an_unmatched_item(settings: Settings) -> uuid.UUID:
     """One source and one item on the review queue, committed. The id is what
     `--resolve` is given, so a case can name a *held* item and vary only the
-    title -- which is what tells the two refusals below apart."""
+    title -- which is what tells the three refusals below apart."""
     async with _session_for(settings) as own:
         source = Source(
             kind=SourceKind.EMBY,
@@ -702,17 +627,56 @@ async def _a_title(settings: Settings) -> uuid.UUID:
     return title_id
 
 
+async def test_unmatched_lists_and_resolves_through_the_real_repository(
+    cli_settings: Settings,
+    clean_slate: None,
+    capsys: pytest.CaptureFixture[str],
+    session: AsyncSession,
+) -> None:
+    """The review queue's two halves, against real SQL. `--resolve` writes
+    `title_id` and leaves `episode_id` null, which `attach_title` documents
+    as the deliberate act of a human rather than a walk's "I did not look".
+    """
+    media_item_id = await _an_unmatched_item(cli_settings)
+    title_id = await _a_title(cli_settings)
+
+    await _unmatched(cli_settings, limit=50, offset=0, resolve=None, title=None)
+    assert "unmatched-1" in capsys.readouterr().out
+
+    await _unmatched(
+        cli_settings, limit=50, offset=0, resolve=str(media_item_id), title=str(title_id)
+    )
+    assert "resolved" in capsys.readouterr().out
+
+    async with _session_for(cli_settings) as own:
+        row = (
+            await own.execute(
+                text("SELECT title_id, episode_id FROM media_items WHERE id = :id"),
+                {"id": media_item_id},
+            )
+        ).one()
+    assert row.title_id == title_id
+    assert row.episode_id is None
+
+    # And it leaves the review queue: `list_unmatched` is `title_id IS NULL`,
+    # so a resolution that wrote nothing would still list here.
+    await _unmatched(cli_settings, limit=50, offset=0, resolve=None, title=None)
+    assert "nothing unmatched" in capsys.readouterr().out
+
+
 async def test_resolving_an_item_that_does_not_exist_says_so(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """**The title is real and the media item is not**, which is the only
     fixture that keeps this a test of `attach_title`'s `rowcount == 0`.
 
-    It named neither until M10's F4. That was answered by the same
-    `no such media item` for as long as nothing checked the title -- and once
-    something does, a case naming neither is answered by whichever check runs
-    first, so it would have gone on reading as coverage of this arm while
-    silently testing the one below it.
+    It named neither until M10's F4, and the repair was **mandatory rather
+    than prophylactic**: with the title pre-check in place the old fixture
+    stops reaching this arm at all and the case goes *loudly* red --
+    `E SystemExit: no such title: …`, measured by restoring its pre-F4 form
+    against the fixed `cli.py`. So there was never a window in which it
+    silently changed subject; what the two ids bought was an answer that
+    happened to be right for a reason the case did not name.
     """
     title_id = await _a_title(cli_settings)
     await _unmatched(
@@ -732,12 +696,26 @@ async def test_an_unknown_title_id_is_a_sentence_against_real_postgres(
     Before M10's F4 this reached `fk_media_items_title_id_titles`,
     `PostgresMediaItemRepository.attach_title` translated it to
     `RepositoryConflict`, and `main` re-raised it because that family is
-    deliberately out of `OPERATOR_ERRORS` -- **60 frames** for a mistyped
-    UUID, measured on this case's own red run.
+    deliberately out of `OPERATOR_ERRORS`. **40 frames at a real terminal**,
+    measured 2026-08-20 by running the console script against a throwaway
+    `pgvector/pgvector:pg17`; this case's own red run reports **62**, but 25
+    of those are `_pytest`/`pluggy`/`pytest_asyncio` and no operator sees
+    them, which is why the pytest number is not the one quoted anywhere.
 
-    The last assertion is what stops the fix being a `try/except` around the
-    write: the item is still on the review queue, so the refusal happened
-    before the statement rather than after it.
+    🔴 **What the last assertion proves is that nothing was *net* written --
+    not that nothing was attempted, and the distinction cost a review round.**
+    It read as *"the refusal happened before the statement rather than after
+    it"*, which this case cannot show: `attach_title` runs its `UPDATE` inside
+    `session.begin_nested()`, so a refused row is rolled back either way and
+    a `try/except RepositoryConflict` around the write **passes every
+    assertion here**. Measured, by planting exactly that swallow.
+
+    So the ordering claim lives in the unit twin, on
+    `harness.media_items.attached == []`, and this case proves the two things
+    no fake can: that the foreign key **fires at all** (the fake has none, by
+    construction and by its own divergence list), and that what an operator
+    gets for it is a sentence naming the id rather than a stack. Read the two
+    cases as a pair; neither is the whole claim.
     """
     media_item_id = await _an_unmatched_item(cli_settings)
     unknown = new_id()

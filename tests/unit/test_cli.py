@@ -296,7 +296,9 @@ async def test_resolving_to_a_title_that_does_not_exist_names_the_id_and_keeps_t
     translated to `RepositoryConflict` by
     `PostgresMediaItemRepository.attach_title`, and re-raised by `main`
     because the family is deliberately out of the tuple -- so the answer to a
-    typo was sixty frames.
+    typo was **40 frames** at a real terminal (measured 2026-08-20 against a
+    throwaway container; the integration twin's docstring has the
+    decomposition and why the pytest run's 62 is not that number).
 
     Widening the tuple would answer this by muting every raise site of that
     family, of which exactly one is reachable from a CLI argument -- this one
@@ -305,15 +307,23 @@ async def test_resolving_to_a_title_that_does_not_exist_names_the_id_and_keeps_t
     when* asks for and what `POST /admin/unmatched/{id}/resolve` has done
     since M9's E4.
 
-    **The third assertion is the one that separates a lookup from a swallow.**
-    `except RepositoryConflict` around the write reads the same way to an
-    operator and is not the same thing: the row is refused by Postgres
-    *after* the statement ran, inside a SAVEPOINT this command then has to
-    unwind. `attach_title` is never called here, and nothing is committed.
+    🔴 **`attached == []` is the assertion that separates a lookup from a
+    swallow, and it is only assertable here.** `except RepositoryConflict`
+    around the write reads the same way to an operator and is not the same
+    thing: Postgres refuses the row *after* the statement ran, inside a
+    SAVEPOINT the command then has to unwind. The integration twin **cannot**
+    tell the two apart -- the SAVEPOINT rolls the refused row back, so the
+    swallow passes every assertion it makes -- which is why the ordering
+    claim lives here and the foreign key lives there.
 
-    The *stack* half of the claim is the integration twin's -- this fake has
-    no foreign key, so the message below is the whole of what an operator
-    sees here either way.
+    Note what this fake can and cannot show. It has **no foreign key** (its
+    own divergence list says so), so it cannot produce the conflict at all:
+    at HEAD before F4 this case failed on `DID NOT RAISE SystemExit` having
+    printed `resolved`, which is the honest red for a *pre-check*. The same
+    property means the swallow plant also dies here on `DID NOT RAISE` rather
+    than on `attached == []` -- see the F4 ledger in
+    `.claude/rules/mutation-sweeps.md`, which records that as a refinement of
+    the plan's prediction rather than a match to it.
     """
     harness = await _resolve_harness(monkeypatch)
     unknown = new_id()
@@ -340,13 +350,16 @@ async def test_resolving_to_a_title_that_does_not_exist_names_the_id_and_keeps_t
 async def test_a_resolve_naming_no_media_item_still_says_so(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The third arm, pinned so the fix above cannot quietly make one message
-    serve two conditions.
+    """The third arm, pinned so the fix above cannot make one message serve
+    two conditions.
 
     The title exists here and the media item does not, which is the *only*
     fixture that can tell the two apart: a case naming neither is answered by
-    whichever check runs first, and would have gone on reading as coverage of
-    this arm while testing the one above.
+    whichever check runs first. That is a case testing the arm above under
+    this arm's name -- **loudly**, not silently, since the two emit different
+    sentences and the integration twin measured its pre-F4 form going red
+    rather than quietly changing subject. The reason to seed both is that the
+    fixture should say which arm it means, not that a wrong one would hide.
     """
     harness = await _resolve_harness(monkeypatch)
     title = Title(kind=TitleKind.MOVIE, name="A Held Title", sort_name="A Held Title")
@@ -361,6 +374,27 @@ async def test_a_resolve_naming_no_media_item_still_says_so(
     # changed precisely so a caller can say this.
     assert harness.media_items.attached == [(missing, title.id)]
     assert harness.session.commits == 1
+
+
+async def test_two_malformed_ids_name_the_media_item_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_as_uuid` runs on `--resolve` before `--title`, and that order is a
+    behaviour rather than an accident of how the arguments were typed.
+
+    It survived F4's own sweep as an unpinned mutant: swapping the two
+    conversions changes which argument an operator is told about when both
+    are wrong, and nothing failed. Cheap to close, so closed -- the title
+    pre-check sits directly under these two lines and is exactly the sort of
+    edit that reorders them.
+    """
+    harness = await _resolve_harness(monkeypatch)
+
+    with pytest.raises(SystemExit) as exit_info:
+        await _unmatched(_cli_settings(), limit=50, offset=0, resolve="nope", title="also-nope")
+
+    assert "media item id is not a uuid" in str(exit_info.value)
+    assert harness.media_items.attached == []
 
 
 def test_similar_is_a_read_form_and_a_write_form_of_one_subcommand() -> None:

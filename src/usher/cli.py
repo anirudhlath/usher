@@ -180,7 +180,11 @@ OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     PortUnavailable,
     # The credential was rejected. `USHER_LLM_API_KEY`, `USHER_TMDB_API_KEY`,
     # a source's stored password -- an operator fixes all three, and none of
-    # them is worth sixty frames.
+    # them is worth forty frames. (*"Sixty"* here and in three other places
+    # until 2026-08-20, when M10's F4 measured the only one of them anybody
+    # had ever counted: 40 at a real terminal, and the 60 was a pytest run's
+    # 62 with 25 harness frames in it. This line predates F4 and is amended
+    # with it, because a census restated in four places goes stale in three.)
     PortAuthFailed,
     # The upstream asked to be backed off. A CLI has no backoff schedule to
     # apply, so the honest answer at a terminal is the sentence and exit 1.
@@ -502,17 +506,27 @@ async def _unmatched(
     naming no media item is `attach_title`'s `rowcount == 0`; and a
     well-formed UUID naming no title used to be
     `fk_media_items_title_id_titles`, translated to `RepositoryConflict` and
-    re-raised by `main` -- sixty frames for pasting the wrong column of the
+    re-raised by `main` -- **40 frames** for pasting the wrong column of the
     listing above, which prints a *media item* id and no title id at all.
+    (Measured 2026-08-20 by running the real console script against a
+    throwaway `pgvector/pgvector:pg17`: 40 `File` lines over four chained
+    tracebacks, 35 of them library code, 5 in this project. PRD 09 and this
+    docstring both said *"sixty"* until then, which was the pytest run's 62
+    -- and 25 of those are `_pytest`/`pluggy`/`pytest_asyncio` frames no
+    operator ever sees. See `.claude/rules/mutation-sweeps.md`.)
 
     **The lookup is here rather than in `OPERATOR_ERRORS`, and that is the
     argued half.** Adding `RepositoryConflict` to the tuple is the one-line
     version, and every raise site of that family was read before it was
     refused: this is the **only** one an operator's own CLI argument reaches.
     ADR-0026's bar is *"a family belongs in the tuple when an operator can act
-    on it"*, and one site out of that census is not a family. **The census
-    itself lives in ADR-0026's Consequences and nowhere else in `src/`**, so
-    there is one copy of a grep-checkable number rather than one per reader.
+    on it"*, and one site out of that census is not a family. **ADR-0026's
+    Consequences is the authority for the census**; `09-roadmap.md`'s
+    discharged debt entry and
+    `test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple`'s
+    assertion message restate it, and those three are the only copies -- kept
+    deliberately few, because a grep-checkable number is exactly what goes
+    stale one place at a time.
 
     **Not `except RepositoryConflict` around the write either**, which reads
     identically to an operator and is not the same thing: Postgres refuses
@@ -522,6 +536,25 @@ async def _unmatched(
     has read the title first since M9's E4 for the same reason, and its own
     docstring states the rule: everything the request names is checked before
     anything is written.
+
+    ⚠️ **The read and the write are not one statement, so this is a
+    check-then-act race, and the residual is accepted rather than absent.** A
+    title deleted between `titles.get` and `attach_title` hands the operator
+    back exactly the stack #5 was filed about. What bounds it is that
+    **nothing in this project ever deletes a `titles` row**: `src/usher/`
+    holds **12** `DELETE FROM` statements (measured 2026-08-20) and they name
+    `title_embeddings`, `title_neighbors`, `title_search_names`, `credits`,
+    `genome_tags`, `curated_rows`, `images` and `jobs` -- never `titles`
+    itself, and there is no ORM-level delete either. So the window needs an
+    out-of-band `psql`, a restore, or a second process doing something this
+    codebase has no path for, and when it fires it degrades to the *pre-fix*
+    behaviour rather than to anything worse -- no wrong row is written,
+    because the foreign key is still there underneath. Closing it would mean
+    `SELECT ... FOR SHARE` on a row this command holds no other reason to
+    lock, on the read path of a hand resolution, to defend against a delete
+    that has no caller. Stated rather than left as an unspoken *"this cannot
+    happen"*, which `.claude/rules/ports-and-error-taxonomy.md` records as
+    the shape that fires one measurement later.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
@@ -529,8 +562,16 @@ async def _unmatched(
             # Both conversions before the read, in the order the arguments
             # were written, so a run with two malformed ids still names the
             # first one rather than the one the new check happens to want.
+            # Pinned by `test_two_malformed_ids_name_the_media_item_first`,
+            # because swapping these two lines is otherwise a silent mutant.
             media_item_id = _as_uuid(resolve, "media item id")
             title_id = _as_uuid(title, "title id")
+            # One extra round trip per hand resolution -- `PostgresTitle
+            # Repository.get` is a `session.get` on the primary key, so it is
+            # one indexed `SELECT` on a command an operator runs by hand, one
+            # line at a time. Priced rather than assumed, the way
+            # `attach_title`'s own comment prices its statement eleven lines
+            # from here.
             if await pipeline.titles.get(title_id) is None:
                 raise SystemExit(f"no such title: {title_id}")
             attached = await pipeline.media_items.attach_title(

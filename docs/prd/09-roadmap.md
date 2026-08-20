@@ -1409,35 +1409,33 @@ suspicion.
   rows, and a `logger.warning` in a stream nothing asserts on. **The claim lease
   is the fix for both**; until then this path is the one to name first, because
   it is the deployment shape `docker compose up` gives you by default.
-- **`usher unmatched --resolve` stack-traces on an unknown `--title`** — found
-  by M9's E4, which fixed the *route* and could not fix the CLI because
-  `cli.py` is not that task's file. The route now reads the title first and
-  answers a problem document; the command hands the id straight to
-  `attach_title`, and against Postgres that is a foreign-key violation
-  translated to `RepositoryConflict` — which is **not** in
-  `cli.OPERATOR_ERRORS` (verified: no member of that tuple is a base of it), so
-  an operator who mistypes a UUID gets sixty frames instead of a sentence.
+- ✅ **`usher unmatched --resolve` stack-traced on an unknown `--title`** —
+  found by M9's E4, **discharged 2026-08-20 by M10's F4**, and the entry is
+  retired rather than deleted because the answer refused the fix this entry
+  proposed. It read *"it is a one-line change and it is carried rather than
+  taken because the family is an argued taxonomy, not a list — the question
+  ADR-0026 asks before adding a member is how often an operator hits it"*.
+  That question was answered by reading every raise site, and **the answer
+  refuses the one-line change**: **22 raise sites across 14 modules**, of which
+  **exactly one is reachable from a CLI argument** — this one. `usher bootstrap
+  --phase` can reach `ImportRunRepository.start`'s uniqueness conflict, but by
+  racing another bootstrap rather than by a typo, and
+  `BootstrapService._concede_to_other_owner` answers it without raising; every
+  other site is reached only by a walk (`similar --rebuild`, `derive`,
+  `curate`, `search`/`suggest`, `work`, `sync`, and `push`/`serve`, which run
+  the lanes). `db/repositories/source.py`'s two split across those groups:
+  `add` only from `POST /admin/sources`, since no subcommand adds a source, but
+  **`update` is not reachable from that route at all** — its one caller is
+  `api/lanes.py`'s `_write_push_available`, so it is CLI-reachable and not
+  argument-reachable. So widening the tuple would mute 22 sites to fix one,
+  several of them the deliberate bug tripwires
   [ADR-0026](decisions/0026-the-cli-boundary-names-families.md)'s amendment
-  family, one member short. It is a one-line change and it is carried rather
-  than taken because the family is an argued taxonomy, not a list — the
-  question ADR-0026 asks before adding a member is how often an operator hits
-  it, and answering that for a *refusal* type whose other raise sites are
-  genuine conflicts is the work.
-  ✅ **Discharged 2026-08-20 by M10's F4, and the answer refused the one-line
-  change.** The question was answered by reading every raise site: **22 across
-  14 modules**, of which **exactly one is reachable from a CLI argument** —
-  this one. `usher bootstrap --phase` can reach `ImportRunRepository.start`'s
-  uniqueness conflict, but by racing another bootstrap rather than by a typo,
-  and `BootstrapService._concede_to_other_owner` answers it without raising;
-  every other site is reached only by a walk (`similar --rebuild`, `derive`,
-  `curate`, `search`/`suggest`, `work`, `sync`), and
-  `db/repositories/source.py`'s two only from `POST /admin/sources`, since no
-  subcommand adds a source. So widening the tuple would mute 22 sites to fix
-  one, several of them the deliberate bug tripwires the amendment names. **The
-  fix is a lookup at the call site** — `cli._unmatched` reads the title before
-  it writes, as `POST /admin/unmatched/{id}/resolve` has since E4 — and the
-  count lives in ADR-0026's Consequences, because a count nobody wrote down is
-  a count somebody re-derives wrongly.
+  names. **The fix is a lookup at the call site** — `cli._unmatched` reads the
+  title before it writes, as `POST /admin/unmatched/{id}/resolve` has since
+  E4 — and the count lives in that ADR's Consequences, because a count nobody
+  wrote down is a count somebody re-derives wrongly. *(This entry also said
+  "sixty frames"; measured at a real terminal it is **40**, and the 60 came
+  from a pytest run's 62 with 25 harness frames in it.)*
 - **A covering index for `GET /admin/unmatched` is measured, requested, and
   declined** — M9's E4, over 200,000 items / 70,000 unmatched / 23,333 undated.
   `ix_media_items_unmatched` is `(source_id) WHERE title_id IS NULL` and carries

@@ -113,19 +113,34 @@ stack *because* the stack is one flag away.
   next request to widen the tuple has to beat.** `grep -rn "raise
   RepositoryConflict\|raise _conflict" src/usher/` finds **22 raise sites
   across 14 modules** — one of which is `_errors.py`'s `refusals_as_conflict`
-  and therefore stands for **8** further call sites. Of all of them, **exactly
-  one is reachable from a CLI argument**: `usher unmatched --resolve … --title
-  …` naming a well-formed UUID no title carries, which is
-  `fk_media_items_title_id_titles` translated by
+  and therefore stands for **8** further call sites. *(The M10 plan predicted
+  seven; re-measured, eight — `bulk.py`×2, `curation.py`, `image.py`,
+  `llm_call.py`, `search_query.py`×2, `watch_state.py`. A correction, not a
+  discrepancy for a later reader to re-derive.)* The census counts **raises**,
+  not constructions: an `ast` walk finds a 23rd site at `title.py`'s
+  `_conflict` factory, which `return`s rather than raises, and
+  `.claude/rules/ports-and-error-taxonomy.md` records that exact trap costing
+  `PortRateLimited`'s census a wrong number twice.
+
+  Of all of them, **exactly one is reachable from a CLI argument**: `usher
+  unmatched --resolve … --title …` naming a well-formed UUID no title carries,
+  which is `fk_media_items_title_id_titles` translated by
   `PostgresMediaItemRepository.attach_title`. `usher bootstrap --phase …` can
   reach `ImportRunRepository.start`'s uniqueness conflict, but by running two
   bootstraps at once rather than by a typo, and
   `BootstrapService._concede_to_other_owner` already answers it without
   raising. Every other site is reached only by a *walk* — `usher similar
-  --rebuild`, `derive`, `curate`, `search`/`suggest`, `work`, `sync` — and
-  `db/repositories/source.py`'s two are reachable only from `POST
-  /admin/sources`, because none of the fifteen subcommands adds a source. So
-  the frequency answer ADR-0026 asks for is **one command, one argument**, and
+  --rebuild`, `derive`, `curate`, `search`/`suggest`, `work`, `sync`, and
+  `push`/`serve`, which run the lanes. `db/repositories/source.py`'s two split
+  between those two groups rather than both belonging to the route, and the
+  distinction is worth stating because the obvious reading is wrong: `add`
+  (`:57`) is reachable only from `POST /admin/sources`, since no subcommand
+  adds a source; **`update` (`:71`) is not reachable from that route at all** —
+  its one production caller is `api/lanes.py`'s `_write_push_available`, which
+  bare `usher push` and `usher serve` both reach through `_run_lanes`. So it is
+  CLI-reachable and **not argument-reachable**, which is the distinction the
+  headline rests on. So the frequency answer ADR-0026 asks for is **one
+  command, one argument**, and
   adding the family here would collapse all 22 to one sentence in order to fix
   one — including the sites the repositories document as tripwires for bugs in
   this project's own code. **The fix belongs at the call site**, and it is
