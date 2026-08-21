@@ -16,17 +16,23 @@ Nothing here reaches a database.
 import pytest
 
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
+from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.db.backup_identity import (
+    RESOLUTION_ORDER,
     Unresolved,
+    episode_reference,
+    keys_tried,
+    resolve_episodes,
     resolve_titles,
     title_reference,
 )
 from usher.domain.enums import TitleKind
+from usher.domain.episode import Episode
 from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.bulk import ImdbTitle
-from usher.ports.repository import TitleReference
+from usher.ports.repository import EpisodeReference, TitleReference
 
 _DUMP = (
     ImdbTitle(
@@ -296,3 +302,125 @@ def test_the_unresolved_rules_are_the_ones_this_group_argued_for() -> None:
     assert UNRESOLVED_RULE["watch_states"] is UnresolvedRule.REFUSE
     assert UNRESOLVED_RULE["media_items"] is UnresolvedRule.REFUSE
     assert UNRESOLVED_RULE["search_queries"] is UnresolvedRule.NULL
+
+
+async def test_an_episode_whose_series_resolves_but_whose_numbers_do_not_is_refused_by_name() -> (
+    None
+):
+    """**The episode half of the headline claim, which nothing exercised.**
+
+    Measured with `coverage` over the whole unit suite on 2026-08-21: four
+    statements of `backup_identity` were unreached, and all four were this
+    half -- `episode_reference`'s body, `resolve_episodes`' body, and both
+    of `keys_tried`'s remaining branches. So *"a named refusal, never
+    `None`"* was pinned for titles and merely asserted for episodes, on a
+    library where 999,827 of 1,126,674 items are episodes.
+
+    The series resolving while the numbers do not is the failure that
+    matters: a resolver that answered the *series'* id here would write a
+    watch state against the wrong row, and both a `None` and a wrong id are
+    silent. The premise below is what separates this from an episode whose
+    series is missing too -- that case is refused for a different reason and
+    would pass this assertion without the numbers ever being consulted.
+    """
+    repository = FakeEpisodeRepository()
+    series = _title(kind=TitleKind.SERIES, imdb_id="tt99000011")
+    series_reference = title_reference(series)
+    repository.title_keys[series.id] = series_reference
+
+    held = Episode.model_validate(
+        {
+            "title_id": series.id,
+            "season_id": new_id(),
+            "season_number": 1,
+            "episode_number": 1,
+            "name": "Pilot",
+        }
+    )
+    await repository.upsert_episodes([held])
+
+    resolved = episode_reference(held, series_reference)
+    missing = EpisodeReference(title=series_reference, season_number=1, episode_number=99)
+
+    answers = await resolve_episodes(repository, [resolved, missing])
+
+    assert answers[resolved] == held.id, (
+        "the premise: the series really does resolve, so the refusal below is "
+        "about the numbers rather than about the series"
+    )
+    refused = answers[missing]
+    assert isinstance(refused, Unresolved), "a missing episode was not refused by name"
+    assert refused != held.id and refused is not None
+    assert all("S01E99" in one for one in refused.keys_tried), (
+        f"the refusal does not name the episode it looked for: {refused.keys_tried}"
+    )
+    assert any("imdb_id=tt99000011" in one for one in refused.keys_tried), (
+        "the refusal names the episode but not the series it hangs from"
+    )
+
+
+def test_the_rendered_rungs_name_the_kind_beside_the_tmdb_id() -> None:
+    """`keys_tried`'s tmdb rung was unreached by any test, so the operator
+    report K4 prints from it was unchecked at exactly the rung ADR-0011
+    exists for.
+
+    A rung rendered `tmdb_id=99000550` rather than `series+tmdb_id=99000550`
+    reads, in a report about a failed restore, as though one number were
+    looked up -- which is the namespacing mistake this layer refuses to
+    make, restated in the one place a human sees it.
+
+    ⚠️ The first draft of this docstring illustrated the rung with TMDb's
+    **real** id 550, which `test_no_identifier_this_repository_once_committed_
+    has_come_back` refused -- correctly, and in a docstring rather than in a
+    fixture, which is the half worth recording. The synthetic id below is
+    the one every case in this file uses.
+    """
+    reference = title_reference(_title(kind=TitleKind.SERIES, tmdb_id=99000550))
+    rendered = keys_tried(reference)
+
+    assert any(one == "series+tmdb_id=99000550" for one in rendered), rendered
+    assert not any(one == "tmdb_id=99000550" for one in rendered), (
+        "the tmdb rung is rendered without its kind"
+    )
+    assert rendered[-1].startswith("id="), "the raw id is the last rung, not the first"
+
+
+async def test_resolution_order_names_the_ladder_both_arms_actually_walk() -> None:
+    """`RESOLUTION_ORDER` is exported and documented as *"the ladder both
+    arms spell"* -- a claim two implementations have to honour, and until
+    this case nothing checked it. **Measured 2026-08-21:** rewriting the
+    constant to `("id", "imdb_id")` survived all 4,527 unit cases, because
+    its only other occurrences are its own `__all__` entry and two prose
+    mentions.
+
+    This binds it to observed behaviour rather than to a second copy of
+    itself. Each rung is exercised by a reference that can resolve *only*
+    through it, so a constant that renames or reorders a rung disagrees with
+    what the resolver does. The same shape as M9's `AKAS_NAME_MAX_CHARS`
+    binding, and for the same reason: a documented constant nothing reads is
+    documentation, not a contract.
+    """
+    assert RESOLUTION_ORDER == ("imdb_id", "kind+tmdb_id", "id")
+
+    by_imdb = _title(imdb_id="tt99000011", tmdb_id=None)
+    by_tmdb = _title(kind=TitleKind.SERIES, imdb_id=None, tmdb_id=99000550)
+    by_raw = _title(imdb_id=None, tmdb_id=None)
+
+    repository = FakeTitleRepository()
+    for title in (by_imdb, by_tmdb, by_raw):
+        await repository.add(title)
+
+    walked = {
+        "imdb_id": title_reference(by_imdb),
+        "kind+tmdb_id": title_reference(by_tmdb),
+        "id": title_reference(by_raw),
+    }
+    assert set(walked) == set(RESOLUTION_ORDER), (
+        "a rung is named in the constant that no reference here exercises"
+    )
+
+    answers = await resolve_titles(repository, list(walked.values()))
+    for rung, reference in walked.items():
+        assert answers[reference] is not None and not isinstance(answers[reference], Unresolved), (
+            f"the {rung} rung does not resolve, so the constant names a rung the arms do not walk"
+        )
