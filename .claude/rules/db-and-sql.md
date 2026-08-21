@@ -1314,19 +1314,39 @@ written from it?* If not, the widest type is the right one.
 **And the SQLAlchemy half, which is where the fix actually was.**
 [ADR-0041](../../docs/prd/decisions/0041-a-bounded-column-is-a-declared-type-that-refuses.md)
 publishes the per-column ledger; F9 moved its `exposed-sqlalchemy` bucket from
-**20 columns to 1** across nineteen writing sites — ten replacing
-`except IntegrityError` with `except DBAPIError` + `is_row_refusal`, nine adding
-`refusals_as_conflict` where there was no `except` at all. Four things worth
-carrying out of it:
+**20 columns to 1** across **twenty** writing sites — **eleven** replacing
+`except IntegrityError` with `except DBAPIError` + `is_row_refusal`, **nine**
+adding `refusals_as_conflict` where there was no `except` at all. Four things
+worth carrying out of it:
 
-- **A shared helper that translates makes every caller look untranslated to a
-  scan that reads each method's own body.** The first spelling put
-  `refusals_as_conflict` inside `bulk.py`'s `_rowcount`/`_write_result` — better
-  design, and the ledger still reported five `titles` columns exposed, because
-  `write_sites()` reads function bodies. Teaching the scan to follow one level
-  of indirection is how it stops being able to see two, so the translation
-  moved to the sites. **When a generated artefact is the check, the code has to
-  be legible to the generator.**
+- 🔴 **When a generated artefact is the check and the code looks wrong to it,
+  fix the instrument — and this rule got written backwards first.** F9's first
+  spelling put `refusals_as_conflict` inside `bulk.py`'s
+  `_rowcount`/`_write_result`, the ledger reported five `titles` columns still
+  exposed, and the translation was copied out into five callers with a comment
+  telling the next author to keep it that way, on the grounds that *"teaching
+  the scan to follow one level of indirection is how it stops being able to see
+  two"*. Review measured the decisive fact: **`_executing_functions` in the same
+  file already followed that exact call edge, transitively** —
+  `bulk.py:apply_ratings` is in the executing set *only* because `_rowcount`
+  calls `execute`. The instrument was traversing an edge for *"does this
+  write?"* and refusing to traverse it for *"does this translate?"*, and the
+  code had been made worse to fit the gap. The scan now resolves both, and the
+  design constraint is where the real work was: **the translation closure has
+  to be narrower than the execution one.** "Callee translates ⇒ caller
+  translates" over-credits a caller that also runs a statement outside the
+  helper, so execution takes **any** refusal point and translation takes the
+  **weakest** — one uncovered statement makes the whole method `none`, because
+  that statement's refusal is what crosses the port boundary raw.
+- 🔴 **A scan that cannot place a writer drops it, and dropping reads
+  *optimistically*.** `PostgresTitleRepository.add` writes
+  `self._session.add(_to_row(title))`, so the mapped class never appears in the
+  method and `write_sites()` did not list it at all — narrowing its `except`
+  back produced no drift and no failing case. A bucket is worst-case over the
+  writers the scan can *see*, so an unresolvable writer launders its whole
+  table. ADR-0041's degradation testing had covered dead scans and empty maps,
+  both of which fail toward `exposed`; this is the one direction that fails
+  toward safe. **A write the scan can see but cannot place now raises.**
 - **`attempts = attempts + 1` is the one place `refusals_as_conflict` is
   wrong.** `jobs.attempts` is written only by that server-side expression, so a
   class-22 refusal from it is a *statement* fault and translating it would

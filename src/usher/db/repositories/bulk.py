@@ -228,8 +228,9 @@ _CROSSWALK_PAIRS = """
 # it**. Staged as `bigint`, such a row stages, joins nothing and is counted
 # as `unmatched`, which is a better answer rather than merely a better
 # exception. There is no destination statement to translate and no `except`
-# to design, which is why this is one change and the other twenty-nine are
-# not.
+# to design, which is what makes this and `stg_akas.ordering` **the only two
+# columns in ADR-0041's scope that a DDL edit finishes on its own** -- the
+# other twenty needed a translation at a writing site.
 _GENOME_STAGING_DDL = """
 CREATE TEMP TABLE stg_genome (
     imdb_id text, tmdb_id bigint, relevance real[]
@@ -387,28 +388,50 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         """
         await stage_records(self._session, ddl=ddl, table=table, columns=columns, records=records)
 
-    async def _rowcount(self, sql: str) -> int:
+    async def _rowcount(self, sql: str, *, refused: str) -> int:
         """`rowcount` lives on `CursorResult`, not the `Result[Any]`
         `AsyncSession.execute` is typed as returning -- mypy strict rejects
         `result.rowcount` without this narrowing (verified: `"Result[Any]" has
         no attribute "rowcount"`). Every statement passed here is a DML
         statement, which always yields a `CursorResult` at runtime.
 
-        **The translation is not here, deliberately.** Each caller opens its
-        own `refusals_as_conflict` around its own statement with its own
-        message, because `scripts/audit_bounded_columns.py` -- which is what
-        ADR-0041's ledger and F9's guard are both computed from -- reads each
-        writing method's own body. A shared helper doing it would make every
-        caller *look* untranslated to that scan, and teaching the scan to
-        follow one level of indirection is how a scan stops being able to see
-        two.
-        """
-        result = await self._session.execute(text(sql))
-        return cast(CursorResult[Any], result).rowcount
+        **`refused` has no default, and that is the point of it being here.**
+        Every destination statement in this module is an `INSERT ... SELECT` or
+        an `UPDATE ... FROM` over a staging table holding the caller's own
+        values, and four of the columns they write (`titles.imdb_id`,
+        `id_crosswalk.imdb_id`, `titles.tmdb_id`, `titles.tvdb_id`) are
+        narrower than the field feeding them. Those refuse as SQLSTATE class 22
+        on a plain `sqlalchemy.exc.DBAPIError` that `except IntegrityError`
+        does not catch, so a *missing* translation is invisible until an
+        operator reads a driver traceback. A required keyword makes the
+        omission a type error at the call site instead. See `_errors.py` for
+        the two measured shapes and ADR-0041 for the per-column ledger.
 
-    async def _write_result(self, sql: str) -> BulkWriteResult:
-        result = await self._session.execute(text(sql))
-        inserted, updated = result.one()
+        ⚠️ **F9 shipped this translation copied out into all five callers, for
+        a stated reason that was false**, and the note is kept because the
+        reasoning is the reusable part. The claim was that
+        `scripts/audit_bounded_columns.py` reads each writing method's own body,
+        so a shared helper would make every caller look untranslated -- true of
+        the scan as it stood, and not a fact about this code. `_executing_
+        functions` in that same file *already* followed this exact call edge
+        to answer "does `apply_ratings` write?" (it is in the executing set
+        **only** because this method calls `execute`), so the instrument was
+        refusing to traverse for one question an edge it traverses for
+        another. The scan now resolves translation across the same edges, with
+        the closure deliberately narrower: a caller is credited only if
+        **every** refusal point it has is covered, so delegating one statement
+        here and running another outside a wrapper still reads `none`.
+        **When a generated artefact is the check, fix the instrument rather
+        than shaping the code to its blind spot.**
+        """
+        async with refusals_as_conflict(self._session, refused):
+            result = await self._session.execute(text(sql))
+            return cast(CursorResult[Any], result).rowcount
+
+    async def _write_result(self, sql: str, *, refused: str) -> BulkWriteResult:
+        async with refusals_as_conflict(self._session, refused):
+            result = await self._session.execute(text(sql))
+            inserted, updated = result.one()
         return BulkWriteResult(inserted=int(inserted), updated=int(updated))
 
     async def upsert_genome_vectors(
@@ -631,10 +654,8 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         # Measured through this method, F9:
         # `asyncpg.exceptions.StringDataRightTruncationError: value too long
         # for type character varying(16)`.
-        async with refusals_as_conflict(
-            self._session, "an IMDb title batch violates the catalog's own bounds"
-        ):
-            return await self._write_result("""
+        return await self._write_result(
+            """
             WITH deduped AS (
                 SELECT DISTINCT ON (imdb_id) * FROM stg_titles ORDER BY imdb_id, id
             ), upserted AS (
@@ -666,7 +687,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             SELECT count(*) FILTER (WHERE inserted) AS inserted,
                    count(*) FILTER (WHERE NOT inserted) AS updated
             FROM upserted
-        """)
+        """,
+            refused="an IMDb title batch violates the catalog's own bounds",
+        )
 
     async def apply_ratings(self, rows: Sequence[ImdbRating]) -> int:
         if not rows:
@@ -685,10 +708,8 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         # titleTypes this milestone drops, and a rating with no title is not
         # a catalog entry. The IS DISTINCT FROM guard keeps a no-op re-import
         # from firing the set_updated_at trigger on a million unchanged rows.
-        async with refusals_as_conflict(
-            self._session, "a ratings batch violates the catalog's own bounds"
-        ):
-            return await self._rowcount("""
+        return await self._rowcount(
+            """
             UPDATE titles t
             SET community_rating = s.community_rating, vote_count = s.vote_count
             FROM (
@@ -697,7 +718,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             WHERE t.imdb_id = s.imdb_id
               AND (t.community_rating, t.vote_count)
                   IS DISTINCT FROM (s.community_rating, s.vote_count)
-        """)
+        """,
+            refused="a ratings batch violates the catalog's own bounds",
+        )
 
     async def fill_credit_names(self, rows: Sequence[ImdbCreditNames]) -> CreditNamesFillResult:
         if not rows:
@@ -945,10 +968,8 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
                 for row in rows
             ],
         )
-        async with refusals_as_conflict(
-            self._session, "a TMDb id batch violates tmdb_ids' own bounds"
-        ):
-            return await self._rowcount("""
+        return await self._rowcount(
+            """
             INSERT INTO tmdb_ids (tmdb_id, kind, original_name, popularity, adult)
             SELECT DISTINCT ON (tmdb_id, kind)
                    tmdb_id, kind, original_name, popularity, adult
@@ -959,7 +980,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
                 popularity = excluded.popularity,
                 adult = excluded.adult,
                 exported_at = now()
-        """)
+        """,
+            refused="a TMDb id batch violates tmdb_ids' own bounds",
+        )
 
     async def upsert_crosswalk(self, rows: Sequence[IdCrosswalkPair]) -> int:
         if not rows:
@@ -988,10 +1011,8 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         # and this method had no `except` at all, so it crossed the port
         # boundary raw. Measured, F9:
         # `asyncpg.exceptions.StringDataRightTruncationError`, `22001`.
-        async with refusals_as_conflict(
-            self._session, "a crosswalk batch violates id_crosswalk's own bounds"
-        ):
-            return await self._rowcount("""
+        return await self._rowcount(
+            """
             INSERT INTO id_crosswalk (
                 imdb_id, tmdb_movie_id, tmdb_series_id, tvdb_series_id
             )
@@ -1008,7 +1029,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
                 tvdb_series_id =
                     COALESCE(excluded.tvdb_series_id, id_crosswalk.tvdb_series_id),
                 retrieved_at = now()
-        """)
+        """,
+            refused="a crosswalk batch violates id_crosswalk's own bounds",
+        )
 
     async def link_crosswalk(self) -> CrosswalkLinkResult:
         # DISTINCT ON (x.tmdb_id, x.kind): 569 TMDb ids are claimed by more
@@ -1021,10 +1044,8 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         # `t.tmdb_id IS NULL` is what makes this idempotent and
         # non-destructive at once: a replay finds nothing to do, and a value
         # a later, better-informed enrichment wrote is never overwritten.
-        async with refusals_as_conflict(
-            self._session, "a crosswalk link violates the catalog's own bounds"
-        ):
-            linked = await self._rowcount(f"""
+        linked = await self._rowcount(
+            f"""
             WITH candidate AS (
                 SELECT DISTINCT ON (x.tmdb_id, x.kind) t.id AS title_id, x.tmdb_id, x.kind
                 FROM ({_CROSSWALK_PAIRS}) x
@@ -1042,8 +1063,11 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             FROM candidate c
             LEFT JOIN tmdb_ids m ON m.tmdb_id = c.tmdb_id AND m.kind = c.kind
             WHERE t.id = c.title_id
-        """)  # noqa: S608  -- _CROSSWALK_PAIRS is a module constant, not input
-            await self._rowcount("""
+        """,  # noqa: S608  -- _CROSSWALK_PAIRS is a module constant, not input
+            refused="a crosswalk link violates the catalog's own bounds",
+        )
+        await self._rowcount(
+            """
             UPDATE titles t
             SET tvdb_id = x.tvdb_series_id
             FROM (
@@ -1057,7 +1081,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
               AND NOT EXISTS (
                   SELECT 1 FROM titles o WHERE o.tvdb_id = x.tvdb_series_id
               )
-        """)
+        """,
+            refused="a crosswalk link violates the catalog's own bounds",
+        )
         # Classification runs *after* the UPDATE, in the same transaction, so
         # a pair that just landed reads back as landed: t.tmdb_id = x.tmdb_id.
         # Anything still divergent is a pair the UPDATE declined.

@@ -266,6 +266,11 @@ _INSERT = re.compile(r"INSERT\s+INTO\s+\"?(\w+)\"?", re.IGNORECASE)
 # `UPDATE`s are written `UPDATE titles t SET`, and a pattern without the alias
 # arm finds no destination for `stg_ratings` or `stg_credit_names` at all.
 _UPDATE = re.compile(r"\bUPDATE\s+\"?(\w+)\"?(?:\s+(?:AS\s+)?\w+)?\s+SET\b", re.IGNORECASE)
+# Not used to attribute a destination -- a `DELETE` writes no column, so it
+# cannot refuse a value -- but used by `_refusal_points` to tell a statement
+# that changes rows from one that reads them. A `DELETE` can still meet a
+# foreign key, which is a class-23 refusal an `except` has to be around.
+_DELETE = re.compile(r"\bDELETE\s+FROM\s+\"?(\w+)\"?", re.IGNORECASE)
 _STAGING_NAME = re.compile(r"\bstg_\w+\b")
 
 
@@ -516,13 +521,73 @@ _ORM_WRITE_CALLS = frozenset({"add", "flush"})
 _ORM_STATEMENT_CALLS = frozenset({"update", "delete", "pg_insert"})
 
 
-def _orm_destinations(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+def _constructed_rows(tree: ast.Module) -> dict[str, set[str]]:
+    """Per module-level function, the tables whose mapped class it *constructs*,
+    followed transitively across calls inside this module.
+
+    🔴 **The blind spot this closes, and the direction it points.**
+    `_orm_destinations` used to read only the mapped classes appearing as a
+    bare `ast.Name` in the method itself, and
+    `PostgresTitleRepository.add` writes `self._session.add(_to_row(title))` --
+    so `TitleRow` never appears in it, the method resolved to no destination,
+    and `write_sites()` **dropped it silently**. That is worse than a
+    pessimistic attribution: a writer the scan cannot resolve makes its table's
+    columns *optimistically* `translated`, because a bucket is worst-case over
+    the writers the scan can see. Measured before the fix: narrowing
+    `title.py:add`'s `except` back to `IntegrityError` produced **no drift and
+    no failing case**. This function, `_orm_destinations`' use of it, and the
+    `DegenerateScan` in `write_sites()` are the three halves of closing it.
+
+    **Constructed, not merely referenced**, and the narrowness is deliberate:
+    `_to_domain(row: TitleRow) -> Title` names the class in an annotation and
+    writes nothing, so crediting every mention would attribute `titles` to
+    every reader in the module the moment one of them flushed for an unrelated
+    reason.
+    """
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    own = {
+        name: {
+            _ROW_TABLES[inner.func.id]
+            for inner in ast.walk(node)
+            if isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id in _ROW_TABLES
+        }
+        for name, node in functions.items()
+    }
+    calls = {name: _called_names(node) & set(functions) for name, node in functions.items()}
+    resolved = {name: set(tables) for name, tables in own.items()}
+    for _ in range(_FIXED_POINT_ROUNDS):
+        moved = False
+        for name, called in calls.items():
+            grown = resolved[name] | {one for other in called for one in resolved[other]}
+            if grown != resolved[name]:
+                resolved[name] = grown
+                moved = True
+        if not moved:
+            return resolved
+    raise DegenerateScan(
+        "the constructed-row closure did not converge in "
+        f"{_FIXED_POINT_ROUNDS} rounds -- the scan truncated rather than finished"
+    )
+
+
+def _orm_destinations(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, constructed: Mapping[str, set[str]]
+) -> set[str]:
     """Tables this method writes through the ORM rather than through SQL text.
 
     `flush()` is the marker, and it is a sound one in this package: it appears
-    in eleven methods and every one of them is a write. A read that merely
+    in eight methods and every one of them is a write. A read that merely
     names a mapped class -- `session.get(TitleRow, id)` inside `get()` -- has
     no `flush`, no `add` and no `update()`, so it is not attributed.
+
+    `constructed` is what makes a row built by a helper visible -- see
+    `_constructed_rows`, and the finding recorded there.
     """
     referenced: set[str] = set()
     flushed = False
@@ -534,6 +599,8 @@ def _orm_destinations(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
             continue
         called = inner.func
         name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+        if name in constructed:
+            referenced |= constructed[name]
         if name in _ORM_WRITE_CALLS:
             flushed = True
         if name in _ORM_STATEMENT_CALLS and inner.args:
@@ -543,30 +610,218 @@ def _orm_destinations(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     return (referenced if flushed else set()) | statement_targets
 
 
-def _translation_of(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
-    """The error translation that actually wraps this method's statements.
+#: Ranked weakest-first, and the *order* is the whole content: `except
+#: IntegrityError` does not catch a column refusing a **value**, because
+#: neither shape `_errors.py` measures is an `IntegrityError`.
+#: `refusals_as_conflict` and `except DBAPIError` both reach `is_row_refusal`,
+#: so they catch the same set and the ranking only has to put both above
+#: `except IntegrityError`; they stay distinct answers because the ledger
+#: prints which spelling a site uses.
+_TRANSLATION_RANK = (
+    "none",
+    "except IntegrityError",
+    "except DBAPIError",
+    "refusals_as_conflict",
+)
 
-    Four answers, and the difference between the middle two is the whole of
-    `_errors.py`'s argument: `except IntegrityError` does not catch a column
-    refusing a *value*, because neither measured shape is an `IntegrityError`.
-    """
+#: The two calls that reach Postgres on the **raw asyncpg connection**, outside
+#: SQLAlchemy's error translation entirely. They are deliberately *not* refusal
+#: points: no `except` clause a repository can write catches either shape they
+#: raise (a bare `builtins.OverflowError` with no SQLSTATE, or an
+#: `asyncpg.exceptions.StringDataRightTruncationError` that is not a
+#: `DBAPIError` and carries no `.orig` chain -- both observed, see
+#: `tests/integration/test_staging.py`). That is the whole of why ADR-0041's
+#: `exposed-copy` bucket is decided by the column's *shape* before any writer's
+#: `except` is consulted, and counting a COPY as an untranslated refusal point
+#: would report every staged writer in `bulk.py` as `none`.
+_COPY_EXECUTION = frozenset({"stage_records", "copy_records_to_table"})
+
+#: A call is a session call only when its receiver is spelled `_session` or
+#: `session`. `add` is the reason: `_ORM_WRITE_CALLS` carries it, and a bare
+#: attribute match would read `seen.add(...)` on a `set` as an ORM write and
+#: put a spurious untranslated refusal point in whatever method holds it.
+_SESSION_RECEIVERS = frozenset({"_session", "session"})
+
+
+def _call_name(node: ast.Call) -> str:
+    called = node.func
+    return called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+
+
+def _is_session_call(node: ast.Call, names: frozenset[str]) -> bool:
+    called = node.func
+    if not isinstance(called, ast.Attribute) or called.attr not in names:
+        return False
+    owner = called.value
+    base = owner.attr if isinstance(owner, ast.Attribute) else getattr(owner, "id", "")
+    return base in _SESSION_RECEIVERS
+
+
+def _handler_rank(handlers: Sequence[ast.ExceptHandler]) -> int:
     names: set[str] = set()
-    for inner in ast.walk(node):
-        if isinstance(inner, ast.Call):
-            called = inner.func
-            if isinstance(called, ast.Name) and called.id == "refusals_as_conflict":
-                return "refusals_as_conflict"
-            if isinstance(called, ast.Attribute) and called.attr == "refusals_as_conflict":
-                return "refusals_as_conflict"
-        if isinstance(inner, ast.ExceptHandler) and inner.type is not None:
-            for handled in ast.walk(inner.type):
-                if isinstance(handled, ast.Name):
-                    names.add(handled.id)
+    for handler in handlers:
+        if handler.type is None:
+            continue
+        for handled in ast.walk(handler.type):
+            if isinstance(handled, ast.Name):
+                names.add(handled.id)
     if "DBAPIError" in names:
-        return "except DBAPIError"
+        return _TRANSLATION_RANK.index("except DBAPIError")
     if "IntegrityError" in names:
-        return "except IntegrityError"
-    return "none"
+        return _TRANSLATION_RANK.index("except IntegrityError")
+    return 0
+
+
+def _statement_text(node: ast.Call, texts: Mapping[str, str]) -> str | None:
+    """The SQL an `execute(...)` runs, when the source says what it is.
+
+    `None` means "unreadable", and every caller treats that as a **write** --
+    `_rowcount(sql)` takes its statement as a parameter, so inside that helper
+    there is nothing to read. Guessing "read" there would launder every
+    delegating writer in `bulk.py`.
+    """
+    if not node.args:
+        return None
+    head = node.args[0]
+    reachable = list(_sql_literals(head))
+    reachable += [
+        texts[inner.id]
+        for inner in ast.walk(head)
+        if isinstance(inner, ast.Name) and inner.id in texts
+    ]
+    return "\n".join(reachable).strip() or None
+
+
+def _refusal_points(
+    node: ast.AST, texts: Mapping[str, str], local: frozenset[str], covered: int = 0
+) -> Iterator[tuple[str, int]]:
+    """Every call in this subtree that can make Postgres refuse a *row*, paired
+    with the rank of the translation **lexically enclosing it**.
+
+    Yields `("", rank)` for a statement this function runs itself and
+    `("<name>", rank)` for one it delegates to another function in the same
+    module -- `_translations` resolves the second kind.
+
+    The lexical part is the point. The predecessor of this function asked "does
+    the name `refusals_as_conflict` appear anywhere in the body", which is
+    satisfied by a method that wraps one statement and runs a second outside
+    the wrapper.
+    """
+    if isinstance(node, ast.AsyncWith | ast.With):
+        inner = covered
+        for item in node.items:
+            if (
+                isinstance(item.context_expr, ast.Call)
+                and _call_name(item.context_expr) == "refusals_as_conflict"
+            ):
+                inner = max(inner, _TRANSLATION_RANK.index("refusals_as_conflict"))
+            yield from _refusal_points(item.context_expr, texts, local, covered)
+        for child in node.body:
+            yield from _refusal_points(child, texts, local, inner)
+        return
+    if isinstance(node, ast.Try | ast.TryStar):
+        guarded = max(covered, _handler_rank(node.handlers))
+        for child in node.body:
+            yield from _refusal_points(child, texts, local, guarded)
+        # A handler's own statements are not covered by the handler they are
+        # in, and neither is a `finally`. `import_run.py:save` runs a
+        # `session.rollback()` in its `except`, which is exactly that shape.
+        for child in (*node.handlers, *node.orelse, *node.finalbody):
+            yield from _refusal_points(child, texts, local, covered)
+        return
+    if isinstance(node, ast.Call):
+        name = _call_name(node)
+        if name in _COPY_EXECUTION:
+            pass
+        elif name in local:
+            yield (name, covered)
+        elif _is_session_call(node, _ORM_WRITE_CALLS):
+            yield ("", covered)
+        elif _is_session_call(node, frozenset({"execute"})):
+            statement = _statement_text(node, texts)
+            if statement is None or any(
+                pattern.search(statement) for pattern in (_INSERT, _UPDATE, _DELETE)
+            ):
+                yield ("", covered)
+        for child in ast.iter_child_nodes(node):
+            yield from _refusal_points(child, texts, local, covered)
+        return
+    for child in ast.iter_child_nodes(node):
+        yield from _refusal_points(child, texts, local, covered)
+
+
+def _translations(tree: ast.Module) -> dict[str, str]:
+    """Per-function translation, resolved **across call edges in this module**.
+
+    🔴 **The asymmetry this ends.** `_executing_functions` above already takes a
+    transitive closure over exactly these edges to answer *"does this method
+    write?"* -- `bulk.py:apply_ratings` is in the executing set **only** because
+    `_rowcount` calls `execute`. The predecessor of this function refused to
+    traverse the same edge to answer *"does this method translate?"*, so a
+    module that moved its translation into a shared helper read as twenty
+    untranslated writers. M10's F9 backed a better `bulk.py` out on exactly
+    that reading, with a comment instructing the next author to keep it backed
+    out; both are gone.
+
+    **The closure is narrower than the execution one, and it has to be.**
+    "The callee translates, so the caller translates" over-credits a caller
+    that *also* runs a statement of its own outside the helper. So execution
+    takes **any** refusal point and translation takes the **weakest**: a
+    method's answer is the `min` over its refusal points of
+    `max(what encloses the call, what the callee itself does)`. One uncovered
+    statement is enough to make the whole method `none`, which is the truth
+    -- that statement's refusal is what crosses the port boundary raw.
+
+    Three kinds of call are deliberately not refusal points, each for a
+    measured reason: a COPY (`_COPY_EXECUTION` -- outside SQLAlchemy's
+    translation, so no `except` reaches it), a `SELECT` (it changes no row, so
+    it cannot be refused for one -- `bulk.py:link_crosswalk` runs its
+    classification query outside its own wrapper and is not penalised for it),
+    and a call into a function that has no refusal point of its own
+    (`bulk.py:_stage` reaches only `stage_records`).
+    """
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    texts = _module_texts(tree)
+    local = frozenset(functions)
+    points = {name: list(_refusal_points(node, texts, local)) for name, node in functions.items()}
+
+    # Which functions can be refused at all. A delegated point into a function
+    # that reaches no statement is dropped rather than scored `none`.
+    refusing = {name for name, own in points.items() if any(not call for call, _ in own)}
+    for _ in range(_FIXED_POINT_ROUNDS):
+        grown = {name for name, own in points.items() if any(call in refusing for call, _ in own)}
+        if grown <= refusing:
+            break
+        refusing |= grown
+    else:  # pragma: no cover - a module deeper than the cap
+        raise DegenerateScan(
+            f"the refusal-point closure did not converge in {_FIXED_POINT_ROUNDS} rounds"
+        )
+
+    top = len(_TRANSLATION_RANK) - 1
+    rank = dict.fromkeys(functions, top)
+    for _ in range(_FIXED_POINT_ROUNDS):
+        moved = False
+        for name, own in points.items():
+            scored = [
+                max(covered, rank[call]) if call else covered
+                for call, covered in own
+                if not call or call in refusing
+            ]
+            value = min(scored) if scored else top
+            if value != rank[name]:
+                rank[name] = value
+                moved = True
+        if not moved:
+            return {name: _TRANSLATION_RANK[value] for name, value in rank.items()}
+    raise DegenerateScan(
+        f"the translation closure did not converge in {_FIXED_POINT_ROUNDS} rounds -- "
+        "a min over a monotone-decreasing lattice cannot cycle, so this is a bug here"
+    )
 
 
 def write_sites() -> list[WriteSite]:
@@ -576,6 +831,8 @@ def write_sites() -> list[WriteSite]:
         tree = ast.parse(path.read_text())
         constants = _module_texts(tree)
         executing = _executing_functions(tree)
+        constructed = _constructed_rows(tree)
+        translations = _translations(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
@@ -594,9 +851,30 @@ def write_sites() -> list[WriteSite]:
                 destinations.update(_UPDATE.findall(statement))
                 staged.update(_STAGING_NAME.findall(statement))
             destinations = {name for name in destinations if not name.startswith("stg_")}
-            destinations |= _orm_destinations(node)
+            destinations |= _orm_destinations(node, constructed)
             destinations &= set(Base.metadata.tables)
             if not destinations:
+                # **A write that resolves to no table must fail, not vanish**,
+                # and this is the degeneracy class ADR-0041's own testing
+                # missed: it covered dead scans and empty maps, never "a writer
+                # the scan cannot place". Dropping such a method is the one
+                # direction that reads *optimistically* -- a bucket is
+                # worst-case over the writers the scan can see, so an
+                # unresolvable one launders its table.
+                #
+                # `flush()` on the session is the marker, because it is
+                # unambiguous here in a way `add` is not: it is a write, full
+                # stop, so failing to name its table is a scan defect rather
+                # than a method that happens to write nothing.
+                if any(
+                    isinstance(inner, ast.Call) and _is_session_call(inner, frozenset({"flush"}))
+                    for inner in ast.walk(node)
+                ):
+                    raise DegenerateScan(
+                        f"{path.name}:{node.name} flushes the session and resolves to no "
+                        "destination table -- the write-site scan cannot place a writer it "
+                        "can see, and a writer it drops makes its table look translated"
+                    )
                 continue
             sites.append(
                 WriteSite(
@@ -605,7 +883,7 @@ def write_sites() -> list[WriteSite]:
                     lineno=node.lineno,
                     destinations=tuple(sorted(destinations)),
                     staged=tuple(sorted(staged)),
-                    translation=_translation_of(node),
+                    translation=translations[node.name],
                 )
             )
     return sorted(sites, key=lambda site: (site.module, site.lineno))
@@ -1570,12 +1848,18 @@ BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 #:
 #: **Moved by M10's F9 on 2026-08-20, which is what makes the count a decision
 #: rather than an observation.** The `exposed-sqlalchemy` bucket went 20 -> 1
-#: under the adopted reading: nineteen of the twenty writing sites took
-#: `refusals_as_conflict` or the widened `except DBAPIError`, and
-#: `jobs.attempts` did not, on the evidence recorded in ADR-0041's scope
-#: section -- its only writer computes the value server-side (`attempts =
-#: attempts + 1`), so translating it would report a *statement* fault as a
-#: refused row, which is the misuse `_errors.py:66-75` exists to warn about.
+#: under the adopted reading. **Twenty writing sites took a translation, all
+#: twenty of them** -- eleven replacing an `except IntegrityError` and nine
+#: where there was no `except` at all. The bucket is 1 rather than 0 because of
+#: one **column**, `jobs.attempts`, whose four remaining writers
+#: (`jobs.py:claim`/`fail`/`touch`/`requeue_running`) are deliberately not
+#: among the twenty: its only writer of that column computes the value
+#: server-side as `attempts = attempts + 1`, so translating it would report a
+#: *statement* fault as a refused row, which is the misuse `_errors.py:66-75`
+#: exists to warn about. ADR-0041's scope section carries the evidence.
+#: (This comment said "nineteen of the twenty writing sites took ... and
+#: `jobs.attempts` did not", which counted a column as a site and was wrong on
+#: both halves.)
 PUBLISHED: Mapping[str, Mapping[str, int]] = {
     "closure": {"safe": 20, "translated": 28, "exposed-copy": 30, "exposed-sqlalchemy": 1},
     "path": {"safe": 18, "translated": 29, "exposed-copy": 31, "exposed-sqlalchemy": 1},

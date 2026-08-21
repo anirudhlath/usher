@@ -17,6 +17,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import Table, delete, insert, text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.schema import CreateIndex
 
@@ -1011,9 +1012,32 @@ async def test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_n
     binary encoder) and with `asyncpg.exceptions.StringDataRightTruncationError`
     or `sqlalchemy.exc.DBAPIError` (the `varchar(N)` and `halfvec(N)` ones,
     refused server-side); none of those is a `UsherPortError`.
+
+    **The SQLSTATE assertion is not decoration**, and `testing-discipline.md`
+    is why it is here: *a rejection is not an assertion — assert the
+    diagnostics.* `pytest.raises(UsherPortError)` alone passes when the arm
+    fails for a reason it was not written for, and the likeliest such reason is
+    a bed row this file forgot to seed: a foreign key naming nothing is a
+    `RepositoryConflict` too. Class **22** is *"this value is not storable"* and
+    class **23** is *"this row violates a constraint"* — the two halves of
+    `ROW_REFUSED_SQLSTATE_CLASSES`, and the whole point of these arms is the
+    first. So the cause chain is read the same way `_errors.py:constraint_name`
+    documents, and an arm that starts passing because of a missing row goes red
+    on `23503`.
     """
-    with pytest.raises(UsherPortError):
+    with pytest.raises(UsherPortError) as caught:
         await _BOUNDED_ARMS[(table, column)](bed)
+
+    cause = caught.value.__cause__
+    assert isinstance(cause, DBAPIError), (
+        f"{table}.{column} was refused by something that never reached the driver: {cause!r}"
+    )
+    sqlstate = getattr(getattr(cause.orig, "__cause__", None), "sqlstate", None)
+    assert isinstance(sqlstate, str) and sqlstate.startswith("22"), (
+        f"{table}.{column} answered a port error, but for SQLSTATE {sqlstate!r} rather than "
+        "a class-22 value refusal -- class 23 here means the arm is failing on a constraint "
+        "(most likely a row `bed` does not seed) and is passing for the wrong reason"
+    )
 
 
 # --------------------------------------------------------------------------

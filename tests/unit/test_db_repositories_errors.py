@@ -23,6 +23,8 @@ it is said. Neither file is replaced by this one; this one is why they now
 describe one implementation instead of three.
 """
 
+import ast
+import pathlib
 from collections.abc import AsyncIterator, Iterator
 from contextlib import (
     AbstractAsyncContextManager,
@@ -228,3 +230,81 @@ async def test_a_failure_that_is_not_the_rows_fault_is_not_translated() -> None:
         "service the row was wrong when the schema is what is missing"
     )
     assert isinstance(raised, DBAPIError)
+
+
+# --------------------------------------------------------------------------
+# The re-raise, at every site that widened -- a property, not eleven cases
+# --------------------------------------------------------------------------
+
+_SCANNED = (
+    pathlib.Path(__file__).resolve().parents[2] / "src" / "usher" / "db" / "repositories",
+    pathlib.Path(__file__).resolve().parents[2] / "src" / "usher" / "adapters" / "search",
+)
+
+
+def _dbapi_handlers() -> list[tuple[str, str, ast.ExceptHandler]]:
+    """Every `except DBAPIError` in the packages that translate, with the
+    method it is in."""
+    found: list[tuple[str, str, ast.ExceptHandler]] = []
+    for directory in _SCANNED:
+        for path in sorted(directory.rglob("*.py")):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                for handler in ast.walk(node):
+                    if not isinstance(handler, ast.ExceptHandler) or handler.type is None:
+                        continue
+                    named = {one.id for one in ast.walk(handler.type) if isinstance(one, ast.Name)}
+                    if "DBAPIError" in named:
+                        found.append((path.name, node.name, handler))
+    return found
+
+
+def test_every_widened_except_re_raises_what_is_not_a_row_refusal() -> None:
+    """The invariant `except DBAPIError` buys its width with, checked once
+    across every site instead of once per site.
+
+    🔴 **It was covered by exactly one behavioural case out of eleven sites**,
+    and the ledger cannot see it at all: `_translation_of` reads the `except`
+    clause's *type* and never the handler body, so deleting `if not
+    is_row_refusal(exc): raise` from `import_run.py:save` left
+    `audit_bounded_columns.py --check` reporting no drift and the whole suite
+    green. What is lost when it goes is not a missed refusal but the opposite —
+    a dropped connection, a statement timeout or an undefined table reported to
+    a caller as *its row being wrong*, which is the one distinction
+    `ROW_REFUSED_SQLSTATE_CLASSES` exists to preserve and the one a caller
+    needs to decide whether a retry can help.
+
+    A structural case rather than eleven integration cases because the
+    behaviour needs a transport fault, and no fixture in this project can
+    manufacture one against a live database.
+
+    `refusals_as_conflict` is excluded by construction: it *is* the guard, and
+    `test_a_failure_that_is_not_the_rows_fault_is_not_translated` above is the
+    behavioural case for it.
+    """
+    handlers = _dbapi_handlers()
+    assert len(handlers) >= 11, (
+        f"only {len(handlers)} `except DBAPIError` handlers found -- the scan is dead, "
+        "and a scan that globs nothing passes exactly like one that passes"
+    )
+
+    unguarded = []
+    for module, method, handler in handlers:
+        if module == "_errors.py" and method == "refusals_as_conflict":
+            continue
+        guarded = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "is_row_refusal"
+            for node in ast.walk(handler)
+        ) and any(isinstance(node, ast.Raise) and node.exc is None for node in ast.walk(handler))
+        if not guarded:
+            unguarded.append(f"{module}:{method}")
+
+    assert not unguarded, (
+        "these `except DBAPIError` handlers catch more than a row refusal and re-raise "
+        f"none of it, so a transport fault reaches the caller as a RepositoryConflict: "
+        f"{unguarded}"
+    )

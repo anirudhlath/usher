@@ -124,20 +124,31 @@ class PostgresImportRunRepository(ImportRunRepository):
             # the module docstring for why a full rollback, rather than a
             # SAVEPOINT, is correct for this repository's one caller.
             await self._session.rollback()
+            # **The `constraint=` widens with the `except` and the sentence
+            # branches on it**, which is not the same thing as generalising the
+            # sentence. `uq_import_runs_dataset` is the only *named* constraint
+            # this table can violate and it is no longer the only refusal this
+            # handler sees -- an out-of-range cursor is a declared width
+            # rejecting a value, not a constraint firing -- so naming it
+            # unconditionally sends an operator to look at an index that is
+            # intact. But generalising to "violates import_runs' own bounds"
+            # for *every* refusal is a regression in the opposite direction and
+            # exactly where the message used to be actionable: two processes
+            # bootstrapping the same dataset at once is the common operator
+            # mistake, and it is the thing this handler was written for.
             #
-            # **The message and the `constraint=` widen with the `except`.**
-            # `uq_import_runs_dataset` is the only *named* constraint this
-            # table can violate, and it is no longer the only refusal this
-            # handler sees: an out-of-range cursor is a column's declared
-            # width rejecting a value, which is not a named constraint firing
-            # at all. Reporting one by name would be this repository telling
-            # an operator to go and look at an index that is intact.
-            # `constraint_name()` answers `None` for exactly that case, which
-            # is what makes reading it the honest spelling rather than a
-            # weaker one.
+            # `constraint_name()` answers a name for a named constraint and
+            # `None` for a column refusing a value, which is precisely the
+            # distinction the two sentences want. So it is read once and
+            # branched on, rather than being asked to carry both meanings.
+            constraint = constraint_name(exc)
+            detail = (
+                f"already exists under a different id ({constraint})"
+                if constraint is not None
+                else "violates import_runs' own bounds"
+            )
             raise RepositoryConflict(
-                f"an import run for {run.dataset} violates import_runs' own bounds",
-                constraint=constraint_name(exc),
+                f"an import run for {run.dataset} {detail}", constraint=constraint
             ) from exc
 
     async def get(self, dataset: str) -> ImportRun | None:

@@ -253,3 +253,25 @@ That property is asserted in `tests/integration/test_services_jobs.py`, where
 two concurrent jobs read `pg_backend_pid()` through their own scope's session
 and the two values have to differ. Ninth divergence, and the first one that is
 about a *fake's shape* rather than about a behaviour it gets wrong.
+
+**A fake that hard-codes a real repository's *sentence* is a change detector,
+and the right repair is to leave it diverged and record it (2026-08-20, M10
+F9).** `tests/unit/test_services_bootstrap.py::_ConflictingImportRunRepository`
+raises `RepositoryConflict(f"an import run for {dataset} already exists under a
+different id")` — the message `PostgresImportRunRepository.save` used to build
+for every refusal it caught. F9 widened that `except` from `IntegrityError` to
+`DBAPIError` + `is_row_refusal`, because `import_runs` carries three `integer`
+columns an `ImportRun` bounds `ge=0` and not above, and the handler now branches:
+a **named** constraint still says *"already exists under a different id"*, and a
+column refusing a value says *"violates import_runs' own bounds"* — the
+distinction `constraint_name(exc)` makes by answering `None` for the second.
+
+The fake stands in for the duplicate-dataset collision specifically, which is
+the branch that kept its old sentence, so it is still telling the truth about
+the case it models. **It is left alone deliberately**: a fake that tracks a
+repository's message text turns every wording change into a red test, which is
+this project's own definition of a change detector, and `BootstrapService`'s
+behaviour under a `RepositoryConflict` does not depend on the sentence. Tenth
+divergence, and the first that is about a *message* rather than a behaviour —
+so the thing to check when it next looks stale is whether the branch it models
+still exists, not whether the words still match.

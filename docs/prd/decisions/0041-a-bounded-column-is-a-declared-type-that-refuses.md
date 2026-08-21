@@ -695,7 +695,7 @@ something of its own — `22012` on a division, `2201B` on a regex, `22P02` on a
 | `bulk.py:upsert_genome_vectors` | `CAST(s.relevance AS halfvec(1128))`, over a staging column holding `GenomeVector.relevance` verbatim | the caller's value |
 | `search.py:upsert_many` | `CAST(embedding AS halfvec)`, over `stg_title_embeddings.embedding`, staged from `TitleEmbeddingUpsert.embedding` | the caller's value |
 | `adapters/search/postgres.py:index_many` | `CAST(batch.vector AS halfvec)` over `unnest(CAST(:vectors AS text[]))` | a bound parameter |
-| `taste.py:put` | three `CAST`s, each over a single bind | bound parameters |
+| `taste.py:put` | **four** `CAST`s (`user_id`, `centroid`, `source_watermark`, `computed_at`), each over a single bind | bound parameters |
 
 No arithmetic, no regex and no literal cast appears in any of them, and the
 joins, `count(*)`s and `xmax = 0` cannot raise class 22 at all. So there is no
@@ -759,14 +759,71 @@ there was no `except` at all (`bulk.py:upsert_genome_vectors`, `upsert_titles`,
 `apply_ratings`, `fill_credit_names`, `upsert_tmdb_ids`, `upsert_crosswalk`,
 `link_crosswalk`, `title.py:replace_genres`, `taste.py:put`).
 
-⚠️ **`bulk.py`'s `_rowcount`/`_write_result` deliberately do *not* do the
-translating, and the first spelling of this fix had them doing it.** A shared
-helper is the better design in the abstract and it made every one of its four
-callers read as **untranslated** to `write_sites()`, which reads each method's
-own body — so the ledger reported five `titles` columns still exposed while the
-behaviour was correct. Teaching the scan to follow one level of indirection is
-how a scan stops being able to see two, so the translation moved to the sites
-and `_rowcount`'s docstring now says why it is not in the helper.
+### 🔴 The instrument was the defect, and F9 shipped once with the code bent around it
+
+**`bulk.py`'s `_rowcount`/`_write_result` do the translating, behind a
+`refused: str` keyword with no default.** F9's first commit had exactly that,
+saw `write_sites()` report five `titles` columns still exposed, copied the
+translation out into five callers, and left a docstring instructing the next
+author to keep it copied out — on the grounds that *"teaching the scan to
+follow one level of indirection is how a scan stops being able to see two"*.
+
+Review measured the fact that settles it: **`_executing_functions` already
+follows that exact call edge, transitively.** `bulk.py:apply_ratings` is in the
+executing set *only* because `_rowcount` calls `execute`. The instrument was
+traversing an edge to answer *"does this method write?"* and refusing to
+traverse the same edge to answer *"does this method translate?"* — and the
+justification for refusing was a property the function next door has anyway and
+is accepted for. The generator is fixed and `bulk.py` is back to the better
+design; `_rowcount`'s docstring now carries the reasoning instead of the
+instruction.
+
+**What was actually hard is the shape of the closure, and it is why the two
+questions are not symmetric.** *"The callee translates, so the caller
+translates"* over-credits a caller that also runs a statement of its own
+outside the helper. So:
+
+> **Execution takes `any` refusal point; translation takes the `min` over
+> them.** A method's answer is `min` over its refusal points of `max(what
+> lexically encloses the call, what the callee itself does)` — one uncovered
+> statement makes the whole method `none`, because that statement's refusal is
+> what crosses the port boundary raw.
+
+Three kinds of call are deliberately **not** refusal points, each on a
+measurement this record already holds: a COPY (outside SQLAlchemy's translation
+— no `except` reaches either of its two shapes, and both are now observed), a
+`SELECT` (it changes no row, so `bulk.py:link_crosswalk` running its
+classification query outside its own wrapper is not a leak), and a call into a
+function with no refusal point of its own (`_stage` reaches only
+`stage_records`). The property is pinned on a module
+`tests/unit/test_bounded_column_ledger.py` writes itself — seven cases,
+including the `mixed` one that must read `none` — rather than against whatever
+`bulk.py` happens to look like today.
+
+### 🔴 A second blind spot, pointing the other way: a writer the scan cannot place
+
+`_orm_destinations` attributed a table only when a mapped class appeared as a
+bare `ast.Name` in the method. `PostgresTitleRepository.add` writes
+`self._session.add(_to_row(title))`, so `TitleRow` never appears in it — and
+**`write_sites()` did not list `title.py:add` at all.** Measured at F9's first
+commit: narrowing that site's `except` back to `IntegrityError` produced **no
+drift and no failing case**.
+
+**That direction is the dangerous one.** A bucket is worst-case over the writers
+the scan can see, so a writer that drops out makes its table read
+*optimistically* `translated`. This record's degradation testing covered dead
+scans (`write_sites() → []`) and empty maps (`staged_into() → {}`), and every
+one of those fails toward `exposed`; *"a writer that resolves to no
+destination"* was not among them and is the only class that fails toward safe.
+Three changes close it: `_constructed_rows` follows construction helpers
+transitively (**constructed**, not merely referenced — `_to_domain(row:
+TitleRow)` names the class in an annotation and writes nothing),
+`_orm_destinations` consumes it, and **a method that flushes the session and
+resolves to no destination now raises `DegenerateScan`** rather than being
+skipped. `flush` is the marker rather than `add`, because `add` is also a `set`
+method and a bare attribute match would invent writers. The site count went
+49 → 50 and **no bucket moved** — `title.py:add` was already translated — but
+narrowing it now produces six drift complaints where it produced none.
 
 `import_run.py:save`'s message and `constraint=` widened with its `except`:
 `uq_import_runs_dataset` is the only *named* constraint that table can violate
@@ -833,6 +890,14 @@ reason.
 - **`stg_credit_names.ordinal` is `enumerate(rows)`** (`bulk.py:668`), which is
   the plan's one wrong member in its list of three staging-only exposures; the
   right two are `stg_genome.tmdb_id` and `stg_akas.ordering`.
+- 🔴 **The degradation list had a hole with a *sign* to it, found by M10's F9
+  review.** Every entry below moves a column toward `exposed`, which is the
+  safe direction to fail. **A writer the scan cannot place moves columns toward
+  `translated`**, and there was no check for it: `title.py:add` was in exactly
+  that state, and narrowing its `except` was invisible to the ledger and to the
+  suite alike. A `flush` that resolves to no destination now raises. When
+  adding a degradation case, ask which *way* it fails as well as whether it
+  fails.
 - **Degradation was tested rather than assumed, and the second review round
   found the guard asymmetric one function over from the one it had fixed.**
   `staged_into() → {}` was silent and moved **31 columns** from `exposed-copy`

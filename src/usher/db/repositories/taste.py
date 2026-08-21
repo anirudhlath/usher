@@ -249,10 +249,11 @@ class PostgresTasteRepository(TasteRepository):
         # `IntegrityError`.
         #
         # `_PUT` passes question (3) of ADR-0041 -- the statement refuses a
-        # *bound value* rather than an expression it computed. Its three
-        # `CAST`s each take a single bind and nothing else; there is no
-        # arithmetic, no regex and no literal cast, so class 22 here cannot
-        # be about this repository's own SQL.
+        # *bound value* rather than an expression it computed. Its **four**
+        # `CAST`s (`user_id`, `centroid`, `source_watermark`, `computed_at`)
+        # each take a single bind and nothing else; there is no arithmetic, no
+        # regex and no literal cast, so class 22 here cannot be about this
+        # repository's own SQL.
         async with refusals_as_conflict(
             self._session, "a stored centroid violates user_taste's own bounds"
         ):

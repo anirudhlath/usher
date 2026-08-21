@@ -87,10 +87,20 @@ async def test_the_copy_refuses_an_over_long_string_server_side_as_22001(
 ) -> None:
     """The shape ADR-0041 predicted and had not run. It predicts correctly.
 
-    `stg_media_items.container` is `varchar(32)`, which is one of the three
-    staging columns that record measures as `22001` rather than as an
-    `OverflowError`. What is asserted is every property the record's argument
-    uses:
+    ⚠️ **The DDL here is a probe, not the shipped `stg_media_items` string**,
+    and the difference is stated rather than glossed. What is shared with the
+    real thing is everything the claim rests on: the same
+    `usher.db.staging.stage_records`, the same `copy_records_to_table` on the
+    same raw asyncpg connection, and the identical column type -- `varchar(32)`
+    is exactly what `media_items.py` declares for `container`, `video_codec`
+    and `audio_codec`, the three columns ADR-0041 measures as `22001` rather
+    than as an `OverflowError`. What is *not* shared is the rest of that
+    table's column list, which cannot affect which exception a single
+    over-long value raises. A one-column probe is used because the claim is
+    about the boundary rather than about a repository, and every other case in
+    this file is built the same way.
+
+    What is asserted is every property the record's argument uses:
 
     - the exception is `asyncpg.exceptions.StringDataRightTruncationError`,
     - it carries SQLSTATE **`22001`**, a real one,
