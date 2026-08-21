@@ -171,3 +171,36 @@ def test_the_two_tier_suggest_adr_is_reachable_from_prd_05_and_from_adr_0002() -
     target = "0031-the-two-tier-suggest.md"
     assert target in prd_05, "PRD 05's autocomplete section does not link ADR-0031"
     assert target in adr_0002, "ADR-0002 does not point at the follow-up that discharges it"
+
+
+def test_every_adr_titles_itself_with_its_own_number() -> None:
+    """A renumber that moves the file and the citations can still leave the
+    document introducing itself as the old number, and nothing else looks.
+
+    **Found by hand on 2026-08-21, which is the argument for the case.** The
+    bounded-column record moved `0041` -> `0043`; its filename moved, its
+    register row moved, all 76 citations moved, and its own `# 0041 — ...`
+    heading did not. Every other check in this file passes against that state:
+    the register compares *filenames* to *links*, and the duplicate-number case
+    reads the filename prefix. The H1 is the one place the number appears that
+    nothing derived it from -- so a reader who opens the file is told the wrong
+    number by the document itself, which is worse than an unlinked record.
+
+    Scoped to the **number** rather than to the whole `# ADR-NNNN —` form on
+    purpose. `0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md`
+    titles itself `# 0030 — ...` with no `ADR-` prefix, which is a formatting
+    drift that misleads nobody, and widening this case to catch it would mean
+    editing a record on the trunk for style inside a milestone branch. The
+    defect this exists for is a *wrong* number, not a missing prefix.
+    """
+    paths = sorted(_DECISIONS.glob("0*.md"))
+    assert len(paths) >= 35, f"the register scan found only {len(paths)} ADRs"
+
+    wrong = [
+        f"{path.name} is titled {heading!r}"
+        for path in paths
+        if (heading := path.read_text().splitlines()[0]) and path.name[:4] not in heading
+    ]
+    assert wrong == [], "these ADRs do not name their own number in their heading: " + "; ".join(
+        wrong
+    )

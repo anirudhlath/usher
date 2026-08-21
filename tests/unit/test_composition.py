@@ -2150,7 +2150,7 @@ def test_the_concurrency_table_covers_exactly_the_kinds_a_build_claims() -> None
 
 
 # ---------------------------------------------------------------------------
-# The outbound gate's owner (M10 S3; ADR-0040 §4)
+# The outbound gate's owner (M10 S3; ADR-0042 §4)
 
 
 _GATED = Source(
@@ -2400,7 +2400,7 @@ async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_s
             )
             assert _gate_of(through_the_worker_lane) is server_gate, (
                 "the worker lane paces independently of the push lane -- the >=2 gates "
-                "per source ADR-0040 §4 measured before S3"
+                "per source ADR-0042 §4 measured before S3"
             )
             assert server_gate is gates.gate(_GATED.id, _GATED.name)
             assert server_gate._rate == 0.4, (
@@ -2455,7 +2455,7 @@ async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_s
 #: The three composition roots in `usher.cli`, and the call each one builds its
 #: registry with. **Keyed by function rather than by command**, because that is
 #: what the assertion below can see: `usher push` with no `--probe` reaches
-#: `_run_lanes`, which is a root an operator cannot name (ADR-0040 §4 records
+#: `_run_lanes`, which is a root an operator cannot name (ADR-0042 §4 records
 #: the correction).
 _CLI_ROOTS: dict[str, str] = {
     "_work": "unit_of_work",  # `usher work`
@@ -2516,7 +2516,7 @@ def test_the_cli_roots_compose_once_rather_than_per_scope() -> None:
     `cli._work`'s `work = unit_of_work(...)` with an
     `@asynccontextmanager`-wrapped `work()` that calls `unit_of_work(...)` fresh
     on every scope -- **a new `SourceGateRegistry` per claim and per job**,
-    verbatim the multiplication ADR-0040 §4 exists to remove -- passes `ruff`,
+    verbatim the multiplication ADR-0042 §4 exists to remove -- passes `ruff`,
     `ruff format --check`, `mypy`, `lint-imports` and the whole suite.
 
     **A source scan rather than a drive, and the choice is argued rather than
@@ -2553,7 +2553,7 @@ def test_the_cli_roots_compose_once_rather_than_per_scope() -> None:
             f"`cli.{root}` calls `{builder}` inside a nested definition, so the registry is "
             f"built once per invocation of that closure rather than once for the process -- "
             f"{nested} of {own + nested} calls. That is a fresh outbound gate per scope, "
-            "which is the defect ADR-0040 §4 exists to remove"
+            "which is the defect ADR-0042 §4 exists to remove"
         )
 
     walk, _ = _calls_of(_cli_function(module, "_sync"), "_open_adapter")

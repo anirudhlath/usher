@@ -400,7 +400,7 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                     result = await self._session.execute(text(_UPSERT))
                     inserted, updated = result.one()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).**
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).**
             # `title_embeddings.embedding` is `halfvec(1024)` and `TitleEmbeddingUpsert.embedding`
             # is a bare `tuple[float, ...]`, so a vector of another width reaches the `CAST` in the
             # destination statement as SQLSTATE `22000` (`expected 1024 dimensions, not N`,
@@ -722,7 +722,7 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
                             },
                         )
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).**
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).**
             # `title_neighbors.rank` is `integer` and `ScoredNeighbor.rank` is a bare `int`, so a
             # blend that computed one is refused by asyncpg's binary encoder before a byte is sent
             # -- no SQLSTATE, and no `IntegrityError`. SQLAlchemy's asyncpg dialect does not map

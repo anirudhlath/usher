@@ -99,7 +99,7 @@ class PostgresImportRunRepository(ImportRunRepository):
             await self._session.flush()
         except DBAPIError as exc:
             # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0041).** `position`, `rows_seen` and `rows_written` are
+            # (ADR-0043).** `position`, `rows_seen` and `rows_written` are
             # `integer` and `ImportRun` bounds all three `ge=0` with no
             # ceiling, so a resumable importer's own cursor is a validly
             # constructed model this table cannot hold. SQLAlchemy's asyncpg

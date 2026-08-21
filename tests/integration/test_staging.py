@@ -68,10 +68,10 @@ async def test_the_raw_connection_is_the_asyncpg_driver(session: AsyncSession) -
 
 
 # --------------------------------------------------------------------------
-# ADR-0041's two COPY-path failure shapes, observed rather than asserted
+# ADR-0043's two COPY-path failure shapes, observed rather than asserted
 # --------------------------------------------------------------------------
 #
-# [ADR-0041](../../docs/prd/decisions/0041-a-bounded-column-is-a-declared-type-that-refuses.md)
+# [ADR-0043](../../docs/prd/decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
 # closes its Evidence with 🔴 *"the `22001` server-side COPY refusal is the one
 # shape this record asserts from the protocol rather than from a run in this
 # repository, and F9's guard is where it should be observed."* These two cases
@@ -85,7 +85,7 @@ async def test_the_raw_connection_is_the_asyncpg_driver(session: AsyncSession) -
 async def test_the_copy_refuses_an_over_long_string_server_side_as_22001(
     session: AsyncSession,
 ) -> None:
-    """The shape ADR-0041 predicted and had not run. It predicts correctly.
+    """The shape ADR-0043 predicted and had not run. It predicts correctly.
 
     ⚠️ **The DDL here is a probe, not the shipped `stg_media_items` string**,
     and the difference is stated rather than glossed. What is shared with the
@@ -93,7 +93,7 @@ async def test_the_copy_refuses_an_over_long_string_server_side_as_22001(
     `usher.db.staging.stage_records`, the same `copy_records_to_table` on the
     same raw asyncpg connection, and the identical column type -- `varchar(32)`
     is exactly what `media_items.py` declares for `container`, `video_codec`
-    and `audio_codec`, the three columns ADR-0041 measures as `22001` rather
+    and `audio_codec`, the three columns ADR-0043 measures as `22001` rather
     than as an `OverflowError`. What is *not* shared is the rest of that
     table's column list, which cannot affect which exception a single
     over-long value raises. A one-column probe is used because the claim is
@@ -131,7 +131,7 @@ async def test_the_copy_refuses_an_over_long_string_server_side_as_22001(
 async def test_the_copy_refuses_an_out_of_range_integer_with_no_sqlstate_at_all(
     session: AsyncSession,
 ) -> None:
-    """The *other* of ADR-0041's two shapes, and the reason it says a fix that
+    """The *other* of ADR-0043's two shapes, and the reason it says a fix that
     widens `bigint` and forgets `text` reaches 28 of 31 rather than all of
     them.
 
@@ -159,7 +159,7 @@ async def test_the_copy_refuses_an_out_of_range_integer_with_no_sqlstate_at_all(
 async def test_a_bigint_staging_column_takes_the_same_value_the_integer_one_refused(
     session: AsyncSession,
 ) -> None:
-    """The control for ADR-0041's scope item 2, which widens
+    """The control for ADR-0043's scope item 2, which widens
     `stg_genome.tmdb_id` and `stg_akas.ordering` to `bigint`.
 
     Without this the widening's whole claim — that the value now *stages* —

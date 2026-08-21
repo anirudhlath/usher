@@ -26,7 +26,7 @@ dataset and `ensure_local` one streamed `GET` -- a revision probe and then a
 single `Range`-resumable transfer of a
 multi-hundred-megabyte file -- so there is no request *stream* for a
 requests-per-second gate to space. `USHER_SOURCE_REQUESTS_PER_SECOND`'s gate
-(ADR-0040) exists because a media source is a machine somebody is watching
+(ADR-0042) exists because a media source is a machine somebody is watching
 television on; a public dataset mirror serving one file is not that, the
 transfer is bounded by the wire, and a courtesy limit over three requests an
 install expresses no policy anybody asked for. What *is* limited here is the

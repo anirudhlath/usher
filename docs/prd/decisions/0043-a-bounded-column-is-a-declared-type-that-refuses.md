@@ -1,4 +1,4 @@
-# 0041 — A bounded column is a declared type that refuses, and the ledger is generated
+# ADR-0043 — A bounded column is a declared type that refuses, and the ledger is generated
 
 **Status:** Accepted, and **implemented by F9 on 2026-08-20** — see
 *"What F9 did, and the two things it decided"* at the foot of this record,

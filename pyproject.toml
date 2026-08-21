@@ -247,7 +247,7 @@ plugins = ["pydantic.mypy"]
 # `usher.db.staging.raw_connection` unwraps to it as `Any` on purpose -- and
 # the one consumer is `tests/integration/test_staging.py`, which names
 # `asyncpg.exceptions.StringDataRightTruncationError` to observe the COPY
-# path's `22001` refusal that ADR-0041 could only assert from the protocol.
+# path's `22001` refusal that ADR-0043 could only assert from the protocol.
 # asyncpg ships no `py.typed`; a stub package bought for one `pytest.raises`
 # is more surface than the `Any` it removes, and the alternative -- matching
 # the exception by class *name* -- is a weaker assertion than the type.

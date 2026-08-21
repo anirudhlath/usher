@@ -412,7 +412,7 @@ class _MinInterval:
 #:
 #: **The class keeps the private name because that is what it is** -- a
 #: minimum-interval algorithm, one of two this repository has (`_TokenBucket`
-#: is the other, and ADR-0040 §1 is the argument between them) -- while
+#: is the other, and ADR-0042 §1 is the argument between them) -- while
 #: `SourceGate` is what it is *for*. A second gate algorithm would be a second
 #: private class and this alias would move; nothing outside would change.
 #:
@@ -455,7 +455,7 @@ class SourceGateRegistry:
     rename, which a name does not. The name is only the `source` label on
     `usher.source.throttle.wait`, matching `usher.source.request.duration`'s
     existing label rather than minting a second per-source identity in
-    telemetry (ADR-0040 §2).
+    telemetry (ADR-0042 §2).
 
     ⚠️ **A renamed source keeps its gate *and its series* until the process
     restarts, which is one dimension less than this docstring claimed until
@@ -470,7 +470,7 @@ class SourceGateRegistry:
     -- either re-label on a name change or say so on the metric.
 
     **The rate is one value for every source**, deliberately: issue #19 asks
-    whether the ceiling belongs per source and ADR-0040 answers *"yes for the
+    whether the ceiling belongs per source and ADR-0042 answers *"yes for the
     key and no for the value in Phase 1"* -- `Source` carries no tuning field
     and adding one is DDL this phase does not open.
 

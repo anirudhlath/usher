@@ -696,11 +696,11 @@ async def test_every_suspendable_index_rebuilds_to_what_the_migration_built(
 
 
 # --------------------------------------------------------------------------
-# ADR-0041's ledger, driven: a value a domain model accepts must not reach an
+# ADR-0043's ledger, driven: a value a domain model accepts must not reach an
 # operator as a raw driver exception.
 # --------------------------------------------------------------------------
 #
-# [ADR-0041](../../docs/prd/decisions/0041-a-bounded-column-is-a-declared-type-that-refuses.md)
+# [ADR-0043](../../docs/prd/decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
 # classifies every bounded column in this schema, and F9 fixes the two buckets
 # below. This is the case that decides whether it did, and it is deliberately
 # written so that it cannot know the answer: **a value a domain model accepts
@@ -883,7 +883,7 @@ async def _refused_image(bed: _Bed, **changes: object) -> None:
 #: own translation, and a statement written here would exercise a second
 #: spelling of the SQL that nothing ships.
 _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
-    # -- exposed at a SQLAlchemy statement (ADR-0041's 20) -------------------
+    # -- exposed at a SQLAlchemy statement (ADR-0043's 20) -------------------
     ("genome_scores", "relevance"): lambda bed: PostgresBulkCatalogRepository(
         bed.session
     ).upsert_genome_vectors(
@@ -943,7 +943,7 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     # `^tt\d{7,8}$`, so the over-long value cannot be constructed there. The
     # bulk loader takes `ports.bulk.ImdbTitle`, whose `imdb_id` is a bare
     # `str`, stages it into `stg_titles.imdb_id text` and meets `varchar(16)`
-    # at the `INSERT ... SELECT`. That gap is ADR-0041's own reason for moving
+    # at the `INSERT ... SELECT`. That gap is ADR-0043's own reason for moving
     # this column out of the `safe` bucket.
     ("titles", "imdb_id"): lambda bed: PostgresBulkCatalogRepository(bed.session).upsert_titles(
         [
@@ -960,13 +960,27 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
         ]
     ),
     ("titles", "tvdb_id"): lambda bed: _refused_title_update(bed, tvdb_id=_OVER_INT32),
+    # **New coverage created by `m10a`/ADR-0040, not a gap this file had.**
+    # `titles.vote_count` was one column with two writers, one of them the
+    # staged `COPY` in `apply_ratings` -- so the ledger scored it `exposed-copy`
+    # (worst case over its writers) and it was outside the two scored buckets
+    # this parametrisation covers. The split sends IMDb's half to
+    # `imdb_num_votes`, still COPY-fed and still unscored, and leaves
+    # `tmdb_vote_count` reached only through the ORM, which makes it
+    # `translated` and brings it in scope. `Title.tmdb_vote_count` is
+    # `Field(ge=0)` with no ceiling against an `integer` column -- the shape
+    # `.claude/rules/db-and-sql.md` calls "the common shape here" -- so a
+    # validly constructed domain model overflows it.
+    ("titles", "tmdb_vote_count"): lambda bed: _refused_title_update(
+        bed, tmdb_vote_count=_OVER_INT32
+    ),
     ("titles", "original_language"): lambda bed: _refused_title_update(
         bed, original_language="x" * 17
     ),
     ("titles", "content_rating"): lambda bed: _refused_title_update(bed, content_rating="y" * 33),
     ("user_taste", "centroid"): lambda bed: _refused_taste(bed, centroid=(0.1, 0.2, 0.3)),
     ("user_taste", "title_count"): lambda bed: _refused_taste(bed, title_count=_OVER_INT32),
-    # -- already translated: the positive control (ADR-0041's 10) ------------
+    # -- already translated: the positive control (ADR-0043's 10) ------------
     ("curated_rows", "position"): lambda bed: PostgresCuratedRowRepository(
         bed.session
     ).replace_for_user(
@@ -1104,7 +1118,7 @@ async def test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_n
 
 
 # --------------------------------------------------------------------------
-# ADR-0041 scope item 2: the two staging columns with no destination at all
+# ADR-0043 scope item 2: the two staging columns with no destination at all
 # --------------------------------------------------------------------------
 
 

@@ -1,6 +1,6 @@
 """F9's guard: the bounded-column ledger is checked by a test, not by a person.
 
-[ADR-0041](../../docs/prd/decisions/0041-a-bounded-column-is-a-declared-type-that-refuses.md)
+[ADR-0043](../../docs/prd/decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
 closes with *"Nothing runs `--check`. It is not in the gate, not in CI, and the
 drift it detects is detected only when a person asks... F9 owns wiring it,
 because F9's guard is a test."* This module is that wiring.
@@ -27,7 +27,7 @@ from tests.bounded_ledger import audit_module, drift, ledger_columns
 def test_the_published_census_still_describes_the_repository() -> None:
     complaints = drift()
     assert complaints == [], (
-        "the bounded-column ledger has moved away from what ADR-0041 publishes. "
+        "the bounded-column ledger has moved away from what ADR-0043 publishes. "
         "Regenerate with `uv run python scripts/audit_bounded_columns.py --summary`, "
         "then update PUBLISHED / PUBLISHED_AT_M08B *and* the record, in the same "
         "commit as the change that moved them:\n  " + "\n  ".join(complaints)
@@ -246,7 +246,7 @@ def test_the_translation_closure_follows_calls_but_stays_narrower_than_execution
 
 
 def test_a_writer_the_scan_cannot_place_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The degeneracy class ADR-0041's own testing missed.
+    """The degeneracy class ADR-0043's own testing missed.
 
     Its degradation suite covered dead scans (`write_sites() -> []`) and empty
     maps (`staged_into() -> {}`) — both of which move a column *toward*
@@ -312,7 +312,7 @@ def test_a_bind_carrying_read_that_would_change_a_verdict_refuses_to_be_scored(
 
     A `SELECT` carrying a caller's bind can be refused on class 22 and leaks if
     it is unwrapped — but wrapping it would report a *statement* fault as a
-    refused row, which ADR-0041 question (3) forbids. Rather than invent a
+    refused row, which ADR-0043 question (3) forbids. Rather than invent a
     verdict, `write_sites` scores the ledger with and without those statements
     and **raises where the two disagree**.
 

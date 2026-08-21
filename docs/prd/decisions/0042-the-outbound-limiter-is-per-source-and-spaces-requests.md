@@ -1,4 +1,4 @@
-# ADR-0040 — The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling
+# ADR-0042 — The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling
 
 **Status:** Accepted — adds the proactive half of [01](../01-architecture.md)'s
 *"retry/backoff, and rate-limit handling"* promise that

@@ -95,7 +95,7 @@ class Title(DomainModel):
     # recorded against `Title.popularity` is discharged here.
     #
     # **The bound is on the model rather than on the column, and that is
-    # ADR-0041's own division of labour inverted for a reason it states.**
+    # ADR-0043's own division of labour inverted for a reason it states.**
     # That record's rule is "the column stays the authority and the repository
     # stays the translator" -- for a column *narrower* than the field feeding
     # it. This is the opposite defect: an *unbounded* column accepting a

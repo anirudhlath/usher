@@ -323,10 +323,10 @@ class PostgresJobQueue(JobQueue):
                     result = cast(CursorResult[Any], await self._session.execute(text(_ENQUEUE)))
                     written = result.rowcount
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).**
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).**
             # `jobs.priority` is `integer` and `JobRequest.priority` is a bare `int` --
             # `domain.Job`'s `ge=0, le=100` is on the shape a caller reads *back*, which this path
-            # never constructs (ADR-0041, question 5). SQLAlchemy's asyncpg dialect does not map
+            # never constructs (ADR-0043, question 5). SQLAlchemy's asyncpg dialect does not map
             # SQLSTATE class 22 onto any classified subclass, so a column refusing a *value* arrives
             # as a bare `DBAPIError` that `except IntegrityError` does not catch and the driver's
             # own exception crossed this port boundary untranslated -- the one thing ADR-0009

@@ -1608,7 +1608,7 @@ the wire.
 
 - **Any Emby build but 4.9.5.0**, one household, one evening.
 - **A real 429 from anywhere.** Still *"pinned by construction, deliberately
-  never observed"* — provoking one is the behaviour ADR-0040's gate exists to
+  never observed"* — provoking one is the behaviour ADR-0042's gate exists to
   prevent.
 - **This server under a paging load.** Every concurrency figure in the phase is
   from single-item reads.

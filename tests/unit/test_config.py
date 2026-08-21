@@ -624,7 +624,7 @@ def test_the_source_rate_default_is_the_courtesy_margin_derived_from_s1(
     """`source_requests_per_second` is a *derived* default, not a chosen one, so
     it gets pinned like a measurement (the `search_*`/`embedding_*` treatment):
     Little's law over S1's page p95 and the Emby concurrency, `4 / 9.1713 =
-    0.436` rps, with the shipped **0.4** a courtesy margin below it (ADR-0040).
+    0.436` rps, with the shipped **0.4** a courtesy margin below it (ADR-0042).
 
     Two properties beyond the number. `ge=0`, not `ge=1`, because `0` is
     unlimited -- the shape `push_gap_min_interval_seconds` uses and a size does

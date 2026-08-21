@@ -255,7 +255,7 @@ def test_the_untranslated_tuple_covers_the_families_httpx_error_does_not() -> No
 
 
 # --------------------------------------------------------------------------
-# _MinInterval -- the proactive outbound gate (ADR-0040)
+# _MinInterval -- the proactive outbound gate (ADR-0042)
 
 
 class _Clock:
@@ -395,7 +395,7 @@ async def test_a_disabled_gate_records_no_throttle_series_at_all() -> None:
 
 
 # ---------------------------------------------------------------------------
-# SourceGateRegistry -- who owns the gate (M10 S3; ADR-0040 §4)
+# SourceGateRegistry -- who owns the gate (M10 S3; ADR-0042 §4)
 
 
 async def test_a_registrys_gate_paces_and_a_second_source_gets_its_own_budget() -> None:

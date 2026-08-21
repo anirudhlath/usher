@@ -1374,7 +1374,7 @@ number that is never stored. Ask of every staging column: *is anything ever
 written from it?* If not, the widest type is the right one.
 
 **And the SQLAlchemy half, which is where the fix actually was.**
-[ADR-0041](../../docs/prd/decisions/0041-a-bounded-column-is-a-declared-type-that-refuses.md)
+[ADR-0043](../../docs/prd/decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
 publishes the per-column ledger; F9 moved its `exposed-sqlalchemy` bucket from
 **20 columns to 1** across **twenty** writing sites — **eleven** replacing
 `except IntegrityError` with `except DBAPIError` + `is_row_refusal`, **nine**
@@ -1406,7 +1406,7 @@ worth carrying out of it:
   method and `write_sites()` did not list it at all — narrowing its `except`
   back produced no drift and no failing case. A bucket is worst-case over the
   writers the scan can *see*, so an unresolvable writer launders its whole
-  table. ADR-0041's degradation testing had covered dead scans and empty maps,
+  table. ADR-0043's degradation testing had covered dead scans and empty maps,
   both of which fail toward `exposed`; this is the one direction that fails
   toward safe. **A write the scan can see but cannot place now raises.**
 - **`attempts = attempts + 1` is the one place `refusals_as_conflict` is
@@ -1417,7 +1417,7 @@ worth carrying out of it:
   exclusion is the finding: **question (3) is about an expression's *inputs*,
   not about whether a `CAST` is present.** Four sites carrying a `CAST` over
   nothing but caller-supplied values (`upsert_genome_vectors`, `upsert_many`,
-  `index_many`, `taste.py:put`) are translated for the same reason ADR-0041
+  `index_many`, `taste.py:put`) are translated for the same reason ADR-0043
   predicted they could not be.
 - **Widening an `except` widens what its message has to be true of.**
   `import_run.py:save` said *"an import run for X already exists under a

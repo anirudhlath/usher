@@ -410,7 +410,7 @@ class PostgresTitleRepository(TitleRepository):
                 self._session.add(_to_row(title))
                 await self._session.flush()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).**
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).**
             # `titles` carries `tmdb_id`/`tvdb_id` (`integer`, unbounded above on `Title`),
             # `original_language` (`varchar(16)`) and `content_rating` (`varchar(32)`) -- and
             # `usher.domain` declares no `max_length` anywhere, so nothing above this layer bounds
@@ -472,7 +472,7 @@ class PostgresTitleRepository(TitleRepository):
                         setattr(row, column.name, getattr(fresh, column.name))
                 await self._session.flush()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).** The
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).** The
             # same four columns as `add`, on the path TMDb enrichment actually takes. SQLAlchemy's
             # asyncpg dialect does not map SQLSTATE class 22 onto any classified subclass, so a
             # column refusing a *value* arrives as a bare `DBAPIError` that `except IntegrityError`
@@ -941,7 +941,7 @@ class PostgresTitleRepository(TitleRepository):
             column("genres", PG_ARRAY(Text)),
             name="new_genres",
         ).data([(row.id, list(row.genres)) for row in rows])
-        # **`refusals_as_conflict`, added by M10's F9 (ADR-0041).** This
+        # **`refusals_as_conflict`, added by M10's F9 (ADR-0043).** This
         # statement is a bare parameterised `UPDATE` over a `VALUES` join --
         # it computes nothing server-side, so class 22 here can only be about
         # a value the caller handed in, which is the precondition

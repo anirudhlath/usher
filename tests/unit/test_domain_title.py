@@ -289,7 +289,7 @@ def test_tmdb_popularity_refuses_a_non_finite_value() -> None:
     neither does the column: `titles.tmdb_popularity` is `sa.Float()` —
     `double precision`, where IEEE `Infinity` is legal — and `Infinity >= 0`
     satisfies `ck_titles_tmdb_popularity_non_negative` too. So this model is
-    the only layer that can say no, which is why ADR-0041 leaves it to the
+    the only layer that can say no, which is why ADR-0043 leaves it to the
     field while leaving every *narrower*-than-its-field column to the
     repository.
 
@@ -343,12 +343,12 @@ def test_year_and_vote_counts_still_accept_a_value_their_column_cannot_hold() ->
     `.claude/rules/db-and-sql.md` calls *"the common shape here"*, and
     `titles.year`, `titles.tmdb_vote_count` and `titles.imdb_num_votes` are all
     live examples: `2**31` constructs cleanly and the column cannot hold it.
-    M10's F9 deliberately does **not** close them, for the reason ADR-0041
+    M10's F9 deliberately does **not** close them, for the reason ADR-0043
     gives in its question (5) — the writers that put values in those columns
     are `bulk.py:upsert_titles` and `bulk.py:apply_ratings`, which take
     `ports.bulk.ImdbTitle` and `ports.bulk.ImdbRating` and never construct a
     `Title` at all, so a ceiling here would be invisible to the path that
-    actually overflows them. All are in ADR-0041's `exposed-copy` bucket, which
+    actually overflows them. All are in ADR-0043's `exposed-copy` bucket, which
     M9's boundary call 8 keeps out of M10 whole.
 
     The case exists so the exclusion is a recorded state rather than an

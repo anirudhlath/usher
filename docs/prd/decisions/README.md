@@ -49,10 +49,49 @@ otherwise be lost and re-litigated in six months.
 | [0039](0039-the-genre-vocabulary-is-usher-owned.md) | The genre vocabulary is Usher's own; `/browse` is fixed at read time, enrichment stops deleting what TMDb cannot name, and `usher genres --backfill` normalises the column | Accepted — closes issue #30; corrects PRD 02, 03, 05 and 07. **Amended 2026-08-19**: the write-time deferral was priced at ~1.8 h against a real 304 embeddings and is withdrawn |
 | [0040](0040-rating-columns-name-their-source.md) | Rating columns name their source (`tmdb_*` / `imdb_*`), IMDb's values re-imported rather than inferred, and the eval frame re-anchored on `imdb_num_votes` | Accepted — corrects PRD 02, 04 and 05; amends 0002's frame and its suggest tiebreak. ⚠️ **One component is deliberately open, not shipped**: the decontamination of the existing `tmdb_*` values, whose pre-registered rule was measured and misses 57,701 of 407,860 rows |
 | [0041](0041-the-eval-schema-is-not-a-migration.md) | The eval schema is applied by the harness, not by alembic | Accepted — dev-only DDL kept out of every deployment, and `alembic heads` kept at one |
-| [0040](0040-the-outbound-limiter-is-per-source-and-spaces-requests.md) | The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling | Accepted — adds the proactive half of PRD 01's rate-limit promise; PRD 03 and 10. **Renumbered from `0039` on 2026-08-20**, the number having been minted twice |
-| [0041](0041-a-bounded-column-is-a-declared-type-that-refuses.md) | A bounded column is a declared type that refuses; the per-column ledger is generated rather than quoted, under three published readings of what closes a value set; M10 fixes the 22 that reach a translatable exception | Accepted — issue #10's scoped decision; corrects PRD 09's carried-debt arithmetic, of which **two of five figures reproduce and three do not**. **Does not re-open M9's boundary call 8** |
+| [0042](0042-the-outbound-limiter-is-per-source-and-spaces-requests.md) | The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling | Accepted — adds the proactive half of PRD 01's rate-limit promise; PRD 03 and 10. **Renumbered twice**: `0039` → `0040` on 2026-08-20, `0040` → `0042` on 2026-08-21, each time because the number had been minted in parallel |
+| [0043](0043-a-bounded-column-is-a-declared-type-that-refuses.md) | A bounded column is a declared type that refuses; the per-column ledger is generated rather than quoted, under three published readings of what closes a value set; M10 fixes the 22 that reach a translatable exception | Accepted — issue #10's scoped decision; corrects PRD 09's carried-debt arithmetic, of which **two of five figures reproduce and three do not**. **Does not re-open M9's boundary call 8**. **Renumbered from `0041` on 2026-08-21** |
 
-**`0039` was assigned twice and the limiter is the one that moved.** The two
+**`0039` was assigned twice, then `0040` and `0041` were assigned twice, and
+the branch's records moved every time.** The two 2026-08-20 ADRs were written in
+parallel — the genre vocabulary landed on `main` in the post-M9 issue sweep, the
+outbound limiter on `milestone/m10-hardening` as M10's S2/S3 — and neither branch
+could see the other take the number, so the merge brought both in. The limiter
+moved to `0040` on the *"the trunk keeps what the trunk published"* rule.
+
+🔴 **That repair chose the next free number on its own branch, which is the rule
+that caused the collision, so it collided again one day later.** By 2026-08-21
+`main` had merged PR #45 carrying its own `0040` (rating columns) and `0041`
+(eval schema), while the branch held `0040` (the limiter, just moved there) and
+`0041` (the bounded column). Two numbers, both duplicated, both branches green in
+isolation. The limiter moved a second time, to `0042`, and the bounded column to
+`0043`.
+
+**The mechanism is the allocation rule and not the guard.** "Take the next free
+number" computed against one tree is not a reservation: two branches that cannot
+see each other compute the same answer, and a *renumber* that also takes the next
+free number is exposed to exactly the same race — which is how `0039 → 0040`
+walked straight into `main`'s `0040`. `test_no_two_adrs_claim_the_same_number`
+detects this at merge time, which is the earliest moment it is real and too late
+to prevent it. **Anything that actually fixes it has to make the number either
+unguessable in parallel or reserved per branch, and that is not decided here.**
+
+The renumbering is its own commit rather than part of the merge, both times: the
+bare string `ADR-0040` stood at 150 sites and `ADR-0041` at 90 after the 2026-08-21
+merge, interleaved across `src/`, `tests/`, `docs/` and `.claude/rules/`, with
+*both* meanings live in eight files at once. That is a per-site disambiguation
+rather than a substitution — 47 sites moved to `0042` and 76 to `0043`, and the
+rest stayed — and doing it inside a merge would have buried a hundred-odd
+unreviewable edits among the conflict resolutions.
+
+⚠️ **A count-delta heuristic is not sufficient to do it**, which is worth
+recording because it is the obvious shortcut: attributing a citation by whether
+`main`'s copy of that file already had one gets `src/usher/domain/title.py` and
+`tests/unit/test_domain_title.py` wrong. Both gained *new* `ADR-0040` citations
+during the merge that refer to **main's** rating-columns record, because the
+merge resolution was written about that record. The sites have to be read.
+
+**The superseded paragraph.** The two
 ADRs were written in parallel — the genre vocabulary landed on `main` in the
 post-M9 issue sweep, the outbound limiter on `milestone/m10-hardening` as M10's
 S2/S3 — and neither branch could see the other take the number, so the merge
@@ -73,13 +112,19 @@ the same plan also offered the number to two ADRs that were never written (J3's
 ids"*), which is itself the evidence that "the next free number" was being
 computed independently in more than one place.
 
-**`tests/unit/test_decision_register.py` was green throughout the collision and
-could not have been otherwise.** It compares *filenames* against the links in
-this table in both directions, and both files were listed and both rows present.
-A duplicate **number** is precisely what it cannot see — the register is keyed
-on filenames, and two filenames sharing a numeric prefix are two distinct
-strings. Nothing in the gate could have caught this; that is why the paragraph
-is here rather than only in a commit message.
+**`tests/unit/test_decision_register.py` was green throughout the *first*
+collision and could not have been otherwise.** Its filename comparison runs in
+both directions, and both files were listed and both rows present. A duplicate
+**number** is precisely what it cannot see — the register is keyed on filenames,
+and two filenames sharing a numeric prefix are two distinct strings.
+
+**Both branches then wrote the same guard, independently, without seeing each
+other** — `test_no_two_decision_records_claim_the_same_number` here and
+`test_no_two_adrs_claim_the_same_number` on `spec/quality-evals`, the same glob
+and the same check. They met in the 2026-08-21 merge and are now one case. That
+two branches solved one problem twice in parallel is the same blindness that
+mints one number twice in parallel, which is the argument for fixing the
+allocation rather than adding a third detector.
 
 Format: context → decision → consequences → evidence. Short is fine.
 

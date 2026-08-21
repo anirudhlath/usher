@@ -218,7 +218,7 @@ _CROSSWALK_PAIRS = """
 #    is a global change made from a local place.
 #
 # **`tmdb_id bigint`, against `titles.tmdb_id integer`, and the mismatch is
-# the point (ADR-0041, F9).** This column is written to nothing: it is
+# the point (ADR-0043, F9).** This column is written to nothing: it is
 # MovieLens's own `tmdb_id`, carried through the staging table for a join
 # that is never made -- the destination statement matches on `imdb_id`. So a
 # value above 2**31 has no destination column to overflow, and the only thing
@@ -229,7 +229,7 @@ _CROSSWALK_PAIRS = """
 # as `unmatched`, which is a better answer rather than merely a better
 # exception. There is no destination statement to translate and no `except`
 # to design, which is what makes this and `stg_akas.ordering` **the only two
-# columns in ADR-0041's scope that a DDL edit finishes on its own** -- the
+# columns in ADR-0043's scope that a DDL edit finishes on its own** -- the
 # other twenty needed a translation at a writing site.
 _GENOME_STAGING_DDL = """
 CREATE TEMP TABLE stg_genome (
@@ -405,7 +405,7 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         does not catch, so a *missing* translation is invisible until an
         operator reads a driver traceback. A required keyword makes the
         omission a type error at the call site instead. See `_errors.py` for
-        the two measured shapes and ADR-0041 for the per-column ledger.
+        the two measured shapes and ADR-0043 for the per-column ledger.
 
         ⚠️ **F9 shipped this translation copied out into all five callers, for
         a stated reason that was false**, and the note is kept because the
@@ -454,7 +454,7 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             [(row.imdb_id, row.tmdb_id, list(row.relevance)) for row in rows],
         )
         # **The destination statement, and the `CAST` in it, is why this
-        # `refusals_as_conflict` needed question (3) of ADR-0041 answered
+        # `refusals_as_conflict` needed question (3) of ADR-0043 answered
         # before it could be applied.** `_errors.py:66-75` bounds "class 22
         # means the row" to *a parameterised statement with no server-side
         # expressions*, and this is not that statement -- so the test is
@@ -850,7 +850,7 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             # `ordering` is staged as `bigint` against a column that does not
             # exist: it is IMDb's own `ordering` field, used for `DISTINCT ON`
             # and `ORDER BY` in the destination statement and written nowhere.
-            # ADR-0041's F9 scope, same one-change argument as
+            # ADR-0043's F9 scope, same one-change argument as
             # `stg_genome.tmdb_id` above -- `integer` here could only turn a
             # malformed dump row into a bare `builtins.OverflowError` out of
             # the COPY, aborting the batch, in exchange for bounding a value
@@ -1019,7 +1019,7 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         # P4983 batch must not blank the tmdb_movie_id a P4947 batch already
         # stored for the same IMDb id.
         # `stg_crosswalk.imdb_id text` -> `id_crosswalk.imdb_id varchar(16)`
-        # is ADR-0041's own worked example of the candidate fix, and it is the
+        # is ADR-0043's own worked example of the candidate fix, and it is the
         # one that refuted it: the refusal already landed on this statement
         # and this method had no `except` at all, so it crossed the port
         # boundary raw. Measured, F9:

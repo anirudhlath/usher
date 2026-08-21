@@ -6769,7 +6769,7 @@ them. The two the plan did **not** name are the ones worth the entry.
 
 `_sweep` takes `source_name` as a parameter rather than reading the run's
 `source_id`, and its docstring says why: `usher.sync.run.duration` beside it is
-already labelled by name, and **ADR-0040 §2 refuses a second per-source identity
+already labelled by name, and **ADR-0042 §2 refuses a second per-source identity
 in telemetry**. So the parameter exists entirely to serve the label — and
 planting `{"source": str(run.source_id)}` **survived every reconcile case and
 the whole of `tests/unit`**. The helper reading the points filtered on

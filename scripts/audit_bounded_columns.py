@@ -1,4 +1,4 @@
-"""The per-column ledger behind ADR-0041 and issue #10.
+"""The per-column ledger behind ADR-0043 and issue #10.
 
 **Not a test, offline, and it writes nothing.** It opens no database and no
 socket. Every fact it prints is derived from three artefacts already in this
@@ -31,7 +31,7 @@ it dies at `e5b8f2c40d17_ingest_pipeline.py:107` on `MockConnection`, which is
 why the migration cross-check below replays the operations as an AST rather
 than asking Alembic to render them.
 
-**The bounding rule this file implements is ADR-0041's, stated once here so
+**The bounding rule this file implements is ADR-0043's, stated once here so
 the total and the COPY figure cannot disagree again:**
 
     A column is BOUNDED when its declared Postgres type refuses at least one
@@ -124,7 +124,7 @@ _UNBOUNDED_PREFIXES = (
 )
 
 # The three failure shapes a bounded column can produce, which is the
-# distinction issue #10 does not make and ADR-0041 turns into a decision.
+# distinction issue #10 does not make and ADR-0043 turns into a decision.
 SHAPE_OVERFLOW = "OverflowError"  # client-side, asyncpg's binary encoder, no SQLSTATE
 SHAPE_22001 = "22001"  # server-side during COPY, SQLSTATE on a non-DBAPIError
 SHAPE_SQLA = "DBAPIError"  # a SQLAlchemy statement, so a translatable exception
@@ -650,7 +650,7 @@ _TRANSLATION_RANK = (
 #: raise (a bare `builtins.OverflowError` with no SQLSTATE, or an
 #: `asyncpg.exceptions.StringDataRightTruncationError` that is not a
 #: `DBAPIError` and carries no `.orig` chain -- both observed, see
-#: `tests/integration/test_staging.py`). That is the whole of why ADR-0041's
+#: `tests/integration/test_staging.py`). That is the whole of why ADR-0043's
 #: `exposed-copy` bucket is decided by the column's *shape* before any writer's
 #: `except` is consulted, and counting a COPY as an untranslated refusal point
 #: would report every staged writer in `bulk.py` as `none`.
@@ -773,7 +773,7 @@ def _refusal_points(
        boundary exactly as raw as an `INSERT`'s would. Two questions were being
        conflated: *should this statement be wrapped in `refusals_as_conflict`?*
        (no -- a class-22 fault in a computed `SELECT` is a **statement** fault,
-       and ADR-0041 question (3) says translating it reports this repository's
+       and ADR-0043 question (3) says translating it reports this repository's
        own bug as the caller's row being wrong) and *does this method leak?*
        (yes). This ledger's `translation` column is a proxy for the second, so
        the exemption is now the narrow, true one: **a `SELECT` with no bind
@@ -786,7 +786,7 @@ def _refusal_points(
     should read is genuinely unresolved -- it does not leak in the way an
     untranslated `INSERT` leaks, and it must not be translated in the way one
     is. `write_sites` raises if one ever appears, so the question arrives as a
-    failure rather than as an answer somebody invented here. ADR-0041 records
+    failure rather than as an answer somebody invented here. ADR-0043 records
     it as open.
 
     ⚠️ **"Writes" is three regexes** -- `_INSERT`, `_UPDATE`, `_DELETE`. A
@@ -1023,7 +1023,7 @@ def write_sites() -> list[WriteSite]:
             destinations &= set(Base.metadata.tables)
             if not destinations:
                 # **A write that resolves to no table must fail, not vanish**,
-                # and this is the degeneracy class ADR-0041's own testing
+                # and this is the degeneracy class ADR-0043's own testing
                 # missed: it covered dead scans and empty maps, never "a writer
                 # the scan cannot place". Dropping such a method is the one
                 # direction that reads *optimistically* -- a bucket is
@@ -1089,7 +1089,7 @@ def write_sites() -> list[WriteSite]:
                     f"read is the only thing keeping it from reading {otherwise!r}. It can "
                     "leak a caller's value as a raw driver exception on class 22, and "
                     "wrapping it would report a statement fault as a refused row -- "
-                    "ADR-0041 records the question as open rather than answered, and this "
+                    "ADR-0043 records the question as open rather than answered, and this "
                     "is where it has to be settled"
                 )
             sites.append(
@@ -1878,7 +1878,7 @@ class DegenerateScan(RuntimeError):
     This project's own rule, and the reason this exception exists rather than a
     comment: *a scan that globs nothing passes identically to a scan that
     passes.* Stubbing `write_sites()` to `[]` used to leave every exposed
-    bucket empty and exit 0 -- and ADR-0041 specifies F9's guard as "assert the
+    bucket empty and exit 0 -- and ADR-0043 specifies F9's guard as "assert the
     `exposed-sqlalchemy` bucket is empty", which a dead scan satisfies
     perfectly. Every derivation this file depends on is checked for emptiness
     before a single column is classified.
@@ -2234,7 +2234,7 @@ def counts(rows: Sequence[LedgerRow]) -> dict[str, int]:
 
 BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 
-#: The figures ADR-0041 publishes, keyed by reading. **This is the drift check
+#: The figures ADR-0043 publishes, keyed by reading. **This is the drift check
 #: with teeth**: `--check` compares the live ledger against it, so a change to
 #: the schema, to a writer's `except`, or to a source class that moves a column
 #: between buckets fails the run and names the document that has gone stale.
@@ -2252,13 +2252,13 @@ BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 #: among the twenty: its only writer of that column computes the value
 #: server-side as `attempts = attempts + 1`, so translating it would report a
 #: *statement* fault as a refused row, which is the misuse `_errors.py:66-75`
-#: exists to warn about. ADR-0041's scope section carries the evidence.
+#: exists to warn about. ADR-0043's scope section carries the evidence.
 #: (This comment said "nineteen of the twenty writing sites took ... and
 #: `jobs.attempts` did not", which counted a column as a site and was wrong on
 #: both halves.)
 #:
 #: 🔴 **Every reading gained one `translated` on 2026-08-21, and the cause is
-#: `m10a`/ADR-0040 rather than anything F9 did.** That revision split
+#: `m10a`/ADR-0042 rather than anything F9 did.** That revision split
 #: `titles.vote_count` -- one `integer` column with two writers -- into
 #: `tmdb_vote_count` and `imdb_num_votes`, and the ledger separates them for
 #: exactly the reason the record split them: `imdb_num_votes` is fed by
@@ -2269,7 +2269,7 @@ BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 #: dual-written column costs. So `exposed-copy` holds station (the IMDb half
 #: inherits the slot), `translated` gains the TMDb half, and the bounded total
 #: goes 79 -> 80. **The provenance split is legible in this instrument without
-#: anyone having taught it about ADR-0040**, which is a corroboration of that
+#: anyone having taught it about ADR-0042**, which is a corroboration of that
 #: record rather than drift against it.
 PUBLISHED: Mapping[str, Mapping[str, int]] = {
     "closure": {"safe": 20, "translated": 29, "exposed-copy": 30, "exposed-sqlalchemy": 1},
@@ -2324,7 +2324,7 @@ def readings_table() -> str:
                 f"{marker}{reading:<10} {label}  {got['safe']:>4}  {got['translated']:>6}  "
                 f"{got['exposed-copy']:>4}  {got['exposed-sqlalchemy']:>4}  {exposed:>7}"
             )
-    lines.append(f"  (* = the reading ADR-0041 adopts: {DEFAULT_READING})")
+    lines.append(f"  (* = the reading ADR-0043 adopts: {DEFAULT_READING})")
     return "\n".join(lines)
 
 
@@ -2357,7 +2357,7 @@ def summary(
     safe_narrow = narrow_staged - counted["exposed-copy"]
 
     lines = [
-        f"bounded columns (ADR-0041's rule, reading={reading}): {len(rows)}",
+        f"bounded columns (ADR-0043's rule, reading={reading}): {len(rows)}",
         "  by type family: " + ", ".join(f"{k} {v}" for k, v in sorted(families.items())),
         "  by bucket:      " + ", ".join(f"{k} {v}" for k, v in sorted(counted.items())),
         f"  narrow-staged bounded destination columns: {narrow_staged}"
@@ -2456,7 +2456,7 @@ def _drift(reading: str) -> list[str]:
             if {k: got[k] for k in want} != want:
                 complaints.append(
                     f"bucket drift at {label} under reading={name}: "
-                    f"ADR-0041 publishes {want}, the ledger says "
+                    f"ADR-0043 publishes {want}, the ledger says "
                     f"{ {k: got[k] for k in want} }"
                 )
     if reading not in READINGS:  # pragma: no cover - argparse constrains this
@@ -2468,7 +2468,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="audit_bounded_columns",
         description=(
-            "The per-column bounded-column ledger behind ADR-0041 and issue #10. "
+            "The per-column bounded-column ledger behind ADR-0043 and issue #10. "
             "Offline: no database, no socket, nothing written. See the module "
             "docstring for the bounding rule and the three readings of it."
         ),
@@ -2477,7 +2477,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="exit 1 on any drift from the figures ADR-0041 publishes, at both heads",
+        help="exit 1 on any drift from the figures ADR-0043 publishes, at both heads",
     )
     parser.add_argument(
         "--at",

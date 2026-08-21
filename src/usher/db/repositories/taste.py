@@ -236,7 +236,7 @@ class PostgresTasteRepository(TasteRepository):
         return _to_stored(row)
 
     async def put(self, taste: StoredTaste) -> None:
-        # **`refusals_as_conflict`, added by M10's F9 (ADR-0041).** Two of
+        # **`refusals_as_conflict`, added by M10's F9 (ADR-0043).** Two of
         # this table's columns are narrower than the field feeding them and
         # this method had no `except` at all, so both crossed the port
         # boundary as a raw driver exception. `centroid` is `halfvec(1024)`
@@ -248,7 +248,7 @@ class PostgresTasteRepository(TasteRepository):
         # wrapped into an unclassified `DBAPIError`. Neither is an
         # `IntegrityError`.
         #
-        # `_PUT` passes question (3) of ADR-0041 -- the statement refuses a
+        # `_PUT` passes question (3) of ADR-0043 -- the statement refuses a
         # *bound value* rather than an expression it computed. Its **four**
         # `CAST`s (`user_id`, `centroid`, `source_watermark`, `computed_at`)
         # each take a single bind and nothing else; there is no arithmetic, no

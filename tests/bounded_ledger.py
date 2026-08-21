@@ -1,6 +1,6 @@
 """The one import of `scripts/audit_bounded_columns.py` the suite makes.
 
-[ADR-0041](../docs/prd/decisions/0041-a-bounded-column-is-a-declared-type-that-refuses.md)
+[ADR-0043](../docs/prd/decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
 generates the bounded-column ledger and publishes its census; F9's guard is
 what makes `--check` a thing CI runs rather than a thing a person remembers to.
 The script lives in `scripts/` rather than in `tests/` for the reason that
@@ -63,10 +63,10 @@ def audit_module() -> ModuleType:
 
 def drift() -> list[str]:
     """`--check`'s own answer, empty when the ledger agrees with what
-    ADR-0041 publishes.
+    ADR-0043 publishes.
 
     Deliberately `_drift()` rather than a bucket assertion of the test's own.
-    An earlier draft of ADR-0041 specified F9's guard as *"assert the
+    An earlier draft of ADR-0043 specified F9's guard as *"assert the
     `exposed-sqlalchemy` bucket is empty"*, and review demonstrated that a
     totally dead scan satisfies it perfectly -- stubbing `write_sites()` to
     `[]` empties every bucket and exits 0. `_drift()` compares the whole
@@ -81,7 +81,7 @@ def drift() -> list[str]:
 
 def ledger_columns(*buckets: str) -> frozenset[tuple[str, str]]:
     """`(table, column)` for every bounded column in the named buckets, under
-    the reading ADR-0041 adopts.
+    the reading ADR-0043 adopts.
 
     Raises on an unknown bucket name rather than answering the empty set: a
     parametrisation that collected nothing reads exactly like one that

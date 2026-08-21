@@ -981,7 +981,7 @@ suspicion.
   M8, measured live against Postgres 17.10 / asyncpg 0.31.0 with every mechanism
   driven through the real repository method. ✅ **Scoped by M10's F8 on
   2026-08-20 —
-  [ADR-0041](decisions/0041-a-bounded-column-is-a-declared-type-that-refuses.md)
+  [ADR-0043](decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
   states the bounding rule, publishes the per-column ledger these figures never
   had, and hands F9 a bounded set of 22.** Every number below is re-measured at
   `m09f` by `scripts/audit_bounded_columns.py`, which derives the ledger from the
@@ -994,19 +994,19 @@ suspicion.
 
   | claimed at `m08b`, quoted since | verdict, measured 2026-08-20 at `m09f` |
   |---|---|
-  | **67 bounded columns** | ✅ **Right when written, and the one genuine reproduction here.** `--at m08b` prints 22 `varchar(N)` + 44 `integer` + 1 `numeric(12,8)` = **67**. At `m09f` that same rule gives **75** (M9 added `images.kind/width/height`, `search_queries.mode/result_count/latency_ms`, `title_search_names.kind`, `credits.source`); ADR-0041's rule adds the one `bigint` and the three `halfvec(N)` for **79**, and there are 6 further CHECK-only value bounds it deliberately excludes |
+  | **67 bounded columns** | ✅ **Right when written, and the one genuine reproduction here.** `--at m08b` prints 22 `varchar(N)` + 44 `integer` + 1 `numeric(12,8)` = **67**. At `m09f` that same rule gives **75** (M9 added `images.kind/width/height`, `search_queries.mode/result_count/latency_ms`, `title_search_names.kind`, `credits.source`); ADR-0043's rule adds the one `bigint` and the three `halfvec(N)` for **79**, and there are 6 further CHECK-only value bounds it deliberately excludes |
   | **5 already translated** | ✅ **Right, and exact.** `curated_rows.position` and the four `llm_calls` columns, at `m08b`, under every reading. Now **10**, since M9 gave `images` and `search_queries` the same treatment |
-  | **17 provably safe** | 🔴 **Not reproducible under any reading, and never scoreable.** ADR-0041 publishes three readings of what closes a value set; at `m08b` they give **18 / 16 / 12** and seventeen is none of them. Two columns the plan counted as safe are not: `titles.imdb_id`'s `pattern` is on `domain.Title` while the bulk writer takes `ports.bulk.ImdbTitle` (a bare `str`), and **`jobs.priority`'s `Field(ge=0, le=100)` is on `domain.Job` while `enqueue` takes `JobRequest`, whose `priority` is a bare `int`** (`ports/jobs.py:45`). A domain bound the write path never runs is not a bound |
+  | **17 provably safe** | 🔴 **Not reproducible under any reading, and never scoreable.** ADR-0043 publishes three readings of what closes a value set; at `m08b` they give **18 / 16 / 12** and seventeen is none of them. Two columns the plan counted as safe are not: `titles.imdb_id`'s `pattern` is on `domain.Title` while the bulk writer takes `ports.bulk.ImdbTitle` (a bare `str`), and **`jobs.priority`'s `Field(ge=0, le=100)` is on `domain.Job` while `enqueue` takes `JobRequest`, whose `priority` is a bare `int`** (`ports/jobs.py:45`). A domain bound the write path never runs is not a bound |
   | **45 exposed** | 🔴 **Not reproducible.** It is `67 − 17 − 5` and 17 is not reachable; the same subtraction with the adopted reading's 16 gives 46, and Rule B's own exposed figure at `m08b` is **50**, at `m09f` **51** — 31 at the COPY, 20 at a SQLAlchemy statement |
   | **31 through the COPY path** | 🔴 **Not reproducible as stated, and the number recurring is a trap rather than a confirmation.** The adopted reading does put 31 in the COPY bucket — `37` narrow-staged bounded destination columns minus `6` provably safe among them — but the other two readings give **30** and **34**, and `37 − 7 = 30` is the plan's own stated alternative. A figure that appears under one reading of three is not a reproduction, and the membership is not the old 31 in any case: **28 raise `OverflowError` and 3 do not.** `media_items.container`/`video_codec`/`audio_codec` are refused **server-side during the COPY** as `StringDataRightTruncationError`, SQLSTATE **`22001`** — a real SQLSTATE on an exception that is still not a `DBAPIError`. **There are two failure shapes, and a fix that widens `bigint` and forgets `text` reaches 28 of 31** |
 
-  **M9's boundary call 8 survives all of it, and ADR-0041 does not re-open it**:
+  **M9's boundary call 8 survives all of it, and ADR-0043 does not re-open it**:
   the COPY-bucket writes go through `stage_records`' `copy_records_to_table` on the raw
   asyncpg connection, outside SQLAlchemy's error translation entirely, so
   `is_row_refusal()` cannot inspect either shape and **no widening of `except
   IntegrityError` can reach them**. `_errors.py`'s scope claim (class 22 + class
   23 covers "not storable as given") is true for SQLAlchemy-executed statements
-  and does not model the COPY path. 🔴 **What ADR-0041 does retire is the
+  and does not model the COPY path. 🔴 **What ADR-0043 does retire is the
   candidate fix this bullet named**: *"declare staging columns wide (`bigint`,
   `text`) so refusal moves to the `INSERT … SELECT` where the existing net
   catches it, evidenced by `id_crosswalk.imdb_id`"* — measured at HEAD, **on
@@ -1026,7 +1026,7 @@ suspicion.
   that exist, and none of this needs an eighth.
   ⚠️ **`bulk.py` does translate, twice** — `refusals_as_conflict` at `:483` and
   `:778` — so its seven untranslated writers are an omission at each site rather
-  than a module that never learned the mechanism. ADR-0041's first draft said
+  than a module that never learned the mechanism. ADR-0043's first draft said
   the module contained no `try`/`except` at all and drew an inference from it;
   that was false and is corrected there.
 
@@ -1042,14 +1042,14 @@ suspicion.
   `attempts = attempts + 1`, so a class-22 refusal there is a *statement* fault,
   and reporting one to a caller as its row being wrong is exactly what
   `_errors.py:66–75` warns against. `JobRequest` carries no `attempts` field, so
-  no port call can supply a value for it either. ADR-0041's *"What F9 did"*
+  no port call can supply a value for it either. ADR-0043's *"What F9 did"*
   section carries the per-site reasoning, including why the two `CAST`-carrying
   destination statements the record predicted would fail question (3) in fact
   pass it. The other nine staging-only integers are `enumerate()` ordinals and
   are bounded by the batch's own length.
 
   ✅ **And `22001` on the COPY path is now observed rather than asserted.**
-  ADR-0041 flagged it as the one failure shape it took from the protocol and
+  ADR-0043 flagged it as the one failure shape it took from the protocol and
   never ran; measured through the shipped `stage_records` on
   `pgvector/pgvector:pg17`, it is exactly what that record predicted —
   `asyncpg.exceptions.StringDataRightTruncationError`, `sqlstate == "22001"`,
@@ -1077,12 +1077,12 @@ suspicion.
   `exposed-copy` bucket, and a ceiling on `Title` would be invisible to the only
   writers that overflow them — `bulk.py:upsert_titles` and
   `bulk.py:apply_ratings` take `ports.bulk` frozen dataclasses and never
-  construct a `Title` at all (ADR-0041, question 5).
+  construct a `Title` at all (ADR-0043, question 5).
   ⚠️ **This bullet named "Postgres 17's unbounded `NUMERIC`" as the column until
   2026-08-20, and that column is not `NUMERIC`** — `titles.popularity` is
   `sa.Float()` (`a8a0e10ff464:102`, mirrored in `db/models/title.py`), which
   PostgreSQL resolves to `double precision`. The round-trip observation stands;
-  the mechanism named for it did not. That is also why ADR-0041's rule excludes
+  the mechanism named for it did not. That is also why ADR-0043's rule excludes
   it: a `float8` refuses nothing a Python `float` can hold, so this is an
   *unbounded* column accepting a nonsense value — the opposite defect from the 50
   above, wanting a domain bound rather than a translation. The same correction is
@@ -1170,7 +1170,7 @@ suspicion.
   real one is **refused with a reason**: the only servers this project talks to
   are a household's own media server and the live TMDb API, and hammering
   either until it rate-limits is precisely what
-  [ADR-0040](decisions/0040-the-outbound-limiter-is-per-source-and-spaces-requests.md)'s
+  [ADR-0042](decisions/0042-the-outbound-limiter-is-per-source-and-spaces-requests.md)'s
   outbound gate exists to prevent, and what
   [ADR-0005](decisions/0005-bulk-bootstrap.md) declined when it sized the crawl
   below TMDb's *stated* "somewhere in the 40 requests per second range" rather

@@ -586,7 +586,7 @@ class PostgresSearchIndex(SearchIndex):
                         },
                     )
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).**
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).**
             # `title_embeddings.embedding` is `halfvec(1024)`; this writer stages the vector as
             # `text` and casts it in the statement, so a vector of another width is a class-22
             # refusal of a **bound value** rather than of an expression this statement computed.

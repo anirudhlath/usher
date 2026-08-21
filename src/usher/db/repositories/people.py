@@ -605,7 +605,7 @@ class PostgresCreditRepository(CreditRepository):
                     )
                     written = (await self._session.execute(text(_INSERT_CREDITS))).scalar_one()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).** This
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).** This
             # method writes `title_search_names` and `titles.credit_names`, neither of which is
             # narrower than the field feeding it -- but its statements bind caller-supplied
             # `uuid[]`, `text[]` and `text` arrays, so every class-22 refusal they can raise is
