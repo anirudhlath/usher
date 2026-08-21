@@ -7415,3 +7415,84 @@ restore was a `cp` from `/var/tmp/m10-f5/*.backup` verified against
 every revert; never `git checkout`. Harness at `/var/tmp/m10-f5/sweep.py`,
 outside the working tree. Swept **in place** rather than in a copy, for the
 reason the `cp -a` entry above gives.
+
+## M10 Task F9 — the bounded-column ledger implemented: 10 mutations, 9 killed, 1 control surviving as designed (2026-08-20)
+
+Bar pre-registered at `/var/tmp/m10-f9/BAR.md`,
+`sha256 1464263f56ff9f8129397b34e0ee245ac24de62bb3caab0ad19a070c5928a7ea`,
+written 2026-08-20T21:17:31-05:00 and re-verified with `sha256sum -c` at the
+top of every run. Scored against the **whole suite** (5,577 passed / 26
+skipped at the baseline, ~228 s a run), `PYTHONDONTWRITEBYTECODE=1`,
+`__pycache__` swept under `src/`, `tests/` and `scripts/` between runs, every
+restore verified against `git show "HEAD:<path>"` and `git status --porcelain`
+asserted empty after each.
+
+| # | mutation | predicted | observed |
+|---|---|---|---|
+| M1 | `stg_genome.tmdb_id bigint` → `integer` | 1 case | **KILLED**, that case |
+| M2 | `stg_akas.ordering bigint` → `integer` | 1 case | **KILLED**, that case |
+| M3 | `title.py:update`\'s `except DBAPIError` → `IntegrityError` | 4 arms + the ledger guard | **KILLED**, exactly those 5 |
+| M4 | `ROW_REFUSED_SQLSTATE_CLASSES` → `{"23"}` | all 27 arms + the class-22 cases elsewhere, **and no constraint case** | **KILLED**, 27 arms + 9 others, 0 constraint cases |
+| M5 | `taste.py:put` loses `refusals_as_conflict` | 2 arms + guard | **KILLED**, exactly those 3 |
+| M6 | `Title.popularity` loses `allow_inf_nan=False` | 1 case | **KILLED**, that case |
+| M7 | `_non_negative_float` loses `math.isfinite` | 1 case | **KILLED**, that case |
+| M8 | `write_sites() -> []` (the review\'s dead scan) | 3 ledger cases | **KILLED**, exactly those 3 |
+| M9 | `collection.py:attach_titles` → `IntegrityError` | **the guard alone** | **KILLED**, the guard alone |
+| M10 | `sync.py:add` loses its `is_row_refusal` guard | **SURVIVOR (control)** | **SURVIVED** |
+
+**M9 is the one worth carrying, and it was predicted rather than discovered.**
+No case in the suite drives a class-22 refusal through `attach_titles` — it
+binds two `uuid[]`s and writes `titles.collection_id`, which is not a bounded
+column — so narrowing its `except` is invisible to every behavioural assertion
+in the project. It dies on the ledger guard alone, because the generated census
+scores a bucket as **worst-case over every writer of the table**. That is a
+generated artefact catching a regression at a site no test reaches, which is
+the thing a ledger buys over a list of cases, and it is exactly the coverage
+`.claude/rules/testing-discipline.md`\'s *"a dependency every test overrides is a
+dependency no test covers"* entry is about, arriving from the other direction.
+
+**M4\'s prediction was right on the half that had teeth and short on the half
+that did not.** The load-bearing claim — *"no case whose subject is a named
+constraint may fail"* — held exactly: every unique-violation, foreign-key and
+CHECK case stayed green, including
+`test_an_over_long_alias_is_refused_for_the_whole_call_and_names_the_constraint`
+(`ck_title_search_names_name_within_btree_bound`, a `23514`), because
+`is_row_refusal` honours `IntegrityError` directly before it reads a SQLSTATE.
+The *enumeration* of collateral files was short by two: two
+`test_watch_state_repository.py` cases and one
+`tests/unit/test_db_repositories_errors.py` case are class-22 assertions I had
+not listed. Recorded as a partial miss on the enumeration rather than smoothed
+over — **predicting a blast radius by naming files is weaker than predicting it
+by naming the property**, and the property was right.
+
+### Two harness findings
+
+🔴 **A plant-presence check that greps for the mutated identifier fails when the
+identifier is also in the comment explaining it.** M5 removes
+`refusals_as_conflict` from `taste.py:put`, whose own comment block says
+*"`refusals_as_conflict`, added by M10\'s F9"* — so `assert "refusals_as_conflict"
+not in source` reported **plant did not land** against a plant that had landed
+perfectly. Scored as unknown and re-run as an AST check
+(`put()`\'s `AsyncWith` items no longer include it), which is what every plant
+in this sweep uses. Same family as the `-q`/`-qq` trap: a harness reading the
+wrong thing and reporting confidence. **Check a plant on the parse tree, not on
+the text, whenever the source explains itself.**
+
+🔴 **Sourcing the harness changes the shell\'s working directory, and a
+relative-path check then fails for the wrong reason.** `sweep.sh` does
+`cd "$SCRATCH"` to verify the bar\'s hash, so a follow-up
+`python3 -c "Path(\'src/...\').read_text()"` in the same shell raised
+`FileNotFoundError` and a `git status` raised *not a git repository* — neither of
+which says anything about the plant. Every check in this sweep therefore uses
+absolute paths or an explicit `cd` of its own.
+
+### The careless spelling, third instance in this project
+
+Three of these mutations narrow an `except DBAPIError` back to
+`except IntegrityError`, and `ruff --fix` had removed the `IntegrityError`
+import from `title.py` when that clause widened. So the careless spelling of
+"narrow it back" is a `NameError` at import — which fails the run with a
+plausible-looking list naming exactly the cases the mutation was aimed at, and
+means nothing. Every such run here restores the import first and is checked for
+`NameError` and *errors during collection* before its verdict is recorded; all
+ten runs reported 0 of each.
