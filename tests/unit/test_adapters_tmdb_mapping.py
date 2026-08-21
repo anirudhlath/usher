@@ -254,18 +254,18 @@ def test_an_unparseable_release_date_is_absent_rather_than_a_parse_error(bad: st
 
 
 def test_an_out_of_range_vote_average_is_dropped() -> None:
-    """`Title.community_rating` is `ge=0, le=10`. TMDb's scale is 0-10, so
+    """`Title.tmdb_vote_average` is `ge=0, le=10`. TMDb's scale is 0-10, so
     this is a defence against a value the mapper has no business trusting
     rather than an observed shape."""
     payload = _movie()
     payload["vote_average"] = 11.5
-    assert _title(payload).community_rating is None
+    assert _title(payload).tmdb_vote_average is None
 
 
 def test_a_negative_popularity_is_dropped() -> None:
     payload = _movie()
     payload["popularity"] = -1.0
-    assert _title(payload).popularity is None
+    assert _title(payload).tmdb_popularity is None
 
 
 def test_an_imdb_id_that_is_not_one_is_dropped() -> None:

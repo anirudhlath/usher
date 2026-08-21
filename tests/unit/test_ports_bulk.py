@@ -44,7 +44,7 @@ _SAMPLES: tuple[object, ...] = (
     _CURSOR,
     BulkBatch[ImdbTitle](rows=(_TITLE,), cursor=_CURSOR),
     _TITLE,
-    ImdbRating(imdb_id="tt99000020", community_rating=7.4, vote_count=12_345),
+    ImdbRating(imdb_id="tt99000020", average_rating=7.4, num_votes=12_345),
     ImdbAka(
         imdb_id="tt99000020",
         ordering=2,

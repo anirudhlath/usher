@@ -27,7 +27,8 @@ The always-on conventions live in `CLAUDE.md`; this file is the evidence.
 
 **M7's measurements, taken 2026-08-04/05 on this host against
 `pgvector/pgvector:pg17` (pgvector 0.8.6) unless stated otherwise. The
-`titles.popularity` re-measure has its own entry inside M6's gate section
+`titles.popularity` re-measure — the column is `titles.tmdb_popularity` since
+`m10a`/ADR-0040 — has its own entry inside M6's gate section
 below, because it is a correction to that gate's headline.**
 **The genome cosine does NOT saturate, measured against a bar written before
 the run — so the vectors ship raw and are not mean-centred.** Over all 16,376

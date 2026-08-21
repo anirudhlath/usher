@@ -46,6 +46,72 @@ dependencies = [
 # dependency is a dependency nobody can install on purpose.
 embedding = ["fastembed>=0.8"]
 
+# The quality-eval harness's IR metrics. An extra for the same reason
+# `embedding` is one, and measured the same two ways ADR-0022 measured that
+# one. Re-measured 2026-08-18, because the figure that stood here first
+# ("~30 packages", no size at all) was neither.
+#
+#   packages -- resolve the closure from `uv.lock`, dropping Windows-only
+#   markers: `ranx` 0.3.21 is **37**, against `embedding`'s accepted 28.
+#   size -- `uv pip install ranx==0.3.21` into a bare 3.13 venv, then
+#   `du -sm .../site-packages`: **520 MiB**, against the 167 MiB ADR-0022
+#   accepted for `fastembed`.
+#
+# Both numbers are checkable rather than asserted, and the method is what
+# makes them so: run the same two commands against `fastembed` and they
+# answer 28 packages and 175 MiB -- ADR-0022's own 28, and its 167 MiB plus
+# the version drift since 2026-08-02. The `du` figure and the closure agree
+# independently, the venv holding exactly 37 `.dist-info` directories.
+#
+# **So the argument is not that this is small. It is 3x the embedding extra,
+# and since `706f207` something does pay for it every run.** That commit
+# changed CI's Install step to `uv sync --frozen --extra eval`
+# (`.github/workflows/ci.yml`), which falsified the sentence that stood here --
+# *"CI installs with a bare `uv sync --frozen` and never passes `--extra eval`,
+# so the production image and the five-step gate each pay zero"*. That
+# paragraph was the whole argument for accepting this extra, so both halves are
+# re-measured rather than reworded (2026-08-19, `UV_PROJECT_ENVIRONMENT`
+# pointed at a venv out of tree, `du -sm .../site-packages`):
+#
+#   **the production image still pays zero, by construction rather than by
+#   care.** `Dockerfile` syncs twice -- `uv sync --frozen --no-install-project
+#   --no-dev` (l.31) and `uv sync --frozen --no-dev` (l.42) -- and neither
+#   passes `--extra` anything, so `ranx` reaches neither stage; the runtime
+#   stage then copies that finished venv wholesale (`COPY --from=builder ...
+#   /app/.venv`, l.58) and installs nothing of its own. Note what this is *not*
+#   a claim about: `COPY src/ ./src/` (l.40) copies `src/usher/eval/` into the
+#   image along with everything else, so "`usher.eval` ships in no image" is
+#   false. What is true is that **no shipped code path imports it** -- the
+#   eleventh contract below enforces that -- and that no image installs the
+#   library it would need.
+#
+#   **CI now pays ~26 packages and ~507 MiB per run**: `uv sync --frozen` gives
+#   84 distributions / 180 MiB, `uv sync --frozen --extra eval` gives 110 / 687
+#   MiB -- counting `.dist-info` directories in `site-packages`, `usher`'s own
+#   editable install included on both sides so the delta is unaffected by it.
+#   It is bought deliberately, for the standing rule that a run that did
+#   not run is not a pass: `tests/unit/test_eval_metrics_ir.py` has to
+#   *execute*, and without the extra it does not even skip -- its own
+#   third-party `import ranx` errors the whole file out at collection.
+#   `ci.yml`'s comment on that step carries the measured traceback and names
+#   the failing line, because the mechanism is not the one an obvious repair
+#   would target.
+#
+# **26 of the 37 are new, not 31**, and the already-present list was short by
+# five. Corrected 2026-08-19, measured by normalised distribution name against
+# a plain `uv sync --frozen` -- the dev environment, which is what CI and a
+# developer machine both have. The **eleven** already there are `requests` with
+# its four transitives (`certifi`, `charset-normalizer`, `idna`, `urllib3`),
+# `packaging`, `rich` with `markdown-it-py`, `mdurl` and `pygments`, and
+# `pyyaml`. The five it missed were all pre-existing rather than introduced by
+# this task, but this is the number `ci.yml` now leans on, so it is the one
+# that has to be right.
+#
+# `ranx` is confined to `usher/eval/metrics/ir.py`. `ir_measures` (4 packages)
+# is the one-file swap if numba ever blocks a CPython upgrade, which is the
+# named residual risk.
+eval = ["ranx>=0.3.21"]
+
 [project.scripts]
 # `usher <command>` as well as `python -m usher <command>`; both land on
 # `usher.cli.main`, which reads `sys.argv` when handed no argv. The
@@ -62,6 +128,14 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "import-linter>=2.1",
+    # import-linter's own graph engine, and already installed as its transitive
+    # -- declared anyway, because `tests/unit/test_eval_contract.py` imports it
+    # directly to pin the reachability fact the eleventh contract's
+    # `allow_indirect_imports` rests on. An undeclared transitive is a
+    # dependency nobody can install on purpose and one that a repackaging of
+    # import-linter can remove without warning, which would turn a
+    # gate-blocking test into a collection error.
+    "grimp>=3.15",
     "testcontainers[postgres]>=4.9",
     "asgi-lifespan>=2.1.0",
     "pyyaml>=6.0",
@@ -72,6 +146,28 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
+# **`packages` already ships the non-Python files inside it, and E1 Task 7
+# measured that rather than assuming it.** `usher/eval/schema.sql` is read at
+# runtime by `ledger.ensure_schema`, so a file that exists in the tree and not
+# in the wheel is a harness that works from a checkout and fails from an
+# installed copy. Built with `uv build --wheel` on 2026-08-19, the wheel's
+# non-`.py` entries are exactly:
+#
+#     usher/db/migrations/README
+#     usher/db/migrations/script.py.mako
+#     usher/eval/schema.sql
+#
+# so hatchling's default file selection for a package directory takes every
+# file in it, and the two migration files have been shipping that way since M1.
+# The plan for this task called for a
+# `[tool.hatch.build.targets.wheel.force-include]` entry mapping
+# `src/usher/eval/schema.sql` to `usher/eval/schema.sql`; it is **not** added,
+# because the measurement above says it would restate what `packages` already
+# does, and a directive whose stated reason is false is the thing this
+# repository keeps having to correct. What holds the claim instead is
+# `tests/unit/test_eval_contract.py::test_the_schema_sql_ships_beside_the_module`,
+# which resolves the path from `usher.eval.__file__` -- the installed copy --
+# rather than from the repository root.
 packages = ["src/usher"]
 
 [tool.pytest.ini_options]
@@ -145,11 +241,48 @@ plugins = ["pydantic.mypy"]
 # is not installed in the environment mypy runs in -- the annotation on
 # `FastEmbedEmbedder._model` is `Any` for exactly that reason, stated
 # there rather than implied here.
-module = ["uuid6", "testcontainers.*", "yaml", "fastembed"]
+#
+# `ranx` is here for exactly `fastembed`'s reason and the entry is load-bearing
+# in *both* environments: measured 2026-08-18 against a CI-identical venv
+# (`UV_PROJECT_ENVIRONMENT=... uv sync --frozen`, no `--extra eval`), the two
+# states raise two different error codes over the same line --
+# `import-untyped` when the extra is synced and the package is installed
+# without `py.typed`, `import-not-found` when it is not. So a
+# `# type: ignore[import-untyped]` is green locally and **red in CI on two
+# counts**, the unmatched code plus `unused-ignore` under `strict`, and
+# `# type: ignore[import-not-found]` is red the other way round.
+#
+# **That argument was overstated until 2026-08-19 and the correction is
+# narrower on two axes.** The claim was that *no* ignore comment is green in
+# both; measured, a **bare** `# type: ignore` is clean in both, and ruff would
+# not object either -- `PGH003` is not in `[tool.ruff.lint] select`. What is
+# true is that no **code-scoped** per-line ignore can be green in both, because
+# the code differs between the two environments; and that a bare ignore on
+# `ir.py`'s import alone still leaves `tests/unit/test_eval_metrics_ir.py`'s own
+# `import ranx` red in **both** environments (`import-untyped` installed,
+# `import-not-found` absent), so the blanket form would have to be repeated at
+# every import site and would silently swallow the next, unrelated error on
+# each of those lines. One override entry covers both sites, is checked by
+# neither environment's accident, and is the shipped choice for that reason
+# rather than for the one written here before.
+#
+# Nothing outside `usher/eval/metrics/` may import `ranx` -- **the twelfth
+# contract below** is what makes that true rather than conventional, and the
+# eleventh, which this comment used to name, does not: it forbids importing
+# `usher.eval`, which is a different claim about a different module. Measured,
+# with the correction recorded on the twelfth contract itself.
+module = ["uuid6", "testcontainers.*", "yaml", "fastembed", "ranx"]
 ignore_missing_imports = true
 
 [tool.importlinter]
 root_packages = ["usher"]
+# Without this, `ranx` is not a node in the graph at all and the twelfth
+# contract below cannot be stated -- see its comment for the measurement that
+# forced it, and for what the wider graph costs. It is a top-level setting
+# rather than a per-contract one, so all twelve contracts are checked against
+# the wider graph; import-linter refuses to start without it when any contract
+# names an external module, which is a loud failure rather than a quiet pass.
+include_external_packages = true
 
 # An allowlist, not a denylist: every top-level package's place is defined by
 # where it sits (or that it's named at all), so a new package can't silently
@@ -447,3 +580,226 @@ modules = [
     "usher.ports.repository.title",
     "usher.ports.repository.watch_state",
 ]
+
+# **The eleventh contract.** `usher.eval` may import anything -- it drives the
+# real services through the real composition root, which is the whole design --
+# and **nothing may import it**. Without this it would sit outside all ten
+# contracts above, which is precisely the "a new package can't silently escape
+# every contract" failure the allowlist note at the top of this section names,
+# and it would let a shipped code path pick up a dev-only extra.
+#
+# **`source_modules` is every top-level importable name under `src/usher/`
+# except one, and `usher.cli` is that one.** It is exempt deliberately --
+# `usher eval` is a subcommand, so the CLI is this package's composition root,
+# the same exemption `usher.composition` holds in three contracts above -- and
+# it is safe for the same reason: the contract "cli is a composition root,
+# nothing depends on it" already stops anything reaching `usher.eval` back
+# through `usher.cli`. Exempt is the claim; absent is not, and this comment
+# said "the only absence" until 2026-08-18 while a second name was missing.
+#
+# **That exemption did not work, and it failed for the one case it exists
+# for.** Measured 2026-08-19 with the future state planted -- a *used*,
+# ruff-clean `from usher.eval.metrics import ir` in `usher/cli.py`, in its
+# isort position, which is what the `usher eval` subcommand will be -- this
+# contract reported **11 kept, 1 broken**:
+#
+#     the eval harness is a leaf, nothing depends on it BROKEN
+#     usher.__main__ is not allowed to import usher.eval:
+#     -   usher.__main__ -> usher.cli (l.16)
+#         usher.cli -> usher.eval.metrics.ir (l.59)
+#
+# A `forbidden` contract reports **indirect chains by default**, and
+# `usher.__main__` is a source that imports `usher.cli` -- which is the
+# container entrypoint's entire job. So the exemption held only while nothing
+# in `usher.cli` reached `usher.eval`, i.e. only before the subcommand it was
+# written for. `allow_indirect_imports = true` is the repair, the same flag
+# the sixth, seventh, eighth and twelfth contracts carry; with it and the same
+# plant, **12 kept, 0 broken**.
+#
+# **It is a real narrowing and not only a repair, which is the difference from
+# those four.** A module that reaches `usher.eval` *through* `usher.cli` is no
+# longer reported here. What still reports it is the fifth contract, which has
+# no such flag: planting a used `from usher.cli import main` in
+# `usher/telemetry.py` on top of the `cli.py` plant leaves this contract KEPT
+# and turns **four others** red (`8 kept, 4 broken`) -- *cli is a composition
+# root* on `usher.services.images -> usher.telemetry -> usher.cli`, plus both
+# layering contracts and *hexagonal layering* on the same chain. Every source
+# listed below except one is imported by something in that contract's six, so
+# the loop is closed for all of them. **The exception is `usher.__main__`,
+# which nothing imports** -- and that is precisely the intended path, since it
+# exists to run the CLI.
+#
+# **That last paragraph is a graph fact, and as of 2026-08-19 a test holds it
+# rather than this comment.** Measured direct importers inside the fifth
+# contract's six: `usher.config` 3, `usher.composition` 3 (all six of those in
+# `usher.api`), `usher.telemetry` 12, `usher.__main__` **0**. Nothing checked
+# it, while `test_eval_contract.py` already pinned the flag, the forbidden
+# module, the `usher.cli` exemption and the full source list -- so a refactor
+# unhooking one of the three would have opened a real hole with the gate still
+# green. Verified by planting exactly that (the three `from usher.composition
+# import` statements in `usher/api/` rewritten away, out of tree): the gate
+# reported **12 kept, 0 broken** with `usher.composition` silently exempt from
+# both contracts, and `test_the_eval_package_is_named_by_an_import_contract`
+# failed on its own line naming it. Restored, green.
+#
+# **Every *direct* import of `usher.eval` is still caught in every listed
+# source, with the flag on**, which is the claim this contract is really
+# making. Re-measured with the careful spelling, one plant at a time:
+# `from usher.eval import goldens` used in `src/usher/__main__.py` reports
+# `usher.__main__ -> usher.eval.goldens (l.17)`, and the same import in
+# `src/usher/services/search.py` reports
+# `usher.services.search -> usher.eval.goldens (l.75)` -- **11 kept, 1 broken**
+# each.
+#
+# The flag's presence is asserted by `tests/unit/test_eval_contract.py`, and
+# the reason is a trap rather than symmetry with the twelfth: deleting it
+# turns this contract red the day Task 11 lands, and the obvious repair for
+# that red is to delete `usher.__main__` from the list below -- which unpicks
+# the measured fix recorded in the next paragraph, and which the same test
+# then fails on, sending the reader further wrong.
+#
+# That name was `usher.__main__`, the container entrypoint
+# (`CMD alembic upgrade head && exec python -m usher`), and it was the one
+# genuinely open surface. Measured, not reasoned: a *used*, ruff-clean
+# `from usher.eval import goldens` planted in `src/usher/__main__.py` reported
+# **11 kept, 0 broken**. It is listed now and must stay listed. The same plant
+# in `src/usher/__init__.py` is caught even unlisted, because `usher` is
+# reached from `usher.composition` through the adapters -- `__main__` is
+# reached from nothing, which is exactly what made it invisible.
+#
+# `tests/unit/test_eval_contract.py` derives this list from a `pkgutil` walk of
+# `src/usher/` and asserts set equality, so the next top-level package to land
+# fails there by name rather than sitting outside a contract that still reports
+# 11 kept.
+#
+# Verified in both directions, with the careful spelling. A plant that dies on
+# ruff `F401` proves only that ruff works, so the plant is *used*:
+#     `from usher.eval import goldens` in `usher/__main__.py`, in its isort
+#     position, with `_PLANT = goldens.__name__` beside it.
+# With the module listed: **10 kept, 1 broken**, naming
+# `usher.__main__ -> usher.eval.goldens (l.17)`. Reverted from a `cp` backup
+# and re-verified at 11 kept, 0 broken -- never with `git checkout <path>`,
+# which discards uncommitted work along with the plant.
+[[tool.importlinter.contracts]]
+name = "the eval harness is a leaf, nothing depends on it"
+type = "forbidden"
+source_modules = [
+    "usher.domain",
+    "usher.ports",
+    "usher.services",
+    "usher.adapters",
+    "usher.db",
+    "usher.api",
+    "usher.config",
+    "usher.composition",
+    "usher.telemetry",
+    "usher.__main__",
+]
+forbidden_modules = ["usher.eval"]
+allow_indirect_imports = true
+
+# **The twelfth contract, which turns `metrics/__init__.py`'s sentence into a
+# check.** That docstring says `ir.py` is the only module in this project that
+# imports `ranx`, and the mypy override above claimed the *eleventh* contract
+# was what made that true rather than conventional. It was not, and the
+# correction is measured rather than argued (2026-08-19): `ranx` was not a node
+# in the graph at all -- `root_packages = ["usher"]` with no
+# `include_external_packages`, so `'ranx' in graph.modules` is `False` -- and
+# the eleventh contract's `forbidden_modules` is `["usher.eval"]`, a statement
+# about who may reach the *harness*, not about who may reach the *library*.
+# A **used**, ruff-clean `import ranx` planted in its isort position with a
+# `_PLANT = ranx.__name__` beside it, in **both** `usher/adapters/http.py` and
+# `usher/eval/errors.py` at once, reported **11 kept, 0 broken**; the positive
+# control on the same out-of-tree copy (`from usher.eval import errors` in
+# `usher/__main__.py`) reported **10 kept, 1 broken**, which is what proves the
+# probe was reading that copy rather than something else.
+#
+# The confinement is not housekeeping. It is the whole mitigation for the risk
+# `metrics/__init__.py` records: `numba`/`llvmlite` pin an LLVM ABI and have
+# historically lagged new CPython, so a 3.14 move could block the `eval` extra,
+# and the escape -- swapping to `ir_measures`, 4 packages and no numba -- is
+# only "one file" for as long as it is genuinely one file. An unenforced
+# boundary is one import away from not existing.
+#
+# **What `include_external_packages` costs**, measured on this host rather than
+# guessed, because a wider graph is a real trade and belongs in the open. The
+# graph goes from *228 files, 906 dependencies* to *279 files, 1,741
+# dependencies*. Ten interleaved A/B pairs of `uv run lint-imports`, medians:
+# **206 ms -> 219 ms** warm, **250 ms -> 269 ms** with `.import_linter_cache`
+# removed before each run. That is +13 ms and +19 ms, i.e. not material, and it
+# is stated here so nobody re-derives it.
+#
+# **`allow_indirect_imports` is load-bearing and is not a loosening**, the same
+# call the sixth, seventh and eighth contracts make and for the same reason.
+# The claim being enforced is *nothing outside `usher.eval.metrics` may **name**
+# `ranx`*; reaching `score()` through the module that does name it is the design,
+# not a violation. Measured with the future state planted -- a ruff-clean
+# `from usher.eval.metrics import ir` in `usher/cli.py`, which is what the
+# `usher eval` subcommand will be: **without** the flag this contract is BROKEN
+# on `usher.cli -> usher.eval.metrics.ir -> ranx`, the reverse of what it is
+# for; **with** it, KEPT, while a direct `import ranx` anywhere in the source
+# list is still BROKEN. Nothing else can reach `ranx` indirectly either, because
+# the only usher module that imports it is inside `usher.eval.metrics` and the
+# eleventh contract governs who may reach `usher.eval` at all.
+#
+# **The exemption is the package `usher.eval.metrics`, not the module `ir`**,
+# and that is a limit of the contract type rather than a choice: a `forbidden`
+# contract's `source_modules` cover a module *and all its descendants*, so
+# `usher.eval.metrics` cannot be a source with `ir` carved out of it. A second
+# `metrics` module importing `ranx` would therefore be KEPT here. That last
+# inch is held by a scan --
+# `test_eval_contract.py::test_only_the_ir_module_inside_the_metrics_package_names_ranx`
+# -- for the reason M8 Task 17 recorded: a graph property covers every module
+# rather than the one a scan is pointed at, and a scan sees what a list has
+# forgotten, so neither check subsumes the other and both are kept.
+#
+# **The list is the contract**, exactly as the eleventh and tenth say of their
+# own, so `test_eval_contract.py::test_the_ranx_contract_names_every_module_that_
+# may_not_import_it` derives it from two `pkgutil` walks -- top level minus
+# `usher.eval`, plus `usher.eval`'s children minus `metrics` -- and carries a
+# premise guard, because a walk that globs nothing passes exactly like a walk
+# that passes. `usher.cli` is a source here and is *not* exempt as it is in the
+# eleventh: it is the eval harness's composition root, which is a reason to let
+# it import `usher.eval`, and no reason at all to let it import `ranx`.
+#
+# Two more measurements a future reader will want and should not have to take.
+# **The contract does not need the extra installed**: grimp reads the name out
+# of the source, so a venv synced without `--extra eval` (where `import ranx`
+# fails at runtime) still reports 12 kept, 0 broken. And **it goes vacuous
+# rather than loud** the day the swap happens: with `ir.py` no longer importing
+# `ranx`, `ranx` leaves the graph and this contract reports KEPT with nothing
+# to check, so whoever moves to `ir_measures` has to re-point it here rather
+# than being told to by a red gate.
+#
+# Verified in both directions with the careful spelling, out of tree, restored
+# from `cp` backups and read back -- never `git checkout <path>`. Both plants
+# together: **11 kept, 1 broken**, naming
+# `usher.adapters.http -> ranx (l.29)` and `usher.eval.errors -> ranx (l.8)`.
+# Restored: **12 kept, 0 broken**.
+[[tool.importlinter.contracts]]
+name = "only the IR metrics package imports ranx"
+type = "forbidden"
+source_modules = [
+    "usher.domain",
+    "usher.ports",
+    "usher.services",
+    "usher.adapters",
+    "usher.db",
+    "usher.api",
+    "usher.config",
+    "usher.composition",
+    "usher.telemetry",
+    "usher.cli",
+    "usher.__main__",
+    "usher.eval.bars",
+    "usher.eval.errors",
+    "usher.eval.fingerprint",
+    "usher.eval.goldens",
+    "usher.eval.ledger",
+    "usher.eval.runner",
+    "usher.eval.suggest_run",
+    "usher.eval.surfaces",
+    "usher.eval.verdicts",
+]
+forbidden_modules = ["ranx"]
+allow_indirect_imports = true

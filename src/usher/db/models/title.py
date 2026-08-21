@@ -110,9 +110,23 @@ class TitleRow(Base):
     )
     content_rating: Mapped[str | None] = mapped_column(String(32))
 
-    community_rating: Mapped[float | None] = mapped_column(Float)
-    vote_count: Mapped[int | None] = mapped_column(Integer)
-    popularity: Mapped[float | None] = mapped_column(Float)
+    # **Five columns where there were three, because three of them had two
+    # writers each and no way to say which one wrote a row.** `bulk/imdb.py`
+    # wrote IMDb's `numVotes`/`averageRating` here and `tmdb/mapping.py` wrote
+    # TMDb's `vote_count`/`vote_average` over the top, into the same column,
+    # counted over different electorates -- ~38x apart over one identified
+    # population counted both ways (the frozen tier's 130,647 enriched rows:
+    # median TMDb 15 against median frozen IMDb `numVotes` 576, S3). The
+    # load-bearing measurement is not that gap but the overlap: on the
+    # deployed catalog skeleton rows reached 2,656,080 while enriched movies
+    # topped out at 40,695, and among movies the two ranges *overlap* (40,518
+    # against 40,695) -- so nothing downstream could have separated them by
+    # magnitude, whatever the typical ratio. ADR-0040.
+    tmdb_vote_average: Mapped[float | None] = mapped_column(Float)
+    tmdb_vote_count: Mapped[int | None] = mapped_column(Integer)
+    tmdb_popularity: Mapped[float | None] = mapped_column(Float)
+    imdb_average_rating: Mapped[float | None] = mapped_column(Float)
+    imdb_num_votes: Mapped[int | None] = mapped_column(Integer)
 
     # The FK it has been waiting for since M1. PRD 02: "the one artefact that
     # exists today is titles.collection_id, a bare nullable UUID with no
@@ -467,14 +481,24 @@ class TitleRow(Base):
             name="ck_titles_runtime_minutes_non_negative",
         ),
         CheckConstraint(
-            "vote_count IS NULL OR vote_count >= 0", name="ck_titles_vote_count_non_negative"
+            "tmdb_vote_count IS NULL OR tmdb_vote_count >= 0",
+            name="ck_titles_tmdb_vote_count_non_negative",
         ),
         CheckConstraint(
-            "popularity IS NULL OR popularity >= 0", name="ck_titles_popularity_non_negative"
+            "tmdb_popularity IS NULL OR tmdb_popularity >= 0",
+            name="ck_titles_tmdb_popularity_non_negative",
         ),
         CheckConstraint(
-            "community_rating IS NULL OR community_rating BETWEEN 0 AND 10",
-            name="ck_titles_community_rating_range",
+            "tmdb_vote_average IS NULL OR tmdb_vote_average BETWEEN 0 AND 10",
+            name="ck_titles_tmdb_vote_average_range",
+        ),
+        CheckConstraint(
+            "imdb_num_votes IS NULL OR imdb_num_votes >= 0",
+            name="ck_titles_imdb_num_votes_non_negative",
+        ),
+        CheckConstraint(
+            "imdb_average_rating IS NULL OR imdb_average_rating BETWEEN 0 AND 10",
+            name="ck_titles_imdb_average_rating_range",
         ),
         CheckConstraint("name <> ''", name="ck_titles_name_not_empty"),
         CheckConstraint("sort_name <> ''", name="ck_titles_sort_name_not_empty"),

@@ -324,8 +324,14 @@ carries a measurement they do not.
    same page for a different reason — see
    [06](06-rows-and-recommendations.md): `watch_states` has no `rating` and no
    `favorite`, and neither does `SourceWatchState`, so a *household's* rating
-   on a card is a field with no source. (`titles.community_rating` exists and
-   is a different thing: IMDb's aggregate, not this household's opinion.)
+   on a card is a field with no source. (`titles.tmdb_vote_average` and
+   `titles.imdb_average_rating` exist and are a different thing: a *provider's*
+   aggregate, not this household's opinion. Both were one column named
+   `community_rating` until `m10a` —
+   [ADR-0040](decisions/0040-rating-columns-name-their-source.md) — with two
+   writers and nothing recording which had won, which is the sharper version of
+   the same point: a rating with no named source is a rating you cannot
+   interpret.)
 
 4. **`Person` and `Credit` ARE built, and `Collection` with them, all three
    re-derived from `raw_payloads` with no second network call.** M4's boundary
@@ -987,10 +993,13 @@ suspicion.
   `text`) so refusal moves to the `INSERT … SELECT` where the existing net
   catches it, evidenced by `id_crosswalk.imdb_id` (staging `text`) surfacing as
   a wrapped `DBAPIError` while `media_items.container` (staging `varchar(32)`)
-  does not. Separately: `Title.popularity: float | None = Field(ge=0)` accepts
+  does not. Separately: `Title.popularity: float | None = Field(ge=0)`
+  (`Title.tmdb_popularity` since `m10a`) accepts
   **infinity** — `float('inf') >= 0` is `True`, Postgres 17's unbounded `NUMERIC`
   stores it, verified round-trip, reachable via `json.loads('1e400')` from a TMDb
-  payload. `community_rating` is safe only by accident of its `le=10`.
+  payload. `community_rating` — now `tmdb_vote_average`, and joined by
+  `imdb_average_rating` — is safe only by accident of its `le=10`, which is
+  true of the new pair too.
   **Still needs a scoped decision before an owner, and M9 looked at it and said
   no with the reason attached** — it is M9's boundary call 8. M9 is the
   milestone that built the problem vocabulary a leak like this would have to map

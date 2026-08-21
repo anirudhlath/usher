@@ -118,8 +118,9 @@ that raises N minutes into a quiet window must not take the N-1 before it.
 WHAT IS RECORDED WITH EVERY NUMBER
 ================================================================================
 
-Catalog row count; the **enrichment split**, because *"`popularity` IS NULL on
-all 1,271,138 rows"* was a `--phase imdb` fact read as a catalog fact; the NULL
+Catalog row count; the **enrichment split**, because *"`tmdb_popularity` IS
+NULL on all 1,271,138 rows"* was a `--phase imdb` fact read as a catalog fact;
+the NULL
 fraction of each of the four sort keys; the genre vocabulary with the row count
 behind every probed genre; **whether `media_items` holds anything at all**, an
 `owned` filter over an empty table not being the `owned` filter that ships;
@@ -277,7 +278,7 @@ async def catalog_facts(session: AsyncSession) -> dict[str, Any]:
     """The catalog's size, shape and server settings, read rather than assumed.
 
     The enrichment split and the four NULL fractions are here because
-    *"`popularity` IS NULL on all 1,271,138 rows"* was true of a
+    *"`tmdb_popularity` IS NULL on all 1,271,138 rows"* was true of a
     `--phase imdb` catalog and false of a catalog that has been enriched --
     a number quoted without the phase it was taken at is a number that will be
     read against the wrong one.
@@ -291,8 +292,8 @@ async def catalog_facts(session: AsyncSession) -> dict[str, Any]:
                    count(*) FILTER (WHERE enrichment_state = 'basic') AS basic,
                    count(*) FILTER (WHERE enrichment_state = 'enriched') AS enriched,
                    count(*) FILTER (WHERE year IS NULL) AS year_null,
-                   count(*) FILTER (WHERE popularity IS NULL) AS popularity_null,
-                   count(*) FILTER (WHERE vote_count IS NULL) AS vote_count_null,
+                   count(*) FILTER (WHERE tmdb_popularity IS NULL) AS popularity_null,
+                   count(*) FILTER (WHERE tmdb_vote_count IS NULL) AS vote_count_null,
                    count(*) FILTER (WHERE sort_name IS NULL) AS sort_name_null,
                    count(*) FILTER (WHERE genres = '{}') AS no_genres
             FROM titles

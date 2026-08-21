@@ -659,7 +659,9 @@ pages, in order, ending early.
 This is not an edge case on this schema. `titles.year`, `titles.popularity` and
 `titles.vote_count` are all nullable, and `popularity` was measured NULL on
 **all 1,271,138 rows** of a bootstrap-only catalog, so on a fresh install the
-unkeyed group is most of the table. ADR-0034 shipped the row-comparison
+unkeyed group is most of the table. *(`m10a`/ADR-0040 renamed those two to
+`titles.tmdb_popularity` and `titles.tmdb_vote_count`; nullability, and
+therefore everything this section argues, is unchanged.)* ADR-0034 shipped the row-comparison
 spelling as the milestone-wide instruction for three groups writing keyset SQL
 independently; it is corrected there with this table, and the correction
 includes the leading term's direction — `(key IS NOT NULL)` **ascending** puts
@@ -1020,6 +1022,67 @@ The old `pool_size=10, max_overflow=5` could not hold the worker alone.
 getting slower until it starts parking jobs, which is a configuration mistake
 wearing an upstream's clothes. `Settings` refuses that arithmetic at startup
 instead.
+
+## A column with two writers and no discriminator is a data-integrity bug that reads as a working column (2026-08-19, ADR-0040)
+
+**Both writers produced in-range values, so no constraint fired and no test
+failed.** `titles.vote_count` held IMDb's `numVotes` on rows the bulk loader
+reached and TMDb's `vote_count` on rows enrichment reached, into the same
+column, with nothing on the row recording which had won; `titles.community_rating`
+held both sources' 0-10 ratings, where there is not even an out-of-range value
+to notice. Measured on a deployed 1,272,870-title catalog:
+
+| kind | state | rows | with `vote_count` | `max(vote_count)` |
+|---|---|---|---|---|
+| movie | enriched | 131,241 | 131,241 | 40,695 |
+| movie | skeleton | 769,637 | 270,713 | 40,518 |
+| all | skeleton | 1,140,427 | 407,860 | **2,656,080** |
+
+🔴 **The load-bearing measurement is the overlap, not the gap.** Among movies
+the two writers' ranges *overlap* — **40,518 against 40,695** — so no threshold,
+ratio or magnitude rule could ever have separated a contaminated row from a
+clean one, whatever the typical ratio between the two scales. A repair by
+`WHERE vote_count > <some number>` is unavailable **as a fact about the data**,
+not as a matter of taste. **Before adding a second writer to any column, check
+whether the first one's units survive it** — and if the two populations can
+overlap at all, the column has to split before the second writer lands, because
+after it lands the split needs evidence the column no longer carries.
+
+**Three further findings from the same repair, each of which cost something:**
+
+- **The defect surfaced through a *sampling frame*, and nothing else was ever
+  going to find it.** No route, no test and no CHECK reads a vote count closely
+  enough to notice it had changed electorate. What noticed was
+  `usher eval suggest`'s frame — ADR-0002's *"movies with `vote_count >= 500`
+  and a unique lower-cased name"* — going from a recorded 48,549 to **8,523**
+  and refusing to record a baseline. Re-anchored on the split-out
+  `imdb_num_votes`, the same predicate answers **48,639, +0.19%**, which is the
+  evidence the diagnosis was complete rather than merely plausible.
+
+- **Splitting the column does not fix its readers; it exposes them.** Three
+  sites depended on `vote_count` being filled by the bootstrap and all three
+  read as working until the writer moved: two `ORDER BY ... DESC NULLS LAST`
+  tiebreaks that degrade silently to `id ASC` (insertion order, on a UUIDv7 key)
+  and one tier predicate, `tmdb_vote_count >= 100`, that silently selects
+  **zero rows** on a fresh catalog. A `NULLS LAST` ordering key and a `>=`
+  predicate are both *totally* silent when the column empties — no error, no
+  empty result the caller can distinguish from a legitimate one. **Grep for
+  every reader before moving a writer, and expect the readers to have been
+  built on whichever writer filled the most rows.**
+
+- **An exact-match repair rule assumes the source is a fixed point, and a daily
+  dump is not.** The pre-registered decontamination — NULL the TMDb pair wherever
+  it exactly equals the freshly re-imported IMDb pair — caught **350,131 of
+  407,860** and missed **57,701**, whose max was the full IMDb-scale 2,656,080.
+  The misses are measured drift: all had a fresh row, **95.9%** held a value
+  ≤ the fresh one and **91.5%** within 10% below it. The stored values came from
+  a dump eight days older than the re-import, so exact equality cannot hold for
+  anything whose count moved. The rule was **reported and not widened**, because
+  the bar said so in terms. ⚠️ **And the same pass found a three-valued-logic
+  hole**: 28 rows carried the TMDb value and no fresh IMDb one, so
+  `NOT (a = b AND c = d)` evaluated NULL and excluded them from *both* arms of
+  the before/after count. A row is in neither arm of an `x` / `NOT x` split
+  whenever `x` is NULL, and a count written as two statements will not say so.
 
 ## A caught `RepositoryConflict` leaves an expired row behind, and touching it synchronously is `MissingGreenlet` (2026-08-19, issue #8)
 

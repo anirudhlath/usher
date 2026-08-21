@@ -321,7 +321,7 @@ def _browse_order(key: ColumnElement[Any], *, descending: bool) -> tuple[ColumnE
     written.
 
     **The nullable sorts do not benefit yet and the reason is worth carrying.**
-    `year`, `popularity` and `vote_count` have no index at all, so all three
+    `year`, `tmdb_popularity` and `tmdb_vote_count` have no index at all, so all three
     stay a sequential scan (B7: 235.55 / 229.50 / 231.21 ms) -- but under the
     written-out spelling a `(col DESC NULLS LAST, id)` btree could not have
     been matched even if it existed, so this change is what makes such an index
@@ -632,11 +632,11 @@ class PostgresTitleRepository(TitleRepository):
             )
         statement = statement.order_by(
             # `nulls_last` spelled out: Postgres defaults a DESC sort to NULLS
-            # FIRST, and `titles.popularity` was measured NULL on all
+            # FIRST, and `titles.tmdb_popularity` was measured NULL on all
             # 1,271,138 rows of a bootstrap-only catalog -- so the default
             # puts the entire unknown population above every known one.
-            nulls_last(TitleRow.popularity.desc()),
-            nulls_last(TitleRow.vote_count.desc()),
+            nulls_last(TitleRow.tmdb_popularity.desc()),
+            nulls_last(TitleRow.tmdb_vote_count.desc()),
             TitleRow.id,
         ).limit(limit)
         with self._session.no_autoflush:  # see get()'s comment
@@ -723,7 +723,7 @@ class PostgresTitleRepository(TitleRepository):
                 TitleRow.id.label("id"),
                 owned.label("owned"),
                 affine.label("affine"),
-                TitleRow.vote_count.label("vote_count"),
+                TitleRow.tmdb_vote_count.label("tmdb_vote_count"),
             )
             .outerjoin(owned_titles, owned_titles.c.title_id == TitleRow.id)
             .where(~watched)
@@ -732,10 +732,10 @@ class PostgresTitleRepository(TitleRepository):
                 affine.desc(),
                 # `nulls_last` spelled out: Postgres defaults a DESC sort to
                 # NULLS FIRST, and on a bootstrap-only catalog every row's
-                # `vote_count` can be NULL -- so the default would put the
+                # `tmdb_vote_count` can be NULL -- so the default would put the
                 # unknown population above the known one and then let the
                 # `id` tail decide the pool.
-                nulls_last(TitleRow.vote_count.desc()),
+                nulls_last(TitleRow.tmdb_vote_count.desc()),
                 # ADR-0028's stability, and the only reason two reads of one
                 # unchanged catalog agree about what index 7 names.
                 TitleRow.id,
@@ -764,7 +764,7 @@ class PostgresTitleRepository(TitleRepository):
             .order_by(
                 ranked.c.owned.desc(),
                 ranked.c.affine.desc(),
-                nulls_last(ranked.c.vote_count.desc()),
+                nulls_last(ranked.c.tmdb_vote_count.desc()),
                 ranked.c.id,
             )
         )

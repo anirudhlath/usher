@@ -38,6 +38,8 @@ from usher.api.deps import (
     get_search_query_repository,
     get_title_read_service,
 )
+from usher.api.dto.browse import BrowseItemResponse
+from usher.api.dto.search import SearchResultResponse
 from usher.api.dto.title import TitleResponse
 from usher.config import Settings
 from usher.domain.enums import EnrichmentState, HdrFormat, ImageKind, SourceKind, TitleKind
@@ -46,7 +48,7 @@ from usher.domain.image import Image
 from usher.domain.jobs import JobKind
 from usher.domain.people import Credit, CreditKind, CreditSource, Person, person_sort_name
 from usher.domain.source import Source
-from usher.domain.title import Title
+from usher.domain.title import WIRE_FIELD_NAMES, Title
 from usher.ports.errors import RepositoryConflict
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
@@ -198,7 +200,7 @@ async def _seed_title(
         year=2021,
         overview="A film.",
         genres=("Drama", "Science Fiction"),
-        community_rating=7.8,
+        tmdb_vote_average=7.8,
         enrichment_state=state,
         enrichment_error=error,
     )
@@ -783,6 +785,68 @@ async def test_a_credit_carries_the_role_and_no_provider_identifier(
             "job": "Director",
         }
     ]
+
+
+def test_every_wire_field_name_is_a_field_some_response_actually_carries() -> None:
+    """**The half of ADR-0040's boundary that `WIRE_FIELD_NAMES` itself does
+    not check: its *values*.**
+
+    `test_no_domain_only_field_name_reaches_the_wire` proves no domain-only
+    attribute reaches `title.updated`. It cannot prove the name that *does*
+    reach it is one a client can act on -- both sides of that mapping are
+    `str`, so mypy sees nothing, and changing `"community_rating"` to
+    `"communityRating"` is a plausible transcription slip that names no field
+    in any response body and passes every other case in this suite. Measured:
+    that edit survives the whole unit run.
+
+    So the values are checked against the union of the three response models
+    that actually carry these fields. A union rather than `TitleResponse`
+    alone, because the three are genuinely spread: `community_rating` is
+    `GET /titles/{id}`'s, while `popularity` and `vote_count` reach a client
+    only through browse and search. That was true before the rename too --
+    the payload has always named fields no single body carries.
+
+    Lives here, in a test module that already imports the DTO layer, and not
+    beside the constant: `usher.domain` importing `usher.api` is
+    `lint-imports` BROKEN, which is the whole reason the mapping is in
+    `domain/` rather than in `api/dto/`.
+    """
+    carried = (
+        set(TitleResponse.model_fields)
+        | set(BrowseItemResponse.model_fields)
+        | set(SearchResultResponse.model_fields)
+    )
+
+    # The premise, and it is not decoration: an empty mapping satisfies a
+    # subset assertion vacuously, and so does one whose values were all
+    # deleted. Both halves are named because `carried` being empty -- a DTO
+    # import that silently resolved to something field-less -- would fail the
+    # subset check for a reason that has nothing to do with the mapping.
+    assert WIRE_FIELD_NAMES, "the premise: the mapping is non-empty"
+    assert "community_rating" in carried, "the premise: the DTO field set really was read"
+
+    unknown = set(WIRE_FIELD_NAMES.values()) - carried
+    assert not unknown, (
+        f"WIRE_FIELD_NAMES points at names no response body carries: {sorted(unknown)}"
+    )
+
+
+async def test_the_rating_fields_keep_their_wire_names(
+    client: httpx.AsyncClient, seeded: Seeded
+) -> None:
+    """**ADR-0040 moved three columns and deliberately moved no wire field.**
+
+    `usher-web` is deployed against this body and generates its types from it,
+    so `TitleResponse.community_rating` stayed put while the column behind it
+    became `titles.tmdb_vote_average`. The sibling case built from
+    `TitleResponse.model_fields` cannot see a rename -- it derives its
+    expectation from the very thing that would have changed -- so this one
+    spells the key out, and asserts the value so a field renamed *and* left
+    unset cannot pass on an absence.
+    """
+    body = (await client.get(f"/titles/{seeded.title_id}")).json()
+
+    assert body["community_rating"] == 7.8
 
 
 async def test_the_response_carries_every_field_of_its_own_model(

@@ -279,8 +279,28 @@ class BulkCatalogRepository(ABC):
 
     @abstractmethod
     async def apply_ratings(self, rows: Sequence[ImdbRating]) -> int:
-        """Set `community_rating`/`vote_count` on titles that already exist,
-        returning how many rows changed.
+        """Set `imdb_average_rating`/`imdb_num_votes` on titles that already
+        exist, returning how many rows changed.
+
+        **Those are IMDb's own columns, and ADR-0040 is why they exist.**
+        This method wrote `community_rating`/`vote_count` until then — the
+        columns `adapters/tmdb/mapping.py` also writes — so whichever writer
+        ran last won, with nothing recording the winner. **The gap is ~38x,
+        over one identified population counted both ways**: of the frozen
+        tier's 130,647 enriched rows, median TMDb `vote_count` **15** against
+        a median frozen IMDb `numVotes` of **576**
+        (`.claude/rules/tmdb-and-enrichment.md`, group S3) — before-and-after
+        over one frozen set of ids rather than two columns read off one row,
+        because no row could hold both until `m10a` and this redirect, which
+        is the entire defect.
+
+        The write is now single-**source** in both directions, which is a
+        weaker and truer claim than single-*writer*: no other writer
+        originates values for these two, and this originates values for
+        nothing else. `PostgresTitleRepository.add`/`update` do carry them to
+        storage — every non-derived column goes through `TitleRow(**model_dump)`
+        and the `setattr` loop — but only as an entity round-trip of values
+        this method put there.
 
         Never creates a title: `title.ratings.tsv.gz` covers `titleType`s
         this milestone drops, and a rating with no title is not a catalog
@@ -441,14 +461,17 @@ class BulkCatalogRepository(ABC):
         independently of whether the incoming pair agrees with what is
         already stored: a title that already carries a *different* value
         does not get overwritten either, and is reported as `conflicted`,
-        not `linked`. Copies `popularity` across from the TMDb id universe
-        at the same time.
+        not `linked`. Copies `tmdb_ids.popularity` across into
+        `titles.tmdb_popularity` at the same time -- which makes this
+        statement that column's **second** writer beside TMDb enrichment, and
+        is why a populated `tmdb_popularity` says nothing about whether a row
+        was enriched (ADR-0040).
 
         **That last clause used to continue "…which is what makes
         `ix_titles_popularity` usable and gives M4's enrichment queue a real
         ordering", and both halves were false.** The enrichment queue is
         `jobs`, claimed through `ix_jobs_claim` (`priority DESC, created_at`);
-        no statement anywhere orders it by `titles.popularity`, so the named
+        no statement anywhere orders it by `titles.tmdb_popularity`, so the named
         consumer never existed. And the index could not have served one
         anyway — it was declared `(popularity DESC)`, i.e. NULLS FIRST, while
         every consumer in `src/` asks `DESC NULLS LAST`, which is a different

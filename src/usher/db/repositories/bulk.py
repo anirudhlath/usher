@@ -577,7 +577,8 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         #
         # The DO UPDATE list is exactly the fields IMDb supplies. It omits
         # enrichment_state, enrichment_error, enriched_at, field_provenance,
-        # overview, tagline, popularity, community_rating, vote_count,
+        # overview, tagline, tmdb_popularity, tmdb_vote_average,
+        # tmdb_vote_count, imdb_average_rating, imdb_num_votes,
         # collection_id, and created_at, so a re-import refreshes IMDb's
         # facts without downgrading an enriched title back to a skeleton.
         #
@@ -624,26 +625,38 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         await self._stage(
             """
             CREATE TEMP TABLE stg_ratings (
-                imdb_id text, community_rating double precision, vote_count integer
+                imdb_id text, imdb_average_rating double precision, imdb_num_votes integer
             ) ON COMMIT DROP
             """,
             "stg_ratings",
-            ("imdb_id", "community_rating", "vote_count"),
-            [(row.imdb_id, row.community_rating, row.vote_count) for row in rows],
+            ("imdb_id", "imdb_average_rating", "imdb_num_votes"),
+            [(row.imdb_id, row.average_rating, row.num_votes) for row in rows],
         )
         # UPDATE ... FROM, never an upsert: title.ratings.tsv.gz covers
         # titleTypes this milestone drops, and a rating with no title is not
         # a catalog entry. The IS DISTINCT FROM guard keeps a no-op re-import
         # from firing the set_updated_at trigger on a million unchanged rows.
+        #
+        # **The two columns named here are IMDb's own, and that is ADR-0040.**
+        # This statement used to write `community_rating`/`vote_count`, which
+        # `adapters/tmdb/mapping.py` also writes -- so whichever ran last won,
+        # with nothing recording the winner. The gap is ~38x, over one
+        # identified population counted both ways: of the frozen tier's
+        # 130,647 enriched rows, median TMDb `vote_count` 15 against a median
+        # frozen IMDb `numVotes` of 576 (`.claude/rules/tmdb-and-enrichment.md`,
+        # group S3). Before-and-after over one frozen set of ids rather than
+        # two columns read off one row -- no row could hold both until `m10a`
+        # and this statement's redirect, which is the entire defect.
         return await self._rowcount("""
             UPDATE titles t
-            SET community_rating = s.community_rating, vote_count = s.vote_count
+            SET imdb_average_rating = s.imdb_average_rating,
+                imdb_num_votes = s.imdb_num_votes
             FROM (
                 SELECT DISTINCT ON (imdb_id) * FROM stg_ratings ORDER BY imdb_id
             ) s
             WHERE t.imdb_id = s.imdb_id
-              AND (t.community_rating, t.vote_count)
-                  IS DISTINCT FROM (s.community_rating, s.vote_count)
+              AND (t.imdb_average_rating, t.imdb_num_votes)
+                  IS DISTINCT FROM (s.imdb_average_rating, s.imdb_num_votes)
         """)
 
     async def fill_credit_names(self, rows: Sequence[ImdbCreditNames]) -> CreditNamesFillResult:
@@ -958,7 +971,7 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             )
             UPDATE titles t
             SET tmdb_id = c.tmdb_id,
-                popularity = COALESCE(m.popularity, t.popularity)
+                tmdb_popularity = COALESCE(m.popularity, t.tmdb_popularity)
             FROM candidate c
             LEFT JOIN tmdb_ids m ON m.tmdb_id = c.tmdb_id AND m.kind = c.kind
             WHERE t.id = c.title_id

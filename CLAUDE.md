@@ -219,7 +219,7 @@ Every one of these must be green before a commit lands:
 uv run ruff check .              # lint
 uv run ruff format --check .     # formatting
 uv run mypy src tests            # strict, including tests/
-uv run lint-imports              # architecture contracts — 10 kept, 0 broken
+uv run lint-imports              # architecture contracts — 12 kept, 0 broken
 uv run pytest                    # full suite; tests/integration/ needs Docker
 ```
 
@@ -295,6 +295,10 @@ uv run usher index                           # model, stale count, refused count
 uv run usher index --backfill                # enqueue one index job per stale title
 uv run usher search "the quiet vacuum"       # hybrid; prints semantic_coverage
 uv run usher suggest "the quie" --limit 5    # type-ahead, typo-tolerant
+
+uv run usher eval                            # every surface, quick, no bar enforced
+uv run usher eval suggest --full             # full goldens, bars enforced, ledger written
+uv sync --extra eval                         # optional: ranx, ~30 packages, dev only
 uv run usher similar <title id>
 uv run usher similar --rebuild               # recompute title_neighbors
 
@@ -307,8 +311,16 @@ uv run usher curate                          # one LLM generation; pool, rows, d
 uv sync --extra embedding                    # optional: fastembed, 167 MiB, no torch
 ```
 
-**`--phase` is `BootstrapPhase`, and its members are in execution order:**
-`imdb`, `credit-names`, `aliases`, `tmdb-ids`, `crosswalk`, `movielens`, `all`.
+**`--phase` is `BootstrapPhase`, and the *steps* of a full run are in execution
+order:** `imdb`, `credit-names`, `aliases`, `tmdb-ids`, `crosswalk`,
+`movielens`. Two members are **aliases rather than steps** and `--phase all`
+dispatches neither: `all` itself, and **`ratings`**, which re-imports
+`title.ratings.tsv.gz` (8.2 MiB) alone rather than paying `--phase imdb`'s
+214.4 MiB of `title.basics.tsv.gz` and the rewrite of every name and year that
+stales an embedding (ADR-0040). `usher.domain.bootstrap.FULL_SEQUENCE` and
+`PHASE_ALIASES` declare the split, and a unit case asserts they partition the
+enum — so a member added to neither is a red rather than a phase `argparse`
+offers, the route accepts and `run_bootstrap` silently ignores.
 The order is measured rather than stylistic — `credit-names`, `aliases` and
 `movielens` all join to `titles` on `imdb_id` so all three follow `imdb`, and
 `credit-names` comes before anything that *enriches* a title because the fill

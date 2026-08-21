@@ -1029,3 +1029,64 @@ vacuum**, so budget the peak. Same confound, same framing, as T3's
 
 **Both new indexes are empty at this revision** (8,192 B each) — every row is
 `source = 'tmdb'` and the natural key is partial on `source <> 'tmdb'`.
+
+## `--phase ratings` shares `--phase imdb`'s checkpoint, so a rebuild deletes the row first (2026-08-19, ADR-0040)
+
+`usher bootstrap --phase ratings` re-imports `title.ratings.tsv.gz` (8.2 MiB)
+alone, because `--phase imdb` downloads `title.basics.tsv.gz` (214.4 MiB) first
+and rewrites every name and year — and a changed name stales that title's
+embedding, which a *rating* refresh against a live catalog should not pay for.
+It is an **alias, not a step**: `FULL_SEQUENCE` and `PHASE_ALIASES` partition
+`BootstrapPhase`, and `--phase all` reaches these rows inside its IMDb arm and
+never dispatches this one. Adding it to both arms imports the file twice.
+
+**Its dataset name is `imdb.title.ratings` — deliberately the same `import_runs`
+row `--phase imdb` checkpoints against**, so the two cannot disagree about what
+revision a catalog holds. **The cost is that a completed run at an unchanged
+upstream revision resumes at EOF and writes nothing, which looks exactly like a
+successful run.** So a rebuild:
+
+1. `DELETE FROM import_runs WHERE dataset = 'imdb.title.ratings'` first, and
+   verify 0 rows remain;
+2. asserts on **`rows_written`**, not on the exit status.
+
+⚠️ **Do not rely on "the ETag will probably have moved."** It had, on the run
+that established this — the stored revision and the pinned one differed, so
+`import_dataset` would have discarded its cursor unaided — and the checkpoint
+was deleted explicitly anyway, because a run whose correctness depends on an
+upstream having changed is a run that reports success for doing nothing.
+Measured: `rows_seen` 1,707,194, `rows_written` 540,850 in 145.5 s.
+
+**It opens no `bulk_load_window()`**, and not only because that window declines
+on a non-empty `titles`: M9 E5's race in this file has two processes over an
+*empty* catalog both read the guard as zero, both `DROP INDEX`, and the loser's
+`CREATE INDEX IF NOT EXISTS` then take a SHARE lock that blocks the winner's
+batch writes. Opening it here would add a third racer, on a catalog nobody asked
+to have reindexed.
+
+### It refuses an empty catalog, and the refusal is not defensive
+
+`apply_ratings` is an `UPDATE ... FROM ... WHERE t.imdb_id = s.imdb_id`, so on
+an empty catalog it matches nothing — **and matching nothing is not an error.**
+The run reaches EOF, writes 0 rows and checkpoints `imdb.title.ratings`
+`completed`, which is the same row `--phase imdb` resumes from: every later
+bootstrap then resumes past the whole file and imports no ratings at all,
+**permanently**, with `bootstrap-status` green throughout. Measured end to end
+against real Postgres before the guard existed: `--phase ratings` on an empty
+catalog left `completed / rows_seen=3 / rows_written=0 / position=4`, the
+`--phase imdb` that followed left the *identical* row, and the catalog held 5
+titles with **0** carrying `imdb_num_votes`.
+
+This is the **fourth** phase joining `titles` on `imdb_id` and was the last to
+gain the refusal the other three always carried. It had stood as a *comment*
+asserting the precondition, and a comment does not run. **A phase that writes
+through a join can poison a shared checkpoint by succeeding**, which is a
+failure mode no per-phase status field can express — the row says `completed`
+and it is telling the truth.
+
+⚠️ **The guard belongs in the phase's own function, not inline in the
+dispatch.** Written inline it returns from the whole of `run_bootstrap`, so a
+`--phase all` that wrongly reached this arm would abandon every later phase
+instead of merely doubling an import — a strictly worse failure introduced by
+the fix. Its three siblings each return from their own function; this one now
+does too.

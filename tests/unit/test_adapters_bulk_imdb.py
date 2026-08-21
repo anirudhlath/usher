@@ -123,12 +123,12 @@ def test_ratings_parse_on_imdbs_own_scale() -> None:
     lines = (_FIXTURES / "title.ratings.slice.tsv").read_text().splitlines()
     rows = [row for row in map(parse_ratings_row, lines) if row is not None]
     assert rows[0].imdb_id == "tt99000020"
-    assert rows[0].community_rating == 7.4
-    assert rows[0].vote_count == 12_345
+    assert rows[0].average_rating == 7.4
+    assert rows[0].num_votes == 12_345
 
 
 def test_a_rating_outside_zero_to_ten_is_malformed() -> None:
-    """Title.community_rating is Field(ge=0, le=10) and the matching CHECK
+    """Title.imdb_average_rating is Field(ge=0, le=10) and the matching CHECK
     would reject it during COPY anyway -- failing here names the row."""
     with pytest.raises(PortDataMalformed):
         parse_ratings_row("tt99000001\t11.5\t100")

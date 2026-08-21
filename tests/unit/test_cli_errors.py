@@ -84,6 +84,7 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
     "genres": ["genres"],
     "search": ["search", "dune"],
     "suggest": ["suggest", "du"],
+    "eval": ["eval"],
     "similar": ["similar", "--rebuild"],
     "home": ["home"],
     "curate": ["curate"],

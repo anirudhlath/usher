@@ -132,8 +132,8 @@ class BrowseItemResponse(BaseModel):
             kind=title.kind,
             name=title.name,
             year=title.year,
-            popularity=title.popularity,
-            vote_count=title.vote_count,
+            popularity=title.tmdb_popularity,
+            vote_count=title.tmdb_vote_count,
         )
 
 
