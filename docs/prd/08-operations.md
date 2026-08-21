@@ -657,14 +657,52 @@ unreachable.
 
 ### Backup — the asymmetry is the point
 
+✅ **The split below is now generated from a manifest, and a test enforces
+it.** `src/usher/db/backup_manifest.py` classifies **every table in the live
+schema** — 29 of them, 7 precious, 1 partial, 20 rebuildable, 1 Alembic's own
+— each with the reason it is where it is and, for a rebuildable one, the
+command that reproduces it.
+`tests/integration/test_backup_manifest_covers_the_live_schema.py` reads
+`information_schema` after the real migration chain and fails in **both**
+directions, so a table a future migration adds is a red rather than a
+paragraph nobody remembered to update. **That guard exists because this
+section drifted twice**, which is what the two ✅ M9 entries below record.
+
 | Rebuildable from importers | Precious |
 |---|---|
-| Catalog, embeddings, search index, neighbour tables, cached images, curated rows | **Watch state**, users, source config, manual unmatched resolutions, ✅ **`llm_calls`** (M8 — see below; it is rebuildable from nothing) |
+| Catalog, embeddings, search index, neighbour tables, cached images, curated rows, the payload cache, the genome, the job queue, the run logs | **Watch state**, users, source config, `source_credentials`, ✅ **`llm_calls`** (M8 — see below; it is rebuildable from nothing), ✅ **`row_provider_settings`** (M9), ✅ **`search_queries`** (M9) |
 
-The precious set is a handful of small tables. A documented `pg_dump` of those
-turns disaster recovery into a short restore plus a background rebuild, instead
-of a crisis. State this loudly in the README — it is the difference between
-"lost everything" and "lost an afternoon of indexing".
+⚠️ **"Manual unmatched resolutions" was in that right-hand column for eight
+milestones and is not a table.** It names two *columns* —
+`media_items.title_id` and `media_items.episode_id`, which
+`db/repositories/media_item.py`'s `attach_title` writes and
+`api/routers/unmatched.py`'s resolve route reaches. Every other column of
+`media_items` is rebuilt by the next source walk, and on the household this
+project measures that is **1,126,789 rows to carry for the sake of a handful
+of links**. So `media_items` is in neither column above: the manifest gives it
+a third class, `PARTIAL`, and carries those two columns alone. It carries
+**all** of them rather than only the operator's, because the schema has no
+provenance column and `services/handlers.py`'s automatic match handler calls
+the *same* `attach_title` as the route — "only the manual ones" is not a
+distinction this schema can express. The harm is asymmetric, which is what
+makes carrying all of them the right call: a link the match ladder would have
+re-derived is re-derived to the same answer, and a link it would not re-derive
+is exactly the operator's judgement. Restore writes one only where the
+target's is `NULL`.
+
+The precious set is a handful of small tables, and **the command that carries
+them is `usher backup` rather than a documented `pg_dump`** — measured
+2026-08-13, and the reason is that the documented alternative *cannot be run
+from the container this project ships*. The runtime image is
+`python:3.13-slim` and carries neither `pg_dump` nor `psql`, so an operator
+following that advice would have to reach the binary inside the **Postgres**
+container, which Usher does not own; adding `postgresql-client` to the runtime
+stage costs **+62.1 MiB, +18% on a 359 MB image**, of which
+`/usr/lib/postgresql` is 3.9 MiB and the rest is libpq, OpenSSL, readline and
+Perl. Either way the point stands: disaster recovery becomes a short restore
+plus a background rebuild instead of a crisis. State this loudly in the
+README — it is the difference between "lost everything" and "lost an afternoon
+of indexing".
 
 **M7 added five tables and four of them are rebuildable, which is worth the
 detail because "everything is rebuildable" is the kind of claim that is true
@@ -673,7 +711,7 @@ right up to the table it is not true of.**
 | Table | Rebuildable? | From what, at what cost |
 |---|---|---|
 | `people`, `credits`, `collections` | **yes, with no network call at all** | `raw_payloads`, via `usher derive --backfill` ([03](03-sources-and-sync.md)'s stage 5). This is M4's boundary call 2 paying off: **the payload cache is the backup** |
-| `user_taste` | **yes** | a mean over embeddings of the household's watch states. It carries its own fingerprint (`model_name` + `source_watermark`), so a missing row is *indistinguishable from a stale one* and is recomputed by the same predicate rather than restored. ⚠️ **And as of M7 nothing in `src/` calls `TasteService.centroid`**, so the table is unwritten on a running deployment — see below |
+| `user_taste` | **yes** | a mean over embeddings of the household's watch states. It carries its own fingerprint (`model_name` + `source_watermark`), so a missing row is *indistinguishable from a stale one* and is recomputed by the same predicate rather than restored. ⚠️ **This cell read *"as of M7 nothing in `src/` calls `TasteService.centroid`"* until 2026-08-21 — the same false absolute the paragraph below already corrects, left standing in a second place.** What is true is narrower: no writer on the **request path**, so the table is empty on a default deployment and not on one that has run a curation with an embedder configured — see below |
 | `title_neighbors` | **yes** | `usher similar --rebuild`, and `blend_fingerprint` is what tells a restored table from a current one |
 | **`genome_scores`** | **yes, but only from upstream** | re-download `ml-latest.zip` and re-run `bootstrap --phase movielens`. Frozen for three years, so reproducible in practice — **and not guaranteed**: GroupLens can withdraw or replace the archive, and then it is not rebuildable at all |
 
@@ -683,6 +721,23 @@ recreation depends on a third party still serving a file. It is not in the
 precious column either, because a dump of it is a redistribution of MovieLens
 data — permitted by `ml-latest`'s licence ([04](04-catalog-bootstrap.md)) and
 still not something this project's own rule 1 does.
+**That risk is accepted knowingly, and the manifest records it in the entry's
+own reason string**: if GroupLens withdraws the archive, `genome_scores` and
+`genome_tags` are not rebuildable at all — and carrying 15,565 MovieLens
+vectors in a backup artifact is precisely the object
+`tests/unit/test_no_third_party_data.py` already refuses over `src/`, one
+directory away. This is the same refusal, not a bet on probability.
+
+⚠️ **`raw_payloads` stays rebuildable, and it is the closest call in the whole
+classification.** Against carrying it: **995 MB**, roughly 2.5× the rest of the
+artifact put together, which turns a "short restore" into a file an operator
+will not keep — and it is third-party TMDb payloads verbatim, so the rule-1
+argument bites harder here than it does on the genome. For carrying it: M9's S3
+measured **130,334 requests over 1.98 h** to fill it, against a server this
+project does not own. The ruling is rebuildable, with that cost stated in the
+manifest and in the runbook, and **`usher backup --include-payloads` is
+deliberately not built** — a flag that makes the artifact redistribute TMDb
+payloads is a licensing decision rather than an operator convenience.
 
 🔴 **M8 added three tables and one of them is the first thing in this project
 that is not rebuildable from anything, at any price.**
@@ -709,8 +764,11 @@ repository rather than a retrieval, and on the request path the centroid is
 deliberately holds none of. ⚠️ **The sentence that used to stand here — *"So
 `TasteService.centroid` has no caller in `src/`"* — was the true claim above it
 escalated one hop into a false absolute, and has been false since M8:
-`services/curation_pool.py:173` calls it, and the guard immediately above that
-call exists *because* it writes.** What survives is the narrow claim: no writer
+`services/curation_pool.py:174` calls it, and the guard immediately above that
+call exists *because* it writes.** (That citation read `:173` until 2026-08-21,
+which is the last line of the comment block above the call — a correction to a
+correction, and the reason the manifest's own reasons cite files rather than
+line numbers.) What survives is the narrow claim: no writer
 on the **request path**, so the table stays empty on a default deployment; what `TasteService` *is*
 called for is `genre_affinity`, which needs no embedder and no centroid. The
 table, its fingerprint and its written refusal are all built and tested;
@@ -718,10 +776,35 @@ the consumer is M9's, with the ranking terms
 [05](05-search-and-similarity.md) names. Recorded here rather than left for an
 operator to discover from an empty table.
 
-⚠️ **Row provider enable/disable belongs in the *precious* column the day it
-exists.** It is operator-authored state in the database, like source config —
-no importer restores a human's choice — and the row above is annotated M9 for
-exactly the reason it is not listed here yet.
+✅ **Row provider enable/disable belonged in the *precious* column the day it
+existed, and this paragraph spent a milestone saying so while the table above
+did not list it.** `row_provider_settings` exists — `m09a` creates it, M9's
+E1/E2 shipped its repository and `PUT /admin/rows/providers` — and it is
+operator-authored state in the database, like source config, which no importer
+restores. It is precious, it is in the table above, and **the table is no
+longer maintained by whoever remembers**: it comes from
+`src/usher/db/backup_manifest.py`, which classifies all 29 tables and is
+enforced against the live schema in both directions by a test.
+
+🔴 **The second drift is worse, because nobody argued either way about it.**
+`search_queries` — also `m09a`, also M9, nine columns — appeared **nowhere** in
+this section. It is not rebuildable by anything: it is the record of what a
+household typed and what it then played, and [09](09-roadmap.md) scopes issues
+#15/#16 *"Post-v1 unless M9's `search_queries` supplies a real evaluation
+set"* — a plan that depends on the table surviving. Losing it costs the only
+evaluation set this project will ever have, and nothing can re-derive it. It is
+precious.
+
+**The general form, and it is worth separating "right by accident" from
+"wrong".** M9 added four tables and this section was updated for none of them.
+Two of the four land in the correct column anyway, because the left column's
+*"search index, cached images"* happens to describe `title_search_names` and
+`images` — but that phrase was written in commit `860b086` (2026-07-28, the
+original 07/08 landing, before M1 shipped), so it predates both tables by nine
+milestones and classifies them right by accident. The other two are the two
+above. **A prose table is updated by whoever remembers; the two tables nobody
+remembered are the two that were wrong.** That is the argument for the
+manifest, and it is why the enforcement is a test rather than a convention.
 
 ### Resource envelope
 
