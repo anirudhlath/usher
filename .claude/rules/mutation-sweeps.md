@@ -7872,3 +7872,106 @@ mechanism; this is the first where the wrong mechanism left a real hole.
 
 Both closed in `eb0c7c8` and both re-planted afterwards: **T16 KILLED, C1
 KILLED.**
+
+## M10 K2 — the natural-key ladder, and two "exactly" claims the task made that the run refutes (2026-08-21)
+
+**7 plants over `src/usher/db/backup_identity.py`,
+`src/usher/db/repositories/title.py`, `src/usher/db/repositories/episode.py`
+and the two fakes — 5 behavioural targets, all KILLED; 2 equivalent-mutant
+controls, both SURVIVED and both passing every gate step separately. 0
+BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.**
+Every verdict matched its pre-registration.
+
+Harness at `/var/tmp/m10-k2/sweep.py`, **outside the working tree** for V1's
+reason and under `/var/tmp` rather than `/tmp`, which is tmpfs on this host.
+Plant list and expected verdicts at `/var/tmp/m10-k2/PLANTS.md`,
+`sha256 fda294d4e75d5204cdde515dff1dd2ee29c741b23ea6e1637b7eab09c5c80a59`,
+written before the first plant and **re-hashed by the harness itself at the
+top of every round** — the check S3's ledger failed. Tree committed at
+`a5ec353` first, so `git status --porcelain` is the verification: asserted
+clean before the round, asserted **non-empty while every plant was live**, and
+clean after every restore, with every restore compared against its `cp` backup
+**and** against `git show "a5ec353:<path>"` (the ref quoted, per S5's finding
+about zsh's history modifier).
+
+Defences: one `cp` backup per **file**, taken before that file's first hunk
+(S6's repair — three of these plants are two-hunk); an exact anchor count per
+hunk; the landing check spelled as **byte equality with the intended mutant**
+(F3's repair, which is the only form correct for a multi-hunk plant and for
+T1/T5, which are deletions); `compile()` as the dry run scoped to `.py`;
+`PYTHONDONTWRITEBYTECODE=1` with `__pycache__` swept under **both** `src/` and
+`tests/` before every run; a `SIGTERM`/`SIGINT`/`SIGHUP` handler that restores;
+and no `-q`, with a verdict regex matching both the banner and the bare
+summary line (S5's finding — the broken regex was inherited once already).
+
+**Selection:** `test_backup_identity.py`,
+`test_title_repository_contract.py`, `test_episode_repository_contract.py`
+(unit) and `test_title_repository.py`, `test_episode_repository.py`
+(integration). Scoped rather than whole-suite, and **the selection was diffed
+against the commit's own file list first** (the S3 review round's
+generalisation): `grep -rln "resolve_natural_keys\|backup_identity" src tests`
+returns exactly the fifteen files this commit touches, and the five test files
+among them are the five selected. All six known-intermittent node ids are
+outside it.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 the `(kind, tmdb_id)` rung dropped, both arms | KILLED | **6** |
+| T2 the tmdb rung not namespaced by `kind`, both arms | KILLED | 3 |
+| T3 `None` in place of `Unresolved` for a missing key | KILLED | **6, all in one file** |
+| T4 the raw-id rung trusted rather than checked, both arms | KILLED | 13 |
+| T5 the episode statement loses its `(season, episode)` predicate, both arms | KILLED | **2 — the scope case on each arm** |
+| C1 *control* — the `by_imdb` and `by_tmdb` `LEFT JOIN`s in the other order | SURVIVED, all five gate steps | — |
+| C2 *control* — one sentence of `keys_tried`'s docstring reworded | SURVIVED, all five gate steps | — |
+
+🔴 **Two of the task's three named sweep targets say "exactly", and the run
+refutes both — in opposite directions, which is why they are worth more than
+the verdicts.**
+
+- *"Dropping the `(kind, tmdb_id)` fallback must fail **exactly** the case
+  written for the 13 titles that need it."* It fails **six**: that case on
+  both arms, the ADR-0011 namespacing case on both arms (its fixture resolves
+  through the rung being deleted), and both Postgres-only cases — the
+  statement count, whose premise asserts all three rungs really resolved, and
+  the `EXPLAIN` case, because `ix_titles_tmdb_id_kind` leaves the plan with
+  the join. **A rung of a ladder is not separable from the cases that resolve
+  through it**, so a plant deleting one is over-determined by construction and
+  "exactly one case" was never available. The claim worth making is the one
+  the run supports: the named case is *among* the six and fails on its own
+  assertion.
+- *"Answering `None` instead of `Unresolved` must fail the headline case **and
+  K4's refusal case, on two different files**, which is what says the refusal
+  is carried rather than reinvented."* K4 does not exist at this head, so the
+  second file is unbuildable and the two-file half of that target is
+  **unmeasurable rather than met**. Reported rather than approximated: T3
+  fails six cases and every one of them is in `tests/unit/test_backup_identity.py`.
+  The property the criterion was reaching for — that a *consumer* carries the
+  refusal — is genuinely untested until K4 lands, and saying so is the finding.
+
+**T5 is the one that fails exactly what the task predicts of its neighbours**,
+two cases, one per arm, and it is the reason the episode contract's scope case
+exists: every series has an S01E01, so an episode resolve that kept the series
+and dropped the numbers answers a full-looking mapping of wrong ids.
+
+**The two controls, each measured against every gate step separately**, with
+the harness outside the tree so the four whole-repository steps are not
+measuring the harness itself:
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 the two `LEFT JOIN` lines swapped | PASS | PASS | PASS | PASS (12/0) | PASS |
+| C2 one docstring sentence reworded | PASS | PASS | PASS | PASS (12/0) | PASS |
+
+C1 is a **SQL-text** control and its equivalence is a fact about the statement
+rather than about what the tools look at, with three legs: neither `ON` clause
+references the other join's alias (each reads only `p` and its own `titles`
+alias), so no join is on the other's output and the two are commutative;
+all three are side-effect-free reads; and the ladder's *precedence* is carried
+by the `COALESCE` in the target list, which the swap does not touch. It is
+deliberately not an `__all__` reorder (`RUF022` rejects those) nor a
+positional-argument reorder (A5's reason for checking rather than assuming) —
+B2's `UNION`-arm control is the nearest precedent, one operator over. C2 was
+checked **first** against `grep -rln "getdoc\|__doc__\|ast.unparse\|getsource\|
+ast.parse" tests/` — note the pattern includes `ast.parse`, which F4's fix
+round records the usual census as missing — and **nothing in the suite scans
+`src/usher/db/backup_identity.py`** in any form.
