@@ -837,11 +837,15 @@ be exempted, and take its method to `translated` on no evidence. There is none
 of that in this package; adding one means adding it to that list.
 
 The property is pinned on a module `tests/unit/test_bounded_column_ledger.py`
-writes itself — **eighteen** cases rather than against whatever `bulk.py`
+writes itself — **fourteen** cases, rather than against whatever `bulk.py`
 happens to look like — including `mixed` (must read `none`),
-`bound_read_outside` (the counter-case to the old rule), the ORM `add`/`flush`
-branch, a statement in an `except` body, a statement in a `finally`, and a
-`set.add` that must not read as an ORM write.
+`bound_read_outside` (the counter-case to the old rule), `calling_a_foreign_get`
+(the receiver defect below), the ORM `add`/`flush` branch, a statement in an
+`except` body, a statement in a `finally`, and a `set.add` that must not read as
+an ORM write. Both new refusals have their own cases: forcing every readable
+`SELECT` to look bind-carrying makes `link_crosswalk` disagree with itself and
+must raise, and emptying one site's refusal points must raise rather than answer
+`refusals_as_conflict`.
 
 ### 🔴 Two defects the narrower predicate found in the instrument itself
 

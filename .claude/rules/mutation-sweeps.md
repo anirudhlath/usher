@@ -7627,3 +7627,55 @@ a transport fault, and no fixture in this project can manufacture one against a
 live database.** Verified to have teeth by deleting the guard from
 `import_run.py:save`: it names the site. That is the shape to reach for when a
 property holds at N sites and the suite can only reach one of them.
+
+### Round 3 — the review round that produced three more asymmetries, all of the same sign (2026-08-20)
+
+No new plant list: the three defects below were each found by a **reviewer**
+reading the instrument rather than by a mutation, and each was confirmed by a
+measurement before it was fixed. Recorded here because "how it was found"
+belongs in a sweep ledger when the answer is *not by this sweep*.
+
+- 🔴 **The `SELECT` exemption's stated rule was false**, and two reviewers
+  reached opposite verdicts from it because they were answering different
+  questions. *"Should a computed `SELECT` be wrapped in
+  `refusals_as_conflict`?"* — no, a class-22 fault there is a **statement**
+  fault. *"Does an unwrapped one leak?"* — yes, if it carries a bind. The
+  ledger's `translation` column is a proxy for the second, so the exemption is
+  now *"a `SELECT` with **no caller-supplied bind**"*. What a bind-carrying,
+  unwrapped one should read is left **open**: the ledger is scored both ways
+  and refuses where they disagree, so the question will arrive as a failure
+  rather than as a verdict somebody invented.
+- 🔴 **A structural test's floor was one below the true count, and the free
+  slot was already spoken for.** `assert len(handlers) >= 11` against **12**
+  handlers. Narrowing any one site left 11 and passed; at eleven of the twelve
+  the ledger's drift check backstopped it, and at the twelfth —
+  `jobs.py:enqueue`, declared unpinned in round 2 for a *reachability* reason —
+  the two declared limits **composed**: zero drift complaints, twelve handlers
+  down to eleven, green. Measured after the fix (a named census): the same
+  narrowing now fails two cases. **Each limit was declared; their composition
+  was not, and that is the general shape — a floor one below the true count is
+  a dead-scan guard wearing a narrowing guard's clothes.**
+- 🔴 **`min([])` returned the top of the lattice**, so a write site whose
+  refusal-point scan found nothing read fully translated on no evidence. Third
+  instance of this file's recurring asymmetry, and reachable:
+  `_executing_functions` and `_refusal_points` use different predicates, so a
+  method whose only database access is a COPY is *executing* with zero refusal
+  points. `bulk.py:_stage` is that shape and was saved from being a
+  counter-example only by resolving no destination table.
+
+**And the narrowed predicate immediately found a live defect in the instrument
+that no plant had reached**: `credit_names.get(scoped_id, ())` — a `dict.get`
+on a caller's mapping — was matched against the module's own function names and
+read as a delegated call into `PostgresPersonRepository.get`, carrying an
+untranslated read's rank into `replace_for_titles`. It surfaced only because
+the ledger was now scored **twice** and the two passes disagreed. *Scoring the
+same thing two ways and comparing is a defect detector in its own right*, and
+it cost one extra pass over an AST.
+
+⚠️ **One measurement that is a declaration, not a kill:** the `_COPY_EXECUTION`
+exemption **implements nothing**. Setting it to `frozenset()` moves no count,
+produces no drift and changes no case, because a COPY reaches the driver
+through a bare-name call or a non-session receiver and no other predicate
+claims it either. It is kept as a declaration of intent and is now labelled
+inert — three co-equal load-bearing exemptions was a claim; two-plus-one is the
+measurement.

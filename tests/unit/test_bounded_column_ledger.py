@@ -274,3 +274,80 @@ def test_every_orm_writer_in_the_package_resolves_to_a_table() -> None:
     module = audit_module()
     placed = {(site.module, site.qualname) for site in module.write_sites()}
     assert ("title.py", "add") in placed, "the ORM construction helper is not being followed"
+
+
+def test_a_write_site_with_no_refusal_point_is_a_failure_not_a_translated_site(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`min([])` has no answer, and the code used to return the top of the
+    lattice — so a site the translation scan found nothing in read
+    `refusals_as_conflict` on **no evidence**.
+
+    The mirror of `test_a_writer_the_scan_cannot_place_fails_loudly`, on the
+    other axis. It is reachable rather than theoretical:
+    `_executing_functions` and `_refusal_points` use different predicates, so a
+    method whose only database access is a COPY is *executing* with zero
+    refusal points, and `bulk.py:_stage` is that shape today — saved from being
+    a counter-example only by resolving no destination table, which is a
+    coincidence and not a defence.
+    """
+    module = audit_module()
+    real = module._points_of
+
+    def stripped(tree: ast.Module) -> dict[tuple[str, int], list[object]]:
+        return {
+            key: ([] if key[0] == "upsert_crosswalk" else own) for key, own in real(tree).items()
+        }
+
+    monkeypatch.setattr(module, "_points_of", stripped)
+
+    with pytest.raises(module.DegenerateScan, match="no refusal point at all"):
+        module.write_sites()
+
+
+def test_a_bind_carrying_read_that_would_change_a_verdict_refuses_to_be_scored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one question this instrument deliberately does not answer.
+
+    A `SELECT` carrying a caller's bind can be refused on class 22 and leaks if
+    it is unwrapped — but wrapping it would report a *statement* fault as a
+    refused row, which ADR-0041 question (3) forbids. Rather than invent a
+    verdict, `write_sites` scores the ledger with and without those statements
+    and **raises where the two disagree**.
+
+    Forcing every readable `SELECT` to look bind-carrying is what puts a site
+    into that state: `bulk.py:link_crosswalk` runs its classification query —
+    genuinely bind-free, which is what makes exempting it correct — outside its
+    own translation, so under the forced predicate it reads `none` where it
+    otherwise reads `refusals_as_conflict`.
+    """
+    module = audit_module()
+    monkeypatch.setattr(module, "_carries_binds", lambda node, statement: True)
+
+    with pytest.raises(module.DegenerateScan, match="bind-carrying read"):
+        module.write_sites()
+
+
+@pytest.mark.parametrize(
+    ("statement", "arguments", "carries"),
+    [
+        ("SELECT count(*) FROM titles", 1, False),
+        ("SELECT count(*) FROM titles WHERE id = CAST(:id AS uuid)", 1, True),
+        # The parameter mapping, with no placeholder visible in the fragment
+        # this scan can read — `_rowcount(sql)` is the shape that motivates it.
+        ("SELECT count(*) FROM titles", 2, True),
+        # A Postgres `::` cast must not read as a bind. This package spells
+        # every cast `CAST(x AS t)` by house rule, so the guard is for a
+        # statement that stops following it rather than for one that exists.
+        ("SELECT id::text FROM titles", 1, False),
+    ],
+)
+def test_a_bind_is_a_placeholder_or_a_parameter_argument_and_not_a_double_colon(
+    statement: str, arguments: int, carries: bool
+) -> None:
+    module = audit_module()
+    parsed = ast.parse(f"session.execute(text(q){', {}' * (arguments - 1)})").body[0]
+    assert isinstance(parsed, ast.Expr) and isinstance(parsed.value, ast.Call)
+
+    assert module._carries_binds(parsed.value, statement) is carries
