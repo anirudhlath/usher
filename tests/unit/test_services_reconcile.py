@@ -33,11 +33,14 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
+from loguru import logger
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from pydantic import SecretStr
 
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
@@ -47,16 +50,22 @@ from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
 from tests.fakes.title_repository import FakeTitleRepository
+from usher.adapters.emby.adapter import EmbyAdapter
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind, SyncRunStatus
-from usher.ports.errors import PortUnavailable, UsherPortError
+from usher.ports.credentials import SourceCredentials
+from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.events import ClientEventKind
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService
+from usher.services.reconcile import (
+    CEILING_ERROR_CODE,
+    RETRACTION_ERROR_CODE,
+    ReconcileService,
+)
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
 # After every run's `started_at`, which defaults to `now()`. A "changed
@@ -470,6 +479,268 @@ async def test_a_delta_walk_under_the_ceiling_still_never_sweeps() -> None:
         assert stored.available is True, f"m{index} was retracted by a delta walk"
 
 
+# -- the gap-closer's ceiling (M10 S6) --------------------------------------
+#
+# "Ceiling" is overloaded in this file and the two are unrelated: ADR-0015's
+# is a *fraction* of a source's rows and gates the availability sweep; this
+# one is a count of *items* and gates the walk. Every name below says "gap
+# ceiling" for that reason.
+
+
+async def test_a_delta_an_operator_asked_for_is_not_bounded_by_the_gap_closers_ceiling() -> None:
+    """The split S5 makes, one task on: the ceiling is the *lane's*, not
+    `ReconcileService`'s.
+
+    `LaneSupervisor._close_gap` is the one caller nobody typed a command
+    for, so a delta it starts against a source Usher has not reached for a
+    month is a walk the operator did not ask for and is bounded.
+    `usher sync --kind delta` is an operator asking for the whole thing and
+    gets it -- `max_items` defaults to 0, and 0 is unlimited.
+
+    Both halves in one case, against **one** source and one cursor, because
+    "the unbounded delta completed" is also what a service with no ceiling
+    at all produces. The bounded run comes first and fails, which is exactly
+    what leaves the cursor where it was for the second.
+    """
+    fixture = _Fixture(batch_size=4)
+    for index in range(12):
+        fixture.adapter.seed(_item(f"m{index}"), LATER)
+    full = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert full.status is SyncRunStatus.COMPLETED and full.items_seen == 12
+
+    bounded = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=5
+    )
+    assert bounded.status is SyncRunStatus.FAILED
+    assert bounded.items_seen == 5, "the lane's delta stops at its ceiling"
+
+    operator = await fixture.service.reconcile(fixture.source, SyncRunKind.DELTA, fixture.adapter)
+    assert operator.status is SyncRunStatus.COMPLETED
+    assert operator.items_seen == 12, "`usher sync --kind delta` asked for the whole thing"
+    assert operator.cursor_at == full.started_at, (
+        "and it resumed from the cursor the bounded run did not move"
+    )
+
+
+async def test_a_delta_whose_whole_answer_is_exactly_the_gap_ceiling_is_not_truncated() -> None:
+    """`>`, not `>=`, and the difference is a whole cursor.
+
+    A delta that returned exactly `max_items` items and then ended has not
+    been truncated -- there is nothing past the ceiling to come back for --
+    so recording it `FAILED` would cost the cursor advance for nothing, and
+    the *next* delta would re-walk the identical window. The comparison
+    fires on the first item **past** the ceiling, which is then discarded
+    unread.
+    """
+    fixture = _Fixture(batch_size=3)
+    for index in range(5):
+        fixture.adapter.seed(_item(f"m{index}"), LATER)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    exact = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=5
+    )
+    assert exact.status is SyncRunStatus.COMPLETED, (
+        "five items against a ceiling of five is a complete answer, not a truncation"
+    )
+    assert exact.items_seen == 5
+    assert exact.error is None
+
+    after = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=5
+    )
+    assert after.cursor_at == exact.started_at, (
+        "the completed exact-fit delta is what the next one resumes from"
+    )
+
+
+async def test_a_walk_stopped_at_the_gap_ceiling_keeps_every_batch_it_committed() -> None:
+    """A ceiling costs the cursor advance and nothing else.
+
+    `_flush` commits per batch (*"a crash costs the batch in flight, never
+    the walk"*), so the items the bounded walk did see are durable even
+    though the run it belongs to is `FAILED`. Without this the honest
+    alternative to a truncated `COMPLETED` would be losing the work, and
+    the trade the setting documents would be a different one.
+
+    The trailing partial batch is deliberate: 7 items at a batch size of 3
+    is two full batches and a remainder, so a ceiling that only ever fired
+    on a batch boundary would commit 6 here.
+    """
+    fixture = _Fixture(batch_size=3)
+    for index in range(20):
+        fixture.adapter.seed(_item(f"m{index}"), LATER)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    before = fixture.commits
+
+    run = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=7
+    )
+
+    assert run.items_seen == 7
+    assert fixture.commits > before, "a bounded walk still commits what it saw"
+    for index in range(7):
+        stored = await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index}")
+        assert stored is not None, f"m{index} was seen before the ceiling and must be stored"
+    assert (
+        await fixture.runs.latest_completed_cursor(fixture.source.id, SyncRunKind.DELTA) is None
+    ), "a bounded delta advances no delta-lane cursor"
+
+
+async def test_a_walk_stopped_at_the_gap_ceiling_sweeps_nothing() -> None:
+    """A truncated walk must not reach the availability sweep: it has rows it
+    never looked at, and the sweep retracts exactly those.
+
+    Reachable only by passing `max_items` alongside `FULL`, which nothing in
+    `src/` does -- the argument is the lane's opt-in and the lane only ever
+    asks for a delta. Pinned anyway, because "the caller happens not to" is
+    not a property, and the same branch is what makes the ceiling's `FAILED`
+    row honest.
+
+    🔴 **The arithmetic is chosen so ADR-0015's guard cannot rescue the
+    case, and the first version of it was rescued.** This is the trap this
+    module's own docstring records for `test_a_walk_that_raises_sweeps_nothing`,
+    arriving one branch over and caught by the sweep rather than by review:
+    written as 20 items bounded at **7**, the sweep would retract 13 of 20 --
+    65%, over `max_retract_fraction`'s 0.25 -- so `AvailabilitySweepRefused`
+    fires, `reconcile`'s own handler records *that* as the run's failure,
+    nothing is retracted, and every assertion below passes against a
+    reconciler that sweeps after a bounded walk. Measured: the plant
+    (`_sweep` called in the truncated branch) **SURVIVED the whole suite** in
+    that shape. At a ceiling of **16** the unseen four are 20% -- under the
+    ceiling -- so the sweep succeeds, retracts four healthy rows, and the
+    case fails on the assertion it was written to make.
+    """
+    fixture = _Fixture(batch_size=3)
+    for index in range(20):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    run = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.FULL, fixture.adapter, max_items=16
+    )
+
+    assert run.status is SyncRunStatus.FAILED
+    assert (run.error or "").startswith(CEILING_ERROR_CODE), (
+        "the premise: this run failed on its ceiling and not on a refused sweep, which is "
+        f"the arithmetic that makes the retraction assertions below able to fail: {run.error}"
+    )
+    assert run.items_retracted == 0
+    for index in range(20):
+        stored = await fixture.media_items.get_by_external_id(fixture.source.id, f"m{index}")
+        assert stored is not None
+        assert stored.available is True, f"m{index} was retracted by a walk that stopped early"
+
+
+async def test_a_walk_stopped_at_the_gap_ceiling_tells_the_operator_what_to_run() -> None:
+    """PRD 08's degradation row, at the level an operator's log filter sees.
+
+    ⚠️ **The count and the ceiling are the same number by construction** --
+    a truncated walk saw exactly `max_items` -- so the line names the number
+    once and names the ceiling by the setting an operator would change. The
+    assertion is against **7 of 20 available items**, so a line rendering
+    what the source held, or the batch, or the ceiling it was configured
+    with under a different arithmetic, all read differently.
+    """
+    fixture = _Fixture(batch_size=3)
+    for index in range(20):
+        fixture.adapter.seed(_item(f"m{index}"), LATER)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING", format="{level.name}|{message}")
+    try:
+        run = await fixture.service.reconcile(
+            fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=7
+        )
+    finally:
+        logger.remove(sink)
+
+    assert run.status is SyncRunStatus.FAILED
+    ceilings = [line for line in lines if "ceiling" in line]
+    assert len(ceilings) == 1, f"one line per bounded walk, at WARNING: {lines}"
+    line = ceilings[0]
+    assert line.startswith("WARNING|"), f"an operator acts on this one: {line}"
+    assert "Living Room Emby" in line, f"the line names the source it stopped on: {line}"
+    assert "7 items" in line, f"the line names how far it got: {line}"
+    assert "USHER_PUSH_GAP_MAX_ITEMS" in line, f"the line names the knob: {line}"
+    assert "usher sync --kind full" in line, (
+        f"a warning that does not say what to run is a dead end: {line}"
+    )
+    # PRD 08's credentials-are-never-logged rule, with the source name above
+    # as the positive control that makes this an absence claim rather than a
+    # statement about an empty line.
+    assert "emby.invalid" not in line, (
+        f"the source's base URL is not an operator's business: {line}"
+    )
+
+
+async def test_the_gap_ceilings_error_is_distinguishable_from_the_dead_mans_switch() -> None:
+    """Two different things end a walk early and both land in the same
+    `sync_runs.error` column, meaning opposite things.
+
+    `MAX_PAGES` is `EmbyAdapter`'s dead-man's switch against a server that
+    ignores `StartIndex`; exhausting it raises `PortDataMalformed` and is a
+    broken upstream to investigate. The gap ceiling is Usher stopping on
+    purpose and is closed by one command. An operator reads the sentence; an
+    alert rule, a dashboard or a later reader has to be able to tell them
+    apart **without parsing English**, which is what `CEILING_ERROR_CODE`
+    being the first token of one and appearing in neither the other nor the
+    adapter is for.
+
+    Both strings are produced rather than transcribed: the dead-man's switch
+    comes out of the **real** `EmbyAdapter` over a handler that never ends,
+    so a reworded message in `adapters/emby/adapter.py` cannot silently make
+    this case's premise stale.
+    """
+    fixture = _Fixture(batch_size=3)
+    for index in range(10):
+        fixture.adapter.seed(_item(f"m{index}"), LATER)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    bounded = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=4
+    )
+    ceiling_error = bounded.error or ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/Users/AuthenticateByName":
+            return httpx.Response(200, json={"AccessToken": "t", "User": {"Id": "u"}})
+        return httpx.Response(200, json={"Items": [{"Id": "m", "Type": "Movie", "Name": "A"}]})
+
+    emby = EmbyAdapter(
+        fixture.source,
+        SourceCredentials(username="usher", password=SecretStr("correct-horse-battery")),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url=fixture.source.base_url
+        ),
+        max_pages=2,
+    )
+    try:
+        with pytest.raises(PortDataMalformed) as caught:
+            _ = [item async for item in emby.list_items()]
+    finally:
+        await emby.aclose()
+    # `str(exc)`, because that is exactly what `reconcile` writes into the
+    # column -- not `repr`, not the class name.
+    dead_mans_switch = str(caught.value)
+
+    def is_a_gap_ceiling(error: str) -> bool:
+        """The whole classifier, and it is one line on purpose."""
+        return error.startswith(CEILING_ERROR_CODE)
+
+    assert is_a_gap_ceiling(ceiling_error), ceiling_error
+    assert not is_a_gap_ceiling(dead_mans_switch), dead_mans_switch
+    assert CEILING_ERROR_CODE not in dead_mans_switch
+    # ...and the other direction, so "distinguishable" is not carried by one
+    # token that a later edit could paste into both. `StartIndex` is the
+    # dead-man's switch's own discriminator; it appears in neither the
+    # ceiling's message nor anywhere it could leak from.
+    assert "StartIndex" in dead_mans_switch, (
+        f"the positive control: this is the message being told apart: {dead_mans_switch}"
+    )
+    assert "StartIndex" not in ceiling_error, ceiling_error
+
+
 # -- telemetry --------------------------------------------------------------
 
 
@@ -629,3 +900,43 @@ async def test_a_failed_walk_still_reported_the_batches_it_did_finish(
         event for event in fixture.events.published if event.kind is ClientEventKind.SYNC_PROGRESS
     ]
     assert [event.data["items_seen"] for event in progress] == [2]
+
+
+def test_the_two_error_codes_are_pinned_by_value_because_they_are_wire_artefacts() -> None:
+    """These strings leave the process, so no in-repo reader can guard them.
+
+    🔴 **Found 2026-08-19 by S9's own positive control failing to be one.** The
+    control changed `RETRACTION_ERROR_CODE`'s value and expected a kill; it
+    survived, because *every* reader imports the constant -- the service that
+    writes it, the CLI that matches it, and the case that asserts it all moved
+    together. Re-measured against `CEILING_ERROR_CODE`, shipped one token
+    earlier by S6: `grep gap_delta_ceiling` over `src/`, `tests/`, `docs/` and
+    `.claude/` returns **exactly one line**, its own definition. So neither
+    value was pinned by anything, and S9 inherited the hole by copying the
+    precedent.
+
+    **They are not internal names.** Both are prefixes on `sync_runs.error`, a
+    durable column that `usher sync-status` prints and `GET /admin/sync`
+    serves, and `CEILING_ERROR_CODE`'s own comment states the purpose: *"a
+    dashboard, an alert rule, or the next reader of this file has to be able to
+    tell the two apart without parsing English"*. A consumer keying on one is
+    outside this repository by construction, exactly like a metric name in PRD
+    10's catalogue -- which is pinned by literal for the same reason.
+
+    So the literal is the assertion, and this is the one place in the project
+    where changing one of these strings is supposed to be inconvenient: a
+    rename is a breaking change to an artefact somebody may be alerting on, and
+    it should cost a deliberate edit here rather than passing silently.
+
+    They must also be **distinct**, which is the whole point of having two: a
+    bounded walk and a refused sweep both land in this column and an operator
+    acts on them differently.
+    """
+    assert CEILING_ERROR_CODE == "gap_delta_ceiling"
+    assert RETRACTION_ERROR_CODE == "availability_ceiling"
+    assert CEILING_ERROR_CODE != RETRACTION_ERROR_CODE
+    # Neither may be a prefix of the other: both are matched with `startswith`
+    # or `in` against the same column, so an overlap would make one answer for
+    # the other on the surface an operator reads.
+    assert not CEILING_ERROR_CODE.startswith(RETRACTION_ERROR_CODE)
+    assert not RETRACTION_ERROR_CODE.startswith(CEILING_ERROR_CODE)

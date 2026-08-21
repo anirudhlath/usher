@@ -68,9 +68,47 @@ class Title(DomainModel):
     # catalog), so no reader could ever have told them apart by magnitude --
     # which is the load-bearing half, whatever the typical ratio. Each column
     # now names its source. ADR-0040.
+    #
+    # **On the two `le=10` fields the ceiling is what refuses `inf` and `NaN`,
+    # not the `ge=0`**, and that is worth stating because it is an accident
+    # rather than a design: `float("inf") >= 0` is `True`, so a ceiling is the
+    # only thing standing between those fields and the value `tmdb_popularity`
+    # accepted below until M10's F9. Pinned by `test_domain_title.py::
+    # test_a_rating_refuses_a_non_finite_value_by_its_ceiling`, over both
+    # fields, so a later relaxation of either ceiling cannot quietly re-open it.
     tmdb_vote_average: float | None = Field(default=None, ge=0, le=10)  # TMDb's 0-10 scale
     tmdb_vote_count: int | None = Field(default=None, ge=0)
-    tmdb_popularity: float | None = Field(default=None, ge=0)
+    # **`allow_inf_nan=False`, and it is the whole of PRD 09's carried
+    # "`Title.popularity` accepts infinity" debt (M10's F9).** `ge=0` alone
+    # does not refuse `+inf` -- `float("inf") >= 0` is `True` -- and
+    # `titles.tmdb_popularity` is `sa.Float()`, i.e. `double precision`, for
+    # which IEEE `Infinity` is a perfectly legal value that also satisfies
+    # `ck_titles_tmdb_popularity_non_negative`. So nothing between a TMDb
+    # payload and the stored row refused it: `json.loads('1e400')` is `inf`,
+    # and it sorted above every real title in every `tmdb_popularity DESC`
+    # read forever.
+    #
+    # **ADR-0040's rename carried the defect across rather than fixing it** --
+    # `popularity` became `tmdb_popularity` with the same `ge=0` and no
+    # ceiling, which is why F9 still had work to do after that record landed.
+    # The rename is why this comment names the new column: the debt PRD 09
+    # recorded against `Title.popularity` is discharged here.
+    #
+    # **The bound is on the model rather than on the column, and that is
+    # ADR-0043's own division of labour inverted for a reason it states.**
+    # That record's rule is "the column stays the authority and the repository
+    # stays the translator" -- for a column *narrower* than the field feeding
+    # it. This is the opposite defect: an *unbounded* column accepting a
+    # nonsense value, where there is no width to widen and no refusal to
+    # translate, so the only layer that can say no is this one.
+    #
+    # `usher.adapters.tmdb.mapping._non_negative_float` filters non-finite
+    # values to `None` **in the same commit**, because that module's contract
+    # is that nothing TMDb can put in a payload may raise -- a
+    # `pydantic.ValidationError` is not a `UsherPortError`, so an unfiltered
+    # `inf` would escape `EnrichService`'s `except` and kill the worker
+    # instead of parking the job.
+    tmdb_popularity: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     imdb_average_rating: float | None = Field(default=None, ge=0, le=10)  # IMDb's 0-10 scale
     imdb_num_votes: int | None = Field(default=None, ge=0)
 

@@ -165,10 +165,10 @@ that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-Emitted today (✅) or owned by a later milestone (the milestone is named).
-A documented metric nothing emits is a dashboard panel that is permanently
-empty, and nothing distinguishes that from a healthy zero — so this column
-is maintained rather than aspirational.
+Emitted today (✅) or owned by a later milestone (named). A documented metric
+nothing emits is a permanently empty panel that nothing distinguishes from a
+healthy zero, so this column is maintained rather than aspirational. **37
+rows: 36 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
 |---|---|---|---|
@@ -187,9 +187,11 @@ is maintained rather than aspirational.
 | `usher.ingest.items` | counter | source, result | ✅ M4 |
 | `usher.match.result` | counter | method, confident | ✅ M4 |
 | `usher.sync.run.duration` | histogram | source, kind, status | ✅ M4 |
+| `usher.sync.retraction.fraction` | histogram | source, outcome | ✅ M10 |
 | `usher.watch_state.run.duration` | histogram | source, status | ✅ M4 |
 | `usher.watch_state.backfilled` | counter | source | ✅ M4 |
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
+| `usher.source.throttle.wait` | histogram | source | ✅ M10 |
 | `usher.source.push.connected` | gauge | source | ✅ M5 |
 | `usher.source.push.reconnects` | counter | source | ✅ M5 |
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
@@ -208,27 +210,50 @@ is maintained rather than aspirational.
 | `usher.bootstrap.phase.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.failures` | counter | dataset, kind | ✅ M2 |
 
+🔴 **Every seconds-unit histogram above is currently unreadable below five
+seconds, and this was found the first time one of them was read.** M10's S1
+exported `usher.source.request.duration` into a real Prometheus on 2026-08-15
+— **nine milestones after M3 emitted it and the first time anybody had** — and
+`configure_metrics` installs no `View`, so the SDK's default explicit bucket
+boundaries apply: `(0.0, 5.0, 10.0, 25.0, 50.0, …)`, in **seconds**. Every
+observation under five seconds falls in one bucket. Measured against the same
+48 timings, `histogram_quantile(0.5, …)` answered **2.5000 s for a `verify`
+whose true median is 0.1253 s and 2.5000 s for a `get_item` whose true median
+is 0.1495 s** — 20× and 16.7× wrong, and *identical*, which is what a panel
+built on this would have shown for every sub-5-second operation forever. A
+dashboard built on it would look like it worked. The fix is per-instrument
+bucket boundaries in `configure_metrics`; it is **not** yet done, and nothing
+in this document's dashboard section should be built before it is. Method and
+the full table: `.claude/rules/emby-push-and-ingest.md`.
+
 **`http.server.duration` is a correction, not an addition, and carries no
 `usher.` prefix on purpose.** M9 re-measured through a real `create_app()` and
-real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor`
-(wired in `create_app`, `api/app.py:127`) already emits this histogram on
-every request — unit `ms`, scope `opentelemetry.instrumentation.fastapi` —
-with `http.target` set to the **route template**
-(`/titles/{title_id}`, not the raw path, so two distinct title ids collapse
-into one series) and `http.status_code`. That is exactly what this row asked
-for, under OpenTelemetry's own semantic-convention name rather than ours, so
-the row now names what ships instead of asking for a second histogram over
-the same measurement — recording `usher.http.server.duration` alongside it
-would double the export for one relabelled series, the same
-two-vocabularies-under-one-name hazard this document already warns about for
-`provider` below.
-**The semconv opt-in is a named hazard, not a footnote**: setting
-`OTEL_SEMCONV_STABILITY_OPT_IN=http` renames this metric to
-`http.server.request.duration`, changes its unit from `ms` to seconds, and
-swaps `http.target` for `http.route` — any one of which empties a dashboard
-panel built against the names above, silently, with no error anywhere.
-Nothing in this project's config sets that variable; it is recorded here so
-the day someone does, the panel that goes quiet is not a mystery.
+real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor` (wired
+in `create_app`, `api/app.py:168`) already emits this histogram on every
+request — unit `ms`, scope `opentelemetry.instrumentation.fastapi` — with
+`http.target` set to the **route template** (`/titles/{title_id}`, not the raw
+path, so two distinct title ids collapse into one series) and
+`http.status_code`. That is exactly what this row asked for, under
+OpenTelemetry's own semantic-convention name rather than ours, so the row now
+names what ships instead of asking for a second histogram over the same
+measurement — recording `usher.http.server.duration` alongside it would double
+the export for one relabelled series, the same two-vocabularies-under-one-name
+hazard this document already warns about for `provider` below.
+**The semconv opt-in is a named hazard.** Measured 2026-08-14 on sdk 1.44.0 /
+instrumentation 0.65b0: `OTEL_SEMCONV_STABILITY_OPT_IN=http` *replaces* this
+metric with `http.server.request.duration`, unit `s` not `ms`, `http.route`
+not `http.target` — the old name is gone rather than renamed, so a panel on it
+empties silently. **It renames a second metric the same way, and that one is
+easy to miss because nothing in this table's duration row mentions it**:
+`http.server.response.size` becomes `http.server.response.body.size` (both
+`By`). Two panels empty silently under one variable, not one — re-measured
+2026-08-14 in M10 O4's three-child probe, which is also where the third mode
+was confirmed: under `http/dup` **both** spellings of **both** metrics are
+emitted, which is what makes it the migration path. It cannot be set from
+`.env`, `.env.example` or `compose.yml` without failing a test or every entry
+point; only the launching process's own environment does. **An unrouted path
+carries no `http.target` at all**, so `group by (http.target)` drops those
+404s.
 
 **`mode`'s vocabulary is `full_text` / `semantic` / `fused`** — `SearchMode`'s
 own values, lower-case, and written down here because a label whose vocabulary
@@ -248,8 +273,14 @@ dashboard query has to know:
   ([ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)), and M6
   emits nothing for it — a gap named here rather than left to be discovered
   from an empty panel, and one **the gate's measured latency makes worth
-  closing rather than merely worth noting**: the shipped suggest path measures
-  p50 33.6 ms / p95 211 ms / max 730 ms at 1.27M names, against the 50 ms
+  closing rather than merely worth noting**. ⚠️ **The figures that used to stand
+  here belong to a tier the route does not default to.**
+  [ADR-0031](decisions/0031-the-two-tier-suggest.md)`:304` states that
+  p50 33.6 / p95 211 / max 730 ms are **tier 2 whole-name** figures; the shipped
+  route defaults to **tier 1**, whose union p95 is **2,707 ms at one character**
+  and 112 ms at the four-character minimum (`:193`). A series for this path must
+  therefore carry a `tier` label rather than being one histogram, measured
+  against the 50 ms
   as-you-type budget [ADR-0002](decisions/0002-postgres-first-search.md) was
   gated on. A path that misses its budget by 4× at p95 and has no series is a
   regression nobody would see.
@@ -911,8 +942,17 @@ under a request shows only that request's.
 LLM spend per day and month by model and purpose · tokens in/out · **cost per
 curated row** and **cost per play attributed to an LLM row** — the honest answer
 to whether the LLM earns its keep · embedding compute time · TMDb quota
-headroom · **oldest `enriched_at` against the 6-month TMDb cache ceiling**, a
-licensing-compliance panel given [ADR-0005](decisions/0005-bulk-bootstrap.md) ·
+headroom · **the oldest cached TMDb payload against the 6-month cache ceiling**, a
+licensing-compliance panel given [ADR-0005](decisions/0005-bulk-bootstrap.md).
+⚠️ **This panel used to name `titles.enriched_at`, which is the wrong column
+and in the wrong direction:** that records when *Usher* enriched a title, not
+when the *payload* was cached, and the two diverge exactly when a title is
+enriched from an already-cached payload — the case the ceiling exists for. The
+series is `raw_payloads.fetched_at` (`ix_raw_payloads_fetched_at`,
+`db/models/sync.py:104-115`); `provider_cache_meta`, which an earlier draft of
+M10's spec reached for, does not exist and
+[ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)`:26`
+refused it by name ·
 data freshness (age of last IMDb import and TMDb changes sync) · Postgres size
 by table with a disk-exhaustion projection.
 
@@ -982,9 +1022,9 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4317
 OTEL_SERVICE_NAME=usher
 ```
 
-**Telemetry is never required.** With no endpoint configured, Usher runs
-normally — exporters become no-ops. The dashboards are an asset of this
-repository; the stack that renders them is infrastructure.
+**Telemetry is never required.** With no endpoint configured Usher runs
+normally and constructs no exporter at all. The dashboards are an asset of
+this repository; the stack that renders them is infrastructure.
 
 ## Alerts
 

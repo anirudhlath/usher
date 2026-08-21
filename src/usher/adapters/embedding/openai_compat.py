@@ -73,6 +73,19 @@ root unwraps at the point of use, per CLAUDE.md) and is re-wrapped in a
 can carry it. `telemetry.configure_logging` sets `diagnose=False`, so loguru
 would not render a local today -- the wrap defends the paths that setting does
 not cover (a pytest traceback, any future sink) and costs one call.
+
+**Upstream: the endpoint named by `USHER_EMBEDDING_MODEL`'s `openai:` runtime
+prefix. Deliberately unthrottled** (M10's S3; the enumeration is
+`tests/unit/test_outbound_call_sites.py`), on `llm/openai_compatible.py`'s
+reasoning exactly: no published ceiling, no measured one, and `KIND_CONCURRENCY`
+caps `index` at **1 in flight**, so the concurrency table is the bound and a
+requests-per-second gate would be a second ceiling above a lower one.
+**Stated here rather than inherited, because this adapter is the one of the two
+that runs for hours**: a `usher index --backfill` over a 1.27M-title catalog is
+a long serialised stream of `POST /embeddings`, not one call a night, so
+"the concurrency cap makes a rate limit unreachable" is a claim worth writing
+down where somebody raising `USHER_JOB_CONCURRENCY` will read it. Raise the
+`index` cap and this decision is reopened.
 """
 
 import math

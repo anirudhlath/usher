@@ -10,6 +10,7 @@ against `external_ids.imdb_id`), and a `pydantic.ValidationError` is not a
 exception no caller can catch.
 """
 
+import json
 import uuid
 from datetime import date
 from typing import Any
@@ -613,3 +614,30 @@ def test_nothing_tmdb_can_put_in_an_image_entry_raises() -> None:
     ]
     assert all(one.width is None for one in posters)
     assert [one.height for one in posters] == [None, 3000]
+
+
+def test_an_infinite_popularity_is_dropped_rather_than_raising() -> None:
+    """`1e400` is well-formed JSON, `json.loads` maps it onto `inf`, and this
+    module's contract is that **nothing TMDb can put in a payload may raise**.
+
+    Both halves matter and only together. `Title.tmdb_popularity` carries
+    `allow_inf_nan=False` since M10's F9, so an unfiltered `inf` would leave
+    the constructor below as a `pydantic.ValidationError` — which is not a
+    `UsherPortError`, so it would escape `EnrichService`'s `except` and kill
+    the worker rather than parking the job. The payload is built by parsing
+    real JSON text rather than by writing `float("inf")`, because the claim is
+    about what an upstream body can carry.
+    """
+    payload = _movie()
+    payload.update(json.loads('{"popularity": 1e400}'))
+    assert payload["popularity"] == float("inf")
+
+    assert _title(payload).tmdb_popularity is None
+
+
+def test_a_finite_popularity_still_survives_the_filter() -> None:
+    """The control: "drops infinity" is also satisfied by a filter that drops
+    every popularity."""
+    payload = _movie()
+    payload["popularity"] = 1739.421
+    assert _title(payload).tmdb_popularity == 1739.421

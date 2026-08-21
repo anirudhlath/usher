@@ -11,6 +11,60 @@ Verified facts, loaded when working in this subsystem. Measured or observed,
 never assumed — each entry carries its date, its sample and what it refuted.
 The always-on conventions live in `CLAUDE.md`; this file is the evidence.
 
+## 🔴 A `src/` docstring is not automatically prose — under `api/` it is often a wire artifact
+
+**Found 2026-08-15 by M10's S1, in review, after the change had already been
+reported as "prose only, no behaviour" and the claim proven by an AST
+comparison.** Filed here rather than beside the measurement that produced it
+because *here* is the trigger that fires for the paths it is about —
+`.claude/rules/emby-push-and-ingest.md` loads on `adapters/emby/**` and five
+`services/*.py`, so a person editing `api/dto/` would never have seen it.
+(Precedent: `b737105`, *"file the config finding where it fires"*.)
+
+**The mechanism.** `LaneReport` (`src/usher/api/dto/health.py`) is a pydantic
+model, so pydantic emits its **class docstring** as the JSON-Schema
+`description` and FastAPI publishes it at `/openapi.json`. A comment
+correcting a stale claim was written into that docstring and thereby shipped a
+`.claude/rules/…` path, a `⚠️` glyph and an internal task id into the public
+API contract — measured on `LaneReport.model_json_schema()["description"]`.
+
+**Why the usual proof did not catch it.** Stripping docstrings and comparing
+the AST of every changed module is a genuine proof of *no code change*, and it
+is exactly blind to this: the docstring **is** the artifact. `mypy`, `ruff`,
+`lint-imports` and the whole suite are equally blind, because the contract is
+not asserted anywhere.
+
+**The three places it applies**, none of which a reader distinguishes from
+ordinary prose by looking at them:
+
+- a **pydantic model's class docstring** → the schema's `description`;
+- a **route handler's docstring** → the operation's `description`;
+- a **`Field(description=…)`** → the property's `description`.
+
+**The check that settles it, and it is cheap.** Regenerate the document from a
+`git archive` of the base commit and diff the whole thing:
+
+```bash
+git archive <base-sha> | tar -x -C /var/tmp/basetree
+# then, in each tree:
+python -c "import json,sys; sys.path.insert(0,'src'); from usher.api.app import create_app; \
+print(json.dumps(create_app().openapi(), indent=1, sort_keys=True))" > openapi.json
+diff -u /var/tmp/basetree/openapi.json openapi.json
+```
+
+S1's repair moved the correction into a comment; the resulting document
+differs from `45398c2` in **exactly one** of 1,691 leaf nodes, and the
+difference is the **removal** of a false *"1–5 s per request"* claim that had
+been published since M1.
+
+⚠️ **Three descriptions already publish a `.claude/rules/…` path and still
+do** — `BootstrapPhase`, `SeasonResponse`, `SuggestResponse`. Measured 3
+before S1 and 3 after, so S1 added one and removed it and did not add to the
+standing gap. Left alone deliberately: **editing a published `description` is
+itself a wire change**, so fixing them inside a task whose claim was "no wire
+diff" would have traded a recorded gap for an unreviewed OpenAPI diff. They
+are a task of their own, and this paragraph is the record that they are known.
+
 **`httpx.ASGITransport` buffers the whole response and therefore cannot test
 SSE at all.** Its `handle_async_request` runs `await self.app(scope, receive,
 send)` to *completion*, collects every `http.response.body` into a list, and
@@ -566,11 +620,19 @@ because a DELTA resumes from the newest *completed* item-lane run, so with none
 there is no `since` and `list_items(since=None)` reads the whole library.
 `LaneSupervisor._close_gap` now asks that method before committing to a walk,
 and `USHER_PUSH_GAP_CLOSE` (`cursored` | `always` | `never`, default
-`cursored`) is what it does with the answer. **The bound is a refusal rather
-than a cap, and that is not squeamishness**: a truncated walk records
-`COMPLETED`, and `latest_completed_cursor` then reads its `started_at`, so
-every item the truncation never reached is skipped by every later delta,
-silently and permanently.
+`cursored`) is what it does with the answer. **The cursorless bound is a refusal rather
+than a cap, and that is not squeamishness**: a truncated walk that recorded
+`COMPLETED` would have `latest_completed_cursor` read its `started_at`, so
+every item the truncation never reached would be skipped by every later delta,
+silently and permanently. ⚠️ **What that argument rules out is a cap recording
+`COMPLETED`, not a cap** — M10's S6 adds `USHER_PUSH_GAP_MAX_ITEMS`, which
+stops a gap close after N items and records **`FAILED`** with a
+`gap_delta_ceiling:` token, advancing no cursor. The two settings compose on
+different axes: `USHER_PUSH_GAP_CLOSE` decides whether a walk with *no cursor*
+happens at all, the ceiling bounds how large *any* gap close may get. One
+consequence worth knowing before quoting the vocabulary: `always` is no longer
+literally the pre-2026-08-19 behaviour, because the walk it starts still passes
+through the ceiling — that needs `USHER_PUSH_GAP_MAX_ITEMS=0` beside it.
 
 **Every arm logs, and the log lives in `_close_gap` rather than in `refresh()`
 or `_start_lane`** — the refresher calls those once per
@@ -673,6 +735,516 @@ lease is what changed — so `USHER_WORKER_ENABLED=false` on a server beside a
 one. What two processes still do is spend the same upstream budget twice:
 `USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` are both per
 process, against a rate limit that is per client.
+
+## Phase 0's live run — the first telemetry this project has ever exported (2026-08-14, M10 O2)
+
+**"Telemetry has exported to no-op exporters for nine milestones" is false, and
+the true claim is stronger: no exporter object is constructed at all.**
+`telemetry.py:191-197` installs a real SDK `TracerProvider` **unconditionally**
+and adds `BatchSpanProcessor(OTLPSpanExporter(...))` only inside
+`if settings.telemetry_enabled`; `:222-232` mirrors it with
+`metric_readers=readers`, where `readers` is the empty list when telemetry is
+disabled. The suite has pinned that from both sides since M1, by monkeypatching
+each exporter class to raise if constructed. Three consequences, and the first
+two are counter-intuitive enough that the "no-ops" phrasing hid them:
+
+- **Spans have always had real, valid ids.** The provider is a real
+  `TracerProvider`, not the API's no-op default, so `inject_trace_context`
+  (`telemetry.py:63-67`) has been firing all along and **every JSON log line in
+  every deployment already carries `trace_id` and `span_id`**. Observed on this
+  run *before* any endpoint mattered: the `GET /health` line carried both.
+- **Metric points were recorded into a provider with no reader**, so they were
+  aggregated in memory and never collected.
+- **Nothing has ever left the process** — which is what to say, rather than that
+  the exporters were no-ops.
+
+**This file already had it right**, in the Group F paragraph above
+(*"install a real `TracerProvider`/`MeterProvider` unconditionally … nothing
+gRPC-related is ever constructed"*), which is why the correction below is to
+the six documents that disagreed with it rather than to anything here. All six
+are listed at the end of this entry, along with why it took three searches of
+increasing shape — not increasing wording — to find them all.
+
+Corrected in `docs/prd/10-telemetry-and-dashboards.md` in the same commit. **The
+edit was sized to keep that paragraph's line count fixed**, because
+`~/code/observability/README.md` cites `:936-937` for the *next* sentence; the
+file stayed at 951 lines and the citation was re-checked after the edit rather
+than assumed.
+
+**The endpoint's scheme is load-bearing and the wrong spelling fails silently.**
+Measured in the installed `opentelemetry-exporter-otlp-proto-grpc` **1.44.0**,
+`exporter.py:316-323`: with no `insecure=` argument and
+`OTEL_EXPORTER_OTLP_INSECURE` unset — exactly how `telemetry.py:195` and `:224`
+call it, passing `endpoint=` and nothing else — `insecure` defaults to
+`parsed_url.scheme == "http"`. So the spelling a person types,
+`OTEL_EXPORTER_OTLP_ENDPOINT=127.0.0.1:4317`, builds a **TLS** channel against a
+plaintext collector and every export fails inside the SDK's own retry loop,
+which logs a warning and **does not raise**; `http://127.0.0.1:4317` builds an
+insecure one. `:325-326` then discards the scheme and keeps the netloc, so
+**both spellings store the identical endpoint** and the flag is the only
+observable difference — verified directly (`_insecure` `True` vs `False`,
+`_endpoint` `127.0.0.1:4317` in both). Pinned by
+`test_an_endpoint_without_a_scheme_builds_a_secure_channel_against_a_plaintext_collector`,
+which asserts the flag *differs between the two spellings* rather than that one
+is `False`, so a future normalisation that prepends a scheme is caught.
+
+**That case and its sibling point at `127.0.0.1:1`, not at the collector**, and
+the reason belongs here because this file is where the real endpoint is
+recorded. They assert on what the exporter *constructs*, never on what answers,
+so aiming them at the live collector this host runs would let an
+environment-independent suite (`tests/unit`: "no Docker, no network") pass partly
+because of the environment. Nothing would be sent either way — gRPC channels
+connect lazily and those cases record nothing, so `shutdown()` flushes an empty
+queue — but that is a property of what they happen not to do, and one recorded
+span would end it. A dead loopback port makes the isolation structural.
+
+**"The app started" is not evidence the export works**, for the same reason: the
+retry loop is quiet. Only the three observations below are evidence.
+
+### The three signals, from one `GET /search?q=Blade+Runner&limit=5` over the live 1,272,401-title catalog
+
+Queried through Grafana's datasource proxy, because Prometheus, Loki and Tempo
+are not published to the host.
+
+1. **The trace.** Tempo, TraceQL `{name="GET /search"}` → one trace,
+   `2fa839a2eb19612d9aeb7c3fca9b441e`, root `GET /search` from scope
+   `opentelemetry.instrumentation.fastapi`, **73.95 ms, 13 spans**. Beneath the
+   root: **six `SELECT` spans plus `SAVEPOINT`, `INSERT` and `RELEASE`** from
+   `opentelemetry.instrumentation.sqlalchemy`, and one `connect`. This is the
+   live confirmation of the instrumentor finding recorded earlier in this file —
+   the fix that made `build_engine` call `sa_asyncio.create_async_engine`
+   *through the module* is still holding, and a `connect` span is not what was
+   accepted here.
+2. **The correlated log line**, found in the direction that proves correlation:
+   the 32-hex id was read **off the Tempo trace** and then grepped for in Loki,
+   not the reverse. Loki,
+   `{service_name="usher"} |= "2fa839a2eb19612d9aeb7c3fca9b441e"` → **exactly one
+   line**, `... - "GET /search?q=Blade%20Runner&limit=5 HTTP/1.1" 200`, carrying
+   `trace_id=2fa839a2eb19612d9aeb7c3fca9b441e` and
+   `span_id=35dad4c7b4bc6de1`. Finding *a* line with *a* `trace_id` would have
+   proved only that the patcher runs, which — per the first section above — it
+   always has.
+3. **The two metric samples**, one Usher's own instrument and one the
+   framework's, because they travel different code paths:
+   - `usher_search_duration_seconds_count{job="usher",mode="full_text"}` → **1**;
+     `_sum` → **0.05405643954873085** (seconds).
+   - `http_server_duration_milliseconds_count{job="usher",http_target="/search",http_status_code="200"}`
+     → **1**; `_sum` → **118** (ms, and the client measured 118.8 ms).
+
+### The stored series name is not the OTLP name, and the transformation includes the *unit*
+
+The half most likely to be guessed wrong, so it is written out — and **the first
+version of this entry generalised a rule from a sample that could not exhibit
+its own counter-examples**, which is the mistake to read before the table.
+Measured against the collector's `prometheusremotewrite` exporter, whose
+`add_metric_suffixes` is left at its default `true`
+(`~/code/observability/otel-collector/config.yaml`), 2026-08-14.
+
+**What one `GET /search` could and could not show.** It exported sixteen series,
+and every one of them was a histogram, a gauge or `target_info`: **not a single
+counter fired**. So that run measured unit handling and was structurally
+incapable of measuring `_total` — and both of its `unit="1"` examples happened
+to be histograms, so it was equally incapable of showing what `1` does on a
+gauge. Two rules were written from it that the sample could not support.
+
+**Observed in the live run:**
+
+| instrument | unit | kind | stored series |
+|---|---|---|---|
+| `usher.search.duration` | `s` | histogram | `usher_search_duration_seconds_{bucket,count,sum}` |
+| `usher.search.results` | `1` | histogram | `usher_search_results_{bucket,count,sum}` |
+| `http.server.duration` | `ms` | histogram | `http_server_duration_milliseconds_{bucket,count,sum}` |
+| `http.server.response.size` | `By` | histogram | `http_server_response_size_bytes_{bucket,count,sum}` |
+| `http.server.active_requests` | `{request}` | up-down counter | `http_server_active_requests` |
+| `db.client.connections.usage` | `connections` | up-down counter | `db_client_connections_usage` |
+| **`usher.sse.connections`** | **`1`** | **observable gauge** | **`usher_sse_connections_ratio`** |
+
+**Measured by a probe**, because the shapes Usher declares most of and this run
+never exercised are exactly the ones the table above cannot reach. One
+instrument per rule, emitted 2026-08-14 under `service.name="namingprobe"`, each
+mirroring a real Usher declaration:
+
+| probe instrument | unit | kind | stored | mirrors |
+|---|---|---|---|---|
+| `probe.items` | `1` | counter | `probe_items_total` | `usher.ingest.items` and eight more |
+| `probe.cachehits` | *(none)* | counter | `probe_cachehits_total` | `usher.cache.hits`/`.misses` |
+| `probe.wait` | `s` | counter | `probe_wait_seconds_total` | unit **and** `_total` together |
+| `probe.queued` | `1` | observable gauge | `probe_queued_ratio` | `usher.jobs.queued` and five more |
+| `probe.connections.usage` | `connections` | up-down counter | `probe_connections_usage` | the `db.client` row above |
+| `probe.things` | `{things}` | up-down counter | `probe_things` | the `active_requests` row above |
+| `probe.payload` | `By` | histogram | `probe_payload_bytes_{…}` | `http.server.response.size` |
+
+**The rule, one clause per measurement:**
+
+1. **Dots become underscores.** Every row.
+2. **The unit is expanded and appended** — `s`→`_seconds`, `ms`→`_milliseconds`,
+   `By`→`_bytes`. This is the genuinely valuable finding and the part no
+   prediction had.
+3. **A brace annotation unit is dropped entirely** — `{request}`, `{things}`.
+4. **A unit already contained in the name is not appended.**
+   `db.client.connections.usage` with unit `connections` stores unsuffixed,
+   while `By` is appended to a name containing no "bytes". So *"the unit is
+   always appended"* is itself too strong.
+5. **Unit `1` depends on the instrument kind.** Dropped for a histogram
+   (`usher.search.results`) and for a counter (`probe.items`); it becomes
+   **`_ratio` for a gauge** (`usher.sse.connections`, `probe.queued`).
+6. **`_total` is for monotonic counters only.** Both up-down counters above get
+   nothing.
+7. `service.name` becomes `job`, `service.instance.id` becomes `instance`, and
+   the collector adds `otel_scope_name`/`otel_scope_version`.
+
+**What that means for Usher's own catalogue, and it is not what anyone would
+guess.** Every one of Usher's roughly ten counters declares `unit="1"`, so by
+rules 5 and 6 they store as `usher_ingest_items_total`,
+`usher_provider_requests_total`, `usher_curation_rows_total` and so on — the
+unit vanishes and `_total` arrives. **And every one of Usher's observable gauges
+also declares `unit="1"`, so they all take `_ratio`**: `usher_jobs_queued_ratio`,
+`usher_jobs_parked_ratio`, `usher_source_push_connected_ratio`,
+`usher_search_embeddings_stale_ratio`, `usher_similarity_neighbors_stale_ratio`.
+A queue-depth gauge stored under `_ratio` looks like a mistake and is not.
+**These are derived by applying the measured rule to declarations read from
+source, not observed under their real names** — only `usher.sse.connections` and
+the two `usher.search.*` histograms have been seen end to end. Treat the derived
+names as strong predictions with a known mechanism, and confirm the first one a
+dashboard actually needs.
+
+**The correction to the M10 plan's prediction, scoped to what was measured.**
+The plan predicted *"dots become underscores, and a monotonic counter gains
+`_total`"*. **Both halves hold** — `_total` is confirmed by the probe above and
+independently by O1's smoke test, whose `observability.smoke.events` stores as
+`observability_smoke_events_total`. What the prediction *omits* is unit handling
+entirely, and that is where every wrong guess will come from: four of the seven
+rules above are about the unit. An earlier version of this entry claimed the
+prediction's `_total` half was refuted; it was not refuted, it was **untested**,
+and saying so was the same error in the opposite direction.
+
+**The negative controls, run rather than assumed:** querying the un-suffixed
+names `usher_search_duration` and `http_server_duration` returns **no series at
+all** — not an error, not a zero. A dashboard panel written against the name a
+person would guess is permanently empty and nothing distinguishes it from a
+healthy zero, which is the same failure `services/search.py` already warns about
+for near-miss instrument names, one layer further out. **`http.server.duration`
+is not Usher's name to choose** — it is whatever the instrumentor emits, so a
+panel plotting it is coupled to that package's version.
+
+### Three traps in running this against the live catalog, each measured
+
+1. **`docker compose up` from an M10 worktree starts a second, empty Postgres.**
+   `compose.yml`'s bind mount is `./data/postgres`, so a different worktree is a
+   different compose project with its own empty volume, and the "live catalog"
+   observation would be over **zero** titles. The 1.27M-row database belongs to
+   the project rooted at the main checkout. Phase 0's run is therefore a **host
+   process** pointed at the existing container over its compose network, which
+   publishes no host port.
+2. **`sources` holds one row and it is enabled**, so the shipped lanes would
+   start a push lane and, on reconnect, a gap-closing `DELTA` reconcile against
+   a real Emby — an unbounded walk. **`USHER_PUSH_ENABLED=false` and
+   `USHER_WORKER_ENABLED=false` are mandatory for this run, not advisory**, and
+   they are what makes the request budget against the live Emby statable at
+   **zero**. Confirmed two ways: no lane log line was emitted, and the trace
+   contains **no `httpx` client span** — `HTTPXClientInstrumentor` is
+   instrumented *unconditionally* (`telemetry.py:199`), so any outbound call
+   would have produced one. An absence claim with a positive control behind it.
+3. **Port 8000 is already taken on this host** by an unrelated service. The run
+   used **8100**, which is `USHER_COMPOSE_HOST_PORT`'s own default in
+   `compose.yml`.
+
+The endpoint itself goes in `.env`, which `.gitignore` already covers and
+`compose.yml` hands to the container whole. **`.env.example` is not edited**, and
+that is enforced rather than preferred: `tests/unit/test_deployment_config.py`
+asserts its key set *equals* the `Settings` field set and that every value equals
+that field's **default**, so the endpoint line has to stay blank there.
+
+### The same false claim stood in six places, and three greps each found fewer than the last
+
+The progression is the finding, not an embarrassment, and it converged only
+when the *shape* of the search changed rather than its wording:
+
+| search | found |
+|---|---|
+| two literal strings — *"no-op exporter"*, *"exporters become no-ops"* | 1 of 6 |
+| the concept, one line at a time — `no-op` **and** `export` on the same line | 5 of 6 |
+| the concept, **across line breaks** | 6 of 6 |
+
+**The sixth hid behind a line break, and no line-oriented grep can ever find
+it.** `docs/prd/08-operations.md:448-449` wrapped the sentence mid-claim:
+
+```
+448: Telemetry is optional: with no OTLP endpoint configured the exporters are
+449: no-ops and Usher runs normally.
+```
+
+Line 448 contains `exporters` and no `no-op`; line 449 contains `no-ops` and no
+`export`. A per-line filter requires both tokens in one line, so it is
+*structurally* blind here — not unlucky, blind. **Prose wraps at about 80
+columns, so any claim longer than a few words is a coin flip to straddle a
+newline**, and `grep`, `rg` without `-U`, and every `| grep` pipeline are all
+line-oriented by default.
+
+**The pattern that finds all six**, and the one to run when retiring a claim —
+`\s+` and `[\s\S]` are what make it newline-blind in the right direction:
+
+```python
+# tight: the claim itself, wherever it wraps
+re.compile(r"exporters?\s+(?:are|become|becomes|degrade\s+to|to\s+be)\s+no-?ops?", re.I)
+# loose: the concept -- `no-op` within ~120 chars of `export`, newlines included
+re.compile(r"(?:export\w*[\s\S]{0,120}?no-?ops?|no-?ops?[\s\S]{0,120}?export\w*)", re.I)
+```
+
+Run over `src/`, `docs/`, `tests/`, `.claude/` and `.env.example` **but
+excluding this file**, the tight pattern returns **4** hits and the loose one
+**17**; both are supersets of the six corrected copies. **The loose pattern
+found no seventh**, which is the only reason to believe the list is now
+complete. Its extra hits are all correct as they stand and a future run must not
+"fix" them:
+
+- `docs/plans/2026-07-28-m1-foundation.md` (3 hits) — a historical plan, which
+  `.claude/rules/prd-maintenance.md` forbids retro-editing.
+- This entry, `docs/prd/decisions/0007-telemetry-architecture.md`'s `## Evidence`
+  section, the M10 plan and spec — all quoting the false claim in order to
+  refute it.
+- `src/usher/telemetry.py:208` — *"the API's **no-op default**"*, which is true:
+  the OTel **API**'s default provider genuinely is a no-op, and that is exactly
+  the contrast the correction turns on.
+- `src/usher/services/rows/curated.py:445` — a different subject entirely
+  (`set_attribute` outside a span).
+- `tests/unit/test_telemetry.py:96` — quoting the old requirement prose as
+  history.
+
+**Why this file is excluded from its own count, which is a trap worth naming.**
+The first version of this entry quoted *"tight 10, loose 28"*. Both were correct
+when measured and the loose one was stale one commit later — at **32** — because
+*writing the search down* added the six-wordings table and the two regexes to
+the very corpus the search scans. **A hit count over a corpus that includes the
+document stating the count is self-referential, and it moves every time the
+document is edited.** Excluding this file makes the number reproducible and
+stable under documentation edits; quoting it with the commit it was measured at
+would be the alternative. The same applies to any "N occurrences remain" claim
+in any rules file here.
+
+The six false copies, all corrected:
+
+| file | the wording it hid behind |
+|---|---|
+| `docs/prd/10-telemetry-and-dashboards.md:936` | *"exporters become no-ops"* — the only one the first search matched |
+| `src/usher/telemetry.py:4` | *"the exporters are no-ops"* |
+| `src/usher/config.py:913` | *"exporters are no-ops"* — on `telemetry_enabled` itself, the very property the claim describes |
+| `docs/prd/decisions/0007-telemetry-architecture.md:55` | *"the exporters are no-ops"* |
+| `.env.example:289` | *"exporters become no-ops when unset"*, a comment |
+| `docs/prd/08-operations.md:448-449` | split across the line break, three lines below its own pointer to PRD 10 |
+
+**A literal-string search is a scan, and a scan that globs the wrong pattern
+reports a clean result exactly like a scan that found nothing to report** — the
+same family as this repository's standing *"a run that did not run is not a
+pass"*.
+
+**Four of the edits are strictly line-count-neutral by construction**, verified
+with `git diff --numstat` returning equal adds and deletes, because these files
+are cited by line from elsewhere: `src/usher/telemetry.py` in **25** distinct
+places in this repository, `src/usher/config.py` in **29**, and
+`docs/prd/08-operations.md` in **36** — including `:447`, immediately above the
+edit. `~/code/observability` cites `src/usher/telemetry.py:16-17` and `:105-114`
+across the repository boundary; both were re-read afterwards and neither moved.
+`docs/prd/decisions/0007-telemetry-architecture.md` gets **ADR treatment rather
+than a reword**, per `.claude/rules/prd-maintenance.md`: its `Status` is
+annotated and the measurement is added as its own `## Evidence` section, because
+an ADR left silently contradicting the PRD is exactly what that rule exists to
+prevent.
+
+**And this task broke two citations itself, which is the honest version of the
+lesson.** O2's *first* commit added two import lines at the top of
+`tests/unit/test_telemetry.py` — additive, touching no existing case, and
+therefore easy to wave through — and thereby shifted every line below by two,
+including the two the M10 plan cites for the pair of negative cases
+(`:94`→`:96`, `:231`→`:233`). Repaired in the same series. **An "append-only"
+edit is only line-count-safe if the append is at the end**; an import block is
+at the top, and the top is above everything anybody cites. The later commits
+checked citations before editing and this one did not, which is the whole
+difference.
+
+## The HTTP semantic convention in force is the **default** one, pinned by version (2026-08-14, M10 O3)
+
+O2's section above is about what happens to a name *after* it leaves the
+process — the collector's storage rename. This one is about what the name **is
+on the wire**, which is a different mechanism with a different trigger, and the
+two compose: a Phase 2 panel is wrong if either is guessed.
+
+**The convention, by name and version.** The **default** HTTP semantic
+conventions, under `opentelemetry-sdk` **1.44.0** and
+`opentelemetry-instrumentation-fastapi`/`-asgi` **0.65b0**
+(`opentelemetry-semantic-conventions` is also 0.65b0). `uv.lock` pins all of
+those; `pyproject.toml:26-31` asks only for `>=1.28` / `>=0.49b0`, so **the
+convention in force is a property of the lock file, not of the manifest**, and
+`uv lock --upgrade` is enough to move it with no source change anywhere.
+
+**The two rows, driven through a real `create_app()` into an
+`InMemoryMetricReader`, one request each, in two separate processes:**
+
+| | metric name | unit | attributes on the point |
+|---|---|---|---|
+| default (nothing set) | `http.server.duration` | `ms` | `http.scheme`, `http.host`, `http.flavor`, `http.method`, `http.server_name`, `http.status_code`, `http.target` |
+| `OTEL_SEMCONV_STABILITY_OPT_IN=http` | `http.server.request.duration` | `s` | `url.scheme`, `http.request.method`, `http.route`, `http.response.status_code`, `network.protocol.version` |
+
+**Under the opt-in `http.server.duration` is absent entirely — not renamed
+alongside, gone.** That is the clause worth reading twice: a panel written
+against it does not start plotting a differently-named series, it plots
+nothing, and nothing anywhere raises. (The M10 plan's version of this table
+omits `network.protocol.version` from the opt-in row; it is on the point.)
+
+**The mechanism is two predicates in the installed contrib package**, and
+knowing them is what makes the third mode predictable rather than surprising.
+`_semconv.py:196-201` defines `_report_new(mode)` as `mode != DEFAULT` and
+`_report_old(mode)` as `mode not in (HTTP, DATABASE)`. `asgi/__init__.py:622-635`
+then builds `duration_histogram_old` (`ms`) behind `_report_old` and
+`duration_histogram_new` (`s`, with second-scaled bucket advice) behind
+`_report_new`. So:
+
+- `DEFAULT` satisfies only `_report_old` → the `ms` histogram only.
+- `http` satisfies only `_report_new` → the `s` histogram only.
+- **`http/dup` satisfies both and emits both histograms.** Observed: one request
+  under it recorded `http.server.duration` at `ms` *and*
+  `http.server.request.duration` at `s`, plus both response-size spellings.
+  **It is the migration path, and the only setting under which a panel written
+  against either name keeps working.**
+
+### `http.target` is absent on an unrouted path, and that is the finding a panel needs
+
+`http.target` is `route.path_format` — `_collect_target_attribute`,
+`asgi/__init__.py:528-551`, which reads `path_format` off the ASGI scope's
+`route` and **returns `None` when nothing matched**. The ASGI middleware omits
+a `None` attribute rather than recording an empty one. Measured:
+`GET /no-such-route` records an `http.server.duration` point whose attributes
+are exactly `{http.scheme, http.host, http.flavor, http.method,
+http.server_name, http.status_code: 404}` — the key is **absent**, not empty.
+
+**So a panel that groups by `http.target` silently drops every 404 on an
+unrouted path**, which is the one class of request an operator most wants to
+see, and it drops them the same way an empty panel looks healthy. Recorded here
+rather than discovered from a dashboard that under-counts. Pinned by
+`tests/unit/test_telemetry_metric_names.py::test_a_path_that_matched_no_route_carries_no_http_target_at_all`,
+whose routed control fires first — "the key is missing" is also what a build
+that never recorded the attribute at all would produce.
+
+**Where the opt-in can and cannot be set is recorded in**
+`.claude/rules/config-cli-and-deployment.md` — its subject is `config.py`,
+`compose.yml` and `.env.example`, and *this* file does not load on any of
+those paths, so the finding would never have reached the person adding an
+`OTEL_*` key. In one line: the only door is the launching process's own
+environment; `.env`, `.env.example` and `compose.yml` each fail a test or
+every entry point.
+
+### 34 and 35 (35 and 36 since S2, 2026-08-18) are both right, about different things, and the M10 spec collapsed them
+
+The M10 design spec `:32-33` says the catalogue is *"34 rows and every one is
+✅"*. **The catalogue (`10-telemetry-and-dashboards.md:143-177`) is 35 rows, 35
+distinct names, and all 35 carry ✅** — counted; there is no unticked row. 34 is
+a real measurement of something else: an AST scan of `src/usher/` for the seven
+`Meter.create_*` instrument factories finds **exactly 34 declared instrument
+names**, and their set is the catalogue **minus `http.server.duration`** — the
+one row Usher does not declare, because `FastAPIInstrumentor` emits it. The
+honest sentence is **34 instruments Usher declares plus one it inherits,
+against 35 documented rows**, and PRD 10's preamble now carries it so the next
+reader counts the right thing.
+
+⚠️ **The count has moved twice since, both times inside M10.** S2 added
+`usher.source.throttle.wait` (the outbound rate gate's own series,
+`usher.adapters.http`) on 2026-08-18, and S8 added
+`usher.sync.retraction.fraction` (`usher.services.reconcile`) on 2026-08-19, so
+it is now **36 declared plus one inherited against 37 rows** — `assert
+len(catalogue) == 37` in `test_telemetry_metric_names.py`. The *mechanism* above
+is unchanged; only the two numbers moved, and each time all four sites (the
+census assertion, that file's docstring and its `create_*` arithmetic,
+`test_telemetry_search.py`'s cross-reference comment, and PRD 10's preamble)
+were updated in the same commit as the instrument. The "34 and 35" prose here is
+the reading as of 2026-08-14 and is left dated rather than rewritten.
+
+**Four sites, and the census assertion is the only one that fails.** The other
+three are prose, so an instrument added without touching them leaves the file
+asserting one number and explaining a different one — which is why they are
+listed here rather than left to a grep for `36`.
+
+**The scan has a trap that manufactures plausible missing metrics, and the
+filter is the factory name — never the prefix.** Re-measured 2026-08-14 at
+`fe4becd`: a naive walk over `src/usher/` for calls whose attribute name
+`startswith("create_")` finds **120** sites (121 counting the one bare-name
+call, `create_async_engine`). **79** are Alembic's `op.create_table` /
+`create_index` / `create_foreign_key` under `db/migrations/versions/`, 34 are
+the instrument factories, six are `asyncio.create_task` and one is
+`sa_asyncio.create_async_engine` (`db/base.py:110`). **All six tasks carry a
+`name=`, and every one of them renders `usher.*`** — four string literals
+(`usher.lane.worker`, `usher.lane.refresh`, `usher.lane.rows.refresh` at
+`api/lanes.py:204-208`, and `usher.jobs.heartbeat` at `services/jobs.py:317`)
+plus two f-strings a literal-only scan cannot see at all:
+`f"usher.lane.push.{source.name}"` (`api/lanes.py:358`) and
+`f"usher.job.{job.kind.value}"` (`services/jobs.py:340`). A prefix filter puts
+**six** task names into a catalogue comparison looking exactly like six
+undocumented metrics.
+
+⚠️ *An earlier draft of this entry — and of the comment in the test file —
+said "four carry a `name=`, three of those are `usher.*`", then listed four.
+It was inherited from the M10 plan's prose and nobody re-counted, which is the
+same failure as the plan's 117/83 one layer in. **The trap is worse than it was
+documented as, which makes the factory-name filter more justified, not less.***
+
+*The M10 plan states 117 sites and 83 Alembic ones, measured 2026-08-13. Both
+differ from the above and the plan's own arithmetic does not close (117 − 83 −
+4 = 30, against 34 instruments that must also be in the total); 120 = 79 + 34 +
+6 + 1 does. Treat 120/79 as the figures and re-derive rather than trusting
+either, since both move with every migration.*
+
+Pinned by
+`tests/unit/test_telemetry_metric_names.py::test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue`,
+which asserts `declared == catalogue - {"http.server.duration"}` — 34 == 34.
+**Both halves of it are scans, so both carry premise guards placed before the
+value they protect**: the walk must find something and must find
+`usher.jobs.queued`; the table parse must find 35 rows, which is the premise a
+Markdown regex loses the moment the table is reformatted. Demonstrated red two
+ways on the declared side — a **deleted** row (the 35-row guard fires) and a
+**renamed** row at a preserved count of 35 (the set comparison fires, which is
+what proves the guard is not the only live assertion).
+
+### Three stored series names, observed under Usher's own instruments rather than derived
+
+O2's seven-clause naming rule above is the mechanism and is **not restated
+here**; this is a status change to three of the names it produced. O2 marked
+Usher's counters and observable gauges as *derived* — the rule applied to
+declarations read from source, never seen under their real names. Two of the
+three are now **observed**:
+
+| catalogue name | kind, unit (from source) | stored series | status |
+|---|---|---|---|
+| `usher.search.duration` | histogram, `s` (`services/search.py:106-107`) | `usher_search_duration_seconds_{bucket,count,sum}` | **observed** — O2's live `GET /search`, re-confirmed |
+| `usher.ingest.items` | counter, `1` (`services/ingest.py:55-56`) | `usher_ingest_items_total` | **observed** 2026-08-14, was derived |
+| `usher.jobs.queued` | observable gauge, `1` (`telemetry.py:299`) | `usher_jobs_queued_ratio` | **observed** 2026-08-14, was derived |
+
+Observed by importing Usher's **own** instrument objects — `_items_counter`
+from `services/ingest.py`, `_search_duration` from `services/search.py`, and
+the gauge via `telemetry.register_queue_gauges` — installing a real
+`MeterProvider` with an OTLP reader against the collector, and reading the
+names back out of Prometheus. Nothing was re-declared, so the name, unit and
+instrument kind all came from shipped source. `usher_jobs_parked_ratio` came
+free from the same registration and is observed too. The emitting resource
+carried `service.name="o3nameprobe"` so the series are attributable and are not
+mistaken for a real Usher run; the storage rename is computed by the
+collector's `prometheusremotewrite` exporter from `(name, unit, kind)` alone
+and is independent of every resource attribute, which is what makes that
+substitution sound.
+
+**`usher_jobs_queued_ratio` is the one to carry.** A queue-depth gauge stored
+under `_ratio` looks like a mistake and is not — it is O2's rule 5 (`unit="1"`
+becomes `_ratio` on a gauge) meeting the fact that **every Usher observable
+gauge declares `unit="1"`**. The same applies to `usher_jobs_parked_ratio`,
+`usher_source_push_connected_ratio`, `usher_search_embeddings_stale_ratio` and
+`usher_similarity_neighbors_stale_ratio`, which remain derived.
+
+**O2's own evidence was re-verified rather than assumed**, and one thing about
+how to look at it is worth keeping: all seven `probe_*` series are still in the
+shared dev Prometheus under `job="namingprobe"`, and `usher_search_duration_*`
+under `job="usher"`. But an **instant** query for any of them returns *no
+series at all*, because Prometheus's instant lookback is ~5 minutes and those
+samples are a day old — indistinguishable, at a glance, from data that was
+never written. Query `/api/v1/series` over an explicit range before concluding
+that a recorded series is gone.
 
 ## Issue #31 — a lane switch was gating a request-path resource (2026-08-19)
 

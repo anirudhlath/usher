@@ -13,17 +13,25 @@ newest copy only, so the two older ones were still one deeply nested payload
 away from taking the worker down.
 """
 
+import asyncio
 import json
+import uuid
 
 import httpx
 import pytest
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader
 
 from usher.adapters.http import (
     UNTRANSLATED_FAILURES,
+    SourceGateRegistry,
+    _MinInterval,
     decode_json,
     failure_detail,
     port_error_for,
 )
+from usher.adapters.tmdb.client import _TokenBucket
 from usher.ports.errors import (
     PortAuthFailed,
     PortDataMalformed,
@@ -247,6 +255,191 @@ def test_the_untranslated_tuple_covers_the_families_httpx_error_does_not() -> No
 
 
 # --------------------------------------------------------------------------
+# _MinInterval -- the proactive outbound gate (ADR-0042)
+
+
+class _Clock:
+    """A monotonic clock that only ever moves when something sleeps -- the
+    `TmdbClient` test's own instrument, so the gate and the bucket it is
+    compared against are driven identically."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+        # A real yield, so a gathered batch interleaves the way it would
+        # against `asyncio.sleep`: without it a "concurrent" case is a
+        # sequential one wearing a costume, and the burst the gate exists to
+        # prevent could never appear.
+        await asyncio.sleep(0)
+
+
+async def _grants(gate: _MinInterval | _TokenBucket, clock: _Clock, n: int) -> list[float]:
+    """The clock instant each of `n` concurrent `take()` calls was granted at,
+    sorted -- sorted because the order the lock hands them out in is not the
+    thing under test, the *spacing* is."""
+
+    async def _timed() -> float:
+        await gate.take()
+        return clock.now
+
+    return sorted(await asyncio.gather(*(_timed() for _ in range(n))))
+
+
+async def test_two_calls_are_spaced_and_a_burst_is_not_permitted_after_an_idle_period() -> None:
+    """The whole reason this is a minimum interval and not a token bucket, and
+    the case proves the two designs *differ* rather than that one works -- so a
+    later "simplification" back to a bucket fails here.
+
+    Five concurrent `take()`s after ten seconds of simulated idleness. The gate
+    grants them `1/rate` apart with no credit banked for the idle time; the
+    identical scenario against a `_TokenBucket` of the same rate grants all
+    five at once, which is the flood issue #19 recorded. `rate=0` grants all
+    five immediately and never sleeps, because a disabled limiter that still
+    awaited is one an operator cannot turn off.
+    """
+    rate = 5.0
+    idle = 10.0
+    step = 1.0 / rate
+
+    # The gate: spaced, and specifically *not* a burst of five.
+    clock = _Clock()
+    gate = _MinInterval(rate, source="Living Room Emby", clock=clock, sleep=clock.sleep)
+    clock.now = idle  # the gate was built at t=0 and nothing touched it for 10 s
+    spaced = await _grants(gate, clock, 5)
+    assert spaced == pytest.approx([idle + i * step for i in range(5)])
+    assert spaced != pytest.approx([idle] * 5), "the burst the minimum interval exists to refuse"
+
+    # The positive control: a token bucket of the same rate banks a second of
+    # credit while idle and lets all five through at once. This is what makes
+    # the assertion above a statement about the *design* and not about spacing
+    # in the abstract.
+    bucket_clock = _Clock()
+    bucket = _TokenBucket(rate, bucket_clock, bucket_clock.sleep)
+    bucket_clock.now = idle
+    assert await _grants(bucket, bucket_clock, 5) == pytest.approx([idle] * 5)
+    assert bucket_clock.slept == [], "a bucket with a second of burst does not wait for five"
+
+    # The disabled arm: unlimited, immediate, and it never awaits.
+    zero_clock = _Clock()
+    disabled = _MinInterval(
+        0.0, source="Living Room Emby", clock=zero_clock, sleep=zero_clock.sleep
+    )
+    assert await _grants(disabled, zero_clock, 5) == pytest.approx([0.0] * 5)
+    assert zero_clock.slept == [], "rate=0 grants everything without a single sleep"
+
+
+async def test_the_gate_records_its_wait_on_every_call_labelled_by_source() -> None:
+    """`usher.source.throttle.wait`, PRD 10's M10 row: the seconds spent inside
+    the gate, on **every** call and not only when it waits, labelled `source`.
+
+    Zero is a real reading -- it is how an operator sees the limiter is enabled
+    and not binding -- so a gate that recorded only its waits would leave the
+    healthy-and-idle case indistinguishable from a permanently empty panel.
+    Two calls at two per second: the first goes immediately (0 s), the second
+    waits half a second, so the histogram holds two observations summing to
+    0.5 s under one source label.
+    """
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+
+    clock = _Clock()
+    gate = _MinInterval(2.0, source="Living Room Emby", clock=clock, sleep=clock.sleep)
+    await gate.take()
+    await gate.take()
+
+    data = reader.get_metrics_data()
+    points = [
+        point
+        for resource in (data.resource_metrics if data else ())
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "usher.source.throttle.wait"
+        for point in metric.data.data_points
+    ]
+    assert len(points) == 1, "one aggregated series for the one source"
+    (point,) = points
+    assert isinstance(point, HistogramDataPoint), "the wait is a histogram, not a counter"
+    assert dict(point.attributes or {}) == {"source": "Living Room Emby"}
+    assert point.count == 2, "recorded on every call, the non-binding one included"
+    assert point.sum == pytest.approx(0.5)
+
+
+async def test_a_disabled_gate_records_no_throttle_series_at_all() -> None:
+    """A disabled gate and one that never binds are two different readings, and
+    the metric has to keep them apart: a `rate=0` gate emits nothing, so an
+    empty `usher.source.throttle.wait` series means the limiter is disabled
+    rather than enabled and permanently unbinding."""
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+
+    clock = _Clock()
+    gate = _MinInterval(0.0, source="Living Room Emby", clock=clock, sleep=clock.sleep)
+    await gate.take()
+    await gate.take()
+
+    data = reader.get_metrics_data()
+    names = {
+        metric.name
+        for resource in (data.resource_metrics if data else ())
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+    assert "usher.source.throttle.wait" not in names
+
+
+# ---------------------------------------------------------------------------
+# SourceGateRegistry -- who owns the gate (M10 S3; ADR-0042 §4)
+
+
+async def test_a_registrys_gate_paces_and_a_second_source_gets_its_own_budget() -> None:
+    """The **behavioural** half of "keyed by `source.id`", which the identity
+    assertions elsewhere cannot state.
+
+    `tests/unit/test_composition.py` pins that two adapters for one source hold
+    the *same* gate object and two sources hold different ones. That is an
+    identity claim, and identity is not the thing an operator experiences —
+    what they experience is that a second server is paced at the full rate
+    rather than at half of it. So this drives two sources through one registry
+    and reads the clock:
+
+    - the second call **for one source** waits `1/rate`;
+    - the first call for a **different** source waits nothing, because it is a
+      different gate with its own `_next`.
+
+    An implementation returning one global gate passes every identity
+    assertion's first half and fails the second arm here, with a number rather
+    than an `is`.
+
+    This is also the only reader of `SourceGateRegistry`'s injected `clock` and
+    `sleep`. They exist so a registry-owned gate can be driven without
+    sleeping, and a constructor argument nothing passes is one nothing covers —
+    `.claude/rules/testing-discipline.md` records that in both directions.
+    """
+    clock = _Clock()
+    gates = SourceGateRegistry(2.0, clock=clock, sleep=clock.sleep)
+    living_room, bedroom = uuid.uuid4(), uuid.uuid4()
+
+    await gates.gate(living_room, "Living Room Emby").take()
+    assert clock.slept == [], "the premise: the first call through a fresh gate never waits"
+
+    await gates.gate(living_room, "Living Room Emby").take()
+    assert clock.slept == [0.5], "the same source's second call is spaced by 1/rate"
+
+    await gates.gate(bedroom, "Bedroom Emby").take()
+    assert clock.slept == [0.5], (
+        "a second source waited behind the first one's slot, so the two share a gate "
+        "and each server is being paced at half the configured rate"
+    )
+
+
+# ---------------------------------------------------------------------------
 # failure_detail
 
 

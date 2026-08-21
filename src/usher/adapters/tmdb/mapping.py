@@ -58,6 +58,7 @@ name — are `PortDataMalformed`, because a canonical title cannot be built
 from either.
 """
 
+import math
 import re
 import uuid
 from collections.abc import Mapping, Sequence
@@ -940,9 +941,28 @@ def _positive_int(value: Any) -> int | None:
 
 
 def _non_negative_float(value: Any) -> float | None:
+    """`None` for anything `Title.popularity` will not take, **including a
+    non-finite one**.
+
+    `math.isfinite` is not decoration beside `value >= 0`: `float("inf") >= 0`
+    is `True`, and `json.loads` maps any JSON number that overflows binary64 --
+    `1e400`, which is well-formed JSON -- straight onto `inf` with no error.
+    Before M10's F9 that value reached `titles.popularity` (`double
+    precision`, where IEEE `Infinity` is legal and satisfies the column's own
+    `>= 0` CHECK) and sorted above every real title forever. `Title.popularity`
+    now carries `allow_inf_nan=False`, so without this filter the same payload
+    would raise `pydantic.ValidationError` out of the constructor below --
+    which is not a `UsherPortError`, and this module's contract is that nothing
+    TMDb can put in a payload may raise.
+
+    `_bounded` needs no such clause and is left alone: `low <= inf <= high` is
+    `False` and every comparison against `NaN` is `False`, so a ceiling
+    excludes both already. That is why `community_rating` never had this
+    defect and `popularity` did.
+    """
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value) if value >= 0 else None
+    return float(value) if math.isfinite(value) and value >= 0 else None
 
 
 def _bounded(value: Any, low: float, high: float) -> float | None:

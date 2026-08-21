@@ -51,10 +51,10 @@ import uuid
 from collections.abc import Mapping, Sequence
 
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, is_row_refusal
 from usher.db.staging import stage_records
 from usher.domain.enums import SearchNameKind
 from usher.domain.ids import new_id
@@ -604,7 +604,22 @@ class PostgresCreditRepository(CreditRepository):
                         records=records,
                     )
                     written = (await self._session.execute(text(_INSERT_CREDITS))).scalar_one()
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).** This
+            # method writes `title_search_names` and `titles.credit_names`, neither of which is
+            # narrower than the field feeding it -- but its statements bind caller-supplied
+            # `uuid[]`, `text[]` and `text` arrays, so every class-22 refusal they can raise is
+            # about a value this call handed in, and the older `IntegrityError` was narrower than
+            # that. SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto any classified
+            # subclass, so a column refusing a *value* arrives as a bare `DBAPIError` that `except
+            # IntegrityError` does not catch and the driver's own exception crossed this port
+            # boundary untranslated -- the one thing ADR-0009 forbids. `db/repositories/_errors.py`
+            # holds the two measured shapes and the only copy of the predicate. Everything that is
+            # *not* a row refusal -- a dropped connection, a statement timeout, an undefined table
+            # -- still propagates, because a caller that cannot tell those apart retries the one
+            # thing a retry cannot fix.
+            if not is_row_refusal(exc):
+                raise
             # A `title_id`/`person_id` naming a row that does not exist, a
             # CHECK violation, or a `tmdb_credit_id` already held by a title
             # outside this call's scope -- which is the natural key doing the

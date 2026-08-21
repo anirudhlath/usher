@@ -70,6 +70,7 @@ from usher.adapters.bulk.wikidata import WikidataCrosswalkDataset
 from usher.adapters.embedding.fastembed import RUNTIME as FASTEMBED_RUNTIME
 from usher.adapters.embedding.openai_compat import RUNTIME as OPENAI_RUNTIME
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
+from usher.adapters.http import SourceGateRegistry
 from usher.adapters.images import DiskImageBlobStore, ProviderCdnImageFetcher
 from usher.adapters.llm import OpenAICompatibleClient
 from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
@@ -311,18 +312,63 @@ class Pipeline:
     commit: Callable[[], Awaitable[None]]
 
 
-def adapter_factory(settings: Settings) -> SourceAdapterFactory:
+def source_gates(settings: Settings) -> SourceGateRegistry:
+    """This process's outbound rate gates, one per source.
+
+    **Built once at a composition root and handed down**, which is the whole
+    of ADR-0042 §4 and the reason `adapter_factory` below takes it rather than
+    reading the rate itself. `create_app`'s lifespan builds one and puts it on
+    `app.state` so the two lanes and every request share it; `usher work` and
+    `usher sync` each build one for the life of the command. `unit_of_work`
+    builds one when nobody hands it one, so the default is *shared across every
+    scope that unit of work opens* rather than fresh per scope.
+
+    Precisely the shape `api/app.py` already uses for `TmdbClient`'s token
+    bucket, and for the reason `api/deps.py` records beside `EnrichService`:
+    a limiter whose lifetime is a request is a limiter multiplied by the
+    number of requests in flight.
+
+    **A second process is a second registry**, and that is a capacity decision
+    rather than a correctness one -- two `usher work` containers against one
+    Emby spend `2 x rate`. Nothing here reaches across a process boundary and
+    nothing should pretend to.
+    """
+    return SourceGateRegistry(settings.source_requests_per_second)
+
+
+def adapter_factory(settings: Settings, gates: SourceGateRegistry) -> SourceAdapterFactory:
     """This deployment's tuning, applied to every adapter it builds.
 
     One function rather than three constructions, because a knob added to
     the registry has to reach the server, the CLI and the lanes at once --
     `push_stale_after_seconds` reaching two of the three is a source whose
     staleness window depends on which process opened its socket.
+
+    **`gates` is required rather than defaulted**, and that is the type
+    checker doing the work a convention would not: this function is called
+    once per unit of work, so a caller that forgot the registry would get a
+    fresh gate per pipeline and the multiplication ADR-0042 §4 records would
+    come straight back. There is no spelling of this call that silently
+    re-introduces it.
+
+    **It is *this* call that is enforced and not the chain below it, which is
+    worth stating because the flattering reading is available.**
+    `ConfiguredSourceAdapterFactory(gates=None)`, `EmbySession(limiter=None)`
+    and `EmbyAdapter(limiter=None)` are all defaulted, deliberately: each means
+    "nobody configured this" and gets a private registry at the unlimited rate,
+    which is what lets a test build one directly (ADR-0042's Consequences say
+    so). The cost of tightening the first of the three is small and measured --
+    **2 edits**, `tests/unit/test_adapters_factory.py`'s two bare
+    constructions, out of four sites there of which two already pass `gates=` --
+    and it is still declined, because a required argument at that layer buys
+    nothing this layer does not already hold: every path that reaches an adapter
+    in a running process comes through here.
     """
     return ConfiguredSourceAdapterFactory(
         page_size=settings.source_page_size,
         timeout_seconds=settings.source_timeout_seconds,
         reauth_cooldown_seconds=settings.source_reauth_cooldown_seconds,
+        gates=gates,
         push_stale_after_seconds=settings.push_stale_after_seconds,
         push_poll_seconds=settings.push_poll_seconds,
     )
@@ -337,6 +383,7 @@ def build_pipeline(
     provider: MetadataProvider | None = None,
     embedder: Embedder | None = None,
     llm: LLMClient | None = None,
+    gates: SourceGateRegistry | None = None,
 ) -> Pipeline:
     """Wire one session into the whole ingest pipeline.
 
@@ -461,7 +508,14 @@ def build_pipeline(
         credits=credits,
         collections=collections,
         images=images,
-        adapters=adapter_factory(settings),
+        # **The gate registry travels with the composition root, not with the
+        # pipeline.** `None` means "nobody handed me one", which is one
+        # command's single pipeline (`usher sync`) or a directly-built pipeline
+        # in a test -- there is nothing for it to share a gate *with*, so a
+        # private registry is the honest answer. Every caller that opens more
+        # than one pipeline passes the same registry to all of them, and
+        # `unit_of_work` is what makes that automatic for the three lanes.
+        adapters=adapter_factory(settings, gates if gates is not None else source_gates(settings)),
         matcher=matcher,
         ingest=ingest,
         reconcile=ReconcileService(
@@ -1418,6 +1472,16 @@ def image_proxy(
     is the cache: after the first request per `(image, rung)` there is no
     outbound traffic at all.
 
+    **M10's S3 re-examined this against `USHER_SOURCE_REQUESTS_PER_SECOND`'s
+    new gate and confirmed it rather than reversing it.** That gate exists
+    because a media *source* is a machine somebody is watching television on
+    (ADR-0042, issue #19); `image.tmdb.org` is a CDN and the argument above is
+    untouched by it. The decline is one of five the S3 enumeration recorded,
+    and this paragraph is where the code says so -- `image.tmdb.org` is the
+    upstream, the cache is the bound, and
+    `tests/unit/test_outbound_call_sites.py` is the closed table that makes a
+    *new* unthrottled call site a red rather than a discovery.
+
     The store is returned rather than built per request because
     `DiskImageBlobStore` holds a `Path` and nothing else — but it is returned
     *here*, beside the fetcher, so a deployment cannot end up with a cache
@@ -1556,6 +1620,7 @@ def unit_of_work(
     *,
     events: EventPublisher,
     provider: MetadataProvider | None = None,
+    gates: SourceGateRegistry | None = None,
 ) -> UnitOfWork:
     """One session, one pipeline, one transaction, closed however it ends.
 
@@ -1565,12 +1630,22 @@ def unit_of_work(
     started -- so every unit of work opens its own. Returned as a callable
     so `usher.api.lanes` never imports SQLAlchemy at all, and so a test can
     hand it a pipeline over fakes without standing up a database.
+
+    **The outbound gate registry is resolved once, here, and closed over** --
+    not per scope. That is the difference between one gate per source and one
+    per unit of work, and this function is where it is decided for three of the
+    four composition roots that dial a source: `LaneSupervisor` takes exactly
+    one `UnitOfWork` and both the push lane and the worker lane read through
+    it, and `usher work` builds one for the daemon. `create_app` passes its own
+    registry in so the *request* path can share it too (`app.state`); nobody
+    else has a second reader, so nobody else needs to.
     """
+    gates = gates if gates is not None else source_gates(settings)
 
     @asynccontextmanager
     async def open() -> AsyncIterator[Pipeline]:
         async with sessions() as session:
-            yield build_pipeline(session, settings, events=events, provider=provider)
+            yield build_pipeline(session, settings, events=events, provider=provider, gates=gates)
 
     return open
 
@@ -2433,6 +2508,7 @@ __all__ = [
     "Pipeline",
     "QueueGauges",
     "SearchGauges",
+    "SourceGateRegistry",
     "SourceRegistry",
     "adapter_factory",
     "build_curation_service",
@@ -2450,5 +2526,6 @@ __all__ = [
     "open_adapter",
     "run_bootstrap",
     "selected_sources",
+    "source_gates",
     "unit_of_work",
 ]

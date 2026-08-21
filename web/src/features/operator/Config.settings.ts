@@ -173,6 +173,15 @@ export const CONFIG: readonly SettingRow[] = [
     measured: false,
   },
   {
+    key: 'USHER_SOURCE_REQUESTS_PER_SECOND',
+    group: 'sources',
+    def: '0.4',
+    about:
+      'The proactive outbound gate: one request per source per process, spaced 1/rate apart, never a burst. Zero is unlimited. The default is derived rather than picked — a household media server is a machine somebody is watching something on, and 0.4 rps is a courtesy margin under the rate this project measured against a real Emby 4.9.5.0.',
+    secret: false,
+    measured: true,
+  },
+  {
     key: 'USHER_SOURCE_REAUTH_COOLDOWN_SECONDS',
     group: 'sources',
     def: '60.0',
@@ -575,6 +584,15 @@ export const CONFIG: readonly SettingRow[] = [
       'What the gap-closer may do when the delta has no cursor. Cursored refuses a full walk and warns instead, which changes behaviour only for a deployment that has never completed one.',
     secret: false,
     measured: false,
+  },
+  {
+    key: 'USHER_PUSH_GAP_MAX_ITEMS',
+    group: 'lanes',
+    def: '20000',
+    about:
+      'The ceiling on one gap-closing delta that does have a cursor, counted in items; zero is unlimited. 20,000 is 100 pages at the shipped page size and about ten minutes of upstream at the 6.04 s/page mean measured 2026-08-15, deliberately under the 28,934 items a 30-day delta returned on that library. A walk that stops here records FAILED, so no cursor advances and nothing it never reached is skipped — `usher sync --kind full` closes the rest. It bounds the item lane only.',
+    secret: false,
+    measured: true,
   },
   {
     key: 'USHER_PUSH_SOURCE_REFRESH_SECONDS',

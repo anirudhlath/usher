@@ -18,7 +18,12 @@ from fastapi import Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.lanes import LaneSupervisor
-from usher.composition import adapter_factory, build_image_proxy_service, build_search_service
+from usher.composition import (
+    SourceGateRegistry,
+    adapter_factory,
+    build_image_proxy_service,
+    build_search_service,
+)
 from usher.config import Settings
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.collection import PostgresCollectionRepository
@@ -294,15 +299,52 @@ def get_source_repository(session: SessionDep) -> SourceRepository:
 SourceRepositoryDep = Annotated[SourceRepository, Depends(get_source_repository)]
 
 
-def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
+def get_source_gates(request: Request) -> SourceGateRegistry:
+    """The process's outbound rate gates, off `app.state`.
+
+    🔴 **The one thing on this page that must not be request-scoped, and the
+    argument is already written forty lines below about `EnrichService`:** *"a
+    request-scoped `TmdbClient` gives every concurrent request a fresh bucket,
+    so N in-flight requests get N x 30 rps"*. A source gate built per request
+    is that defect against a household's media server rather than against a
+    CDN-backed public API -- and the server this project measures answers a
+    single-item read in 0.1495 s, so N concurrent requests really do reach the
+    rate the gate is set to refuse (`.claude/rules/emby-push-and-ingest.md`,
+    2026-08-15, one household one evening). It is on `app.state` for the reason
+    the image fetcher and the TMDb provider are, and it is the *same* object
+    the two lanes read through, so an admin status probe and a push lane pace
+    against one gate (ADR-0042 §4).
+
+    Same defensive `getattr`/`cast` shape as `get_lane_supervisor` above and
+    for the same reason -- `app.state` is typed `Any`.
+    """
+    gates = getattr(request.app.state, "source_gates", None)
+    if gates is None:
+        raise RuntimeError(
+            "app.state.source_gates is not set -- create_app's lifespan has not run. "
+            "If this is a test using a bare ASGI transport, wrap the app in "
+            "asgi_lifespan.LifespanManager first."
+        )
+    return cast(SourceGateRegistry, gates)
+
+
+def get_source_adapter_factory(
+    settings: SettingsDep,
+    gates: Annotated[SourceGateRegistry, Depends(get_source_gates)],
+) -> SourceAdapterFactory:
     """The composition root's adapter registry.
 
     Its own dependency, not inlined into `get_source_service`, so a test can
     override exactly this one thing -- pointing the real `EmbyAdapter` at an
     in-memory server -- without also replacing the repository, the
     credential store, or the service.
+
+    **Request-scoped, and that is now safe rather than merely tolerated.**
+    The factory itself is cheap and stateless; the one piece of it whose
+    lifetime matters is the gate registry, and that comes off `app.state`
+    above rather than being minted here.
     """
-    return adapter_factory(settings)
+    return adapter_factory(settings, gates)
 
 
 def get_credential_store(session: SessionDep, settings: SettingsDep) -> CredentialStore:

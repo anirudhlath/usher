@@ -242,6 +242,16 @@ plugins = ["pydantic.mypy"]
 # `FastEmbedEmbedder._model` is `Any` for exactly that reason, stated
 # there rather than implied here.
 #
+# `asyncpg.*` is here for the same reason as `yaml`: nothing in `src/` imports
+# it -- the driver is reached through SQLAlchemy's dialect, and
+# `usher.db.staging.raw_connection` unwraps to it as `Any` on purpose -- and
+# the one consumer is `tests/integration/test_staging.py`, which names
+# `asyncpg.exceptions.StringDataRightTruncationError` to observe the COPY
+# path's `22001` refusal that ADR-0043 could only assert from the protocol.
+# asyncpg ships no `py.typed`; a stub package bought for one `pytest.raises`
+# is more surface than the `Any` it removes, and the alternative -- matching
+# the exception by class *name* -- is a weaker assertion than the type.
+#
 # `ranx` is here for exactly `fastembed`'s reason and the entry is load-bearing
 # in *both* environments: measured 2026-08-18 against a CI-identical venv
 # (`UV_PROJECT_ENVIRONMENT=... uv sync --frozen`, no `--extra eval`), the two
@@ -271,7 +281,7 @@ plugins = ["pydantic.mypy"]
 # eleventh, which this comment used to name, does not: it forbids importing
 # `usher.eval`, which is a different claim about a different module. Measured,
 # with the correction recorded on the twelfth contract itself.
-module = ["uuid6", "testcontainers.*", "yaml", "fastembed", "ranx"]
+module = ["uuid6", "testcontainers.*", "yaml", "fastembed", "ranx", "asyncpg.*"]
 ignore_missing_imports = true
 
 [tool.importlinter]

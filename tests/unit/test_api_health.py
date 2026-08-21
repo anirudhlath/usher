@@ -14,6 +14,7 @@ undebated for as long as it did.
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import pytest
 from asgi_lifespan import LifespanManager
@@ -107,21 +108,22 @@ class _Lanes(LaneSupervisor):
         *,
         push: list[str] | None = None,
         worker: bool = False,
+        crashed: list[str] | None = None,
+        recovered: int | None = None,
+        recovered_when: datetime | None = None,
         available: dict[uuid.UUID, bool | None] | None = None,
     ) -> None:
         super().__init__(
-            Settings(
-                database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
-                secret_key="0123456789abcdef0123456789abcdef",
-                push_enabled=False,
-                worker_enabled=False,
-            ),
+            _settings(),
             _no_work,
             NullEventPublisher(),
             user_id=_no_user,
         )
         self._reported = push or []
         self._worker_reported = worker
+        self._crashed = crashed or []
+        self._recovered = recovered
+        self._recovered_when = recovered_when
         self._available = available or {}
 
     def running_sources(self) -> list[str]:
@@ -130,8 +132,26 @@ class _Lanes(LaneSupervisor):
     def worker_running(self) -> bool:
         return self._worker_reported
 
+    def crashed_sources(self) -> list[str]:
+        return self._crashed
+
+    def recovered_claims(self) -> int | None:
+        return self._recovered
+
+    def recovered_at(self) -> datetime | None:
+        return self._recovered_when
+
     def push_available(self, source_id: uuid.UUID) -> bool | None:
         return self._available.get(source_id)
+
+
+def _settings() -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
+        secret_key="0123456789abcdef0123456789abcdef",
+        push_enabled=False,
+        worker_enabled=False,
+    )
 
 
 @asynccontextmanager
@@ -146,13 +166,7 @@ async def _no_user() -> uuid.UUID:
 
 @asynccontextmanager
 async def _client_with_lanes(lanes: LaneSupervisor) -> AsyncIterator[AsyncClient]:
-    settings = Settings(
-        database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
-        secret_key="0123456789abcdef0123456789abcdef",
-        push_enabled=False,
-        worker_enabled=False,
-    )
-    app = create_app(settings)
+    app = create_app(_settings())
     app.dependency_overrides[get_lane_supervisor] = lambda: lanes
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)
@@ -161,9 +175,61 @@ async def _client_with_lanes(lanes: LaneSupervisor) -> AsyncIterator[AsyncClient
 
 
 async def test_readiness_reports_the_lanes() -> None:
-    async with _client_with_lanes(_Lanes(push=["Living Room Emby"], worker=True)) as client:
+    stamp = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+    lanes = _Lanes(
+        push=["Living Room Emby"],
+        worker=True,
+        crashed=["Attic Emby"],
+        recovered=20,
+        recovered_when=stamp,
+    )
+    async with _client_with_lanes(lanes) as client:
         body = (await client.get("/health/ready")).json()
-    assert body["lanes"] == {"push": ["Living Room Emby"], "worker": True}
+    assert body["lanes"] == {
+        "push": ["Living Room Emby"],
+        "worker": True,
+        "crashed_sources": ["Attic Emby"],
+        "recovered_claims": 20,
+        # The literal wire spelling, not `stamp.isoformat()`: pydantic renders
+        # a UTC datetime with a `Z` and `isoformat()` renders `+00:00`, so the
+        # derived form asserts what Python does rather than what a client
+        # receives.
+        "recovered_at": "2026-08-19T12:00:00Z",
+    }
+
+
+async def test_a_process_that_runs_no_worker_reports_no_orphan_count_rather_than_zero() -> None:
+    """**`null`, not `0`, and the difference is a claim.**
+
+    `USHER_WORKER_ENABLED=false` beside a `usher work` container is the split
+    topology PRD 08 prices, and this process never calls `recover()` at all --
+    so `0` would assert *"no orphans"* about a question it never asked, on the
+    one endpoint an operator reads to find out. `SourceStatus.push_available`
+    is the precedent: `None` means **not probed**.
+
+    Driven against a **real** `LaneSupervisor` rather than the `_Lanes` stub
+    above, because a stub returning `None` because it was told to says nothing
+    about what the shipped supervisor reports. Its unit of work and its user
+    reader both raise, so a readiness check that went looking fails loudly.
+    """
+    lanes = LaneSupervisor(_settings(), _no_work, NullEventPublisher(), user_id=_no_user)
+    assert lanes.worker_running() is False, "the premise: this process runs no worker lane"
+
+    async with _client_with_lanes(lanes) as client:
+        body = (await client.get("/health/ready")).json()
+
+    assert body["lanes"]["recovered_claims"] is None
+    assert body["lanes"]["recovered_at"] is None
+
+    # **The control, and it is the assertion with teeth.** `is None` is
+    # satisfied by a field that can only ever be `null` -- a `bool` reported
+    # as `None`, a serialiser dropping a zero. The same route, one stub over,
+    # has to answer `0` for a process that asked and found nothing, because
+    # "asked and found none" and "never asked" are the two answers this field
+    # exists to distinguish.
+    async with _client_with_lanes(_Lanes(worker=True, recovered=0)) as client:
+        asked = (await client.get("/health/ready")).json()
+    assert asked["lanes"]["recovered_claims"] == 0
 
 
 async def test_a_source_whose_push_is_down_does_not_make_this_process_unready() -> None:
@@ -187,27 +253,66 @@ async def test_a_source_whose_push_is_down_does_not_make_this_process_unready() 
 
 
 @pytest.mark.parametrize(
-    ("push", "worker"),
-    [([], False), ([], True), (["A"], False), (["A", "B"], True)],
+    ("push", "worker", "crashed", "recovered", "recovered_when"),
+    [
+        ([], False, [], None, None),
+        ([], True, [], 0, None),
+        (["A"], False, ["B"], 20, datetime(2026, 8, 19, 12, 0, tzinfo=UTC)),
+        (["A", "B"], True, [], None, datetime(2026, 8, 19, 12, 0, tzinfo=UTC)),
+        ([], True, ["A", "B"], 1, datetime(2026, 8, 19, 12, 0, tzinfo=UTC)),
+    ],
 )
 async def test_no_lane_state_can_change_the_readiness_verdict(
-    push: list[str], worker: bool
+    push: list[str],
+    worker: bool,
+    crashed: list[str],
+    recovered: int | None,
+    recovered_when: datetime | None,
 ) -> None:
     """Every combination of lane state, one verdict.
 
-    This is the case the two mutations in the plan's table land on: putting
-    `push` inside `ReadinessChecks` makes `all(checks.model_dump().values())`
-    pick it up automatically, and `... and lanes.running_sources()` does it
-    by hand. Both change the answer for at least one row below; the
-    database is unreachable throughout, so `checks` is constant and the
-    lanes are the only thing varying.
+    This is the case the mutations in the plan's table land on: putting any
+    one of the **five** lane fields inside `ReadinessChecks` makes
+    `all(checks.model_dump().values())` pick it up automatically, and
+    `... and lanes.running_sources()` does it by hand. The database is
+    unreachable throughout, so `checks` is constant and the lanes are the only
+    thing varying.
+
+    **The `checks` assertion is what has teeth here, not the status code**,
+    and saying so is the point: this app is already 503, so a folded field
+    cannot move the verdict in *this* file at all -- what it does move is the
+    contents of `checks`, which the exact-equality below refuses to grow.
+    `tests/integration/test_health.py::
+    test_a_process_with_no_lanes_running_is_still_ready` is the other half,
+    where a reachable database means a folded `crashed_sources: []`,
+    `recovered_claims: null` or `recovered_at: null` is a **falsy** member of
+    `all(...)` and turns a 200 into a 503.
+
+    M10's F2 added the last three parameters. Each varies over both a falsy
+    and a truthy value, so a fold is caught wherever it happens to land.
     """
-    async with _client_with_lanes(_Lanes(push=push, worker=worker)) as client:
+    lanes = _Lanes(
+        push=push,
+        worker=worker,
+        crashed=crashed,
+        recovered=recovered,
+        recovered_when=recovered_when,
+    )
+    async with _client_with_lanes(lanes) as client:
         response = await client.get("/health/ready")
     assert response.status_code == 503
     body = response.json()
     assert body["status"] == "degraded"
     assert body["checks"] == {"database": False, "migrations": False}
+    # And every one of them really is in the body, so the equality above is
+    # refusing a *move* rather than passing because the field does not exist.
+    assert set(body["lanes"]) == {
+        "push",
+        "worker",
+        "crashed_sources",
+        "recovered_claims",
+        "recovered_at",
+    }
 
 
 async def test_readiness_never_touches_a_source() -> None:

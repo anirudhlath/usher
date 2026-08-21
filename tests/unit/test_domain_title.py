@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 import pytest
@@ -270,3 +271,97 @@ def test_title_serialization_round_trips() -> None:
     )
     restored = Title.model_validate_json(title.model_dump_json())
     assert restored == title
+
+
+# --- the three unbounded-above numbers, and which of them is a defect ------
+
+
+def test_tmdb_popularity_refuses_a_non_finite_value() -> None:
+    """PRD 09's carried *"`Title.popularity` accepts infinity"* debt, closed by
+    M10's F9.
+
+    `1e400` is well-formed JSON and `json.loads` maps it onto `inf` with no
+    error at all, so this is the value a TMDb payload actually delivers rather
+    than a constructed one — spelled that way here so the case is about the
+    reachable shape and not about `float("inf")`.
+
+    `ge=0` alone does not refuse it (`float("inf") >= 0` is `True`), and
+    neither does the column: `titles.tmdb_popularity` is `sa.Float()` —
+    `double precision`, where IEEE `Infinity` is legal — and `Infinity >= 0`
+    satisfies `ck_titles_tmdb_popularity_non_negative` too. So this model is
+    the only layer that can say no, which is why ADR-0043 leaves it to the
+    field while leaving every *narrower*-than-its-field column to the
+    repository.
+
+    **The field is `tmdb_popularity` and was `popularity` when F9 wrote this
+    case; ADR-0040's rename carried the defect across rather than fixing it.**
+    That record split three dual-written columns into five source-named ones
+    and reproduced `Field(default=None, ge=0)` verbatim on the new
+    `tmdb_popularity` — so the debt survived a rename that touched the exact
+    line holding it, which is worth knowing before assuming a rename pass
+    would have caught something like this.
+    """
+    for value in (json.loads("1e400"), float("inf"), float("nan")):
+        with pytest.raises(ValidationError):
+            Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_popularity=value)
+
+
+def test_a_finite_tmdb_popularity_is_still_accepted() -> None:
+    """The control for the case above: `allow_inf_nan=False` must refuse the
+    two non-finite values and nothing else. Without this, "refuses infinity"
+    is also satisfied by a field that refuses every float."""
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_popularity=1739.421)
+    assert title.tmdb_popularity == 1739.421
+    bare = Title(kind=TitleKind.MOVIE, name="D", sort_name="D", tmdb_popularity=0.0)
+    assert bare.tmdb_popularity == 0.0
+
+
+@pytest.mark.parametrize("field", ["tmdb_vote_average", "imdb_average_rating"])
+def test_a_rating_refuses_a_non_finite_value_by_its_ceiling(field: str) -> None:
+    """Neither rating field ever had `tmdb_popularity`'s defect, and the reason
+    is the `le=10` rather than anything about them being better designed.
+
+    Stated as a case because neither carries `allow_inf_nan=False`: if a later
+    change relaxes or removes either ceiling — TMDb changing scale, say — the
+    protection goes with it silently. This is the thing that notices.
+
+    **Parametrised over both because ADR-0040 turned one such field into two.**
+    Before that record this was `community_rating` alone; the split gave IMDb
+    its own `imdb_average_rating` with the same `ge=0, le=10`, so the accident
+    is now load-bearing in two places and a case naming one of them would leave
+    the other free to lose its ceiling unobserved.
+    """
+    for value in (json.loads("1e400"), float("nan")):
+        with pytest.raises(ValidationError):
+            Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: value})
+
+
+def test_year_and_vote_counts_still_accept_a_value_their_column_cannot_hold() -> None:
+    """An **excluded** case, asserted rather than left unstated.
+
+    `Field(ge=0)` against an `integer` column is what
+    `.claude/rules/db-and-sql.md` calls *"the common shape here"*, and
+    `titles.year`, `titles.tmdb_vote_count` and `titles.imdb_num_votes` are all
+    live examples: `2**31` constructs cleanly and the column cannot hold it.
+    M10's F9 deliberately does **not** close them, for the reason ADR-0043
+    gives in its question (5) — the writers that put values in those columns
+    are `bulk.py:upsert_titles` and `bulk.py:apply_ratings`, which take
+    `ports.bulk.ImdbTitle` and `ports.bulk.ImdbRating` and never construct a
+    `Title` at all, so a ceiling here would be invisible to the path that
+    actually overflows them. All are in ADR-0043's `exposed-copy` bucket, which
+    M9's boundary call 8 keeps out of M10 whole.
+
+    The case exists so the exclusion is a recorded state rather than an
+    oversight: whoever closes the COPY path will see it go red.
+    """
+    title = Title(
+        kind=TitleKind.MOVIE,
+        name="Dune",
+        sort_name="Dune",
+        year=2**31,
+        tmdb_vote_count=2**31,
+        imdb_num_votes=2**31,
+    )
+    assert title.year == 2**31
+    assert title.tmdb_vote_count == 2**31
+    assert title.imdb_num_votes == 2**31

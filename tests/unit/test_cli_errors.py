@@ -33,6 +33,8 @@ import contextlib
 import inspect
 import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +45,10 @@ from sqlalchemy.exc import DBAPIError, MissingGreenlet, OperationalError
 
 from usher import cli as usher_cli
 from usher.config import Settings
+from usher.domain.enums import SourceKind
+from usher.domain.ids import new_id
+from usher.domain.source import Source
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.ports.errors import (
     PortAuthFailed,
     PortDataMalformed,
@@ -61,6 +67,7 @@ from usher.ports.errors import (
 from usher.ports.ingest import AvailabilitySweepRefused
 from usher.ports.search import FilterNotSupported
 from usher.ports.source import SourceNotSupported
+from usher.services.reconcile import RETRACTION_ERROR_CODE
 
 # A value that must never appear in anything this module asserts on. Spelled
 # once so a leak fails loudly rather than being read past.
@@ -540,6 +547,30 @@ def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> 
     # with -- `ReconcileService` and `PushService` absorb two of them, and
     # `_TRANSLATORS` covers every `SearchFilters` field, so the third fires
     # only for a field a later milestone forgets.
+    #
+    # ⚠️ **`AvailabilitySweepRefused` stays out for the *absorbed* half of that
+    # sentence and no longer for the other half** (M10 S9): the family has been
+    # observed in the field, and it is still unreachable here because
+    # `reconcile` promises never to raise it. `_sync` reports it off the run row
+    # and exits non-zero -- see the three cases at the end of this module.
+    #
+    # 🔴 **`RepositoryConflict`'s exclusion carries its own measurement since
+    # M10's F4**, because it is the member somebody keeps arriving here to add
+    # -- PRD 09 carried *"a one-line change"* for it from M9 to M10 -- and an
+    # omission with no number beside it reads as an oversight. The reason
+    # travels in the assertion messages below rather than only in this comment,
+    # so a widening meets the argument at the point it fails.
+    exclusion = (
+        "RepositoryConflict stays out: 22 raise sites across 14 modules "
+        "(re-derived 2026-08-20, M10 F4), of which exactly ONE is reachable "
+        "from a CLI argument -- `usher unmatched --title` naming no title, "
+        "fixed by a lookup in `cli._unmatched` rather than by muting the other "
+        "21. Several of those are deliberate tripwires for bugs in this "
+        "project's own code (`title_neighbors`' bounds, the credits delete's "
+        "scope, a curated batch this project assembled wrong), and ADR-0026's "
+        "bar is that a family belongs here when an operator can act on it. "
+        "1-of-22 is not a family. See ADR-0026's Consequences."
+    )
     assert everything_else == {
         RepositoryConflict,
         RepositoryNotFound,
@@ -547,14 +578,14 @@ def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> 
         SourceNotSupported,
         FilterNotSupported,
         AvailabilitySweepRefused,
-    }
+    }, exclusion
 
     assert UsherPortError not in usher_cli.OPERATOR_ERRORS
     assert not issubclass(UsherPortError, usher_cli.OPERATOR_ERRORS)
     for family in reaching:
         assert issubclass(family, usher_cli.OPERATOR_ERRORS), family
     for family in everything_else:
-        assert not issubclass(family, usher_cli.OPERATOR_ERRORS), family
+        assert not issubclass(family, usher_cli.OPERATOR_ERRORS), f"{family}\n{exclusion}"
 
 
 def test_an_unreachable_llm_endpoint_is_a_message_rather_than_a_traceback(
@@ -668,6 +699,278 @@ def test_a_malformed_upstream_payload_keeps_its_traceback(
 
     with pytest.raises(PortDataMalformed):
         usher_cli.main(["search", "dune"])
+
+
+# -- a failed sync run is a non-zero exit -------------------------------------
+#
+# The stand-ins below drive `_sync`'s real body -- every other case in this
+# module patches the dispatch coroutine, which is what makes them tests of the
+# *boundary*. This one is about what the command itself does with a run row it
+# was handed, so the body has to run.
+
+
+def _run(kind: SyncRunKind, status: SyncRunStatus, *, error: str | None = None) -> SyncRun:
+    return SyncRun(
+        source_id=new_id(),
+        kind=kind,
+        status=status,
+        error=error,
+        finished_at=datetime(2026, 8, 19, tzinfo=UTC),
+    )
+
+
+class _StubAdapter:
+    def __init__(self) -> None:
+        self.closed = 0
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+def _sync_against(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    walk: SyncRun,
+    watch: SyncRun,
+    second: tuple[SyncRun, SyncRun] | None = None,
+) -> list[_StubAdapter]:
+    """Wire `_sync` to given run rows and nothing else.
+
+    Deliberately not a fake pipeline with behaviour: the property under test is
+    what the command does with `run.status`, and a stub that could itself fail
+    would make a red ambiguous.
+
+    ⚠️ **`second` is not a convenience.** With one source, *"collect the
+    failures and exit after the loop"* and *"exit on the first failing source"*
+    are the same program -- measured, in S9's own sweep, where moving the
+    `raise` inside the loop survived every case in this module. One source
+    cannot see the difference and `_sync`'s docstring calls it load-bearing, so
+    a second one is what makes the claim checkable.
+    """
+    _configured(monkeypatch)
+    sources = [
+        Source(
+            kind=SourceKind.EMBY,
+            name=name,
+            base_url="https://emby.invalid",
+            credentials_ref=f"ref-{index}",
+            device_id=f"device-{index}",
+        )
+        for index, name in enumerate(["Shared Emby", "Second Emby"][: 2 if second else 1])
+    ]
+    adapters = [_StubAdapter() for _ in sources]
+    walks = [walk, second[0]] if second else [walk]
+    watches = [watch, second[1]] if second else [watch]
+
+    @asynccontextmanager
+    async def session_for(_settings: object) -> AsyncIterator[object]:
+        class _Session:
+            async def commit(self) -> None:
+                return None
+
+        yield _Session()
+
+    # Indexed off the adapter the loop is holding rather than off a counter, so
+    # a plant that walks one source twice is not silently handed the second
+    # source's rows.
+    class _Reconcile:
+        async def reconcile(self, _source: Source, _kind: object, adapter: object) -> SyncRun:
+            return walks[adapters.index(adapter)]  # type: ignore[arg-type]
+
+    class _Watch:
+        async def sync(self, _source: Source, adapter: object, **kwargs: object) -> SyncRun:
+            return watches[adapters.index(adapter)]  # type: ignore[arg-type]
+
+    class _Pipeline:
+        reconcile = _Reconcile()
+        watch = _Watch()
+
+    async def selected(*args: object, **kwargs: object) -> list[Source]:
+        return sources
+
+    async def default_user_id(*args: object, **kwargs: object) -> uuid.UUID:
+        return new_id()
+
+    async def open_adapter(_pipeline: object, source: Source) -> _StubAdapter:
+        return adapters[sources.index(source)]
+
+    monkeypatch.setattr(usher_cli, "_session_for", session_for)
+    monkeypatch.setattr(usher_cli, "build_pipeline", lambda *a, **k: _Pipeline())
+    monkeypatch.setattr(usher_cli, "selected_sources", selected)
+    monkeypatch.setattr(usher_cli, "ensure_default_user", default_user_id)
+    monkeypatch.setattr(usher_cli, "_open_adapter", open_adapter)
+    return adapters
+
+
+def test_a_refused_sweep_is_reported_at_the_boundary_the_operator_actually_watches(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A run that recorded `FAILED` must not leave the command exiting 0.
+
+    🔴 **Measured on a real deployment before this case existed.** The
+    operator's own `sync_runs` holds a `full` run from 2026-08-13 that recorded
+    `FAILED` with *"refusing to mark 60 of 180 items unavailable in one run
+    (33% exceeds the 25% ceiling)"* -- and `usher sync` printed that line and
+    **exited 0**. The same table holds ten `watch_state` runs that have failed
+    every night since, also at exit 0. A human watching the terminal sees it; a
+    cron entry, a CI step and a systemd unit all see success.
+
+    **The plan for this task said the fix is adding `AvailabilitySweepRefused`
+    to `OPERATOR_ERRORS`, and that would have changed nothing.**
+    `ReconcileService.reconcile` absorbs it into a `FAILED` row by contract and
+    its own docstring promises exactly that -- a promise worth keeping, since a
+    multi-source sync must not abort on one source's refusal. The exception
+    never reaches `main`'s boundary, so the tuple never sees it. What reaches
+    the operator is the **run row**, and the exit status is what was lying
+    about it.
+
+    Three assertions, and the reporting one is not redundant with the exit:
+    a command that exits 1 having printed nothing is a worse outcome than the
+    one being fixed, and the numbers are the operator's actual information.
+
+    The positive control is the second case below: the same wiring with both
+    runs completing must exit **0**, or "raises SystemExit" is satisfied by a
+    command that fails unconditionally.
+    """
+    # Built the way `ReconcileService._recorded_error` builds it, from the same
+    # constant, because this case and the service are two halves of one
+    # agreement: the CLI matches a token the service has to have written. A
+    # literal here would let either side drift and leave both suites green --
+    # `test_a_refused_sweep_records_the_token_the_cli_matches_on` in
+    # `tests/integration/test_services_reconcile.py` is the other half, and it
+    # drives a real refusal through real Postgres rather than composing a string.
+    refusal = (
+        f"{RETRACTION_ERROR_CODE}: refusing to mark 60 of 180 items unavailable "
+        "in one run (33% exceeds the 25% ceiling); nothing was retracted"
+    )
+    _sync_against(
+        monkeypatch,
+        walk=_run(SyncRunKind.FULL, SyncRunStatus.FAILED, error=refusal),
+        watch=_run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync"])
+
+    output = capsys.readouterr()
+    combined = output.out + output.err + str(exit_info.value)
+
+    assert exit_info.value.code != 0, "a run that failed must not exit 0"
+    assert "60 of 180" in combined and "25% ceiling" in combined, (
+        "the two numbers are the operator's information and must survive to the terminal"
+    )
+    assert "--allow-full-retraction" in combined, (
+        "the refusal is the one sync failure with an escape hatch, and nothing "
+        "else in the output names it"
+    )
+
+
+def test_a_sync_whose_runs_all_completed_still_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The control for the case above, and it is the one with teeth.
+
+    `pytest.raises(SystemExit)` is satisfied by a command that exits non-zero
+    unconditionally, and so is every assertion about the message. This is the
+    same wiring with two completed runs, and it must reach the end of `main`
+    without raising at all.
+    """
+    adapters = _sync_against(
+        monkeypatch,
+        walk=_run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
+        watch=_run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
+    )
+
+    usher_cli.main(["sync"])
+
+    assert "completed" in capsys.readouterr().out
+    assert [one.closed for one in adapters] == [1], (
+        "the premise: the body ran and closed its adapter"
+    )
+
+
+def test_a_source_that_failed_does_not_stop_the_next_source_being_walked(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The exit is collected after the loop, and one source cannot end the run.
+
+    🔴 **Nothing pinned this until S9's own sweep said so.** Moving the `raise`
+    inside the loop -- the obvious spelling, and the one somebody reaches for
+    when adding the exit -- survived every case in this module, because each
+    wired exactly **one** source and the two programs are then identical. The
+    claim was load-bearing and lived only in `_sync`'s docstring, which is the
+    shape `.claude/rules/testing-discipline.md` calls a deleted guard.
+
+    It matters because it is the same property `ReconcileService.reconcile`
+    swallows the exception for in the first place: a household with a laptop
+    that is asleep and a NAS that is up must still get the NAS walked. Exiting
+    on the first failure would put that back one layer up, having removed it
+    one layer down.
+
+    The premise is asserted before the conclusion: **both** adapters must have
+    been opened and closed, or "the second source was walked" is a claim about
+    a loop that never reached it.
+    """
+    adapters = _sync_against(
+        monkeypatch,
+        walk=_run(SyncRunKind.FULL, SyncRunStatus.FAILED, error="source went away mid-walk"),
+        watch=_run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
+        second=(
+            _run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
+            _run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync"])
+
+    output = capsys.readouterr().out
+    assert [one.closed for one in adapters] == [1, 1], (
+        "the premise: both sources were opened and both adapters released"
+    )
+    assert "Second Emby: full completed" in output, (
+        "the second source is walked even though the first one failed"
+    )
+    assert exit_info.value.code != 0, "and the run still ends non-zero"
+
+
+def test_a_failed_watch_lane_is_a_non_zero_exit_without_the_retraction_hint(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The lane that has actually been failing here, and the hint's negative arm.
+
+    Ten of this deployment's thirteen `watch_state` runs have recorded `FAILED`
+    and none has ever completed, every one of them at exit 0 -- so the change is
+    about a failed run rather than about a refused sweep, and the `full` arm
+    above would pass against a command that special-cased retraction alone.
+
+    And the flag is **absent** here, which is the half that keeps the hint
+    honest: `--allow-full-retraction` does nothing for a read timeout, and an
+    escape hatch offered for every failure is one an operator learns to paste
+    without reading.
+    """
+    _sync_against(
+        monkeypatch,
+        walk=_run(SyncRunKind.FULL, SyncRunStatus.COMPLETED),
+        watch=_run(
+            SyncRunKind.WATCH_STATE,
+            SyncRunStatus.FAILED,
+            error="GET /Users/{user_id}/Items failed: ReadTimeout after 30.0s (read budget)",
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync"])
+
+    combined = capsys.readouterr().out + str(exit_info.value)
+    assert exit_info.value.code != 0
+    assert "watch_state" in combined and "ReadTimeout" in combined
+    assert "--allow-full-retraction" not in combined, (
+        "the hint belongs to the one failure it resolves, not to every failure"
+    )
+
+
+# -- issue #5: `--title` naming a title the catalog does not hold -------------
 
 
 class _AbsentTitle:

@@ -19,10 +19,11 @@ established.
 
 import asyncio
 import dataclasses
+import inspect
 import io
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -80,9 +81,15 @@ from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.watch import User
 from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
-from usher.ports.jobs import JobRequest
+from usher.ports.events import EventPublisher
+from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.llm import LLMClient
-from usher.ports.repository import MediaItemRepository, RowProviderSettingsRepository
+from usher.ports.repository import (
+    MediaItemRepository,
+    RowProviderSettingsRepository,
+    SyncRunRepository,
+    WatchStateRepository,
+)
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.ports.source import (
     SourceAdapter,
@@ -171,11 +178,18 @@ class _Adapters(SourceAdapterFactory):
         self.built: dict[str, FakeSourceAdapter] = {}
         self.crashing: set[str] = set()
         self.slow: set[str] = set()
-        # What every adapter this factory builds already holds, applied at
-        # build time. A case about the *gap-closer* has to seed the library
-        # before the lane connects, and the adapter does not exist until
-        # `_start_lane` asks the factory for one -- so seeding `built[...]`
-        # afterwards races the walk the case is trying to observe.
+        # Two spellings of one precondition, kept because each side's cases
+        # use its own: `_start_lane` builds the adapter and hands it straight
+        # to `PushSupervisor.run`, whose first act after connecting is to
+        # close the gap, so seeding off `built[...]` afterwards races the
+        # very walk the case is trying to observe -- and a case that lost the
+        # race would assert against a library of zero items, which is exactly
+        # what a broken ceiling produces.
+        #
+        # `library` is the declarative form (a list of items to seed);
+        # `prepare` is the general one (any set-up a case wants), and it runs
+        # first so a case can use both.
+        self.prepare: Callable[[FakeSourceAdapter], None] | None = None
         self.library: list[tuple[SourceItem, datetime]] = []
 
     def crash(self, name: str) -> None:
@@ -192,6 +206,8 @@ class _Adapters(SourceAdapterFactory):
         else:
             kind = FakeSourceAdapter
         adapter = kind(source)
+        if self.prepare is not None:
+            self.prepare(adapter)
         for item, changed_at in self.library:
             adapter.seed(item, changed_at)
         self.built[source.name] = adapter
@@ -230,6 +246,82 @@ class _CountingQueue(FakeJobQueue):
         return await super().requeue_running(older_than_seconds=older_than_seconds)
 
 
+class _RecordingReconcile(ReconcileService):
+    """A `ReconcileService` that says which walks it was asked for.
+
+    A subclass that **delegates** rather than a spy that returns nothing:
+    the gap-closer's guard is only observable as "this walk did not happen",
+    and `walks == []` is equally what a `reconcile` that does nothing at all
+    produces. The arm that is *not* refused has to walk for real, or the
+    positive control is as hollow as the absence claim it protects.
+    """
+
+    def __init__(
+        self,
+        walks: list[tuple[str, SyncRunKind]],
+        ceilings: list[int],
+        *,
+        ingest: IngestService,
+        media_items: MediaItemRepository,
+        runs: SyncRunRepository,
+        events: EventPublisher,
+        commit: Callable[[], Awaitable[None]],
+    ) -> None:
+        super().__init__(
+            ingest=ingest, media_items=media_items, runs=runs, events=events, commit=commit
+        )
+        self._walks = walks
+        self._ceilings = ceilings
+
+    async def reconcile(
+        self,
+        source: Source,
+        kind: SyncRunKind,
+        adapter: SourceAdapter,
+        *,
+        max_items: int = 0,
+    ) -> SyncRun:
+        self._walks.append((source.name, kind))
+        # Recorded as well as counted, for the reason `_CountingQueue`
+        # records `older_than_seconds`: the ceiling's correctness is in
+        # *what the lane passed*, and "the gap closed" is what a lane
+        # passing nothing produces too.
+        self._ceilings.append(max_items)
+        return await super().reconcile(source, kind, adapter, max_items=max_items)
+
+
+class _RecordingWatchSync(WatchStateSyncService):
+    """The other half of `_close_gap`, recorded on the same terms.
+
+    Without it "the gap-closer *returned*" is unstated: a refusal spelled as
+    an early exit from the item lane alone still walks `watch_state()`, which
+    is the same unbounded upstream walk one method over.
+    """
+
+    def __init__(
+        self,
+        walks: list[str],
+        *,
+        media_items: MediaItemRepository,
+        watch_states: WatchStateRepository,
+        runs: SyncRunRepository,
+        queue: JobQueue,
+        commit: Callable[[], Awaitable[None]],
+    ) -> None:
+        super().__init__(
+            media_items=media_items,
+            watch_states=watch_states,
+            runs=runs,
+            queue=queue,
+            commit=commit,
+        )
+        self._walks = walks
+
+    async def sync(self, source: Source, adapter: SourceAdapter, *, user_id: uuid.UUID) -> SyncRun:
+        self._walks.append(source.name)
+        return await super().sync(source, adapter, user_id=user_id)
+
+
 @dataclass(slots=True)
 class _Fakes:
     """One set of repositories, shared across every unit of work.
@@ -242,16 +334,39 @@ class _Fakes:
     sources: FakeSourceRepository
     credentials: FakeCredentialStore
     media_items: FakeMediaItemRepository
-    queue: _CountingQueue
-    # Shared for the same reason `queue` is, and it was per-pipeline until the
-    # gap-closer cases needed it: `sync_runs` is where a *cursor* lives, so a
-    # fresh one per unit of work models a database that forgets every completed
-    # walk the instant the session closes -- under which no delta ever has a
-    # `since` and "the gap-closer is bounded once a walk has completed" is
+    # Shared for the reason the docstring gives, and it is load-bearing for
+    # the gap-closer's guard specifically: "has this source ever completed
+    # an item-lane run" is a question about the *database*, so a `sync_runs`
+    # table minted per unit of work answers "no" for every source forever.
+    #
+    # **What that costs is measured rather than reasoned about, and it is
+    # not what an earlier version of this comment claimed.** Planted
+    # (`runs = fakes.runs` back to `runs = FakeSyncRunRepository()`), the
+    # gap-closer's case goes **red** -- it does not quietly pass while
+    # testing nothing. What makes it impossible to miss is the case's own
+    # third arm: `Cellar` has a `COMPLETED` run, so a per-unit-of-work
+    # table refuses `Cellar` too, `watch_synced` never fills, and the
+    # second `_drain` expires. So the shared table is load-bearing for the
+    # *positive control*, and the positive control is what reports.
+    #
+    # Put another way: `sync_runs` is where a *cursor* lives, so a fresh one
+    # per unit of work models a database that forgets every completed walk the
+    # instant the session closes -- under which no delta ever has a `since`
+    # and "the gap-closer is bounded once a walk has completed" is
     # unobservable.
     runs: FakeSyncRunRepository
+    queue: _CountingQueue
     adapters: _Adapters
     events: FakeEventPublisher
+    # Which walks the push lanes' gap-closer actually asked for. Two lists
+    # rather than one, because `_close_gap` runs two lanes in a stated order
+    # and a refusal has to stop both.
+    reconciled: list[tuple[str, SyncRunKind]]
+    # The `max_items` each of those walks was handed, in the same order.
+    # Separate from `reconciled` rather than a third tuple slot, so every
+    # assertion written before the ceiling existed still reads.
+    gap_ceilings: list[int]
+    watch_synced: list[str]
     commits: list[float]
     # When each unit of work was opened. The `rows.refresh` lane's whole
     # premise is that it runs on a session it opened itself rather than on a
@@ -332,14 +447,17 @@ def _pipeline(
         adapters=fakes.adapters,
         matcher=matcher,
         ingest=ingest,
-        reconcile=ReconcileService(
+        reconcile=_RecordingReconcile(
+            fakes.reconciled,
+            fakes.gap_ceilings,
             ingest=ingest,
             media_items=fakes.media_items,
             runs=runs,
             events=fakes.events,
             commit=commit,
         ),
-        watch=WatchStateSyncService(
+        watch=_RecordingWatchSync(
+            fakes.watch_synced,
             media_items=fakes.media_items,
             watch_states=watch_states,
             runs=runs,
@@ -400,6 +518,20 @@ def _pipeline(
     )
 
 
+def _settings(**overrides: object) -> Settings:
+    """The one spelling of this file's `Settings`.
+
+    Extracted from `_supervisor` so a case that wants a `Pipeline` and no
+    supervisor can have one without reaching into `LaneSupervisor._work`,
+    and without a second literal drifting from this one.
+    """
+    return Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+        secret_key="0" * 32,
+        **overrides,  # type: ignore[arg-type]
+    )
+
+
 def _supervisor(
     fakes: _Fakes,
     *,
@@ -412,11 +544,7 @@ def _supervisor(
     provider_settings: RowProviderSettingsRepository | None = None,
     **overrides: object,
 ) -> LaneSupervisor:
-    settings = Settings(
-        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
-        secret_key="0" * 32,
-        **overrides,  # type: ignore[arg-type]
-    )
+    settings = _settings(**overrides)
 
     @asynccontextmanager
     async def work() -> AsyncIterator[Pipeline]:
@@ -450,10 +578,13 @@ def fakes() -> _Fakes:
         sources=FakeSourceRepository(),
         credentials=FakeCredentialStore(),
         media_items=FakeMediaItemRepository(),
-        queue=_CountingQueue(),
         runs=FakeSyncRunRepository(),
+        queue=_CountingQueue(),
         adapters=_Adapters(),
         events=FakeEventPublisher(),
+        reconciled=[],
+        gap_ceilings=[],
+        watch_synced=[],
         commits=[],
         units_of_work=[],
     )
@@ -475,6 +606,43 @@ async def _settle() -> None:
     """
     for _ in range(10):
         await asyncio.sleep(0)
+
+
+async def _item_run(fakes: _Fakes, source: Source, status: SyncRunStatus) -> None:
+    """One finished `FULL` run for `source`, in whatever state.
+
+    `FULL` rather than `DELTA` because it is the run an operator's
+    `usher sync` leaves behind, which is the state the refusal below is
+    telling them to reach.
+    """
+    await fakes.runs.add(
+        SyncRun(
+            source_id=source.id,
+            kind=SyncRunKind.FULL,
+            status=status,
+            finished_at=datetime.now(UTC),
+        )
+    )
+
+
+def _refusals(lines: list[str]) -> list[str]:
+    """Every gap-close refusal a `WARNING` sink has captured.
+
+    Filtered on the subject and never on the level, because the sink is
+    already the level filter: a refusal downgraded to `DEBUG` -- invisible
+    at any shipped `USHER_LOG_LEVEL` -- never reaches this list at all.
+    The `WARNING|` prefix each line carries is the other direction, an
+    upgrade to `ERROR`.
+
+    **Where that absence is actually reported is the drain, not a count
+    assertion**, and an earlier version of this docstring said otherwise.
+    Measured by planting the downgrade: the refusal list stays empty, so
+    every `_drain` waiting on it expires and the case dies on the
+    deadline -- before any assertion below it runs. That is why `_drain`
+    takes a `note`: the deadline is the reporting site, so the counts have
+    to be in its message.
+    """
+    return [line for line in lines if "gap" in line]
 
 
 # -- the push lanes -----------------------------------------------------
@@ -604,6 +772,327 @@ async def test_push_availability_for_a_source_with_no_lane_is_not_probed(
         await supervisor.stop()
 
 
+# -- the gap-closing delta ----------------------------------------------
+
+
+async def test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator_is_told(
+    fakes: _Fakes,
+) -> None:
+    """A delta with no cursor is not a delta, it is a full walk wearing a
+    delta's name -- and the lane is the one caller nobody typed a command
+    for.
+
+    `_start_lane` runs for every enabled source before the refresher's first
+    sleep and `PushSupervisor.run` closes the gap immediately after every
+    successful connection, so **the first thing a freshly started
+    `uvicorn usher.api.app:create_app --factory` does against every enabled
+    source is close a gap**. With no completed item-lane run there is no
+    cursor, `reconcile` walks `list_items(since=None)`, and that is the whole
+    library -- 1,134,919 items over 5,675 pages on the one household this
+    project measures, i.e. 7.3-11.8 hours (M10 S1, 2026-08-15;
+    `.claude/rules/emby-push-and-ingest.md`). `push_gap_min_interval_seconds`
+    cannot help: it bounds *cadence*, and `_Gate.at` is `None` until a gap
+    has run, so the first one is never skipped
+    (`test_the_first_gap_after_an_outage_is_never_skipped`).
+
+    **Three arms, because the middle one is what makes this a test of the
+    cursor rather than of emptiness.** A source with no runs at all is
+    refused; a source with a `FAILED` run and no completed one is refused
+    identically -- that is the state a killed probe leaves behind, and
+    `latest_completed_cursor` is `status = 'completed'` for exactly the
+    reason a delta must not resume from a walk that stopped halfway; a
+    source with one `COMPLETED` run is gap-closed.
+
+    **The positive control is the third arm and it is the first assertion**:
+    a refusal that refuses everything is not a guard, it is an off switch,
+    and every other assertion here passes against one.
+    """
+    atrium, belfry, cellar = _source("Atrium"), _source("Belfry"), _source("Cellar")
+    for source in (atrium, belfry, cellar):
+        await _seed(fakes, source)
+    await _item_run(fakes, belfry, SyncRunStatus.FAILED)
+    await _item_run(fakes, cellar, SyncRunStatus.COMPLETED)
+    supervisor = _supervisor(fakes)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING", format="{level.name}|{message}")
+    try:
+        await supervisor.start()
+        # Every lane has *decided*: it either walked or refused. At HEAD all
+        # three decide at once, so this returns immediately and the case
+        # fails on its own assertions rather than on the drain's deadline.
+        #
+        # **When it does fail here, the deadline is the reporting site**, so
+        # the counts go in its message: a WARNING downgraded to DEBUG never
+        # reaches `_refusals`, this condition is never met, and the count
+        # assertion below is never evaluated. Measured, not predicted.
+        await _drain(
+            lambda: len(fakes.reconciled) + len(_refusals(lines)) >= 3,
+            note=lambda: (
+                f"only {len(fakes.reconciled)} walked and {len(_refusals(lines))} refused "
+                f"of 3 sources: reconciled={fakes.reconciled} refusals={_refusals(lines)}"
+            ),
+        )
+        # ...and then the one arm that is gap-closed finishes its pair, so
+        # "the refusal returns" is asserted against a watch lane that is
+        # observably reachable.
+        await _drain(
+            lambda: bool(fakes.watch_synced),
+            note=lambda: (
+                "no source reached the watch lane, so the arm that is *not* refused never "
+                f"finished its pair: reconciled={fakes.reconciled}"
+            ),
+        )
+    finally:
+        logger.remove(sink)
+        await supervisor.stop()
+
+    assert fakes.reconciled == [("Cellar", SyncRunKind.DELTA)], (
+        f"a refusal that refuses everything is not a guard, it is an off switch: {fakes.reconciled}"
+    )
+    assert fakes.watch_synced == ["Cellar"], (
+        "the refusal returns from the gap-closer; it does not fall through to the "
+        f"watch lane, which walks the same source: {fakes.watch_synced}"
+    )
+    refusals = _refusals(lines)
+    assert len(refusals) == 2, f"one refusal per refused source, at WARNING: {lines}"
+    named = {
+        name for name in ("Atrium", "Belfry", "Cellar") if any(name in line for line in refusals)
+    }
+    assert named == {"Atrium", "Belfry"}, f"the refusal names the source it refused: {refusals}"
+    for line in refusals:
+        assert line.startswith("WARNING|"), f"the refusal is a WARNING, not an ERROR: {line}"
+        # The command and nothing more specific. This branch's own S5 spelled
+        # the remedy `usher sync --kind full`; the implementation that shipped
+        # is `main`'s (issue #9), whose line names `usher sync --source "..."`
+        # and the `USHER_PUSH_GAP_CLOSE=always` escape beside it. The claim
+        # worth pinning is neither spelling -- it is that **a refusal that does
+        # not say what to run is a dead end**, so the assertion is on the
+        # command an operator types.
+        assert "usher sync" in line, (
+            f"a refusal that does not say what to run is a dead end: {line}"
+        )
+        assert "USHER_PUSH_GAP_CLOSE" in line, (
+            f"the refusal names the setting that lifts it, or it reads as a wall: {line}"
+        )
+        # PRD 08's credentials rule, and `reconcile.py`'s own failure line is
+        # the local precedent: the *name* is what an operator typed, and it
+        # is the positive control that makes the three absences below claims
+        # about redaction rather than about an empty string.
+        #
+        # **Each of the three has been shown to fire, and the obvious plant
+        # shows none of them.** Swapping `source.name` for `source.base_url`
+        # dies two assertions earlier, on `named == {"Atrium", "Belfry"}` --
+        # `base_url` is lower-cased (`https://atrium.invalid`), so the name
+        # is simply absent and this loop is never entered. The plants that
+        # reach here keep the line count at 2 *and* the name present, and
+        # add one field each: `{source} ({url})` dies on the first line
+        # below, `{source} ({password})` on the second, `{source}
+        # ({credentials_ref})` on the third. All three KILLED, each on its
+        # own assertion -- which is what makes the password line a claim
+        # rather than a decoration, since `Source` does not carry a password
+        # and no mutation of the *shipped* call site can put one there.
+        # `.claude/rules/mutation-sweeps.md` has the round.
+        assert atrium.base_url not in line and belfry.base_url not in line
+        assert CREDENTIALS.password.get_secret_value() not in line
+        assert atrium.credentials_ref not in line and belfry.credentials_ref not in line
+
+
+async def test_the_gap_closers_delta_carries_the_ceiling_and_the_watch_lane_still_runs_after_it(
+    fakes: _Fakes,
+) -> None:
+    """M10 S6, and the deliberate half of it is the second assertion.
+
+    **The ceiling is the item lane's and only the item lane's.** The watch
+    lane derives its own cursor under its own upstream filter
+    (`MinDateLastSavedForUser`, 29,005 items against the item lane's 28,934
+    over the same 30-day window) and `WatchStateSyncService.sync` takes no
+    ceiling at all -- so a gap close whose item walk stopped at
+    `USHER_PUSH_GAP_MAX_ITEMS` still runs the watch lane, whole. That is a
+    cost, not a free choice: the *startup* a ceiling bounds is bounded on
+    the item lane alone, and PRD 03's Reconnect-delta row says so.
+
+    Both halves are needed and neither implies the other. Without the
+    first, the lane closes an unbounded gap while looking configured; the
+    obvious careful spelling of the second's defect is
+    `if run.status is FAILED: return` after the item walk, which passes
+    every assertion this file had before this case and quietly stops the
+    watch lane on every bounded gap close.
+    """
+    source = _source("Atrium")
+    await _seed(fakes, source)
+    await _item_run(fakes, source, SyncRunStatus.COMPLETED)
+
+    def stock(adapter: FakeSourceAdapter) -> None:
+        """More items than the ceiling, on the lane's own adapter, so the
+        walk genuinely truncates rather than merely being handed a number."""
+        for index in range(10):
+            adapter.seed(_item(f"a-{index}"), datetime.now(UTC))
+
+    fakes.adapters.prepare = stock
+    supervisor = _supervisor(fakes, push_gap_max_items=3)
+    try:
+        await supervisor.start()
+        await _drain(
+            lambda: bool(fakes.watch_synced),
+            note=lambda: (
+                "the item lane's ceiling stopped the watch lane too: "
+                f"reconciled={fakes.reconciled} watch_synced={fakes.watch_synced}"
+            ),
+        )
+    finally:
+        await supervisor.stop()
+
+    deltas = [
+        run
+        for run in await fakes.runs.list_for_source(source.id, limit=20)
+        if run.kind is SyncRunKind.DELTA
+    ]
+    assert [run.status for run in deltas] == [SyncRunStatus.FAILED], (
+        "the premise: the item walk really did stop at the ceiling, so the watch-lane "
+        f"assertion below is about a gap close that truncated: {deltas}"
+    )
+    assert [run.items_seen for run in deltas] == [3]
+    assert fakes.reconciled == [("Atrium", SyncRunKind.DELTA)]
+    assert fakes.gap_ceilings == [3], (
+        "the gap-closer hands the item lane `USHER_PUSH_GAP_MAX_ITEMS`; a lane passing "
+        f"nothing closes an unbounded gap while looking configured: {fakes.gap_ceilings}"
+    )
+    assert fakes.watch_synced == ["Atrium"], (
+        "the ceiling is the item lane's alone -- the watch lane owns a different cursor "
+        f"under a different upstream filter and is not bounded by it: {fakes.watch_synced}"
+    )
+    assert "max_items" not in inspect.signature(WatchStateSyncService.sync).parameters, (
+        "and it cannot be, structurally: adding a ceiling to the watch lane is a port-"
+        "adjacent signature change, not a quiet argument"
+    )
+
+
+async def test_an_operators_delta_on_a_fresh_source_still_walks(fakes: _Fakes) -> None:
+    """The other side of the refusal above, and the reason it lives in
+    `LaneSupervisor` rather than in `ReconcileService`.
+
+    `usher sync --kind delta` against a source that has never completed a run
+    is an operator asking for a walk of everything, and it must keep working
+    -- `cli.py`'s `_sync` calls `pipeline.reconcile.reconcile(source,
+    SyncRunKind(kind), adapter)` directly, which is the very object the lane
+    refuses *through*. So this drives that same service, on the same fakes,
+    and asserts the walk happened: a refusal pushed one layer down would
+    break the command with nothing here to notice.
+    """
+    source = _source("Atrium")
+    await _seed(fakes, source)
+    adapter = FakeSourceAdapter(source)
+    adapter.seed(_item("a-1"), datetime.now(UTC))
+    # `_pipeline` directly rather than `LaneSupervisor._work()`: the
+    # supervisor is the object this case is deliberately *not* testing, and
+    # reaching into its private for a `Pipeline` that `_pipeline` hands out
+    # in one call couples the case to a name it has no claim on.
+    pipeline = _pipeline(fakes, _settings())
+    assert await pipeline.reconcile.cursor_for(source, SyncRunKind.DELTA) is None, (
+        "the premise: this source has no cursor, which is what the lane refuses"
+    )
+    run = await pipeline.reconcile.reconcile(source, SyncRunKind.DELTA, adapter)
+    assert run.status is SyncRunStatus.COMPLETED
+    assert run.cursor_at is None, "a delta with no completed run walks from no cursor"
+    assert run.items_seen == 1, "the operator's delta walked nothing"
+
+
+async def test_a_deferred_push_event_on_a_cursorless_source_is_refused_and_its_items_are_dropped(
+    fakes: _Fakes,
+) -> None:
+    """`_close_gap` has a **second** caller, and it is on the delivery path.
+
+    `PushSupervisor.run` closes the gap on reconnect *and* whenever an
+    applied event comes back `deferred_to_delta` -- an event naming more
+    than `push_max_items_per_event` items with no payload
+    (`services/push.py`), which is deferred precisely because a request per
+    item against a 1.13M-item library is worse than a paged walk. Against a
+    cursorless source that walk is now refused, so those items are applied
+    **neither inline nor by a walk**: the event is discarded until an
+    operator runs `usher sync --kind full`.
+
+    **That is a deliberate trade and it was undocumented and untested until
+    this case.** The alternative is the whole-library walk the refusal
+    exists to prevent, triggered by an event rather than by a reconnect, so
+    the refusal is the right answer -- but "the items are dropped" is a
+    behaviour a reader must be able to find, and an absence nothing asserts
+    is an absence nobody chose.
+
+    **Two arms, and the second is the positive control.** `Belfry` has a
+    `COMPLETED` run, so its deferred event reaches a gap-closer that walks,
+    and its two items arrive in the catalog *by the walk* -- which is what
+    makes "the deferral really does call `_gap`" a measured fact rather
+    than an assumption. Without it, `Atrium`'s empty catalog is equally
+    what a supervisor that ignored `deferred_to_delta` entirely produces.
+
+    `push_gap_min_interval_seconds=0.0` because the gate is a **cadence**
+    guard and would otherwise skip the second gap on both lanes: `_gap`
+    stamps `gate.at` before it delegates, so the deferral's gap is inside
+    the default 60 s window opened by the reconnect's.
+    """
+    atrium, belfry = _source("Atrium"), _source("Belfry")
+    for source in (atrium, belfry):
+        await _seed(fakes, source)
+    await _item_run(fakes, belfry, SyncRunStatus.COMPLETED)
+    supervisor = _supervisor(fakes, push_max_items_per_event=1, push_gap_min_interval_seconds=0.0)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING", format="{level.name}|{message}")
+    try:
+        await supervisor.start()
+        # The reconnect gap settles first, so the deferral's gap below is
+        # unambiguously the *second* call on each lane.
+        await _drain(
+            lambda: len(_refusals(lines)) >= 1 and len(fakes.reconciled) >= 1,
+            note=lambda: (
+                "neither lane closed its reconnect gap: "
+                f"reconciled={fakes.reconciled} refusals={_refusals(lines)}"
+            ),
+        )
+        # Seeded *after* the reconnect walk, and later than the cursor it
+        # left behind, so anything that reaches the catalog got there
+        # through the second walk rather than the first.
+        changed = datetime.now(UTC) + timedelta(hours=1)
+        for source in (atrium, belfry):
+            adapter = fakes.adapters.built[source.name]
+            for external_id in (f"{source.name}-1", f"{source.name}-2"):
+                adapter.seed(_item(external_id), changed)
+            # Two ids against `push_max_items_per_event=1`, and no payload:
+            # `_apply_items` defers rather than resolving them one at a time.
+            adapter.push(
+                SourceEvent(
+                    kind=SourceEventKind.ITEM_UPDATED,
+                    external_ids=(f"{source.name}-1", f"{source.name}-2"),
+                )
+            )
+        await _drain(
+            lambda: len(_refusals(lines)) >= 2 and len(fakes.reconciled) >= 2,
+            note=lambda: (
+                "the deferred event never reached a second gap close: "
+                f"reconciled={fakes.reconciled} refusals={_refusals(lines)} "
+                f"stored={_stored(fakes.media_items)}"
+            ),
+        )
+    finally:
+        logger.remove(sink)
+        await supervisor.stop()
+
+    assert fakes.reconciled == [("Belfry", SyncRunKind.DELTA)] * 2, (
+        "the positive control: a deferred event on a source that *has* a cursor closes a "
+        f"second gap, so the deferral path really does reach `_close_gap`: {fakes.reconciled}"
+    )
+    assert _stored(fakes.media_items) == ["Belfry-1", "Belfry-2"], (
+        "the deferred event's items are dropped on a cursorless source -- not applied inline "
+        f"and not walked: {_stored(fakes.media_items)}"
+    )
+    refusals = _refusals(lines)
+    assert len(refusals) == 2, (
+        f"one refusal for the reconnect gap and one for the deferred event's: {lines}"
+    )
+    assert all("Atrium" in line for line in refusals), (
+        f"both refusals are the cursorless source's: {refusals}"
+    )
+
+
 # -- crash isolation ----------------------------------------------------
 
 
@@ -722,6 +1211,74 @@ async def test_a_crashed_lane_says_so(fakes: _Fakes) -> None:
     assert crash, lines
     assert "A" in crash[0]
     assert "ZeroDivisionError" in crash[0]
+
+
+async def test_a_lane_that_reached_the_failure_ceiling_releases_its_adapter_and_is_named_as_stopped(
+    fakes: _Fakes,
+) -> None:
+    """The leak M10's S10 closed, and its positive control in the same case.
+
+    A lane whose task finished -- the failure ceiling, or a crash -- used to
+    keep its `SourceAdapter` in `_open_adapters` for the process lifetime.
+    That adapter is an `EmbyAdapter` holding a live `httpx.AsyncClient`
+    **against a server this deployment does not own**, and it went on feeding
+    `push_snapshots()`, which is the series PRD 10's "Push down" alert reads.
+    A dead lane reporting `delivering=False` forever and a dead lane reporting
+    nothing are different alerts.
+
+    Three things are asserted and the fourth is the control:
+
+    * the adapter is closed **exactly once**, not once per refresh tick -- a
+      count, because `aclose` is idempotent and a flag cannot tell the two
+      apart;
+    * it is gone from the push-gauge snapshot, so the series stops;
+    * the lane is **not restarted**, which is PRD 08's own remedy ("lean on
+      the nightly walk") -- a refresh that replaced it would reconnect forever
+      against the buffering proxy the ceiling exists for;
+    * and source B, whose lane is **live**, keeps its adapter and its series
+      through the same `refresh()`. Without that arm a `refresh` that closed
+      every adapter would pass the first three assertions and break push
+      entirely, which is the loudest regression this file can ship.
+    """
+    await _seed(fakes, _source("A"))
+    await _seed(fakes, _source("B"))
+    fakes.adapters.crash("A")
+    supervisor = _supervisor(fakes)
+    await supervisor.start()
+    try:
+        # The premise, asserted before anything else: a lane that never
+        # finished cannot pass this case.
+        await _drain(
+            lambda: supervisor.crashed_sources() == ["A"],
+            note=lambda: (
+                f"crashed={supervisor.crashed_sources()} running={supervisor.running_sources()}"
+            ),
+        )
+        by_name = {source.name: source for source in await fakes.sources.list_all()}
+        stopped = fakes.adapters.built["A"]
+        live = fakes.adapters.built["B"]
+        assert stopped._closes == 0, "the leak: nothing has released it yet"
+        assert set(supervisor.push_snapshots()) == {"A", "B"}
+
+        await supervisor.refresh()
+
+        assert stopped._closes == 1
+        assert set(supervisor.push_snapshots()) == {"B"}, "the dead lane stops publishing"
+        assert supervisor.push_available(by_name["A"].id) is None, "not probed, not broken"
+        assert supervisor.crashed_sources() == ["A"], "F2 still has a state to report"
+        assert supervisor.running_sources() == ["B"], "and the lane is not restarted"
+
+        # The control: the live lane is untouched by the same call.
+        assert live._closes == 0
+        assert supervisor.push_available(by_name["B"].id) is not None
+
+        # And a second tick does not close it again -- the `pop` is what makes
+        # the release at-most-once, and a timer-driven refresh is what would
+        # otherwise call `aclose` forever.
+        await supervisor.refresh()
+        assert stopped._closes == 1
+    finally:
+        await supervisor.stop()
 
 
 async def test_push_snapshots_report_the_adapters_own_ledger(fakes: _Fakes) -> None:
@@ -982,6 +1539,70 @@ async def test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass(
     )
 
 
+class _JustBooted:
+    """`time`, with `monotonic()` frozen at a small uptime.
+
+    Substituted for the **module's** `time`, never the global one:
+    `asyncio`'s own timers resolve `time.monotonic` through `loop.time()` at
+    call time, so patching `time.monotonic` globally freezes every sleep in
+    the event loop and the case hangs instead of failing.
+    """
+
+    def __init__(self, uptime: float) -> None:
+        self._uptime = uptime
+
+    def monotonic(self) -> float:
+        return self._uptime
+
+
+async def test_the_worker_lane_recovers_on_its_first_pass_on_a_host_that_just_booted(
+    fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **The throttle's origin is the identity element of its own
+    comparison, and that made the field above lie.**
+
+    `time.monotonic()` on Linux is seconds since **boot**. Against an origin of
+    `0.0`, `now - origin >= lease / 2` is *false* for the first
+    `job_lease_seconds / 2` -- 150 s at the shipped lease -- so a
+    worker-enabled process started with the machine skips its first recovery
+    pass entirely and `/health/ready` answers `recovered_claims: null`, the
+    value `LaneReport` documents as *"this process runs no worker"*. That is
+    the field lying about the one thing it exists to report, at exactly the
+    moment a compose stack comes up holding the previous boot's orphans.
+
+    `.claude/rules/testing-discipline.md` already names the shape: a fixture
+    whose origin is the identity element of the operation under test cannot
+    distinguish the operation from its absence. Here `0.0` is the identity for
+    the subtraction, and every case in this file that recovers passes only
+    because the host it runs on has been up for longer than half a lease --
+    which is a property of the machine, not of the code.
+
+    So the clock is shimmed rather than trusted, and the assertion is the same
+    one `test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass`
+    makes at a normal uptime. Against `0.0` this reports **0** requeues.
+    """
+    monkeypatch.setattr("usher.api.lanes.time", _JustBooted(10.0))
+    supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
+    assert _settings().job_lease_seconds / 2 > 10.0, (
+        "the premise: the shimmed uptime is inside the window the throttle would skip"
+    )
+
+    await supervisor.start()
+    try:
+        await _drain(lambda: fakes.queue.claims >= 2, bound=2.0)
+    finally:
+        await supervisor.stop()
+
+    assert fakes.queue.requeues == 1, (
+        "a worker started within half a lease of boot never recovered, so its report "
+        "of what it took back is `null` -- indistinguishable from a process running no worker"
+    )
+    # And still exactly once and still at the lease, so the fix did not buy the
+    # first pass by removing the throttle.
+    assert fakes.queue.requeue_ages == [pytest.approx(DEFAULT_LEASE_SECONDS)]
+    assert supervisor.recovered_claims() == 0, "it asked; `null` would mean it never did"
+
+
 async def test_a_missing_tmdb_key_is_not_re_reported_on_every_pass(fakes: _Fakes) -> None:
     """PRD 08's "TMDb key missing" degradation is worth surfacing once.
 
@@ -1072,7 +1693,9 @@ def _stored(media_items: MediaItemRepository) -> list[str]:
     return sorted(item.external_id for item in media_items._items.values())
 
 
-async def _drain(until: Callable[[], bool], *, bound: float = 5.0) -> None:
+async def _drain(
+    until: Callable[[], bool], *, bound: float = 5.0, note: Callable[[], str] | None = None
+) -> None:
     """Turn the loop until `until()` holds, bounded so a supervisor that
     never runs the lane fails the case instead of hanging the suite.
 
@@ -1080,13 +1703,22 @@ async def _drain(until: Callable[[], bool], *, bound: float = 5.0) -> None:
     why this is a deadline over `sleep(0)` rather than a timeout around one
     await -- the same reason `tests/integration/test_job_queue.py` bounds
     its claims explicitly.
+
+    **`note` is what the deadline says instead of nothing, and it exists
+    because a timeout is the failure mode a mutation most often produces
+    here.** Measured: the WARNING-to-DEBUG plant over `_close_gap` empties
+    the refusal list, so the *drain* expires and the count assertion the
+    case was written for is never reached -- and `"the lane never got
+    there"` tells a reader nothing about a log level. A `note` renders the
+    same quantities the assertion downstream would have shown.
     """
     deadline = time.perf_counter() + bound
     while time.perf_counter() < deadline:
         if until():
             return
         await asyncio.sleep(0.005)
-    raise AssertionError("the lane never got there")
+    detail = "" if note is None else f": {note()}"
+    raise AssertionError(f"the lane never got there{detail}")
 
 
 async def test_the_worker_lane_holds_one_embedder_across_every_pass(fakes: _Fakes) -> None:

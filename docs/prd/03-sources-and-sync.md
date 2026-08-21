@@ -38,8 +38,11 @@ refresh-token flow; this pattern *is* the refresh mechanism.
   operator revokes it. Re-authentication is **single-flight** — concurrent 401s
   collapse into one `AuthenticateByName` — and exactly one retry is attempted
   per request. A credential that is genuinely *wrong* is remembered for a
-  cooldown, so a bad password cannot turn every call into two requests against
-  a source measured at 1–5 s per request. That matters beyond this section,
+  cooldown, so a bad password cannot turn every call into two requests. ⚠️ The
+  *added* request is `POST /Users/AuthenticateByName`, whose cost nothing here
+  has ever measured; what is measured is the call being retried — 0.1495 s per
+  single-item read, 6.04 s per 200-item page
+  ([01](01-architecture.md), M10 S1, 2026-08-15). That matters beyond this section,
   because a direct-play URL carries this token
   ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)).
 - Credentials live behind `credentials_ref` indirection: an opaque, random
@@ -55,6 +58,29 @@ refresh-token flow; this pattern *is* the refresh mechanism.
   them authenticates
   ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md); PRD
   [08](08-operations.md) carries the same qualification).
+- **Outbound calls to one source are paced, not just retried politely.** The
+  re-auth cooldown above stops a *bad credential* becoming a request storm; it
+  says nothing about a *good* one prefetching hard. So a minimum-interval gate
+  spaces every outbound call at least `1/rate` seconds apart, where `rate` is
+  `USHER_SOURCE_REQUESTS_PER_SECOND` (0 disables it) — the proactive half of PRD
+  [01](01-architecture.md)'s rate-limit promise and the answer to issue #19's
+  operator flood. **It is one gate per source per process**: a
+  `SourceGateRegistry` keyed by `source.id` is built once at each composition
+  root and handed into the adapter factory, so a server process's push lane, its
+  worker lane and every request pace against the same gate, and so do all of one
+  `usher work` daemon's job scopes. A **second process is a second gate** — two
+  `usher work` containers against one server spend `2 × rate`, which is a
+  capacity decision an operator makes, exactly as `USHER_JOB_CONCURRENCY` and
+  `USHER_TMDB_REQUESTS_PER_SECOND` already are. The default **0.4 rps** is
+  derived from S1, not chosen: a 200-item
+  page at **mean 6.0369 s / p95 9.1713 s** and the Emby concurrency (4) give an
+  expected concurrent-walk rate `4/6.0369 = 0.66` rps and a conservative p95
+  ceiling `4/9.1713 = 0.436` rps, with 0.4 below both. It is inert on a sequential
+  walk (0.17 rps) and binds single-item reads; whether it binds a *concurrent*
+  walk is **unmeasured and is S7's** to settle. Full argument in
+  [ADR-0042](decisions/0042-the-outbound-limiter-is-per-source-and-spaces-requests.md);
+  the seconds spent in the gate are the `usher.source.throttle.wait` histogram
+  ([10](10-telemetry-and-dashboards.md)).
 
 > **The identity header was exercised against the live server on 2026-07-31,
 > and one thing it does *not* do is worth recording.** Presenting an existing
@@ -296,9 +322,11 @@ paragraph above and
 ledger rather than from a probe**
 ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). `verify()`
 opens no socket at all — a status
-screen a dashboard polls must not cost a socket per poll against a server
-measured at 1–5 s per request, and it would still be answering a question about
-a socket that is not the one doing the work. It reports `null` ("not probed")
+screen a dashboard polls must not cost a **socket** per poll, and it would
+still be answering a question about a socket that is not the one doing the
+work. (The two HTTP probes `verify()` *does* make are cheap and now measured:
+0.1253 s for `/System/Info/Public` — [01](01-architecture.md), M10 S1. The
+socket is what the objection was ever about.) It reports `null` ("not probed")
 for an adapter that has never had a channel, and the live answer — a connection
 *and* at least one received message *and* a recent one — for the adapter a push
 lane is running. `GET /admin/sources/{id}/status` reads the lane's, injected by
@@ -330,7 +358,7 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 | Lane | Trigger | Work |
 |---|---|---|
 | **Push** | WebSocket event | **Apply it inline when it is small; defer to a delta when it is large.** A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk instead, because a request per item against a 1,126,789-item library is a design defect rather than a slow path |
-| **Reconnect delta** | Socket re-established, **and a previous item walk completed** | Items changed since the last cursor. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds. ✅ **With no cursor there is no gap and the lane refuses rather than walking the library** — `USHER_PUSH_GAP_CLOSE`, see below |
+| **Reconnect delta** | Socket re-established, **or a push event deferred to a delta** — and, under `USHER_PUSH_GAP_CLOSE`'s `cursored` default, **only when a previous item walk completed** | Items changed since the last cursor — and **refused outright when there is no cursor**, because a source with no completed item-lane run has none and the "delta" is then a walk of the whole library that nobody asked for (issue #9; the lane starts itself for every enabled source, so on a fresh deployment that walk is the first thing the server does). The lane logs a WARNING naming the source and `usher sync`, and keeps the socket up. `usher sync --kind delta` on such a source still walks: the refusal is the *lane's*, not `ReconcileService`'s, and `USHER_PUSH_GAP_CLOSE=always` restores the old behaviour (warning first) while `never` turns gap-closing walks off entirely. **The refusal covers the deferral trigger too, and that is a real cost**: an oversized event on a cursorless source is applied neither inline nor by a walk, so it is discarded until the sync runs — deliberate, because the alternative is that walk of everything on the strength of one event. **And "the catalog is empty anyway" is not the premise**: a deployment bootstrapped in bulk ([04](04-catalog-bootstrap.md)) has a populated catalog and no `sync_runs` row at all — `BootstrapService` writes `import_runs` — so it is refused indefinitely, with the remedy in the line. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds — but that limit is a bound on *cadence* only, and the first gap after a restart is never skipped. **And a delta that *does* have a cursor is bounded in size** (M10 S6): the item walk stops at `USHER_PUSH_GAP_MAX_ITEMS` and the run records **`FAILED`**, never `COMPLETED`, because `latest_completed_cursor` reads `started_at` of the newest *completed* run — so a truncated run that completed would advance the cursor to its own start instant and everything past the ceiling would never be requested by any delta again, with no scheduled full reconcile anywhere in `src/` to cover it. Nothing the bounded walk saw is lost (`_flush` commits per batch); what it costs is the cursor advance, and the WARNING names `usher sync --kind full`. **The ceiling bounds the item lane only** — the watch lane owns its own cursor under `MinDateLastSavedForUser` and still walks whole after a truncated item walk, which is a stated cost rather than an oversight |
 | **Full reconcile** | Nightly, or an operator's `POST /admin/sources/{id}/sync` (M9) | Walk the source; upsert everything; mark unseen items `available = false` |
 
 Polling is the backstop, not the design.
@@ -352,7 +380,24 @@ the design is safe against it by construction rather than by coincidence.**
 The Reconnect-delta row above — `LaneSupervisor._close_gap` — runs the
 identical pair (`reconcile.reconcile(source, DELTA, adapter)`, then
 `watch.sync(...)`) on its own adapter whenever a source's push socket comes
-back, entirely independently of the job queue; and `usher sync` has always
+back, entirely independently of the job queue — **except when that source has
+no cursor, which is the one thing it will not do.** It is the only caller of
+`reconcile()` that no operator triggered: a push lane is started for every
+enabled source by the refresher before its first sleep, so a source that has
+never completed an item-lane run would otherwise get a full walk under a
+delta's name as the first act of a freshly started server. The gap-closer
+reads `ReconcileService.cursor_for(source, DELTA)` and, under
+`USHER_PUSH_GAP_CLOSE`'s `cursored` default, returns on `None`, logging one
+WARNING that names the source and the command that fixes it. The socket
+stays up and the push lane keeps delivering, which is the point of the lane;
+the walk is the operator's to schedule. **`_close_gap` has two triggers, not
+one** — `PushSupervisor.run` calls it on reconnect and again whenever an
+applied event comes back deferred — so the refusal costs a deferred event its
+items as well as costing a reconnect its delta, and both stay uncovered until
+the full sync runs. **The refusal is deliberately not in
+`ReconcileService`**, because `usher sync --kind delta` against a fresh source
+is an operator asking for precisely that walk, and it still gets one. And
+`usher sync` has always
 been a third way to trigger the same pair, from a second process. So a
 triggered `sync` job can genuinely run concurrently with the push lane's own
 gap-closer, or with an operator's cron — this route adds a caller, not a new
@@ -369,6 +414,39 @@ sweep regardless of which task wrote it. A `full` sync requested through this
 route while the push lane happens to be closing a gap on the same source is
 therefore not a new failure mode this route introduces; it is the existing
 concurrent-walk safety argument exercised by a fourth caller.
+
+**The other half of the same argument is size, and it is M10 S6's.** A delta
+*with* a cursor can still be enormous — a source Usher has not reached for a
+month, a library the owner re-scanned (a `LibraryChanged` naming thousands of
+items is deferred to exactly this walk by `push_max_items_per_event`), or a
+`deferred_to_delta` outcome on a busy evening. Against the household measured
+above, a 30-day cursor returns **28,934** items for the item lane: 145 pages at
+`USHER_SOURCE_PAGE_SIZE`'s 200, and ~14.6 minutes of upstream at the **6.0369 s**
+pooled mean M10 S1 measured for a page on 2026-08-15. `USHER_PUSH_GAP_MAX_ITEMS`
+bounds it, defaulting to **20,000 items** — 100 pages, ~10 minutes at that mean,
+and deliberately *below* 28,934, because a ceiling the one measured pathological
+case slips beneath is not a ceiling. Zero is unlimited.
+
+**A bounded walk records `FAILED`, and that is the whole design rather than a
+detail of it.** `latest_completed_cursor` is `started_at` of the newest
+*completed* run in the lane, so a truncated run recorded `COMPLETED` would
+advance the cursor to its own start instant and everything past the ceiling
+would never be requested by any delta again. The nightly full reconcile would
+cover it — except that **nothing in `src/` schedules anything** ([09](09-roadmap.md)'s
+M9 boundary call 6) and `usher sync --kind` defaults to `full` because a human
+runs it, so on a shipped deployment with no cron that hole has no closer. What
+the ceiling costs is therefore the cursor advance and nothing else: `_flush`
+commits per batch, so every item the bounded walk saw is durable, and the
+WARNING it logs names the source, how far it got, the setting, and `usher sync
+--kind full`. A fourth `SyncRunStatus` member would say it more precisely and
+is DDL; it is named as a candidate and not taken.
+
+**It bounds the item lane and not the watch lane.**
+`WatchStateSyncService.sync` derives its own cursor under
+`MinDateLastSavedForUser` (29,005 items over the same window) and takes no
+ceiling, so a gap close whose item walk stopped still walks the watch lane
+whole. The startup this bounds is bounded on one of the two lanes — a real
+cost, recorded here rather than left implicit.
 
 **A push `ITEM_REMOVED` retracts nothing.**
 [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
@@ -392,18 +470,28 @@ the source has** — 1,126,789 on the household this project measures — issued
 the operator may not own. `push_gap_min_interval_seconds` never covered this:
 it bounds how *often* a gap is closed, not how large the walk is.
 
-The fix is a decision rather than a limit, because **there is no honest way to
-truncate this walk**. A bound in the iterator would end a run that then records
-`COMPLETED`, and `latest_completed_cursor` reads that run's `started_at` — so
-every item the truncated walk never reached would be silently skipped by every
-later delta, forever. So the walk is either performed whole or refused whole,
-and `USHER_PUSH_GAP_CLOSE` (`cursored` by default) is where the operator says
-which: a *gap* is the window a socket was down, and with no completed walk the
-window is the entire catalog, which is `usher sync`'s job. Every arm logs
-before it acts — the uncursored ones at `WARNING`, naming the source and the
-size — because an operator who learns about the walk from their media server's
-access log has learned too late. [08](08-operations.md) has the operator-facing
-version.
+The fix for the *cursorless* walk is a decision rather than a limit, because
+**a truncation that records `COMPLETED` is not honest**. A bound in the
+iterator that ended a run as completed would have `latest_completed_cursor`
+read that run's `started_at` — so every item the truncated walk never reached
+would be silently skipped by every later delta, forever. So the cursorless walk
+is either performed whole or refused whole, and `USHER_PUSH_GAP_CLOSE`
+(`cursored` by default) is where the operator says which: a *gap* is the window
+a socket was down, and with no completed walk the window is the entire catalog,
+which is `usher sync`'s job. Every arm logs before it acts — the uncursored
+ones at `WARNING`, naming the source and the size — because an operator who
+learns about the walk from their media server's access log has learned too
+late. [08](08-operations.md) has the operator-facing version.
+
+⚠️ **A truncation that records `FAILED` *is* honest, and that is what bounds
+the other half** (M10 S6). `USHER_PUSH_GAP_MAX_ITEMS` stops a gap-closing delta
+that *does* have a cursor after that many items and records the run `FAILED`
+with a `gap_delta_ceiling:` token, so no cursor advances and nothing the walk
+never reached is skipped — everything it *did* see is already committed by
+`_flush`, and the rest is what `usher sync --kind full` closes. The two are one
+hazard answered on two axes: `USHER_PUSH_GAP_CLOSE` decides whether a walk with
+no cursor happens at all, `USHER_PUSH_GAP_MAX_ITEMS` bounds how large one with
+a cursor may get. Neither bounds the watch lane, which owns its own cursor.
 
 **Retraction is a separate step, and it can decline.** Marking unseen items
 unavailable is a distinct call the reconciler makes only after the walk
@@ -420,6 +508,27 @@ which is what an operator deliberately removing a library passes. See
 An item that reappears in a walk is available again at that moment: the
 upsert restores it, because appearing in a walk *is* the evidence of
 availability. The sweep only ever sets `false`.
+
+**A source is either a library this deployment owns or a *view* of somebody
+else's, and Usher does not model the difference.** The vocabulary is stated
+here once because several behaviours already read differently under the two
+and all of them shipped assuming the first: the retraction ceiling above
+assumes removals are the operator's to authorise; *"availability goes stale,
+not wrong"* ([08](08-operations.md)) assumes staleness is the only failure;
+and the watch write-back ([07](07-client-api.md)) writes play state to an
+account on a server the operator does not administer. **Pointing Usher at a
+server somebody else runs is an intended deployment, not a misuse** — it is
+the one this project is developed against — so the assumption is named rather
+than left for a stranger to discover.
+
+⚠️ **The ceiling is a fraction of what *Usher* holds, not of the source**, which
+is the part that surprises on a view: a catalogue that has ingested a tenth of
+its source measures that source's churn against its own incompleteness.
+Measured 2026-08-19 (M10 S8): the guard's one observed firing on a real
+deployment was tripped by a **bounded walk of Usher's own**, refusing 60 of 180
+items at 33% on a day nothing had been deleted. The default stays at `0.25` and
+[ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
+carries why. A per-source override is post-v1, named there with its column.
 
 **Only a full walk sweeps, and the ceiling is not a substitute for that.** A
 delta walk returns only what changed, so by construction nearly everything is

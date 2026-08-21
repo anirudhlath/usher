@@ -31,9 +31,12 @@ the two cases below exercise "nothing to probe" and "no credential to probe
 with", both of which answer from local state.
 """
 
+import asyncio
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from contextlib import suppress
 from decimal import Decimal
 from typing import Any
 
@@ -349,34 +352,249 @@ async def test_work_completes_a_job_for_an_item_no_source_addresses(
     assert remaining == 0, "a job for an item nothing addresses is done, not poison"
 
 
-async def test_unmatched_lists_and_resolves_through_the_real_repository(
+#: Backdated an hour, past `USHER_JOB_LEASE_SECONDS`' 300 s default without
+#: moving the setting. A **raw `INSERT`** because that is the only way to own
+#: `jobs.updated_at`: every statement in `PostgresJobQueue` stamps it
+#: `clock_timestamp()` itself, so a claim made through the port is by
+#: construction fresh and can never be older than the lease.
+_PLANT_AN_ORPHAN = """
+INSERT INTO jobs (id, kind, key, priority, status, attempts, created_at, updated_at)
+VALUES (
+    :id, :kind, :key, :priority, 'running', 0,
+    clock_timestamp() - interval '1 hour',
+    clock_timestamp() - interval '1 hour'
+)
+"""
+
+
+async def test_work_names_the_claims_it_took_back_from_a_process_that_stopped(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**`recover()`'s return value has a reader at both call sites**, and
+    this is the `usher work` one (M10 F2).
+
+    It was `await worker.recover()` as a bare statement here and in
+    `api/lanes.py` since W1, so the only trace of M9's S3 condition -- a
+    worker dead at 78 minutes holding twenty claims -- was a WARNING that
+    fires only when the count is non-zero. The server reports the total in
+    `/health/ready`'s body; this command has no readiness route, so it says so
+    in the pass line it already prints rather than growing a surface.
+
+    The premise is asserted first and from the command's own session: a row
+    recovery cannot see recovers `0`, and `0` is also what a discarded return
+    value prints.
+    """
+    key = f"an-orphan-{new_id()}"
+    async with _session_for(cli_settings) as session:
+        await session.execute(
+            text(_PLANT_AN_ORPHAN),
+            {
+                "id": new_id(),
+                "kind": JobKind.MATCH.value,
+                "key": key,
+                "priority": int(JobPriority.NEW),
+            },
+        )
+        await session.commit()
+    async with _session_for(cli_settings) as session:
+        stale = (
+            await session.execute(
+                text(
+                    "SELECT status, updated_at <= clock_timestamp() - "
+                    "make_interval(secs => :lease) AS stale FROM jobs WHERE key = :key"
+                ),
+                {"lease": cli_settings.job_lease_seconds, "key": key},
+            )
+        ).one()
+    assert (stale.status, stale.stale) == ("running", True), (
+        "the premise: an abandoned claim older than the lease is what recovery takes back"
+    )
+
+    await _work(cli_settings, once=True)
+
+    out = capsys.readouterr().out
+    assert "1 recovered claims" in out, out
+    # And the recovered claim really was re-run in the same pass, which is
+    # what makes the number a recovery rather than a count of anything.
+    assert "1 jobs" in out, out
+
+
+class _JustBooted:
+    """`time`, with `monotonic()` frozen at a small uptime.
+
+    Substituted for `usher.cli`'s **module** attribute, never the global one:
+    `asyncio` resolves `time.monotonic` through `loop.time()` at call time, so
+    a global patch freezes every sleep in the event loop and this hangs rather
+    than fails. `usher.cli` reads `time` for exactly two things -- this
+    throttle and a `perf_counter()` in `_suggest` -- so the shim carries both.
+    """
+
+    def __init__(self, uptime: float) -> None:
+        self._uptime = uptime
+
+    def monotonic(self) -> float:
+        return self._uptime
+
+    def perf_counter(self) -> float:  # pragma: no cover -- `_suggest`'s, not `_work`'s
+        return self._uptime
+
+
+async def test_work_recovers_on_its_first_pass_on_a_host_that_just_booted(
     cli_settings: Settings,
     clean_slate: None,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    session: AsyncSession,
 ) -> None:
-    """The review queue's two halves, against real SQL. `--resolve` writes
-    `title_id` and leaves `episode_id` null, which `attach_title` documents
-    as the deliberate act of a human rather than a walk's "I did not look".
+    """🔴 **`usher work --once` from a cron inside the first 150 s of host
+    uptime used to recover nothing at all**, while `_measure`'s own comment
+    claimed it recovers "before the first claim".
+
+    `time.monotonic()` on Linux is seconds since boot, and the throttle's
+    origin was `0.0`, so `now - origin >= lease / 2` was false for half a
+    lease after the machine came up. The `api/lanes.py` twin of this case
+    carries the full argument; this is the second call site, and it is the one
+    whose whole purpose is to be run by a scheduler that starts at boot.
+
+    Against the old origin this prints `0 recovered claims` -- `0` asserting
+    "no orphans" about a question it never asked, which is the precise lie the
+    API side spends four paragraphs refusing.
     """
-    title_id = new_id()
-    async with _session_for(cli_settings) as own:
+    monkeypatch.setattr("usher.cli.time", _JustBooted(10.0))
+    assert cli_settings.job_lease_seconds / 2 > 10.0, (
+        "the premise: the shimmed uptime is inside the window the throttle would skip"
+    )
+    key = f"an-orphan-{new_id()}"
+    async with _session_for(cli_settings) as session:
+        await session.execute(
+            text(_PLANT_AN_ORPHAN),
+            {
+                "id": new_id(),
+                "kind": JobKind.MATCH.value,
+                "key": key,
+                "priority": int(JobPriority.NEW),
+            },
+        )
+        await session.commit()
+
+    await _work(cli_settings, once=True)
+
+    out = capsys.readouterr().out
+    assert "1 recovered claims" in out, out
+
+
+async def test_the_work_daemon_reports_a_recovery_that_happens_after_it_started(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """**A daemon printed exactly one line, ever**, and it was at startup when
+    the total is almost always zero -- so every later recovery, which is
+    precisely M9's S3, was invisible in the only mode a container runs. PRD
+    08's *"`usher work` ... prints the same total in its pass line"* was true
+    of `--once` alone.
+
+    Two recoveries are needed to see the difference, and the second has to
+    happen *after* the daemon is already running, so the lease is dialled to
+    its floor (`ge=10.0`) and the throttle with it. The second orphan is
+    planted mid-run and backdated an hour, which is what makes it recoverable
+    against a 10 s lease rather than a live claim of this very worker's.
+
+    The premise -- that the first line really did print before the second
+    orphan existed -- is asserted before the plant, because a case that only
+    read the final buffer could not tell "reported twice" from "reported once,
+    late".
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)
+    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
+    monkeypatch.setenv("USHER_JOB_LEASE_SECONDS", "10")
+    get_settings.cache_clear()
+    settings = get_settings()
+    try:
+        await _purge(settings)
+        first, second = f"orphan-a-{new_id()}", f"orphan-b-{new_id()}"
+        await _plant_orphan(settings, first)
+
+        daemon = asyncio.create_task(_work(settings, once=False))
+        try:
+            startup = await _until(
+                lambda out: "1 recovered claims" in out, capsys, note="the first pass"
+            )
+            # The premise, asserted rather than described: at this point only
+            # one orphan has ever existed, so a case that ends up green cannot
+            # have been satisfied by the startup line alone.
+            assert "2 recovered claims" not in startup, startup
+
+            await _plant_orphan(settings, second)
+            await _until(
+                lambda out: "2 recovered claims" in out,
+                capsys,
+                bound=30.0,
+                note="a recovery after startup never reached stdout",
+            )
+        finally:
+            daemon.cancel()
+            with suppress(asyncio.CancelledError):
+                await daemon
+        await _purge(settings)
+    finally:
+        get_settings.cache_clear()
+
+
+async def _plant_orphan(settings: Settings, key: str) -> None:
+    async with _session_for(settings) as session:
+        await session.execute(
+            text(_PLANT_AN_ORPHAN),
+            {
+                "id": new_id(),
+                "kind": JobKind.MATCH.value,
+                "key": key,
+                "priority": int(JobPriority.NEW),
+            },
+        )
+        await session.commit()
+
+
+async def _until(
+    matches: Callable[[str], bool],
+    capsys: pytest.CaptureFixture[str],
+    *,
+    bound: float = 30.0,
+    note: str = "",
+) -> str:
+    """Poll `capsys` for a line the daemon prints from another task, and hand
+    back everything seen so far.
+
+    Accumulating rather than re-reading: `readouterr()` **drains** the buffer,
+    so a poll loop that tested only the latest chunk would miss a line printed
+    between two reads -- the same trap as a `_drain` that reads a counter
+    instead of a total. Returning the accumulation is what lets the caller
+    assert a premise about what had *not* arrived yet.
+    """
+    seen = ""
+    deadline = time.perf_counter() + bound
+    while time.perf_counter() < deadline:
+        seen += capsys.readouterr().out
+        if matches(seen):
+            return seen
+        await asyncio.sleep(0.05)
+    seen += capsys.readouterr().out
+    raise AssertionError(f"{note}; stdout was {seen!r}")
+
+
+async def _an_unmatched_item(settings: Settings) -> uuid.UUID:
+    """One source and one item on the review queue, committed. The id is what
+    `--resolve` is given, so a case can name a *held* item and vary only the
+    title -- which is what tells the three refusals below apart."""
+    async with _session_for(settings) as own:
         source = Source(
             kind=SourceKind.EMBY,
-            name="cli-source",
+            name=f"cli-source-{new_id()}",
             base_url="https://emby.invalid",
             credentials_ref=f"ref-{new_id()}",
             device_id=str(new_id()),
         )
         await PostgresSourceRepository(own).add(source)
-        await own.execute(
-            text(
-                "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
-                "VALUES (:id, 'movie', 'cli-orphan', 'cli-orphan', 'skeleton')"
-            ),
-            {"id": title_id},
-        )
-        pipeline = build_pipeline(own, cli_settings)
+        pipeline = build_pipeline(own, settings)
         await pipeline.media_items.upsert_many(
             [
                 MediaItemUpsert(
@@ -400,19 +618,51 @@ async def test_unmatched_lists_and_resolves_through_the_real_repository(
         )
         await own.commit()
         stored = await pipeline.media_items.get_by_external_id(source.id, "unmatched-1")
-    assert stored is not None
+    assert stored is not None, "the premise: the item being resolved is on the queue"
+    return stored.id
+
+
+async def _a_title(settings: Settings) -> uuid.UUID:
+    """A `titles` row `--title` can legitimately name."""
+    title_id = new_id()
+    async with _session_for(settings) as own:
+        await own.execute(
+            text(
+                "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
+                "VALUES (:id, 'movie', 'cli-orphan', 'cli-orphan', 'skeleton')"
+            ),
+            {"id": title_id},
+        )
+        await own.commit()
+    return title_id
+
+
+async def test_unmatched_lists_and_resolves_through_the_real_repository(
+    cli_settings: Settings,
+    clean_slate: None,
+    capsys: pytest.CaptureFixture[str],
+    session: AsyncSession,
+) -> None:
+    """The review queue's two halves, against real SQL. `--resolve` writes
+    `title_id` and leaves `episode_id` null, which `attach_title` documents
+    as the deliberate act of a human rather than a walk's "I did not look".
+    """
+    media_item_id = await _an_unmatched_item(cli_settings)
+    title_id = await _a_title(cli_settings)
 
     await _unmatched(cli_settings, limit=50, offset=0, resolve=None, title=None)
     assert "unmatched-1" in capsys.readouterr().out
 
-    await _unmatched(cli_settings, limit=50, offset=0, resolve=str(stored.id), title=str(title_id))
+    await _unmatched(
+        cli_settings, limit=50, offset=0, resolve=str(media_item_id), title=str(title_id)
+    )
     assert "resolved" in capsys.readouterr().out
 
     async with _session_for(cli_settings) as own:
         row = (
             await own.execute(
                 text("SELECT title_id, episode_id FROM media_items WHERE id = :id"),
-                {"id": stored.id},
+                {"id": media_item_id},
             )
         ).one()
     assert row.title_id == title_id
@@ -427,30 +677,74 @@ async def test_unmatched_lists_and_resolves_through_the_real_repository(
 async def test_resolving_an_item_that_does_not_exist_says_so(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The media item is the absent one, so the title has to be real.
+    """**The title is real and the media item is not**, which is the only
+    fixture that keeps this a test of `attach_title`'s `rowcount == 0`.
 
-    This case passed a random uuid for *both* ids until 2026-08-19 and
-    asserted the media-item message, which made it a test of check order
-    wearing the name of a test about a missing item: issue #5 added the
-    title lookup that now runs first, and the case failed reporting the
-    other true fact. Each absence gets its own case below, and each one
-    seeds the id it is not testing.
+    It named a random uuid for *both* ids until 2026-08-19, which made it a
+    test of check order wearing the name of a test about a missing item: the
+    title lookup issue #5 added runs first, so the old fixture is answered by
+    the *other* true fact. The repair was **mandatory rather than
+    prophylactic** -- with the pre-check in place the old fixture stops
+    reaching this arm at all and the case goes *loudly* red on
+    `no such title: ...` where it asserts `no such media item`. There was
+    never a window in which it silently changed subject; what the two random
+    ids bought was an answer that happened to be right for a reason the case
+    did not name. Each absence now gets its own case, and each seeds the id it
+    is not testing.
     """
-    title_id = new_id()
-    async with _session_for(cli_settings) as own:
-        await own.execute(
-            text(
-                "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
-                "VALUES (:id, 'movie', 'cli-real', 'cli-real', 'skeleton')"
-            ),
-            {"id": title_id},
-        )
-        await own.commit()
-
+    title_id = await _a_title(cli_settings)
     await _unmatched(
         cli_settings, limit=50, offset=0, resolve=str(uuid.uuid4()), title=str(title_id)
     )
     assert "no such media item" in capsys.readouterr().out
+
+
+async def test_an_unknown_title_id_is_a_sentence_against_real_postgres(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**Issue #5 against the foreign key that produces it**, which is the half
+    no fake can exhibit -- `FakeMediaItemRepository`'s own divergence list says
+    it has no foreign keys, so the unit twin proves the pre-check and this
+    proves what the pre-check is standing in front of.
+
+    Before M10's F4 this reached `fk_media_items_title_id_titles`,
+    `PostgresMediaItemRepository.attach_title` translated it to
+    `RepositoryConflict`, and `main` re-raised it because that family is
+    deliberately out of `OPERATOR_ERRORS`. **40 frames at a real terminal**,
+    measured 2026-08-20 by running the console script against a throwaway
+    `pgvector/pgvector:pg17`; this case's own red run reports **62**, but 25
+    of those are `_pytest`/`pluggy`/`pytest_asyncio` and no operator sees
+    them, which is why the pytest number is not the one quoted anywhere.
+
+    🔴 **What the last assertion proves is that nothing was *net* written --
+    not that nothing was attempted, and the distinction cost a review round.**
+    It read as *"the refusal happened before the statement rather than after
+    it"*, which this case cannot show: `attach_title` runs its `UPDATE` inside
+    `session.begin_nested()`, so a refused row is rolled back either way and
+    a `try/except RepositoryConflict` around the write **passes every
+    assertion here**. Measured, by planting exactly that swallow.
+
+    So the ordering claim lives in the unit twin, on
+    `harness.media_items.attached == []`, and this case proves the two things
+    no fake can: that the foreign key **fires at all** (the fake has none, by
+    construction and by its own divergence list), and that what an operator
+    gets for it is a sentence naming the id rather than a stack. Read the two
+    cases as a pair; neither is the whole claim.
+    """
+    media_item_id = await _an_unmatched_item(cli_settings)
+    unknown = new_id()
+
+    await _unmatched(
+        cli_settings, limit=50, offset=0, resolve=str(media_item_id), title=str(unknown)
+    )
+
+    printed = capsys.readouterr().out
+    assert str(unknown) in printed, printed
+    assert "Traceback" not in printed, printed
+    assert "resolved" not in printed, printed
+
+    await _unmatched(cli_settings, limit=50, offset=0, resolve=None, title=None)
+    assert str(media_item_id) in capsys.readouterr().out
 
 
 async def test_resolving_to_a_title_that_does_not_exist_says_so(

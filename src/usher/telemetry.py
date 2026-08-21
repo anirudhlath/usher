@@ -1,7 +1,7 @@
 """Logging and tracing setup.
 
-Telemetry is optional: with no OTLP endpoint configured the exporters are
-no-ops and Usher runs normally. See PRD 10 and ADR-0007.
+Telemetry is optional: with no OTLP endpoint configured no exporter object
+is constructed at all and Usher runs normally. See PRD 10 and ADR-0007.
 """
 
 import inspect

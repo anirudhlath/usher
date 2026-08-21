@@ -64,6 +64,15 @@ _TABLE_BEGIN = "<!-- vocabulary:begin -->"
 _TABLE_END = "<!-- vocabulary:end -->"
 _ROW = re.compile(r"^\|\s*`([a-z][a-z_]*)`\s*\|\s*(\d{3})\s*\|", re.MULTILINE)
 
+# An amendment's own disposition line, in both spellings the record uses.
+# `_amendment_statuses` explains why the colon has to be adjacent.
+_AMENDMENT_STATUS = re.compile(r"Status of the amendment:\**\s*([A-Z][a-z]+)")
+
+# The three words an amendment may be in. Anything else is a garbled line, and
+# a garbled line is how a status stops being findable while still looking like
+# one to a reader.
+_DISPOSITIONS = frozenset({"Open", "Accepted", "Declined"})
+
 # The one member D4 landed against a real unreachable source, and the one
 # ADR-0030 says it may not rename: PRD 07's worked example of this envelope
 # is this code, spelled this way. Every scan in this file uses it as the
@@ -196,6 +205,31 @@ def _declared() -> dict[str, int]:
     parsed = {code: int(code_status) for code, code_status in rows}
     assert len(parsed) == len(rows), f"ADR-0030's table names a code twice: {rows}"
     return parsed
+
+
+def _amendment_statuses() -> dict[str, str]:
+    """Every amendment heading in ADR-0030, mapped to its declared status.
+
+    Two spellings are in the document and both are load-bearing, so the
+    pattern takes either: `**Status of the amendment: Open.**` and
+    `**Status of the amendment:** Accepted, ...`. Prose that merely *names*
+    the line (`` a `Status of the amendment` line ``) does not match, because
+    the colon has to follow the word directly.
+
+    Keyed by the heading text rather than by position, so a fourth amendment
+    landing between two existing ones cannot silently re-point an assertion
+    at the wrong section.
+    """
+    statuses: dict[str, str] = {}
+    heading = ""
+    for line in _ADR.read_text().splitlines():
+        if line.startswith("#"):
+            heading = line.lstrip("#").strip()
+            continue
+        found = _AMENDMENT_STATUS.search(line)
+        if found is not None:
+            statuses[heading] = found.group(1)
+    return statuses
 
 
 def _resource_nouns(app: FastAPI) -> set[str]:
@@ -414,6 +448,69 @@ def test_the_status_translation_table_covers_only_what_usher_does_not_raise_itse
     assert set(_CODE_FOR_STATUS) == {404, 405, 422}, (
         f"_CODE_FOR_STATUS covers {sorted(_CODE_FOR_STATUS)}; ADR-0030 scopes it to the "
         "statuses Starlette and FastAPI raise before any Usher handler runs"
+    )
+
+
+def test_the_image_proxys_amendment_is_no_longer_open() -> None:
+    """ADR-0030's image amendment has an answer, and `Open` is not one.
+
+    **Why a case rather than a reading.** This record's own text says that a
+    request left open while the table states an answer flatly is *"how an
+    unanswered question quietly becomes an answered one"* -- it happened to
+    the sibling amendment, which was open in one bullet and settled precedent
+    in two other files. `GET /images/{image_id}`'s second upstream arm is the
+    one M10's spec picked up out of `08-operations.md` as an open defect. So
+    the disposition is asserted rather than left to whoever reads the section
+    next.
+
+    **The positive control is the whole reason this is trustworthy.** A regex
+    that matches nothing passes exactly like one that passes, and this one is
+    aimed at prose. So: the scan must find status lines at all, and it must
+    find the **accepted** `not_playable` amendment reading `Accepted` --
+    a section this file does not otherwise touch and whose disposition has
+    been settled since M9. Without that anchor, a renamed heading, a reworded
+    status line or a moved section all read as "no longer open".
+
+    **Scoped to the image amendment on purpose.** The `?mode=semantic`
+    amendment beside it is a different question with a stronger case for
+    minting by this record's own reading, and it is deliberately left `Open`;
+    a case asserting *every* amendment is answered would either fail today or
+    press the next reader into answering both at once, which is the fan-out
+    ADR-0030 exists to prevent.
+    """
+    statuses = _amendment_statuses()
+    assert statuses, (
+        f"the amendment scan found no `Status of the amendment:` lines in {_ADR.name} -- "
+        "the parse is measuring nothing"
+    )
+
+    anchors = [heading for heading in statuses if "not_playable" in heading]
+    assert len(anchors) == 1, (
+        f"the scan found {len(anchors)} amendments naming `not_playable`, expected the one "
+        f"accepted in M9: {sorted(statuses)}"
+    )
+    assert statuses[anchors[0]] == "Accepted", (
+        f"the accepted amendment reads {statuses[anchors[0]]!r}, so the scan is not reading "
+        "the dispositions it thinks it is"
+    )
+
+    unknown = {
+        heading: status for heading, status in statuses.items() if status not in _DISPOSITIONS
+    }
+    assert unknown == {}, (
+        f"amendments whose status is not one of {sorted(_DISPOSITIONS)}: {unknown}"
+    )
+
+    image = [heading for heading in statuses if "/images/{image_id}" in heading]
+    assert len(image) == 1, (
+        f"the scan found {len(image)} amendments naming `GET /images/{{image_id}}`: "
+        f"{sorted(statuses)}"
+    )
+    assert statuses[image[0]] != "Open", (
+        "ADR-0030's image amendment is still `Open`. Its residual `PortDataMalformed` arm has "
+        "been measured against the live CDN; the record has to say `Accepted` or `Declined` "
+        "and carry the rate, or the vocabulary table and `08-operations.md` go on stating an "
+        "answer to a question this record calls unanswered."
     )
 
 

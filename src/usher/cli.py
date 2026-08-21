@@ -55,7 +55,7 @@ from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.eval.errors import EvalDependencyMissing
 from usher.eval.goldens.suggest import GATE_SEED
 from usher.ports.errors import (
@@ -78,6 +78,7 @@ from usher.services.curation import CurationReport
 from usher.services.curation_validate import DropReason
 from usher.services.genres import GenreNormalisationService
 from usher.services.home import ComposeReport, HomeService
+from usher.services.reconcile import RETRACTION_ERROR_CODE
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
 from usher.services.search import SearchAnswer, SemanticSearchUnavailable, SuggestTier
@@ -159,6 +160,18 @@ _IDLE_SLEEP_SECONDS = 5.0
 # for the opposite reason: no measured path reaches this boundary with one, and
 # ADR-0026 asks for evidence per family before the tuple grows.
 #
+# ⚠️ **`AvailabilitySweepRefused` now has that evidence and still stays out, and
+# the two reasons are worth keeping apart** (M10 S9, 2026-08-19). The *family*
+# does occur in the field: the operator's own `sync_runs` holds a `full` run
+# refused by ADR-0015's ceiling on 2026-08-13. What it does not have is a
+# **path** here -- `ReconcileService.reconcile` absorbs it into a `FAILED` row
+# and its docstring promises never to raise, deliberately, so one source's
+# refusal cannot abort a multi-source sync. Adding it to this tuple would be a
+# decision with no effect. `_sync` reports it off the **run row** instead, which
+# is the artefact that does cross this boundary, and exits non-zero there.
+# *"Unreachable here"* and *"never observed"* are two claims, and only the first
+# is still true of this one.
+#
 # `tests/unit/test_cli_errors.py::
 # test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple`
 # reads the set off `__subclasses__()`, so a tenth member cannot arrive
@@ -199,7 +212,11 @@ OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     PortUnavailable,
     # The credential was rejected. `USHER_LLM_API_KEY`, `USHER_TMDB_API_KEY`,
     # a source's stored password -- an operator fixes all three, and none of
-    # them is worth sixty frames.
+    # them is worth forty frames. (*"Sixty"* here and in three other places
+    # until 2026-08-20, when M10's F4 measured the only one of them anybody
+    # had ever counted: 40 at a real terminal, and the 60 was a pytest run's
+    # 62 with 25 harness frames in it. This line predates F4 and is amended
+    # with it, because a census restated in four places goes stale in three.)
     PortAuthFailed,
     # The upstream asked to be backed off. A CLI has no backoff schedule to
     # apply, so the honest answer at a terminal is the sentence and exit 1.
@@ -364,6 +381,44 @@ async def _sync(
     first -- `WatchStateSyncService` resolves each state against a
     `MediaItem`, so a watch lane that ran before the items existed would
     count every state unmatched and merge nothing.
+
+    **One pipeline for the whole command, which is also one outbound gate per
+    source for the whole command** (ADR-0042 §4). `build_pipeline` builds a
+    `SourceGateRegistry` when nobody hands it one, and this command opens
+    exactly one pipeline and loops the sources inside it -- so the walk and the
+    watch lane below share a gate per source, and two sources get two.
+
+    ⚠️ **Until 2026-08-19 this paragraph ended *"a second `build_pipeline` here
+    would be a second registry and twice the rate"*, and that is unreachable as
+    written.** Doubling the rate for one source takes **two** things -- two
+    registries *and* two adapters built against them -- and this command has
+    one of each, so either one alone is a sufficient guard. The loop below
+    opens **one** adapter per source via `_open_adapter` and hands that same
+    object to the reconcile walk and to the watch lane, so however many
+    pipelines existed there would still be one gate per source. Measured: both
+    spellings of the claim's own defect -- a second `build_pipeline` beside the
+    first, and one moved inside the loop -- survive as equivalent mutants,
+    because the adapter count is what is really holding it. The load-bearing
+    property is therefore **one `_open_adapter` per source**, which is what
+    `tests/unit/test_composition.py::test_the_cli_roots_compose_once_rather_than_per_scope`
+    asserts, alongside the property that *is* about the registry: the
+    `build_pipeline` call is in this function's own body and not inside a
+    closure that runs per scope.
+
+    🔴 **A run that recorded `FAILED` exits non-zero, and until 2026-08-19 it
+    did not.** `ReconcileService.reconcile` absorbs every `UsherPortError`
+    into a `FAILED` row and never raises -- deliberately, so one source's
+    failure cannot abort a multi-source sync -- so nothing reached `main`'s
+    boundary and the command exited 0 having printed the word `failed`. A
+    human reading the terminal saw it; cron, CI and a systemd unit did not.
+    Measured on the deployment this milestone was written against: one `full`
+    run refused by ADR-0015's ceiling on 2026-08-13, and **ten consecutive
+    `watch_state` failures with not one completion, every one of them exit 0.**
+
+    **The exit is collected and raised after the loop**, never inside it: the
+    reason `reconcile` swallows the exception in the first place is that the
+    remaining sources still have to be walked, and exiting early would
+    reintroduce exactly that.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(
@@ -375,6 +430,7 @@ async def _sync(
             return
         user_id = await ensure_default_user(session)
         await session.commit()
+        failed: list[SyncRun] = []
         for source in sources:
             adapter = await _open_adapter(pipeline, source)
             if adapter is None:
@@ -398,8 +454,37 @@ async def _sync(
                     f"unmatched={watch.items_unmatched}"
                     + (f" error={watch.error}" if watch.error else "")
                 )
+                failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)
             finally:
                 await adapter.aclose()
+        if failed:
+            raise SystemExit(_sync_failed(failed))
+
+
+def _sync_failed(runs: Sequence[SyncRun]) -> str:
+    """The exit line for a sync in which at least one run recorded `FAILED`.
+
+    The per-run detail is already on stdout above -- including each `error`,
+    which for a refusal is the two numbers and the ceiling. This says *which*
+    lanes failed and stops the command claiming success, rather than repeating
+    what was printed a line earlier.
+
+    **`--allow-full-retraction` is named only when a refusal is among them**,
+    and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is the one
+    failure here an operator has a command for; a read timeout is not, and an
+    escape hatch offered for every failure is one people learn to paste
+    without reading. The token is matched rather than the refusal's English,
+    because that sentence is built from three numbers in `ports/ingest.py` and
+    is a standing candidate for rewording.
+    """
+    lanes = ", ".join(f"{one.kind.value}" for one in runs)
+    line = f"{len(runs)} sync run(s) failed: {lanes}; see the lines above and `usher sync-status`"
+    if any(RETRACTION_ERROR_CODE in (one.error or "") for one in runs):
+        line += (
+            "\nthe availability sweep refused: if the removal was intended, "
+            "re-run with `usher sync --allow-full-retraction`"
+        )
+    return line
 
 
 async def _sync_status(settings: Settings) -> None:
@@ -447,31 +532,87 @@ async def _unmatched(
     one loop: an operator reads a page, resolves one line of it, and reads
     the next.
 
-    **Both ids are checked before anything is written, and only one of them
-    needs a lookup to do it.** `--resolve` naming no row is `attach_title`'s
-    boolean -- the `UPDATE` matches nothing, so nothing is written and there
-    is nothing to undo. `--title` naming no row is not symmetric: the
-    `UPDATE` matches, `fk_media_items_title_id_titles` fires, and the
-    repository translates it into a `RepositoryConflict` whose message names
-    the *media item* -- the id that was fine. That family is deliberately
-    outside `OPERATOR_ERRORS`, because its other raise sites are tripwires
-    for bugs in this project's own code, so the operator got sixty frames
-    for a typo. The guard is a `SELECT` in front of the write, which is the
-    order `POST /admin/unmatched/{id}/resolve` already keeps for the reason
-    it documents: `attach_title` writes what it is given, so a refusal that
-    arrived after the write would be a refusal that had already happened.
+    **`--title` has three bad values and each gets its own sentence, which is
+    why the title is read before anything is written** (issue #5, fixed on
+    `main` and again as M10's F4; `main`'s spelling is the one that shipped).
+    A value that is not a UUID is `_as_uuid`'s; a `--resolve` naming no media
+    item is `attach_title`'s `rowcount == 0` -- the `UPDATE` matches nothing,
+    so nothing is written and there is nothing to undo; and a well-formed
+    UUID naming no title used to be `fk_media_items_title_id_titles`,
+    translated to `RepositoryConflict` whose message names the *media item*,
+    the id that was fine. That family is deliberately outside
+    `OPERATOR_ERRORS`, because its other raise sites are tripwires for bugs in
+    this project's own code, so `main` re-raised it and an operator got
+    **40 frames** for pasting the wrong column of the listing above, which
+    prints a media item id and no title id at all. (Measured 2026-08-20 by
+    running the real console script against a throwaway
+    `pgvector/pgvector:pg17`: 40 `File` lines over four chained tracebacks, 35
+    of them library code, 5 in this project. This docstring and PRD 09 both
+    said *"sixty"* until then, which was the pytest run's 62 -- and 25 of
+    those are `_pytest`/`pluggy`/`pytest_asyncio` frames no operator ever
+    sees. See `.claude/rules/mutation-sweeps.md`.)
+
+    **The lookup is here rather than in `OPERATOR_ERRORS`, and that is the
+    argued half.** Adding `RepositoryConflict` to the tuple is the one-line
+    version, and every raise site of that family was read before it was
+    refused: this is the **only** one an operator's own CLI argument reaches.
+    ADR-0026's bar is *"a family belongs in the tuple when an operator can act
+    on it"*, and one site out of that census is not a family. **ADR-0026's
+    Consequences is the authority for the census**; `09-roadmap.md`'s
+    discharged debt entry and
+    `test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple`'s
+    assertion message restate it, and those three are the only copies -- kept
+    deliberately few, because a grep-checkable number is exactly what goes
+    stale one place at a time.
+
+    **Not `except RepositoryConflict` around the write either**, which reads
+    identically to an operator and is not the same thing: Postgres refuses
+    the row *after* the statement has run, inside a SAVEPOINT this command
+    would then have to unwind, and the same handler would swallow the other
+    conflicts `attach_title` can raise. `POST /admin/unmatched/{id}/resolve`
+    has read the title first since M9's E4 for the same reason, and its own
+    docstring states the rule: everything the request names is checked before
+    anything is written.
 
     Both refusals print and return rather than raising `SystemExit` the way
     `_as_uuid` does. One command naming two things that do not exist owes
     them one exit code, and `no such media item` has had this one since M4.
+
+    ⚠️ **The read and the write are not one statement, so this is a
+    check-then-act race, and the residual is accepted rather than absent.** A
+    title deleted between `titles.get` and `attach_title` hands the operator
+    back exactly the stack #5 was filed about. What bounds it is that
+    **nothing in this project ever deletes a `titles` row**: `src/usher/`
+    holds **12** `DELETE FROM` statements (measured 2026-08-20) and they name
+    `title_embeddings`, `title_neighbors`, `title_search_names`, `credits`,
+    `genome_tags`, `curated_rows`, `images` and `jobs` -- never `titles`
+    itself, and there is no ORM-level delete either. So the window needs an
+    out-of-band `psql`, a restore, or a second process doing something this
+    codebase has no path for, and when it fires it degrades to the *pre-fix*
+    behaviour rather than to anything worse -- no wrong row is written,
+    because the foreign key is still there underneath. Closing it would mean
+    `SELECT ... FOR SHARE` on a row this command holds no other reason to
+    lock, on the read path of a hand resolution, to defend against a delete
+    that has no caller. Stated rather than left as an unspoken *"this cannot
+    happen"*, which `.claude/rules/ports-and-error-taxonomy.md` records as
+    the shape that fires one measurement later.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if resolve is not None and title is not None:
-            # Parsed in argument order, so a command that misspells both is
-            # still told about `--resolve` first.
+            # Both conversions before the read, in the order the arguments
+            # were written, so a run with two malformed ids still names the
+            # first one rather than the one the new check happens to want.
+            # Pinned by `test_two_malformed_ids_name_the_media_item_first`,
+            # because swapping these two lines is otherwise a silent mutant.
             media_item_id = _as_uuid(resolve, "media item id")
             title_id = _as_uuid(title, "title id")
+            # One extra round trip per hand resolution -- `PostgresTitle
+            # Repository.get` is a `session.get` on the primary key, so it is
+            # one indexed `SELECT` on a command an operator runs by hand, one
+            # line at a time. Priced rather than assumed, the way
+            # `attach_title`'s own comment prices its statement eleven lines
+            # from here.
             if await pipeline.titles.get(title_id) is None:
                 print(f"no such title: {title_id}")
                 return
@@ -503,6 +644,17 @@ async def _work(settings: Settings, *, once: bool) -> None:
     bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
     the client. A client per job would give every job its own budget, which
     is a rate limiter that limits nothing.
+
+    **The same argument, one upstream over, and it is why `unit_of_work` is
+    built once here rather than per job.** The daemon below opens a scope per
+    claim and per job, so anything that lives on a `Pipeline` lives for one
+    job -- including, before M10's S3, the outbound gate on every source
+    adapter. `unit_of_work` now resolves a `SourceGateRegistry` once and closes
+    over it, so this process paces one source at
+    `USHER_SOURCE_REQUESTS_PER_SECOND` however many jobs are in flight
+    (ADR-0042 §4). **A second `usher work` container is a second registry and
+    therefore twice the rate** -- a capacity decision an operator makes, and one
+    nothing in a process can make for them.
 
     **Publishes to `NullEventPublisher`, and that is a stated consequence
     rather than an oversight.** `usher work` is a separate process and M5's
@@ -560,7 +712,28 @@ async def _work(settings: Settings, *, once: bool) -> None:
             user_id=user_id,
         )
 
-        recovered_at = 0.0
+        # 🔴 **`-inf`, never `0.0`** -- `api/lanes.py` carries the argument, and
+        # it applies here with one extra consequence: `usher work --once` from
+        # a cron inside the first 150 s of host uptime would recover nothing at
+        # all, while `_measure` below claims it recovers "before the first
+        # claim". `time.monotonic()` is seconds since boot on Linux.
+        throttled_at = float("-inf")
+        # The running total of what this process has taken back from workers
+        # that stopped heartbeating, kept for the same reason the server keeps
+        # it in `/health/ready`'s body: `recover()` has returned this number
+        # since M9's W1 and **both** callers discarded it, so the only trace of
+        # M9's S3 condition was a WARNING that fires when the count is
+        # non-zero. This command has no readiness route, so it goes in the pass
+        # line it already prints rather than growing a surface (M10 F2).
+        #
+        # An `int` here and an `int | None` on `LaneReport`, deliberately.
+        # `None` there is *"this process runs no worker"*, which is a state
+        # `create_app` really has (`USHER_WORKER_ENABLED=false`) and which
+        # `usher work` cannot be: with the origin above, the first `_measure`
+        # always recovers before anything is printed, so `0` on this line means
+        # *asked and found none* and there is no third state for a `None` to
+        # name. Spelling it `int | None` would add a branch no run can reach.
+        recovered = 0
 
         async def _measure() -> int:
             # PRD 08's recovery, on the lease rather than on "everything
@@ -571,11 +744,11 @@ async def _work(settings: Settings, *, once: bool) -> None:
             # the lease for `api/lanes.py`'s reason: it is an `UPDATE` scanning
             # `status = 'running'`, and between leases there is nothing to
             # find.
-            nonlocal recovered_at
+            nonlocal throttled_at, recovered
             now = time.monotonic()
-            if now - recovered_at >= settings.job_lease_seconds / 2:
-                await worker.recover()
-                recovered_at = now
+            if now - throttled_at >= settings.job_lease_seconds / 2:
+                recovered += await worker.recover()
+                throttled_at = now
             done = await worker.run_once()
             async with work() as pipeline:
                 await gauges.refresh(pipeline.queue)
@@ -585,11 +758,23 @@ async def _work(settings: Settings, *, once: bool) -> None:
             return done
 
         ran = await _measure()
-        print(f"{ran} jobs")
+        print(f"{ran} jobs, {recovered} recovered claims")
         while not once:
             if ran == 0:
                 await asyncio.sleep(_IDLE_SLEEP_SECONDS)
+            taken = recovered
             ran = await _measure()
+            if recovered != taken:
+                # **On a change, never per pass.** Without this a daemon prints
+                # exactly one line, at startup, when the total is almost always
+                # zero -- so every later recovery, which is precisely M9's S3,
+                # is invisible in the only mode a container runs, and PRD 08's
+                # "`usher work` ... prints the same total in its pass line"
+                # would be true of `--once` alone. A line *per pass* is the
+                # other error: at `_IDLE_SLEEP_SECONDS` that is ~17,280 a day,
+                # the rate `.claude/rules/config-cli-and-deployment.md` already
+                # records as training an operator to ignore output.
+                print(f"{ran} jobs, {recovered} recovered claims")
     finally:
         await registry.aclose()
         await aclose()
@@ -2093,6 +2278,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     boundary wraps `_dispatch` rather than living inside it, and
     `tests/unit/test_cli_errors.py` asserts that shape by AST as well as
     asserting the behaviour.
+
+    **`_sync`'s failed-run exit is not a hole in that boundary.** A `SyncRun`
+    that recorded `FAILED` is a *value* the command was handed, not an
+    exception it caught -- `ReconcileService.reconcile` absorbed the exception
+    three layers down and promises to, so there is nothing here to translate.
+    It exits through `SystemExit` like the five below.
 
     Reading the settings is inside it too. A `.env` that fails validation is
     the same kind of failure as a database that is down, it reaches the

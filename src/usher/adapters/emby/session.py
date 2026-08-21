@@ -30,9 +30,15 @@ tested:
 2. **Negative caching.** If `AuthenticateByName` itself is rejected, a
    monotonic deadline is recorded and every call raises `PortAuthFailed`
    without a network request until it passes. Without it a wrong password
-   doubles every request forever, against an upstream PRD 01 measures at
-   1-5 s per call. The clock is injected so the *expiry* is testable
-   without sleeping.
+   doubles every request forever. ⚠️ **What the doubling costs is still
+   unmeasured**, and this is the one place it would be easy to quote the wrong
+   number: the added request is `AuthenticateByName`, which no run in this
+   repository has ever exercised -- the operator's secrets hold a token, not a
+   password. What M10's S1 priced on 2026-08-15 is the *other* half, the call
+   being retried: 0.1649 s mean for a single-item read, 6.04 s for a 200-item
+   page (`.claude/rules/emby-push-and-ingest.md`). So the storm is real and its
+   per-unit price is half-known.
+   The clock is injected so the *expiry* is testable without sleeping.
 
 The injected clock also times `usher.source.request.duration` (PRD 10's
 catalogue entry for M3). Deliberately the same one: two clocks would be a
@@ -83,7 +89,12 @@ import httpx
 from opentelemetry import metrics, trace
 
 from usher import __version__
-from usher.adapters.http import UNTRANSLATED_FAILURES, failure_detail, retry_after_seconds
+from usher.adapters.http import (
+    UNTRANSLATED_FAILURES,
+    SourceGate,
+    failure_detail,
+    retry_after_seconds,
+)
 from usher.adapters.http import decode_json as _decode_json_body
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
@@ -267,6 +278,7 @@ class EmbySession:
         device_id: str,
         app_version: str = __version__,
         reauth_cooldown_seconds: float = 60.0,
+        limiter: SourceGate | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
@@ -276,6 +288,27 @@ class EmbySession:
         self._app_version = app_version
         self._reauth_cooldown = reauth_cooldown_seconds
         self._clock = clock
+        # The proactive outbound gate (ADR-0042), **handed in rather than
+        # minted**. It used to be constructed here from a `requests_per_second`
+        # scalar, which made it per *session* -- i.e. per adapter, i.e. per
+        # pipeline, i.e. per request -- so one server process running both lanes
+        # held >=2 gates for one source and ran it at twice the configured rate.
+        # `SourceGateRegistry` (`usher.adapters.http`) owns it now, keyed by
+        # `source.id` at the composition root, so every adapter for one source
+        # shares one gate however many pipelines exist (M10 S3; ADR-0042 §4).
+        # This module is one row of the closed outbound table in
+        # `tests/unit/test_outbound_call_sites.py`, which asserts that the row
+        # and this paragraph do not outlive one another.
+        #
+        # `None` is an unthrottled session, which is what a test that builds one
+        # directly wants -- and a session built without a registry has nothing
+        # to share with anyway. It gets this session's clock, one time source as
+        # the duration histogram does; a gate that *came* from a registry
+        # carries the registry's, because a gate shared by N sessions cannot
+        # take one of their clocks.
+        self._limiter = (
+            limiter if limiter is not None else SourceGate(0.0, source=source_name, clock=clock)
+        )
         self._lock = asyncio.Lock()
         self._token: str | None = None
         self._user_id: str | None = None
@@ -314,8 +347,9 @@ class EmbySession:
         translation governs what crosses the port when a send *fails*; this
         governs the send never happening at all -- and when the client was
         *injected* it is not closed, so nothing but this flag stands
-        between a closed adapter and a working request against an upstream
-        PRD 01 measures at 1-5 s per call.
+        between a closed adapter and a working request against somebody
+        else's media server (measured 0.1649 s mean for a single-item read,
+        6.04 s for a page -- M10 S1, `.claude/rules/emby-push-and-ingest.md`).
         """
         if self._closed:
             raise PortUnavailable("this source adapter has been closed")
@@ -433,6 +467,10 @@ class EmbySession:
         headers: Mapping[str, str],
         op: str,
     ) -> httpx.Response:
+        # Pace before the wire, and before the clock the request duration is
+        # measured against starts: the gate's wait is its own series
+        # (`usher.source.throttle.wait`), never folded into request latency.
+        await self._limiter.take()
         started = self._clock()
         try:
             # Built explicitly, then sent as a *reference* on its own line --

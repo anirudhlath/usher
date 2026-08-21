@@ -83,6 +83,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from loguru import logger
 from opentelemetry import trace
@@ -180,6 +181,12 @@ class LaneSupervisor:
         self._worker: asyncio.Task[None] | None = None
         self._refresher: asyncio.Task[None] | None = None
         self._rows_lane: asyncio.Task[None] | None = None
+        # What `JobWorker.recover()` measured, kept rather than discarded --
+        # see `recovered_claims()` below. `None` until the first recovery pass
+        # returns, so a process that runs no worker lane reports *not probed*
+        # rather than *no orphans*.
+        self._recovered_claims: int | None = None
+        self._recovered_at: datetime | None = None
         self._gauges = QueueGauges()
         # PRD 10's embedding backlog, on the same beat and for the same
         # reason: an OTel observable callback runs on the metric reader's
@@ -257,6 +264,40 @@ class LaneSupervisor:
     def worker_running(self) -> bool:
         return self._worker is not None and not self._worker.done()
 
+    def recovered_claims(self) -> int | None:
+        """The total `JobWorker.recover()` has returned in this process, or
+        `None` if it has never asked.
+
+        Three values, three statements -- `None` *not probed*, `0` *asked and
+        found none*, non-zero *took some back* -- on the terms
+        `SourceStatus.push_available` (`usher.ports.source`) already sets. **The
+        whole argument for the shape, the cost and the per-process bound is on
+        `LaneReport` (`usher.api.dto.health`), which is the wire contract**;
+        stating it here too is two copies to drift.
+        """
+        return self._recovered_claims
+
+    def recovered_at(self) -> datetime | None:
+        """When the last recovery pass that *found something* ran -- see
+        `LaneReport` for why it is not "when recovery last ran"."""
+        return self._recovered_at
+
+    def _note_recovery(self, recovered: int) -> None:
+        """Fold one `recover()` result into the two reported fields.
+
+        Reads the **return value**, and a counter incremented before the call
+        instead is the mutation this exists to refuse. The two **diverge where
+        it matters and agree where it does not**: a pass that recovered nothing
+        reports `0` here and `1` there, while at exactly one orphan both say
+        `1` -- which is why F2's own spec, asserting `== 1` against a single
+        planted claim, could not tell them apart, and why the case that kills
+        it is the one that recovers **none**
+        (`.claude/rules/mutation-sweeps.md`, M10 F2).
+        """
+        self._recovered_claims = (self._recovered_claims or 0) + recovered
+        if recovered:
+            self._recovered_at = datetime.now(UTC)
+
     def rows_refreshing(self) -> bool:
         """Whether the `rows.refresh` lane has a live task.
 
@@ -296,8 +337,44 @@ class LaneSupervisor:
     # -- the push lanes --------------------------------------------------
 
     async def refresh(self) -> None:
-        """Start a lane for every enabled source that has none, and drop the
-        lanes of sources that have gone, been disabled, or crashed.
+        """Start a lane for every enabled source that has none, drop the lanes
+        of sources that have gone or been disabled, and **release the adapter
+        of a lane that has finished** without restarting it.
+
+        🔴 **That third clause used to read "or crashed" and the code did no
+        such thing**, which is the defect M10's S10 fixed. A lane reaches
+        `PushSupervisor.run`'s failure ceiling, its task completes, and nothing
+        popped it -- so the `SourceAdapter` stayed in `self._open_adapters`
+        **holding a live `httpx.AsyncClient` against a server this deployment
+        does not own, for the process lifetime**. That is the same class as
+        issues #19 and #9 rather than a tidiness problem, which is why the task
+        moved into Phase 1.
+
+        Worse than the socket: `push_snapshots()` reads that dict, so
+        `usher.source.push.delivering` went on publishing a series for a lane
+        that had stopped existing -- and that is the series PRD 10's *"Push
+        down"* alert reads. A dead lane reporting `delivering=False` forever and
+        a dead lane reporting nothing are different alerts.
+
+        **The lane is deliberately not restarted, and that is unchanged.** PRD
+        08's remedy for the ceiling is *"lean on the nightly walk"*; a `refresh`
+        that replaced a finished lane would reconnect forever against exactly
+        the buffering proxy the ceiling exists for.
+
+        **So the finished task stays in `self._lanes` and only the adapter is
+        released**, which is load-bearing twice over and is the one design
+        choice here worth stating: the entry is what stops the loop below
+        restarting the lane, and it is what `crashed_sources()` reads. S10
+        releases the resource; F2 reports the state. Popping the task instead
+        would restart the lane on the next tick *and* leave F2 nothing to
+        report -- so the plan's sweep target naming `self._lanes.pop` describes
+        a design that cannot work, and the ledger records that rather than the
+        code adopting it.
+
+        Releasing it is also what makes `GET /admin/sources/{id}/status`
+        honest. `push_available()` answers `None` -- *"not probed"* -- when no
+        adapter is open, which is the truthful answer for a source this process
+        has stopped watching, against a `False` read off a dead ledger.
 
         **Not re-entrant, and never called concurrently.** The refresher
         task awaits one call before sleeping, and nothing else in `src/`
@@ -318,6 +395,14 @@ class LaneSupervisor:
             for source_id in list(self._lanes):
                 if source_id not in wanted:
                     await self._stop_lane(source_id)
+            for source_id, task in list(self._lanes.items()):
+                # `task.done()` is the whole predicate, and it is the only
+                # thing separating this from the loudest regression this file
+                # could ship -- releasing a *live* lane's adapter mid-stream.
+                # The case for this carries a positive control over a running
+                # lane for exactly that reason.
+                if task.done():
+                    await self._release_adapter(source_id)
             for source_id, source in wanted.items():
                 if source_id not in self._lanes:
                     await self._start_lane(pipeline, source)
@@ -385,6 +470,24 @@ class LaneSupervisor:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await self._release_adapter(source_id)
+
+    async def _release_adapter(self, source_id: uuid.UUID) -> None:
+        """Close this source's adapter and forget it, at most once.
+
+        The `pop` is what makes it at-most-once, and that is the property
+        rather than an optimisation: `refresh` runs on a timer, so a release
+        path that only called `aclose()` would call it again every
+        `push_source_refresh_seconds` for the life of the process. `aclose` is
+        idempotent on both implementations, so nothing would break and nothing
+        would say so -- which is why the case for this asserts a **count** and
+        not a flag.
+
+        Shared with `_stop_lane` deliberately: a source whose lane is stopped
+        and a source whose lane finished on its own must release the adapter
+        the same way, and two spellings of one rule is how the wrong one gets
+        tested.
+        """
         adapter = self._open_adapters.pop(source_id, None)
         if adapter is not None:
             await adapter.aclose()
@@ -407,20 +510,67 @@ class LaneSupervisor:
         unmatched and merge nothing.
 
         **A delta with no cursor is a full walk, and until 2026-08-19 this
-        method performed one on startup without saying so.** `reconcile` reads
-        its `since` from the newest *completed* item-lane run; with none there
-        is no `since`, so `list_items(since=None)` walks the entire library --
-        1,126,789 items on the household this project measures -- issued by
-        `uvicorn` with default settings and no operator command, against a
-        server the operator may not own. `push_gap_min_interval_seconds` does
-        not cover it: that bounds how *often* a gap is closed and says nothing
-        about how large the walk is.
+        method performed one on startup without saying so.** `reconcile`
+        reads its `since` from the newest *completed* item-lane run; with
+        none there is no `since`, so `list_items(since=None)` walks the
+        entire library, issued by `uvicorn` with default settings and no
+        operator command, against a server the operator may not own.
+        `push_gap_min_interval_seconds` does not cover it: that bounds how
+        *often* a gap is closed and says nothing about how large the walk is,
+        and `_Gate.at` is `None` until a gap has run, so the *first* one is
+        never skipped (`services/push.py`).
+
+        **The size of that walk, on the one household this project has, and
+        the two figures in this repository are a series rather than a
+        disagreement.** Issue #9 quoted **1,126,789 items**, which is the
+        2026-08-02 count and the one most of `src/` still cites; M10 S1
+        re-measured **1,134,919 items over 5,675 pages** on 2026-08-15 and
+        priced the walk at **~9.5 hours** at that run's 6.04 s pooled mean
+        per page (7.3-11.8 h across its two `list` classes' means).
+        `.claude/rules/emby-push-and-ingest.md` carries the whole series --
+        1,126,674 on 2026-07-31, 1,126,789 on 2026-08-02, 1,134,919 on
+        2026-08-15 -- so the library is growing and neither number is wrong,
+        but **2026-08-15 is the most recent count and issue #9's is 13 days
+        stale**. One household, sequential -- re-derive before quoting.
 
         So the decision is `USHER_PUSH_GAP_CLOSE`, defaulting to `cursored`:
-        close a gap that is a *gap*, refuse one that is the whole catalog, and
-        leave the first walk to `usher sync`, which is a command an operator
-        issued. A deployment past its first walk has a cursor and is
-        unaffected.
+        close a gap that is a *gap*, refuse one that is the whole catalog,
+        and leave the first walk to `usher sync`, which is a command an
+        operator issued. `always` is the old behaviour; `never` turns
+        gap-closing walks off entirely. A deployment past its first walk has
+        a cursor and is unaffected.
+
+        **This is the one caller of `reconcile` nobody typed a command
+        for**, which is the whole reason the refusal is here. `_start_lane`
+        runs for every enabled source before the refresher's first sleep and
+        `PushSupervisor.run` closes the gap immediately after every
+        successful connection, so on a fresh deployment the first thing
+        `uvicorn usher.api.app:create_app --factory` does with default
+        settings is this walk, against every source at once.
+
+        **There is a second caller, and it is on the delivery path rather
+        than the reconnect path.** `PushSupervisor.run` closes the gap again
+        whenever an applied event comes back `deferred_to_delta` -- an event
+        naming more than `push_max_items_per_event` items with no payload
+        (`services/push.py`), deferred precisely *because* a request per item
+        is worse than a paged walk. Against a cursorless source under the
+        `cursored` default that walk is refused too, so those items are
+        applied **neither inline nor by a walk**: the event is discarded, and
+        stays discarded until an operator runs the sync the line names. That
+        is the deliberate trade and not an oversight -- the alternative is
+        the whole-library walk above, triggered by an event -- and it is the
+        reason the WARNING carries a remedy rather than only a diagnosis.
+        `tests/unit/test_api_lanes.py::
+        test_a_deferred_push_event_on_a_cursorless_source_is_refused_and_its_items_are_dropped`
+        is where that half is pinned.
+
+        **`usher sync --kind delta` on a fresh source keeps working**, and
+        that is not an accident of where the check sits: an operator asking
+        for a walk of everything is asking for exactly this, so
+        `ReconcileService` is deliberately left able to do it.
+
+        Refusing returns rather than raising and leaves the socket up: the
+        push lane goes on delivering, which is the point of the lane.
 
         **Every arm logs, and this is the only place that may.** The line
         belongs here rather than in `refresh()` or `_start_lane`, which the
@@ -429,6 +579,30 @@ class LaneSupervisor:
         day `.claude/rules/config-cli-and-deployment.md` records against
         `build_worker`. A gap is closed on reconnect and rate-limited by
         `PushSupervisor._gap`, so this is once per close.
+
+        **A delta that does have a cursor can still be large, and
+        `USHER_PUSH_GAP_MAX_ITEMS` is where that is bounded (M10 S6).** A
+        source Usher has not reached for a month, a library the owner
+        re-scanned, or a `deferred_to_delta` outcome all produce one: PRD 03
+        measured this household's 30-day delta at 28,934 items, which at the
+        shipped page size is 145 pages and ~14.6 minutes at S1's 6.0369 s
+        pooled mean. The ceiling is passed here and nowhere else, which is
+        the same split the refusal above makes -- `usher sync --kind delta`
+        and `POST /admin/sources/{id}/sync` are an operator asking for the
+        whole thing and pass nothing.
+
+        **It bounds the item lane and not the watch lane, deliberately.**
+        `WatchStateSyncService.sync` derives its own cursor under its own
+        upstream filter (`MinDateLastSavedForUser`, 29,005 items against the
+        item lane's 28,934 over the same 30-day window) and takes no ceiling
+        argument at all, so a gap close whose item walk stopped still walks
+        the watch lane whole. That is a real cost and not a free choice --
+        the startup this bounds is bounded on one of the two lanes -- and it
+        is stated in PRD 03's Reconnect-delta row and PRD 08's degradation
+        table rather than left as an accident of where the argument was
+        threaded. Bounding the watch lane too would widen a second service's
+        signature for a cursor that fails the same way, and is a task of its
+        own.
         """
         if self._settings.push_gap_close == "never":
             # Before the unit of work: there is nothing to ask a database.
@@ -439,10 +613,34 @@ class LaneSupervisor:
             )
             return
         async with self._work() as pipeline:
-            # The walk's own question, asked by the walk's own method, so the
-            # size this logs and the size it then performs cannot disagree.
+            # The walk's own question, asked by the walk's own method, so
+            # the size this logs and the size it then performs cannot
+            # disagree, and one reader of `None` is shared with `reconcile()`
+            # instead of two.
+            #
+            # It is **not** a saving on the shipped path, and an earlier
+            # version of this comment claimed it was. `reconcile()` derives
+            # the identical cursor again through `cursor_for`
+            # (`services/reconcile.py`), so a gap close that *does* run
+            # issues `latest_completed_cursor` four times where it used to
+            # issue two. Negligible -- two indexed reads on `sync_runs`
+            # against a walk of a library -- but the binding is not what
+            # makes it negligible.
+            #
+            # S6's ceiling below is computed from nothing about the cursor:
+            # it is a count of **items**, evaluated in `ReconcileService`'s
+            # own walk loop where `run.items_seen` already lives. S5
+            # predicted the binding would save that read; it does not. What
+            # did hold is the other half of the prediction -- the ceiling is
+            # a refusal rather than a clamp, so `reconcile()` still takes no
+            # `since` override.
             cursor = await pipeline.reconcile.cursor_for(source, SyncRunKind.DELTA)
             if cursor is None:
+                # The source's **name**, never its base URL and never
+                # anything from its credential row -- PRD 08's
+                # credentials-are-never-logged rule, and `ReconcileService`'s
+                # own failure line is the local precedent for spelling it
+                # this way.
                 if self._settings.push_gap_close == "cursored":
                     logger.warning(
                         "not closing {source}'s push gap: no item sync has ever completed "
@@ -466,7 +664,17 @@ class LaneSupervisor:
                     source=source.name,
                     since=cursor.isoformat(),
                 )
-            await pipeline.reconcile.reconcile(source, SyncRunKind.DELTA, adapter)
+            await pipeline.reconcile.reconcile(
+                source,
+                SyncRunKind.DELTA,
+                adapter,
+                max_items=self._settings.push_gap_max_items,
+            )
+            # Unconditionally, and after a bounded item walk as much as
+            # after a whole one. `reconcile` never raises, so a truncated
+            # walk arrives here as a returned `FAILED` run rather than as
+            # control flow -- and the watch lane must still run, because it
+            # is a different lane with a different cursor.
             await pipeline.watch.sync(source, adapter, user_id=await self._user_id())
 
     async def _write_push_available(self, source: Source, available: bool) -> None:
@@ -615,7 +823,21 @@ class LaneSupervisor:
         register_search_gauges(self._backlog.read)
         registry = SourceRegistry()
         worker: JobWorker | None = None
-        recovered_at = 0.0
+        # 🔴 **`-inf`, never `0.0`, and this is a defect rather than a style.**
+        # `time.monotonic()` on Linux is seconds since **boot**, so against a
+        # `0.0` origin `now - throttled_at >= lease / 2` is *false* for the
+        # first 150 s of host uptime at the shipped lease -- a worker-enabled
+        # process started with the machine skips its first recovery pass
+        # entirely and reports `recovered_claims: null`, which this file
+        # documents as meaning "this process runs no worker". The field lies at
+        # exactly the moment a compose stack comes up holding the previous
+        # boot's orphans. `-inf` is the identity for `max`-like "never yet",
+        # and it makes the first pass unconditional, which is what this
+        # docstring and `usher work`'s copy have always claimed.
+        # `.claude/rules/testing-discipline.md`: an origin that is the identity
+        # element of the operation under test cannot distinguish the operation
+        # from its absence.
+        throttled_at = float("-inf")
         while True:
             ran = 0
             try:
@@ -630,9 +852,13 @@ class LaneSupervisor:
                         user_id=await self._user_id(),
                     )
                 now = time.monotonic()
-                if now - recovered_at >= self._settings.job_lease_seconds / 2:
-                    await worker.recover()
-                    recovered_at = now
+                if now - throttled_at >= self._settings.job_lease_seconds / 2:
+                    # The return value has a reader, which it did not until
+                    # M10's F2: `/health/ready`'s body carries the total, so
+                    # an operator can see the condition M9's S3 hit rather
+                    # than only a WARNING that fires when it is non-zero.
+                    self._note_recovery(await worker.recover())
+                    throttled_at = now
                 ran = await worker.run_once()
                 async with self._work() as pipeline:
                     await self._gauges.refresh(pipeline.queue)

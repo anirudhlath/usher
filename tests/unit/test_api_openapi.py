@@ -25,8 +25,11 @@ reading.
 4. **The `code` enum in the schema is `ProblemCode` as a set**, so a member
    added without regenerating the schema fails here as well as in
    `tests/unit/test_api_problem_vocabulary.py`.
-5. **Every problem response is declared at `application/problem+json`**, and
-   the media type the document declares is the one the wire really sends.
+5. **Every problem response is declared at `application/problem+json`**, the
+   media type the document declares is the one the wire really sends, and no
+   other body was moved onto it. Keyed on the schema rather than on the
+   status, which is what excludes `GET /health/ready`'s 503 by construction
+   rather than by a second exemption list.
 
 **Every scan carries its positive control, and the control runs before any
 membership claim is read out of it.** An app that failed to build and a PRD
@@ -119,8 +122,16 @@ _PROBLEM_SCHEMA: Final = "ProblemResponse"
 #: is one: **56** responses across 35 operations carried a `ProblemResponse`
 #: when issue #6 was measured, and a route added later only raises that. What
 #: it guards is the vacuous pass -- a walk that matched nothing satisfies
-#: `wrong == {}` exactly as well as a document that is right.
+#: `wrong == {}` exactly as well as a document that is right, and on FastAPI
+#: 0.140 an empty walk is the *default* failure here.
 _PROBLEM_RESPONSES: Final = 50
+
+#: The non-problem bodies, and this one is an exact count rather than a floor
+#: on purpose: it is the arm that fails when a rewrite of the document moves a
+#: **200** as well as a problem, and a floor cannot see a body that left the
+#: set. Re-measure it when the surface grows -- 36 as of Group F, over 35
+#: operations and 92 response bodies.
+_NON_PROBLEM_BODIES: Final = 36
 
 #: Non-2xx responses that are deliberately **not** problem documents, each with
 #: the shape it keeps instead and the reason it keeps it. A bare skip list
@@ -322,6 +333,21 @@ def _schema_ref(response: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _bodies(document: Mapping[str, Any]) -> Iterator[tuple[str, str, str, str, str | None]]:
+    """Every response *body* the document describes, one per media type.
+
+    `(path, method, status, media type, $ref)`. One entry per media type
+    rather than per response, because the whole question below is which key a
+    body is filed under -- and `GET /images/{id}` really does describe one
+    response under three of them.
+    """
+    for path, method, operation in _operations(document):
+        for status, response in operation.get("responses", {}).items():
+            for media, body in response.get("content", {}).items():
+                reference = body.get("schema", {}).get("$ref")
+                yield path, method, status, media, reference if isinstance(reference, str) else None
+
+
 def _failures_a_route_can_raise(route: APIRoute) -> set[tuple[int, str | None]]:
     return _raised(route.endpoint.__module__, route.endpoint.__name__)
 
@@ -500,6 +526,58 @@ def test_every_failure_the_schema_describes_is_a_problem_document(
     assert seen >= 30, f"only {seen} non-2xx responses were examined; the walk found nothing"
     assert wrong == {}, (
         f"non-2xx responses described as something other than a problem document: {wrong}"
+    )
+
+
+def test_the_rewrite_registers_its_component_and_leaves_every_other_body_alone(
+    document: Mapping[str, Any],
+) -> None:
+    """The two arms the media-type case below cannot state, both of them
+    positive controls over `UsherAPI.openapi`'s rewrite.
+
+    **`ProblemResponse` has to still be a *component*.** The spelling a reader
+    reaches for is `{"content": {PROBLEM_MEDIA_TYPE: {"schema": {"$ref":
+    "#/components/schemas/ProblemResponse"}}}}` in place of `model=`, which
+    renders the right key with the right `$ref` and, with no route naming the
+    model, never registers it -- measured on a two-route probe against FastAPI
+    0.140.13, where an app carrying only that spelling publishes
+    `components.schemas == ["Ok"]`. Every media-type assertion in this file
+    passes against that document while every `$ref` in it dangles.
+
+    **And the count of non-problem bodies is exact rather than a floor**,
+    because that is the arm a rewrite which moved a **200** dies on: a floor
+    cannot see a body that left the set. `moved == []` is the same claim from
+    the other side.
+    """
+    assert _PROBLEM_SCHEMA in document["components"]["schemas"], (
+        f"`{_PROBLEM_SCHEMA}` is not a component, so every `$ref` naming it dangles -- which is "
+        "what hand-writing the `$ref` in place of `model=` produces, and it passes every "
+        f"media-type assertion in this file: {sorted(document['components']['schemas'])}"
+    )
+
+    # A list of pairs and never a mapping keyed by the response: one response
+    # can carry several bodies, and `GET /images/{id}`'s 200 really carries
+    # three. Collapsing them would take the non-problem count from 36 to 34 and
+    # the arm below would then be pinned to an artefact of the collapse.
+    problem: list[tuple[str, str]] = []
+    other: list[tuple[str, str]] = []
+    for path, method, status, media, reference in _bodies(document):
+        where = f"{method.upper()} {path} {status}"
+        target = problem if (reference or "").endswith(f"/{_PROBLEM_SCHEMA}") else other
+        target.append((where, media))
+    assert len(problem) >= _PROBLEM_RESPONSES, (
+        f"the walk found {len(problem)} problem bodies against a floor of {_PROBLEM_RESPONSES} -- "
+        "it is measuring nothing"
+    )
+
+    assert len(other) == _NON_PROBLEM_BODIES, (
+        f"the document describes {len(other)} non-problem bodies against {_NON_PROBLEM_BODIES} "
+        "measured -- the surface moved, so re-measure rather than relaxing this"
+    )
+    moved = sorted(where for where, media in other if media == PROBLEM_MEDIA_TYPE)
+    assert moved == [], (
+        f"the rewrite moved bodies that are not problem documents onto {PROBLEM_MEDIA_TYPE}: "
+        f"{moved}"
     )
 
 

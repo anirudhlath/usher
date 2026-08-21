@@ -46,8 +46,10 @@ the client's next move is identical either way: ask `/play` again.
 of and for a title id that does not exist -- it reads `media_items`, which is
 silent about the difference. `POST /titles/{unknown}/play` is a client error
 and `POST /titles/{owned-but-unplayable}/play` is not, so the routes below
-resolve existence first. Two primary-key reads per play, against an upstream
-PRD 01 measures at 1-5 s per request; the cost is not the consideration.
+resolve existence first. Two primary-key reads per play, against the upstream
+`get_item` the same request makes -- measured at 0.1495 s median (M10 S1,
+2026-08-15, `.claude/rules/emby-push-and-ingest.md`), three orders of
+magnitude above an indexed read; the cost is not the consideration.
 """
 
 import uuid

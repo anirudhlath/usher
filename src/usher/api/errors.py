@@ -193,7 +193,14 @@ def problem_responses_carry_their_media_type(document: dict[str, Any]) -> dict[s
     So the choice is a post-pass or a hand-written `$ref` per response with no
     model behind it, and the second is worse in the way that matters here: with
     no `model=` on any route, `ProblemResponse` stops being a component at all
-    and every one of those refs dangles. This walk keeps the declarations
+    and every one of those refs dangles. **Measured on a two-route probe
+    against the installed FastAPI 0.140.13**, because a dangling ref is the one
+    failure that looks like a success: an app carrying only that spelling
+    publishes `components.schemas == ["Ok"]`, so the document ships a `$ref`
+    pointing at nothing while an assertion spelled
+    `schema["$ref"].endswith("/ProblemResponse")` passes. That is why
+    `ProblemResponse in components/schemas` is an assertion in
+    `test_api_openapi.py` and not a note. This walk keeps the declarations
     exactly as they are and corrects the one thing FastAPI gets wrong about
     them.
 
@@ -201,7 +208,13 @@ def problem_responses_carry_their_media_type(document: dict[str, Any]) -> dict[s
     status nobody has minted a code for, a 4xx a future group invents -- all of
     them are covered by declaring `ProblemResponse`, which is the same act that
     adopts the envelope. Nothing here enumerates statuses, so nothing here goes
-    stale.
+    stale. It is also what excludes `GET /health/ready`'s 503 -- the one non-2xx
+    in this API that is deliberately not a problem document -- **by
+    construction** rather than by an exemption list: its declared model is
+    `ReadinessResponse`, which this predicate does not match. Keyed on a status
+    it would need a second, differently spelled copy of ADR-0030's
+    `PROBLEM_EXEMPTIONS`, which is exactly the drift that record exists to
+    prevent.
 
     **Idempotent, and that is load-bearing rather than tidy.** `app.openapi()`
     caches into `app.openapi_schema` and invalidates on a route change, so this

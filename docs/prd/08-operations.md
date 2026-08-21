@@ -198,9 +198,14 @@ container that starts and dies on validation).
 per **enabled** source, and the lane closes its reconnect gap with a delta
 walk. A delta resumes from the newest **completed** item walk; a deployment
 that has never completed one has no cursor, so the "delta" reads every item the
-source has. On the household this project measures that is **1,126,789 items**,
-performed by `uvicorn` with default settings, on a media server the operator
-may not own, with no command issued. An earlier probe ran exactly that walk
+source has. On the household this project measures that is **1,126,789 items**
+as counted on 2026-08-02 — re-measured at **1,134,919 items over 5,675 pages**
+on 2026-08-15 by M10's S1, which also priced the walk at **~9.5 h** at its
+6.04 s pooled mean per page. The library grows, so both are right on their
+dates and the later one is the one to quote;
+`.claude/rules/emby-push-and-ingest.md` carries the series. Either way it is a
+walk performed by `uvicorn` with default settings, on a media server the
+operator may not own, with no command issued. An earlier probe ran exactly that walk
 before someone killed it, and M9's live run had to set
 `USHER_PUSH_ENABLED=false` and `USHER_WORKER_ENABLED=false` to keep its request
 budget statable.
@@ -213,7 +218,7 @@ entire catalog, and importing a catalog is `usher sync`'s job. So
 | Value | The lane does |
 |---|---|
 | **`cursored`** (default) | Closes a gap that has a cursor. With none, logs a `WARNING` naming the source and pointing at `usher sync`, and walks nothing |
-| `always` | The pre-2026-08-19 behaviour. Walks the whole library when there is no cursor — and logs a `WARNING` naming the source and saying it is about to, *before* it starts |
+| `always` | Walks when there is no cursor — and logs a `WARNING` naming the source and saying it is about to, *before* it starts. ⚠️ **Not quite the pre-2026-08-19 behaviour**: the walk still passes through `USHER_PUSH_GAP_MAX_ITEMS` (M10 S6), so at its default it stops after 20,000 items and records `FAILED`. `USHER_PUSH_GAP_MAX_ITEMS=0` alongside is what restores an unbounded gap close. The two settings compose rather than override: one decides whether a cursorless walk happens, the other bounds how large any gap close may get |
 | `never` | No gap-closing walk at all, logged at `INFO` each time. **This has a cost**: Emby does not re-deliver what a disconnected client missed, so a change made during an outage waits for the next `usher sync` |
 
 **What changes for an existing deployment:** only one that has never completed
@@ -277,7 +282,11 @@ Rules:
   would add is the credential
   ([ADR-0026](decisions/0026-the-cli-boundary-names-families.md)).
 - Rotating `USHER_SECRET_KEY` re-encrypts on next write; a documented rotation
-  command handles the bulk case. **Until that write happens the old rows are
+  command handles the bulk case. ⚠️ **"On next write" is not a mechanism that
+  keeps a deployment limping — there is no such path.** `PostgresCredentialStore.put`
+  encrypts with whatever cipher it was built with, so the only "next write" that
+  re-encrypts anything is *a credential an operator re-types*. Until the rotation
+  command exists (M10), rotating the key strands every stored credential. **Until that write happens the old rows are
   unreadable, and that state is rendered rather than raised**: Fernet's
   authentication tag makes a wrong key a diagnosable `PortDataMalformed`, and
   `GET /admin/sources/{id}/status` reports it as an unreachable,
@@ -341,11 +350,13 @@ local state can answer.**
 | Failure | Behaviour |
 |---|---|
 | Source unreachable | Catalog fully browsable. Playback → 503 `source_unavailable`. Availability goes stale, not wrong. |
+| A refused availability sweep (a source that churns, or one Usher has only partly ingested) | ✅ M10 S8/S9: the sweep retracts **nothing** and the run records `FAILED` with the two numbers and the ceiling ([ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)); the catalog is unaffected and availability goes stale rather than wrong. `usher sync` now **exits non-zero** on any failed run and names `usher sync --allow-full-retraction`, which is the operator's action *if the removal was intended* — until 2026-08-19 the command printed the word `failed` and exited 0, so cron and CI saw success. `usher.sync.retraction.fraction{outcome="refused"}` is the series; it is recorded on **every** finished full walk, so a flat zero means "nothing was shed" rather than "no sweep ran". ⚠️ **On a *view* of somebody else's library a refusal can be the steady state rather than an incident** — refusing nightly is indistinguishable from having no sweep — and the thing that trips it first is Usher's own partial coverage, not the owner's deletions (measured: this deployment's one firing refused 60 of 180 at 33% after a bounded walk, with nothing deleted). If it recurs, check that the last full walk **completed** before reaching for the flag. |
 | Source credentials rejected | `GET /admin/sources/{id}/status` reports `authenticated: false`; re-authentication is retried after a cooldown rather than on every call. Catalog unaffected. |
-| Push socket drops | Backoff reconnect; delta reconcile on reconnect — ✅ **only when a completed walk gives that delta a cursor** (`USHER_PUSH_GAP_CLOSE`, above): with none the "delta" is the whole library, so the lane logs a `WARNING` and leaves the first walk to `usher sync`; after N failures mark `supports_push = false` and lean on the nightly walk. **The failure counter resets on delivery, not on connection** — a proxy that upgrades and then buffers connects perfectly every time, so a counter reset by connecting never reaches the ceiling and this row silently never fires ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). |
+| Push socket drops | Backoff reconnect; delta reconcile on reconnect — ✅ **only when a completed walk gives that delta a cursor** (`USHER_PUSH_GAP_CLOSE`, above; issue #9). With none the lane refuses the walk, logs a WARNING naming the source and `usher sync`, and keeps the socket up ( a source with no completed item-lane run has no cursor, so its "delta" is a walk of the whole library that nobody asked for; see [03](03-sources-and-sync.md)'s Reconnect-delta row). The same refusal covers a push event **deferred** to a delta, so on such a source an oversized event is applied neither inline nor by a walk until that full sync has run. After N failures (`USHER_PUSH_MAX_CONSECUTIVE_FAILURES`, default 5) mark `supports_push = false` and lean on the nightly walk. **The failure counter resets on delivery, not on connection**, and the reason is a design that was *not* taken: **if** it reset on connection, a proxy that upgrades and then buffers would connect perfectly every time, a counter reset by connecting would never reach the ceiling, and this row would silently never fire ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). ⚠️ **That clause is a counterfactual about the rejected design and the M10 spec read it as a description of shipping code** (`docs/specs/2026-08-13-m10-hardening-design.md:155-157`, struck by S10). The row **does** fire, and the evidence is two-sided: `tests/unit/test_services_push.py`'s ceiling case drives the whole path end to end (`push_available == [False]` after `sleeps == [5.0, 10.0]`, the last failure hitting the ceiling without sleeping), and M5's final sweep measured the **inverse** mutation — `failures = 0` moved from delivery to connection — as failing **4** cases. ✅ **M10 S10**: when the ceiling is reached the lane's task finishes and the next `refresh()` **releases the adapter**, so the socket against a server this deployment does not own is closed rather than held for the process lifetime, `usher.source.push.delivering` stops publishing for that lane, and `GET /admin/sources/{id}/status` answers `push_available: null` ("not probed") rather than `false` off a dead ledger. The lane is deliberately **not** restarted — a refresh that replaced it would reconnect forever against exactly the buffering proxy this ceiling exists for. |
+| Gap-closing delta larger than `USHER_PUSH_GAP_MAX_ITEMS` | ✅ M10 S6: the item walk stops at the ceiling (default **20,000 items** — 100 pages at `USHER_SOURCE_PAGE_SIZE`'s 200, ~10 minutes at the 6.04 s/page mean measured 2026-08-15, and under the 28,934 items a 30-day delta returned on the measured library; `0` is unlimited). The run records **`FAILED`**, never `COMPLETED`: `latest_completed_cursor` reads only completed runs, so a truncated run that completed would advance the cursor to its own start instant and everything past the ceiling would never be requested by any delta again — and **nothing in `src/` schedules the nightly full reconcile** that would otherwise cover it. **Nothing the walk saw is lost** (`_flush` commits per batch); what a ceiling costs is the cursor advance. One WARNING names the source, how far it got, the setting and `usher sync --kind full`, whose walk is what closes the rest. `usher sync --kind delta` and `POST /admin/sources/{id}/sync` are unbounded — the ceiling is the lane's, and the lane is the caller nobody typed a command for. **The item lane only**: the watch lane owns its own cursor and still walks whole after a truncated item walk, so this bounds one of the two lanes (see [03](03-sources-and-sync.md)). |
 | TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected. |
 | TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades. |
-| Provider image CDN unreachable | ✅ M9: catalog and every rendered card unaffected — an artwork reference is a row, not a fetch, so browsing, search and the home screen never touch the CDN. A **cold** image (no entry for that `(image id, rung)`) answers `503 source_unavailable` with `Retry-After`; a **cached** one still serves, because `GET /images/{id}` reads the disk before the network. The CDN needs no credential, so this row has no authentication arm. An answer the proxy cannot serve splits in two: artwork this deployment declines to carry (an `image/svg+xml` logo, ~1 title in 17) is an ordinary `404 not_found`, and everything else — a 4xx, a body past `image_max_bytes`, a captive portal's HTML under a 200 — is `503 source_unavailable` with **no** `Retry-After`, since re-asking produces the same answer. That second one's honest status is a 502 and [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s closed vocabulary has no code for one. |
+| Provider image CDN unreachable | ✅ M9: catalog and every rendered card unaffected — an artwork reference is a row, not a fetch, so browsing, search and the home screen never touch the CDN. A **cold** image (no entry for that `(image id, rung)`) answers `503 source_unavailable` with `Retry-After`; a **cached** one still serves, because `GET /images/{id}` reads the disk before the network. The CDN needs no credential, so this row has no authentication arm **of its own** — which is not the same as saying a 401/403 cannot arrive here: it can, and it means something *in front of* the CDN refused (a proxy, a portal), which is why it belongs to the residual population rather than to a credential problem an operator can fix by rotating a key. An answer the proxy cannot serve splits in two: artwork this deployment declines to carry (an `image/svg+xml` logo, ~1 title in 17) is an ordinary `404 not_found`, and everything else — a 4xx, a body past `image_max_bytes`, a captive portal's HTML under a 200 — is `503 source_unavailable` with **no** `Retry-After`, since re-asking produces the same answer. ✅ **M10 F3: that second arm's honest status is a 502, [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s closed vocabulary has no code for one, and the amendment asking for one is now `Declined` — so `Retry-After`'s presence and absence **is** the contract between the two 503s rather than an interim.** Measured 2026-08-20 against the live CDN: the residual arm fired on **0 of 240** fetches (3 kinds × 20 stored rows × all 4 rungs, both controls firing), so its rate on this catalog is below **1.25%** at 95% confidence, the largest body seen was 16.5% of `image_max_bytes`, and every rung served every kind — including `logo` at `w1280`, the "rung withdrawn from a kind" case. ⚠️ **A captive portal's HTML is the one residual cause the measurement could not reach**: it is a property of a network in front of Usher, not of the CDN, so a healthy network cannot produce one and no sample size would have. ⚠️ **And a CDN 429 or 401/403 reaches neither arm** — `port_error_for` answers those with `PortRateLimited`/`PortAuthFailed`, which do not subclass `PortUnavailable`, so `GET /images/{id}` answers a bare `500` outside the envelope (measured 2026-08-20, `PortUnavailable` answering a `503` problem document as the control). Never observed live; not fixed by F3, which changed no behaviour. |
 | LLM call fails | Previous curated rows persist. Home composes without them. ✅ M8: the failure is fatal to the *job* and never to the screen — a failed generation never reaches `replace_for_user`, so this row is a property of the control flow rather than of a transaction. **Only the failures that translate to `PortDataMalformed` park the job** rather than retrying into the same answer: a 4xx that is none of 429, 401/403 or 408 (so 400, 402, 404, 409, 422), a 200 whose body does not conform, and a generation that validated to zero rows. The other three families **back off** — `JobWorker` parks on `PortDataMalformed` alone and marks every other `UsherPortError` retryable (`services/jobs.py`, `JobWorker._run`), so 429 (`PortRateLimited`), 401/403 (`PortAuthFailed`) and 408 or any 5xx (`PortUnavailable`) all retry with jittered backoff. *(This sentence read "a 4xx that is not 429 parks the job" until 2026-08-07, which over-parked three families; measured against the adapter's `_decode` and `JobWorker`'s two `except` arms.)* |
 | LLM call fails during a **search** (query expansion) | ✅ M8: the search runs on the query the user typed and `expanded_query` is absent. **The attempt is still billed** — one `llm_calls` row per attempted call — so the warning arrives after the money. Off by default ([05](05-search-and-similarity.md)), which is why this is a narrower row than the one above. |
 | Embedder unavailable | Semantic search falls back to full-text, flagged in the response. |
@@ -488,8 +499,8 @@ loguru for logs, OpenTelemetry for metrics and traces, and Grafana over three
 datasources. Instrumentation, metric catalogue, dashboards, and alerts are
 specified in [10](10-telemetry-and-dashboards.md).
 
-Telemetry is optional: with no OTLP endpoint configured the exporters are
-no-ops and Usher runs normally.
+Telemetry is optional: with no OTLP endpoint configured no exporter object
+is constructed at all and Usher runs normally.
 
 `GET /health` is liveness; `GET /health/ready` reports Postgres and
 migration state — and **gates its status code on those two alone**. Lane
@@ -502,6 +513,19 @@ fix, which is the same argument that keeps liveness off the database. The
 failure table above already prices an unreachable source as "catalog fully
 browsable"; a 503 would contradict it.
 
+✅ **M10 F2 adds three more body-only fields on exactly those terms** —
+`lanes.crashed_sources` (lanes whose task has finished and will not restart),
+`lanes.recovered_claims` (abandoned claims *this process* has taken back since
+it started, `null` where it runs no worker and has therefore never asked) and
+`lanes.recovered_at` — **none of them in the status code**, because a process
+that has just taken back a dead peer's claims is doing its job and dropping it
+out of a load balancer for saying so is the inversion this split exists to
+prevent. The shape, the per-process bound and why the count is the one
+`JobWorker.recover()` returned rather than a per-poll query are on `LaneReport`
+(`src/usher/api/dto/health.py`), which is the wire contract. `usher work`, which
+has no readiness route, prints the same running total in its pass line —
+at startup and again whenever it changes.
+
 The report is still degraded rather than binary, so a dashboard can
 distinguish "down" from "running without Emby" — it just does so by reading
 the body, which is what a dashboard does and what Kubernetes, Docker
@@ -510,8 +534,10 @@ the body, which is what a dashboard does and what Kubernetes, Docker
 Lane state is free to report — `lanes.push` is the set of running lane
 *tasks*, and `push_available` is an in-memory ledger of messages received,
 not a probe — so readiness makes **no upstream request at all**. The shipped
-compose healthcheck polls this endpoint every 2 s against a source
-[01](01-architecture.md) measures at 1–5 s per request. The on-demand probe
+compose healthcheck polls this endpoint every 2 s; the reason that matters is
+the 503-takes-the-process-out-of-a-load-balancer argument above, not the price
+of a probe, which [01](01-architecture.md) now measures at 0.1253 s rather
+than at the 1–5 s this sentence used to cite. The on-demand probe
 that *does* open a socket is `usher push --probe`, and it reports what
 arrived rather than that the handshake succeeded
 ([ADR-0004](decisions/0004-push-over-polling.md)).
@@ -680,8 +706,12 @@ that is a property of M7 rather than of backup.** `RowContext.taste` was
 specified and deleted — every provider turned out to be a predicate over a
 repository rather than a retrieval, and on the request path the centroid is
 `None` unconditionally anyway, because it needs an embedder the route
-deliberately holds none of. So `TasteService.centroid` has no caller in `src/`
-and the table stays empty on a default deployment; what `TasteService` *is*
+deliberately holds none of. ⚠️ **The sentence that used to stand here — *"So
+`TasteService.centroid` has no caller in `src/`"* — was the true claim above it
+escalated one hop into a false absolute, and has been false since M8:
+`services/curation_pool.py:173` calls it, and the guard immediately above that
+call exists *because* it writes.** What survives is the narrow claim: no writer
+on the **request path**, so the table stays empty on a default deployment; what `TasteService` *is*
 called for is `genre_affinity`, which needs no embedder and no centroid. The
 table, its fingerprint and its written refusal are all built and tested;
 the consumer is M9's, with the ranking terms
@@ -716,9 +746,9 @@ MB)**, at `m09c`, with 130,647 embeddings, 3,266,225 `title_neighbors`,
 | Postgres, + the IMDb people/credits load | **+3.4 GB** — 12,637,249 credits over 3,215,476 people, measured after `VACUUM FULL` ([ADR-0036](decisions/0036-the-imdb-tmdb-provenance-rule.md)). Not loaded by default. |
 | **Running the `m09d` migration** | **+637 MB transient on `credits`, and 50 s**, at 2,877,486 credits: `UPDATE credits SET source = 'tmdb'` leaves a dead tuple per live one (794 MB → 1,431 MB), and `SET NOT NULL` then scans the table. `VACUUM FULL` settles it at **740 MB, 54 MB *below* baseline** — but the migration does not run one, so **budget the peak**. Both scale with the enriched tier. |
 | Postgres, + `titles.credit_names` | **+624 MB settled, +1,368 MB transient** before a vacuum — the peak is what an operator's disk sees |
-| **Running the `m09e` migration** | 🔶 The only entry here that *frees* space, and the only one whose settled figure is unknown. It deletes every row of `title_embeddings` (130,673, in a 278 MB relation), `user_taste` and `title_neighbors` (3,266,175) and rebuilds the HNSW index empty. It runs no `VACUUM`, so the dead tuples are still on disk when it returns, and the catalog then re-grows: measured 2026-08-13, the backfill of 130,720 titles took **105.9 minutes** and settled at **707 MB** of relation and **340 MB** of index. 🔴 **`usher similar --rebuild` is the expensive half and its cost changed by more than the width did: 594.7 ms/seed against 36.50 at `halfvec(384)`, i.e. a full 130,720-seed walk of 21.6 hours against 80 minutes.** `nearest_for` runs under `enable_indexscan = off` by design, so it is an exact scan whose working set now exceeds both `shared_buffers` and this host's L3. Plan the rebuild as an overnight job, not a follow-on step ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)). |
+| **Running the `m09e` migration** | 🔶 The only entry here that *frees* space, and the only one whose settled figure is unknown. It deletes every row of `title_embeddings` (130,673, in a 278 MB relation), `user_taste` and `title_neighbors` (3,266,175) and rebuilds the HNSW index empty. It runs no `VACUUM`, so the dead tuples are still on disk when it returns, and the catalog then re-grows: measured 2026-08-13, the backfill of 130,720 titles took **105.9 minutes** and settled at **707 MB** of relation and **340 MB** of index. 🔴 **`usher similar --rebuild` is the expensive half and its cost changed by more than the width did: 594.7 ms/seed against 36.50 at `halfvec(384)`, i.e. a full 130,720-seed walk of 21.6 hours against 80 minutes.** ⚠️ **Both figures are `m09e`'s and `m09f` repaired them** — moving every `halfvec` column to `PLAIN` storage took the exact scan back to **91.7 ms/seed**, so the completed walk measured **130,720 seeds in 11,981 s = 3.33 hours**, not 21.6. The overnight-job conclusion below survives; the number that motivated it does not. `nearest_for` runs under `enable_indexscan = off` by design, so it is an exact scan whose working set now exceeds both `shared_buffers` and this host's L3. Plan the rebuild as an overnight job, not a follow-on step ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)). |
 | HNSW (`halfvec`) | 🔶 **~1.5 GB at full embedding coverage was projected at `halfvec(384)` and is now a floor.** Measured immediately before `m09e` on 2026-08-13: **146 MB** of `ix_title_embeddings_hnsw` over **130,673** embeddings, inside a **278 MB** `title_embeddings` total relation. `m09e` widened the lane count to 1024 — 2,048 bytes a vector against 768 — and the rebuilt figures, measured 2026-08-13 after 130,720 titles re-embedded through `bge-m3`, are **340 MB** of index inside a **707 MB** relation: **2.33× and 2.54×**, both under the 2.67× the lane count alone predicts, so the graph and the row headers amortise a little. Extrapolating the old ~1.5 GB projection by the same 2.33× gives ~3.5 GB at full catalog coverage — an extrapolation, and labelled as one. |
-| Image cache | Grows with use; capped by a configurable LRU ceiling |
+| Image cache | Grows with use, **without bound**. ⚠️ *"capped by a configurable LRU ceiling"* was wrong from the day it was written: there is **no eviction** (`services/images.py:7` says so in as many words) and no ceiling setting. `image_max_bytes` is a **per-image** 5 MiB refusal, not a cache ceiling. Nothing reclaims this directory. |
 | Usher process | ~500 MB–1 GB, plus ~200 MB for the embedding model — **the model half applies to the `fastembed:` runtime only**, and was measured for `bge-small-en-v1.5`. Under `openai:` no model is loaded in this process at all; the memory is the inference server's. |
 | Embedding model | 🔶 **~130 MB on disk was `bge-small-en-v1.5`'s measured download.** The shipped default is now `fastembed:BAAI/bge-large-en-v1.5`, which fastembed 0.8.0 declares at **1.2 GB** against bge-small's 0.07 — the price of the 1024-wide column, and the reason this row is called out rather than quietly edited ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)). Its download has not been re-measured, and it is **0 on the `openai:` runtime**. |
 

@@ -27,8 +27,13 @@ _SHORTEST_REDACTABLE = 4
 #:
 #: - ``cursored`` -- close the gap only when a completed walk gives a `since`.
 #:   Shipped default. A deployment that has synced even once is unaffected.
-#: - ``always`` -- the pre-2026-08-19 behaviour, walking the whole library when
-#:   there is no cursor. Logged at WARNING before the walk starts, every time.
+#: - ``always`` -- walk when there is no cursor. Logged at WARNING before the
+#:   walk starts, every time. ⚠️ **Not quite the pre-2026-08-19 behaviour any
+#:   more**: the walk it starts still passes through
+#:   ``USHER_PUSH_GAP_MAX_ITEMS`` (M10 S6), so at that setting's default it
+#:   stops after 20,000 items and records ``FAILED``. Set the ceiling to ``0``
+#:   as well for a genuinely unbounded gap close. The two settings answer two
+#:   different halves of one hazard and compose rather than override.
 #: - ``never`` -- no gap-closing walk at all. Costly and deliberate: Emby does
 #:   not re-deliver what a disconnected client missed, so whatever changed
 #:   during an outage waits for the operator's next walk.
@@ -226,6 +231,33 @@ class Settings(BaseSettings):
     # wrong password turns every request into two (the call, then a doomed
     # re-authentication) for as long as it stays wrong.
     source_reauth_cooldown_seconds: float = Field(default=60.0, ge=0)
+    # The proactive outbound ceiling: calls to one source are spaced at least
+    # `1/rate` seconds apart (ADR-0042). `0` is unlimited -- the `ge=0` shape
+    # `push_gap_min_interval_seconds` uses, not the `ge=1` a size takes --
+    # because "off" is a value an operator sets. The gate is owned by a
+    # `SourceGateRegistry` built once at each composition root and keyed by
+    # `source.id`, so this is **one gate per source per process** -- the push
+    # lane, the worker lane and every request in a server process all pace
+    # against the same one (ADR-0042 s4). A second process is a second
+    # registry, so two `usher work` containers against one server spend
+    # `2 x rate`: a capacity decision an operator makes, exactly as
+    # `USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` already are.
+    #
+    # The default is derived from S1, not chosen. S1 measured (2026-08-15,
+    # `.claude/rules/emby-push-and-ingest.md`, one household one evening) a
+    # 200-item page at **mean 6.0369 s / p95 9.1713 s** and a single-item read
+    # at median 0.1495 s. Little's law over a page paced by the Emby-facing
+    # `KIND_CONCURRENCY` of **4** gives two figures: the mean-based expected
+    # concurrent-walk rate `4/6.0369 = 0.66` rps (a sum over pages wants the
+    # mean) and the conservative p95 ceiling `4/9.1713 = 0.436` rps. **0.4** is
+    # below both, a courtesy margin under either.
+    #
+    # It is inert on a sequential walk (`1/6.0369 = 0.17` rps) and binds
+    # single-item reads (~27 rps four-in-flight at S1's 0.15 s). Whether it
+    # binds a *concurrent* walk is unmeasured and is **S7's** to settle -- under
+    # S1's ~0.68 rps a 0.4 gate would bind it, not sit "just under" it -- since
+    # every S1 request was sequential. S1's table is the evidence, not a guess.
+    source_requests_per_second: float = Field(default=0.4, ge=0)
 
     # The ingest pipeline (PRD 03). Same reasoning as the bulk and source
     # settings above: PRD 08's TOML config layer does not exist yet.
@@ -234,6 +266,31 @@ class Settings(BaseSettings):
     # before it refuses and changes nothing (ADR-0015). 1.0 disables the
     # guard, which is what an operator deliberately removing a library
     # passes on the command line.
+    #
+    # **0.25 stayed on 2026-08-19 (M10 S9), and it stayed because somebody
+    # looked.** A number that stayed because nobody looked and a number that
+    # stayed because it was measured are the same value and different claims,
+    # so this comment says which. Issue #20 asked whether the default suits a
+    # library the operator does **not own** and asked for a reading across a
+    # churn event nobody can schedule. What S8 found instead, in the
+    # deployment's own `sync_runs`: the ceiling had **already fired**, on
+    # 2026-08-13, refusing 60 of 180 items at 33% -- and nothing had been
+    # deleted. The walk was *bounded* and saw 120 of the 180 Usher held.
+    #
+    # So the one observation of this guard firing in the field was **Usher's
+    # own partial coverage, not the source's churn**, and moving a ceiling on
+    # that evidence would be tuning it against the wrong population. The
+    # drift probe (`scripts/measure_source_drift.py`) cannot supply the right
+    # one here either: it read 11,851 available against a live 1,137,502, and
+    # its lower bound is structurally 0 for any catalogue that lags its
+    # source. Revisit when a **completed** full walk of a shared library
+    # exists to measure -- none ever has.
+    #
+    # The per-source override is the post-v1 candidate, named rather than
+    # taken: a `sources.max_retract_fraction real` column, nullable, falling
+    # back to this. It is out of scope here because `Source` carries ten
+    # fields and not one of them is tuning, so the first one is a data-model
+    # decision and a migration rather than a default being chosen.
     sync_max_retract_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
     job_batch_size: int = Field(default=20, ge=1, le=500)
     # How many jobs one worker process may have in flight at once, and the
@@ -700,9 +757,11 @@ class Settings(BaseSettings):
     push_max_consecutive_failures: int = Field(default=5, ge=1)
     # How many items one push event may name before the lane stops resolving
     # them one at a time and asks for a delta walk instead. Emby emits
-    # `LibraryChanged` during a library scan and it can name thousands;
-    # against 1,126,789 items at 1-5 s per request, a request per changed
-    # item is a design defect rather than a slow path. Bounded above at 500,
+    # `LibraryChanged` during a library scan and it can name thousands; at
+    # `get_item`'s measured 0.1649 s mean (M10 S1, 2026-08-15 -- see
+    # `.claude/rules/emby-push-and-ingest.md`) a thousand named items is
+    # nearly three minutes of serial upstream, so a request per changed item
+    # is a design defect rather than a slow path. Bounded above at 500,
     # because a value an operator could set to 100,000 turns the guard off
     # while looking configured.
     push_max_items_per_event: int = Field(default=50, ge=1, le=500)
@@ -724,6 +783,44 @@ class Settings(BaseSettings):
     # `push_gap_min_interval_seconds` bounds how *often* the walk happens and
     # says nothing about how large it is.
     push_gap_close: PushGapClose = "cursored"
+    # The ceiling on **one** gap-closing delta, counted in items, and the
+    # other half of the same hazard (M10 S6). `push_gap_close` above answers
+    # the delta with *no* cursor; what is left is a delta *with* a cursor
+    # that is still large -- a source Usher has not reached for a month, a
+    # library the owner re-scanned, or a `deferred_to_delta` outcome arriving
+    # on a busy evening.
+    #
+    # **Items, deliberately, and not pages.** `MAX_PAGES`
+    # (`adapters/emby/adapter.py`) is already the dead-man's switch against a
+    # server that ignores `StartIndex`, and exhausting it raises
+    # `PortDataMalformed` -- so a ceiling spelled in pages would report a
+    # deliberate, correct stop as a broken upstream in the one message an
+    # operator acts on.
+    #
+    # **The default is derived, not picked.** PRD 03 measured this
+    # household's 30-day item-lane delta at **28,934 items**
+    # (`MinDateLastSaved`), i.e. 145 pages at `source_page_size`'s 200, and
+    # M10 S1 measured a page at a **6.0369 s** pooled mean (2026-08-15;
+    # `.claude/rules/emby-push-and-ingest.md`) -- the mean rather than the
+    # median because a sum over pages wants the mean of a right-tailed
+    # distribution. That is ~14.6 minutes of upstream before the lane has
+    # done anything else, issued by a bare `uvicorn` against every enabled
+    # source at once. 20,000 items is 100 pages, **~10 minutes** at that
+    # mean, and roughly three weeks of the same household's measured change
+    # rate. Deliberately *under* 28,934: a ceiling the one measured
+    # pathological case slips beneath is not a ceiling. One household, one
+    # evening -- re-derive it against your own before trusting it.
+    #
+    # The trade, in one sentence: **a ceiling buys a bounded startup and
+    # costs a reconcile an operator must run**, because a walk stopped here
+    # records `FAILED`, advances no cursor, and leaves the rest of the
+    # window for `usher sync --kind full` (`services/reconcile.py`).
+    #
+    # `ge=0` with zero meaning unlimited -- the same deliberate exception
+    # `push_gap_min_interval_seconds` above makes, and for the same reason:
+    # "close the whole gap however big it is" is expensive and correct,
+    # unlike every other zero in this block.
+    push_gap_max_items: int = Field(default=20_000, ge=0)
     # How often the lane supervisor re-reads the source list, so a source
     # added through `POST /admin/sources` gets a lane without a restart.
     push_source_refresh_seconds: float = Field(default=60.0, gt=0)
@@ -1011,7 +1108,7 @@ class Settings(BaseSettings):
 
     @property
     def telemetry_enabled(self) -> bool:
-        """Telemetry is optional: with no endpoint configured, exporters are no-ops."""
+        """Telemetry is optional: with no endpoint configured no exporter is constructed."""
         return bool(self.otlp_endpoint)
 
 

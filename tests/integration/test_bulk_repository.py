@@ -6,15 +6,22 @@ bulk_load_window really drops and rebuilds indexes, and that it declines to
 when the catalog is non-empty.
 """
 
+import dataclasses
 import uuid
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import cast
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import Table, delete, insert, text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.schema import CreateIndex
 
+from tests.bounded_ledger import ledger_columns
 from tests.contract.bulk_catalog_repository_contract import (
     SHAWSHANK,
     BulkCatalogRepositoryContract,
@@ -24,12 +31,45 @@ from usher.db.models.search import SEARCH_NAME_MAX_CHARS
 from usher.db.models.source import SourceRow
 from usher.db.models.title import TitleRow
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.genome import PostgresGenomeRepository
-from usher.domain.enums import SourceKind, TitleKind
+from usher.db.repositories.image import PostgresImageRepository
+from usher.db.repositories.import_run import PostgresImportRunRepository
+from usher.db.repositories.llm_call import PostgresLLMCallRepository
+from usher.db.repositories.search import (
+    PostgresTitleEmbeddingRepository,
+    PostgresTitleNeighborRepository,
+)
+from usher.db.repositories.search_query import PostgresSearchQueryRepository
+from usher.db.repositories.source import PostgresSourceRepository
+from usher.db.repositories.sync import PostgresSyncRunRepository
+from usher.db.repositories.taste import PostgresTasteRepository
+from usher.db.repositories.title import PostgresTitleRepository
+from usher.domain.bootstrap import ImportRun
+from usher.domain.curation import CuratedRow, LLMCall, LLMPurpose
+from usher.domain.enums import ImageKind, SourceKind, TitleKind
 from usher.domain.ids import new_id
-from usher.ports.bulk import ImdbAka, ImdbRating, ImdbTitle
-from usher.ports.errors import RepositoryConflict
-from usher.ports.repository import BulkCatalogRepository
+from usher.domain.image import Image
+from usher.domain.source import Source
+from usher.domain.sync import SyncRun, SyncRunKind
+from usher.domain.title import Title
+from usher.ports.bulk import (
+    GENOME_TAG_COUNT,
+    GenomeVector,
+    IdCrosswalkPair,
+    ImdbAka,
+    ImdbRating,
+    ImdbTitle,
+)
+from usher.ports.errors import RepositoryConflict, UsherPortError
+from usher.ports.repository import (
+    BulkCatalogRepository,
+    ScoredNeighbor,
+    SearchQueryRecord,
+    StoredTaste,
+    TitleEmbeddingUpsert,
+)
+from usher.ports.search import SearchMode
 
 # Spelled out rather than derived from `_SUSPENDABLE_INDEXES`, so a name
 # silently dropped from that dict fails these cases instead of being read
@@ -653,3 +693,498 @@ async def test_every_suspendable_index_rebuilds_to_what_the_migration_built(
         assert from_dict.replace(dict_probe, name, 1) == from_model.replace(model_probe, name, 1), (
             name
         )
+
+
+# --------------------------------------------------------------------------
+# ADR-0043's ledger, driven: a value a domain model accepts must not reach an
+# operator as a raw driver exception.
+# --------------------------------------------------------------------------
+#
+# [ADR-0043](../../docs/prd/decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
+# classifies every bounded column in this schema, and F9 fixes the two buckets
+# below. This is the case that decides whether it did, and it is deliberately
+# written so that it cannot know the answer: **a value a domain model accepts
+# must not reach an operator as a raw driver exception** is ADR-0009's rule and
+# is what `db/repositories/_errors.py` exists for, so every arm asserts
+# `UsherPortError` and nothing about which `except` clause produced it.
+#
+# **The arms are collected from the generator, not from a list written here.**
+# `_BOUNDED_ARMS` names the driver per column; `test_every_ledger_column_...`
+# below asserts that its keys plus the named exclusions are *exactly* the
+# ledger's `exposed-sqlalchemy` and `translated` buckets, so a column that
+# lands in either without an arm fails collection-adjacent rather than passing
+# silently. That check is what stops this file from being the third place in
+# this milestone where a scan that globs nothing reads like a scan that passed.
+#
+# **The positive control is the `translated` bucket.** Those columns answered
+# `RepositoryConflict` before F9 touched anything, so a parametrisation that
+# collected nothing -- or one whose values were all in range -- cannot read as
+# coverage: the run is only green if those arms pass *and* the
+# `exposed-sqlalchemy` arms, which failed at `3972c2e` with `builtins.
+# OverflowError` and `asyncpg.exceptions.StringDataRightTruncationError`, pass
+# too.
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _Bed:
+    """The rows every arm's real repository call needs to exist first.
+
+    One fixture rather than one per arm: the point of each case is the value
+    handed *in*, and a foreign key that is missing produces a
+    `RepositoryConflict` too -- which would let an arm pass for the wrong
+    reason, this project's named recurring failure.
+    """
+
+    session: AsyncSession
+    title: Title
+    other_title_id: uuid.UUID
+    source_id: uuid.UUID
+    user_id: uuid.UUID
+
+
+_LEDGER_NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+
+#: `2**31` is the smallest value an `integer` column cannot hold that every
+#: `Field(ge=0)` in `usher.domain` accepts -- `db-and-sql.md`'s *"the common
+#: shape here"*, and the value both of `_errors.py`'s measured shapes were
+#: found with.
+_OVER_INT32 = 2**31
+
+
+async def _seed_users(session: AsyncSession, user_id: uuid.UUID) -> None:
+    await session.execute(
+        text("INSERT INTO users (id, name) VALUES (CAST(:id AS uuid), :name)"),
+        {"id": user_id, "name": "An Invented Household"},
+    )
+
+
+@pytest_asyncio.fixture
+async def bed(session: AsyncSession) -> _Bed:
+    user_id = new_id()
+    await _seed_users(session, user_id)
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="An Invented Ledger Source",
+        base_url="https://source.invalid",
+        credentials_ref="an-invented-ref",
+        device_id="an-invented-device",
+    )
+    await PostgresSourceRepository(session).add(source)
+    titles = PostgresTitleRepository(session)
+    title = Title(
+        kind=TitleKind.MOVIE,
+        imdb_id="tt99000041",
+        name="An Invented Bounded Title",
+        sort_name="An Invented Bounded Title",
+    )
+    other = Title(kind=TitleKind.MOVIE, name="An Invented Neighbour", sort_name="An Invented N")
+    await titles.add(title)
+    await titles.add(other)
+    return _Bed(
+        session=session,
+        title=title,
+        other_title_id=other.id,
+        source_id=source.id,
+        user_id=user_id,
+    )
+
+
+def _import_run(**changes: object) -> ImportRun:
+    return ImportRun(
+        id=new_id(),
+        dataset="an-invented-dataset",
+        revision="an-invented-revision",
+        started_at=_LEDGER_NOW,
+        heartbeat_at=_LEDGER_NOW,
+        **changes,
+    )
+
+
+def _sync_run(source_id: uuid.UUID, **changes: object) -> SyncRun:
+    return SyncRun(
+        id=new_id(),
+        source_id=source_id,
+        kind=SyncRunKind.FULL,
+        started_at=_LEDGER_NOW,
+        **changes,
+    )
+
+
+def _llm_call(**changes: object) -> LLMCall:
+    defaults: dict[str, object] = {
+        "id": new_id(),
+        "at": _LEDGER_NOW,
+        "model": "an-invented-model",
+        "purpose": LLMPurpose.CURATION,
+        "tokens_in": 1,
+        "tokens_out": 1,
+        "cost_usd": Decimal("0.001"),
+        "latency_ms": 1,
+        "ok": True,
+    }
+    return LLMCall(**(defaults | changes))
+
+
+async def _refused_import_run(bed: _Bed, **changes: object) -> None:
+    await PostgresImportRunRepository(bed.session).save(_import_run(**changes))
+
+
+async def _refused_sync_run(bed: _Bed, **changes: object) -> None:
+    await PostgresSyncRunRepository(bed.session).add(_sync_run(bed.source_id, **changes))
+
+
+async def _refused_title_update(bed: _Bed, **changes: object) -> None:
+    await PostgresTitleRepository(bed.session).update(bed.title.evolve(**changes))
+
+
+async def _refused_taste(bed: _Bed, **changes: object) -> None:
+    stored = StoredTaste(
+        user_id=bed.user_id,
+        centroid=None,
+        model_name="an-invented-model",
+        source_watermark=None,
+        title_count=1,
+        computed_at=_LEDGER_NOW,
+    )
+    await PostgresTasteRepository(bed.session).put(dataclasses.replace(stored, **changes))  # type: ignore[arg-type]
+
+
+async def _refused_search_query(bed: _Bed, **changes: object) -> None:
+    record = SearchQueryRecord(
+        id=new_id(),
+        at=_LEDGER_NOW,
+        user_id=bed.user_id,
+        query="an invented query",
+        mode=SearchMode.FULL_TEXT,
+        result_count=1,
+        latency_ms=1,
+    )
+    await PostgresSearchQueryRepository(bed.session).record(
+        dataclasses.replace(record, **changes)  # type: ignore[arg-type]
+    )
+
+
+async def _refused_image(bed: _Bed, **changes: object) -> None:
+    image = Image(
+        title_id=bed.title.id,
+        kind=ImageKind.POSTER,
+        provider="an-invented-provider",
+        provider_path="/an/invented/path.jpg",
+        is_primary=True,
+    )
+    await PostgresImageRepository(bed.session).replace_for_titles(
+        [bed.title.id], [image.evolve(**changes)]
+    )
+
+
+#: One driver per column, each calling the **real** repository method with the
+#: smallest value the domain model or port DTO accepts and the column cannot
+#: hold. Never a hand-written statement: the thing under test is the writer's
+#: own translation, and a statement written here would exercise a second
+#: spelling of the SQL that nothing ships.
+_BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
+    # -- exposed at a SQLAlchemy statement (ADR-0043's 20) -------------------
+    ("genome_scores", "relevance"): lambda bed: PostgresBulkCatalogRepository(
+        bed.session
+    ).upsert_genome_vectors(
+        [
+            GenomeVector(
+                movie_id=1,
+                imdb_id=cast(str, bed.title.imdb_id),
+                tmdb_id=1,
+                # Three lanes into `halfvec(1128)`. `GenomeVector.relevance` is
+                # a bare `tuple[float, ...]` on a frozen dataclass, so no width
+                # is checked before the `CAST` in the destination statement.
+                relevance=(0.5, 0.5, 0.5),
+            )
+        ],
+        revision="an-invented-revision",
+    ),
+    ("id_crosswalk", "imdb_id"): lambda bed: PostgresBulkCatalogRepository(
+        bed.session
+    ).upsert_crosswalk([IdCrosswalkPair(imdb_id="tt" + "9" * 20, tmdb_movie_id=1)]),
+    ("import_runs", "position"): lambda bed: _refused_import_run(bed, position=_OVER_INT32),
+    ("import_runs", "rows_seen"): lambda bed: _refused_import_run(bed, rows_seen=_OVER_INT32),
+    ("import_runs", "rows_written"): lambda bed: _refused_import_run(bed, rows_written=_OVER_INT32),
+    ("sync_runs", "items_seen"): lambda bed: _refused_sync_run(bed, items_seen=_OVER_INT32),
+    ("sync_runs", "items_matched"): lambda bed: _refused_sync_run(bed, items_matched=_OVER_INT32),
+    ("sync_runs", "items_unmatched"): lambda bed: _refused_sync_run(
+        bed, items_unmatched=_OVER_INT32
+    ),
+    ("sync_runs", "items_retracted"): lambda bed: _refused_sync_run(
+        bed, items_retracted=_OVER_INT32
+    ),
+    ("title_embeddings", "embedding"): lambda bed: PostgresTitleEmbeddingRepository(
+        bed.session
+    ).upsert_many(
+        [
+            TitleEmbeddingUpsert(
+                title_id=bed.title.id,
+                embedding=(0.1, 0.2, 0.3),
+                model_name="an-invented-model",
+                source_fingerprint="an-invented-fingerprint",
+            )
+        ]
+    ),
+    ("title_neighbors", "rank"): lambda bed: PostgresTitleNeighborRepository(bed.session).replace(
+        [bed.title.id],
+        [
+            ScoredNeighbor(
+                title_id=bed.title.id,
+                neighbor_title_id=bed.other_title_id,
+                score=0.5,
+                rank=_OVER_INT32,
+            )
+        ],
+        blend_fingerprint="an-invented-fingerprint",
+    ),
+    ("titles", "tmdb_id"): lambda bed: _refused_title_update(bed, tmdb_id=_OVER_INT32),
+    # Not through `TitleRepository.update`: `Title.imdb_id` carries
+    # `^tt\d{7,8}$`, so the over-long value cannot be constructed there. The
+    # bulk loader takes `ports.bulk.ImdbTitle`, whose `imdb_id` is a bare
+    # `str`, stages it into `stg_titles.imdb_id text` and meets `varchar(16)`
+    # at the `INSERT ... SELECT`. That gap is ADR-0043's own reason for moving
+    # this column out of the `safe` bucket.
+    ("titles", "imdb_id"): lambda bed: PostgresBulkCatalogRepository(bed.session).upsert_titles(
+        [
+            ImdbTitle(
+                imdb_id="tt" + "9" * 20,
+                kind=TitleKind.MOVIE,
+                name="An Invented Over-Long Identifier",
+                original_name=None,
+                year=None,
+                end_year=None,
+                runtime_minutes=None,
+                genres=(),
+            )
+        ]
+    ),
+    ("titles", "tvdb_id"): lambda bed: _refused_title_update(bed, tvdb_id=_OVER_INT32),
+    # **New coverage created by `m10a`/ADR-0040, not a gap this file had.**
+    # `titles.vote_count` was one column with two writers, one of them the
+    # staged `COPY` in `apply_ratings` -- so the ledger scored it `exposed-copy`
+    # (worst case over its writers) and it was outside the two scored buckets
+    # this parametrisation covers. The split sends IMDb's half to
+    # `imdb_num_votes`, still COPY-fed and still unscored, and leaves
+    # `tmdb_vote_count` reached only through the ORM, which makes it
+    # `translated` and brings it in scope. `Title.tmdb_vote_count` is
+    # `Field(ge=0)` with no ceiling against an `integer` column -- the shape
+    # `.claude/rules/db-and-sql.md` calls "the common shape here" -- so a
+    # validly constructed domain model overflows it.
+    ("titles", "tmdb_vote_count"): lambda bed: _refused_title_update(
+        bed, tmdb_vote_count=_OVER_INT32
+    ),
+    ("titles", "original_language"): lambda bed: _refused_title_update(
+        bed, original_language="x" * 17
+    ),
+    ("titles", "content_rating"): lambda bed: _refused_title_update(bed, content_rating="y" * 33),
+    ("user_taste", "centroid"): lambda bed: _refused_taste(bed, centroid=(0.1, 0.2, 0.3)),
+    ("user_taste", "title_count"): lambda bed: _refused_taste(bed, title_count=_OVER_INT32),
+    # -- already translated: the positive control (ADR-0043's 10) ------------
+    ("curated_rows", "position"): lambda bed: PostgresCuratedRowRepository(
+        bed.session
+    ).replace_for_user(
+        bed.user_id,
+        [
+            CuratedRow(
+                id=new_id(),
+                user_id=bed.user_id,
+                slug="an-invented-row",
+                title="An Invented Row",
+                card_title_ids=(bed.title.id,),
+                position=_OVER_INT32,
+                model_name="an-invented-model",
+                generation_id=new_id(),
+                generated_at=_LEDGER_NOW,
+            )
+        ],
+    ),
+    ("llm_calls", "tokens_in"): lambda bed: PostgresLLMCallRepository(bed.session).record(
+        _llm_call(tokens_in=_OVER_INT32)
+    ),
+    ("llm_calls", "tokens_out"): lambda bed: PostgresLLMCallRepository(bed.session).record(
+        _llm_call(tokens_out=_OVER_INT32)
+    ),
+    # `NUMERIC(12, 8)` is four integer digits, so `10_000` is the smallest
+    # whole dollar amount it cannot hold -- server-side `22003`, the shape
+    # `_errors.py` was written from.
+    ("llm_calls", "cost_usd"): lambda bed: PostgresLLMCallRepository(bed.session).record(
+        _llm_call(cost_usd=Decimal("10000"))
+    ),
+    ("llm_calls", "latency_ms"): lambda bed: PostgresLLMCallRepository(bed.session).record(
+        _llm_call(latency_ms=_OVER_INT32)
+    ),
+    ("images", "width"): lambda bed: _refused_image(bed, width=_OVER_INT32),
+    ("images", "height"): lambda bed: _refused_image(bed, height=_OVER_INT32),
+    ("search_queries", "result_count"): lambda bed: _refused_search_query(
+        bed, result_count=_OVER_INT32
+    ),
+    ("search_queries", "latency_ms"): lambda bed: _refused_search_query(
+        bed, latency_ms=_OVER_INT32
+    ),
+}
+
+#: Bounded columns in the two scored buckets that **no repository method
+#: accepts a value for**, so no arm above can drive one. Each is an exclusion
+#: with a measurement rather than a gap: their writers still gain the wider
+#: translation in F9, because the ledger's buckets are worst-case over every
+#: writer and a column nothing can currently overflow is one refactor away
+#: from being one.
+_NO_CALLER_SUPPLIED_VALUE = {
+    # Written only as the server-side expression `attempts = attempts + 1`
+    # (`db/repositories/jobs.py`'s `_FAIL`). `JobRequest` carries no
+    # `attempts` field at all, so refusing this column needs 2**31 failures of
+    # one job rather than one call.
+    ("jobs", "attempts"): "written only as `attempts + 1`; no port DTO carries it",
+    # Both writers bind a module constant -- `bulk.py`'s `_ALIAS_NAME_KIND` and
+    # `people.py`'s `_PERSON_NAME_KIND`, each `SearchNameKind.<member>.value`.
+    # Neither `replace_aliases` nor `replace_for_titles` takes a `kind`.
+    ("title_search_names", "kind"): "both writers bind a module constant, not a parameter",
+    # `SearchQueryRecord.mode` is a `SearchMode`, so the longest value that can
+    # reach `varchar(16)` is `'full_text'` at nine characters.
+    ("search_queries", "mode"): "enum-typed on the port DTO; longest member is 9 of 16",
+}
+
+
+def test_every_ledger_column_in_the_two_scored_buckets_has_an_arm_or_a_reason() -> None:
+    """The premise of the parametrisation below, asserted before it runs.
+
+    An empty parametrisation passes exactly like a clean one, and so does one
+    that quietly stopped covering a column the ledger moved into scope. The
+    equality is two-sided on purpose: an arm naming a column that is no longer
+    in either bucket is just as much a drift as a column with no arm.
+    """
+    scored = ledger_columns("exposed-sqlalchemy", "translated")
+    covered = set(_BOUNDED_ARMS) | set(_NO_CALLER_SUPPLIED_VALUE)
+
+    assert scored, "the ledger reported no scored columns at all -- the scan is dead"
+    assert covered == scored, (
+        "the ledger and this file's arms disagree.\n"
+        f"  in the ledger, no arm here: {sorted(scored - covered)}\n"
+        f"  an arm here, not in the ledger: {sorted(covered - scored)}"
+    )
+    assert not (set(_BOUNDED_ARMS) & set(_NO_CALLER_SUPPLIED_VALUE)), (
+        "a column is both driven and excluded"
+    )
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    sorted(_BOUNDED_ARMS),
+    ids=[f"{table}.{column}" for table, column in sorted(_BOUNDED_ARMS)],
+)
+async def test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_never_as_an_encoder_crash(  # noqa: E501
+    bed: _Bed, table: str, column: str
+) -> None:
+    """One arm per column, and the assertion names no exception this project
+    does not own.
+
+    `UsherPortError` rather than `RepositoryConflict`: the rule under test is
+    ADR-0009's -- nothing above a repository imports `sqlalchemy.exc` -- and a
+    case that named the narrower type would be asserting *which* port error a
+    site chose, which is the site's decision rather than this rule's.
+
+    At `3972c2e` the `exposed-sqlalchemy` arms fail here with `builtins.
+    OverflowError` (the `integer` columns, refused client-side by asyncpg's own
+    binary encoder) and with `asyncpg.exceptions.StringDataRightTruncationError`
+    or `sqlalchemy.exc.DBAPIError` (the `varchar(N)` and `halfvec(N)` ones,
+    refused server-side); none of those is a `UsherPortError`.
+
+    **The SQLSTATE assertion is not decoration**, and `testing-discipline.md`
+    is why it is here: *a rejection is not an assertion — assert the
+    diagnostics.* `pytest.raises(UsherPortError)` alone passes when the arm
+    fails for a reason it was not written for, and the likeliest such reason is
+    a bed row this file forgot to seed: a foreign key naming nothing is a
+    `RepositoryConflict` too. Class **22** is *"this value is not storable"* and
+    class **23** is *"this row violates a constraint"* — the two halves of
+    `ROW_REFUSED_SQLSTATE_CLASSES`, and the whole point of these arms is the
+    first. So the cause chain is read the same way `_errors.py:constraint_name`
+    documents, and an arm that starts passing because of a missing row goes red
+    on `23503`.
+    """
+    with pytest.raises(UsherPortError) as caught:
+        await _BOUNDED_ARMS[(table, column)](bed)
+
+    cause = caught.value.__cause__
+    assert isinstance(cause, DBAPIError), (
+        f"{table}.{column} was refused by something that never reached the driver: {cause!r}"
+    )
+    sqlstate = getattr(getattr(cause.orig, "__cause__", None), "sqlstate", None)
+    assert isinstance(sqlstate, str) and sqlstate.startswith("22"), (
+        f"{table}.{column} answered a port error, but for SQLSTATE {sqlstate!r} rather than "
+        "a class-22 value refusal -- class 23 here means the arm is failing on a constraint "
+        "(most likely a row `bed` does not seed) and is passing for the wrong reason"
+    )
+
+
+# --------------------------------------------------------------------------
+# ADR-0043 scope item 2: the two staging columns with no destination at all
+# --------------------------------------------------------------------------
+
+
+async def test_a_movielens_tmdb_id_above_int32_stages_and_is_reported_unmatched(
+    bed: _Bed,
+) -> None:
+    """`stg_genome.tmdb_id` is `bigint` since M10's F9, and this is the
+    behaviour that buys.
+
+    That column is written to **nothing**: `upsert_genome_vectors`' destination
+    statement joins on `imdb_id`, and MovieLens's own `tmdb_id` is carried
+    through the staging table for a join nobody makes. Declared `integer`, a
+    value above 2**31 raised `builtins.OverflowError` inside
+    `copy_records_to_table` — no SQLSTATE, not a `DBAPIError`, nothing
+    `is_row_refusal` can inspect — and took the whole batch with it. So a
+    single malformed row in a 350 MB dump aborted ten thousand good ones over
+    a number that is never stored.
+
+    The assertion is on the batch **completing**, not on an absence: the
+    unmatched row is counted, and a second row that really does match is
+    written in the same call, so a repository that silently dropped the batch
+    would fail here.
+    """
+    matched = GenomeVector(
+        movie_id=1,
+        imdb_id=cast(str, bed.title.imdb_id),
+        tmdb_id=2**31,
+        relevance=(0.5,) * GENOME_TAG_COUNT,
+    )
+    unmatched = GenomeVector(
+        movie_id=2,
+        imdb_id="tt99000042",
+        tmdb_id=2**31 + 1,
+        relevance=(0.25,) * GENOME_TAG_COUNT,
+    )
+
+    written = await PostgresBulkCatalogRepository(bed.session).upsert_genome_vectors(
+        [matched, unmatched], revision="an-invented-revision"
+    )
+
+    assert (written.inserted, written.updated, written.unmatched) == (1, 0, 1)
+
+
+async def test_an_imdb_akas_ordering_above_int32_stages_and_the_batch_is_written(
+    bed: _Bed,
+) -> None:
+    """`stg_akas.ordering` is `bigint` since M10's F9, for
+    `stg_genome.tmdb_id`'s reason exactly.
+
+    IMDb's own `ordering` field is read by the destination statement's
+    `DISTINCT ON`/`ORDER BY` and written to no column, so bounding it to
+    `integer` could only convert a malformed dump row into an aborted batch.
+    The alias itself must still land, which is what makes this a statement
+    about the widening rather than about the row being ignored.
+    """
+    written = await PostgresBulkCatalogRepository(bed.session).replace_aliases(
+        [
+            ImdbAka(
+                imdb_id=cast(str, bed.title.imdb_id),
+                ordering=2**31,
+                name="An Invented Alias",
+                region="US",
+                language=None,
+            )
+        ],
+        imdb_ids=[cast(str, bed.title.imdb_id)],
+    )
+
+    assert (written.written, written.unmatched) == (1, 0)

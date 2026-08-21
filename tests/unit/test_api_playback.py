@@ -1021,14 +1021,24 @@ async def test_all_three_routes_are_in_the_openapi_document_with_real_shapes(
         # was taken: FastAPI renders a `{"model": ProblemResponse}` declaration
         # under the *route's* response media type and offers no per-response
         # override, so the document described a right shape under a wrong name.
-        # `api/app.py`'s `UsherAPI.openapi` corrects it in a post-pass, and this
-        # assertion -- with its twin in `test_api_watch.py` -- is the fork H2
-        # named as the cost of the fix. Kept spelled out here rather than
-        # deferred to `tests/unit/test_api_openapi.py`'s enumeration, because a
-        # route's own file is where a client's generator would be read from.
+        # `api/app.py`'s `UsherAPI.openapi` corrects it in a post-pass, keyed
+        # off the schema rather than the status -- so a status added to
+        # `_PLAY_FAILURES` later needs no edit here.
+        #
+        # This assertion -- with its twin in `test_api_watch.py` -- is the fork
+        # M9's H2 named as the cost of the fix, and one operation carrying two
+        # media types is the whole point of paying it: the 200 is this route's
+        # own body at `application/json`, every failure is a problem document.
+        # Kept spelled out here rather than deferred to
+        # `tests/unit/test_api_openapi.py`'s enumeration, because a route's own
+        # file is where a client's generator would be read from.
         for failure in ("404", "409", "503"):
             failed = operation["responses"][failure]["content"][PROBLEM_MEDIA_TYPE]["schema"]
             assert failed["$ref"].endswith("/ProblemResponse"), (path, failure)
+            assert "application/json" not in operation["responses"][failure]["content"], (
+                path,
+                failure,
+            )
 
     redeem_operation = paths["/stream/{ticket}"]["get"]
     assert "302" in redeem_operation["responses"]

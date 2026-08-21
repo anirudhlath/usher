@@ -27,6 +27,31 @@ read before trusting the playback and write-back paths end to end:
 | **M7** | the composed home screen — nine row providers, `HomeService`, `TasteService`, `DeriveService`, the tag genome, `GET /home` | a real 1,271,570-title catalog |
 | **M8** | LLM curation end to end — `OpenAICompatibleClient` (litellm declined), `curated_rows` + `llm_calls`, the candidate pool, `CurationService` and its validator, `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate`, `usher curate`, the genome tag vocabulary, query expansion | a local vLLM serving `gemma-4-26b-a4b` over a real 1,271,138-title catalog |
 | **M9** | the whole HTTP surface — PRD 07's Screens, Resources, Actions, Admin and Meta tables behind one RFC 9457 envelope over a closed seven-member `code` vocabulary; keyset cursors; search, the two-tier suggest, browse, similarity, the series hierarchy; the image proxy (`images` + `GET /images/{id}`) and artwork on `RowCard`; `POST /titles|episodes/{id}/play` with the playback ticket and outbound watch write-back; the admin completion (sync, unmatched, bootstrap status + trigger, row-provider toggles, `bootstrap.progress`); `search_queries` whole; `GET /meta/attribution`. **Track 2:** `append_to_response=season/N`, the IMDb akas and credit-names bulk expansion, the priority-tier TMDb crawl | the **live TMDb v3 API** (S3: 130,334 requests over 1.98 h, 130,647 titles enriched; T2/T3 against the real IMDb dumps) **and a real Emby 4.9.5.0** — H4/H5 ran 2026-08-12 in 23 bounded requests with no walk: `/play` → ticket → `302` → a real **206** with `video/x-matroska` bytes, the play body leaking nothing with its positive control fired first, and the watch write-back read back *from Emby* and restored **byte-for-byte**. ⚠️ They ran **after** the milestone closed, because M9 recorded "no Emby credentials on this host" having checked `~/code/usher/.env` and nowhere else |
+| **M10 Phase 1** (Safety, Group S — S1–S11, in progress on `milestone/m10-hardening`) | the outbound rate gate (`_MinInterval`, `SourceGateRegistry`, ADR-0042), the 429 chain end to end, a cursorless delta refused, `USHER_PUSH_GAP_MAX_ITEMS`, the four `KIND_CONCURRENCY` entries turned into measurements, `usher.sync.retraction.fraction`, a failed sync run exiting non-zero, and a leaked push adapter released | a real Emby 4.9.5.0 — **S1 52 requests, S7 142, S8 1, S11 11** |
+
+**M10 Phase 1 is gated (2026-08-19), and the half worth reading is what it did
+not measure.** Its gate ran **11 live requests against a pre-registered ceiling
+of 40**, under a checklist hashed before the first socket opened
+(`/var/tmp/m10-gate/GATE-S.md`). The headline: **the shipped app was started with
+`USHER_PUSH_ENABLED=true` against the operator's real server — the configuration
+every rule in this repository has been working around — and the reconnect
+gap-closer stopped at its ceiling in two requests**, recording `FAILED` so no
+cursor advanced, against 5,634 pages if the fix were absent. The gate paces at
+`1/rate` within 0.13%.
+
+🔴 **What Phase 1 did *not* establish, stated because M9's gap is what taught
+this project to:** any Emby build but **4.9.5.0**, on one household, on one
+evening; **a real 429 from anywhere** — 130,750 requests to two upstreams have
+never produced one, and it stays *"pinned by construction, deliberately never
+observed"* because provoking it is the behaviour ADR-0042 exists to prevent;
+**this server under a paging load**, since every concurrency figure in the phase
+is from single-item reads; **N > 1 Usher processes against one source**, the one
+bound the group cannot express because every limiter is per process; and **a
+completed full walk of this library**, which has never once happened — so the
+retraction guard's behaviour on an honest denominator is unmeasured, and the
+drift probe's `0` means *"Usher holds 1% of this source"* rather than *"the
+library is stable"*. Phase 1's own numbers are in
+`.claude/rules/emby-push-and-ingest.md` with their dates and samples.
 
 **Post-M9 follow-up work is merged into `main` and changes things the table
 above describes.** The one to know about before touching search: **the embedding

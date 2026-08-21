@@ -33,11 +33,11 @@ from typing import Any, cast
 
 from pydantic import AwareDatetime
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.sync import SyncRunRow
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, is_row_refusal
 from usher.domain.ids import new_id
 from usher.domain.sync import SyncRun, SyncRunKind
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
@@ -126,7 +126,20 @@ class PostgresSyncRunRepository(SyncRunRepository):
             async with self._session.begin_nested():
                 self._session.add(SyncRunRow(**run.model_dump()))
                 await self._session.flush()
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).**
+            # `sync_runs` carries four `integer` counters -- `items_seen`, `items_matched`,
+            # `items_unmatched`, `items_retracted` -- each fed by a `SyncRun` field bounded `ge=0`
+            # and not above. SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto any
+            # classified subclass, so a column refusing a *value* arrives as a bare `DBAPIError`
+            # that `except IntegrityError` does not catch and the driver's own exception crossed
+            # this port boundary untranslated -- the one thing ADR-0009 forbids.
+            # `db/repositories/_errors.py` holds the two measured shapes and the only copy of the
+            # predicate. Everything that is *not* a row refusal -- a dropped connection, a statement
+            # timeout, an undefined table -- still propagates, because a caller that cannot tell
+            # those apart retries the one thing a retry cannot fix.
+            if not is_row_refusal(exc):
+                raise
             raise RepositoryConflict(
                 f"sync run {run.id} conflicts with an existing run",
                 constraint=constraint_name(exc),
@@ -146,7 +159,19 @@ class PostgresSyncRunRepository(SyncRunRepository):
                 for name in _MUTABLE:
                     setattr(row, name, getattr(run, name))
                 await self._session.flush()
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).** The
+            # same four counters as `add`, on the path that writes them at the end of a walk rather
+            # than at its start. SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto
+            # any classified subclass, so a column refusing a *value* arrives as a bare `DBAPIError`
+            # that `except IntegrityError` does not catch and the driver's own exception crossed
+            # this port boundary untranslated -- the one thing ADR-0009 forbids.
+            # `db/repositories/_errors.py` holds the two measured shapes and the only copy of the
+            # predicate. Everything that is *not* a row refusal -- a dropped connection, a statement
+            # timeout, an undefined table -- still propagates, because a caller that cannot tell
+            # those apart retries the one thing a retry cannot fix.
+            if not is_row_refusal(exc):
+                raise
             raise RepositoryConflict(
                 f"sync run {run.id} conflicts with an existing run",
                 constraint=constraint_name(exc),

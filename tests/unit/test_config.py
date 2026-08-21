@@ -265,6 +265,73 @@ def test_the_worker_concurrency_settings_have_the_measured_defaults(
     assert KIND_CONCURRENCY[JobKind.BOOTSTRAP] == 1, "bulk_load_window commits the caller's session"
 
 
+def test_the_four_concurrency_entries_that_are_bounds_are_pinned_by_value_and_say_which_measurement_moved_them() -> (  # noqa: E501
+    None
+):
+    """The four entries the case above leaves unpinned, each with its run.
+
+    🔴 **Until M10's S7 these four were pinned by nothing at all, and that was
+    demonstrated rather than argued**: `MATCH` set to 7 and `DERIVE` to 9 --
+    arbitrary values -- passed all **4,119** unit cases on 2026-08-19. The case
+    above asserts `set(KIND_CONCURRENCY) == set(JobKind)` and pins `ENRICH`,
+    `INDEX`, `CURATE` and `BOOTSTRAP` by value, and asserts nothing whatever
+    about `MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK`, `DERIVE` or `SYNC` --
+    which are exactly the entries issue #13 is about. This is D4's
+    `TICKET_TTL_SECONDS`, B9's `CAST_LIMIT` and S7's own `_WEIGHTS` finding a
+    fourth time, in its weakest form: not pinned by a derived assertion, **not
+    pinned**.
+
+    **Every number below is a literal**, and none is read back out of
+    `KIND_CONCURRENCY` -- that is the tell the three prior instances shared. A
+    case whose expectation is computed from the thing under test pins that the
+    constant is *in force* and can never pin its *value*.
+
+    The measurements, both run 2026-08-19 and both recorded with their
+    denominators in `.claude/rules/emby-push-and-ingest.md`:
+
+    * **4 for the three Emby-facing kinds.** 44 bounded read-only requests
+      against the operator's real Emby, `get_item` at 1, 2 and 4 in flight with
+      the outbound gate off. Per-request median **0.1377 / 0.1405 / 0.1363 s**
+      -- flat, the c=4 median 1% *below* the c=1 median -- and steady-state
+      throughput **7.40 / 14.21 / 28.75 rps**, i.e. **3.89x** at four in
+      flight. This server does not degrade at 4 concurrent single-item reads,
+      which refutes the W1-shaped prediction that it would.
+    * **4 for `derive`.** 200 jobs a rung against a throwaway
+      `pgvector/pgvector:pg17`, one pool, own session per coroutine:
+      **48.7 / 85.3 / 115.7 / 130.7 jobs/s** at 1 / 2 / 4 / 8, with per-job
+      median **19.8 / 22.6 / 31.8 / 54.2 ms**. The knee is at 4: the fourth
+      in-flight job buys +36% throughput, the eighth buys **+13%** for +71%
+      per-job latency. Reproduced within 2% on a second run.
+    * **1 for `sync`**, unchanged and not a concurrency measurement at all --
+      ADR-0015's retraction ceiling is computed per run, so two overlapping
+      walks each see half the retractions and neither trips it.
+
+    ⚠️ **The three Emby numbers are a slot count, not a request rate, and the
+    difference is measured.** With `USHER_SOURCE_REQUESTS_PER_SECOND` at its
+    shipped **0.4**, four coroutines against one source produced requests
+    **2.50 s apart with a peak of one in flight** -- `_MinInterval` holds its
+    lock across the wait and `SourceGateRegistry` gives one source one gate.
+    So since S3 landed, this entry has not been what bounds the request rate to
+    a source; the gate is. Raising it would not raise the rate.
+    """
+    assert KIND_CONCURRENCY[JobKind.MATCH] == 4
+    assert KIND_CONCURRENCY[JobKind.WATCH_HISTORY] == 4
+    assert KIND_CONCURRENCY[JobKind.WATCH_WRITEBACK] == 4
+    assert KIND_CONCURRENCY[JobKind.DERIVE] == 4
+    assert KIND_CONCURRENCY[JobKind.SYNC] == 1
+
+    # The three Emby-facing kinds share one number for one reason -- they make
+    # the same single-item read against the same server -- so a change to one
+    # that is not a change to all three is a change that lost its argument.
+    # Spelled over the literal above rather than by comparing the three to each
+    # other, which would pass with all three set to 7.
+    assert (
+        KIND_CONCURRENCY[JobKind.MATCH]
+        == KIND_CONCURRENCY[JobKind.WATCH_HISTORY]
+        == KIND_CONCURRENCY[JobKind.WATCH_WRITEBACK]
+    )
+
+
 def test_a_concurrency_the_pool_cannot_serve_is_refused_at_startup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -549,6 +616,33 @@ def test_every_setting_is_read_by_something(monkeypatch: pytest.MonkeyPatch) -> 
     )
     unread = [name for name in Settings.model_fields if f".{name}" not in read]
     assert unread == []
+
+
+def test_the_source_rate_default_is_the_courtesy_margin_derived_from_s1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`source_requests_per_second` is a *derived* default, not a chosen one, so
+    it gets pinned like a measurement (the `search_*`/`embedding_*` treatment):
+    Little's law over S1's page p95 and the Emby concurrency, `4 / 9.1713 =
+    0.436` rps, with the shipped **0.4** a courtesy margin below it (ADR-0042).
+
+    Two properties beyond the number. `ge=0`, not `ge=1`, because `0` is
+    unlimited -- the shape `push_gap_min_interval_seconds` uses and a size does
+    not -- and the derived default is genuinely below the rate it was derived
+    from, which is the whole of "courtesy margin rather than a re-statement of
+    the server's own speed".
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    assert Settings().source_requests_per_second == 0.4
+    # Below the rate it is derived from, so it is a margin and not the speed.
+    assert Settings().source_requests_per_second < 4 / 9.1713
+
+    monkeypatch.setenv("USHER_SOURCE_REQUESTS_PER_SECOND", "0")
+    assert Settings().source_requests_per_second == 0.0  # unlimited is a value, not an error
+    monkeypatch.setenv("USHER_SOURCE_REQUESTS_PER_SECOND", "-1")
+    with pytest.raises(ValidationError):
+        Settings()
 
 
 def test_the_search_and_embedding_settings_have_the_measured_defaults(

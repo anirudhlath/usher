@@ -14,6 +14,296 @@ Verified facts, loaded when working in this subsystem. Measured or observed,
 never assumed — each entry carries its date, its sample and what it refuted.
 The always-on conventions live in `CLAUDE.md`; this file is the evidence.
 
+## What a request to this Emby costs, measured 2026-08-15 — and *"~1–5 s/request"* was never about a request
+
+**M10 S1.** `scripts/measure_source_latency.py`, **52 live requests**, sequential,
+all `GET`, nothing written, no iterator anywhere in the run. Bar
+`/var/tmp/m10-gate/BAR-S1.md`,
+`sha256 b0ff82ac4a85db58fd04b1636500427e97ef122bc5b647c3d6b4807ec2f9c23b`,
+written 02:35:16Z — before the harness existed and seven minutes before the
+first request. **One household, one evening, one network path, one Emby
+build.** Every number here is a snapshot with a date on it, not a constant.
+
+**The window, quoted from the artifact rather than around it.** The harness
+printed `02:42:42Z -> 02:45:11Z`, which is the **48 reps**; the four warm-ups
+came before it and that version of the harness did not timestamp them (it does
+now, and prints both windows). **Nothing was sent to the source after
+02:45:11Z by this process** — the client was closed on the last response and
+everything after it is a local Prometheus read. That is the claim available;
+*"the server was idle"* is not, because this run has no visibility into what
+else the household was asking of it and no right to assert one.
+
+⚠️ **The version of the harness that produced these numbers is not the
+committed one, and the difference is in the reporting rather than the
+measurement.** The run was made by the file at `02:41:01Z`
+(`/var/tmp/m10-gate/measure_source_latency.py.bak`); the committed harness
+adds the warm-up-inclusive two-instrument comparison the 18.11% below made
+necessary, prints the warm-up timings and the wider window, persists raw
+observations under `--timings-out`, and moves the `--budget 0` guard ahead of
+the client. **So re-running the committed script does not reproduce the 18.11%
+line** — it reproduces the corrected comparison. The probe plan, the timing
+call site and the export are unchanged.
+
+⚠️ **"Emby 4.9.5.0" is carried over from M9's H4/H5 and was not measured
+here.** This run never read `/System/Info`; the `verify` probe is
+`/System/Info/Public`, whose body was recorded only as a byte count. Same
+household, same server, thirty-six hours later — but the version string is an
+inheritance, not an observation.
+
+🔴 **The string this repository has cited 22 times and called *measured* 11
+times was never measured.** *"Emby is slow (~1–5 s/request observed)"* enters in
+`0c823e0` on 2026-07-28 — the **first PRD commit**, two days before
+`src/usher/adapters/emby/` existed and before any request had been sent to any
+Emby from this project. PRD 01:314 attributed it to *"the old table"*, i.e. to
+an earlier revision of itself.
+
+**The grep behind that, scoped and pinned, because the plan's version of it is
+false:** `git log -S "1–5 s/request observed" 45398c2 -- docs/prd/` returns
+**exactly one** commit, `0c823e0`. The M10 plan states it as `--all -- docs/`,
+which returns **two** at `45398c2` (the second being `71c44e5`, the plan itself,
+under `docs/plans/`) and **four** across the repo at HEAD. It was already false
+in the commit that wrote it, and it was copied here verbatim before being run.
+**A grep-checkable claim that nobody re-ran is a claim, and promoting one from
+a plan into a rules file means running it first.**
+
+**And the census is 22, not 21.** The plan says 21 — 16 in `src/` across 13
+files, 5 in `docs/prd/`. There are **6** in `docs/prd/`: the sixth is
+`docs/prd/README.md`'s own M10 row, which quotes the string while describing
+this task. *"Called measured 11 times"* survives scrutiny: 12 lines match
+`grep measur` beside the string, and the twelfth is that same README row
+**denying** it was ever measured, which is not a citation calling it measured.
+
+### The table
+
+Wall clock around `EmbySession.request`, n = 12 per class, warm-up discarded.
+⚠️ One exception, because the durable record should carry it rather than only
+the module docstring: **`verify` is timed around `anonymous_json`**, which is
+what the shipped `verify()` calls and which includes `decode_json` of a
+138-byte body — microseconds against 125 ms, and the *only* class whose wall
+clock and histogram do not bracket the identical span.
+
+| class | n | median | mean | p95 | max | median body |
+|---|---|---|---|---|---|---|
+| `verify` (`GET /System/Info/Public`) | 12 | **0.1253 s** | 0.1543 s | 0.4721 s | 0.4721 s | 138 B |
+| `get_item` (`GET /Users/{u}/Items/{id}`) | 12 | **0.1495 s** | 0.1649 s | 0.3587 s | 0.3587 s | 13,975 B |
+| `list` @ `StartIndex=0` | 12 | **4.5356 s** | 4.6067 s | 4.8355 s | 4.8355 s | 945,131 B |
+| `list` @ scattered `StartIndex` | 12 | **7.4155 s** | 7.4670 s | 9.6805 s | 9.6805 s | 819,964 B |
+| `list`, both pooled (`op="list"`) | 24 | 5.0954 s | **6.0369 s** | 9.1713 s | 9.6805 s | — |
+
+**The mean is beside the median because the distribution is right-tailed on
+every class** (M9 S2's finding): any `Σ` over pages wants the mean.
+
+### What it refutes, and the confirmations after
+
+- 🔴 **"1–5 s" is not about a request, and where it *is* about something it
+  **understates** it.** A 200-item page carrying the full `Fields` set costs
+  **4.54 s at depth 0 and 7.42 s deep** — the pre-registered prediction was
+  `median(list) ∈ [1, 5]` and 5.0954 s falls outside it. The max was predicted
+  under 5 s and is **9.68 s**, and **12 of the 24 `list` reps exceeded 5 s** —
+  every scattered page and no depth-0 one, which follows from the table (max
+  `list@0` is 4.8355 and the pooled median 5.0954 forces min `list@scattered`
+  to **at least** 5.3553 -- the 12th-smallest of 24 is <= 4.8355, so the 13th
+  is >= 2*5.0954 - 4.8355; a lower bound, not the equality an earlier draft
+  wrote) and is confirmed in Prometheus, where the replayed reps read
+  `le="5"` = 12 against `le="10"` = 24. *An earlier version of this entry said
+  nine; nine was a guess dressed as a count.*
+- 🔴 **A single-item read is 34× cheaper than a page**, not "1–5 s".
+  `median(list)/median(get_item)` = **34.1** (predicted ≥ 5). M9's H5 read
+  0.141/0.142/0.143 s as an *upper* bound on a `get_item`; this measures the
+  request itself at **0.1495 s median / 0.1649 s mean**, so H5's figure was
+  essentially the request and not the worker pass around it.
+- ✅ **The distribution is bimodal by op class**, which is the hypothesis the
+  run was written against and declared in the bar rather than after.
+- ✅ **`verify` is the cheapest class** — 0.1253 s median, a 138-byte body, and
+  it is unauthenticated, so a status screen's cost is a tenth of a second and
+  not a fifth of a minute.
+- ✅ **Depth costs.** Scattered over depth-0 is **1.63×** (predicted ≥ 1.20).
+  ⚠️ **Confounded by design and named in the bar**: `list@0` asks for the same
+  page twelve times and is cacheable, `list@scattered` never repeats a
+  `StartIndex`. It is depth *and* cacheability at once, so read it as "a real
+  walk's pages cost more than its first page" rather than as a clean depth
+  coefficient.
+- ✅ **Right-tailed everywhere**: mean > median on all three ops.
+
+### The numbers Phase 1 actually needs, derived from the mean
+
+Library **1,134,919 items** on 2026-08-15 (up from 1,126,789 on 2026-08-02 and
+1,126,674 on 2026-07-31 — it moves), i.e. **5,675 pages** at the shipped
+`page_size=200`.
+
+- **A full walk is 7.3–11.8 hours**, ~9.5 h at the pooled mean. The old
+  *"5,634 pages at 1–5 s each"* gave 1.6–7.8 h, so this repository has been
+  assuming a walk about **twice as cheap** as it is.
+- **4.7–5.4 GB of JSON off the wire**, ~5.0 GB at the mean of the two median
+  bodies. The arithmetic, written out because an earlier version of this entry
+  said "~4.9 GB": 5,675 × 819,964 B = **4.65 GB**, 5,675 × 945,131 B =
+  **5.36 GB**, and 5,675 × 882,547 B = **5.01 GB**. Decimal GB throughout.
+  **"~4.9 GB" reproduces from nothing** — it needs 863,436 B/page in GB or
+  927,107 B/page in GiB, and neither is a body this run measured. That is the
+  whole finding; a second attempt at this entry offered "a GiB/GB slip on
+  5.01 GB" as its origin and 5.01 GB is 4.66 GiB, so the story was itself
+  unreproducible. **Inventing a derivation for a superseded number is the same
+  error one register down: stop at "it reproduces from nothing".**
+- **The source yields 33 items/s.** `scripts/measure_ingest.py` measured the
+  local pipeline at **1,933–2,135 items/s**, so **the ingest side is ~60×
+  faster than the source can feed it** — the walk is entirely upstream-bound,
+  and any local optimisation of it is optimising the 1.7%.
+- **Single-item ops run at ~6 rps sequentially** (1/0.1649). That is the number
+  a source-side rate limiter's default has to be chosen against, not "1–5 s".
+- **M5 measured a real `ItemsUpdated` batch at 42 ids**; applied inline at
+  `get_item`'s mean that is **6.9 s**, i.e. about one page.
+- ⚠️ **A rate limiter on `list` cannot bind *a sequential walk*.** One page at
+  a time is already 0.17 rps, so any per-source limit above that never fires on
+  the walk this run measured, and a limit below ~6 rps binds only the
+  single-item ops. Whether it binds a *concurrent* walk is unmeasured and is
+  S7's -- N pages in flight is N x 0.17 rps, which a limiter set for
+  courtesy could well reach. The claim is about the sequential case, which is
+  the only case this run has.
+
+### Two instruments, and the second one caught a defect in the first's reporting
+
+`usher.source.request.duration` — the histogram `EmbySession._send` has
+recorded in a `finally` since M3, and which **nine milestones emitted and
+nobody ever read** — was exported over OTLP into Phase 0's Prometheus and
+compared against the harness's own `time.monotonic()`.
+
+| op | median agreement | mean agreement |
+|---|---|---|
+| `get_item` | **0.13%** | 0.67% |
+| `list` | **1.17%** | 0.92% |
+| `verify` | **1.05%** | 18.11% ⚠️ |
+
+🔴 **The 18.11% is real and it is the harness's fault, not the pipeline's.**
+`_send` records in a `finally` on **every** request, including the four the
+harness discards from its own statistics — so the histogram held 52
+observations against the wall clock's 48, and one extra observation moves a
+12-sample mean and barely moves its median. Proven arithmetically rather than
+argued: the same 48 timings replayed under a second `service.name` reproduce
+the wall-clock mean to **0.001%–0.027%**, and subtracting that series from the
+live one leaves exactly **4 observations totalling 14.1825 s** — the warm-up,
+whose `verify` leg is 0.5175 s because it is the first request of the run and
+carries the TCP and TLS connect. The harness now compares over `warmups +
+timings`. **The general form: a discard is a property of the analysis, not of
+the instrument, and an instrument in a `finally` cannot be told about it.**
+
+Also worth having: the histogram's own `_count` was **13 / 13 / 26 = 52**,
+exactly the budget the harness reported spending. A metric nobody reads is also
+an audit of the run that produced it.
+
+⚠️ **The 48 raw observations were not persisted** — that harness printed a
+4-dp table and nothing else, so `p95` and `max` in the table above rest on that
+print. What Prometheus *can* corroborate, because the fine boundaries are 5%
+wide, is each observation localised to one bucket: the largest `get_item` falls
+in `(0.352224, 0.369835]` against a printed max of 0.3587, the largest `list`
+in `(9.257674, 9.720557]` against 9.6805, and the largest `verify` in
+`(0.495614, 0.520395]` — which is the **warm-up** at 0.5175 s, reached
+independently by the subtraction above and by the bucket, two routes to one
+number. The harness now takes `--timings-out` and writes every observation as
+JSON; this run predates it, and no further live request was spent to recover
+them.
+
+### 🔴 The shipped telemetry cannot express any of the above, and this is the finding with the widest blast radius
+
+`configure_metrics` (`src/usher/telemetry.py`) installs **no `View`**, so
+`usher.source.request.duration` takes the OTel Python SDK's default explicit
+bucket boundaries — `(0.0, 5.0, 10.0, 25.0, 50.0, …)` **in seconds**. Every
+observation below five seconds falls in one bucket. Measured, by replaying the
+identical 48 timings through a provider configured exactly as ship does and
+querying Prometheus:
+
+| op | `histogram_quantile(0.5, …)` as shipped | true median | wrong by |
+|---|---|---|---|
+| `verify` | **2.5000 s** | 0.1253 s | **20×** |
+| `get_item` | **2.5000 s** | 0.1495 s | **16.7×** |
+| `list` | 5.0000 s | 5.0954 s | 1.9% (coincidence — the true median sits on a boundary) |
+
+So PRD 10 lists this metric ✅ M3 and any dashboard built on it would have
+plotted **2.5 s for every sub-5-second operation this project performs**,
+identically, forever — and would have read as a working panel. The same applies
+to every seconds-unit histogram in the catalogue. Fixing it is a `View` in
+`configure_metrics`, is *not* S1's task (S1 is a prose diff over 13 files and
+must not be bundled with a mechanism), and is recorded here so whoever builds
+Phase 2's dashboards does not build them on this.
+
+### Where the run deviated from its own bar
+
+**The bar is not edited to match the run — that is the one property a
+pre-registered bar has.** These are recorded here instead, which is where a
+deviation belongs.
+
+- **The bar says the page is priced by calling `EmbySession.json_body`
+  directly; the harness calls `EmbySession.request`.** Same wire request, same
+  parameters, deliberate: `json_body` is `request` plus `ok()`'s status check
+  plus `decode_json`, and decoding a 945 KB page is tens of milliseconds that
+  belong to neither instrument. Keeping the decode outside the timed window is
+  what lets the wall clock and `_send`'s `finally` bracket as nearly the same
+  span as two instruments can — which is the acceptance criterion the bar
+  itself sets two paragraphs later. The status check and the decode still
+  happen, immediately after the clock stops.
+- **The bar's own `View` deviation, declared in it before the run** and
+  restated here because it is the reason the numbers are readable at all: the
+  harness installs fine geometric bucket boundaries for its export because the
+  shipped configuration cannot resolve a sub-5-second median. See the section
+  above.
+- **`verify` is timed around `anonymous_json`, not `request`** — noted at the
+  table.
+
+🔴 **And one correction to how the reconciliation was described, which is a
+finding rather than a footnote.** S1's citation diff was reported as *"prose
+only, no behaviour"*, proven by every changed `src/` module being AST-identical
+with docstrings stripped. **The AST claim is true and "no behaviour" was
+false.** `LaneReport` (`src/usher/api/dto/health.py`) is a **pydantic model**,
+so pydantic emits its class docstring as the JSON-Schema `description` and
+FastAPI publishes it at `/openapi.json` — the edit put a `.claude/rules/…`
+path, a `⚠️` glyph and an internal task id into the public API contract.
+Repaired by moving the correction into a comment; the published description
+now differs from `45398c2` in exactly one of 1,691 leaf nodes and the
+difference is the **removal** of the false "1–5 s per request" claim, verified
+by regenerating `openapi.json` from a `git archive` of `45398c2` and diffing
+the whole document.
+
+**The general form — a `src/` docstring is not automatically prose; on a
+pydantic model, a route handler or a `Field(description=…)` it is a wire
+artifact, and an AST comparison cannot see the difference — is recorded in
+`.claude/rules/api-telemetry-and-lanes.md`, not here.** This file's trigger is
+`adapters/emby/**` and five `services/*.py`; that one's is `src/usher/api/**`,
+which is where the finding fires. It is cross-referenced rather than duplicated
+so the two cannot drift, and the three standing DTO leaks it names are recorded
+there too.
+
+### Still unverified, named rather than implied
+
+- ✅ **This server under sustained concurrency** — closed by S7 on 2026-08-19,
+  in the section below. Every request in *this* section was sequential, one in
+  flight, and nothing in it licenses a concurrency figure; the one that does is
+  its own measurement.
+- **Any other Emby build**, and any other network path. One household.
+- **`op="watch_history"`** — the same route and payload shape as `get_item`
+  (`_fetch(external_id, op=…)`), differing only in its telemetry label, but not
+  one of the four classes the budget bought.
+- **A cold server.** Nothing here flushed Emby's caches, and `list@0`'s
+  twelve identical requests are the arm most likely to have been served warm.
+- **`POST /Users/AuthenticateByName`**, still never exercised by this project —
+  the run installed the operator's existing token.
+- **Whether `page_size` trades linearly.** Only 200 was measured, so "halve the
+  page and halve the latency" is a guess.
+- **This server's version.** Not read in this run — see the note above the
+  table. `4.9.5.0` is M9's observation, thirty-six hours old.
+- **Whether the server was idle.** The claim available is that *this process*
+  sent nothing after 02:45:11Z; what else the household asked of that server
+  during the run is unobserved.
+
+  ⚠️ **Two caveats on the `list` spread, and this is the weaker of them.** The
+  declared confound is **cacheability** — `list@0` repeats one page and
+  `list@scattered` never repeats a `StartIndex` — and it is in the bar, before
+  the run. Unobserved household load is a second and lesser one, and the run
+  was built against it: `plan_probes` is **round-robin**, so the two `list`
+  arms alternate across the whole 2:29 window rather than occupying separate
+  stretches of it, and a drift in what the server was doing lands on both
+  roughly equally. What it cannot rule out is a burst that happened to fall on
+  scattered requests; what it does rule out is a monotonic drift being read as
+  a depth effect.
+
 ## M9's live verification — it ran on 2026-08-12, and the reason it had not is the first finding
 
 **Both halves passed against the same real Emby 4.9.5.0, and H5 is the first
@@ -169,7 +459,7 @@ real upstream this project talks to has ever produced the header that feeds it.
   walk with no warning — closed 2026-08-19 (issue #9).** `LaneSupervisor` starts
   a push lane per enabled source, and its reconnect gap-closer calls
   `reconcile(source, SyncRunKind.DELTA, adapter)`. **The half that made it a
-  full walk is `_cursor_for`, not the gap-closer**: a DELTA resumes from the
+  full walk is `cursor_for` (public since this fix), not the gap-closer**: a DELTA resumes from the
   newest *completed* item-lane run, so with none there is no `since` and
   `list_items(since=None)` reads the whole library — the walk every rule in this
   file forbids, issued by `uvicorn` with default settings and no command of its
@@ -181,10 +471,17 @@ real upstream this project talks to has ever produced the header that feeds it.
   off to keep its request budget *statable* — one socket and one gap-closer
   still decide the count — but a run that forgets them no longer walks a
   household. `always` is the old behaviour, which now warns before it starts.
-  **The bound is a refusal rather than a cap on purpose**: a truncated walk
-  records `COMPLETED`, and `latest_completed_cursor` then reads its
-  `started_at`, so everything the truncation never reached is skipped by every
-  later delta, silently and permanently.
+  **The cursorless bound is a refusal rather than a cap on purpose**: a
+  truncated walk that recorded `COMPLETED` would have `latest_completed_cursor`
+  read its `started_at`, so everything the truncation never reached is skipped
+  by every later delta, silently and permanently. ⚠️ **A cap that records
+  `FAILED` does not have that defect, and M10's S6 is one** —
+  `USHER_PUSH_GAP_MAX_ITEMS` stops a gap close after N items and records
+  `FAILED` with a `gap_delta_ceiling:` token, so no cursor advances. The two
+  compose: `USHER_PUSH_GAP_CLOSE` decides whether a *cursorless* walk happens,
+  the ceiling bounds how large *any* gap close may get, and `always` is
+  therefore no longer literally the old behaviour unless the ceiling is `0`
+  as well.
 
 **Emby push works.** Verified 2026-07-29 against the live server with a normal
 non-admin token: `/embywebsocket` upgrades (101), delivers periodic `Sessions`,
@@ -826,7 +1123,13 @@ bounded by **new titles** (94,438 movies + 32,409 series), never by items —
 an episode never walks the ladder, so the other 999,827 items cost nothing
 there — and a second walk creates none. Batch-level cost is 772 statements,
 0.0154 per item. Throughput is against a local database with no network in
-the way; a real walk is bounded by Emby's 5,634 pages at 1–5 s each.
+the way; a real walk is bounded by Emby's pages, **measured 2026-08-15 at
+4.61 s for the first page and 7.47 s deep** (M10 S1, at the top of this file) —
+5,675 pages of a 1,134,919-item library, i.e. **7.3–11.8 h**. The "1–5 s each"
+this sentence used to carry was never measured and was about half the truth.
+That is 33 items/s off the wire against 1,933–2,135 items/s through the
+pipeline below, so **the walk is upstream-bound by a factor of ~60** and every
+statement count on this page is 1.7% of the wall clock.
 **Four scale risks, planned against the statement the repository actually
 issued** (`scripts/measure_ingest.py --scale 1126674`; captured off
 `before_cursor_execute`, never transcribed — a hand-copied lookalike drifts
@@ -905,3 +1208,415 @@ walked `adapter.watch_state()` *looking for one known item id* is a walk of
 issued several hundred requests against a shared server before it was
 killed. Any "find the item where X" over a walk is a full walk; ask the
 server with a filter.
+
+## M10 Task S7 — this server under concurrency, and a tail that was our own TLS (2026-08-19)
+
+**44 bounded read-only requests against the operator's live Emby**, 15:48:51Z →
+15:49:13Z, the operator having stated the server was quiet from the last
+request. Every probe a `GET /Users/{user}/Items/{item}` over an `external_id`
+`media_items` already held — no walk, no iterator, no write, nothing sent to
+`/PlayedItems` or `/UserData`, so there is nothing to restore. Driven from
+`scripts/measure_source_lane.py` with the base URL, token, user id and device
+id redacted from everything printed. Pre-registered bar at
+`/var/tmp/m10-gate/BAR-S7.md`
+(`sha256 ea7a2b5db249fd9afdd34680f2c91954c60de7a02c19c8a72ab7ecd8ca6ce4f4`,
+written 15:39:13 before the first request and re-hashed by the harness at run
+time — the digest printed in both run logs matches). Quiet-check: CPU drift
+−0.034 against a ±0.1 limit, foreign `pytest` census 0.
+
+**Group S budget: S1 spent 52, S7 spent 142 (98 + 44 — see the lost run below),
+leaving 62 of the declared 256 for S8 and S11.**
+
+### The ladder, gate off — this server does not degrade at four
+
+Settings **interleaved and rotated** rather than blocked: interleaving spreads
+wall-clock drift across all three (S1's finding), and rotating the order per
+round stops `c1` always being the one that pays for a cold cache and subsidises
+`c2` and `c4` — a bias that runs in exactly the direction that would make
+concurrency look free.
+
+| in flight | n | median | mean | max | steady-state | vs c=1 |
+|---|---|---|---|---|---|---|
+| 1 | 12 | 0.1377 s | 0.1368 s | 0.1410 s | **7.40 rps** | — |
+| 2 | 11* | 0.1405 s | 0.1394 s | 0.1431 s | **14.21 rps** | 1.92× |
+| 4 | 10* | 0.1363 s | 0.1370 s | 0.1417 s | **28.75 rps** | **3.89×** |
+
+Overlap, because *"four requests finished"* is also what a serialised loop
+produces (`CLAUDE.md`'s fourth evidence rule): peak in flight **1 / 2 / 4**,
+mean in flight **1.00 / 1.99 / 3.51**, IoU **0.000 / 0.986 / 0.995**. The
+concurrency was achieved, measured on the wire.
+
+**Per-request latency is flat and throughput is near-linear.** The c=4 median
+is **1% below** the c=1 median. 🔴 **This refutes the run's own pre-registered
+prediction**, which took W1's TMDb result — a 37% per-worker throughput loss at
+three workers — as the prior and predicted >20% median degradation at c=4, a
+throughput ratio in [1.5, 3.5] and a p95 more than 1.5× worse. Median: refuted.
+Ratio: 3.89×, above the band. p95: see below. **A degradation curve measured
+against a CDN-backed public API is not a prior for a machine on the same LAN.**
+
+### 🔴 The tail was the harness's own connection pool, and the naive reading would have moved a shipped default
+
+\* Three requests in the whole ladder exceeded 0.25 s — one in the first `c2`
+block (0.4153 s) and two in the first `c4` block (0.4098, 0.4085) — against a
+baseline of ~0.137. Read naively that is *"p95 triples under concurrency"*, it
+satisfies the pre-registered p95 prediction, and it would have justified moving
+`KIND_CONCURRENCY[MATCH]` down to 2.
+
+**It is httpx opening connections #2, #3 and #4.** The evidence is internal and
+cost no extra request:
+
+- The slow requests are **exactly** the ones that must open a new connection —
+  one at the first appearance of concurrency 2, two at the first appearance of
+  concurrency 4 — and the excess over baseline (~0.27 s) is a TLS handshake to
+  a remote host.
+- **Every later block at every setting is clean.** `c4`'s second and third
+  blocks have a max of 0.1407 and 0.1360; `c2`'s have 0.1431 and 0.1420. If the
+  server degraded under concurrency the tail would recur, and it never does.
+- **Server-side caching is excluded**, which is what makes this decisive rather
+  than plausible: round 0 ran `c1` first over the same four item ids, so by the
+  time `c2` and `c4` ran, those items had already been served once and twice.
+  The only thing new at each first block is a **connection**.
+
+With the three handshakes removed, `c4`'s max (0.1417 s) is within 0.5% of
+`c1`'s (0.1410 s). **The general form: a harness that opens connections lazily
+manufactures a latency tail at exactly the moment it first raises concurrency,
+and that tail is indistinguishable from server contention in any summary
+statistic.** Warm the pool to the maximum concurrency before the first measured
+block, or — as here — keep enough structure in the run that the artifact can be
+isolated afterwards. Nearest relative in `mutation-sweeps.md` is the `cp -a`
+venv shebang: a complete, plausible, wrong result.
+
+### Arm C — the shipped default makes the concurrency entry moot, measured on the wire
+
+Six requests, four coroutines in flight, `USHER_SOURCE_REQUESTS_PER_SECOND` at
+its shipped **0.4**:
+
+| | measured |
+|---|---|
+| wire send-to-send gaps | **2.5031, 2.5026, 2.5026, 2.5007, 2.5035 s** |
+| peak in flight | **1** |
+| IoU | **0.000** |
+
+So **`KIND_CONCURRENCY[MATCH] = 4` is not what bounds this deployment's request
+rate to a source, and has not been since S3 landed.** `_MinInterval` holds its
+lock across the wait and `SourceGateRegistry` gives one source one gate shared
+by every adapter, so four job slots queue behind one 2.5 s interval. The entry
+bounds jobs in flight — sessions and connections held — and the **gate** bounds
+the wire. Raising it would not raise the rate.
+
+🔴 **And the instrument that would have said otherwise was caught by a stub
+rehearsal, before it cost a request.** The harness times around
+`session.request`, and `EmbySession._send` calls `await self._limiter.take()`
+*inside* that region — deliberately, since the gate's wait is its own series.
+So the coroutine window under a gated arm is dominated by **queueing**: the
+same six requests read **peak in flight 4, IoU 0.802** on that instrument,
+which is the exact opposite conclusion. Overlap is therefore computed from
+httpx's own `request`/`response` event hooks, downstream of the gate. **When a
+component's whole job is to make callers wait, any timer that wraps the wait
+measures the waiting and not the work.**
+
+### 🔴 The run before this one spent 98 live requests and retained nothing
+
+The first invocation completed all 96 ladder requests and then raised
+`TypeError: build_session() got an unexpected keyword argument 'limiter'` in
+the arm-C session builder. The `except` clause caught
+`(BudgetExceeded, ProbeFailed, UsherPortError)` — S1's tuple — so the
+`TypeError` propagated past every line that reports, and **96 observations
+already bought from somebody else's server were discarded**, along with the
+two warm-ups. `--timings-out` is written after the try/finally, so it never ran.
+
+S1 had already recorded this shape (*"a run that ends early otherwise loses
+every observation it bought"*) and defended against it by catching the budget
+exception and reporting anyway. **That defence is a denylist**: it enumerates
+the ways a run was *expected* to end, and the way this one ended — an ordinary
+programming error in a later arm — is on no such list and never will be.
+
+Three repairs, and the first is the only one that generalises:
+
+- **The report is no longer what makes an observation durable; the write is.**
+  Every timing is appended to a JSONL journal and flushed **on arrival**, so a
+  crash, a `SIGKILL` or an exception of any type leaves everything already paid
+  for on disk. JSONL rather than one document because a partial JSONL file is
+  readable and a partial `json.dumps([...])` is not.
+- The `except` is widened to `Exception`, so a bug in a later arm cannot
+  invalidate an earlier arm's data.
+- A `client_factory` seam, so the whole run rehearses against a stub. S1's
+  harness has one and this arm did not — which is why its first rehearsal was
+  the live server. The rehearsal now runs before every live invocation and
+  costs nothing; it is what then caught the arm-C instrument error above.
+
+**The general form: a live-request budget is spent at the transport, but it is
+*earned back* only by the write. Journal on arrival, and treat every line
+between the last request and the report as code that can lose the run.**
+
+### Still unverified, named rather than implied
+
+- **A *paging* load under concurrency.** Every request here is a single-item
+  read. S1 measured a 200-item page at 5.0954 s median — ~34× dearer — and
+  nothing has put pages in flight. Four concurrent *pages* is a different
+  question and this section does not answer it.
+- **Any Emby build but 4.9.5.0**, and any other network path.
+- **N > 1 Usher processes against one source.** Every limiter in this group is
+  per process and `SourceGateRegistry` is per composition root, so two
+  processes are two gates and 0.8 rps. This is the one bound the whole group
+  cannot express.
+- **Concurrency above 4.** The ladder stops at the entry under test; 8 in
+  flight against this server is unmeasured.
+- **A real 429 from this server.** S4 met one only against a stub.
+
+## M10 Task S8 — the retraction ceiling on somebody else's library, and the guard had already fired here (2026-08-19)
+
+**One live request.** `scripts/measure_source_drift.py`, a single
+`GET /Users/{user}/Items` with `Limit=1&EnableTotalRecordCount=true` — no
+iterator, no `StartIndex`, nothing written. Window 23:07:31Z → 23:07:40Z. Bar
+`/var/tmp/m10-gate/BAR-S8.md`
+(`sha256 e5cbd3a0d0c079492e3259fa3be89801ee4b147b19673b6b07ab706caacd554f`,
+written 18:06 before the harness existed, re-hashed by the harness at run time
+and again when this entry was written — all three match). Base URL, token, user
+id and device id redacted from everything printed.
+
+| | reading |
+|---|---|
+| source's live `TotalRecordCount` | **1,137,502** |
+| Usher's `count(media_items WHERE available)` for it | **11,851** |
+| would-retract lower bound | **0** |
+| fraction | 0.0000 against a 0.25 ceiling |
+| would the guard refuse? | **no** |
+
+⚠️ **Lower bound only, and every use of the number carries the sentence.** A
+count is not a set: an owner who removed 300 items and added 300 shows zero
+drift here and would still trip 0.25 on a real walk. It bounds the guard from
+*below*, which is the useful direction for *"does this fire at all"* — a
+reading already past the ceiling proves the guard would fire; a reading under
+it proves nothing about a walk.
+
+### 🔴 The probe cannot say anything on this deployment, and the reason is not churn
+
+**D1 predicted the two counts within ±2%. They differ by 96×** — Usher holds
+**1.04%** of the source. The bar's rationale (*"S1 measured this library at
+1,134,919 items and the catalog was built from it"*) named the wrong table:
+`titles` holds **1,272,870** rows and comes from M2's IMDb/TMDb bulk import,
+while the guard's denominator is `media_items`, which only an Emby walk fills
+and which nothing here had ever filled.
+
+**So the probe's arithmetic is structurally dead whenever Usher's catalogue
+lags its source.** `would_retract` is `max(0, usher_available − live_total)`,
+clamped at zero because a *grown* source is `upsert_many`'s business rather
+than a retraction — and any deployment that has not finished a walk sits on the
+clamp. It answers 0 and the 0 means *"Usher is behind"*, not *"the library is
+stable"*. **The probe is informative only when Usher's available count is at or
+above the source's total**, which is the state a completed walk produces and
+this deployment has never reached. That limit is now in the script's own
+docstring; it was not in the bar, and it should have been.
+
+### 🔴 D2 is refuted, by the deployment's own history rather than by the probe
+
+Issue #20 asked for a reading *"across at least one genuine churn event"*,
+which nobody can schedule. **Nobody had to: the ceiling already fired on this
+household, on 2026-08-13**, and the row is still in `sync_runs`:
+
+```
+kind=full  status=failed  started 04:14:07Z  elapsed 19.3 s  items_seen=120
+error: refusing to mark 60 of 180 items unavailable in one run
+       (33% exceeds the 25% ceiling); nothing was retracted
+```
+
+**And what tripped it was not churn at all — it was a bounded walk.** 120 items
+seen against 180 Usher held available; nobody deleted anything. The run before
+it (04:12:29Z, `full`, COMPLETED, **60 items**, 9.6 s) is the only full walk
+that has ever completed here, and the two together are ADR-0015's *Context*
+arriving as an event: *"a walk that succeeds and returns far less than the
+library holds"*, generated by Usher's own bounded test tooling rather than by
+the source. `reconcile._walk`'s ceiling comment says the same thing forward —
+*"a bounded walk has items it never looked at, so a sweep after one would
+retract every one of them"* — and this is it happening.
+
+**The transferable half, and it is the one S9 has to decide against: on a
+library the operator does not own, the thing that reaches the ceiling first is
+Usher's own partial coverage, not the owner's deletions.** Both produce the
+identical `AvailabilitySweepRefused`, and the refusal is the correct answer to
+both — but a default chosen against *churn* is being asked to hold against
+*coverage*, and only one of those is bounded by how much the household deletes.
+
+### The rest of the deployment's sync history, because it is the sample
+
+28 `sync_runs` rows: 2 full (1 completed, 1 refused), 13 delta (all completed),
+13 watch_state (**10 failed, 3 orphaned as `running`, 0 completed — ever**).
+`media_items` reached 11,851 almost entirely through one delta on 2026-08-19
+that saw 11,295 items; the rest saw 0–221 each. `items_retracted` is **0 on
+every row in the table**, so the *accepted* sweep path has never once run
+against this server — the only sweeps that ever had anything to retract were
+the one that was refused and the ones that never happened because no full walk
+finished.
+
+The watch lane's never-completing loop is filed as
+[#41](https://github.com/anirudhlath/usher/issues/41) and diagnosed there: no
+completed run means no cursor, so every pass walks the whole library and one
+transient error restarts it. It is named here because it is *why* the full-walk
+column is empty, and therefore why S8's probe had nothing to measure against.
+
+### Still unverified, named rather than implied
+
+- **Churn composition.** Additions and removals net out in a count. Only a walk
+  distinguishes them and no walk was run.
+- **The ceiling against a *completed* full walk of this library.** Nothing has
+  ever produced one — 5,688 pages at S1's measured 6.98 s/page is ~11 hours —
+  so the number the guard would see on an honest walk is unmeasured.
+- **Per-library scoping.** The probe asks the same `IncludeItemTypes` the
+  adapter walks; a library removed from *view* rather than from disk is
+  invisible to both.
+- **Any Emby build but 4.9.5.0**, one household, one evening.
+
+## M10 Task S11 — the Phase 1 gate: push enabled against a real household, in two requests (2026-08-19)
+
+**11 live requests against a declared ceiling of 40**, across four observations,
+21:13Z–02:25Z. Pre-registered checklist `/var/tmp/m10-gate/GATE-S.md`
+(`sha256 6cb2e82d7b4471bf4d17e1c227de6ec705ad27e70bebcc9ffa667c7c107f06df`),
+written and hashed **before the first socket opened** and re-verified by every
+driver at run time — all four printed the matching digest. No walk began, no
+write was made to the operator's account, and every request was a `GET`.
+
+| # | observation | requests | verdict |
+|---|---|---|---|
+| **#19** | the outbound gate through the shipped composition | 8 | **pass** |
+| **#9** | the app started with push **enabled** against the real source | **2** | **pass** |
+| **#13** | the concurrency entries pinned by value | 0 | **pass** |
+| **#20** | the retraction drift probe | 1 | **pass** |
+
+### 🔴 #9 — the scenario this whole project has been working around, in two requests
+
+**Every rule in this repository has said *set `USHER_PUSH_ENABLED=false` before
+pointing anything at a real household*,** because `LaneSupervisor` starts a lane
+per enabled source and its reconnect gap-closer calls `reconcile(..., DELTA,
+...)` — which against this library is **5,634 pages nobody asked for**. This is
+the first time the shipped app has been started with that switch **on** against
+the operator's own server, and the result is the phase's headline:
+
+```
+kind=delta  status=failed  items_seen=50  items_matched=31
+error: gap_delta_ceiling: stopped after 50 items, this walk's
+       USHER_PUSH_GAP_MAX_ITEMS ceiling. Nothing seen was lost and no cursor
+       moved; run `usher sync --kind full` for this source to close the rest
+```
+
+**Two live requests, both `StartIndex=0`** — one per lane, and the parameters
+are the evidence that they were two *different* lanes: request 1 carried
+`MinDateLastSaved` (the item lane's filter) and request 2 `MinDateLastSavedForUser`
+(the watch lane's). The run recorded **`FAILED`, never `COMPLETED`**, so
+`latest_completed_cursor` does not advance past the hole; the WARNING named the
+source, the setting **and** the remedy. **The external kill never fired** — the
+code's own ceiling held, which is the whole claim.
+
+**Run against a throwaway Postgres, not the deployment's**, and that was decided
+before the session rather than after: at the time of the gate the deployment's
+database was at `m10a` from a concurrent session in `~/code/usher-evals`, this
+branch's chain did not contain that revision, and a second session writing the
+same rows mid-observation would have made the reading unreproducible.
+
+⚠️ **That condition was temporary and is recorded in the past tense on purpose.**
+The shared database was rolled back to `m09f` the same evening and
+`usher-usher-1` is ready again; the `m10a` work moved to a separate `usher_m10a`
+database. **The gate's numbers are unaffected and that is checked rather than
+assumed:** #19 and #20 read `usher-postgres-1` **directly** rather than through
+the app, that container was never stopped, both ran ~90 minutes before the
+app's restart, and `media_items` still reads 11,851/11,851 — the denominator
+#20 was closed on. The decision to use a throwaway database would be the right
+one regardless; a live-verification run should not share a database with
+whatever else is in flight. The pre-registered `GATE-S.md` still says *"is at
+`m10a`"* and is **deliberately not edited** — a bar records what was true when
+it was written.
+
+🔴 **The finding that made the run bounded rather than lucky, and it was found by
+reading `_close_gap` before writing the driver.** `USHER_PUSH_GAP_MAX_ITEMS`
+bounds **only the item lane** — `WatchStateSyncService.sync` takes no ceiling
+argument, by a decision `api/lanes.py` states explicitly — so the watch lane runs
+*after* the bounded item walk and is bounded by nothing but its own cursor. A
+driver that seeded only an item cursor would have left the watch lane cursorless
+and walking all 1,137,557 items, which is precisely the outcome the observation
+exists to rule out. **So the seed carries two cursors with deliberately different
+windows**: the item cursor 30 days wide, so the delta overruns the ceiling on its
+first page and the refusal is a *prediction* rather than an accident of when the
+last sync happened; the watch cursor 15 minutes wide, because its window is the
+only thing bounding it. One window for both cannot satisfy both halves.
+
+**The bound that was never needed but had to exist:** an `os._exit(99)` at 10
+requests, counted in the app subprocess's own httpx wrapper. *A bound that lives
+only inside the code under test is not a bound on a run that exists to find out
+whether that code works.*
+
+### #19 — the gate at 1/rate, and two findings about the instrument
+
+Four single-item reads at `USHER_SOURCE_REQUESTS_PER_SECOND=0.5`, then four more
+at `0`, through the shipped `SourceGateRegistry` and `EmbyAdapter`, exported over
+the real OTLP collector. Spacing read from httpx's own `request` event hook —
+**downstream of the gate**, because a timer wrapping `_MinInterval.take()`
+measures the waiting rather than the pacing (S7's arm-C finding).
+
+| arm | wire gaps | median | vs `1/rate` |
+|---|---|---|---|
+| rate **0.5** | 2.0013, 2.0026, 2.0026 s | **2.0026 s** | **0.13%** (pass < 10%) |
+| rate **0** (control) | 0.4702, 0.1593, 0.1453 s | **0.1593 s** | collapsed |
+
+The control's first gap is the TLS handshake, S7's connection artefact again; the
+other two sit on S1's 0.1495 s and S7's 0.1377 s single-item medians. In
+Prometheus, `usher_source_throttle_wait_seconds` reads **sum 5.0046 over count 4
+= 1.2512 s mean** on the paced arm. That is self-consistent with the wire: the
+first request meets a fresh gate and waits ~0, three wait ~1.668 s each, and
+1.668 s of waiting plus ~0.33 s of request is the 2.0 s spacing measured.
+
+🔴 **Finding 1: the two arms' `service.name` separation did not take, and only a
+label saved the control.** `configure_telemetry` was called twice in one process
+and `set_meter_provider` is **set-once**, so both arms exported under the *first*
+arm's job name. What actually separated them is the `source` label — and only
+because the two arms were given different source *names*. **A same-named pair
+would have merged silently and the control would have read as a pass.** S1 and S7
+used a distinct `service.name` per run and both were separate processes, which is
+why the trap had not been met before; `api-telemetry-and-lanes.md` already
+records the set-once provider, one consequence over.
+
+🔴 **Finding 2: at rate 0 the throttle histogram publishes no series at all,
+rather than a zero.** Measured: `usher_source_throttle_wait_seconds_count{source=
+"gate-s19-unpaced"}` is **absent**, while that arm's
+`usher_source_request_duration_seconds_count` is present at 4 — so the export
+worked and the instrument simply recorded nothing. On PRD 10's panel *"the gate
+is off"* and *"the exporter is down"* are therefore the same silence. **This is
+the defect S8 fixed one metric over** — `usher.sync.retraction.fraction` is
+recorded on every finished full walk *including* the zeros for exactly this
+reason — and it is recorded here rather than fixed, because the gate is not the
+place to change an instrument.
+
+### #20 — the drift probe, re-read inside the gate's own window
+
+One request. **Live total 1,137,557 against Usher's 11,851 available, drift 0** —
+and the library moved **+55 items in three hours** against the 1,137,502 S8 read
+at 23:07Z, which is the reading's own evidence that the source is live. The 0
+means *"Usher holds 1.04% of this source"* and not *"the library is stable"*;
+GATE-S predicted both the value and that reading in advance, so neither is
+hindsight.
+
+### #13 — zero requests
+
+The four `KIND_CONCURRENCY` entries are pinned **by literal** in
+`tests/unit/test_config.py` (`== 4` four times, `SYNC == 1`), with the derived
+cross-check kept *beside* them rather than in place of them — the defect S7's own
+first sweep round found. Headline restated with its denominator: at the shipped
+`source_requests_per_second = 0.4`, four coroutines issue requests **2.503 s
+apart with peak in-flight 1**, so the entry bounds job slots and the gate bounds
+the wire.
+
+### Still unverified after this gate, named rather than implied
+
+- **Any Emby build but 4.9.5.0**, one household, one evening.
+- **A real 429 from anywhere.** Still *"pinned by construction, deliberately
+  never observed"* — provoking one is the behaviour ADR-0042's gate exists to
+  prevent.
+- **This server under a paging load.** Every concurrency figure in the phase is
+  from single-item reads.
+- **N > 1 Usher processes against one source** — the one bound this group cannot
+  express, because every limiter is per process.
+- **A completed full walk of this library**, and therefore the retraction guard
+  on an honest denominator. None has ever finished.
+- **#9's other arm** — the cursorless refusal against a genuinely fresh source
+  (S5 on this branch, `USHER_PUSH_GAP_CLOSE=cursored` as it shipped from
+  `main`). The operator chose the gap-closer arm; the refusal is pinned by
+  tests and by the deployment's own history, not by this run.

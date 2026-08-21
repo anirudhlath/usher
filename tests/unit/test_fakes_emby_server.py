@@ -51,7 +51,7 @@ from usher.adapters.emby.push import to_source_events
 from usher.adapters.emby.session import EmbySession
 from usher.domain.enums import HdrFormat
 from usher.ports.credentials import SourceCredentials
-from usher.ports.errors import PortUnavailable
+from usher.ports.errors import PortRateLimited, PortUnavailable
 from usher.ports.source import SourceEventKind, SourceItem, SourceItemKind, SourceWatchState
 
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
@@ -597,6 +597,94 @@ def test_the_public_route_refuses_a_session_token() -> None:
     without = server.handle(httpx.Request("GET", url, headers={"Authorization": identity}))
     assert with_token.status_code == 400
     assert without.status_code == 200
+
+
+@pytest.mark.parametrize("retry_after", ["120", "Wed, 21 Oct 2026 07:28:00 GMT", None])
+def test_an_armed_rate_limit_answers_one_request_for_one_path(retry_after: str | None) -> None:
+    """`rate_limit` is scoped to its path and consumed by one firing, and both
+    halves are load-bearing rather than tidy.
+
+    A limit that fired for every path would land on `AuthenticateByName`
+    instead of on the read a case armed -- `EmbySession` authenticates before
+    it reads anything -- and a limit that fired forever would make
+    `tests/integration/test_rate_limited_end_to_end.py`'s re-arm between its
+    probe and its worker run a no-op nobody could see. The three parameters are
+    RFC 9110's two forms and its absence: `usher.adapters.http.
+    retry_after_seconds` reaches the date one only after `float(value)` has
+    raised, and answers `None` for a 429 that carried no header at all.
+    """
+    server = FakeEmbyServer()
+    identity = 'MediaBrowser Client="Usher", Device="d", DeviceId="i", Version="1"'
+
+    def send(path: str) -> httpx.Response:
+        url = f"https://emby.invalid{path}"
+        return server.handle(httpx.Request("GET", url, headers={"Authorization": identity}))
+
+    server.rate_limit("/System/Info/Public", retry_after=retry_after)
+    assert send("/Users/x/Items/y").status_code != 429, "an armed limit is not a global switch"
+    fired = send("/System/Info/Public")
+    assert fired.status_code == 429, "the other path's request consumed this one's arming"
+    # `.get` rather than a branch: the absent header and the two present forms
+    # are one assertion, and `None` is what the absence has to read as.
+    assert fired.headers.get("Retry-After") == retry_after
+    assert send("/System/Info/Public").status_code == 200, "one arming, one firing"
+
+
+def test_a_refused_request_does_not_consume_an_armed_rate_limit() -> None:
+    """The identity gate answers *before* the limiter, which is where
+    `rate_limit`'s docstring says it sits.
+
+    Without this the placement is prose and the two orderings are
+    indistinguishable: a limiter in front of the gate answers 429 here, and the
+    request that was going to be refused anyway silently spends the arming --
+    so the case that armed it goes on to see an ordinary 200 and reads the
+    absence of a 429 as an adapter that never asked.
+    """
+    server = FakeEmbyServer()
+    url = "https://emby.invalid/System/Info/Public"
+    identity = 'MediaBrowser Client="Usher", Device="d", DeviceId="i", Version="1"'
+    server.rate_limit("/System/Info/Public", retry_after="120")
+
+    refused = server.handle(httpx.Request("GET", url))
+    assert refused.status_code == 400
+
+    fired = server.handle(httpx.Request("GET", url, headers={"Authorization": identity}))
+    assert fired.status_code == 429
+    assert fired.headers["Retry-After"] == "120"
+
+
+async def test_a_rate_limited_handshake_reaches_the_session_as_a_rate_limit(
+    driver: _Driver,
+) -> None:
+    """The limiter sits behind the identity gate and **in front of
+    authentication**, and this is the half of that claim nothing else pins.
+
+    The case above pins the first half -- a limiter moved *above* the identity
+    gate dies there. The second half was prose until this one existed: moving
+    the limiter block *below* the `AuthenticateByName` route arm, which is the
+    precise negation of what `rate_limit`'s docstring claims, left the whole
+    suite at **5,342 passed / 26 skipped**, because every other arming in this
+    repository is on `/System/Info/Public` or an item path and **nothing had
+    ever armed the authenticating call**.
+
+    It is also the first exercise `EmbySession._authenticate_locked`'s own 429
+    arm has ever had, and that arm is reachable no other way: the 429 check in
+    `EmbySession.request` sits after its 401 arm, on a call that by then
+    already holds a token. So a limit armed here is the only route to it, and
+    the item read never leaving the process is what says the *handshake* was
+    what got limited rather than the read behind it.
+    """
+    driver.server.add_item(MOVIE, T0)
+    driver.server.rate_limit("/Users/AuthenticateByName", retry_after="120")
+
+    with pytest.raises(PortRateLimited) as caught:
+        await driver.payload("movie-1")
+
+    assert caught.value.retry_after == 120.0
+    assert "POST /Users/AuthenticateByName" in driver.server.requests
+    assert f"GET /Users/{USER_ID}/Items/movie-1" not in driver.server.requests, (
+        "the read went out, so the 429 the session translated was not the handshake's"
+    )
 
 
 async def test_an_unrouted_path_is_a_404_not_a_cheerful_200(driver: _Driver) -> None:

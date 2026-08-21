@@ -103,6 +103,12 @@ class FakeSourceAdapter(SourceAdapter):
         self._offline = False
         self._credentials_valid = True
         self._closed = False
+        #: How many times `aclose()` has been awaited. **A count rather than a
+        #: second spelling of `_closed`**, because `aclose` is idempotent on
+        #: both implementations, so a flag cannot tell one release from twenty
+        #: -- and "the supervisor closes this adapter on every refresh tick
+        #: forever" is precisely the defect it would hide. M10's S10.
+        self._closes = 0
         self._fail_after: int | None = None
         # The session model. `_server_token` is what the source currently
         # accepts; `_token` is what this adapter last obtained. Expiring a
@@ -443,6 +449,7 @@ class FakeSourceAdapter(SourceAdapter):
 
     async def aclose(self) -> None:
         self._closed = True
+        self._closes += 1
         # A closed adapter has no channel, whatever the ledger last saw --
         # `EmbyAdapter.aclose` records the same thing through
         # `PushHealth.record_close`.

@@ -49,15 +49,41 @@ section below this one.
    milestone does not re-litigate a measurement by flipping a default. What
    would settle it is a real evaluation set out of `search_queries`, which is
    carried debt rather than a boundary call.
-8. **The 45 columns that leak a raw driver exception are still not translated.**
+8. **The columns that leak a raw driver exception are still not translated.**
    M9 is the milestone that built the problem-code vocabulary such a leak would
    map onto, so it is where "widen the `except`" was cheapest to try — and the
-   measurement is what stops it: **31 of the 45 are written through
-   `copy_records_to_table` on the raw asyncpg connection**, where an
-   out-of-range int raises a bare `OverflowError` with **no SQLSTATE**, so no
-   widening of `except IntegrityError` reaches them and there is nothing to map.
-   Mapping them means wrapping the COPY path, which is a bulk-loader change.
-   Left in PRD 09's carried debt with the candidate fix named.
+   measurement is what stops it: **the COPY writes go through
+   `copy_records_to_table` on the raw asyncpg connection**, outside SQLAlchemy's
+   translation entirely, so no widening of `except IntegrityError` reaches them
+   and there is nothing to map. Mapping them means wrapping the COPY path, which
+   is a bulk-loader change. **This reason survived every re-measurement in M10
+   and the call stands.**
+
+   🔴 **The arithmetic did not survive, and this entry carried it until
+   2026-08-20.** "45 exposed" was `67 − 17 − 5`, and **17 is reproducible under
+   no rule** — M10's F8 built the per-column ledger the figure never had and got
+   18, 16 or 12 depending on which rule closes a bounded set, so 45 rests on a
+   number nobody can derive. Measured at `m09f` on 2026-08-20: **79 bounded
+   columns, 51 exposed — 31 at the COPY and 20 at a SQLAlchemy statement.**
+
+   Two further corrections, both of which *widen* the call rather than narrow
+   it. **There are two COPY failure shapes, not one:** 28 columns refuse
+   client-side as a bare `OverflowError` with no SQLSTATE, but **3 refuse
+   server-side as `StringDataRightTruncationError` carrying `22001`** — a real
+   SQLSTATE on an exception that is still not a `DBAPIError`, because it is
+   raised on the raw connection. A fix that widens `bigint` and forgets `text`
+   closes one of the two. And **seven `bulk.py` writers have no `except` at
+   all**, so the candidate fix — stage wide, let the `INSERT … SELECT` refuse —
+   routes refusals onto a path that also leaks. It is two changes, not one.
+
+   ⚠️ **That the COPY figure is again 31 is a coincidence and must not be read
+   as a confirmation.** It recurs under one of three defensible rules and its
+   *membership* differs from M8's; the other two rules give 30 and 34. The scope
+   boundary is *everything refused inside `copy_records_to_table`*, not the
+   integer. See
+   [ADR-0043](../../docs/prd/decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
+   and regenerate rather than quote:
+   `uv run python scripts/audit_bounded_columns.py --summary`.
 
 ✅ **The one thing M9 shipped as a gap has since been closed: the live Emby
 verification of playback and watch write-back (H4/H5) ran on 2026-08-12 and

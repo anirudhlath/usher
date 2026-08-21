@@ -977,20 +977,116 @@ roadmap says who owes them, because a finding filed only next to the code it
 concerns is one nobody schedules. Every entry names its evidence; none is a
 suspicion.
 
-- **45 columns leak a raw driver exception across the port boundary** — found by
+- **51 columns leak a raw driver exception across the port boundary** — found by
   M8, measured live against Postgres 17.10 / asyncpg 0.31.0 with every mechanism
-  driven through the real repository method. 67 bounded columns: 17 provably
-  safe, 5 already translated (both M8 tables), **45 exposed**. The reason this is
-  not a small fix: **31 of the 45 are written through `stage_records`'
-  `copy_records_to_table` on the raw asyncpg connection**, outside SQLAlchemy's
-  error translation entirely, where an out-of-range `int` raises
-  `builtins.OverflowError` — no SQLSTATE, not a `DBAPIError`, and
-  `is_row_refusal()` cannot even inspect it. **No widening of `except
-  IntegrityError` can reach them.** `_errors.py`'s scope claim (class 22 + class
+  driven through the real repository method. ✅ **Scoped by M10's F8 on
+  2026-08-20 —
+  [ADR-0043](decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
+  states the bounding rule, publishes the per-column ledger these figures never
+  had, and hands F9 a bounded set of 22.** Every number below is re-measured at
+  `m09f` by `scripts/audit_bounded_columns.py`, which derives the ledger from the
+  SQLAlchemy metadata and cross-checks it against an independent replay of the
+  migration chain, offline and with no database. 🔴 **The headline correction:
+  of the five figures this bullet has carried since M8, only two reproduce.**
+  `67` and `5` are right and regenerate under every reading of the rule; `17`,
+  `45` and `31` do not, and `17` never could have, because no ledger of it was
+  ever published to compare a membership against.
+
+  | claimed at `m08b`, quoted since | verdict, measured 2026-08-20 at `m09f` |
+  |---|---|
+  | **67 bounded columns** | ✅ **Right when written, and the one genuine reproduction here.** `--at m08b` prints 22 `varchar(N)` + 44 `integer` + 1 `numeric(12,8)` = **67**. At `m09f` that same rule gives **75** (M9 added `images.kind/width/height`, `search_queries.mode/result_count/latency_ms`, `title_search_names.kind`, `credits.source`); ADR-0043's rule adds the one `bigint` and the three `halfvec(N)` for **79**, and there are 6 further CHECK-only value bounds it deliberately excludes |
+  | **5 already translated** | ✅ **Right, and exact.** `curated_rows.position` and the four `llm_calls` columns, at `m08b`, under every reading. Now **10**, since M9 gave `images` and `search_queries` the same treatment |
+  | **17 provably safe** | 🔴 **Not reproducible under any reading, and never scoreable.** ADR-0043 publishes three readings of what closes a value set; at `m08b` they give **18 / 16 / 12** and seventeen is none of them. Two columns the plan counted as safe are not: `titles.imdb_id`'s `pattern` is on `domain.Title` while the bulk writer takes `ports.bulk.ImdbTitle` (a bare `str`), and **`jobs.priority`'s `Field(ge=0, le=100)` is on `domain.Job` while `enqueue` takes `JobRequest`, whose `priority` is a bare `int`** (`ports/jobs.py:45`). A domain bound the write path never runs is not a bound |
+  | **45 exposed** | 🔴 **Not reproducible.** It is `67 − 17 − 5` and 17 is not reachable; the same subtraction with the adopted reading's 16 gives 46, and Rule B's own exposed figure at `m08b` is **50**, at `m09f` **51** — 31 at the COPY, 20 at a SQLAlchemy statement |
+  | **31 through the COPY path** | 🔴 **Not reproducible as stated, and the number recurring is a trap rather than a confirmation.** The adopted reading does put 31 in the COPY bucket — `37` narrow-staged bounded destination columns minus `6` provably safe among them — but the other two readings give **30** and **34**, and `37 − 7 = 30` is the plan's own stated alternative. A figure that appears under one reading of three is not a reproduction, and the membership is not the old 31 in any case: **28 raise `OverflowError` and 3 do not.** `media_items.container`/`video_codec`/`audio_codec` are refused **server-side during the COPY** as `StringDataRightTruncationError`, SQLSTATE **`22001`** — a real SQLSTATE on an exception that is still not a `DBAPIError`. **There are two failure shapes, and a fix that widens `bigint` and forgets `text` reaches 28 of 31** |
+
+  **M9's boundary call 8 survives all of it, and ADR-0043 does not re-open it**:
+  the COPY-bucket writes go through `stage_records`' `copy_records_to_table` on the raw
+  asyncpg connection, outside SQLAlchemy's error translation entirely, so
+  `is_row_refusal()` cannot inspect either shape and **no widening of `except
+  IntegrityError` can reach them**. `_errors.py`'s scope claim (class 22 + class
   23 covers "not storable as given") is true for SQLAlchemy-executed statements
-  and does not model the COPY path. Needs a scoped decision before an owner —
-  the cheapest candidate measured is declaring staging columns wide (`bigint`,
+  and does not model the COPY path. 🔴 **What ADR-0043 does retire is the
+  candidate fix this bullet named**: *"declare staging columns wide (`bigint`,
   `text`) so refusal moves to the `INSERT … SELECT` where the existing net
+  catches it, evidenced by `id_crosswalk.imdb_id`"* — measured at HEAD, **on
+  that path there is no net**. `stg_crosswalk.imdb_id` is already `text`, the
+  refusal already lands on the `INSERT … SELECT`, and `bulk.py:upsert_crosswalk`
+  has no `except` at all. The same holds at the three other places the pattern
+  already exists — `stg_titles.imdb_id text` → `titles.imdb_id`,
+  `stg_genome.relevance real[]` → `genome_scores.relevance`, and
+  `stg_title_embeddings.embedding text` → `title_embeddings.embedding`.
+  **Four for four: the candidate is two changes, not one**, and the second one —
+  which destination `except` a staged `INSERT … SELECT` with a `CAST` may safely
+  take, given `_errors.py:66–75`'s own caveat that class 22 is about the row only
+  for a parameterised statement with no server-side expression — is the
+  bulk-loader design task M10 does not own.
+  [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
+  closed the problem-code vocabulary at seven members on the evidence of routes
+  that exist, and none of this needs an eighth.
+  ⚠️ **`bulk.py` does translate, twice** — `refusals_as_conflict` at `:483` and
+  `:778` — so its seven untranslated writers are an omission at each site rather
+  than a module that never learned the mechanism. ADR-0043's first draft said
+  the module contained no `try`/`except` at all and drew an inference from it;
+  that was false and is corrected there.
+
+  ✅ **What M10 owned was F9's 22, and F9 landed it on 2026-08-20 — 21 of the
+  22, with the twenty-second excluded on evidence.** Twenty writing sites took
+  `refusals_as_conflict` or the widened `except DBAPIError` + `is_row_refusal`
+  (eleven replacing an `except IntegrityError`, nine where there was no `except`
+  at all — counted by an AST walk, not by listing them), and `stg_genome.tmdb_id` and `stg_akas.ordering` widened to `bigint`. No
+  migration: the only DDL touched is two `CREATE TEMP TABLE` strings in
+  `bulk.py`. The `exposed-sqlalchemy` bucket went **20 → 1**.
+  **The one left is `jobs.attempts`, and translating it would have been the
+  misuse rather than the fix**: its only writer computes it server-side as
+  `attempts = attempts + 1`, so a class-22 refusal there is a *statement* fault,
+  and reporting one to a caller as its row being wrong is exactly what
+  `_errors.py:66–75` warns against. `JobRequest` carries no `attempts` field, so
+  no port call can supply a value for it either. ADR-0043's *"What F9 did"*
+  section carries the per-site reasoning, including why the two `CAST`-carrying
+  destination statements the record predicted would fail question (3) in fact
+  pass it. The other nine staging-only integers are `enumerate()` ordinals and
+  are bounded by the batch's own length.
+
+  ✅ **And `22001` on the COPY path is now observed rather than asserted.**
+  ADR-0043 flagged it as the one failure shape it took from the protocol and
+  never ran; measured through the shipped `stage_records` on
+  `pgvector/pgvector:pg17`, it is exactly what that record predicted —
+  `asyncpg.exceptions.StringDataRightTruncationError`, `sqlstate == "22001"`,
+  **not** a `sqlalchemy.exc.DBAPIError` and carrying no `.orig` chain, so
+  `is_row_refusal()` cannot be handed it. **M9's boundary call 8 therefore now
+  rests on a measurement.** `tests/integration/test_staging.py`.
+
+  ✅ **Separately, and closed by F9 on 2026-08-20:** `Title.popularity: float |
+  None = Field(ge=0)` accepted **infinity** — `float('inf') >= 0` is `True`,
+  Postgres 17 stores it, verified round-trip, reachable via `json.loads('1e400')`
+  from a TMDb payload. It now carries `allow_inf_nan=False`, and
+  `adapters/tmdb/mapping.py:_non_negative_float` filters non-finite values to
+  `None` **in the same commit** — that module's contract is that nothing TMDb can
+  put in a payload may raise, and a `pydantic.ValidationError` is not a
+  `UsherPortError`, so an unfiltered `inf` would have escaped `EnrichService`'s
+  `except` and killed the worker instead of parking the job. The bound is on the
+  model rather than on the column because there is no width to widen: see below.
+  `community_rating` is safe only by accident of its `le=10`, which is now a case
+  (`test_community_rating_refuses_a_non_finite_value_by_its_ceiling`) so that
+  relaxing the ceiling cannot quietly re-open it.
+  ⚠️ **`titles.year` and `titles.vote_count` are the same `Field(ge=0)`-against-
+  `integer` shape and are deliberately *not* closed**, with
+  `test_year_and_vote_count_still_accept_a_value_their_column_cannot_hold`
+  recording the exclusion rather than leaving it unstated. Both are in the
+  `exposed-copy` bucket, and a ceiling on `Title` would be invisible to the only
+  writers that overflow them — `bulk.py:upsert_titles` and
+  `bulk.py:apply_ratings` take `ports.bulk` frozen dataclasses and never
+  construct a `Title` at all (ADR-0043, question 5).
+  ⚠️ **This bullet named "Postgres 17's unbounded `NUMERIC`" as the column until
+  2026-08-20, and that column is not `NUMERIC`** — `titles.popularity` is
+  `sa.Float()` (`a8a0e10ff464:102`, mirrored in `db/models/title.py`), which
+  PostgreSQL resolves to `double precision`. The round-trip observation stands;
+  the mechanism named for it did not. That is also why ADR-0043's rule excludes
+  it: a `float8` refuses nothing a Python `float` can hold, so this is an
+  *unbounded* column accepting a nonsense value — the opposite defect from the 50
+  above, wanting a domain bound rather than a translation. The same correction is
+  owed to issue #10's body, which carries the `NUMERIC` spelling.
   catches it, evidenced by `id_crosswalk.imdb_id` (staging `text`) surfacing as
   a wrapped `DBAPIError` while `media_items.container` (staging `varchar(32)`)
   does not. Separately: `Title.popularity: float | None = Field(ge=0)`
@@ -1012,8 +1108,21 @@ suspicion.
   The candidate is unchanged: declare staging columns wide (`bigint`, `text`) so
   the refusal moves to the `INSERT … SELECT`.
 - **`PortRateLimited.retry_after` reaches no consumer** — an M4 gap found by M8.
-  Seven raise sites across five modules produce it; `git grep retry_after src/`
-  finds **zero** consumers. `JobWorker._fail` passes only `retryable=True`, and
+  **Six sites across four adapter modules** construct it — `adapters/bulk/
+  wikidata.py`, `adapters/bulk/download.py`, `adapters/emby/session.py` (three)
+  and `adapters/http.py` — and `git grep retry_after src/`
+  finds **zero** consumers.
+  ⚠️ *This bullet read "seven raise sites across five modules" until 2026-08-19,
+  and both halves were wrong. Re-measured by an `ast` walk for
+  `PortRateLimited(...)` calls under `src/`: **six across four**, of which
+  **five are `raise` and one is a `return`** — `adapters/http.py`'s
+  `port_error_for` hands the error back for its caller to raise, so "six raise
+  sites" is a shade off in the other direction. M9's D9 plan had already
+  measured the same six ("an earlier draft said 'seven sites across five
+  modules'; measured, it is six across four") and this bullet kept the draft;
+  `db/repositories/jobs.py`'s module docstring, PRD 08 and
+  `.claude/rules/emby-push-and-ingest.md` all state the corrected census.*
+  `JobWorker._fail` passes only `retryable=True`, and
   the backoff is computed from attempt count alone, so a 429 telling us exactly
   when to return is answered with a jittered guess and the hint survives only as
   prose in `jobs.last_error`. Affects every job kind. **M9-sized** — it needs a
@@ -1034,9 +1143,98 @@ suspicion.
   `len(distinct) > 1` over twenty round trips, which **real `clock_timestamp()`
   drift satisfies on its own** (~8 ms measured with the jitter term deleted,
   against ~410–440 ms with it): both that case and D9's new one now assert a
-  *magnitude*. ⚠️ The field this closes has still never been exercised by a real
-  429 from TMDb — T2's 393-request live run saw none — so its behaviour is
-  pinned by one case and by no observation.
+  *magnitude*.
+  ⚠️ **This entry stays in carried debt, and what it owes is now stated as two
+  claims rather than one** — because the ✅ above invites the reader to take
+  both, and only the first is bought. **The mechanism is pinned; the upstream
+  behaviour is not.** Since 2026-08-19 (M10's S4) the chain is exercised end to
+  end by `tests/integration/test_rate_limited_end_to_end.py`, which fails a real
+  `match` job through the shipped `EmbyAdapter` and the shipped `JobWorker`
+  against real Postgres and reads `run_after - clock_timestamp()` back out of
+  the row — over **both** of RFC 9110's `Retry-After` forms, an integer and an
+  HTTP-date, the second being the one `float(value)` alone raises `ValueError`
+  on and which carried that bug in two separate copies before
+  `usher.adapters.http.retry_after_seconds` was shared. Measured: **147.0 s**
+  and **141.4 s** on the two hinted arms against **15.5 s** and **26.1 s** for
+  the same job under a 429 carrying no header at all, i.e. the ordinary jittered
+  [15, 30) draw. So the field is pinned by two cases and by real interval
+  arithmetic rather than by one case and a Python transcription of it.
+  ⚠️ **The second claim is the one nothing can buy here: no upstream this
+  project talks to has ever sent a 429.** M9's T2 saw none in **393** TMDb
+  requests, with no `retry-after` on its one 400; M9's S3 saw none in
+  **130,334** TMDb requests, with no `Retry-After` on any of its 193 non-200s;
+  M9's H4/H5 saw none in **23** requests to a real Emby 4.9.5.0, with
+  `run_after` NULL on the only queued row. S4's 429 therefore comes from a
+  **stub** — `FakeEmbyServer.rate_limit`, whose own docstring says it is the
+  one behaviour in that file with no observation behind it — and provoking a
+  real one is **refused with a reason**: the only servers this project talks to
+  are a household's own media server and the live TMDb API, and hammering
+  either until it rate-limits is precisely what
+  [ADR-0042](decisions/0042-the-outbound-limiter-is-per-source-and-spaces-requests.md)'s
+  outbound gate exists to prevent, and what
+  [ADR-0005](decisions/0005-bulk-bootstrap.md) declined when it sized the crawl
+  below TMDb's *stated* "somewhere in the 40 requests per second range" rather
+  than discovering the real ceiling by hitting it. Evidence for this half would
+  be evidence that the gate failed. The general form —
+  **a refusal path that has never fired is pinned by its construction and not
+  by an observation, and the honest closing note names which of the two the
+  reader is getting** — is in
+  `.claude/rules/ports-and-error-taxonomy.md`.
+- 🔴 **`GET /images/{image_id}` catches two of the four families
+  `port_error_for` returns, so a CDN 429 or 401/403 leaves the RFC 9457 envelope
+  as a bare `500 text/plain`** — found by M10's F3 on 2026-08-20 while measuring
+  something else, and confirmed independently in review. `port_error_for` answers
+  429 with `PortRateLimited` and 401/403 with `PortAuthFailed`; **neither
+  subclasses `PortUnavailable`**, and `get_image`'s ladder is `PortUnavailable` →
+  `MediaTypeNotServable` → `PortDataMalformed`, so neither family is caught
+  anywhere and Starlette answers before any handler can. **The evidence, with its
+  control:** driven through a real `create_app()` with one dependency overridden,
+  `PortUnavailable` answers `503 application/problem+json` (the control fires) and
+  `PortRateLimited` and `PortAuthFailed` both answer `500 text/plain`; a reviewer
+  reproduced it by driving the real `ProviderCdnImageFetcher` over an
+  `httpx.MockTransport`, so the whole chain ran rather than a fake raising.
+  **Never observed live**: 0 firings in F3's 250-request run against the real
+  CDN, and the entry above records 130,750 requests to two upstreams that have
+  never produced a 429 at all — so this is a defect nobody has met, which is why
+  it survived M9's whole review. **Not a vocabulary question**, and that is what
+  makes it small: `PortRateLimited` is unambiguously transient and
+  `503 source_unavailable` with a `Retry-After` already exists one arm away, so
+  the 429 half is an `except` tuple. Only the 401/403 half needs a decision — the
+  CDN needs no credential, so a 403 means something *in front of* it refused,
+  which is the captive-portal population wearing a status
+  ([ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s
+  image amendment has the taxonomy). **F3 deliberately did not fix it**: its bar
+  pre-registered the deliverable as "exactly this and nothing more" before the
+  first request, and a behaviour change inside it would have been editing the bar
+  after seeing the run. The gap was *pre-registered*, not discovered — the bar's
+  classification table gave `escapes_the_route` its own bucket up front.
+  **The transferable half is not about images**: a route's `except` ladder
+  encodes an assumption about the shared `port_error_for` ladder that **nothing
+  type-checks**, so any route catching a subset of what its adapter can raise
+  leaves the envelope silently. Worth a scan across every router before this is
+  called a one-route bug. 🔴 **And the project already knows this shape** — the
+  identical escape is written into `adapters/bulk/download.py` and
+  `adapters/bulk/movielens.py` as a scar (*"naming only one of them is what let a
+  `PortRateLimited` escape uncaught from a caller that had guarded only against
+  `PortUnavailable`"*), and `services/` carries a three-line test idiom for it
+  **twice**: a fresh anonymous `UsherPortError` subclass asserted not to escape
+  (`test_services_jobs.py::test_every_port_error_backs_off_rather_than_escaping`,
+  `test_services_reconcile.py::test_reconcile_never_raises_a_port_error`). **No
+  route in `api/` has one.** The guard stopped at the service boundary because
+  that is where an escape kills a loop, while at a route it is one ugly response
+  nobody is watching. That makes this cheap to fix properly rather than
+  per-route: the recipe already exists in the tree.
+  ⚠️ **Filed with it, because it is the same reader and the same file:
+  `GET /images/{image_id}`'s three failure arms have no counter**, so nothing
+  that ships can say how often any of them fires. That is what makes ADR-0030's
+  reopening trigger for the image amendment un-checkable in its rate half, and
+  it is the read-surface rule (`.claude/rules/ports-and-error-taxonomy.md`'s *"a
+  filter is invisible without a counter"*) applied one layer up. The obvious
+  repair — one `outcome`-labelled counter on `usher.images`, on
+  `usher.images.references`' precedent — carries one real design question, which
+  is that `configure_metrics` installs `metric_readers=[]` unless
+  `telemetry_enabled`, so on a default deployment it would export nowhere and
+  the trigger would be no more checkable than it is now.
 - 🔴 **`test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_own`
   is intermittent under whole-suite load, and this list is where that belongs** —
   **1 failure in 5 whole-`tests/integration` runs, 0 in 5 runs on its own**,
@@ -1079,6 +1277,28 @@ suspicion.
   began after the request's ended"*, observed through a session log rather than
   forced. Not to deselect it in CI: a case deselected in CI is a feature nobody
   checks.
+- ⚠️ **A second intermittent integration group is *reported* and did not
+  reproduce, and this list is where the report belongs rather than a rate.**
+  Raised 2026-08-19 reviewing M10's S4:
+  `tests/integration/test_adapters_search_postgres.py` run alone gave **1 / 0 /
+  3 failures over three consecutive runs** on a copy verified byte-identical to
+  `139a37c`, always the same three RRF-fusion cases
+  (`test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found`,
+  `test_a_row_only_one_lane_found_is_still_returned`,
+  `test_a_title_deep_in_both_lanes_still_reaches_the_first_page`).
+  **Re-measured the same day: ten consecutive solo runs, `38 passed / 1
+  skipped` every time, zero failures** — and neither obvious explanation
+  survives, because S4 changed no file under `src/` (so the search path is
+  byte-identical in both measurements) and the ten runs were taken at a load
+  average of **9.59 on 16 cores** rather than on an idle box. Four failures in
+  three runs and zero in ten do not average into a rate: they are two
+  environments or one very low rate, and nothing here can tell them apart. It
+  is recorded because **Phase 1's S11 runs a phase-wide mutation sweep scored
+  on "did the run fail"**, which an intermittent case makes unsound in exactly
+  the way the entry above describes — a plant whose only kill is one of these
+  three would be a false kill. `.claude/rules/mutation-sweeps.md` carries the
+  full measurement and the reason the affected sweep control's verdict stands
+  either way. Chasing the mechanism is nobody's task yet, deliberately.
 - ✅ **`test_sse_end_to_end.py::test_opening_a_stub_promotes_it…` was flaky and
   is closed — do not inherit the deselection.** `.claude/rules/mutation-sweeps.md`
   names it **four** times: one attribution note and **two deselections**, then
@@ -1303,28 +1523,26 @@ suspicion.
   rows, and a `logger.warning` in a stream nothing asserts on. **The claim lease
   is the fix for both**; until then this path is the one to name first, because
   it is the deployment shape `docker compose up` gives you by default.
-- ✅ **`usher unmatched --resolve` stack-traces on an unknown `--title`** — found
-  by M9's E4, which fixed the *route* and could not fix the CLI because
-  `cli.py` is not that task's file. The route now reads the title first and
-  answers a problem document; the command hands the id straight to
-  `attach_title`, and against Postgres that is a foreign-key violation
-  translated to `RepositoryConflict` — which is **not** in
-  `cli.OPERATOR_ERRORS` (verified: no member of that tuple is a base of it), so
-  an operator who mistypes a UUID gets sixty frames instead of a sentence.
-  [ADR-0026](decisions/0026-the-cli-boundary-names-families.md)'s amendment
-  family, one member short. It is a one-line change and it is carried rather
-  than taken because the family is an argued taxonomy, not a list — the
-  question ADR-0026 asks before adding a member is how often an operator hits
-  it, and answering that for a *refusal* type whose other raise sites are
-  genuine conflicts is the work.
-  ✅ **Paid on 2026-08-18 (issue #5), and the taxonomy question above was the
-  wrong one to have been waiting on.** The fix is not a tenth member of
-  `OPERATOR_ERRORS`: it is the route's own `SELECT` in front of the write, so
-  the command answers `no such title: <id>` and `RepositoryConflict` keeps
-  every stack it had. That leaves ADR-0026's line exactly where it was, which
-  is why this cost no argument about the family — the entry sized the work as
-  "decide whether a refusal type is operator-facing" when the available fix
-  was "do not raise one".
+- ✅ **`usher unmatched --resolve` stack-traced on an unknown `--title`** —
+  found by M9's E4, which fixed the *route* and could not fix the CLI because
+  `cli.py` is not that task's file. The route read the title first and answered
+  a problem document; the command handed the id straight to `attach_title`, and
+  against Postgres that is a foreign-key violation translated to
+  `RepositoryConflict` — which is **not** in `cli.OPERATOR_ERRORS` (verified:
+  no member of that tuple is a base of it), so an operator who mistyped a UUID
+  got a stack instead of a sentence.
+  ✅ **Paid on 2026-08-18 (issue #5), and the taxonomy question this entry was
+  waiting on was the wrong one to have been waiting on.** The entry read *"it
+  is a one-line change and it is carried rather than taken because the family
+  is an argued taxonomy, not a list — the question ADR-0026 asks before adding
+  a member is how often an operator hits it"*. The fix is **not** a tenth
+  member of `OPERATOR_ERRORS`: it is the route's own `SELECT` in front of the
+  write, so the command answers `no such title: <id>` and `RepositoryConflict`
+  keeps every stack it had. That leaves
+  [ADR-0026](decisions/0026-the-cli-boundary-names-families.md)'s line exactly
+  where it was, which is why this cost no argument about the family — the entry
+  sized the work as "decide whether a refusal type is operator-facing" when the
+  available fix was "do not raise one".
   **Reproduced before it was fixed**, against `pgvector/pgvector:pg17` at
   `alembic head` with one seeded source and one unmatched item: the traceback
   ended in `RepositoryConflict: cannot attach media item <media item id>` —
@@ -1334,6 +1552,26 @@ suspicion.
   `--resolve` is not symmetric with an unknown `--title`: the `UPDATE` matches
   no row, so the foreign key is never evaluated, and `attach_title`'s boolean
   has answered `no such media item` since M4. Confirmed on the same database.
+  Both refusals therefore print and return rather than raising `SystemExit` —
+  one command naming two things that do not exist owes them one exit code.
+  📎 **M10's F4 answered the frequency question anyway, on 2026-08-20, and the
+  answer is kept because it is what ADR-0026's Consequences now carries.** It
+  refuses the one-line change on its own terms: **22 raise sites across 14
+  modules**, of which **exactly one is reachable from a CLI argument** — this
+  one. `usher bootstrap --phase` can reach `ImportRunRepository.start`'s
+  uniqueness conflict, but by racing another bootstrap rather than by a typo,
+  and `BootstrapService._concede_to_other_owner` answers it without raising;
+  every other site is reached only by a walk (`similar --rebuild`, `derive`,
+  `curate`, `search`/`suggest`, `work`, `sync`, and `push`/`serve`, which run
+  the lanes). `db/repositories/source.py`'s two split across those groups:
+  `add` only from `POST /admin/sources`, since no subcommand adds a source, but
+  **`update` is not reachable from that route at all** — its one caller is
+  `api/lanes.py`'s `_write_push_available`, so it is CLI-reachable and not
+  argument-reachable. So widening the tuple would mute 22 sites to fix one,
+  several of them the deliberate bug tripwires that ADR's amendment names.
+  *(F4 also measured the frame count this entry used to quote as "sixty": at a
+  real terminal it is **40**, and the 60 came from a pytest run's 62 with 25
+  `_pytest`/`pluggy`/`pytest_asyncio` harness frames in it.)*
 - **A covering index for `GET /admin/unmatched` is measured, requested, and
   declined** — M9's E4, over 200,000 items / 70,000 unmatched / 23,333 undated.
   `ix_media_items_unmatched` is `(source_id) WHERE title_id IS NULL` and carries
@@ -1363,22 +1601,43 @@ suspicion.
   known-wrong marker and pointed at `tests/unit/test_api_openapi.py`. **A debt
   recorded only in the roadmap is a debt the person editing the code does not
   see** — the same shape as the curation role sentence corrected in
-  `testing-discipline.md` this same day, one subsystem over.
+  `testing-discipline.md` this same day, one subsystem over. **It worked**:
+  the fix below found both assertions from the markers.
+  ⚠️ **And the second marker misnamed its own twin**, which is worth keeping
+  because it is the failure mode the correction was written to prevent. Both
+  markers said the fix *"would fork this assertion and its twin in
+  `test_api_watch.py`"* — correct in the playback file and a **self-reference**
+  in the watch file, whose twin is in the playback file. A marker that points at
+  itself is a marker that survives a grep for the thing it was meant to make
+  findable. Both are deleted now that the fix has landed.
   ✅ **Taken 2026-08-19 (issue #6), and the reason it was carried is the part
   that did not hold.** *"Buys a client nothing it cannot read off the `type`
   member"* is a claim about a client that has already decided to parse the body
   as a problem document; a generated one decides that from the **declared media
-  type**, before it parses anything — and `~/code/usher-web` generates against
-  this document with `openapi-typescript`. Measured before: **56** responses
-  across 35 operations carried a `ProblemResponse`, every one of them declared
-  `application/json`, against a wire that answered `application/problem+json`
-  on all five vocabulary members reachable without a database. The fix is
-  `UsherAPI.openapi` in `api/app.py` — a post-pass over the generated document,
-  keyed off the `$ref` rather than off a status list, because FastAPI offers no
-  per-response media type and dropping `model=` to hand-write `content` would
-  leave `ProblemResponse` out of `components` and every ref dangling.
-  `test_api_openapi.py` enumerates rather than samples, and a second case
-  compares the declared type to the one three real routes actually send.
+  type**, before it parses anything — and the console that ships in this
+  repository generates against this document with `openapi-typescript`
+  (`web/package.json`'s `gen:types`). Measured before: **56** responses across
+  **35** operations and **92** response bodies carried a `ProblemResponse`,
+  every one of them declared `application/json` and none
+  `application/problem+json`, against a wire that answered
+  `application/problem+json` on all five vocabulary members reachable without a
+  database. The fix is `UsherAPI.openapi` in `api/app.py` — a post-pass over the
+  generated document, keyed off the `$ref` rather than off a status list,
+  because FastAPI offers no per-response media type and dropping `model=` to
+  hand-write `content` would leave `ProblemResponse` out of `components` and
+  every ref dangling. **Keying on the schema is also what excludes
+  `GET /health/ready`'s 503 by construction** — its model is
+  `ReadinessResponse` — rather than by a second exemption list beside
+  ADR-0030's `PROBLEM_EXEMPTIONS`; `model=` stays at all 20 declaration sites
+  across 14 router modules and no route decorator changed.
+  `test_api_openapi.py` enumerates rather than samples, over a floor and an
+  exact non-problem count so that a walk which matched nothing and a rewrite
+  that moved a **200** both fail; a second case compares the declared type to
+  the one three real routes actually send. The cost was real but smaller than
+  stated: five assertions in two files, of which three move and two stay — a
+  **200** really is `application/json`, and `test_api_watch.py`'s case reads
+  better for saying so, since the 404 and the 200 on one operation are now two
+  different media types.
 
 ## Post-v1 candidates
 

@@ -41,8 +41,12 @@ invisible waiting for a sweep to notice.
 **The guard measures what this run would change, not how much of the source
 is already unavailable.** Otherwise an operator who accepted one mass
 retraction gets a refusal every night afterwards, forever — which is worse
-than having no guard, because a refused sweep fails the sync run and the
-*upsert* half of the next walk never commits either.
+than having no guard, because a refused sweep fails the sync run. ⚠️ **The
+clause that used to follow — *"and the upsert half of the next walk never
+commits either"* — is false against the code:** `services/reconcile.py` flushes
+**one commit per batch** (*"One commit per batch, exactly like
+BootstrapService: a crash costs"* one batch), so a later refusal does not
+unwind the upserts a walk already landed.
 
 ## Consequences
 
@@ -58,6 +62,39 @@ re-running a sync and the other is not, and asking once is cheap.
 **Also:** availability goes *stale* rather than wrong when a source is
 unreachable, which is exactly what PRD [08](../08-operations.md)'s failure
 table already promises ("Availability goes stale, not wrong").
+
+**And the case this ADR did not distinguish, named on 2026-08-19 (M10 S9): an
+owned library and a *view* of somebody else's.** PRD [03](../03-sources-and-sync.md)
+adopts that vocabulary. **The 0.25 default assumes the first** — it is a
+number for a library whose removals the operator authorises, where a large
+retraction means something went wrong and asking once is cheap. On a **view**,
+three of this ADR's premises read differently:
+
+- The operator cannot authorise a removal they did not make, so *"ask once and
+  re-run with the ceiling raised"* is asking them to ratify somebody else's
+  decision sight unseen.
+- A refusal stops being an incident and becomes a **steady state**, which is
+  the failure mode a ceiling cannot distinguish: refusing every night is
+  indistinguishable from having no sweep at all, and the catalog's
+  availability silently stops being updated.
+- The ceiling is a fraction of what **Usher** holds, so a catalogue that has
+  only partially ingested its source measures the source's churn against its
+  own incompleteness.
+
+**The default stays at 0.25 anyway, and the reason is the evidence rather than
+inertia.** The one time this guard has fired in the field it was tripped by
+Usher's own bounded walk, not by the source (see *Evidence*), and no completed
+full walk of a shared library exists to measure churn against. Moving a ceiling
+on a reading of the wrong population is worse than leaving it where it is and
+saying so. `src/usher/config.py` records the same thing at the number itself.
+
+**What did change is that a refused sweep now reaches the operator.**
+`usher sync` exits non-zero when any run it performed recorded `FAILED`, and
+names `--allow-full-retraction` when a refusal is among them.
+`AvailabilitySweepRefused` deliberately did **not** join `cli.OPERATOR_ERRORS`:
+`ReconcileService.reconcile` absorbs it by contract so one source's refusal
+cannot abort a multi-source sync, so the exception never reaches that boundary
+and adding it there would have changed nothing.
 
 ## Evidence
 
@@ -100,6 +137,30 @@ no refusal, no exception, two available items quietly retracted.
 and its real-Postgres twin in `tests/integration/test_services_reconcile.py`
 are both built to that arithmetic, and both fail under the mutation on the
 assertion they were written to make.
+
+**The ceiling has fired on a real deployment, and not for the reason this ADR
+argues it would.** Measured 2026-08-19 (M10 S8). Issue #20 asked for a reading
+*"across at least one genuine churn event"*; the operator's own `sync_runs`
+already held one, from 2026-08-13 — a `full` run recording `FAILED` with
+*"refusing to mark 60 of 180 items unavailable in one run (33% exceeds the 25%
+ceiling); nothing was retracted"*. **Nobody had deleted anything.** The walk was
+*bounded* and saw 120 of the 180 items Usher held, which is the *Context*
+section's "a walk that succeeds and returns far less than the library holds"
+arriving from Usher's own tooling rather than from the source. The refusal was
+correct; what it caught was **partial coverage, not churn**, and the two are
+indistinguishable from inside the guard.
+
+A one-request bounded probe (`scripts/measure_source_drift.py`, ≤ 6 requests,
+read-only, no walk) reads the source's live `TotalRecordCount` against
+`count(media_items WHERE available)` for the same source. On that deployment:
+**1,137,502 live against 11,851 available, a would-retract lower bound of 0.**
+⚠️ **That 0 is not evidence the guard would not fire** — a count is not a set,
+and with Usher holding 1.04% of the source the clamped difference is zero by
+construction. The probe is informative only where Usher's available count is at
+or above the source's total, i.e. after a walk that finished; no walk of this
+library ever has. `usher.sync.retraction.fraction` (`source`, `outcome`) is what
+makes the number visible on every finished full walk rather than only when this
+guard raises.
 
 **A refusal must leave the session usable**, because `reconcile` writes the
 `FAILED` run row that explains it *afterwards*. It does — the guard is

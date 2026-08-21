@@ -25,10 +25,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import httpx
 import pytest
+from asgi_lifespan import LifespanManager
+from fastapi import Depends
 from loguru import logger
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -55,8 +57,12 @@ from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
+from usher.adapters.emby.adapter import EmbyAdapter
+from usher.api.app import create_app
+from usher.api.deps import get_source_adapter_factory, get_source_gates
 from usher.composition import (
     Pipeline,
+    SourceGateRegistry,
     SourceRegistry,
     UnitOfWork,
     _worker_handlers,
@@ -69,10 +75,12 @@ from usher.composition import (
     llm_client,
     metadata_provider,
     run_bootstrap,
+    unit_of_work,
     worker_concurrency,
     worker_kinds,
 )
 from usher.config import Settings
+from usher.db.base import build_session_factory
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.domain.bootstrap import FULL_SEQUENCE, PHASE_ALIASES, BootstrapPhase, ImportRun
 from usher.domain.curation import LLMPurpose
@@ -82,6 +90,7 @@ from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.bulk import ImdbTitle
+from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
 from usher.ports.errors import PortUnavailable
 from usher.ports.events import ClientEvent, EventPublisher, NullEventPublisher
@@ -95,7 +104,12 @@ from usher.ports.repository import (
     TitleRepository,
     WatchStateRepository,
 )
-from usher.ports.source import SourceItem, SourceItemKind
+from usher.ports.source import (
+    SourceAdapter,
+    SourceAdapterFactory,
+    SourceItem,
+    SourceItemKind,
+)
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import ITEM_IDS_KEY, REASON_KEY, ROWS_KEY, TITLE_KEY
 from usher.services.events import DeferredEventPublisher
@@ -2132,4 +2146,490 @@ def test_the_concurrency_table_covers_exactly_the_kinds_a_build_claims() -> None
     pinched = worker_concurrency(_settings(job_concurrency=2), everything)
     assert max(pinched.values()) == 2, (
         f"a per-kind constant outran the configured global: {pinched}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The outbound gate's owner (M10 S3; ADR-0042 §4)
+
+
+_GATED = Source(
+    id=new_id(),
+    kind=SourceKind.EMBY,
+    name="Living Room Emby",
+    base_url="https://emby.invalid",
+    credentials_ref="ref-1",
+    device_id=str(new_id()),
+)
+_SECOND_SERVER = Source(
+    id=new_id(),
+    kind=SourceKind.EMBY,
+    name="Bedroom Emby",
+    base_url="https://bedroom.invalid",
+    credentials_ref="ref-2",
+    device_id=str(new_id()),
+)
+_GATE_CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
+
+
+def _emby_gate(adapter: SourceAdapter) -> object:
+    assert isinstance(adapter, EmbyAdapter), "the premise: the factory built an Emby adapter"
+    return adapter._session._limiter
+
+
+#: Where each `SourceKind`'s adapter keeps the gate it was handed.
+#:
+#: **A table rather than one `isinstance`, because the hole this closes is a
+#: *new class*.** The realistic second construction site for an adapter is not
+#: a second `EmbyAdapter(...)` somewhere -- it is `adapters/jellyfin/adapter.py`
+#: arriving as a new branch of `ConfiguredSourceAdapterFactory.build` at the
+#: `SourceKind` seam (`factory.py`'s own docstring names it), added by someone
+#: who forgets `limiter=`. A per-class scan for "one construction site" cannot
+#: see a class that does not exist yet; a table keyed by the **enum** can,
+#: because `test_every_source_kind_has_a_gate_reader` goes red the moment the
+#: member lands and stays red until this entry is written.
+_GATE_READERS: dict[SourceKind, Callable[[SourceAdapter], object]] = {
+    SourceKind.EMBY: _emby_gate,
+}
+
+
+def _gate_of(adapter: SourceAdapter, kind: SourceKind = SourceKind.EMBY) -> object:
+    """The `SourceGate` one adapter paces its outbound calls through.
+
+    Reached through two private attributes because there is no public
+    accessor and inventing one purely so a test could read it would be a
+    wider API for a narrower reason -- the argument
+    `test_the_deployment_tuning_reaches_the_adapter` already makes one
+    module over. Returned as `object` because every assertion about it here
+    is an **identity** assertion.
+    """
+    return _GATE_READERS[kind](adapter)
+
+
+def _source_of(kind: SourceKind, name: str, ref: str) -> Source:
+    return Source(
+        id=new_id(),
+        kind=kind,
+        name=name,
+        base_url="https://emby.invalid",
+        credentials_ref=ref,
+        device_id=str(new_id()),
+    )
+
+
+def test_every_source_kind_has_a_gate_reader() -> None:
+    """The premise the parametrisation below rests on, asserted rather than
+    left to `list(SourceKind)` quietly covering one member.
+
+    A `SourceKind` with no row in `_GATE_READERS` is a kind whose adapter
+    nobody has checked shares a gate -- and since `SourceKind` is the seam
+    `factory.py` says a Jellyfin adapter arrives at, that is precisely the
+    moment the check is wanted.
+    """
+    assert set(_GATE_READERS) == set(SourceKind), (
+        "a `SourceKind` member has no gate reader, so the parametrised case below silently "
+        f"stopped covering it: {sorted(k.value for k in set(SourceKind) - set(_GATE_READERS))}"
+    )
+
+
+def _kind_id(kind: object) -> str:
+    return kind.value if isinstance(kind, SourceKind) else repr(kind)
+
+
+@pytest.mark.parametrize("kind", list(SourceKind), ids=_kind_id)
+async def test_two_adapters_for_one_source_share_one_gate_and_two_sources_do_not(
+    kind: SourceKind,
+) -> None:
+    """🔴 **The finding S3 exists for: the obvious placement is per request.**
+
+    `adapter_factory` is called from `build_pipeline`, i.e. **once per unit of
+    work** -- the server opens a pipeline per lane task, `usher work`'s worker
+    opens a scope per claim and per job, and `api/deps.py` builds one per
+    request. So a gate held on the `EmbySession` (per adapter) or on the
+    `ConfiguredSourceAdapterFactory` (per factory) is a gate per *request*,
+    which is `api/deps.py`'s own recorded defect verbatim: *"a request-scoped
+    `TmdbClient` gives every concurrent request a fresh bucket, so N in-flight
+    requests get N x 30 rps"*. The gate is therefore owned by the composition
+    root and keyed by `source.id`, and every pipeline that root opens hands
+    out the same one.
+
+    **The second assertion is the positive control and it is not decoration.**
+    An implementation that returned one *global* gate satisfies the first
+    assertion and halves the configured rate for every source after the
+    first -- a two-server household would run at `rate/2` each with nothing
+    saying so. A case carrying only the first assertion would ratify it.
+
+    A real `AsyncSession` factory over a real engine, for the reason
+    `test_the_candidate_pool_reads_the_pipelines_own_taste_service` gives:
+    `create_async_engine` does not connect and nothing here issues a
+    statement, so a wiring assertion stays in the unit suite.
+
+    **Parametrised over `SourceKind`, which is one arm today and grows with the
+    enum for free.** The alternative considered and declined was a scan
+    asserting that each adapter class has one construction site: that closes a
+    narrower hole than it looks, because the realistic second site is a *new
+    class* at the `SourceKind` seam (`adapters/jellyfin/adapter.py`, added as a
+    `factory.build` branch that forgets `limiter=`), which no per-class scan can
+    see. `_GATE_READERS` plus `test_every_source_kind_has_a_gate_reader` does:
+    the new member is red until somebody says where its adapter keeps the gate,
+    and then this case covers it.
+    """
+    gated = _source_of(kind, "Living Room", "ref-1")
+    second_server = _source_of(kind, "Bedroom", "ref-2")
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        work = unit_of_work(build_session_factory(engine), _settings(), events=NullEventPublisher())
+        async with work() as first:
+            one = first.adapters.build(gated, _GATE_CREDENTIALS)
+        async with work() as second:
+            two = second.adapters.build(gated, _GATE_CREDENTIALS)
+            elsewhere = second.adapters.build(second_server, _GATE_CREDENTIALS)
+        try:
+            assert one is not two, (
+                "the premise: two pipelines really did build two adapters -- "
+                "`SourceAdapterFactory.build`'s contract is that the caller owns each one"
+            )
+            gate_a = _gate_of(one, kind)
+            gate_b = _gate_of(two, kind)
+            gate_c = _gate_of(elsewhere, kind)
+
+            assert gate_a is gate_b, (
+                "two pipelines from one composition root gave one source two gates, "
+                "so the configured rate is multiplied by however many pipelines are open"
+            )
+            assert gate_a is not gate_c, (
+                "two sources sharing one gate is a limiter that halves itself per source"
+            )
+        finally:
+            await one.aclose()
+            await two.aclose()
+            await elsewhere.aclose()
+    finally:
+        await engine.dispose()
+
+
+async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_source(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The four roots, driven rather than argued (M10 S3's acceptance).
+
+    Each arm is a **real** composition root, spelled the way its own module
+    spells it:
+
+    | root | how it composes | arm below |
+    |---|---|---|
+    | the server's push lane | `LaneSupervisor` reads `create_app`'s one `UnitOfWork` | 1 + 2 |
+    | the server's worker lane | the same `UnitOfWork`, a scope per claim and per job | 1 + 2 |
+    | an HTTP request | a real one, resolving `get_source_adapter_factory` off the graph | 1 |
+    | `usher work` | `unit_of_work(...)`, a scope per job | 2 |
+    | `usher sync` | one `build_pipeline`, sources looped inside it | 3 |
+
+    🔴 **The request arm is a request, and as S3 shipped it, it was not.** That
+    row read the same then and the arm below it called
+    `adapter_factory(settings, app.state.source_gates)` — which is
+    `get_source_adapter_factory`'s *body* re-derived here, so it asserted the
+    wiring this file writes rather than the wiring `api/deps.py` has. Measured
+    on the shipped tree: planting `get_source_adapter_factory` to
+    `return adapter_factory(settings, SourceGateRegistry())` — a fresh registry
+    per request, i.e. verbatim the defect `api/deps.py`'s `EnrichService`
+    comment records and this task exists to remove — passed `ruff`, `mypy`,
+    `lint-imports` and **the whole 5,329-case suite**, because every test that
+    names that dependency overrides it and `get_source_gates` was executed by
+    no test at all. `.claude/rules/testing-discipline.md` has the general
+    form: *a dependency every test overrides is a dependency no test covers*.
+    So the arm drives a real request through a probe route and reads the
+    factory the graph resolved.
+
+    **What "one process" means here, stated plainly because the flattering
+    reading is available.** Within one process, one source has one gate however
+    many pipelines, lanes, adapters or requests exist -- that is what these
+    arms assert. `usher work` and `usher sync` are *separate processes* from the
+    server, so their registries are separate from its by construction, and a
+    second `usher work` container is a second registry and therefore twice the
+    configured rate. That is a capacity decision an operator makes; nothing in a
+    process can reach across to another one, and this case does not pretend
+    otherwise.
+    """
+    settings = _settings(
+        push_enabled=False,
+        worker_enabled=False,
+        image_cache_dir=tmp_path / "images",
+        source_requests_per_second=0.4,
+    )
+
+    # -- 1. the server: the lanes' unit of work and the request path -------
+    app = create_app(settings)
+    # The request path, driven rather than re-derived. A probe route on the
+    # real app, because a `SourceAdapterFactory` cannot come back over HTTP and
+    # what this arm needs is the object the graph built:
+    # `get_source_adapter_factory` -> `get_source_gates` -> `app.state`. The
+    # same shape `tests/integration/test_pipeline_deps.py` uses for the four
+    # other dependencies whose wiring no route can show.
+    resolved: list[SourceAdapterFactory] = []
+
+    @app.get("/_probe/adapter-factory")
+    def _probe(
+        adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
+    ) -> dict[str, bool]:
+        resolved.append(adapters)
+        return {"resolved": True}
+
+    async with LifespanManager(app) as manager:
+        gates = app.state.source_gates
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            probe = await client.get("/_probe/adapter-factory")
+        assert probe.status_code == 200, f"the probe route did not run: {probe.text}"
+        assert len(resolved) == 1, (
+            "the premise: the dependency graph resolved exactly one factory, so the gate "
+            "asserted below came through `api/deps.py` rather than from this file"
+        )
+        through_a_request = resolved[0].build(_GATED, _GATE_CREDENTIALS)
+        # The lanes, through the supervisor's own unit of work -- the object
+        # `_start_lane` (push) and `_run_worker` both open their pipelines
+        # from. Two scopes, because the two lanes never share one.
+        async with app.state.lanes._work() as push_scope:
+            through_the_push_lane = push_scope.adapters.build(_GATED, _GATE_CREDENTIALS)
+        async with app.state.lanes._work() as worker_scope:
+            through_the_worker_lane = worker_scope.adapters.build(_GATED, _GATE_CREDENTIALS)
+        try:
+            server_gate = _gate_of(through_a_request)
+            assert _gate_of(through_the_push_lane) is server_gate, (
+                "the push lane paces independently of the request path, so an admin "
+                "status probe and a reconnect gap-closer spend two budgets"
+            )
+            assert _gate_of(through_the_worker_lane) is server_gate, (
+                "the worker lane paces independently of the push lane -- the >=2 gates "
+                "per source ADR-0042 §4 measured before S3"
+            )
+            assert server_gate is gates.gate(_GATED.id, _GATED.name)
+            assert server_gate._rate == 0.4, (
+                "the premise: these gates carry the configured rate, so the identity "
+                "above is not three unthrottled defaults agreeing by accident"
+            )
+        finally:
+            await through_a_request.aclose()
+            await through_the_push_lane.aclose()
+            await through_the_worker_lane.aclose()
+
+    # -- 2. `usher work`: one registry for the daemon, a scope per job -----
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        work = unit_of_work(build_session_factory(engine), settings, events=NullEventPublisher())
+        async with work() as one_job:
+            first = one_job.adapters.build(_GATED, _GATE_CREDENTIALS)
+        async with work() as another_job:
+            second = another_job.adapters.build(_GATED, _GATE_CREDENTIALS)
+        try:
+            assert _gate_of(first) is _gate_of(second)
+            assert _gate_of(first) is not server_gate, (
+                "the premise, and the honest half of the claim: a second process is a "
+                "second registry -- these two roots are only ever in one process here "
+                "because a test is a process that runs everything"
+            )
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+        # -- 3. `usher sync`: one pipeline, the sources looped inside it ----
+        sync = build_pipeline(AsyncSession(engine), settings)
+        walking = sync.adapters.build(_GATED, _GATE_CREDENTIALS)
+        watching = sync.adapters.build(_GATED, _GATE_CREDENTIALS)
+        elsewhere = sync.adapters.build(_SECOND_SERVER, _GATE_CREDENTIALS)
+        try:
+            assert _gate_of(walking) is _gate_of(watching), (
+                "`usher sync` walks items and then watch state through one pipeline; "
+                "two gates there is one command spending twice its own ceiling"
+            )
+            assert _gate_of(walking) is not _gate_of(elsewhere), (
+                "two sources sharing one gate is a limiter that halves itself per source"
+            )
+        finally:
+            await walking.aclose()
+            await watching.aclose()
+            await elsewhere.aclose()
+    finally:
+        await engine.dispose()
+
+
+#: The three composition roots in `usher.cli`, and the call each one builds its
+#: registry with. **Keyed by function rather than by command**, because that is
+#: what the assertion below can see: `usher push` with no `--probe` reaches
+#: `_run_lanes`, which is a root an operator cannot name (ADR-0042 §4 records
+#: the correction).
+_CLI_ROOTS: dict[str, str] = {
+    "_work": "unit_of_work",  # `usher work`
+    "_run_lanes": "unit_of_work",  # bare `usher push`
+    "_sync": "build_pipeline",  # `usher sync`
+}
+
+
+def _cli_function(module: ast.Module, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """The top-level `def`/`async def` named `name`, or an assertion failure."""
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == name:
+            return node
+    raise AssertionError(
+        f"`usher.cli` has no top-level `{name}` -- this table names a root that has been "
+        "renamed or moved, so the assertions below are about nothing"
+    )
+
+
+def _calls_of(root: ast.AST, callee: str) -> tuple[int, int]:
+    """`(in the function's own body, inside a nested definition)`.
+
+    The split *is* the assertion. A builder called from the function's own body
+    runs once when the command starts; the identical call moved inside a
+    `def`, an `async def` or a `lambda` runs once per invocation of that
+    closure -- which for a `@asynccontextmanager`-wrapped `work()` is once per
+    scope, i.e. per claim and per job.
+    """
+    own = nested = 0
+
+    def walk(node: ast.AST, inside: bool) -> None:
+        nonlocal own, nested
+        for child in ast.iter_child_nodes(node):
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == callee
+            ):
+                if inside:
+                    nested += 1
+                else:
+                    own += 1
+            walk(child, inside or isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef))
+
+    walk(root, False)
+    return own, nested
+
+
+def test_the_cli_roots_compose_once_rather_than_per_scope() -> None:
+    """🔴 **Rows 4 and 5 of the table above are re-derivations, and the defect
+    they miss is the one row 3 already shipped with.**
+
+    The four-roots case drives `usher work` and `usher sync` by calling
+    `unit_of_work(...)` and `build_pipeline(...)` *in the test* -- which is not
+    what its own header promises (*"a **real** composition root, spelled the way
+    its own module spells it"*), and is exactly the shape the spec round found
+    and repaired for the request arm. Measured on the shipped tree: replacing
+    `cli._work`'s `work = unit_of_work(...)` with an
+    `@asynccontextmanager`-wrapped `work()` that calls `unit_of_work(...)` fresh
+    on every scope -- **a new `SourceGateRegistry` per claim and per job**,
+    verbatim the multiplication ADR-0042 §4 exists to remove -- passes `ruff`,
+    `ruff format --check`, `mypy`, `lint-imports` and the whole suite.
+
+    **A source scan rather than a drive, and the choice is argued rather than
+    assumed.** `cli._work` opens an engine, a metadata provider, an embedder, an
+    LLM client and a worker loop before it reaches the line in question, so
+    driving it needs a database; and lifting the construction into a helper the
+    four-roots case could call would move the boundary rather than close it --
+    the plant would simply go in `_work`'s body, one level above the helper, and
+    survive again. What distinguishes the correct spelling from the defect is
+    **structural**: the builder is called in the root's own body, not inside a
+    closure that runs per scope. That is a claim an AST can settle, in the shape
+    `test_get_source_gates_is_the_only_reader_of_app_state_source_gates` uses
+    over `api/`.
+
+    **A count is deliberately not asserted, and `_sync` is why.** A *second*
+    `build_pipeline` in `usher sync` is an equivalent mutant -- both spellings
+    were planted and both survive, correctly, because `_sync` opens one adapter
+    per source and hands it to both lanes, so the second registry is never
+    reached. Doubling a source's rate takes two registries **and** two adapters;
+    what carries `usher sync` is the adapter count, which is asserted here as
+    itself rather than through a proxy that would kill a mutant nothing is wrong
+    with.
+    """
+    source = pathlib.Path(usher.__file__).parent / "cli.py"
+    module = ast.parse(source.read_text(encoding="utf-8"), str(source))
+
+    for root, builder in _CLI_ROOTS.items():
+        own, nested = _calls_of(_cli_function(module, root), builder)
+        assert own + nested >= 1, (
+            f"the premise: `cli.{root}` does not call `{builder}` at all, so the assertion "
+            "below is an absence proved by a scan that found nothing"
+        )
+        assert nested == 0, (
+            f"`cli.{root}` calls `{builder}` inside a nested definition, so the registry is "
+            f"built once per invocation of that closure rather than once for the process -- "
+            f"{nested} of {own + nested} calls. That is a fresh outbound gate per scope, "
+            "which is the defect ADR-0042 §4 exists to remove"
+        )
+
+    walk, _ = _calls_of(_cli_function(module, "_sync"), "_open_adapter")
+    assert walk == 1, (
+        "`usher sync` opens more than one adapter per source, so the reconcile walk and the "
+        f"watch lane no longer share one -- {walk} calls to `_open_adapter`"
+    )
+
+
+async def test_a_request_without_the_lifespan_is_refused_rather_than_quietly_ungated() -> None:
+    """`api/deps.get_source_gates`' `RuntimeError` arm, which nothing ran.
+
+    🔴 **This dependency was executed by no test in the suite** — not one, in
+    either direction. Every case that names `get_source_adapter_factory`
+    replaces it through `dependency_overrides` (`test_api_playback.py`,
+    `test_api_playback_leaks.py`, and three integration files),
+    `test_api_health.py::test_readiness_never_touches_a_source` asserts that
+    readiness does **not** resolve it, and the arm above reaches it only with a
+    started lifespan. So the code path that decides what happens when the
+    registry is missing had never been taken, and its message had never been
+    read by anything.
+
+    **It matters because the alternative failure is silent.** `app.state` is
+    typed `Any` and raises `AttributeError` for a missing name, so the
+    defensive `getattr(..., None)` here is what turns "the lifespan did not
+    run" into a sentence naming the attribute and the fix, rather than into a
+    500 from an attribute lookup — or, if the default had been a fresh
+    `SourceGateRegistry()`, into a process that dials a household's server
+    completely unthrottled and reports nothing at all. A limiter's missing
+    owner has to be loud.
+
+    Driven as a real request through `httpx.ASGITransport` **without**
+    `LifespanManager`, because that is precisely the configuration the message
+    is written for: the transport speaks HTTP to the app and never sends it a
+    lifespan event, so `create_app`'s startup block never runs.
+    """
+    settings = _settings(push_enabled=False, worker_enabled=False)
+    app = create_app(settings)
+
+    @app.get("/_probe/gates")
+    def _probe(gates: Annotated[SourceGateRegistry, Depends(get_source_gates)]) -> dict[str, bool]:
+        return {"resolved": True}  # pragma: no cover -- the point is that it does not
+
+    assert not hasattr(app.state, "source_gates"), (
+        "the premise: the lifespan really has not run, so the refusal below is the "
+        "dependency's own and not an artefact of this case clearing state"
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with pytest.raises(RuntimeError, match="source_gates is not set") as caught:
+            await client.get("/_probe/gates")
+
+    assert "LifespanManager" in str(caught.value), (
+        "the message names the attribute and not the remedy, which is the half a "
+        "reader needs -- `asgi_lifespan.LifespanManager` is what a bare ASGI "
+        "transport is missing"
+    )
+
+
+def test_get_source_gates_is_the_only_reader_of_app_state_source_gates() -> None:
+    """The registry reaches a request through the dependency and no other way.
+
+    A second reader — a router doing `request.app.state.source_gates` inline —
+    would resolve, pass mypy and behave identically today, and it is exactly
+    how the `RuntimeError` above stops being the only answer to a missing
+    lifespan. Asserted as a source scan rather than argued, in the shape
+    `test_no_outbound_http_call_escapes_a_recorded_decision` uses one package
+    over.
+    """
+    api = pathlib.Path(usher.__file__).parent / "api"
+    readers = sorted(
+        path.relative_to(api).as_posix()
+        for path in api.rglob("*.py")
+        if "state.source_gates" in path.read_text(encoding="utf-8")
+    )
+    assert readers == ["app.py", "deps.py"], (
+        "`app.state.source_gates` is written by `create_app`'s lifespan and read by "
+        f"`get_source_gates`, and by nothing else: {readers}"
     )

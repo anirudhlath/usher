@@ -86,7 +86,7 @@ from sqlalchemy import (
 )
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
@@ -94,7 +94,11 @@ from usher.db.models.episode import EpisodeRow
 from usher.db.models.source import MediaItemRow
 from usher.db.models.title import DERIVED_COLUMNS, TitleRow
 from usher.db.models.watch import WatchStateRow
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import (
+    constraint_name,
+    is_row_refusal,
+    refusals_as_conflict,
+)
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.genres import canonical_genres, genre_spellings
 from usher.domain.title import Title
@@ -405,7 +409,21 @@ class PostgresTitleRepository(TitleRepository):
             async with self._session.begin_nested():
                 self._session.add(_to_row(title))
                 await self._session.flush()
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).**
+            # `titles` carries `tmdb_id`/`tvdb_id` (`integer`, unbounded above on `Title`),
+            # `original_language` (`varchar(16)`) and `content_rating` (`varchar(32)`) -- and
+            # `usher.domain` declares no `max_length` anywhere, so nothing above this layer bounds
+            # either string. SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto any
+            # classified subclass, so a column refusing a *value* arrives as a bare `DBAPIError`
+            # that `except IntegrityError` does not catch and the driver's own exception crossed
+            # this port boundary untranslated -- the one thing ADR-0009 forbids.
+            # `db/repositories/_errors.py` holds the two measured shapes and the only copy of the
+            # predicate. Everything that is *not* a row refusal -- a dropped connection, a statement
+            # timeout, an undefined table -- still propagates, because a caller that cannot tell
+            # those apart retries the one thing a retry cannot fix.
+            if not is_row_refusal(exc):
+                raise
             # Postgres's own unique-violation on a duplicate id (or a
             # duplicate tmdb_id/imdb_id/tvdb_id), translated so callers
             # depend only on usher.ports.errors -- importing sqlalchemy.exc
@@ -453,7 +471,19 @@ class PostgresTitleRepository(TitleRepository):
                     if column.name not in _NOT_UPDATABLE:
                         setattr(row, column.name, getattr(fresh, column.name))
                 await self._session.flush()
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).** The
+            # same four columns as `add`, on the path TMDb enrichment actually takes. SQLAlchemy's
+            # asyncpg dialect does not map SQLSTATE class 22 onto any classified subclass, so a
+            # column refusing a *value* arrives as a bare `DBAPIError` that `except IntegrityError`
+            # does not catch and the driver's own exception crossed this port boundary untranslated
+            # -- the one thing ADR-0009 forbids. `db/repositories/_errors.py` holds the two measured
+            # shapes and the only copy of the predicate. Everything that is *not* a row refusal -- a
+            # dropped connection, a statement timeout, an undefined table -- still propagates,
+            # because a caller that cannot tell those apart retries the one thing a retry cannot
+            # fix.
+            if not is_row_refusal(exc):
+                raise
             # Same translation and same SAVEPOINT reasoning as add() -- see
             # the module docstring. Retargeting tmdb_id/imdb_id/tvdb_id to a
             # value another title already holds raises IntegrityError here
@@ -911,18 +941,30 @@ class PostgresTitleRepository(TitleRepository):
             column("genres", PG_ARRAY(Text)),
             name="new_genres",
         ).data([(row.id, list(row.genres)) for row in rows])
-        with self._session.no_autoflush:  # see get()'s comment
-            result = await self._session.execute(
-                update(TitleRow)
-                .where(TitleRow.id == source.c.id)
-                .where(TitleRow.genres.is_distinct_from(source.c.genres))
-                .values(genres=source.c.genres)
-                # The ORM would otherwise try to synchronise the session's
-                # identity map against a multi-row UPDATE it cannot match
-                # rows for. Nothing above this call holds a `TitleRow` for
-                # these ids -- the sweep reads a projection.
-                .execution_options(synchronize_session=False)
-            )
+        # **`refusals_as_conflict`, added by M10's F9 (ADR-0043).** This
+        # statement is a bare parameterised `UPDATE` over a `VALUES` join --
+        # it computes nothing server-side, so class 22 here can only be about
+        # a value the caller handed in, which is the precondition
+        # `_errors.py:66-75` states for `is_row_refusal`'s own claim. The
+        # method previously had no `except` at all, and `titles` carries four
+        # columns narrower than the fields feeding them, so a sweep of this
+        # table was one of the eight untranslated writers the ledger scores it
+        # on. `genres` itself is `text[]` and refuses nothing.
+        async with refusals_as_conflict(
+            self._session, "a genre batch violates the catalog's own bounds"
+        ):
+            with self._session.no_autoflush:  # see get()'s comment
+                result = await self._session.execute(
+                    update(TitleRow)
+                    .where(TitleRow.id == source.c.id)
+                    .where(TitleRow.genres.is_distinct_from(source.c.genres))
+                    .values(genres=source.c.genres)
+                    # The ORM would otherwise try to synchronise the session's
+                    # identity map against a multi-row UPDATE it cannot match
+                    # rows for. Nothing above this call holds a `TitleRow` for
+                    # these ids -- the sweep reads a projection.
+                    .execution_options(synchronize_session=False)
+                )
         # `rowcount` is what the `WHERE` matched, and `IS DISTINCT FROM` is
         # *in* the `WHERE` -- so this is rows **changed**, never rows touched.
         # The cast is what `bulk.py:_rowcount` and

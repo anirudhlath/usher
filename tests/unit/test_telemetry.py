@@ -5,9 +5,11 @@ import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 from loguru import logger
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from usher.api.app import create_app
@@ -247,3 +249,159 @@ def test_no_metric_exporter_constructed_when_telemetry_disabled(
     settings = _settings_with_telemetry_disabled()
     assert settings.telemetry_enabled is False
     configure_metrics(settings)
+
+
+# **A port nothing listens on, deliberately, and not the collector's 4317.**
+# The two cases below assert on what the exporter *constructs* — the channel's
+# `_insecure` flag, and whether a processor was attached — and never on whether
+# anything answers. Pointing them at the live collector this host happens to run
+# would make an environment-independent suite (`tests/unit`: "no Docker, no
+# network") pass partly *because* of the environment.
+#
+# Nothing would in fact be sent even then, and the mechanism is worth stating so
+# the choice does not rest on the observation: `grpc.insecure_channel()` connects
+# **lazily**, so no I/O happens at construction, and these cases record no span
+# and no measurement, so the `shutdown()` at the end flushes an empty queue and
+# issues no RPC. That is a property of what these cases happen not to do — add
+# one recorded span and it stops holding. A dead port makes it structural
+# instead, which is the difference between a suite that is isolated and one that
+# is isolated today.
+#
+# **Do not "fix" this back to 4317.** The real endpoint belongs in `.env` and in
+# `.claude/rules/api-telemetry-and-lanes.md`, which records the live run that
+# used it. Loopback, so that even a connection attempt cannot leave the host.
+_DEAD_OTLP_HOST_PORT = "127.0.0.1:1"
+
+
+def _settings_with_endpoint(endpoint: str) -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://u:p@localhost:5432/usher",
+        secret_key="0" * 32,
+        OTEL_EXPORTER_OTLP_ENDPOINT=endpoint,
+    )
+
+
+def test_a_configured_endpoint_builds_one_real_exporter_over_an_insecure_channel() -> None:
+    """The positive mirror of the two "nothing is constructed when disabled"
+    cases above, which is the half nobody wrote -- and it asserts one
+    *installation* rather than one *construction*, because those are
+    different failures. `test_no_exporter_constructed_when_telemetry_disabled`
+    monkeypatches the exporter class to raise, so it can only ever say that
+    zero were built; a `configure_tracing` that built an exporter and then
+    guarded the `add_span_processor` call instead of the exporter satisfies
+    it, ships a provider with an empty processor list, and exports nothing.
+    That is the state this case exists to tell apart from a working one.
+
+    **The positive control is the point, not decoration.** A provider with
+    no span processor and a provider with no metric reader *are* the
+    disabled state (`telemetry.py:191-197`, `:222-232` add neither when
+    `settings.telemetry_enabled` is false), so an assertion phrased as
+    "nothing wrong is attached" is satisfied by nothing being attached at
+    all. `assert processors` and `assert readers` run before the counts for
+    exactly that reason.
+
+    The provider and the reader are shut down at the end because both own a
+    background thread -- see `configure_tracing`'s docstring on the five
+    orphaned threads that motivated its idempotency guard. Nothing is
+    recorded through either, so both queues are empty and neither shutdown
+    reaches the network.
+
+    **The reader count is read off `_metric_readers` and not off
+    `_all_metric_readers`, which is a class attribute.** Measured directly:
+    `MeterProvider._all_metric_readers` is a `WeakSet` on the *class*, the
+    SDK's registry for refusing to bind one reader to two providers, so two
+    providers holding one and two readers each both report **3**. The first
+    spelling of this case read it and passed alone and under `-k`, then
+    failed the whole unit suite with `got 12` -- one weakref per
+    `InMemoryMetricReader` any earlier test had built. Same family as this
+    repository's standing "a suite run one directory at a time is not the
+    suite" finding: an assertion over global state is satisfied by whatever
+    else happens to be in the process, and the isolated run is the one that
+    lies. `_metric_readers` is the per-provider list (1, 2 and 0 for the
+    three providers above).
+    """
+    settings = _settings_with_endpoint(f"http://{_DEAD_OTLP_HOST_PORT}")
+    assert settings.telemetry_enabled is True, "the premise: this endpoint enables telemetry"
+
+    configure_tracing(settings)
+    configure_metrics(settings)
+
+    tracer_provider = trace.get_tracer_provider()
+    assert isinstance(tracer_provider, TracerProvider)
+    meter_provider = metrics.get_meter_provider()
+    assert isinstance(meter_provider, MeterProvider)
+
+    try:
+        processors = tracer_provider._active_span_processor._span_processors
+        readers = meter_provider._metric_readers
+        assert processors, "no span processor was installed at all"
+        assert readers, "no metric reader was installed at all"
+        assert len(processors) == 1, f"expected exactly one span processor, got {len(processors)}"
+        assert len(readers) == 1, f"expected exactly one metric reader, got {len(readers)}"
+
+        processor = processors[0]
+        assert isinstance(processor, BatchSpanProcessor)
+        exporter = processor.span_exporter
+        assert isinstance(exporter, OTLPSpanExporter)
+        assert exporter._insecure is True, (
+            "the collector speaks plaintext gRPC, so the channel must be the insecure one"
+        )
+    finally:
+        tracer_provider.shutdown()
+        meter_provider.shutdown()
+
+
+def test_an_endpoint_without_a_scheme_builds_a_secure_channel_against_a_plaintext_collector() -> (
+    None
+):
+    """The scheme is load-bearing and the wrong spelling fails *silently*,
+    which is why it gets a case rather than a sentence in a docstring.
+
+    Measured in the installed `opentelemetry-exporter-otlp-proto-grpc`
+    1.44.0, `exporter.py:316-323`: with no `insecure=` argument and
+    `OTEL_EXPORTER_OTLP_INSECURE` unset -- which is exactly how
+    `telemetry.py:195` and `:224` call it, passing `endpoint=` and nothing
+    else -- `insecure` defaults to `parsed_url.scheme == "http"`. So
+    a bare `host:port`, the spelling a person types, parses to an empty
+    scheme, builds a **TLS** channel against a plaintext collector, and
+    every export fails inside the SDK's own retry loop, which logs a
+    warning and does not raise. `:325-326` then discards the scheme and
+    keeps the netloc, so **both spellings store the identical endpoint**
+    and the only observable difference is this flag.
+
+    The assertion is that the flag *differs between the two spellings*
+    rather than that this one is `False`: a future normalisation that
+    prepends `http://` to a bare endpoint would make the two agree, which
+    is the change this case is here to notice.
+    """
+    settings = _settings_with_endpoint(_DEAD_OTLP_HOST_PORT)
+    assert settings.telemetry_enabled is True, "the premise: this endpoint enables telemetry"
+
+    configure_tracing(settings)
+
+    tracer_provider = trace.get_tracer_provider()
+    assert isinstance(tracer_provider, TracerProvider)
+
+    try:
+        processors = tracer_provider._active_span_processor._span_processors
+        assert processors, "no span processor was installed at all"
+        processor = processors[0]
+        assert isinstance(processor, BatchSpanProcessor)
+        without_scheme = processor.span_exporter
+        assert isinstance(without_scheme, OTLPSpanExporter)
+
+        with_scheme = OTLPSpanExporter(endpoint=f"http://{_DEAD_OTLP_HOST_PORT}")
+        try:
+            assert without_scheme._endpoint == with_scheme._endpoint, (
+                "the premise: the scheme is discarded, so both spellings target the same netloc "
+                "and this flag is the only thing that distinguishes them"
+            )
+            assert without_scheme._insecure != with_scheme._insecure, (
+                "a bare host:port and an http:// endpoint built the same channel -- something "
+                "normalises the scheme, and the silent-TLS trap this case pins is gone"
+            )
+            assert without_scheme._insecure is False
+        finally:
+            with_scheme.shutdown()
+    finally:
+        tracer_provider.shutdown()

@@ -502,6 +502,7 @@ unrunnable without it. Deliberately not a repository port — no *service*
 needs it (`WatchStateSyncService` takes a `user_id` per call), and an ABC
 plus a fake plus a contract suite for one `SELECT` is a port with nothing on
 the other side.
+
 **And the blindfold this file warns about had already been on, spelled
 `SQLAlchemyError` rather than `Exception`.** The entry above is right that
 `except Exception` at a CLI boundary trades a wart for a blindfold, and
@@ -525,3 +526,50 @@ the one that needed the narrower name. Full evidence and the
 identity-map artefact the same conflict path leaves behind:
 `.claude/rules/db-and-sql.md`; the decision is ADR-0026's 2026-08-19
 amendment.
+
+## `OTEL_SEMCONV_STABILITY_OPT_IN` cannot be set from anything this repository ships (2026-08-14, M10 O3)
+
+**Why this is filed here rather than beside the telemetry it affects.** Setting
+that variable silently renames the HTTP server-duration metric and re-units it,
+emptying any dashboard panel built on the old name — the measurement is in
+`.claude/rules/api-telemetry-and-lanes.md`. But the *configuration* half is
+about `config.py`, `compose.yml`, `.env.example` and
+`tests/unit/test_deployment_config.py`, and the telemetry rules file **does not
+load on any of those paths**. Somebody adding an `OTEL_*` key to `compose.yml`
+would never have seen the assertion that refuses it. A finding filed where it
+cannot fire is a finding nobody has.
+
+This is stronger than the sentence PRD 10 used to carry — *"Nothing in this
+project's config sets that variable"*, removed in commit `4148589`, which was a
+statement about today's *values*. This is a statement about the *shape* of the
+configuration, and there are four doors:
+
+- **As a line in `.env`** → `ValidationError: otel_semconv_stability_opt_in —
+  Extra inputs are not permitted`, from **every** entry point, because they all
+  build `Settings`. `Settings.model_config` is `extra="forbid"`
+  (`config.py:144-149`) and pydantic-settings' dotenv source hands an unmatched
+  key back under its full lowercased name. Measured directly by planting the
+  line, not reasoned.
+  ⚠️ **The mechanism is narrower than "`.env` refuses `OTEL_*`", and getting
+  that wrong would make the rule look false**: `Settings` declares
+  `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` as *aliased fields*
+  (`config.py:757-758`), and both are accepted from `.env` today. What is
+  refused is every **un-declared** key — probed one at a time:
+  `OTEL_SEMCONV_STABILITY_OPT_IN`, `OTEL_TOTALLY_MADE_UP`, `ZZZ_RANDOM_KEY` and
+  `USHER_MADE_UP` all rejected; the two aliased ones accepted.
+- **In `compose.yml`'s `environment:` block** →
+  `tests/unit/test_deployment_config.py:337` asserts that block's key set
+  **equals** the five names in `_TOPOLOGY_OWNED` (`:89-97`). *(That constant
+  holds five members while its own docstring says "the four" twice, at `:340`
+  and `:343` — the docstring is stale, the assertion is not.)*
+- **In `.env.example`** → `tests/unit/test_deployment_config.py:282` asserts
+  `.env.example`'s key set **equals** the `Settings` field set.
+- **As a process environment variable** → **works.** `Settings` builds normally
+  (measured), because the variable never reaches pydantic at all. This is the
+  only door, and it is outside everything the repository ships.
+
+So the convention in force is held by three tests and a validation error rather
+than by a comment — which is the point of writing it down this way. **The same
+argument covers any future `OTEL_*` knob**: the SDK reads them from
+`os.environ`, `Settings` refuses them from `.env`, and the two aliased fields
+above are the only ones this project routes through its own configuration.

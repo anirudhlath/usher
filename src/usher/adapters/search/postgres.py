@@ -49,10 +49,10 @@ import uuid
 from collections.abc import Callable, Sequence
 
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, is_row_refusal
 from usher.domain.enums import ENRICHMENT_RANK, EnrichmentState, TitleKind
 from usher.ports.errors import RepositoryConflict
 from usher.ports.search import (
@@ -585,7 +585,21 @@ class PostgresSearchIndex(SearchIndex):
                             "vectors": [_as_vector_text(document.vector) for document in documents],
                         },
                     )
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).**
+            # `title_embeddings.embedding` is `halfvec(1024)`; this writer stages the vector as
+            # `text` and casts it in the statement, so a vector of another width is a class-22
+            # refusal of a **bound value** rather than of an expression this statement computed.
+            # SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto any classified
+            # subclass, so a column refusing a *value* arrives as a bare `DBAPIError` that `except
+            # IntegrityError` does not catch and the driver's own exception crossed this port
+            # boundary untranslated -- the one thing ADR-0009 forbids. `db/repositories/_errors.py`
+            # holds the two measured shapes and the only copy of the predicate. Everything that is
+            # *not* a row refusal -- a dropped connection, a statement timeout, an undefined table
+            # -- still propagates, because a caller that cannot tell those apart retries the one
+            # thing a retry cannot fix.
+            if not is_row_refusal(exc):
+                raise
             # A `title_id` naming no `titles` row. Translated so nothing above
             # imports sqlalchemy.exc, and raised rather than skipped: a
             # document for a title that does not exist is a caller bug, and

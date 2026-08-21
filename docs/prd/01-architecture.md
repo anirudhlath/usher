@@ -120,6 +120,60 @@ Practical consequence: a shared `BaseHTTPAdapter` carries the httpx client
 lifecycle, retry/backoff, and rate-limit handling that the Emby and TMDb
 adapters both need, instead of each reimplementing it.
 
+**How much of that has actually been built, and which upstreams are
+deliberately not throttled.** `src/usher/adapters/http.py` is the piece that
+exists — `retry_after_seconds`, `decode_json`, `port_error_for`,
+`UNTRANSLATED_FAILURES`, and since M10 the outbound gate `_MinInterval` with
+its per-process `SourceGateRegistry`. The client *lifecycle* is still
+per-adapter, because `CachedDatasetFile` is handed a client it does not own
+while `EmbyAdapter` owns one per source. M10's S3 enumerated every outbound
+call site under `adapters/` by grep rather than by memory and recorded a
+limiter decision for each.
+
+**The unit counted is the module**, and the table below has one row per module.
+**Nine modules** under `src/usher/adapters/` dial an upstream: **eight over
+httpx**, between them **sixteen call sites**, and a ninth — `emby/push.py` —
+over `websockets`. *Upstreams* is a smaller number however it is counted, which
+is why this is not a count of them: `tmdb/client.py` and `tmdb/provider.py` are
+one host, and `/embywebsocket` is the same machine as the media source. Three
+of the nine are paced; six deliberately are not.
+`tests/unit/test_outbound_call_sites.py::test_the_module_census_is_the_one_the_records_quote`
+asserts all four figures off its own table, and
+`::test_prd_01_prints_the_census_this_table_computes` reads this paragraph and
+the table below back out of this file, so neither can drift from the tree
+without a red.
+
+⚠️ **The call-site figure was fifteen until 2026-08-19 and it was short by
+one.** The AST scan behind it enumerated six of `httpx.AsyncClient`'s eleven
+request-issuing methods, omitting `put`, `delete`, `patch`, `head` and
+`options` — and `bulk/download.py`'s `CachedDatasetFile.revision` has issued a
+`HEAD` per dataset since M2. The module census, the paced count and the decline
+count are unchanged; only the call-site total moves. The scan now carries all
+eleven verbs, which is also what a **write-back** adapter at the `SourceKind`
+seam would be spelled with.
+
+| module → upstream | limiter |
+|---|---|
+| the configured media source (`emby/session.py`) | the per-source minimum-interval gate, `USHER_SOURCE_REQUESTS_PER_SECOND` ([ADR-0042](decisions/0042-the-outbound-limiter-is-per-source-and-spaces-requests.md)) |
+| `api.themoviedb.org` (`tmdb/client.py`) | `_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` ([ADR-0005](decisions/0005-bulk-bootstrap.md)) |
+| `api.themoviedb.org` (`tmdb/provider.py`, six call sites) | the bucket above — this module holds no client of its own |
+| `/embywebsocket` (`emby/push.py`) | **none** — a socket held open is not a request; the reconnect *backoff* is its limiter |
+| `image.tmdb.org` (`images/provider.py`) | **none** — the CDN publishes no limit and the cache is the bound ([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)) |
+| the IMDb/TMDb/MovieLens dataset hosts (`bulk/download.py`, two call sites) | **none** — one streamed file per dataset plus one `HEAD` for its revision, not a request stream |
+| `query.wikidata.org` (`bulk/wikidata.py`) | **none** — a bootstrap phase run by hand, chunked and sequential, not a lane |
+| `USHER_LLM_BASE_URL` (`llm/openai_compatible.py`) | **none** — `curate` is capped at 1 in flight and [06](06-rows-and-recommendations.md) budgets one completion per household per day |
+| `USHER_EMBEDDING_MODEL`'s endpoint (`embedding/openai_compat.py`) | **none** — `index` is capped at 1 in flight |
+
+**Six of the nine get nothing, and every one of the six has a stated reason
+rather than an omission** — `emby/push.py` included, whose decline S3 recorded
+only in the test table and which now carries it in its own module docstring.
+That is as much the deliverable as the wiring is,
+because `.claude/rules/ports-and-error-taxonomy.md` records what happens when a
+decision about an upstream is left implicit. Each reason is written beside the
+code, and `tests/unit/test_outbound_call_sites.py` holds the same table closed
+against an AST scan, so **a new adapter with a new outbound call is a red rather
+than a discovery**.
+
 ```python
 class SourceAdapter(ABC):
     """A backend that holds playable media."""
@@ -280,8 +334,8 @@ own semaphore, so a slow upstream can't starve the API:
 | Source event stream | 1 per source | push connection |
 | **Job worker, globally** (M9 W1) | **`USHER_JOB_CONCURRENCY`, default 12** | the connection pool; `Settings` refuses a value it cannot serve |
 | — `enrich` | the global (12) | TMDb, at `USHER_TMDB_REQUESTS_PER_SECOND` |
-| — `match`, `watch_history`, `watch_writeback` | 4 | a household media server, **unmeasured under concurrency** |
-| — `derive` | 4 | the pool's share, not a measured throughput |
+| — `match`, `watch_history`, `watch_writeback` | 4 | **measured** (M10 S7): flat latency and 3.89× throughput at 4 in flight |
+| — `derive` | 4 | **measured** (M10 S7): the knee — the 8th job buys +13% for +71% latency |
 | — `index` | 1 | `fastembed` is CPU-bound at a flat tokens/s ceiling |
 | — `curate` | 1 | the reference endpoint has 56 tokens of context spare |
 | — `sync`, `bootstrap` | 1 | a walk of the whole library; a session `bulk_load_window` commits |
@@ -303,18 +357,78 @@ not the policy.
 What replaced it is a **bounded pool per kind on one worker**, not a lane per
 kind: `usher.services.jobs.KIND_CONCURRENCY` is a table over every `JobKind`,
 resolved against the global at build time, and **each entry names the
-measurement it came from in its own source** — with one exception, `derive`,
-which is derived from the connection-pool budget rather than from any measured
-throughput and says so. The global default of 12 is Little's law over S3's
-measured tail (p95 HTTP 0.4267 s plus ~0.033 s of per-job bookkeeping, so
-~11.5 in flight to hold ADR-0005's ~25 rps), not a round number.
+measurement it came from in its own source.** The global default of 12 is
+Little's law over S3's measured tail (p95 HTTP 0.4267 s plus ~0.033 s of
+per-job bookkeeping, so ~11.5 in flight to hold ADR-0005's ~25 rps), not a
+round number.
 
-⚠️ **The `match`/`watch_history`/`watch_writeback` row is the one number here
-that is a *bound* rather than a measurement.** The old table guessed 4 for
-"source sync workers" against *"Emby is slow (~1–5 s/request observed)"*; this
-repository still has no measurement of a household media server under
-concurrent load, so 4 survives as a deliberately conservative cap on an
-unmeasured upstream. It is written down as unmeasured rather than dressed up.
+✅ **The four entries that were bounds are measurements as of 2026-08-19 (M10
+S7), and until then this page contradicted itself about how many there were.**
+The paragraph here called the `match`/`watch_history`/`watch_writeback` row
+*"the one number here that is a bound rather than a measurement"* while the
+table three rows up described `derive` as *"the pool's share, not a measured
+throughput"* — two claims on one page each naming a different single unmeasured
+number, while both in fact flagged both. `usher/services/jobs.py` carried the
+mirror image of the same error, and `.claude/rules/tmdb-and-enrichment.md` said
+*"two of the eight"* against a table of **nine**. It was **four entries and two
+justifications**, and all three documents are corrected together.
+
+🔴 **Nothing pinned those four, either, and that was demonstrated rather than
+argued**: `KIND_CONCURRENCY[MATCH]` set to 7 and `[DERIVE]` to 9 passed all
+**4,119** unit cases. `tests/unit/test_config.py::test_the_four_concurrency_
+entries_that_are_bounds_are_pinned_by_value_and_say_which_measurement_moved_
+them` now pins each by literal.
+
+**What S7 measured, and the second half is the one that reframes the first:**
+
+- **The three Emby-facing kinds do not degrade at 4.** 44 bounded read-only
+  requests, `get_item` at 1, 2 and 4 in flight with the gate off: median
+  **0.1377 / 0.1405 / 0.1363 s** — flat, the c=4 median 1% *below* c=1 — and
+  steady-state **7.40 / 14.21 / 28.75 rps**, i.e. **3.89×** at four in flight.
+  The W1-shaped prediction that a household server would show TMDb's 37%
+  per-worker loss is **refuted** for this workload.
+- ⚠️ **But 4 is a slot count, not a request rate, and has been since S3.** With
+  `USHER_SOURCE_REQUESTS_PER_SECOND` at its shipped **0.4**, four coroutines
+  against one source were measured issuing requests **2.50 s apart, peak one in
+  flight** — `_MinInterval` holds its lock across the wait and one source has
+  one gate. The concurrency entry bounds jobs in flight, and therefore sessions
+  and connections; the **gate** bounds the wire. Raising this row would not
+  raise the request rate.
+- **`derive`'s knee is at 4.** 200 jobs a rung on one pool: **48.7 / 85.3 /
+  115.7 / 130.7 jobs/s** at 1 / 2 / 4 / 8, per-job median **19.8 / 22.6 / 31.8 /
+  54.2 ms**. The eighth in-flight job buys +13% throughput for +71% latency, so
+  the pool-budget argument and the throughput measurement agree.
+
+**What is still unverified is named rather than implied**: any Emby build but
+4.9.5.0, this server under a *paging* load rather than single-item reads (a
+page is ~34× dearer, see below), and N > 1 Usher processes against one source —
+which no limiter here can express, because every one of them is per process.
+
+🔴 **That string has now been measured, and it was never about a request.**
+M10's S1 (2026-08-15, 52 bounded read-only requests against the operator's
+live Emby — full table and method in `.claude/rules/emby-push-and-ingest.md`)
+prices this deployment's source at:
+
+| op | median | mean | p95 | max | n |
+|---|---|---|---|---|---|
+| `verify` — `GET /System/Info/Public` | 0.1253 s | 0.1543 s | 0.4721 s | 0.4721 s | 12 |
+| `get_item` — one item, full `Fields` | 0.1495 s | 0.1649 s | 0.3587 s | 0.3587 s | 12 |
+| `list` — a 200-item page | 5.0954 s | 6.0369 s | 9.1713 s | 9.6805 s | 24 |
+
+One household, one evening, one Emby build, **sequential** — not a constant.
+Three consequences for the numbers on this page:
+
+- **A single-item read is ~34× cheaper than a page.** The three job kinds
+  capped at 4 all make single-item reads, so the upstream they are capped
+  against runs at ~6 rps from one coroutine, not at one request per 1–5 s.
+- **A page is dearer than the old string, not cheaper.** A full walk of the
+  1,134,919-item library is 5,675 pages, i.e. **7.3–11.8 h** against the
+  1.6–7.8 h the old figure implied.
+- **The old figure was never a measurement.** It entered the repository in
+  `0c823e0` on 2026-07-28, the first PRD commit, two days before an Emby
+  adapter existed; it was cited **22** times and called *measured* 11 times, and
+  the paragraph above used to attribute it to "the old table" — i.e. to an
+  earlier revision of this document.
 
 **Every job in flight holds an `AsyncSession`**, which is why
 `USHER_DB_POOL_SIZE` exists and why `Settings` refuses a `job_concurrency` the
