@@ -160,6 +160,21 @@ def test_the_registered_numbers_are_the_ones_that_were_registered() -> None:
     as a number being nudged until CI goes green, which is what would happen
     if this case derived its expectations from `bars.toml`.
 
+    ⚠️ **The prefix ceiling moved 0.022 -> 0.028 on 2026-08-20 and this case
+    is where that edit had to be made**, so it is the first worked example of
+    the distinction the paragraph above draws. It is the reviewed act and not
+    the nudge, and the check is that **the number shipped is not the number
+    that makes the run green**: 0.024 would have done that, and 0.024 is
+    exactly what was refused. 0.028 is the observed mean of sixteen draws plus
+    3 draw SD, and it is the smallest ceiling that also admits ADR-0031's own
+    B3 gate run of 0.0267 -- an independent draw, measured on 2026-08-12,
+    which the old window had *also* failed. A window fitted to this baseline
+    would have kept that one failing. The argument is in `bars.toml`'s
+    `source` beside the number, worked through in ADR-0031 under *"Bar (4)'s
+    window was wrong"*, and the three pending bars below are **untouched** --
+    a widening that also filled those in would be the two events happening at
+    once, which is what this case exists to keep apart.
+
     ⚠️ **`registered` is a `dict` keyed by the four-tuple, so two bars sharing
     one key would collapse into one entry and this case would fail with a
     message about a missing bar rather than about a duplicate one.** That is a
@@ -181,7 +196,7 @@ def test_the_registered_numbers_are_the_ones_that_were_registered() -> None:
         for one in bars.bars
     }
     assert registered == {
-        ("suggest", "prefix", "recall_at_5", "all"): ("window", 0.016, 0.022),
+        ("suggest", "prefix", "recall_at_5", "all"): ("window", 0.016, 0.028),
         ("suggest", "prefix", "latency_p95_ms", "all"): ("floor", 0.0, 10.0),
         ("suggest", "fuzzy", "recall_at_5", "all"): ("pending", None, None),
         ("suggest", "fuzzy", "recall_at_5", "band=2-4"): ("pending", None, None),

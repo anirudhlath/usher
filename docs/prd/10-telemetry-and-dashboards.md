@@ -948,13 +948,23 @@ which the harness creates outside the alembic chain
 ([ADR-0041](decisions/0041-the-eval-schema-is-not-a-migration.md)). The other
 three surfaces arrive with E2 and E3.
 
-🔶 **One recorded run so far, on 2026-08-19, and it is a failing one** — the
-`prefix recall_at_5` window `[0.016, 0.022]` was inherited from
+✅ **Two recorded runs, and between them they are the trend panel's own
+control.** The first, 2026-08-19, **failed**: the `prefix recall_at_5` window
+`[0.016, 0.022]` was inherited from
 [ADR-0031](decisions/0031-the-two-tier-suggest.md) and the re-anchored frame
-measures 0.0237 against it. The trend panel therefore has a single point and
-its bar-status series starts red. See
-[the baseline disagreement](../evals/2026-08-19-e1-baseline-window-disagreement.md);
-the window has deliberately **not** been widened to make it green.
+measured 0.023738 against it. The second, 2026-08-21, **passed** — against the
+widened `[0.016, 0.028]`, which ADR-0031 amended on the strength of sixteen
+measured draws after its own B3 gate run was found to have failed the old
+window too, at 0.0267.
+
+🔴 **The two rows carry the identical `inputs_digest` and the identical value
+to six decimals — 0.023738 both times — and differ only in `bars_sha256`.** So
+the trend panel's first two points say, in the ledger's own columns, that
+nothing about the system moved and only the bar did. That is what a bar change
+is supposed to look like in this table, and it is why `bars_sha256` is a column
+rather than a comment: a widening that had also moved the measurement would be
+visible here as two things changing at once. The bar-status series starts red
+and turns green with no accompanying movement in the value series.
 
 ## Where the stack lives
 

@@ -3837,6 +3837,15 @@ tick.
 - [ ] `uv run usher eval suggest --full` reproduces **ADR-0031's 1.9% tier-1
       recall inside the `[0.016, 0.022]` window**, which is the one number that
       says the harness agrees with the gate it generalises.
+      ⚠️ **Amended 2026-08-20 — the window is now `[0.016, 0.028]`, and this
+      criterion was unsatisfiable as written.** The harness measured 0.023738
+      and failed; the window had also never been reproduced by the gate it
+      generalises, ADR-0031's own B3 run having measured 0.0267 against it. So
+      the criterion asked the harness to agree with a number that nothing,
+      including its source, had ever reproduced. Widened from sixteen measured
+      draws — [ADR-0031](../prd/decisions/0031-the-two-tier-suggest.md), *"Bar
+      (4)'s window was wrong"*. The criterion stands with the new bounds; the
+      write-up it produced is `docs/evals/2026-08-19-e1-baseline-window-disagreement.md`.
 - [ ] The negative control collapses recall to 0.0 and the positive control
       scores 1.0 — both run, both recorded.
 - [ ] `docs/evals/ledger.jsonl` has exactly one line per `--full` run, and the

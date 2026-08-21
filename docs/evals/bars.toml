@@ -46,11 +46,32 @@ metric = "recall_at_5"
 stratum = "all"
 kind = "window"
 low = 0.016
-high = 0.022
+high = 0.028
 source = """ADR-0031 and scripts/measure_suggest_tiers.py bar (4): tier 1 has \
-1.9% typo recall by construction -- it is the btree exact-prefix probe. A tier \
+~2% typo recall by construction -- it is the btree exact-prefix probe. A tier \
 1 that scores *higher* is not the index that was measured, so this is a window \
-in both directions rather than a floor."""
+in both directions rather than a floor.
+
+WIDENED 2026-08-20, ceiling 0.022 -> 0.028, by ADR-0031's amendment. The old \
+window was one draw (0.019) with a half-width guessed at +/-0.003, and it had \
+never once been reproduced: ADR-0031's own B3 gate run measured 0.0267 against \
+it and recorded FAIL, and E1's first baseline measured 0.023738 and recorded \
+FAIL. Both failures are at the ceiling; no draw has ever gone below 0.016, \
+which is why the floor is unchanged.
+
+The ceiling is now 3 observed draw SD above the observed mean rather than a \
+guess. Eight seeds x two arms (2026-08-20, n=2991 per run, ordering defect \
+present and repaired) give mean 0.021975, SD 0.001853, range 0.0184-0.0244. \
+The window [0.016, 0.028] is centred on 0.022 -- the observed mean to three \
+decimals -- with a half-width of 0.006 = 3.24 SD, and it contains all 16 of \
+those draws, the committed baseline's 0.023738, ADR-0031's own 0.019, and \
+B3's 0.0267. A 2 SD window would exclude B3's draw, i.e. would preserve the \
+defect being repaired.
+
+What it still catches is unchanged in kind and enormous in margin: tier 1 \
+answering as tier 2 scores 0.8094 (29x the ceiling) and a collapsed index \
+scores 0.0. This bar was never a 5%-regression detector -- it detects that \
+the exact-prefix btree probe is no longer what is running."""
 
 [[bar]]
 surface = "suggest"

@@ -4,6 +4,14 @@
 so Task 14 stopped at Step 2 and the three pending bars were not filled in.**
 This file is the write-up the plan asks for in place of widening the window.
 
+⚠️ **Superseded in part on 2026-08-20: the window has since been widened, to
+`[0.016, 0.028]`.** Everything below stands as measured — this file is the
+evidence the amendment rests on, not a document the amendment contradicts. What
+changed is the conclusion of *"### What was deliberately not done"*, whose first
+bullet is annotated where it sits. The decision and its derivation are in
+[ADR-0031](../prd/decisions/0031-the-two-tier-suggest.md), under *"Bar (4)'s
+window was wrong, and this ADR is where it was wrong"*.
+
 ## The run
 
 ```
@@ -282,11 +290,64 @@ deletion class, and a probe returning fewer than five candidates never
 exercises the tiebreak at all — so ordering is irrelevant to most cases. **That
 is a hypothesis and nothing here measures it.**
 
+## The widened window, run — 2026-08-21
+
+The amendment was verified by re-running `usher eval suggest --full` against the
+same scratch catalog at the same default seed, rather than by arithmetic on the
+recorded value.
+
+| | run 1 — 2026-08-20 | run 2 — 2026-08-21 |
+|---|---|---|
+| `inputs_digest` | `21678a1e2ed38b8a` | **`21678a1e2ed38b8a`** |
+| `prefix recall_at_5` | 0.023738 | **0.023738** |
+| `bars_sha256` | `ae51d05c1f9abdeb` | **`3be5bacc68d1a0f3`** |
+| bar | `[0.016, 0.022]` | **`[0.016, 0.028]`** |
+| verdict | **fail** | **pass** |
+
+🔴 **The value reproduced to all six decimals and the frame digest is
+byte-identical, so the only thing that moved between a failing run and a passing
+one is the bar.** That is the control this amendment needed, and it is stronger
+than the arithmetic would have been: had the widening been accompanied by any
+drift in the measurement, these two rows would show two things changing at once
+and neither could be attributed. It also demonstrates the harness is
+deterministic at a fixed seed across two days and two `bars.toml` files, which
+nothing had yet shown over more than one run.
+
+The three pending bars are still pending and still reported rather than gated;
+`fuzzy recall_at_5` measured 0.8094 at `all` in both runs.
+
 ## What was deliberately not done
 
 - **The window was not widened.** Moving `high` from 0.022 to 0.024 makes the
   run green in one line and is the precise move `bars.toml`'s hash exists to
   make visible.
+
+  ⚠️ **Reversed 2026-08-20 — the window *was* widened, to `[0.016, 0.028]`.
+  The objection above is right and the amendment is built to answer it rather
+  than to step around it.** The move this bullet refuses is `high = 0.024`:
+  the smallest number that makes *this run* green, which is a bar
+  reverse-engineered from the value it judges. The ceiling shipped is
+  **0.028**, and nothing about it is derived from 0.023738 — it is the
+  observed mean of sixteen draws plus 3 draw SD, and the sixteen draws are the
+  ones tabulated above in this file. Three checks separate the two moves:
+
+  - **It is not the minimum that passes.** 0.024 would do that. 0.028 is
+    0.0043 further out, and that margin is where the draw noise lives.
+  - **It covers a draw nobody was trying to make pass.** ADR-0031's own B3
+    gate run measured **0.0267** and recorded FAIL against the old window on
+    2026-08-12 — an independent failure, eight days before this harness
+    existed. Any ceiling below 0.0267 leaves that draw failing, so a window
+    fitted to *this* baseline would have preserved the defect. 0.024 does not
+    cover it; 0.028 does.
+  - **The floor did not move.** Every failure this window has ever produced is
+    at the ceiling and none is at the floor, so `low` stays 0.016. A widening
+    that loosened both ends would be the "quietly disabled gate" this bullet
+    is warning about.
+
+  What the bar still catches is unchanged and enormous: tier 1 answering as
+  tier 2 scores **0.8094**, 29× the new ceiling, and a collapsed index scores
+  **0.0**. `bars.toml`'s hash did exactly its job here — it made the change
+  visible, and the visible change is argued in `source` beside the number.
 - **The three pending bars were not filled in**, although this run produced
   values for all three (`fuzzy recall_at_5` 0.8094 at `all`, 0.3063 at
   `band=2-4`, 0.6893 at `typo_class=transposition`). A pending bar is filled in

@@ -1389,11 +1389,16 @@ against pre-registered bars in `docs/evals/bars.toml`, recording each run in the
 [ADR-0041](decisions/0041-the-eval-schema-is-not-a-migration.md) for why that
 schema is not a migration.
 
-🔶 **Its first run disagrees with the 1.9% above, and the disagreement is open.**
-The E1 baseline of 2026-08-19 measures tier 1 at **2.37%** over 2,991 cases —
-outside the `[0.016, 0.022]` window pre-registered from this section's number —
-so the run failed and the harness's three pending bars were left unfilled rather
-than set from a frame under suspicion. The number decomposes exactly: tier 1's
+✅ **Its first run disagreed with the 1.9% above, and the disagreement is now
+settled: the window was too narrow.** The E1 baseline of 2026-08-19 measures
+tier 1 at **2.37%** over 2,991 cases — outside the `[0.016, 0.022]` window
+pre-registered from this section's number — so that run failed and the
+harness's three pending bars were left unfilled rather than set from a frame
+under suspicion. **The window has since been widened to `[0.016, 0.028]`**
+([ADR-0031](decisions/0031-the-two-tier-suggest.md), amended 2026-08-20): it
+had never once been reproduced, having also failed ADR-0031's *own* B3 gate run
+at 2.67% on 2026-08-12, and every failure it has produced is at the ceiling
+rather than the floor. The number decomposes exactly: tier 1's
 recall is **entirely the deletion class** (9.45%), with substitution and doubling
 at exactly 0.0% because an exact-prefix probe cannot survive either.
 
@@ -1416,9 +1421,13 @@ cannot explain a baseline that came in high. Measured cause:
 77% of the catalog has no popularity at all — so the tiebreaker is the ordering
 for most titles. Tracked as #39. Write-up:
 [the baseline disagreement](../evals/2026-08-19-e1-baseline-window-disagreement.md).
-**The window has not been widened to accommodate the number**, and the three
-pending bars stay pending: all three are `fuzzy recall_at_5`, the arm the defect
-hits hardest, so filling them now would pin a value that the eventual fix fails.
+**The window was widened on 2026-08-20 — but not to accommodate this number.**
+The ceiling that would have done that is 0.024; the ceiling shipped is 0.028,
+which is the observed mean of sixteen draws plus 3 draw SD and is the smallest
+value that also covers B3's independent 0.0267. **The three pending bars stay
+pending**: all three are `fuzzy recall_at_5`, the arm the defect hits hardest,
+so filling them now would pin a value that the eventual fix fails. They are
+blocked on #39, not on the window.
 
 ✅ **Tier 1 is built.** `PostgresPrefixSuggestIndex`
 (`adapters/search/prefix.py`) is the probe: `lower(name) LIKE 'typed%'` over
