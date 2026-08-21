@@ -27,6 +27,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.search import EMBEDDING_DIMENSIONS
+from usher.db.repositories._errors import refusals_as_conflict
 from usher.ports.repository import LibraryGenres, StoredTaste, TasteRepository
 
 # The whole invalidation, in one place, so a second consumer cannot spell it
@@ -235,21 +236,41 @@ class PostgresTasteRepository(TasteRepository):
         return _to_stored(row)
 
     async def put(self, taste: StoredTaste) -> None:
-        await self._session.execute(
-            text(_PUT),
-            {
-                "user_id": taste.user_id,
-                # `str(list)` is pgvector's own text input form and the cast
-                # in the statement does the rest -- the same route
-                # `genome_scores` takes for `real[] -> halfvec`, without
-                # needing a staging column here because this is one row.
-                "centroid": None if taste.centroid is None else str(list(taste.centroid)),
-                "model_name": taste.model_name,
-                "source_watermark": taste.source_watermark,
-                "title_count": taste.title_count,
-                "computed_at": taste.computed_at,
-            },
-        )
+        # **`refusals_as_conflict`, added by M10's F9 (ADR-0041).** Two of
+        # this table's columns are narrower than the field feeding them and
+        # this method had no `except` at all, so both crossed the port
+        # boundary as a raw driver exception. `centroid` is `halfvec(1024)`
+        # against `StoredTaste.centroid`'s bare `tuple[float, ...]` -- a
+        # vector of another width is `asyncpg.exceptions.DataError`
+        # "expected 1024 dimensions, not N", SQLSTATE `22000`, measured --
+        # and `title_count` is `integer` against a bare `int`, refused
+        # client-side by asyncpg's binary encoder as `builtins.OverflowError`
+        # wrapped into an unclassified `DBAPIError`. Neither is an
+        # `IntegrityError`.
+        #
+        # `_PUT` passes question (3) of ADR-0041 -- the statement refuses a
+        # *bound value* rather than an expression it computed. Its three
+        # `CAST`s each take a single bind and nothing else; there is no
+        # arithmetic, no regex and no literal cast, so class 22 here cannot
+        # be about this repository's own SQL.
+        async with refusals_as_conflict(
+            self._session, "a stored centroid violates user_taste's own bounds"
+        ):
+            await self._session.execute(
+                text(_PUT),
+                {
+                    "user_id": taste.user_id,
+                    # `str(list)` is pgvector's own text input form and the
+                    # cast in the statement does the rest -- the same route
+                    # `genome_scores` takes for `real[] -> halfvec`, without
+                    # needing a staging column here because this is one row.
+                    "centroid": None if taste.centroid is None else str(list(taste.centroid)),
+                    "model_name": taste.model_name,
+                    "source_watermark": taste.source_watermark,
+                    "title_count": taste.title_count,
+                    "computed_at": taste.computed_at,
+                },
+            )
 
     async def watermark(self, user_id: uuid.UUID) -> AwareDatetime | None:
         with self._session.no_autoflush:

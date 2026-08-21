@@ -1567,18 +1567,36 @@ BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 #: A cross-check that only compared the metadata against the migrations could
 #: not see any of that -- every `shape`, `staging`, `writer` and `translation`
 #: cell F9 consumes had no drift check at all.
+#:
+#: **Moved by M10's F9 on 2026-08-20, which is what makes the count a decision
+#: rather than an observation.** The `exposed-sqlalchemy` bucket went 20 -> 1
+#: under the adopted reading: nineteen of the twenty writing sites took
+#: `refusals_as_conflict` or the widened `except DBAPIError`, and
+#: `jobs.attempts` did not, on the evidence recorded in ADR-0041's scope
+#: section -- its only writer computes the value server-side (`attempts =
+#: attempts + 1`), so translating it would report a *statement* fault as a
+#: refused row, which is the misuse `_errors.py:66-75` exists to warn about.
 PUBLISHED: Mapping[str, Mapping[str, int]] = {
-    "closure": {"safe": 20, "translated": 10, "exposed-copy": 30, "exposed-sqlalchemy": 19},
-    "path": {"safe": 18, "translated": 10, "exposed-copy": 31, "exposed-sqlalchemy": 20},
-    "pydantic": {"safe": 14, "translated": 10, "exposed-copy": 34, "exposed-sqlalchemy": 21},
+    "closure": {"safe": 20, "translated": 28, "exposed-copy": 30, "exposed-sqlalchemy": 1},
+    "path": {"safe": 18, "translated": 29, "exposed-copy": 31, "exposed-sqlalchemy": 1},
+    "pydantic": {"safe": 14, "translated": 29, "exposed-copy": 34, "exposed-sqlalchemy": 2},
 }
 
 #: Same, at M8's head, which is what the roadmap's corrections are scored
 #: against. `17` appears in none of them, and that is the finding.
+#:
+#: ⚠️ **These moved with F9 too, and the reason is worth knowing before
+#: reading them as history.** `--at m08b` is *"that revision's columns,
+#: classified with **today's** source"* -- so translating a writer today
+#: changes what this rule says about M8's schema. The `translated` column here
+#: went 5 -> 23 without a line of M8-era code changing. What is still
+#: comparable across the two heads is the *column set*, which is what the
+#: roadmap's `67` is scored on; the buckets are a statement about today's
+#: writers and always were.
 PUBLISHED_AT_M08B: Mapping[str, Mapping[str, int]] = {
-    "closure": {"safe": 18, "translated": 5, "exposed-copy": 30, "exposed-sqlalchemy": 18},
-    "path": {"safe": 16, "translated": 5, "exposed-copy": 31, "exposed-sqlalchemy": 19},
-    "pydantic": {"safe": 12, "translated": 5, "exposed-copy": 34, "exposed-sqlalchemy": 20},
+    "closure": {"safe": 18, "translated": 22, "exposed-copy": 30, "exposed-sqlalchemy": 1},
+    "path": {"safe": 16, "translated": 23, "exposed-copy": 31, "exposed-sqlalchemy": 1},
+    "pydantic": {"safe": 12, "translated": 23, "exposed-copy": 34, "exposed-sqlalchemy": 2},
 }
 
 

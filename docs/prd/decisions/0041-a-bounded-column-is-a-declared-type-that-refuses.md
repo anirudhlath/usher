@@ -1,7 +1,11 @@
 # 0041 — A bounded column is a declared type that refuses, and the ledger is generated
 
-**Status:** Accepted — the scoped decision [PRD 09](../09-roadmap.md)'s carried
-debt and issue #10 have both been asking for since M8. Corrects that bullet's
+**Status:** Accepted, and **implemented by F9 on 2026-08-20** — see
+*"What F9 did, and the two things it decided"* at the foot of this record,
+which is where the two questions this document left open are answered and where
+the census below is restated at its post-F9 values. The scoped decision
+[PRD 09](../09-roadmap.md)'s carried debt and issue #10 have both been asking
+for since M8. Corrects that bullet's
 arithmetic in place: **two of its five figures reproduce and three do not.**
 **Does not re-open
 [M9's boundary call 8](../../../.claude/rules/milestone-boundary-calls.md)**:
@@ -248,12 +252,20 @@ Every bounded column falls in exactly one. **The buckets are worst-case over
 every writer**: one translating writer does not launder a sibling that has none,
 because a column is exposed if *any* path into it lets a refusal escape.
 
-| bucket | what it means | `m09f` | `m08b` |
-|---|---|---|---|
-| **safe** | the value cannot be constructed. Decided before any writer's `except` is consulted | **18** | **16** |
-| **translated** | every writer catches on the SQLSTATE class | **10** | **5** |
-| **exposed at the COPY** | refused inside `copy_records_to_table`, on the raw asyncpg connection | **31** | **31** |
-| **exposed at a SQLAlchemy statement** | reaches a translatable exception, and no writer translates it | **20** | **19** |
+| bucket | what it means | `m09f` | `m08b` | **after F9** |
+|---|---|---|---|---|
+| **safe** | the value cannot be constructed. Decided before any writer's `except` is consulted | **18** | **16** | 18 |
+| **translated** | every writer catches on the SQLSTATE class | **10** | **5** | **29** |
+| **exposed at the COPY** | refused inside `copy_records_to_table`, on the raw asyncpg connection | **31** | **31** | 31 |
+| **exposed at a SQLAlchemy statement** | reaches a translatable exception, and no writer translates it | **20** | **19** | **1** |
+
+⚠️ **The `m09f` and `m08b` columns are this record's measurement at `8ca21af`
+and are left standing rather than overwritten**; the fourth is the same
+generator run after F9 landed. The `m08b` column moved too — 5 translated to
+23 — with no M8-era code changing, because `--at` classifies *that revision's
+columns with today's source*. What is comparable across heads is the column
+set, never the buckets. `--summary` prints all of it and `PUBLISHED_AT_M08B`
+carries the same caveat.
 
 And the same census under the other two readings, printed by `--summary` so it
 cannot be quoted selectively:
@@ -641,6 +653,149 @@ taxonomy one.
   drift it detects is detected only when a person asks. That is stated rather
   than dressed up: a reassurance nobody executes is the same shape of defect as
   a number nobody can reproduce. F9 owns wiring it, because F9's guard is a test.
+  ✅ **Done, 2026-08-20** — `tests/unit/test_bounded_column_ledger.py` is one
+  `assert _drift(DEFAULT_READING) == []`, so `uv run pytest` runs it.
+
+## What F9 did, and the two things it decided (2026-08-20)
+
+This section is the write-back the Scope above asks for. Everything in it was
+measured against real Postgres (`pgvector/pgvector:pg17`, testcontainers), driven
+through the shipped repository methods — which is the bar the *original* five
+numbers were set at and this record's own classification was not.
+
+### The red, and its positive control
+
+`tests/integration/test_bulk_repository.py::
+test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_never_as_an_encoder_crash`
+parametrises over this ledger's own `exposed-sqlalchemy` and `translated`
+buckets and drives each column's real repository method with the smallest value
+its domain model or port DTO accepts and the column cannot hold. At `3972c2e`:
+**18 arms failed and 9 passed.** The 9 are the `translated` bucket, which is
+the positive control — an empty parametrisation, or one whose values were all in
+range, would have been green in exactly the way a dead scan is. The 18 failed as
+`builtins.OverflowError` (11), `asyncpg.exceptions.DataError` on a `halfvec`
+width (3) and `asyncpg.exceptions.StringDataRightTruncationError` (4), all
+wrapped in a bare `sqlalchemy.exc.DBAPIError` and none of them a
+`UsherPortError`.
+
+### Decision 1 — the two `CAST`-carrying statements are translated, not deferred
+
+The Scope names `genome_scores.relevance` and `title_embeddings.embedding` as
+*"known now to fail"* question (3)'s test, and offers F9 the choice of narrowing
+the predicate or deferring them. **Neither: they pass the test as stated, and
+the reason is that question (3) is about what an expression's *inputs* are
+rather than about whether a `CAST` is present.** `_errors.py:66–75` bounds
+"class 22 means the row" to *a parameterised statement with no server-side
+expressions*, and the fault it is guarding against is a statement computing
+something of its own — `22012` on a division, `2201B` on a regex, `22P02` on a
+**literal** cast. Read site by site, as the Scope requires:
+
+| site | every class-22-capable expression | verdict |
+|---|---|---|
+| `bulk.py:upsert_genome_vectors` | `CAST(s.relevance AS halfvec(1128))`, over a staging column holding `GenomeVector.relevance` verbatim | the caller's value |
+| `search.py:upsert_many` | `CAST(embedding AS halfvec)`, over `stg_title_embeddings.embedding`, staged from `TitleEmbeddingUpsert.embedding` | the caller's value |
+| `adapters/search/postgres.py:index_many` | `CAST(batch.vector AS halfvec)` over `unnest(CAST(:vectors AS text[]))` | a bound parameter |
+| `taste.py:put` | three `CAST`s, each over a single bind | bound parameters |
+
+No arithmetic, no regex and no literal cast appears in any of them, and the
+joins, `count(*)`s and `xmax = 0` cannot raise class 22 at all. So there is no
+refusal these statements can produce that is *not* about a value the caller
+handed in, and `refusals_as_conflict` reports the truth. Each site says so in
+its own comment rather than pointing here, because the argument is per
+statement and a statement that later grows an expression has to be re-read.
+
+### Decision 2 — `jobs.attempts` is excluded, and translating it would have been the misuse
+
+This is the one column of the twenty that F9 does **not** move, and it is the
+opposite of an oversight. `jobs.attempts` is written by exactly one statement,
+`_FAIL`, as **`attempts = attempts + 1`** — an expression the *server* computes.
+A `22003` from it is a statement fault, not a refused row, so wrapping `fail()`
+in `refusals_as_conflict` would report this repository's own arithmetic to a
+caller as its row being wrong: precisely the failure `_errors.py:66–75` is
+written to prevent, arriving at the one site where the warning is literally
+true. `JobRequest` carries no `attempts` field, so no port call can supply a
+value for it either — refusing it needs 2³¹ failures of one job. It stays
+`exposed-sqlalchemy`, at 1, with this paragraph as the reason.
+
+Two further columns are in the fixed set but have **no arm** in the case above,
+for the same shape of reason, and are listed in `_NO_CALLER_SUPPLIED_VALUE`
+beside it rather than left as a silent gap: `title_search_names.kind` (both
+writers bind a module constant — `_ALIAS_NAME_KIND`, `_PERSON_NAME_KIND`) and
+`search_queries.mode` (enum-typed on the port DTO; longest member is 9 of 16).
+Their *writers* are translated, so the columns move; what cannot be driven is a
+value.
+
+### The `22001` COPY refusal, observed at last
+
+This record's Evidence closes with 🔴 *"the `22001` server-side COPY refusal is
+the one shape this record asserts from the protocol rather than from a run in
+this repository, and F9's guard is where it should be observed."* **Observed
+2026-08-20, and it behaves exactly as predicted.** Through the shipped
+`usher.db.staging.stage_records` into a `varchar(32)` staging column:
+`asyncpg.exceptions.StringDataRightTruncationError`, `sqlstate == "22001"`,
+**not** a `sqlalchemy.exc.DBAPIError`, and carrying no `.orig` chain at all — so
+`is_row_refusal()` cannot be handed it and no `except DBAPIError` anywhere
+catches it. The sibling shape is pinned in the same file: `2**31` into a staged
+`integer` is a bare `builtins.OverflowError`, not a `PostgresError`, with no
+`sqlstate` attribute. `tests/integration/test_staging.py`, three cases, the
+third being the control that a `bigint` staging column takes the same value.
+
+**So M9's boundary call 8 now rests on a measurement rather than on a protocol
+reading**, and the `exposed-copy` bucket is unchanged at 31.
+
+### What moved in `src/`
+
+**Twenty writing sites — counted by walking the tree rather than by listing
+them, because the first draft of this paragraph said nineteen and its own list
+had eleven names in it.** No migration; the only DDL touched is the two
+`CREATE TEMP TABLE` strings this record's Scope names. **Eleven** took the
+widened `except DBAPIError` + `is_row_refusal` in place of
+`except IntegrityError`
+(`sync.py:add`/`save`, `title.py:add`/`update`, `import_run.py:save`,
+`jobs.py:enqueue`, `search.py:upsert_many`/`replace`,
+`adapters/search/postgres.py:index_many`, `people.py:replace_for_titles`,
+`collection.py:attach_titles`); **nine** gained `refusals_as_conflict` where
+there was no `except` at all (`bulk.py:upsert_genome_vectors`, `upsert_titles`,
+`apply_ratings`, `fill_credit_names`, `upsert_tmdb_ids`, `upsert_crosswalk`,
+`link_crosswalk`, `title.py:replace_genres`, `taste.py:put`).
+
+⚠️ **`bulk.py`'s `_rowcount`/`_write_result` deliberately do *not* do the
+translating, and the first spelling of this fix had them doing it.** A shared
+helper is the better design in the abstract and it made every one of its four
+callers read as **untranslated** to `write_sites()`, which reads each method's
+own body — so the ledger reported five `titles` columns still exposed while the
+behaviour was correct. Teaching the scan to follow one level of indirection is
+how a scan stops being able to see two, so the translation moved to the sites
+and `_rowcount`'s docstring now says why it is not in the helper.
+
+`import_run.py:save`'s message and `constraint=` widened with its `except`:
+`uq_import_runs_dataset` is the only *named* constraint that table can violate
+and it is no longer the only refusal that handler sees, so it reads
+`constraint_name(exc)` — which correctly answers `None` for a declared width
+rejecting a value — rather than naming an index that is intact.
+
+### `Title.popularity`, and the two the roadmap leaves open
+
+`Title.popularity` carries `allow_inf_nan=False`. The bound is on the *model*
+and not on the column, which inverts this record's own division of labour on
+purpose: `titles.popularity` is `sa.Float()` → `double precision`, for which
+IEEE `Infinity` is legal and also satisfies `ck_titles_popularity_non_negative`,
+so there is no width to widen and no refusal to translate. In the same commit,
+`adapters/tmdb/mapping.py:_non_negative_float` filters non-finite values to
+`None`, because that module's contract is that nothing TMDb can put in a payload
+may raise and a `pydantic.ValidationError` is not a `UsherPortError`.
+`json.loads('1e400')` is a case on both sides. `_bounded` needs no such clause
+and is left alone — `low <= inf <= high` is `False` — which is why
+`community_rating` never had the defect, and there is now a case pinning that
+its `le=10` is what does the refusing.
+
+**`titles.year` and `titles.vote_count` are excluded, with a case that says
+so.** Both are `Field(ge=0)` against `integer` and both accept `2**31`; both sit
+in the `exposed-copy` bucket, whose writers (`bulk.py:upsert_titles`,
+`bulk.py:apply_ratings`) take `ports.bulk` frozen dataclasses and never
+construct a `Title` — so a ceiling on the domain model would be invisible to the
+only path that overflows them, which is this record's own question (5), third
+reason.
 
 ## Evidence
 

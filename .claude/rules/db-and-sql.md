@@ -1281,3 +1281,83 @@ failure shape one column over — and it would also miss the 12 live titles whos
 `genres` merely contains a **duplicate** (`{Drama,Drama}`), which normalise to
 a shorter array with no alias involved. Filtering saves a tenth of a scan and
 costs a predicate nobody can keep in step.
+
+## The COPY path's two refusal shapes, both observed, and the widening that closed the SQLAlchemy half (2026-08-20, M10 F9)
+
+**`22001` on a `COPY` was a protocol reading in this repository until now, and
+it is exactly what was predicted.** Measured on `pgvector/pgvector:pg17` through
+the shipped `usher.db.staging.stage_records`, which is the path every bulk
+writer takes:
+
+| staged value | column | raises | `sqlstate` | a `sqlalchemy.exc.DBAPIError`? |
+|---|---|---|---|---|
+| `"x" * 33` | `varchar(32)` | `asyncpg.exceptions.StringDataRightTruncationError` | **`22001`** | **no**, and no `.orig` chain at all |
+| `2**31` | `integer` | `builtins.OverflowError` | **absent** | no — not even a `PostgresError` |
+| `2**31` | `bigint` | — stores, reads back `2147483648` | — | — |
+
+The third row is the control: without it, "the widening works" is an absence.
+**Both refusals are unreachable by any `except` clause a repository can write**
+— `copy_records_to_table` runs on the raw driver connection, outside
+SQLAlchemy's translation, so `is_row_refusal()` cannot be *handed* either one.
+That is what M9's boundary call 8 rests on, and it now rests on a run rather
+than on a reading. `tests/integration/test_staging.py`.
+
+**The corollary that decides a staging DDL's width:** for a staging column with
+**no destination column at all**, `integer` buys nothing and costs a batch.
+`stg_genome.tmdb_id` (MovieLens's own id, joined on nothing — the destination
+statement matches on `imdb_id`) and `stg_akas.ordering` (IMDb's own field, read
+by `DISTINCT ON`/`ORDER BY` and stored nowhere) are both `bigint` since F9: one
+malformed row in a 350 MB dump used to abort ten thousand good ones over a
+number that is never stored. Ask of every staging column: *is anything ever
+written from it?* If not, the widest type is the right one.
+
+**And the SQLAlchemy half, which is where the fix actually was.**
+[ADR-0041](../../docs/prd/decisions/0041-a-bounded-column-is-a-declared-type-that-refuses.md)
+publishes the per-column ledger; F9 moved its `exposed-sqlalchemy` bucket from
+**20 columns to 1** across nineteen writing sites — ten replacing
+`except IntegrityError` with `except DBAPIError` + `is_row_refusal`, nine adding
+`refusals_as_conflict` where there was no `except` at all. Four things worth
+carrying out of it:
+
+- **A shared helper that translates makes every caller look untranslated to a
+  scan that reads each method's own body.** The first spelling put
+  `refusals_as_conflict` inside `bulk.py`'s `_rowcount`/`_write_result` — better
+  design, and the ledger still reported five `titles` columns exposed, because
+  `write_sites()` reads function bodies. Teaching the scan to follow one level
+  of indirection is how it stops being able to see two, so the translation
+  moved to the sites. **When a generated artefact is the check, the code has to
+  be legible to the generator.**
+- **`attempts = attempts + 1` is the one place `refusals_as_conflict` is
+  wrong.** `jobs.attempts` is written only by that server-side expression, so a
+  class-22 refusal from it is a *statement* fault and translating it would
+  report this repository's own arithmetic to a caller as its row being wrong —
+  literally the case `_errors.py:66–75` warns about. It is excluded, and the
+  exclusion is the finding: **question (3) is about an expression's *inputs*,
+  not about whether a `CAST` is present.** Four sites carrying a `CAST` over
+  nothing but caller-supplied values (`upsert_genome_vectors`, `upsert_many`,
+  `index_many`, `taste.py:put`) are translated for the same reason ADR-0041
+  predicted they could not be.
+- **Widening an `except` widens what its message has to be true of.**
+  `import_run.py:save` said *"an import run for X already exists under a
+  different id"* and named `uq_import_runs_dataset` as the constraint. That is a
+  lie about an out-of-range cursor, and it sends an operator to look at an index
+  that is intact — so the message generalised and the constraint became
+  `constraint_name(exc)`, which correctly answers `None` for a declared width
+  rejecting a value.
+- **A `halfvec` width mismatch is class 22 and translatable.** `expected 1024
+  dimensions, not 3` is `asyncpg.exceptions.DataError`, SQLSTATE `22000`, a bare
+  `DBAPIError` — the same shape as `curated_rows."position"`, from a completely
+  different mechanism. `user_taste.centroid`, `title_embeddings.embedding` and
+  `genome_scores.relevance` all reach it, and all three had no `except` or an
+  `except IntegrityError`.
+
+**`titles.popularity` is the mirror-image defect and does not belong to any of
+this.** It is `sa.Float()` → `double precision`, so it refuses *nothing* a
+Python float can hold: `float("inf") >= 0` is `True`, `json.loads("1e400")` is
+`inf`, and `Infinity` satisfies `ck_titles_popularity_non_negative` too. There
+is no width to widen and no refusal to translate, so the bound went on
+`Title.popularity` (`allow_inf_nan=False`) and the TMDb mapper's
+`_non_negative_float` gained a `math.isfinite` in the same commit. **A `ge=`
+with no ceiling does not exclude `+inf`; a `le=` excludes both `inf` and `NaN`
+for free**, which is the whole of why `community_rating` never had this and
+`popularity` did.

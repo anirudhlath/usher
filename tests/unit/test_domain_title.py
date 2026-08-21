@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 import pytest
@@ -259,3 +260,73 @@ def test_title_serialization_round_trips() -> None:
     )
     restored = Title.model_validate_json(title.model_dump_json())
     assert restored == title
+
+
+# --- the three unbounded-above numbers, and which of them is a defect ------
+
+
+def test_popularity_refuses_a_non_finite_value() -> None:
+    """PRD 09's carried *"`Title.popularity` accepts infinity"* debt, closed by
+    M10's F9.
+
+    `1e400` is well-formed JSON and `json.loads` maps it onto `inf` with no
+    error at all, so this is the value a TMDb payload actually delivers rather
+    than a constructed one — spelled that way here so the case is about the
+    reachable shape and not about `float("inf")`.
+
+    `ge=0` alone does not refuse it (`float("inf") >= 0` is `True`), and
+    neither does the column: `titles.popularity` is `sa.Float()` — `double
+    precision`, where IEEE `Infinity` is legal — and `Infinity >= 0` satisfies
+    `ck_titles_popularity_non_negative` too. So this model is the only layer
+    that can say no, which is why ADR-0041 (`docs/prd/decisions/0041-a-bounded-\
+column-is-a-declared-type-that-refuses.md`) leaves it to the field while
+    leaving every *narrower*-than-its-field column to the repository.
+    """
+    for value in (json.loads("1e400"), float("inf"), float("nan")):
+        with pytest.raises(ValidationError):
+            Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", popularity=value)
+
+
+def test_a_finite_popularity_is_still_accepted() -> None:
+    """The control for the case above: `allow_inf_nan=False` must refuse the
+    two non-finite values and nothing else. Without this, "refuses infinity"
+    is also satisfied by a field that refuses every float."""
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", popularity=1739.421)
+    assert title.popularity == 1739.421
+    assert Title(kind=TitleKind.MOVIE, name="D", sort_name="D", popularity=0.0).popularity == 0.0
+
+
+def test_community_rating_refuses_a_non_finite_value_by_its_ceiling() -> None:
+    """`community_rating` never had `popularity`'s defect, and the reason is
+    the `le=10` rather than anything about the field being better designed.
+
+    Stated as a case because the field carries no `allow_inf_nan=False`: if a
+    later change relaxes or removes that ceiling — TMDb changing scale, say —
+    the protection goes with it silently. This is the thing that notices.
+    """
+    for value in (json.loads("1e400"), float("nan")):
+        with pytest.raises(ValidationError):
+            Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", community_rating=value)
+
+
+def test_year_and_vote_count_still_accept_a_value_their_column_cannot_hold() -> None:
+    """An **excluded** case, asserted rather than left unstated.
+
+    `Field(ge=0)` against an `integer` column is what
+    `.claude/rules/db-and-sql.md` calls *"the common shape here"*, and
+    `titles.year` and `titles.vote_count` are both live examples: `2**31`
+    constructs cleanly and the column cannot hold it. M10's F9 deliberately
+    does **not** close them, for the reason ADR-0041 gives in its question (5)
+    — the writers that put values in those two columns are
+    `bulk.py:upsert_titles` and `bulk.py:apply_ratings`, which take
+    `ports.bulk.ImdbTitle` and `ports.bulk.ImdbRating` and never construct a
+    `Title` at all, so a ceiling here would be invisible to the path that
+    actually overflows them. Both are in ADR-0041's `exposed-copy` bucket,
+    which M9's boundary call 8 keeps out of M10 whole.
+
+    The case exists so the exclusion is a recorded state rather than an
+    oversight: whoever closes the COPY path will see it go red.
+    """
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", year=2**31, vote_count=2**31)
+    assert title.year == 2**31
+    assert title.vote_count == 2**31

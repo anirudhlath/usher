@@ -49,13 +49,13 @@ from collections.abc import Sequence
 
 from pydantic import AwareDatetime
 from sqlalchemy import ColumnElement, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, defer
 
 from usher.db.models.search import TitleEmbeddingRow
 from usher.db.models.title import TitleRow
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, is_row_refusal
 
 # Same package, and deliberately shared rather than reimplemented: the
 # `DERIVED_COLUMNS` filter is what keeps `Title`'s `extra="forbid"` from
@@ -399,7 +399,21 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                     )
                     result = await self._session.execute(text(_UPSERT))
                     inserted, updated = result.one()
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).**
+            # `title_embeddings.embedding` is `halfvec(1024)` and `TitleEmbeddingUpsert.embedding`
+            # is a bare `tuple[float, ...]`, so a vector of another width reaches the `CAST` in the
+            # destination statement as SQLSTATE `22000` (`expected 1024 dimensions, not N`,
+            # measured). SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto any
+            # classified subclass, so a column refusing a *value* arrives as a bare `DBAPIError`
+            # that `except IntegrityError` does not catch and the driver's own exception crossed
+            # this port boundary untranslated -- the one thing ADR-0009 forbids.
+            # `db/repositories/_errors.py` holds the two measured shapes and the only copy of the
+            # predicate. Everything that is *not* a row refusal -- a dropped connection, a statement
+            # timeout, an undefined table -- still propagates, because a caller that cannot tell
+            # those apart retries the one thing a retry cannot fix.
+            if not is_row_refusal(exc):
+                raise
             # A `title_id` naming no title, or a CHECK on model_name /
             # source_fingerprint. The CHECK fires here rather than during the
             # COPY because the staging table is declared without constraints,
@@ -707,7 +721,20 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
                                 "blend_fingerprint": blend_fingerprint,
                             },
                         )
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).**
+            # `title_neighbors.rank` is `integer` and `ScoredNeighbor.rank` is a bare `int`, so a
+            # blend that computed one is refused by asyncpg's binary encoder before a byte is sent
+            # -- no SQLSTATE, and no `IntegrityError`. SQLAlchemy's asyncpg dialect does not map
+            # SQLSTATE class 22 onto any classified subclass, so a column refusing a *value* arrives
+            # as a bare `DBAPIError` that `except IntegrityError` does not catch and the driver's
+            # own exception crossed this port boundary untranslated -- the one thing ADR-0009
+            # forbids. `db/repositories/_errors.py` holds the two measured shapes and the only copy
+            # of the predicate. Everything that is *not* a row refusal -- a dropped connection, a
+            # statement timeout, an undefined table -- still propagates, because a caller that
+            # cannot tell those apart retries the one thing a retry cannot fix.
+            if not is_row_refusal(exc):
+                raise
             # A score outside [0, 1], a self-neighbour, a negative rank, or a
             # title id naming no row -- all four are CHECKs or foreign keys on
             # `title_neighbors`, and all four are a bug in the blend rather

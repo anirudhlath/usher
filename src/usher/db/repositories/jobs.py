@@ -96,10 +96,10 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, is_row_refusal
 from usher.db.staging import stage_records
 from usher.domain.ids import new_id
 from usher.domain.jobs import Job, JobKind
@@ -322,7 +322,20 @@ class PostgresJobQueue(JobQueue):
                     )
                     result = cast(CursorResult[Any], await self._session.execute(text(_ENQUEUE)))
                     written = result.rowcount
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).**
+            # `jobs.priority` is `integer` and `JobRequest.priority` is a bare `int` --
+            # `domain.Job`'s `ge=0, le=100` is on the shape a caller reads *back*, which this path
+            # never constructs (ADR-0041, question 5). SQLAlchemy's asyncpg dialect does not map
+            # SQLSTATE class 22 onto any classified subclass, so a column refusing a *value* arrives
+            # as a bare `DBAPIError` that `except IntegrityError` does not catch and the driver's
+            # own exception crossed this port boundary untranslated -- the one thing ADR-0009
+            # forbids. `db/repositories/_errors.py` holds the two measured shapes and the only copy
+            # of the predicate. Everything that is *not* a row refusal -- a dropped connection, a
+            # statement timeout, an undefined table -- still propagates, because a caller that
+            # cannot tell those apart retries the one thing a retry cannot fix.
+            if not is_row_refusal(exc):
+                raise
             raise RepositoryConflict(
                 "a job batch conflicts with the queue's constraints",
                 constraint=constraint_name(exc),

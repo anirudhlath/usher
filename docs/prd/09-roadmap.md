@@ -1024,18 +1024,54 @@ suspicion.
   the module contained no `try`/`except` at all and drew an inference from it;
   that was false and is corrected there.
 
-  **What M10 does own is F9's 22**: the 20 exposed at a SQLAlchemy statement,
-  which take `refusals_as_conflict` per site wherever the statement refuses a
-  bound value rather than its own `CAST`, plus the two staging-only columns with
-  no destination at all (`stg_genome.tmdb_id`, `stg_akas.ordering`, both carrying
-  an external id into a staged `integer`), which widen to `bigint` with no
-  destination statement to translate. The other nine staging-only integers are
-  `enumerate()` ordinals and are bounded by the batch's own length.
+  ✅ **What M10 owned was F9's 22, and F9 landed it on 2026-08-20 — 21 of the
+  22, with the twenty-second excluded on evidence.** Twenty writing sites took
+  `refusals_as_conflict` or the widened `except DBAPIError` + `is_row_refusal`
+  (eleven replacing an `except IntegrityError`, nine where there was no `except`
+  at all — counted by an AST walk, not by listing them), and `stg_genome.tmdb_id` and `stg_akas.ordering` widened to `bigint`. No
+  migration: the only DDL touched is two `CREATE TEMP TABLE` strings in
+  `bulk.py`. The `exposed-sqlalchemy` bucket went **20 → 1**.
+  **The one left is `jobs.attempts`, and translating it would have been the
+  misuse rather than the fix**: its only writer computes it server-side as
+  `attempts = attempts + 1`, so a class-22 refusal there is a *statement* fault,
+  and reporting one to a caller as its row being wrong is exactly what
+  `_errors.py:66–75` warns against. `JobRequest` carries no `attempts` field, so
+  no port call can supply a value for it either. ADR-0041's *"What F9 did"*
+  section carries the per-site reasoning, including why the two `CAST`-carrying
+  destination statements the record predicted would fail question (3) in fact
+  pass it. The other nine staging-only integers are `enumerate()` ordinals and
+  are bounded by the batch's own length.
 
-  **Separately, and still owed by nobody:** `Title.popularity: float | None =
-  Field(ge=0)` accepts **infinity** — `float('inf') >= 0` is `True`, Postgres 17
-  stores it, verified round-trip, reachable via `json.loads('1e400')` from a TMDb
-  payload. `community_rating` is safe only by accident of its `le=10`.
+  ✅ **And `22001` on the COPY path is now observed rather than asserted.**
+  ADR-0041 flagged it as the one failure shape it took from the protocol and
+  never ran; measured through the shipped `stage_records` on
+  `pgvector/pgvector:pg17`, it is exactly what that record predicted —
+  `asyncpg.exceptions.StringDataRightTruncationError`, `sqlstate == "22001"`,
+  **not** a `sqlalchemy.exc.DBAPIError` and carrying no `.orig` chain, so
+  `is_row_refusal()` cannot be handed it. **M9's boundary call 8 therefore now
+  rests on a measurement.** `tests/integration/test_staging.py`.
+
+  ✅ **Separately, and closed by F9 on 2026-08-20:** `Title.popularity: float |
+  None = Field(ge=0)` accepted **infinity** — `float('inf') >= 0` is `True`,
+  Postgres 17 stores it, verified round-trip, reachable via `json.loads('1e400')`
+  from a TMDb payload. It now carries `allow_inf_nan=False`, and
+  `adapters/tmdb/mapping.py:_non_negative_float` filters non-finite values to
+  `None` **in the same commit** — that module's contract is that nothing TMDb can
+  put in a payload may raise, and a `pydantic.ValidationError` is not a
+  `UsherPortError`, so an unfiltered `inf` would have escaped `EnrichService`'s
+  `except` and killed the worker instead of parking the job. The bound is on the
+  model rather than on the column because there is no width to widen: see below.
+  `community_rating` is safe only by accident of its `le=10`, which is now a case
+  (`test_community_rating_refuses_a_non_finite_value_by_its_ceiling`) so that
+  relaxing the ceiling cannot quietly re-open it.
+  ⚠️ **`titles.year` and `titles.vote_count` are the same `Field(ge=0)`-against-
+  `integer` shape and are deliberately *not* closed**, with
+  `test_year_and_vote_count_still_accept_a_value_their_column_cannot_hold`
+  recording the exclusion rather than leaving it unstated. Both are in the
+  `exposed-copy` bucket, and a ceiling on `Title` would be invisible to the only
+  writers that overflow them — `bulk.py:upsert_titles` and
+  `bulk.py:apply_ratings` take `ports.bulk` frozen dataclasses and never
+  construct a `Title` at all (ADR-0041, question 5).
   ⚠️ **This bullet named "Postgres 17's unbounded `NUMERIC`" as the column until
   2026-08-20, and that column is not `NUMERIC`** — `titles.popularity` is
   `sa.Float()` (`a8a0e10ff464:102`, mirrored in `db/models/title.py`), which

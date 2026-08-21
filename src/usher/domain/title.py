@@ -54,9 +54,39 @@ class Title(DomainModel):
     origin_countries: tuple[str, ...] = Field(default_factory=tuple)  # ISO 3166-1 alpha-2
     content_rating: str | None = None
 
+    # **The `le=10` is what refuses `inf` and `NaN` here, not the `ge=0`**, and
+    # that is worth stating because it is an accident rather than a design:
+    # `float("inf") >= 0` is `True`, so a ceiling is the only thing standing
+    # between this field and the value `popularity` used to accept. Pinned by
+    # `test_domain_title.py::
+    # test_community_rating_refuses_a_non_finite_value_by_its_ceiling`, so a
+    # later relaxation of the ceiling cannot quietly re-open it.
     community_rating: float | None = Field(default=None, ge=0, le=10)  # TMDb's 0-10 scale
     vote_count: int | None = Field(default=None, ge=0)
-    popularity: float | None = Field(default=None, ge=0)
+    # **`allow_inf_nan=False`, and it is the whole of PRD 09's carried
+    # "`Title.popularity` accepts infinity" debt (M10's F9).** `ge=0` alone
+    # does not refuse `+inf` -- `float("inf") >= 0` is `True` -- and
+    # `titles.popularity` is `sa.Float()`, i.e. `double precision`, for which
+    # IEEE `Infinity` is a perfectly legal value that also satisfies
+    # `ck_titles_popularity_non_negative`. So nothing between a TMDb payload
+    # and the stored row refused it: `json.loads('1e400')` is `inf`, and it
+    # sorted above every real title in every `popularity DESC` read forever.
+    #
+    # **The bound is on the model rather than on the column, and that is
+    # ADR-0041's own division of labour inverted for a reason it states.**
+    # That record's rule is "the column stays the authority and the repository
+    # stays the translator" -- for a column *narrower* than the field feeding
+    # it. This is the opposite defect: an *unbounded* column accepting a
+    # nonsense value, where there is no width to widen and no refusal to
+    # translate, so the only layer that can say no is this one.
+    #
+    # `usher.adapters.tmdb.mapping._non_negative_float` filters non-finite
+    # values to `None` **in the same commit**, because that module's contract
+    # is that nothing TMDb can put in a payload may raise -- a
+    # `pydantic.ValidationError` is not a `UsherPortError`, so an unfiltered
+    # `inf` would escape `EnrichService`'s `except` and kill the worker
+    # instead of parking the job.
+    popularity: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
     collection_id: uuid.UUID | None = None
 

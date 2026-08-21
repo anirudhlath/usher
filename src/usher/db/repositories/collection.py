@@ -35,10 +35,10 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, is_row_refusal
 from usher.db.staging import stage_records
 from usher.domain.collection import Collection
 from usher.ports.errors import RepositoryConflict
@@ -280,7 +280,21 @@ class PostgresCollectionRepository(CollectionRepository):
                             "collection_ids": [collection_id for _, collection_id in links],
                         },
                     )
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0041).** The
+            # statement binds two caller-supplied `uuid[]`s and computes nothing, so class 22 here
+            # can only be about a value this call handed in -- and `titles` carries four columns
+            # narrower than the fields feeding them, which is what the ledger scores this table on.
+            # SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto any classified
+            # subclass, so a column refusing a *value* arrives as a bare `DBAPIError` that `except
+            # IntegrityError` does not catch and the driver's own exception crossed this port
+            # boundary untranslated -- the one thing ADR-0009 forbids. `db/repositories/_errors.py`
+            # holds the two measured shapes and the only copy of the predicate. Everything that is
+            # *not* a row refusal -- a dropped connection, a statement timeout, an undefined table
+            # -- still propagates, because a caller that cannot tell those apart retries the one
+            # thing a retry cannot fix.
+            if not is_row_refusal(exc):
+                raise
             # A `collection_id` naming no collection. A `title_id` naming no
             # title matches nothing and is deliberately not an error: an
             # UPDATE that matches nothing is not a failure, and treating it as
