@@ -971,31 +971,31 @@ roadmap says who owes them, because a finding filed only next to the code it
 concerns is one nobody schedules. Every entry names its evidence; none is a
 suspicion.
 
-- **50 columns leak a raw driver exception across the port boundary** — found by
+- **51 columns leak a raw driver exception across the port boundary** — found by
   M8, measured live against Postgres 17.10 / asyncpg 0.31.0 with every mechanism
   driven through the real repository method. ✅ **Scoped by M10's F8 on
   2026-08-20 —
   [ADR-0041](decisions/0041-a-bounded-column-is-a-declared-type-that-refuses.md)
   states the bounding rule, publishes the per-column ledger these figures never
-  had, and hands F9 a bounded set of 21.** Every number below is re-measured at
+  had, and hands F9 a bounded set of 22.** Every number below is re-measured at
   `m09f` by `scripts/audit_bounded_columns.py`, which derives the ledger from the
   SQLAlchemy metadata and cross-checks it against an independent replay of the
-  migration chain, offline and with no database. ⚠️ **This bullet carried M8's
-  arithmetic until 2026-08-20, and every figure now has a verdict: two were right
-  when written, one cannot be scored at all because no ledger of it was ever
-  published, one was consistent arithmetic over the other three, and one is a
-  number that survives on a sentence that does not.**
+  migration chain, offline and with no database. 🔴 **The headline correction:
+  of the five figures this bullet has carried since M8, only two reproduce.**
+  `67` and `5` are right and regenerate under every reading of the rule; `17`,
+  `45` and `31` do not, and `17` never could have, because no ledger of it was
+  ever published to compare a membership against.
 
   | claimed at `m08b`, quoted since | verdict, measured 2026-08-20 at `m09f` |
   |---|---|
-  | **67 bounded columns** | ✅ **Right when written.** `--at m08b` prints 22 `varchar(N)` + 44 `integer` + 1 `numeric(12,8)` = **67**. At `m09f` that same rule gives **75** (M9 added `images.kind/width/height`, `search_queries.mode/result_count/latency_ms`, `title_search_names.kind`, `credits.source`); ADR-0041's rule adds the one `bigint` and the three `halfvec(N)` for **79**, and there are 6 further CHECK-only value bounds it deliberately excludes |
-  | **5 already translated** | ✅ **Right, and exact.** `curated_rows.position` and the four `llm_calls` columns. Now **10**, since M9 gave `images` and `search_queries` the same treatment |
-  | **17 provably safe** | ⚠️ **Unscoreable — no ledger of the 17 was ever published.** Applying ADR-0041's rule to `m08b`'s columns gives **exactly 17** and names them: 13 enum-backed, `jobs.priority`, `genome_tags.tag_id`, and `titles.imdb_id`/`episodes.imdb_id` bounded by `pattern=r"^tt\d{7,8}$"`. Whether that is M8's 17 is unverifiable. **19** today |
-  | **45 exposed** | ⚠️ **Arithmetically consistent and superseded.** `67 − 17 − 5`; under ADR-0041's rule at `m08b` it is `71 − 17 − 5 = 49`, and at `m09f` it is **50** — 31 at the COPY, 19 at a SQLAlchemy statement |
-  | **31 through the COPY path** | 🔴 **The number holds and the sentence does not.** **37** bounded destination columns are fed by a staging column no wider than themselves and **6** of those are provably safe, so `37 − 6 = 31` — which is only arithmetic once `bigint` counts, and `67` excluded it. And **only 27 of the 31 are the `OverflowError` this bullet describes**: `media_items.container`/`video_codec`/`audio_codec` and `tmdb_ids.kind` are refused **server-side during the COPY** as `StringDataRightTruncationError`, SQLSTATE **`22001`** — a real SQLSTATE on an exception that is still not a `DBAPIError`. **There are two failure shapes, and a fix that widens `bigint` and forgets `text` reaches 27 of 31** |
+  | **67 bounded columns** | ✅ **Right when written, and the one genuine reproduction here.** `--at m08b` prints 22 `varchar(N)` + 44 `integer` + 1 `numeric(12,8)` = **67**. At `m09f` that same rule gives **75** (M9 added `images.kind/width/height`, `search_queries.mode/result_count/latency_ms`, `title_search_names.kind`, `credits.source`); ADR-0041's rule adds the one `bigint` and the three `halfvec(N)` for **79**, and there are 6 further CHECK-only value bounds it deliberately excludes |
+  | **5 already translated** | ✅ **Right, and exact.** `curated_rows.position` and the four `llm_calls` columns, at `m08b`, under every reading. Now **10**, since M9 gave `images` and `search_queries` the same treatment |
+  | **17 provably safe** | 🔴 **Not reproducible under any reading, and never scoreable.** ADR-0041 publishes three readings of what closes a value set; at `m08b` they give **18 / 16 / 12** and seventeen is none of them. Two columns the plan counted as safe are not: `titles.imdb_id`'s `pattern` is on `domain.Title` while the bulk writer takes `ports.bulk.ImdbTitle` (a bare `str`), and **`jobs.priority`'s `Field(ge=0, le=100)` is on `domain.Job` while `enqueue` takes `JobRequest`, whose `priority` is a bare `int`** (`ports/jobs.py:45`). A domain bound the write path never runs is not a bound |
+  | **45 exposed** | 🔴 **Not reproducible.** It is `67 − 17 − 5` and 17 is not reachable; the same subtraction with the adopted reading's 16 gives 46, and Rule B's own exposed figure at `m08b` is **50**, at `m09f` **51** — 31 at the COPY, 20 at a SQLAlchemy statement |
+  | **31 through the COPY path** | 🔴 **Not reproducible as stated, and the number recurring is a trap rather than a confirmation.** The adopted reading does put 31 in the COPY bucket — `37` narrow-staged bounded destination columns minus `6` provably safe among them — but the other two readings give **30** and **34**, and `37 − 7 = 30` is the plan's own stated alternative. A figure that appears under one reading of three is not a reproduction, and the membership is not the old 31 in any case: **28 raise `OverflowError` and 3 do not.** `media_items.container`/`video_codec`/`audio_codec` are refused **server-side during the COPY** as `StringDataRightTruncationError`, SQLSTATE **`22001`** — a real SQLSTATE on an exception that is still not a `DBAPIError`. **There are two failure shapes, and a fix that widens `bigint` and forgets `text` reaches 28 of 31** |
 
   **M9's boundary call 8 survives all of it, and ADR-0041 does not re-open it**:
-  31 of the writes go through `stage_records`' `copy_records_to_table` on the raw
+  the COPY-bucket writes go through `stage_records`' `copy_records_to_table` on the raw
   asyncpg connection, outside SQLAlchemy's error translation entirely, so
   `is_row_refusal()` cannot inspect either shape and **no widening of `except
   IntegrityError` can reach them**. `_errors.py`'s scope claim (class 22 + class
@@ -1003,27 +1003,33 @@ suspicion.
   and does not model the COPY path. 🔴 **What ADR-0041 does retire is the
   candidate fix this bullet named**: *"declare staging columns wide (`bigint`,
   `text`) so refusal moves to the `INSERT … SELECT` where the existing net
-  catches it, evidenced by `id_crosswalk.imdb_id`"* — measured at HEAD, **there
-  is no existing net**. `stg_crosswalk.imdb_id` is already `text`, the refusal
-  already lands on the `INSERT … SELECT`, and `bulk.py:upsert_crosswalk` has no
-  `except` at all; `bulk.py` contains no `try`/`except` statement anywhere, and
-  seven of its methods write untranslated. The same holds at the two other
-  places the pattern already exists (`stg_genome.relevance real[]` →
-  `genome_scores.relevance`, `stg_title_embeddings.embedding text` →
-  `title_embeddings.embedding`). **Three for three: the candidate is two changes,
-  not one**, and the second one — which destination `except` a staged
-  `INSERT … SELECT` with a `CAST` may safely take, given `_errors.py:66–75`'s
-  own caveat that class 22 is about the row only for a parameterised statement
-  with no server-side expression — is the bulk-loader design task M10 does not
-  own. [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
+  catches it, evidenced by `id_crosswalk.imdb_id`"* — measured at HEAD, **on
+  that path there is no net**. `stg_crosswalk.imdb_id` is already `text`, the
+  refusal already lands on the `INSERT … SELECT`, and `bulk.py:upsert_crosswalk`
+  has no `except` at all. The same holds at the three other places the pattern
+  already exists — `stg_titles.imdb_id text` → `titles.imdb_id`,
+  `stg_genome.relevance real[]` → `genome_scores.relevance`, and
+  `stg_title_embeddings.embedding text` → `title_embeddings.embedding`.
+  **Four for four: the candidate is two changes, not one**, and the second one —
+  which destination `except` a staged `INSERT … SELECT` with a `CAST` may safely
+  take, given `_errors.py:66–75`'s own caveat that class 22 is about the row only
+  for a parameterised statement with no server-side expression — is the
+  bulk-loader design task M10 does not own.
+  [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
   closed the problem-code vocabulary at seven members on the evidence of routes
   that exist, and none of this needs an eighth.
+  ⚠️ **`bulk.py` does translate, twice** — `refusals_as_conflict` at `:483` and
+  `:778` — so its seven untranslated writers are an omission at each site rather
+  than a module that never learned the mechanism. ADR-0041's first draft said
+  the module contained no `try`/`except` at all and drew an inference from it;
+  that was false and is corrected there.
 
-  **What M10 does own is F9's 21**: the 19 exposed at a SQLAlchemy statement,
-  which take `refusals_as_conflict` per site, plus the two staging-only columns
-  with no destination at all (`stg_genome.tmdb_id`, `stg_akas.ordering`, both
-  carrying an external id into a staged `integer`), which widen to `bigint` with
-  no destination statement to translate. The other nine staging-only integers are
+  **What M10 does own is F9's 22**: the 20 exposed at a SQLAlchemy statement,
+  which take `refusals_as_conflict` per site wherever the statement refuses a
+  bound value rather than its own `CAST`, plus the two staging-only columns with
+  no destination at all (`stg_genome.tmdb_id`, `stg_akas.ordering`, both carrying
+  an external id into a staged `integer`), which widen to `bigint` with no
+  destination statement to translate. The other nine staging-only integers are
   `enumerate()` ordinals and are bounded by the batch's own length.
 
   **Separately, and still owed by nobody:** `Title.popularity: float | None =

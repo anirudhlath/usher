@@ -2,10 +2,13 @@
 
 **Status:** Accepted — the scoped decision [PRD 09](../09-roadmap.md)'s carried
 debt and issue #10 have both been asking for since M8. Corrects that bullet's
-arithmetic in place. **Does not re-open
+arithmetic in place: **two of its five figures reproduce and three do not.**
+**Does not re-open
 [M9's boundary call 8](../../../.claude/rules/milestone-boundary-calls.md)**:
 its reason survives every re-measurement below and is restated with two failure
 shapes rather than one. Narrows the follow-up (F9) to a set this record names.
+Amended once before acceptance, and the amendment is in the record rather than
+in the history — see *"internally consistent and externally wrong"* below.
 
 ## Context
 
@@ -39,10 +42,11 @@ file under `src/usher/db/models/`). Every figure is produced by
 no socket, and prints a deterministic table:
 
 ```
-uv run python scripts/audit_bounded_columns.py            # the 79-row ledger
-uv run python scripts/audit_bounded_columns.py --summary  # the counts
-uv run python scripts/audit_bounded_columns.py --at m08b  # the count at M8's head
-uv run python scripts/audit_bounded_columns.py --check    # exit 1 on drift
+uv run python scripts/audit_bounded_columns.py                    # the 79-row ledger
+uv run python scripts/audit_bounded_columns.py --summary          # every count here
+uv run python scripts/audit_bounded_columns.py --at m08b          # M8's head, today's rule
+uv run python scripts/audit_bounded_columns.py --reading pydantic # the other readings
+uv run python scripts/audit_bounded_columns.py --check            # exit 1 on drift
 ```
 
 **It lives in `scripts/` rather than in `/var/tmp`, and that is a decision.**
@@ -50,7 +54,40 @@ Every other artefact in that directory opens a real socket or a real database;
 this one is the opposite and is kept for the opposite reason. *"17 provably
 safe"* was quoted three times in two milestones and could not be reproduced,
 which is the defect this record exists to close — a throwaway would recreate it
-the moment the next column lands. It passes the gate like any other file.
+the moment the next column lands.
+
+⚠️ **Two things it does not do, said here rather than left to be assumed.**
+`ruff check`, `ruff format --check` and `pytest` cover `scripts/`; **`mypy` does
+not** — the gate runs `mypy src tests`, so this file is lint-clean and
+formatted and *not* type-checked, and adding `scripts/` to the gate is a
+separate job on a directory that is not clean today. And **nothing runs it**:
+`--check` is not in the gate and not in CI, so its drift detection is something
+a person does. F9 owns closing that, because F9's guard is a test and tests do
+run.
+
+### 🔴 The first version of this record was internally consistent and externally wrong, and that is the finding it now carries
+
+Review re-derived every published figure against the generator and found no
+transcription drift at all — the document and the script agreed exactly. Then it
+checked the *script* against the source and found a cell where the script was
+wrong: `tmdb_ids.kind` was classified `exposed-copy / 22001`, and its only
+writer stages `row.kind.value` off a `TitleKind` (`ports/bulk.py:237`), which is
+`"movie"` or `"series"` — six characters into `varchar(16)`. It cannot raise
+`22001`.
+
+The reason that is worth a section rather than a fix: **`titles.kind` is the
+identical construction one file over** (`bulk.py:523` stages `row.kind.value`
+off `ImdbTitle.kind`), and the first version classified *that* one `safe`, via a
+two-entry hand-written table of exceptions. One rule, two answers, one shape —
+and the ledger's own self-agreement could not see it, because both answers came
+from the same generator.
+
+So the ledger's internal consistency is real and **is not evidence of
+correctness**. The repair is not to correct two cells: it is that the bound is
+now **derived from the class the writing method actually takes** — resolved off
+each staging writer's own `Sequence[X]` parameter annotation — and the hand
+table is deleted. That is what makes "one rule, two answers" impossible rather
+than merely noticed.
 
 **The migration chain is replayed independently and the two agree column for
 column.** `alembic upgrade head --sql` is unusable offline (it dies at
@@ -100,6 +137,47 @@ the rest: `Centroid.vector` declares `min_length=1` and no ceiling
 it is two-thirds of the evidence in *"the candidate fix is two changes"* below.
 Excluding them would have hidden that.
 
+`vector(N)` is admitted on the same sentence. There is no such column today; it
+is named because the script's family list knew `HALFVEC(` and not `VECTOR(` on
+**both** sides of the cross-check, so a `vector(N)` column added tomorrow would
+have been invisible to the metadata scan and the migration replay alike and
+`--check` would have reported zero drift. An unrecognised family now raises
+`UnknownTypeFamily` rather than defaulting to "not bounded".
+
+### Rule B's second half — whose closure counts, and all three answers are published
+
+Rule B decides which columns are *bounded*. A second question decides which of
+them are **safe**: what closes the value set before it reaches the driver, and
+does that closure hold on the path that writes? There are three defensible
+answers, they move published figures, and **the script computes all three** so
+that choosing between them is visible rather than fallen into:
+
+| reading | what counts as closing the set |
+|---|---|
+| `closure` | a bound declared **anywhere**, including a `pattern` on a pydantic model the writing path never constructs |
+| **`path`** — adopted | only the bound on the class **the writer actually takes**. An enum still counts on a frozen dataclass; a `pattern` does not count off-path |
+| `pydantic` | stricter: only a bound a **validator runs**, so a frozen dataclass's annotation closes nothing |
+
+**`path` is adopted, and the reason is a mechanism rather than a preference.**
+Every staged bulk writer stages `row.<field>.value`. That expression closes the
+set *by itself*: a `TitleKind` member's `.value` is one of two short strings, and
+anything that is not an enum member has no `.value` at all — a bare `str` raises
+`AttributeError` before a byte reaches the COPY. No validator is needed, so the
+enum counts on `ImdbTitle` and `TmdbId` exactly as it does on `Title`. A
+`pattern`, by contrast, is inert unless something runs it: `Title.imdb_id`
+carries `^tt\d{7,8}$` and `bulk.py:upsert_titles` takes
+`ports.bulk.ImdbTitle`, whose `imdb_id` is a bare `str`. Crediting that pattern
+asserts a validator the writing path never runs.
+
+`closure` is too generous for exactly that reason. `pydantic` is too strict for
+the mirror-image reason: it denies the `.value` argument, which is a fact about
+Python rather than about pydantic.
+
+**Every figure below is `path`'s.** The other two are one flag away
+(`--reading closure`, `--reading pydantic`) and are tabulated at the end of
+`--summary`, so no figure in this record can be quoted without its alternatives
+being one command away.
+
 ### The counts, at both heads
 
 | | `m08b` (M8's head) | `m09f` (today) |
@@ -126,61 +204,90 @@ agrees with the plan's `81` (75 + 6) exactly**; the six are
 the live metadata rather than from the replay, and one of those six tables
 (`title_search_names`) did not exist then.
 
-### The four buckets, and the ledger
+### The four buckets, at both heads and under all three readings
 
 Every bounded column falls in exactly one. **The buckets are worst-case over
 every writer**: one translating writer does not launder a sibling that has none,
 because a column is exposed if *any* path into it lets a refusal escape.
 
-| bucket | `m09f` | what it means |
-|---|---|---|
-| **safe** | **19** | the value cannot be constructed. Decided before any writer is consulted |
-| **translated** | **10** | every writer catches on the SQLSTATE class |
-| **exposed at the COPY** | **31** | refused inside `copy_records_to_table`, on the raw asyncpg connection |
-| **exposed at a SQLAlchemy statement** | **19** | reaches a translatable exception, and no writer translates it |
+| bucket | what it means | `m09f` | `m08b` |
+|---|---|---|---|
+| **safe** | the value cannot be constructed. Decided before any writer's `except` is consulted | **18** | **16** |
+| **translated** | every writer catches on the SQLSTATE class | **10** | **5** |
+| **exposed at the COPY** | refused inside `copy_records_to_table`, on the raw asyncpg connection | **31** | **31** |
+| **exposed at a SQLAlchemy statement** | reaches a translatable exception, and no writer translates it | **20** | **19** |
 
-**50 exposed**, against the bullet's 45 — and the two are not comparable,
-because 45 was `67 − 17 − 5` at `m08b` under a narrower rule. Under Rule B at
-`m08b` the same subtraction is `71 − 17 − 5 = 49`.
+And the same census under the other two readings, printed by `--summary` so it
+cannot be quoted selectively:
 
-#### safe — 19
+| reading | safe | translated | COPY | SQLAlchemy | exposed |
+|---|---|---|---|---|---|
+| `closure` — `m09f` / `m08b` | 20 / 18 | 10 / 5 | 30 / 30 | 19 / 18 | 49 / 48 |
+| **`path`** — `m09f` / `m08b` | **18 / 16** | **10 / 5** | **31 / 31** | **20 / 19** | **51 / 50** |
+| `pydantic` — `m09f` / `m08b` | 14 / 12 | 10 / 5 | 34 / 34 | 21 / 20 | 55 / 54 |
 
-`credits.kind`, `credits.source`, `images.kind`, `import_runs.status`,
-`jobs.kind`, `jobs.status`, `llm_calls.purpose`, `media_items.hdr_format`,
-`sources.kind`, `sync_runs.kind`, `sync_runs.status`, `titles.kind`,
-`titles.status`, `titles.enrichment_state`, `watch_states.origin` are
-**enum-backed** — a closed Python enum, validated by pydantic.
-`jobs.priority` is `Field(ge=0, le=100)` (`domain/jobs.py:326`), the **only**
-numeric field in `usher.domain` bounded on both sides other than
-`Title.community_rating`, whose column is `double precision` and therefore not
-in this set at all. `genome_tags.tag_id` is bounded **at the batch** by
-`replace_genome_tags`' 1..n contiguity check (`bulk.py:1027`), which a
-per-column scan cannot see and which this record's script therefore names
-explicitly. And `titles.imdb_id` and `episodes.imdb_id` are bounded by
-`pattern=r"^tt\d{7,8}$"` — longest match 10, against `varchar(16)`.
+### 🔴 Which of the five quoted numbers this record actually reproduces: two
 
-🔴 **The two `imdb_id` columns are what the plan's reconstruction could not see,
-and they are what makes 17 reachable.** That reconstruction looked only at enums,
-got to 16 (*"14 enum-backed `varchar` columns plus `jobs.priority` plus
-`genome_tags.tag_id`"*) and said the 17th could not be identified.
-`_errors.py`'s rule admits an anchored `pattern` exactly as readily as an enum,
-and applying Rule B to `m08b`'s column set gives **17**: the 15 enum columns
-today minus `images.kind` and `credits.source`, which M9 added, is **13**, plus
-`jobs.priority`, `genome_tags.tag_id`, `titles.imdb_id` and `episodes.imdb_id`.
+This is the thesis, and the first version of this record got it wrong by
+landing on `17` and `31` and reading the agreement as confirmation.
 
-⚠️ **That is 13 enum columns where the plan counted 14, and the discrepancy is
-not reconcilable**: neither M8 nor the plan published a list, so there is no way
-to tell which column the two enumerations disagree about. The honest statement is
-that **17 is reachable, is named, and regenerates** — not that it is the same 17.
+| claim | verdict |
+|---|---|
+| **67 bounded columns** | ✅ **Reproduced, and reading-independent.** `--at m08b` gives 22 `varchar` + 44 `integer` + 1 `numeric` = 67. The readings change buckets, not the column set, so this holds under all three |
+| **5 already translated** | ✅ **Reproduced, and reading-independent.** 5 at `m08b` under every reading — `curated_rows.position` and the four `llm_calls` columns |
+| **17 provably safe** | ❌ **Not reproducible under any reading.** `m08b` gives **18 / 16 / 12**. Seventeen is not among them, and no ledger of M8's 17 was ever published, so there is nothing to compare membership against either |
+| **45 exposed** | ❌ **Not reproducible.** It is `67 − 17 − 5`, and 17 is not reachable; with `path`'s 16 the same subtraction gives 46, and Rule B's own exposed figure at `m08b` is **50** |
+| **31 through the COPY path** | ❌ **Not reproducible *as stated*, and the coincidence is a trap.** `path` does put 31 in the COPY bucket at both heads — but `closure` says 30 and `pydantic` says 34, so a figure that appears under one reading of three is not a reproduction. Its membership differs anyway: the roadmap's 31 are all out-of-range `int`s, and these are **28 `OverflowError` + 3 `22001`**, one of them a `bigint` the 67 excludes. **Same number, different set, one reading only** |
 
-⚠️ **Two of the 19 are safe in a weaker sense and the ledger says so on their
-own row.** `titles.kind` and `titles.imdb_id` are validated by pydantic on the
-`TitleRepository` path and fed on the **bulk** path by
-`usher.ports.bulk.ImdbTitle`, a *frozen dataclass* — which does not validate
-anything. There the enum and the pattern are mypy claims. **`usher.domain`
-declares no `max_length` at all** (measured: zero occurrences across nineteen
-modules), so a pattern is the only thing in this codebase that can bound a
-string above, and there is exactly one.
+⚠️ **The first version of this record claimed `31` and `17` as reproductions,
+on one reading, without computing the others.** That is the same error as the
+`tmdb_ids.kind` cell one level up: a number agreeing with a number nobody can
+check the membership of is not evidence. The three-reading table exists so that
+the next person quoting a figure from here can see immediately whether it
+survives the choice.
+
+#### safe — 18
+
+**Sixteen enum-backed**: `credits.kind`, `credits.source`, `images.kind`,
+`import_runs.status`, `jobs.kind`, `jobs.status`, `llm_calls.purpose`,
+`media_items.hdr_format`, `sources.kind`, `sync_runs.kind`, `sync_runs.status`,
+`titles.kind`, `titles.status`, `titles.enrichment_state`, `tmdb_ids.kind`,
+`watch_states.origin`. **Plus two**: `episodes.imdb_id`, bounded by
+`pattern=r"^tt\d{7,8}$"` on the pydantic `Episode` that `upsert_episodes`
+actually takes — longest match 10, against `varchar(16)` — and
+`genome_tags.tag_id`, bounded **at the batch** by `replace_genome_tags`' 1..n
+contiguity check (`bulk.py:1027`), which no per-column scan can see and which
+the script therefore names explicitly.
+
+**Two columns the first version of this record put in this bucket are not in it,
+and both moved for the same reason: the bound was on a class the writing path
+never constructs.**
+
+- **`titles.imdb_id`.** Its `pattern` is on `usher.domain.title.Title`;
+  `bulk.py:upsert_titles` takes `ports.bulk.ImdbTitle`, whose `imdb_id` is a
+  bare `str`. It is staged into `stg_titles.imdb_id text`, so its refusal lands
+  on the `INSERT … SELECT` — it is now in the SQLAlchemy bucket.
+- 🔴 **`jobs.priority`, and this one is a finding the plan got wrong too.** The
+  plan's own reconstruction cites *"`jobs.priority` (`Field(ge=0, le=100)`,
+  `domain/jobs.py:326`)"* as one of its 16 defensible columns. That field is on
+  `domain.jobs.Job` — **the shape a caller reads back**. `PostgresJobQueue.
+  enqueue` takes `Sequence[JobRequest]`, and `JobRequest.priority`
+  (`ports/jobs.py:45`) is a bare `int`. So the enqueue path applies no bound at
+  all, and `stg_jobs.priority integer` refuses `2**31` in the COPY. The CHECK
+  `ck_jobs_priority_range` is the real defence for 0..100 and it works — 23514,
+  an `IntegrityError`, caught — but it never runs, because the encoder refuses
+  first. **`jobs.priority` is exposed at the COPY.**
+
+Both were `safe` under `closure` and both are exposed under `path`; they are the
+whole of the difference between those two columns of the census table.
+
+⚠️ **`usher.domain` declares no `max_length` at all** — measured, zero
+occurrences across nineteen modules — so an anchored `pattern` is the only thing
+in this codebase that can bound a string above, and there is exactly one of
+those. That is also why `_fully_bounded`'s width comparison is parsed rather
+than substring-matched: `f"max_length={width}" in domain` reads `max_length=160`
+as satisfying `varchar(16)`, and it is dormant only because of the zero above —
+which is the state question (5) debates changing.
 
 #### translated — 10
 
@@ -195,53 +302,68 @@ string above, and there is exactly one.
 `llm_calls.purpose` is enum-backed and is in the safe bucket, which is where the
 plan put it too.
 
-#### exposed at the COPY — 31
+#### exposed at the COPY — 31 under `path`, 30 under `closure`, 34 under `pydantic`
 
 **37 bounded destination columns are fed by a staging column no wider than
-themselves; 6 of those are provably safe; 37 − 6 = 31.** That reproduces both of
-the plan's figures and resolves their inconsistency: the 6 are
+themselves; 6 of those are provably safe; 37 − 6 = 31.** The 6 are
 `credits.kind`, `credits.source`, `episodes.imdb_id`, `media_items.hdr_format`,
-`titles.kind` and `jobs.priority`, and `media_items.file_size_bytes` is counted
-in the 37 because Rule B counts `bigint`.
+`titles.kind` and `tmdb_ids.kind`; `media_items.file_size_bytes` is in the 37
+because Rule B counts `bigint`. Under `closure` the safe set gains
+`jobs.priority` and the answer is `37 − 7 = 30` — **which is the plan's own
+stated alternative**, the one it reached by assuming `bigint` was excluded.
 
-🔴 **The membership is not the old 31, and the split is the reason.** The
-roadmap says all 31 are an out-of-range `int` raising `OverflowError`. Measured:
-**27 take that shape and 4 do not** — `media_items.container`,
-`media_items.video_codec`, `media_items.audio_codec` and `tmdb_ids.kind` are
-over-length strings into a staged `varchar(N)`, refused **server-side during the
-COPY** as `asyncpg.exceptions.StringDataRightTruncationError` carrying SQLSTATE
-**`22001`**. That is a real SQLSTATE on an exception that is still not a
-`DBAPIError`, because it is raised on the raw driver connection outside
-SQLAlchemy's translation. So `is_row_refusal()` cannot inspect it either, for a
-*different reason* from the first. Issue #10 names only the `OverflowError`
-shape. **A decision that widens `bigint` and forgets `text` fixes 27 of 31.**
+**That the `path` figure equals the roadmap's 31 is a coincidence and is not
+claimed as anything else.** It moves to 30 and 34 under the other two readings,
+and its membership is not the old 31 in any case.
+
+🔴 **There are two failure shapes on this path, not one, and the roadmap names
+only the first.** Measured: **28 raise `OverflowError`** — an out-of-range `int`
+refused client-side by asyncpg's binary encoder, no SQLSTATE — and **3 do not**.
+`media_items.container`, `media_items.video_codec` and `media_items.audio_codec`
+are over-length strings into a staged `varchar(32)`, refused **server-side
+during the COPY** as `asyncpg.exceptions.StringDataRightTruncationError`
+carrying SQLSTATE **`22001`**: a real SQLSTATE on an exception that is still not
+a `DBAPIError`, because it is raised on the raw driver connection outside
+SQLAlchemy's translation. `is_row_refusal()` cannot inspect it either, for a
+*different reason* from the first. **A decision that widens `bigint` and forgets
+`text` fixes 28 of 31.**
+
+(The first version of this record said 27 + 4, counting `tmdb_ids.kind` as a
+`22001`. It is enum-backed and cannot be one — see the correction above.)
 
 The full 31, with the staging column that feeds each and the method that stages
 it, is in the ledger the script prints; it is not transcribed here, because a
 hand-copied table is the thing this record exists to stop.
 
-#### exposed at a SQLAlchemy statement — 19
+#### exposed at a SQLAlchemy statement — 20
 
 | column | type | staging column | untranslated writer |
 |---|---|---|---|
 | `genome_scores.relevance` | `HALFVEC(1128)` | `stg_genome.relevance real[]` | `bulk.py:upsert_genome_vectors` — no `except` |
 | `title_embeddings.embedding` | `HALFVEC(1024)` | `stg_title_embeddings.embedding text` | `search.py:upsert_many`, `adapters/search/postgres.py:index_many` — `except IntegrityError` |
 | `id_crosswalk.imdb_id` | `VARCHAR(16)` | `stg_crosswalk.imdb_id text` | `bulk.py:upsert_crosswalk` — no `except` |
+| **`titles.imdb_id`** | `VARCHAR(16)` | `stg_titles.imdb_id text` | `bulk.py:upsert_titles` — no `except` |
 | `user_taste.centroid`, `user_taste.title_count` | `HALFVEC(1024)`, `INTEGER` | — | `taste.py:put` — no `except` |
 | `import_runs.position`, `rows_seen`, `rows_written` | `INTEGER` | — | `import_run.py:save` — `except IntegrityError` |
 | `sync_runs.items_seen`, `items_matched`, `items_unmatched`, `items_retracted` | `INTEGER` | — | `sync.py:add`, `sync.py:save` — `except IntegrityError` |
 | `titles.tmdb_id`, `tvdb_id`, `original_language`, `content_rating` | `INTEGER` ×2, `VARCHAR(16)`, `VARCHAR(32)` | — | **eight** untranslated writers, four of them in `bulk.py` with no `except` at all |
 | `title_neighbors.rank` | `INTEGER` | — | `search.py:replace` — `except IntegrityError` |
 | `title_search_names.kind` | `VARCHAR(16)` | — | `people.py:replace_for_titles` — `except IntegrityError` |
-| `jobs.attempts` | `INTEGER` | — | `jobs.py:fail` and four others — no `except` |
+| `jobs.attempts` | `INTEGER` | — | `jobs.py:fail` and three others — no `except` |
 
-Two caveats this record states rather than lets F9 rediscover. Writer
-attribution is **per table**, so a writer naming `titles` is credited with every
-bounded column in `titles`; that is conservative in the direction of exposure
-and it never changes a verdict here, because each of the four `titles` rows also
-has an untranslated writer that really does write it. And **two of the 19 are
-exposed but arguably unreachable**: `jobs.attempts` is only ever written
-server-side as `attempts + 1`, so refusing it needs 2³¹ attempts on one job, and
+⚠️ **Writer attribution is per TABLE, not per column, and F9 must not
+parametrise straight off it.** A method whose SQL names `titles` is credited
+with every bounded column in `titles`, so `bulk.py:apply_ratings` appears
+against `titles.original_language`, which it never writes. Bucket-wise that is
+pessimistic and therefore harmless — each of those four rows has an untranslated
+writer that really does write it — but **F9's unit of work is the site**, so a
+run parametrised over `(column, writer)` from this field would wrap sites that
+cannot refuse that column. The caveat now lives on `WriteSite`, on
+`LedgerRow.writers` and in the printed column heading, not only here.
+
+**Two of the 20 are exposed but arguably unreachable**, named so F9 can decide
+with evidence: `jobs.attempts` is only ever written server-side as
+`attempts + 1`, so refusing it needs 2³¹ attempts on one job, and
 `title_neighbors.rank` is a loop index over at most 25.
 
 ## The five questions, answered
@@ -253,7 +375,7 @@ computed from the same predicate in the same file, so they cannot disagree
 again. `bigint` in. CHECK-only bounds out, counted at 6 and printed.
 `double precision` out. `halfvec` in.
 
-### (2) Widening the 16 staging DDLs is **not** the fix, because it is two changes and the second one is missing at all three places the pattern already exists
+### (2) Widening the 16 staging DDLs is **not** the fix, because it is two changes and the second one is missing at all four places the pattern already exists
 
 The candidate the roadmap has carried since M8 is *"declare staging columns wide
 (`bigint`, `text`) so refusal moves to the `INSERT … SELECT` where the existing
@@ -264,22 +386,46 @@ as a wrapped `DBAPIError`."*
 `stg_crosswalk.imdb_id` is already `text`; the refusal already lands on the
 `INSERT … SELECT`; it already surfaces as a wrapped `DBAPIError` — and
 **`bulk.py:upsert_crosswalk` has no `except` at all**, so it crosses the port
-boundary raw anyway. There is no existing net. Verified at HEAD, and it is not
-an isolated slip: **`bulk.py` contains no `try`/`except` statement anywhere.**
-Seven of its methods write with no translation — `upsert_titles`,
-`apply_ratings`, `fill_credit_names`, `upsert_tmdb_ids`, `upsert_crosswalk`,
-`upsert_genome_vectors` and **`link_crosswalk`**, which the plan's list of six
-missed.
+boundary raw anyway. **On that path there is no net.**
 
-The same shape appears twice more, and both are the *cast* form the candidate
-proposes generalising. `stg_genome.relevance real[]` → `genome_scores.relevance
-halfvec(1128)` and `stg_title_embeddings.embedding text` →
-`title_embeddings.embedding halfvec(1024)` are exactly "staged wide, cast at the
-destination", and their writers have no `except` and `except IntegrityError`
-respectively. **Three for three: every place this project already implements the
-candidate fix still leaks.** Widening the staging DDLs without the second change
-converts an untranslated `OverflowError` into an untranslated `DBAPIError`. That
-is a change of exception type, not a repair.
+⚠️ **The first version of this record generalised that into "`bulk.py` contains
+no `try`/`except` statement anywhere" and drew an inference from it, and both
+were wrong.** `bulk.py` imports `refusals_as_conflict` at `:83` and uses it at
+`:483` (`replace_genome_tags`) and `:778` (`replace_aliases`); there is also a
+`try`/`finally` at `:350`. What is true is narrower and more damning: **the
+module has no `except` clause**, it *does* translate at two of its sites with
+the sanctioned mechanism, and it therefore demonstrably knows the mechanism. So
+the seven untranslated writers — `upsert_titles`, `apply_ratings`,
+`fill_credit_names`, `upsert_tmdb_ids`, `upsert_crosswalk`,
+`upsert_genome_vectors` and **`link_crosswalk`**, which the plan's list of six
+missed — are an **omission at each site**, not an absence by construction. That
+is a worse fact than the one it replaced: a module that reaches for the right
+tool twice and not seven times is drifting, not uniformly unbuilt.
+
+The staged-wide shape appears twice more, and both are the *cast* form the
+candidate proposes generalising. `stg_genome.relevance real[]` →
+`genome_scores.relevance halfvec(1128)` and `stg_title_embeddings.embedding
+text` → `title_embeddings.embedding halfvec(1024)` are exactly "staged wide,
+cast at the destination", and their writers have no `except` and
+`except IntegrityError` respectively. With `stg_titles.imdb_id text` →
+`titles.imdb_id varchar(16)` (also `upsert_titles`, also no `except`), that is
+**four for four: every place this project already implements the candidate fix
+still leaks.** Widening the staging DDLs without the second change converts an
+untranslated `OverflowError` into an untranslated `DBAPIError`. That is a change
+of exception type, not a repair.
+
+✅ **And the script refutes the plan's staging count in the same direction.**
+The plan claimed *"of 16 staging tables, exactly three declare a column wider
+than its destination"*. `--summary` prints **7** such pairs. Three are the
+plan's own value-carrying shape (`stg_jobs.kind text` → `jobs.kind`,
+`stg_titles.imdb_id text` → `titles.imdb_id`, `stg_crosswalk.imdb_id text` →
+`id_crosswalk.imdb_id`); two more are the `halfvec` casts above; and two —
+`stg_ratings.imdb_id` and `stg_credit_names.imdb_id` — are **join keys matched
+by name that are never written to `titles.imdb_id` at all**, so they are an
+artefact of matching on name and are called out rather than counted. This
+strengthens *"four for four"* rather than diluting it: the two join keys sit in
+`fill_credit_names` and `apply_ratings`, which are on the no-`except` list too,
+so every writer named in this paragraph — all four of them — leaks.
 
 Two further costs, named rather than argued away. The widening is **16 DDLs on
 the hottest write path in the project** — 1,126,674 items a walk — and it moves
@@ -306,7 +452,7 @@ answer.** A staged destination statement needs a narrower predicate than
 `is_row_refusal` — one that can tell a bound value's refusal from its own cast's
 — and designing that is a task with a measurement in it, not a `sed`. Widening
 `except IntegrityError` per site is refused for the opposite reason: it is
-already there for **ten of the nineteen** SQLAlchemy-side columns and already
+already there for **ten of the twenty** SQLAlchemy-side columns and already
 misses class 22, which is why they are in the exposed bucket at all.
 
 **Where the statement *is* a bare parameterised one, `refusals_as_conflict` is
@@ -338,6 +484,17 @@ than aborting a ten-thousand-row batch, not merely a better exception.
 
 ### (5) The domain models are **not** bounded instead of the columns
 
+🔴 **Before the argument: this question is less hypothetical than it looks,
+because two of the bounds this project believes it has are on the wrong class.**
+`titles.imdb_id`'s `pattern` and `jobs.priority`'s `ge=0, le=100` are both
+declared on `usher.domain` models that the *writing* paths never construct — the
+bulk loader takes `ports.bulk.ImdbTitle`, the queue takes `ports.jobs.JobRequest`
+(`:45`, a bare `int`). Both were quoted as safe, by the plan and by the first
+version of this record. **A domain bound that the write path does not run is
+indistinguishable from no bound at all, and nothing in this repository was
+checking which.** That is the strongest argument *for* bounding the models — and
+it is also why bounding them is not the fix on its own.
+
 `usher.domain` has **44 fields bounded below and not above** and **no
 `max_length` anywhere**. Adding `le=2**31-1` to all 44 was considered and is
 refused, for three reasons and not for effort.
@@ -365,17 +522,17 @@ evidence, and it is left there rather than annexed here.
 
 ## Scope for F9 — what M10 fixes, and what it does not
 
-**F9 fixes 21 columns and mints no migration.** The only DDL it touches is the
+**F9 fixes 22 columns and mints no migration.** The only DDL it touches is the
 two `CREATE TEMP TABLE` strings in `bulk.py` that declare `stg_genome` and
 `stg_akas`, which describe per-batch temporary tables and are not part of the
 migration chain.
 
-1. **The 19 exposed at a SQLAlchemy statement**, by giving each writing site
+1. **The 20 exposed at a SQLAlchemy statement**, by giving each writing site
    `refusals_as_conflict` in place of its `except IntegrityError` or its absent
    `except` — **but only where question (3)'s test passes**: the statement
    refuses a *bound value*, not an expression it computed itself. Applying that
    test site by site is F9's first act rather than this record's; what this
-   record fixes is the population, at 19. Two of them are known now to fail it —
+   record fixes is the population, at 20. Two of them are known now to fail it —
    `genome_scores.relevance` and `title_embeddings.embedding`, whose destination
    statements carry a `CAST` — and F9 either narrows the predicate for those or
    defers them with the reason written back into this section.
@@ -383,9 +540,14 @@ migration chain.
    `stg_akas.ordering` — widened to `bigint`. One change each, no destination
    statement, no `except` to design.
 3. **A guard**, derived from `scripts/audit_bounded_columns.py` rather than
-   hand-listed, asserting that the `exposed-sqlalchemy` bucket is empty and that
-   the `exposed-copy` bucket is exactly the 31 named here. A count that moves
-   without anybody deciding is the failure this whole record is about.
+   hand-listed. ⚠️ **It must not be spelled "assert the `exposed-sqlalchemy`
+   bucket is empty", which is how the first version of this record specified
+   it** — a totally dead write-site scan satisfies that assertion perfectly, and
+   review demonstrated exactly that by stubbing `write_sites()` to `[]`. The
+   guard asserts the **whole census** against a published figure, in both
+   directions, and it runs `--check`, which now refuses to build a ledger at all
+   when any scan comes back empty. F9 is also where `--check` should join CI:
+   nothing runs it today.
 
 **F9 does not fix the 31 exposed at the COPY, and this is where M9's boundary
 call 8 stands unchanged.** *"31 of the writes never reach a SQLAlchemy `except`
@@ -393,9 +555,15 @@ at all, so no widening of `except IntegrityError` reaches them and there is
 nothing to map"* — every re-measurement above leaves that standing, and adds to
 it. It is now **two** shapes rather than one (`OverflowError` with no SQLSTATE,
 and `22001` with a SQLSTATE on a non-`DBAPIError`), the repair is **two**
-changes rather than one, and the second change is missing at all three places
-the first one already exists. That is a bulk-loader design task with a
-measurement in it, and it is a milestone's work, not a task's.
+changes rather than one, and the second change is missing at all four places the
+first one already exists. That is a bulk-loader design task with a measurement
+in it, and it is a milestone's work, not a task's.
+
+⚠️ **The `31` in "F9 does not fix the 31" is `path`'s figure.** Under `closure`
+the same set is 30 and under `pydantic` 34; the *membership* moves by two
+columns (`jobs.priority`, `tmdb_ids.kind`) and the boundary — everything refused
+inside `copy_records_to_table` — does not. F9's scope is the boundary, not the
+integer.
 
 **Also out of scope and named so nobody re-derives it:** the 9 `enumerate()`
 ordinals; the 6 CHECK-only columns; `titles.popularity`'s infinity; and the
@@ -406,48 +574,75 @@ taxonomy one.
 
 ## Consequences
 
-- **The five numbers become one command.** `--summary` prints every figure this
-  record quotes; `--check` fails when the metadata and the migrations disagree.
-  The next reader does not have to trust this document's arithmetic.
-- **`67` and `5` were right when written; `31` was not, under the rule that
-  produced `67`; `17` cannot be verified at all** because no ledger of it was
-  ever published. All four verdicts are now in PRD 09's bullet with their dates.
-- **The exposed count went up, 45 → 50, and only one of the five is new code.**
-  Rule B at `m08b` gives 49, so **four** of the increase is the rule admitting
-  `bigint` and `halfvec` and **one** is M9. The milestone that fixes it fixes 21.
-  That is the honest shape: naming the leak precisely made it bigger and made the
-  fixable part separable, which is the whole return on writing a ledger instead
-  of a total.
+- **Two of the five numbers reproduce, and three do not.** `67` and `5` were
+  right when written and regenerate under every reading; `17`, `45` and `31` do
+  not, and `17` never could have — no ledger of it was published, so there is
+  not even a membership to compare against. All five verdicts are in PRD 09's
+  bullet with their dates.
+- **The exposed count went up, 45 → 51, and almost none of it is new code.**
+  Rule B under `path` at `m08b` gives 50, so **five** of the increase is the
+  rule (admitting `bigint` and `halfvec`, and refusing two off-path domain
+  bounds) and **one** is M9. Naming the leak precisely made it bigger and made
+  the fixable part separable, which is the whole return on writing a ledger
+  instead of a total.
+- **A ledger that agrees with itself is not a ledger that is right.** This
+  record shipped once, was re-derived cell by cell against its own generator
+  with no drift found, and was still wrong about `tmdb_ids.kind` — because the
+  document and the generator share an error the way two copies of a constant
+  share a typo. The defence that landed is not more checking of the document
+  against the script; it is deriving the disputed fact from the source instead
+  of hand-writing it.
 - **Nothing in `src/` changed in this commit and no test was added.** This is a
   design record; the red belongs to F9, whose test is the guard above.
-- **The ledger will go stale, and it will say so.** `--check` compares two
-  independent derivations of the same 79 columns; a schema change that lands in
-  the models and not the migrations, or the reverse, exits 1.
+- 🔴 **Nothing runs `--check`.** It is not in the gate, not in CI, and the
+  drift it detects is detected only when a person asks. That is stated rather
+  than dressed up: a reassurance nobody executes is the same shape of defect as
+  a number nobody can reproduce. F9 owns wiring it, because F9's guard is a test.
 
 ## Evidence
 
 - **The measurement date is 2026-08-20, at `8ca21af`, head `m09f`** — verified
   by replaying the chain, not by reading a filename.
-- **Metadata and migrations agree column for column at 79.** Zero in either and
-  not the other, over 22 revisions replayed offline.
+- **Metadata and migrations agree at 79, and it is 76 agreements plus 3
+  tautologies.** `genome_scores.relevance`, `user_taste.centroid` and
+  `llm_calls.cost_usd` have their widths written in the migration as imported
+  names (`GENOME_TAG_COUNT`, `EMBEDDING_DIMENSIONS`, `COST_PRECISION`/`SCALE`)
+  which the replay resolves against the *live* package, so those three cannot
+  disagree with the metadata by construction. `--summary` names them. The same
+  mechanism is why `--at m08b` prints `user_taste.centroid` at today's width
+  rather than the 384 `m09e` widened it from.
 - **`--at m08b` prints `VARCHAR 22, INTEGER 44, NUMERIC 1`** (plus the `BIGINT 1`
   and `HALFVEC 3` Rule B adds), so the claim's own three families sum to **67** —
-  the first reproduction of issue #10's headline figure from this repository.
+  **the one genuine first reproduction in this record.**
 - **The CHECK-only count is 6**, matching the plan's `81 = 75 + 6` exactly, and
   the six are listed by the script rather than asserted.
-- **`37 − 6 = 31`** — the narrow-staged bounded destination columns, minus the
-  provably safe among them, reproducing both of the plan's figures under one
-  rule for the first time.
-- **`bulk.py` contains no `try`/`except` statement**, so all seven of its
-  untranslated writers are untranslated by construction rather than by omission
-  at a particular site.
-- **Three for three**, on the candidate fix's own worked examples:
-  `id_crosswalk.imdb_id`, `genome_scores.relevance` and
+- **`37 − 6 = 31` under `path`, `37 − 7 = 30` under `closure`.** The
+  narrow-staged bounded destination columns minus the provably safe among them.
+  Printed by `--summary` as an arithmetic line, so the two operands are visible
+  rather than inferred from the result.
+- **`bulk.py` has no `except` clause and does translate twice** —
+  `refusals_as_conflict` imported at `:83`, used at `:483` and `:778`, plus a
+  `try`/`finally` at `:350`. So its seven untranslated writers are an omission
+  per site, not an absence by construction. **The first version of this record
+  claimed the opposite and drew an inference from it.**
+- **Four for four**, on the candidate fix's own worked examples:
+  `id_crosswalk.imdb_id`, `titles.imdb_id`, `genome_scores.relevance` and
   `title_embeddings.embedding` all stage wide, all surface at the
   `INSERT … SELECT`, and all still leak.
+- **`--summary` prints 7 staging columns wider than their destination**, against
+  the plan's *"exactly three"* — three value-carrying, two `halfvec` casts, and
+  two join keys the name-match picks up and the summary calls out.
 - **`stg_credit_names.ordinal` is `enumerate(rows)`** (`bulk.py:668`), which is
   the plan's one wrong member in its list of three staging-only exposures; the
   right two are `stg_genome.tmdb_id` and `stg_akas.ordering`.
+- **Degradation was tested rather than assumed.** `write_sites() → []`,
+  `staging_ddls() → {}`, `domain_bounds() → {}` and `staged_bounds() → {}` each
+  now raise `DegenerateScan`; dropping `execute` from `_EXECUTING_CALLS` raises
+  on the `unwritten` bucket. An ablation of that list one name at a time shows
+  **only `execute` moves the answer**, and the staleness guard added beside it
+  **found a dead entry on its first run** — `add_all`, listed and called by
+  nothing in `usher`, contributing nothing while looking exactly like a name
+  that contributed everything.
 - **Line numbers in the task plan had drifted** — `bulk.py:768` is a comment and
   the call is at `:778`; `replace_genome_tags` is at `:446` with its
   `refusals_as_conflict` at `:483`. Every citation in this record was

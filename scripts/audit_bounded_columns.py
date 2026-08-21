@@ -7,9 +7,15 @@ repository -- the SQLAlchemy metadata in `usher.db.models`, the source of
 `usher.domain` -- plus an independent replay of `usher/db/migrations/versions/`
 used only to cross-check the first of those.
 
-    uv run python scripts/audit_bounded_columns.py            # the ledger
-    uv run python scripts/audit_bounded_columns.py --summary  # the counts only
-    uv run python scripts/audit_bounded_columns.py --check    # exit 1 on drift
+    uv run python scripts/audit_bounded_columns.py                  # the ledger
+    uv run python scripts/audit_bounded_columns.py --summary        # the counts
+    uv run python scripts/audit_bounded_columns.py --at m08b        # a past head
+    uv run python scripts/audit_bounded_columns.py --reading pydantic
+    uv run python scripts/audit_bounded_columns.py --check          # exit 1 on drift
+
+**Nothing runs this file.** It is not wired into CI and `--check` is not part
+of the gate, so its drift detection is a thing a person runs, not a thing that
+fires. F9 owns closing that, because F9's guard is a test and tests do run.
 
 **Why this exists.** *"67 bounded columns, 17 provably safe, 5 already
 translated, 45 exposed, 31 through the COPY path"* has been quoted in
@@ -53,6 +59,7 @@ import enum
 import pathlib
 import re
 import sys
+import typing
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
@@ -83,7 +90,38 @@ def _written_sources() -> list[pathlib.Path]:
 # on the prefix rather than on the SQLAlchemy class, so `VARCHAR(16)` and
 # `NUMERIC(12, 8)` carry their width into the ledger and a reader can check the
 # classification against the DDL without holding the type hierarchy in mind.
-_BOUNDED_PREFIXES = ("VARCHAR(", "CHAR(", "SMALLINT", "INTEGER", "BIGINT", "NUMERIC(", "HALFVEC(")
+_BOUNDED_PREFIXES = (
+    "VARCHAR(",
+    "CHAR(",
+    "SMALLINT",
+    "INTEGER",
+    "BIGINT",
+    "NUMERIC(",
+    "HALFVEC(",
+    # `VECTOR(` for the reason Rule B admits `HALFVEC(` -- a `list[float]` has
+    # no fixed length either. It was missing from both this tuple and
+    # `_literal_type`, so a `vector(N)` column added tomorrow would have
+    # vanished from the metadata side *and* the replay side and `--check`
+    # would have reported zero drift on a column neither one could see.
+    "VECTOR(",
+)
+
+# The type families this file has decided about. Anything else is a column the
+# rule has never been applied to, and it must stop the run rather than be
+# silently sorted into "not bounded" -- which is how `VECTOR(` hid.
+_UNBOUNDED_PREFIXES = (
+    "TEXT",
+    "UUID",
+    "BOOLEAN",
+    "TIMESTAMP",
+    "DATE",
+    "JSONB",
+    "BYTEA",
+    "TSVECTOR",
+    "FLOAT",
+    "DOUBLE PRECISION",
+    "REAL",
+)
 
 # The three failure shapes a bounded column can produce, which is the
 # distinction issue #10 does not make and ADR-0041 turns into a decision.
@@ -103,7 +141,17 @@ class StagingColumn:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class WriteSite:
-    """A repository method that issues at least one write."""
+    """A repository method that issues at least one write.
+
+    **`destinations` is per TABLE, never per column**, and anything consuming
+    this must know it. A method whose SQL names `titles` is credited with every
+    bounded column in `titles`, so `bulk.py:apply_ratings` appears against
+    `titles.original_language`, which it never writes. Bucket-wise that is
+    pessimistic and therefore safe. **For F9 it is not**: F9's unit of work is
+    the *site*, so a run parametrised over `(column, writer)` straight off this
+    field would wrap sites that cannot refuse that column. Narrow by reading
+    each statement's own column list first.
+    """
 
     module: str
     qualname: str
@@ -115,7 +163,12 @@ class WriteSite:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class LedgerRow:
-    """One bounded destination column, with everything the ADR quotes."""
+    """One bounded destination column, with everything the ADR quotes.
+
+    `writers` carries `WriteSite.destinations`' per-table attribution -- see
+    that class. It answers "which methods write this column's table", not
+    "which methods write this column".
+    """
 
     table: str
     column: str
@@ -137,8 +190,25 @@ def _rendered_type(column: Column[Any]) -> str:
     return str(column.type.compile(dialect=postgresql.dialect()))
 
 
+class UnknownTypeFamily(RuntimeError):
+    """A column type Rule B has never been applied to.
+
+    Loud rather than silent, on both sides of the cross-check: an unrecognised
+    family sorted into "not bounded" is invisible to `--check`, because the
+    metadata side and the replay side would agree about a column neither of
+    them can see.
+    """
+
+
 def _is_bounded(rendered: str) -> bool:
-    return rendered.startswith(_BOUNDED_PREFIXES)
+    if rendered.startswith(_BOUNDED_PREFIXES):
+        return True
+    if rendered.startswith(_UNBOUNDED_PREFIXES) or rendered.endswith("[]"):
+        return False
+    raise UnknownTypeFamily(
+        f"{rendered!r} is neither in _BOUNDED_PREFIXES nor in _UNBOUNDED_PREFIXES. "
+        "Apply Rule B to it and add it to one of them; do not let it default."
+    )
 
 
 def bounded_columns() -> list[tuple[str, str, str]]:
@@ -306,7 +376,7 @@ def _module_texts(tree: ast.Module) -> dict[str, str]:
             references[name] = referenced - {name}
 
     resolved = dict(own)
-    for _ in range(4):
+    for _ in range(_FIXED_POINT_ROUNDS):
         moved = False
         for name, referenced in references.items():
             reachable = "\n".join(
@@ -317,19 +387,44 @@ def _module_texts(tree: ast.Module) -> dict[str, str]:
                 resolved[name] = merged
                 moved = True
         if not moved:
-            break
-    return resolved
+            return resolved
+    raise DegenerateScan(
+        "module-name resolution did not converge -- a deeper reference chain than "
+        f"{_FIXED_POINT_ROUNDS} rounds means this scan silently truncated"
+    )
+
+
+#: The cap on both fixed points below. **It raises rather than truncates**, and
+#: that is not defensive: at four rounds it *already* truncated on
+#: `src/usher/composition.py`, which is harmless there only because that module
+#: writes nothing. A cap that silently stops is a scan that silently goes
+#: partial, which is the class of failure this file exists to make impossible.
+_FIXED_POINT_ROUNDS = 12
 
 
 # The calls that actually reach the database. A function holding SQL is not a
 # write site: `watch_state.py`'s `_deduped`, `_update` and `_insert` are string
 # builders, and counting them as writers put five "no `except`" verdicts on
 # `watch_states` columns that `merge_from_source` does translate.
+#
+# **Ablated one name at a time, 2026-08-20, and only `execute` moves the
+# answer** -- dropping it raises `DegenerateScan` on the `unwritten` bucket,
+# and dropping any of the other eight changes no count at all, because
+# `_executing_functions` takes a transitive closure and `_rowcount`, `_stage`
+# and `_write_result` are all defined in the same module as their callers.
+# They stay listed rather than trimmed because `stage_records` and
+# `copy_records_to_table` are defined *elsewhere* (`db/staging.py`, asyncpg) and
+# would need this list the moment a repository stopped wrapping them, and
+# because the list is a statement of what reaches the database rather than a
+# minimal working set. The ablation is recorded so nobody re-derives it, and
+# `_check_executing_calls_are_live` below is what stops the list going stale --
+# **which it caught one of on its very first run**: `add_all` was listed here
+# and nothing in `usher` calls it, so it had been contributing nothing while
+# looking exactly like a name that contributed everything.
 _EXECUTING_CALLS = frozenset(
     {
         "execute",
         "add",
-        "add_all",
         "flush",
         "stage_records",
         "_stage",
@@ -338,6 +433,24 @@ _EXECUTING_CALLS = frozenset(
         "copy_records_to_table",
     }
 )
+
+
+def _check_executing_calls_are_live() -> None:
+    """Every name in `_EXECUTING_CALLS` must be called somewhere in the package.
+
+    A hand-maintained name list degrades by the *code* being renamed, not by
+    the list being edited -- and a name that matches nothing contributes
+    nothing while looking exactly like a name that matches everything.
+    """
+    seen: set[str] = set()
+    for path in _written_sources():
+        seen |= _called_names(ast.parse(path.read_text()))
+    missing = sorted(_EXECUTING_CALLS - seen)
+    if missing:
+        raise DegenerateScan(
+            f"_EXECUTING_CALLS names nothing this package calls: {missing} -- "
+            "the list has gone stale against a rename"
+        )
 
 
 def _called_names(node: ast.AST) -> set[str]:
@@ -365,12 +478,14 @@ def _executing_functions(tree: ast.Module) -> set[str]:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
     }
     executing = {name for name, calls in direct.items() if calls & _EXECUTING_CALLS}
-    for _ in range(4):
+    for _ in range(_FIXED_POINT_ROUNDS):
         grown = {name for name, calls in direct.items() if calls & executing}
         if grown <= executing:
-            break
+            return executing
         executing |= grown
-    return executing
+    raise DegenerateScan(
+        f"the executing-call closure did not converge in {_FIXED_POINT_ROUNDS} rounds"
+    )
 
 
 # Every mapped class, so an ORM write can be attributed to a table without a
@@ -553,7 +668,10 @@ def _bound_of(annotation: Any, metadata: Sequence[Any]) -> str:
         pattern = getattr(item, "pattern", None)
         if isinstance(pattern, str):
             parts.append(f"pattern={pattern}")
-    return ",".join(sorted(parts)) if parts else ""
+    # `"; "` and not `","`: the one pattern in this package is
+    # `^tt\d{7,8}$`, whose own text contains a comma, so a comma-joined
+    # bound cannot be parsed back apart.
+    return "; ".join(sorted(parts)) if parts else ""
 
 
 # `usher.domain` declares **no `max_length` at all** -- measured 2026-08-20,
@@ -581,6 +699,131 @@ def domain_bounds() -> dict[tuple[str, str], str]:
                 if bound:
                     bounds[(table, name)] = bound
                     break
+    return bounds
+
+
+# --------------------------------------------------------------------------
+# 3b. The bound on the path that actually writes
+#
+# **This section exists because the hand-maintained table it replaced was
+# wrong, and wrong in a way the ledger's own self-agreement could not see.**
+# Until 2026-08-20 the staged bound was inferred from `_DOMAIN_FOR_TABLE`
+# alone, which knows only `usher.domain`. `tmdb_ids` has no domain model, so
+# `tmdb_ids.kind` came back unbounded and landed in `exposed-copy` as a
+# `22001` -- while `titles.kind`, which is **the same construction one file
+# over** (`row.kind.value` off a `TitleKind` on a frozen dataclass), was
+# classified `safe` by a two-entry hand table. One rule, two answers, one
+# shape. Deriving the bound from the writer's own parameter type is what makes
+# that impossible rather than merely noticed.
+
+
+def _staging_sources() -> dict[str, tuple[str, type[Any]]]:
+    """`stg_x -> (writer qualname, the class its rows arrive as)`.
+
+    Every staging writer in this package takes exactly one `Sequence[X]`
+    parameter, so `X` is the type whose fields really reach the COPY -- a
+    pydantic model on the ingest paths and a frozen dataclass from
+    `usher.ports.bulk` on the bulk ones. Resolved through the *repository
+    module's own namespace*, so a renamed import is an immediate failure.
+    """
+    sources: dict[str, tuple[str, type[Any]]] = {}
+    for path in _written_sources():
+        tree = ast.parse(path.read_text())
+        texts = _module_texts(tree)
+        module = _import_of(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            staged = {
+                name
+                for statement in [
+                    *_sql_literals(node),
+                    *(
+                        texts[inner.id]
+                        for inner in ast.walk(node)
+                        if isinstance(inner, ast.Name) and inner.id in texts
+                    ),
+                ]
+                for name in _STAGING_NAME.findall(statement)
+                if _DDL.search(statement)
+            }
+            if not staged:
+                continue
+            element = _sequence_element(node, module)
+            if element is None:
+                continue
+            for name in staged:
+                sources.setdefault(name, (f"{path.name}:{node.name}", element))
+    return sources
+
+
+def _import_of(path: pathlib.Path) -> Any:
+    dotted = ".".join(path.relative_to(_PACKAGE.parent).with_suffix("").parts)
+    return __import__(dotted, fromlist=["__name__"])
+
+
+def _sequence_element(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, module: Any
+) -> type[Any] | None:
+    """`rows: Sequence[TmdbId]` -> the `TmdbId` class, resolved in `module`."""
+    for argument in node.args.args + node.args.kwonlyargs:
+        annotation = argument.annotation
+        if annotation is None:
+            continue
+        text = ast.unparse(annotation)
+        match = re.fullmatch(r"Sequence\[(\w+)\]", text)
+        if match is None:
+            continue
+        resolved = getattr(module, match.group(1), None)
+        if isinstance(resolved, type):
+            return resolved
+    return None
+
+
+def _fields_of(model: type[Any]) -> dict[str, tuple[str, bool]]:
+    """`field -> (its bound, whether a validator enforces it at runtime)`.
+
+    The second half of the pair is the whole of reading 3 below, and it is why
+    this returns a pair rather than a string: a `pattern` on a pydantic model
+    is applied when that model is constructed, and the identical `pattern`
+    would be inert on a frozen dataclass, which validates nothing.
+    """
+    if issubclass(model, BaseModel):
+        found: dict[str, tuple[str, bool]] = {}
+        for name, info in model.model_fields.items():
+            args = getattr(info.annotation, "__args__", ())
+            for candidate in (info.annotation, *args):
+                bound = _bound_of(candidate, info.metadata)
+                if bound:
+                    found[name] = (bound, True)
+                    break
+        return found
+    try:
+        hints: dict[str, Any] = typing.get_type_hints(model)
+    except (NameError, TypeError):  # pragma: no cover - defensive
+        return {}
+    plain: dict[str, tuple[str, bool]] = {}
+    for name, annotation in hints.items():
+        for candidate in (annotation, *getattr(annotation, "__args__", ())):
+            bound = _bound_of(candidate, ())
+            if bound:
+                plain[name] = (bound, False)
+                break
+    return plain
+
+
+def staged_bounds() -> dict[tuple[str, str], tuple[str, bool, str]]:
+    """`(stg_table, column) -> (bound, validated at runtime, where it came from)`.
+
+    Matched by **name**, which is what the `INSERT ... SELECT` matches on too:
+    `stg_tmdb_ids.kind` is fed by `TmdbId.kind`. A staging column with no field
+    of that name -- `ordinal`, or an `id` minted by `new_id()` -- gets nothing,
+    which is the right answer rather than a gap.
+    """
+    bounds: dict[tuple[str, str], tuple[str, bool, str]] = {}
+    for staging, (writer, model) in _staging_sources().items():
+        for name, (bound, validated) in _fields_of(model).items():
+            bounds[(staging, name)] = (bound, validated, f"{model.__name__} via {writer}")
     return bounds
 
 
@@ -635,9 +878,9 @@ def _literal_type(node: ast.expr, names: Mapping[str, int]) -> str | None:
         precision = keywords.get("precision", arguments[0] if arguments else None)
         scale = keywords.get("scale", arguments[1] if len(arguments) > 1 else None)
         return f"NUMERIC({precision}, {scale})" if precision is not None else None
-    if name == "HALFVEC":
+    if name in {"HALFVEC", "VECTOR"}:
         dimensions = keywords.get("dim", arguments[0] if arguments else None)
-        return f"HALFVEC({dimensions})" if dimensions is not None else None
+        return f"{name}({dimensions})" if dimensions is not None else None
     return None
 
 
@@ -724,8 +967,15 @@ def migration_bounded_columns(stop_after: str | None = None) -> set[tuple[str, s
     "67 bounded columns" was counted against, and until this argument existed
     there was no way to score that number without checking out M8's tree.
     """
+    chain = _revision_order()
+    known = {_revision_of(ast.parse(path.read_text())) for path in chain}
+    if stop_after is not None and stop_after not in known:
+        # Quality 2: `--at m09b` used to print the head count and exit 0,
+        # because the `break` fires only on a match. A revision that does not
+        # exist must not answer as though it did.
+        raise ValueError(f"no migration with revision {stop_after!r}; chain is {sorted(known)}")
     schema: dict[str, dict[str, str]] = {}
-    for path in _revision_order():
+    for path in chain:
         tree = ast.parse(path.read_text())
         upgrade = next(
             (
@@ -890,27 +1140,84 @@ def _shape(destination_type: str, staging_type: str | None) -> str:
     return SHAPE_SQLA
 
 
-def build_ledger() -> list[LedgerRow]:
+#: The three readings of "the value set is closed", and the ADR publishes all
+#: three because choosing between them moves published figures and the choice
+#: has to be visible rather than fallen into.
+#:
+#: - `closure`  -- a bound declared anywhere counts, including a `pattern` on a
+#:                 pydantic model that the writing path never constructs.
+#: - `path`     -- **the default.** Only the bound on the class the writer
+#:                 actually takes counts. An enum still counts on a frozen
+#:                 dataclass, because `row.kind.value` closes the set by itself:
+#:                 anything that is not an enum member has no `.value`.
+#: - `pydantic` -- stricter still: a bound counts only where a validator runs,
+#:                 so a frozen dataclass's annotation closes nothing.
+READINGS = ("closure", "path", "pydantic")
+DEFAULT_READING = "path"
+
+
+class DegenerateScan(RuntimeError):
+    """A scan found nothing, which must fail rather than read as a clean sheet.
+
+    This project's own rule, and the reason this exception exists rather than a
+    comment: *a scan that globs nothing passes identically to a scan that
+    passes.* Stubbing `write_sites()` to `[]` used to leave every exposed
+    bucket empty and exit 0 -- and ADR-0041 specifies F9's guard as "assert the
+    `exposed-sqlalchemy` bucket is empty", which a dead scan satisfies
+    perfectly. Every derivation this file depends on is checked for emptiness
+    before a single column is classified.
+    """
+
+
+def build_ledger(reading: str = DEFAULT_READING, at: str | None = None) -> list[LedgerRow]:
+    """The ledger, optionally over the column set of a *past* migration head.
+
+    `at` narrows the columns to what the replay says existed at that revision
+    and classifies them with **today's** source. That is the only past-head
+    statement this file can honestly make, and it is labelled as such wherever
+    it is printed: the writers, the `except` clauses and the source classes are
+    all today's, so `--at m08b` answers "how would this rule score M8's schema",
+    not "what did M8 measure".
+    """
+    if reading not in READINGS:
+        raise ValueError(f"unknown reading {reading!r}; expected one of {READINGS}")
+    _check_executing_calls_are_live()
     staging = staging_ddls()
     edges = staged_into()
     sites = write_sites()
+    columns = bounded_columns() if at is None else sorted(migration_bounded_columns(at))
     bounds = domain_bounds()
+    staged = staged_bounds()
+
+    if not staging:
+        raise DegenerateScan("no CREATE TEMP TABLE found -- the staging scan is dead")
+    if not sites:
+        raise DegenerateScan("no write site found -- the write-site scan is dead")
+    if not columns:
+        raise DegenerateScan("no bounded column found -- the metadata scan is dead")
+    if not bounds:
+        raise DegenerateScan("no domain bound found -- the pydantic scan is dead")
+    if not staged:
+        raise DegenerateScan("no staged bound found -- the source-class scan is dead")
+    missing = sorted(set(edges) - set(staging))
+    if missing:
+        raise DegenerateScan(f"staging tables read but never declared: {missing}")
 
     feeds: dict[tuple[str, str], StagingColumn] = {}
     for staging_table, destinations in edges.items():
         for destination in destinations:
-            for column in staging.get(staging_table, {}).values():
-                feeds.setdefault((destination, column.name), column)
+            for staging_column in staging.get(staging_table, {}).values():
+                feeds.setdefault((destination, staging_column.name), staging_column)
 
     rows: list[LedgerRow] = []
-    for table, column, sql_type in bounded_columns():
+    for table, column, sql_type in columns:
         writers = [site for site in sites if table in site.destinations]
         fed = feeds.get((table, column))
         staged_writers = [site for site in writers if any(site.staged)]
         shape = _shape(sql_type, fed.sql_type if fed and staged_writers else None)
-        domain = bounds.get((table, column), "")
+        bound = _bound_for(reading, table, column, fed, bounds, staged)
         translations = {site.translation for site in writers}
-        bucket, reason = _classify(sql_type, domain, shape, writers, table, column)
+        bucket, reason = _classify(sql_type, bound, shape, writers, table, column)
         rows.append(
             LedgerRow(
                 table=table,
@@ -922,10 +1229,67 @@ def build_ledger() -> list[LedgerRow]:
                 staging=f"{fed.table}.{fed.name} {fed.sql_type}" if fed else "-",
                 writers=", ".join(f"{site.module}:{site.qualname}" for site in writers) or "-",
                 translation=", ".join(sorted(translations)) or "-",
-                domain=domain or "-",
+                domain=bound.text or "-",
             )
         )
+    unwritten = [row for row in rows if row.bucket == "unwritten"]
+    if unwritten and at is None:
+        raise DegenerateScan(
+            "columns with no writer at all, which means the write-site scan "
+            f"degraded rather than that nothing writes them: {[r.column for r in unwritten]}"
+        )
     return rows
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Bound:
+    """What closes a column's value set, and where that claim comes from."""
+
+    text: str
+    source: str
+
+
+def _bound_for(
+    reading: str,
+    table: str,
+    column: str,
+    fed: StagingColumn | None,
+    domain: Mapping[tuple[str, str], str],
+    staged: Mapping[tuple[str, str], tuple[str, bool, str]],
+) -> Bound:
+    """The bound this reading credits, and nothing else.
+
+    The `path` and `pydantic` readings deliberately do **not** fall back to the
+    domain model for a staged column. That fallback is what produced the
+    original defect: `titles.imdb_id`'s `pattern` lives on `usher.domain.title.
+    Title`, and `bulk.py:upsert_titles` takes `ports.bulk.ImdbTitle`, whose
+    `imdb_id` is a bare `str` -- so crediting the pattern there asserts a
+    validator that the writing path never runs.
+    """
+    on_path = staged.get((fed.table, fed.name)) if fed else None
+    declared = domain.get((table, column), "")
+    if reading == "closure":
+        if declared:
+            return Bound(declared, "declared on the domain model")
+        if on_path:
+            return Bound(on_path[0], on_path[2])
+        return Bound("", "")
+
+    # Staged: the source class is authoritative, **including its silence.**
+    # Falling back to the domain model here is what produced the original
+    # defect twice over -- `titles.imdb_id`'s `pattern` is on `domain.Title`
+    # while `upsert_titles` takes `ports.bulk.ImdbTitle` (a bare `str`), and
+    # `jobs.priority`'s `ge=0, le=100` is on `domain.Job` while `enqueue`
+    # takes `JobRequest` (a bare `int`). Crediting either asserts a validator
+    # the writing path never runs.
+    if fed is not None:
+        if on_path is None:
+            return Bound("", "")
+        text, validated, where = on_path
+        if reading == "pydantic" and not validated:
+            return Bound("", "")
+        return Bound(text, where)
+    return Bound(declared, "declared on the domain model") if declared else Bound("", "")
 
 
 # `genome_tags.tag_id` is the one column in this schema bounded by neither its
@@ -942,27 +1306,10 @@ _BATCH_BOUNDED: Mapping[tuple[str, str], str] = {
 
 _TRANSLATING = frozenset({"refusals_as_conflict", "except DBAPIError"})
 
-# One column, and it is the one place `safe` means something weaker than it
-# does everywhere else. `titles.kind` is `TitleKind` on `usher.domain.title.
-# Title`, which is pydantic and validates; on the *bulk* path the same column
-# is fed by `usher.ports.bulk.ImdbTitle.kind`, a **frozen dataclass** field,
-# which is a mypy claim and not a runtime one. Named rather than re-bucketed:
-# the value set is still closed, and what is weaker is who closes it.
-_ANNOTATION_ONLY: Mapping[tuple[str, str], str] = {
-    ("titles", "kind"): (
-        " -- WEAKER on the bulk path: fed by ports.bulk.ImdbTitle.kind, a frozen "
-        "dataclass field, so the enum is enforced by mypy and not at runtime"
-    ),
-    ("titles", "imdb_id"): (
-        " -- WEAKER on the bulk path: fed by ports.bulk.ImdbTitle.imdb_id, a bare "
-        "`str` on a frozen dataclass, so the pattern is not applied there at all"
-    ),
-}
-
 
 def _classify(
     sql_type: str,
-    domain: str,
+    bound: Bound,
     shape: str,
     writers: Sequence[WriteSite],
     table: str,
@@ -974,16 +1321,15 @@ def _classify(
     a refusal escape, so one translated writer does not launder a sibling that
     has no `except` -- `titles` has eight writers and only some of them
     translate. The `safe` bucket is the only one that does not depend on a
-    writer at all, which is why it is decided first: a value the domain refuses
-    to construct never reaches a driver by any route.
+    writer's `except` at all, which is why it is decided first: a value nothing
+    can construct never reaches a driver by any route.
     """
-    note = _ANNOTATION_ONLY.get((table, column), "")
-    if domain == "enum":
-        return "safe", f"enum-backed: the field's value set is a closed Python enum{note}"
+    if bound.text == "enum":
+        return "safe", f"enum-backed, {bound.source}: `.value` off a member closes the set"
     if (table, column) in _BATCH_BOUNDED:
         return "safe", _BATCH_BOUNDED[(table, column)]
-    if _fully_bounded(sql_type, domain):
-        return "safe", f"the domain field is bounded on every side the column is ({domain}){note}"
+    if _fully_bounded(sql_type, bound.text):
+        return "safe", f"bounded on every side the column is ({bound.text}), {bound.source}"
     if shape in {SHAPE_OVERFLOW, SHAPE_22001}:
         return "exposed-copy", f"refused inside copy_records_to_table as {shape}"
     if not writers:
@@ -1002,18 +1348,28 @@ def _fully_bounded(sql_type: str, domain: str) -> bool:
     every side the column is, and exposed when it is bounded on fewer."""
     if not domain:
         return False
+    declared_parts = dict(part.partition("=")[::2] for part in domain.split("; "))
     if sql_type.startswith(("INTEGER", "SMALLINT", "BIGINT", "NUMERIC(")):
-        return ("le=" in domain or "lt=" in domain) and ("ge=" in domain or "gt=" in domain)
+        above = {"le", "lt"} & declared_parts.keys()
+        below = {"ge", "gt"} & declared_parts.keys()
+        return bool(above and below)
     if sql_type.startswith(("VARCHAR(", "CHAR(")):
         declared = re.search(r"\((\d+)\)", sql_type)
         if declared is None:
             return False
         width = int(declared.group(1))
-        if f"max_length={width}" in domain:
+        # Parsed rather than substring-matched. `f"max_length={width}" in
+        # domain` reads `max_length=160` as satisfying `VARCHAR(16)`, and
+        # `f"pattern={p}" in domain` matches any pattern with `p` as a prefix.
+        # Both are dormant today only because `usher.domain` declares zero
+        # `max_length` and exactly one pattern -- which is precisely the state
+        # question (5) debates changing.
+        length = declared_parts.get("max_length", "")
+        if length.isdigit() and int(length) <= width:
             return True
-        for pattern, longest in _PATTERN_MAX_LENGTH.items():
-            if f"pattern={pattern}" in domain and longest <= width:
-                return True
+        pattern = declared_parts.get("pattern")
+        if pattern is not None and _PATTERN_MAX_LENGTH.get(pattern, width + 1) <= width:
+            return True
     return False
 
 
@@ -1029,7 +1385,7 @@ _HEADINGS = (
     "shape",
     "staging column",
     "domain bound",
-    "writer",
+    "writer (per table -- see WriteSite)",
     "translation",
     "reason",
 )
@@ -1051,6 +1407,8 @@ def render(rows: Sequence[LedgerRow]) -> str:
         )
         for row in rows
     ]
+    if not body:
+        raise DegenerateScan("nothing to render -- an empty ledger is a dead scan, not a result")
     widths = [
         max(len(_HEADINGS[index]), *(len(line[index]) for line in body))
         for index in range(len(_HEADINGS))
@@ -1108,27 +1466,87 @@ def staging_shape() -> tuple[list[str], list[str]]:
     return wider, orphans
 
 
-def summary(rows: Sequence[LedgerRow]) -> str:
-    counted: dict[str, int] = {}
+def counts(rows: Sequence[LedgerRow]) -> dict[str, int]:
+    """The bucket census. One function, so `--summary` and `--check` cannot
+    read the same ledger and disagree about what it says."""
+    counted: dict[str, int] = {bucket: 0 for bucket in BUCKETS}
     for row in rows:
         counted[row.bucket] = counted.get(row.bucket, 0) + 1
+    return counted
+
+
+BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
+
+#: The figures ADR-0041 publishes, keyed by reading. **This is the drift check
+#: with teeth**: `--check` compares the live ledger against it, so a change to
+#: the schema, to a writer's `except`, or to a source class that moves a column
+#: between buckets fails the run and names the document that has gone stale.
+#: A cross-check that only compared the metadata against the migrations could
+#: not see any of that -- every `shape`, `staging`, `writer` and `translation`
+#: cell F9 consumes had no drift check at all.
+PUBLISHED: Mapping[str, Mapping[str, int]] = {
+    "closure": {"safe": 20, "translated": 10, "exposed-copy": 30, "exposed-sqlalchemy": 19},
+    "path": {"safe": 18, "translated": 10, "exposed-copy": 31, "exposed-sqlalchemy": 20},
+    "pydantic": {"safe": 14, "translated": 10, "exposed-copy": 34, "exposed-sqlalchemy": 21},
+}
+
+#: Same, at M8's head, which is what the roadmap's corrections are scored
+#: against. `17` appears in none of them, and that is the finding.
+PUBLISHED_AT_M08B: Mapping[str, Mapping[str, int]] = {
+    "closure": {"safe": 18, "translated": 5, "exposed-copy": 30, "exposed-sqlalchemy": 18},
+    "path": {"safe": 16, "translated": 5, "exposed-copy": 31, "exposed-sqlalchemy": 19},
+    "pydantic": {"safe": 12, "translated": 5, "exposed-copy": 34, "exposed-sqlalchemy": 20},
+}
+
+
+def readings_table() -> str:
+    """Every reading's arithmetic at both heads, printed together.
+
+    Printed rather than chosen-and-hidden because the choice between them moves
+    published figures: `safe` runs 20/18/14 today and 18/16/12 at `m08b`. A
+    reader who cannot see the other two columns cannot tell a decision from an
+    accident.
+    """
+    lines = ["reading            safe  transl  copy  sqla  exposed  (m09f / m08b)"]
+    for reading in READINGS:
+        for label, at in (("m09f", None), ("m08b", "m08b")):
+            got = counts(build_ledger(reading, at=at))
+            exposed = got["exposed-copy"] + got["exposed-sqlalchemy"]
+            marker = "*" if reading == DEFAULT_READING else " "
+            lines.append(
+                f"{marker}{reading:<10} {label}  {got['safe']:>4}  {got['translated']:>6}  "
+                f"{got['exposed-copy']:>4}  {got['exposed-sqlalchemy']:>4}  {exposed:>7}"
+            )
+    lines.append(f"  (* = the reading ADR-0041 adopts: {DEFAULT_READING})")
+    return "\n".join(lines)
+
+
+def summary(rows: Sequence[LedgerRow], reading: str = DEFAULT_READING) -> str:
+    counted = counts(rows)
     families: dict[str, int] = {}
     for row in rows:
         family = re.sub(r"\(.*", "", row.sql_type)
         families[family] = families.get(family, 0) + 1
     copy_shapes: dict[str, int] = {}
+    narrow_staged = 0
     for row in rows:
+        if row.shape in {SHAPE_OVERFLOW, SHAPE_22001}:
+            narrow_staged += 1
         if row.bucket == "exposed-copy":
             copy_shapes[row.shape] = copy_shapes.get(row.shape, 0) + 1
+    safe_narrow = narrow_staged - counted["exposed-copy"]
 
     check_only = check_bounded_columns()
     wider, orphans = staging_shape()
     metadata_set = {(table, column, sql_type) for table, column, sql_type in bounded_columns()}
     replayed = migration_bounded_columns()
     lines = [
-        f"bounded columns (ADR-0041's rule): {len(rows)}",
+        f"bounded columns (ADR-0041's rule, reading={reading}): {len(rows)}",
         "  by type family: " + ", ".join(f"{k} {v}" for k, v in sorted(families.items())),
         "  by bucket:      " + ", ".join(f"{k} {v}" for k, v in sorted(counted.items())),
+        f"  narrow-staged bounded destination columns: {narrow_staged}"
+        f", of which {safe_narrow} provably safe"
+        f" -> {narrow_staged} - {safe_narrow} = {counted['exposed-copy']} exposed at the COPY",
         "  COPY-path failure shapes: "
         + (", ".join(f"{k} {v}" for k, v in sorted(copy_shapes.items())) or "none"),
         f"CHECK-only value bounds (excluded by the rule): {len(check_only)}",
@@ -1147,48 +1565,114 @@ def summary(rows: Sequence[LedgerRow]) -> str:
     only_migrations = sorted(replayed - metadata_set)
     lines.append(f"  in the metadata and not in the replay: {only_metadata or 'none'}")
     lines.append(f"  in the replay and not in the metadata: {only_migrations or 'none'}")
+    lines.append(
+        "  NOT fully independent, and the exception is named rather than glossed: "
+        f"{len(_TAUTOLOGOUS)} of the {len(replayed)} widths are written in the "
+        "migration as an imported name that this replay resolves against the *live* "
+        "package, so they cannot disagree with the metadata by construction --"
+    )
+    lines += [f"    {table}.{column}" for table, column in sorted(_TAUTOLOGOUS)]
+    lines.append(
+        "    (the same mechanism is why `--at m08b` prints user_taste.centroid at "
+        "today's width rather than the 384 m09e widened it from)"
+    )
+    lines.append("")
+    lines.append(readings_table())
     return "\n".join(lines)
+
+
+#: The three columns whose width the migration chain writes as an imported
+#: constant -- `HALFVEC(GENOME_TAG_COUNT)`, `HALFVEC(EMBEDDING_DIMENSIONS)` and
+#: `sa.Numeric(COST_PRECISION, COST_SCALE)`. Resolving those against the live
+#: package is what lets the replay run at all, and it also means their
+#: agreement with the metadata is a tautology rather than a check. Named here
+#: so "79 from each, zero drift" is read as 76 agreements and 3 tautologies.
+_TAUTOLOGOUS = (
+    ("genome_scores", "relevance"),
+    ("user_taste", "centroid"),
+    ("llm_calls", "cost_usd"),
+)
+
+
+def _drift(reading: str) -> list[str]:
+    """Everything `--check` compares. Empty means no drift.
+
+    Three comparisons, not one. The column set against the migration replay is
+    the weakest of them and was the only one this file had: it cannot see a
+    writer losing its `except`, a source class losing a bound, or a staging
+    DDL widening -- every cell F9 actually consumes.
+    """
+    complaints: list[str] = []
+    metadata_set = set(bounded_columns())
+    replayed = migration_bounded_columns()
+    if metadata_set != replayed:
+        complaints.append(
+            f"metadata/migration drift: only-metadata={sorted(metadata_set - replayed)} "
+            f"only-migrations={sorted(replayed - metadata_set)}"
+        )
+    for label, published, at in (
+        ("m09f", PUBLISHED, None),
+        ("m08b", PUBLISHED_AT_M08B, "m08b"),
+    ):
+        for name in READINGS:
+            got = counts(build_ledger(name, at=at))
+            want = dict(published[name])
+            if {k: got[k] for k in want} != want:
+                complaints.append(
+                    f"bucket drift at {label} under reading={name}: "
+                    f"ADR-0041 publishes {want}, the ledger says "
+                    f"{ {k: got[k] for k in want} }"
+                )
+    if reading not in READINGS:  # pragma: no cover - argparse constrains this
+        complaints.append(f"unknown reading {reading!r}")
+    return complaints
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        prog="audit_bounded_columns",
+        description=(
+            "The per-column bounded-column ledger behind ADR-0041 and issue #10. "
+            "Offline: no database, no socket, nothing written. See the module "
+            "docstring for the bounding rule and the three readings of it."
+        ),
     )
     parser.add_argument("--summary", action="store_true", help="print the counts only")
     parser.add_argument(
         "--check",
         action="store_true",
-        help="exit 1 if the metadata and the migration replay disagree",
+        help="exit 1 on any drift from the figures ADR-0041 publishes, at both heads",
     )
     parser.add_argument(
         "--at",
         metavar="REVISION",
-        help="count the bounded columns at a past migration head (e.g. m08b), off the replay",
+        help=(
+            "score a past migration head (e.g. m08b): that revision's columns, "
+            "classified with today's writers and source classes"
+        ),
+    )
+    parser.add_argument(
+        "--reading",
+        choices=READINGS,
+        default=DEFAULT_READING,
+        help=f"which reading of 'the value set is closed' to apply (default: {DEFAULT_READING})",
     )
     arguments = parser.parse_args(argv)
 
-    if arguments.at:
-        past = migration_bounded_columns(stop_after=arguments.at)
-        families: dict[str, int] = {}
-        for _, _, sql_type in past:
-            family = re.sub(r"\(.*", "", sql_type)
-            families[family] = families.get(family, 0) + 1
-        print(f"bounded columns at {arguments.at}: {len(past)}")
-        print("  by type family: " + ", ".join(f"{k} {v}" for k, v in sorted(families.items())))
-        for row in sorted(past):
-            print("    " + ".".join(row[:2]) + " " + row[2])
-        return 0
+    if arguments.check:
+        complaints = _drift(arguments.reading)
+        for complaint in complaints:
+            print(complaint)
+        print("no drift" if not complaints else f"{len(complaints)} drift(s)")
+        return 1 if complaints else 0
 
-    rows = build_ledger()
+    rows = build_ledger(arguments.reading, at=arguments.at)
     if not arguments.summary:
         print(render(rows))
         print()
-    print(summary(rows))
-
-    if arguments.check:
-        metadata_set = {(table, column, sql_type) for table, column, sql_type in bounded_columns()}
-        if metadata_set != migration_bounded_columns():
-            return 1
+    if arguments.at:
+        print(f"** {arguments.at}'s columns, classified with TODAY's source **")
+    print(summary(rows, arguments.reading))
     return 0
 
 
