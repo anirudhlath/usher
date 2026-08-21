@@ -33,11 +33,10 @@ root.
 `media_items` is the table that proves it. PRD 08 lists *"manual unmatched
 resolutions"* as precious; there is no such table. What that names is two
 **columns** -- `media_items.title_id` and `media_items.episode_id`, written
-by `db/repositories/media_item.py`'s `attach_title` and reached by
-`api/routers/unmatched.py`'s resolve route. Every other column of
-`media_items` is rebuilt by the next source walk, and on the household this
-project measures that is 1,126,789 rows to carry for the sake of a handful
-of links.
+by `PostgresMediaItemRepository.attach_title` and reached by the resolve
+route in `api/routers/unmatched.py`. Every other column of `media_items` is
+rebuilt by the next source walk, and on the household this project measures
+that is 1,126,789 rows to carry for the sake of a handful of links.
 
 | class | meaning | restore behaviour |
 |---|---|---|
@@ -47,16 +46,15 @@ of links.
 | `SCHEMA` | Alembic's own bookkeeping | read as a stamp, never written |
 
 ⚠️ **`media_items` carries no provenance column, so "manual" is not a
-distinction the schema can express.** `services/handlers.py:243` -- the
-automatic match handler -- calls the *same* `attach_title` as the
-operator's route at `api/routers/unmatched.py:276`. A backup can carry all
-`(source_id, external_id) -> title` links or none; it cannot carry only the
-manual ones. Carrying all of them is the right call because the harm is
-asymmetric: a link the match ladder would have re-derived is re-derived to
-the same answer, and a link it would not re-derive is exactly the
-operator's judgement. K4's merge rule -- write only where the target's link
-is `NULL` -- is what keeps that safe, which is what `RestoreRule.MERGE`
-names.
+distinction the schema can express.** `services/handlers.py`'s automatic
+match handler calls the *same* `attach_title` as the operator's route. A
+backup can carry all `(source_id, external_id) -> title` links or none; it
+cannot carry only the manual ones. Carrying all of them is the right call
+because the harm is asymmetric: a link the match ladder would have
+re-derived is re-derived to the same answer, and a link it would not
+re-derive is exactly the operator's judgement. K4's merge rule -- write only
+where the target's link is `NULL` -- is what keeps that safe, which is what
+`RestoreRule.MERGE` names.
 
 ## Three rulings this module makes, because PRD 08 leaves all three open
 
@@ -72,9 +70,8 @@ exactly the object it exists to prevent, one directory over. Not a
 judgement about probability; the same refusal the repository already makes.
 
 **`raw_payloads` stays rebuildable, and it is the closest call in the
-table.** Against carrying it: 995 MB, which is 2.5x the whole rest of the
-artifact and turns a "short restore" into a file an operator will not keep;
-and it is third-party TMDb payloads verbatim, so the rule-1 argument
+table.** Against carrying it: it is the third-largest relation in this
+database, and third-party TMDb payloads verbatim, so the rule-1 argument
 applies with more force than it does to the genome. For carrying it: 1.98 h
 and 130,334 requests against a server this project does not own, which is
 the Phase-1 politeness argument pointing the other way. The ruling is
@@ -84,30 +81,49 @@ TMDb payloads is a licensing decision, not an operator convenience.
 
 **`user_taste`'s classification does not move either way.** PRD 08 once
 said *"`TasteService.centroid` has no caller in `src/`"*; that has been
-false since M8 (`services/curation_pool.py:174`) and the PRD now says so.
-The table is empty on this deployment because no curation run with an
-embedder configured has touched it, not because nothing can write it -- and
-a mean over embeddings is rebuildable whoever computes it.
+false since M8 -- `CurationPoolService` calls it, and the guard immediately
+above that call exists because it writes -- and the PRD now says so. The
+table is empty on this deployment because no curation run with an embedder
+configured has touched it, not because nothing can write it; and a mean
+over embeddings is rebuildable whoever computes it.
 
-## Two conventions in the data below
+## Three conventions in the data below
 
-**`rebuilt_by` names CLI subcommands and omits the `usher` prefix**, so its
-first token is a member of `build_parser()`'s subcommand list and
-`test_every_rebuildable_entry_names_a_command_the_cli_advertises` can check
-it against the parser rather than against a second hand-copied list.
-Where a rebuild takes more than one command they are joined by `" then "`
-in run order, and **every** step is checked, not only the first -- so
-`"... then restore --catalog"`, a command nobody built, cannot hide behind a
-real first clause. CLAUDE.md's standing rule: do not invent commands for
-tooling that does not exist yet.
+**`rebuilt_by` names CLI subcommands and omits the `usher` prefix**, so
+each step is something `usher.cli.build_parser()` can parse. Where a
+rebuild takes more than one command they are joined by `" then "` in run
+order, and `rebuild_commands` splits them.
+`test_every_rebuild_step_is_a_command_the_cli_really_accepts` feeds **every
+step** through `parse_args`, so an unbuilt command, an unknown flag and a
+`--phase` outside `BootstrapPhase`'s closed vocabulary are all reds -- not
+only the ones in first position. CLAUDE.md's standing rule: do not invent
+commands for tooling that does not exist yet.
 
-**The row counts and sizes in the reasons are measurements**, taken from
-`pg_stat_user_tables` / `pg_total_relation_size` on `usher-postgres-1` on
-2026-08-13. They are there to make the asymmetry legible -- 3.2 M
-neighbour rows on one side of the split, one `users` row on the other --
-and they are dated because they will drift. No revision label appears in
-any of them for the same reason: `alembic_version` stamped `m09f` when this
-was designed and `m10a` when it landed.
+**Row counts and relation sizes are `pg_stat_user_tables.n_live_tup` and
+`pg_total_relation_size` on `usher-postgres-1`, read 2026-08-13.** Sizes
+are therefore *totals* -- heap plus TOAST plus every index -- which is why
+`title_embeddings` is one number here and appears in PRD 08's resource
+envelope as "707 MB of relation and 340 MB of index", the index being a
+component of the total rather than something to add to it. They are here to
+make the asymmetry legible (3.2 M neighbour rows on one side of the split,
+one `users` row on the other) and they are dated because they drift: `m10a`
+was an `ALTER` over `titles` and this database has not been `VACUUM
+FULL`ed since.
+
+⚠️ **Durations are *not* from that reading and carry their own
+provenance**, which is where this file's one shipped error was -- a
+`title_neighbors` figure copied from a draft that the same plan's own
+corrections table refuted. Each is named at its entry: the embedding
+backfill (105.9 min) and the neighbour walk (91.7 ms/seed over 11,981 s)
+are both 2026-08-13 runs recorded in PRD 08's resource envelope and
+`.claude/rules/search-and-embeddings.md`; the payload crawl (1.98 h) is
+M9's S3 against the live TMDb API. **No revision label appears in any
+reason string**, for the same reason: `alembic_version` stamped `m09f`
+when this was designed and `m10a` when it landed.
+
+**Citations name symbols, not line numbers.** PRD 08 carried
+`curation_pool.py:173` for a call that is on line 174, and that off-by-one
+is the small version of the drift this whole module exists to stop.
 """
 
 from dataclasses import dataclass
@@ -120,6 +136,9 @@ from typing import Final
 #: `src/` -- Alembic creates it from `alembic/env.py` -- so `Base.metadata`
 #: cannot see it and every check that compares the two has to name it.
 ALEMBIC_VERSION_TABLE: Final = "alembic_version"
+
+#: What separates one rebuild step from the next inside `rebuilt_by`.
+REBUILD_STEP: Final = " then "
 
 
 class BackupClass(StrEnum):
@@ -140,8 +159,8 @@ class BackupClass(StrEnum):
 
 class RestoreRule(StrEnum):
     """What restore does with the table. Stored per entry rather than derived
-    from the class at read time, so K4 reads one field; a unit case asserts it
-    never disagrees with the class it sits beside.
+    from the class at read time, so K4 reads one field; `__post_init__`
+    refuses an entry whose rule disagrees with its class.
     """
 
     WHOLE = "whole"
@@ -154,6 +173,19 @@ class RestoreRule(StrEnum):
     """Restore does not write this table."""
 
 
+#: Which rule each class takes. One mapping rather than a rule repeated at
+#: 29 call sites, and `__post_init__` is what makes it binding on the
+#: entries K3 and the test fixtures build that this file never sees.
+_RULE_FOR: Final[MappingProxyType[BackupClass, RestoreRule]] = MappingProxyType(
+    {
+        BackupClass.PRECIOUS: RestoreRule.WHOLE,
+        BackupClass.PARTIAL: RestoreRule.MERGE,
+        BackupClass.REBUILDABLE: RestoreRule.NEVER,
+        BackupClass.SCHEMA: RestoreRule.NEVER,
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class BackupEntry:
     """One table's classification, with the argument for it attached.
@@ -161,6 +193,12 @@ class BackupEntry:
     `reason` is not decoration. The failure this module exists to prevent
     is a table reclassified by someone who did not know why it was where it
     was, and a class with no reason beside it is the prose table again.
+
+    **The invariants are enforced at construction rather than by a case over
+    `MANIFEST`.** A test can only notice for the 29 entries that exist here;
+    K3's report, K4's merge and every fixture that builds an entry are
+    constructions this file never sees, and a `PARTIAL` entry naming no
+    column would mean restore silently merging nothing.
     """
 
     kind: BackupClass
@@ -172,12 +210,26 @@ class BackupEntry:
     columns: tuple[str, ...] = ()
     """`PARTIAL` only: the operator-authored columns restore merges."""
 
+    def __post_init__(self) -> None:
+        if not self.reason.strip():
+            raise ValueError("a backup entry needs a reason; the class alone is the prose table")
+        if self.restore is not _RULE_FOR[self.kind]:
+            raise ValueError(
+                f"{self.kind} restores as {_RULE_FOR[self.kind]}, not {self.restore}",
+            )
+        wants_columns = self.kind is BackupClass.PARTIAL
+        if bool(self.columns) is not wants_columns:
+            raise ValueError(f"{self.kind} entries name columns iff they are PARTIAL")
+        wants_command = self.kind is BackupClass.REBUILDABLE
+        if bool(self.rebuilt_by.strip()) is not wants_command:
+            raise ValueError(f"{self.kind} entries name a rebuild command iff they are REBUILDABLE")
+
     @property
     def rebuild_commands(self) -> tuple[str, ...]:
         """`rebuilt_by` split into its steps, in run order; empty when there
         is no rebuild command, which is every class but `REBUILDABLE`.
         """
-        return tuple(step for step in self.rebuilt_by.split(" then ") if step)
+        return tuple(step for step in self.rebuilt_by.split(REBUILD_STEP) if step.strip())
 
 
 def _precious(reason: str) -> BackupEntry:
@@ -191,6 +243,19 @@ def _rebuildable(reason: str, rebuilt_by: str) -> BackupEntry:
         reason=reason,
         rebuilt_by=rebuilt_by,
     )
+
+
+def _partial(reason: str, columns: tuple[str, ...]) -> BackupEntry:
+    return BackupEntry(
+        kind=BackupClass.PARTIAL,
+        restore=RestoreRule.MERGE,
+        reason=reason,
+        columns=columns,
+    )
+
+
+def _schema(reason: str) -> BackupEntry:
+    return BackupEntry(kind=BackupClass.SCHEMA, restore=RestoreRule.NEVER, reason=reason)
 
 
 #: Every table in the live schema, classified. Exhaustiveness is enforced
@@ -232,30 +297,31 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "that depends on this table surviving"
         ),
         # --- partial: rebuildable but for named columns ---------------------
-        "media_items": BackupEntry(
-            kind=BackupClass.PARTIAL,
-            restore=RestoreRule.MERGE,
-            reason=(
-                "180 rows here, 1,126,789 on the household this project measures. Every "
-                "column is rebuilt by the next source walk except the two links -- which "
-                "is what PRD 08's 'manual unmatched resolutions' actually names, since "
-                "there is no such table. No provenance column exists, so all links are "
-                "carried and K4 writes only where the target's is NULL"
-            ),
-            rebuilt_by="",
-            columns=("title_id", "episode_id"),
+        "media_items": _partial(
+            "180 rows here, 1,126,789 on the household this project measures. Every "
+            "column is rebuilt by the next source walk except the two links -- which "
+            "is what PRD 08's 'manual unmatched resolutions' actually names, since "
+            "there is no such table. No provenance column exists, so all links are "
+            "carried and K4 writes only where the target's is NULL",
+            ("title_id", "episode_id"),
         ),
         # --- rebuildable ----------------------------------------------------
         "titles": _rebuildable(
-            "1,272,401 rows, 1050 MB. Two commands, because ADR-0040 split the rating "
-            "columns by source: `--phase imdb` runs basics then ratings, so the skeleton "
-            "and `imdb_average_rating`/`imdb_num_votes` arrive together (`--phase ratings` "
-            "is an alias for that second half -- a refresh, not a rebuild), while the "
-            "TMDb-sourced columns are the enrichment crawl's and return with whatever a "
-            "walk matches. ⚠️ Enriching beyond that -- M9's 130,647-title priority tier -- "
-            "is `scripts/enqueue_tier_enrichment.py`, not a command, so this string does "
-            "not name it",
-            "bootstrap --phase imdb then sync then work",
+            "1,272,401 rows, 1050 MB. **Four writers, which is why the command is "
+            "`--phase all` rather than a subset**: `imdb` brings the skeleton and, since "
+            "it runs basics then ratings, ADR-0040's `imdb_average_rating` and "
+            "`imdb_num_votes` (`--phase ratings` is an alias for that second half -- a "
+            "refresh, not a rebuild); `credit-names` brings `credit_names`; `crosswalk` "
+            "brings `tmdb_id`, `tvdb_id` and `tmdb_popularity`, which is ADR-0040's "
+            "refutation 3 -- popularity has a second writer in `link_crosswalk` that "
+            "touches neither rating column; and enrichment brings the rest of the TMDb "
+            "columns. The phases have ordering constraints between them (`credit-names` "
+            "before anything that enriches; `tmdb-ids` before `crosswalk`), so naming a "
+            "subset would be a second copy of `FULL_SEQUENCE`. ⚠️ Enriching past what a "
+            "walk matches -- M9's 130,647-title priority tier -- is "
+            "`scripts/enqueue_tier_enrichment.py`, not a command, so this string does not "
+            "claim it",
+            "bootstrap --phase all then sync then work",
         ),
         "seasons": _rebuildable(
             "0 rows here. TMDb enrichment, via `append_to_response=season/N`",
@@ -284,13 +350,19 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "derive --backfill",
         ),
         "title_embeddings": _rebuildable(
-            "130,723 rows, 697 MB. 105.9 min measured at `halfvec(1024)`",
+            "130,723 rows, 707 MB (of which 340 MB is the HNSW index). The backfill of "
+            "130,720 titles measured 105.9 min on 2026-08-13",
             "index --backfill then work",
         ),
         "title_neighbors": _rebuildable(
-            "3,256,676 rows, 1140 MB. 594.7 ms/seed, a 21.6-hour walk -- the most "
-            "expensive thing in this column by two orders of magnitude, and still "
-            "rebuildable",
+            "3,256,676 rows, 1140 MB -- the largest relation in this database, and still "
+            "rebuildable. The completed walk, 2026-08-13: 130,720 seeds, 3,268,000 rows, "
+            "11,981 s at **91.7 ms/seed = 3.33 h**. ⚠️ Not 594.7 ms/seed and not 21.6 h: "
+            "those are `m09e`'s figures and `m09f` repaired them by moving every "
+            "`halfvec` column to PLAIN storage. At the true cost this is 1.9x the "
+            "embedding backfill above it, not the two orders of magnitude a draft of this "
+            "manifest claimed -- an overnight job, which is the conclusion that survived "
+            "the number",
             "similar --rebuild",
         ),
         "title_search_names": _rebuildable(
@@ -306,11 +378,13 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "bootstrap --phase crosswalk",
         ),
         "raw_payloads": _rebuildable(
-            "⚠️ 130,749 rows, 995 MB -- the largest single relation after the neighbour "
-            "table, and the closest call in this manifest. Rebuildable only from TMDb: "
-            "M9's S3 measured 130,334 requests over 1.98 h to fill it. Not carried, "
-            "because the artifact would be 2.5x the size of everything else in it and "
-            "would redistribute third-party payloads verbatim. See the module docstring",
+            "⚠️ 130,749 rows, 995 MB -- the third-largest relation here, after "
+            "`title_neighbors` and `titles`, and the closest call in this manifest. "
+            "Rebuildable only from TMDb: M9's S3 measured 130,334 requests over 1.98 h to "
+            "fill it. Not carried, because it would take the artifact from the kilobytes "
+            "the precious set weighs on this deployment to a gigabyte an operator will not "
+            "keep, and because it is third-party payloads verbatim. See the module "
+            "docstring",
             "sync then work",
         ),
         "genome_scores": _rebuildable(
@@ -346,31 +420,35 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "enrichment, `index --backfill` for embeddings, `push` for the lane",
             "sync",
         ),
-        "import_runs": BackupEntry(
-            kind=BackupClass.REBUILDABLE,
-            restore=RestoreRule.NEVER,
-            reason=(
-                "6 rows. Resumption checkpoints for *this* database, and the one entry "
-                "where NEVER is load-bearing rather than incidental: for every other "
-                "rebuildable table 'never written' follows from 'never carried', but these "
-                "rows would be harmful even if an operator carried them by hand -- they "
-                "tell a resumable importer a phase is complete over an empty catalog. "
-                "Recorded here rather than left to K4"
-            ),
-            rebuilt_by="bootstrap",
+        "import_runs": _rebuildable(
+            "6 rows. Resumption checkpoints for *this* database, and the one entry where "
+            "NEVER is load-bearing rather than incidental: for every other rebuildable "
+            "table 'never written' follows from 'never carried', but these rows would be "
+            "harmful even if an operator carried them by hand -- they tell a resumable "
+            "importer a phase is complete over an empty catalog. Recorded here rather "
+            "than left to K4",
+            "bootstrap",
         ),
         "sync_runs": _rebuildable("2 rows. An audit trail a new walk replaces", "sync"),
         # --- schema ---------------------------------------------------------
-        ALEMBIC_VERSION_TABLE: BackupEntry(
-            kind=BackupClass.SCHEMA,
-            restore=RestoreRule.NEVER,
-            reason=(
-                "1 row. Read by backup as the artifact's stamp and compared by restore, "
-                "never written by it: a restore that wrote this would claim a schema "
-                "version the database does not have. It has no `Table` object in `src/` -- "
-                "Alembic creates it -- which is why the coverage check reads "
-                "`information_schema` rather than `Base.metadata`"
-            ),
+        ALEMBIC_VERSION_TABLE: _schema(
+            "1 row. Read by backup as the artifact's stamp and compared by restore, "
+            "never written by it: a restore that wrote this would claim a schema "
+            "version the database does not have. It has no `Table` object in `src/` -- "
+            "Alembic creates it -- which is why the coverage check reads "
+            "`information_schema` rather than `Base.metadata`"
         ),
     }
 )
+
+
+def tables_of(kind: BackupClass) -> tuple[str, ...]:
+    """The tables in one class, in manifest order.
+
+    K3 needs the `PRECIOUS` set, K4 needs `PRECIOUS` and `PARTIAL`, and K7
+    needs `PRECIOUS` to know what a re-encryption touches. One accessor
+    rather than the same comprehension in three services -- and computed on
+    call rather than cached in a second mapping, which would be a thing to
+    keep in step with `MANIFEST` and therefore a thing to forget.
+    """
+    return tuple(table for table, entry in MANIFEST.items() if entry.kind is kind)

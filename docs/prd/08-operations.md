@@ -690,8 +690,9 @@ re-derived is re-derived to the same answer, and a link it would not re-derive
 is exactly the operator's judgement. Restore writes one only where the
 target's is `NULL`.
 
-The precious set is a handful of small tables, and **the command that carries
-them is `usher backup` rather than a documented `pg_dump`** — measured
+The precious set is a handful of small tables, and 🚧 **the command that will
+carry them is `usher backup` (M10 Group K, task K3 — not built yet) rather than
+a documented `pg_dump`** — measured
 2026-08-13, and the reason is that the documented alternative *cannot be run
 from the container this project ships*. The runtime image is
 `python:3.13-slim` and carries neither `pg_dump` nor `psql`, so an operator
@@ -729,15 +730,17 @@ vectors in a backup artifact is precisely the object
 directory away. This is the same refusal, not a bet on probability.
 
 ⚠️ **`raw_payloads` stays rebuildable, and it is the closest call in the whole
-classification.** Against carrying it: **995 MB**, roughly 2.5× the rest of the
-artifact put together, which turns a "short restore" into a file an operator
-will not keep — and it is third-party TMDb payloads verbatim, so the rule-1
-argument bites harder here than it does on the genome. For carrying it: M9's S3
-measured **130,334 requests over 1.98 h** to fill it, against a server this
-project does not own. The ruling is rebuildable, with that cost stated in the
-manifest and in the runbook, and **`usher backup --include-payloads` is
-deliberately not built** — a flag that makes the artifact redistribute TMDb
-payloads is a licensing decision rather than an operator convenience.
+classification.** Against carrying it: **995 MB** — the third-largest relation
+in this database at the 2026-08-13 reading, behind `title_neighbors` (1140 MB)
+and `titles` (1050 MB) — which takes the artifact from the kilobytes the
+precious set weighs on this deployment to a file an operator will not keep;
+and it is third-party TMDb payloads verbatim, so the rule-1 argument bites
+harder here than it does on the genome. For carrying it: M9's S3 measured
+**130,334 requests over 1.98 h** to fill it, against a server this project does
+not own. The ruling is rebuildable, with that cost stated in the manifest and
+🚧 (K5) in the runbook, and **`usher backup --include-payloads` is deliberately
+not built** — a flag that makes the artifact redistribute TMDb payloads is a
+licensing decision rather than an operator convenience.
 
 🔴 **M8 added three tables and one of them is the first thing in this project
 that is not rebuildable from anything, at any price.**
