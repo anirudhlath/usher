@@ -107,9 +107,9 @@ class TitleRepositoryContract:
             spoken_languages=("en",),
             origin_countries=("US", "GB"),
             content_rating="TV-MA",
-            community_rating=8.4,
-            vote_count=22000,
-            popularity=369.5,
+            tmdb_vote_average=8.4,
+            tmdb_vote_count=22000,
+            tmdb_popularity=369.5,
             collection_id=collection_id,
             enrichment_state=EnrichmentState.ENRICHED,
             enrichment_error=None,
@@ -490,8 +490,10 @@ class TitleRepositoryOwnedContract:
             sort_name=name.lower(),
             genres=genres,
             keywords=keywords,
-            popularity=popularity,
-            vote_count=vote_count,
+            # The builder's own keyword names are test-local vocabulary and
+            # stay; only the `Title` fields they feed moved. ADR-0040.
+            tmdb_popularity=popularity,
+            tmdb_vote_count=vote_count,
             enrichment_state=EnrichmentState.ENRICHED,
         )
 
@@ -539,7 +541,7 @@ class TitleRepositoryOwnedContract:
     async def test_vote_count_orders_titles_whose_popularity_is_unknown(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """`titles.popularity` was measured NULL on all 1,271,138 rows of a
+        """`titles.tmdb_popularity` was measured NULL on all 1,271,138 rows of a
         bootstrap-only catalog, so an ordering with only that key is an
         ordering by `id` on the deployment most likely to exist.
 
@@ -769,7 +771,9 @@ class TitleRepositoryCandidateContract:
             name=name,
             sort_name=name.lower(),
             genres=genres,
-            vote_count=vote_count,
+            # The builder's own keyword names are test-local vocabulary and
+            # stay; only the `Title` fields they feed moved. ADR-0040.
+            tmdb_vote_count=vote_count,
             enrichment_state=enrichment_state,
         )
 
@@ -1092,7 +1096,7 @@ class TitleRepositoryCandidateContract:
         the enriched tier would have passed every case in the suite. That is
         the same shape as `media_items.available`, whose mutation survived
         everything until a fixture wrote the other value, and as
-        `titles.popularity` before it: **a predicate on a column no fixture
+        `titles.tmdb_popularity` before it: **a predicate on a column no fixture
         ever writes falsely is unobservable.**
 
         The defect is not hypothetical and it is quiet. M6 measured the
@@ -1230,8 +1234,10 @@ class TitleRepositoryBrowseContract:
             genres=genres,
             keywords=keywords,
             year=year,
-            popularity=popularity,
-            vote_count=vote_count,
+            # The builder's own keyword names are test-local vocabulary and
+            # stay; only the `Title` fields they feed moved. ADR-0040.
+            tmdb_popularity=popularity,
+            tmdb_vote_count=vote_count,
             enrichment_state=EnrichmentState.ENRICHED,
         )
 
@@ -1389,8 +1395,9 @@ class TitleRepositoryBrowseContract:
     ) -> None:
         """**The NULL trap, and it is the quietest defect in this port.**
 
-        `titles.year`, `titles.popularity` and `titles.vote_count` are all
-        nullable, and `popularity` was measured NULL on all 1,271,138 rows of a
+        `titles.year`, `titles.tmdb_popularity` and `titles.tmdb_vote_count`
+        are all nullable, and the popularity column was measured NULL on all
+        1,271,138 rows of a
         bootstrap-only catalog -- so the unkeyed group is not an edge case,
         it is most of the catalog on a fresh install. A keyset that compares a
         NULL evaluates to NULL rather than to false, so once the cursor lands

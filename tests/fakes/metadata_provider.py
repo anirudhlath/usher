@@ -266,9 +266,11 @@ class FakeMetadataProvider(MetadataProvider):
             runtime_minutes=payload.get("runtime"),
             genres=tuple(one["name"] for one in payload.get("genres", [])),
             original_language=payload.get("original_language"),
-            community_rating=payload.get("vote_average"),
-            vote_count=payload.get("vote_count"),
-            popularity=payload.get("popularity"),
+            # The payload keys are TMDb's own and stay; the `Title` fields
+            # they land in now name their source. ADR-0040.
+            tmdb_vote_average=payload.get("vote_average"),
+            tmdb_vote_count=payload.get("vote_count"),
+            tmdb_popularity=payload.get("popularity"),
             # `enrichment_state` is deliberately not set: the tier is
             # `EnrichService`'s to raise, through `ENRICHMENT_RANK` only.
         )

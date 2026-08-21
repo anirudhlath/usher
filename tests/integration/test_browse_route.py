@@ -13,7 +13,7 @@ involves one -- and that is a fact about *Postgres*, not about a tuple
 comparison in Python. `FakeTitleRepository` cannot express the defect at all
 (a Python tuple compares `None` by raising, or not at all), so the unit arm's
 version of this walk is an echo and this one is the assertion. Three of the
-four sorts are nullable and `popularity` was measured NULL on **980,523 of
+four sorts are nullable and `tmdb_popularity` was measured NULL on **980,523 of
 1,272,367** rows of a real catalog, so the unkeyed group is most of the screen
 rather than an edge.
 
@@ -155,9 +155,9 @@ async def test_a_page_boundary_inside_the_unkeyed_group_keeps_the_rest_of_it(
     The premise is asserted rather than assumed: the boundary row really is
     unkeyed, and there really is more of the unkeyed group after it.
     """
-    await _seed(sessions, "A keyed", genres=(GENRE,), popularity=9.0)
+    await _seed(sessions, "A keyed", genres=(GENRE,), tmdb_popularity=9.0)
     for index in range(3):
-        await _seed(sessions, f"B unkeyed {index}", genres=(GENRE,), popularity=None)
+        await _seed(sessions, f"B unkeyed {index}", genres=(GENRE,), tmdb_popularity=None)
 
     first = await client.get("/browse", params={"sort": "popularity", "genre": GENRE, "limit": 2})
     assert first.status_code == 200, first.text

@@ -409,6 +409,101 @@ async def test_the_dropped_watch_state_index_is_gone(session: AsyncSession) -> N
     assert result.scalar_one() == 0
 
 
+async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url: str) -> None:
+    """**The one thing `m10a` does that no schema reader in this file can
+    see**, and the only statement in it that touches a row.
+
+    `field_provenance` is `field -> provider` and `adapters/tmdb/mapping.py`
+    derives its keys from the `Title` field names this revision renames, so a
+    revision that moved the columns and left the keys leaves every enriched
+    row carrying `"community_rating": "tmdb"` while its *next* enrichment adds
+    `"tmdb_vote_average": "tmdb"` beside it -- permanently, because
+    `services/enrich.py` merges provenance rather than assigning it. Nothing
+    else here would notice: `_column_set`, `_constraint_set`, `_index_set` and
+    `compare_metadata` all read the catalog, and this is data.
+
+    Seeded **below** the revision and read above it, then read again after the
+    downgrade, because a key rename is only observable across the boundary.
+    The third key is deliberately absent from the seeded row: `upgrade()`
+    builds its statement per key, and a wholesale spelling would give that row
+    a `tmdb_popularity` entry pointing at nothing -- an invented provenance
+    claim, which is exactly the inference this revision's docstring refuses.
+    """
+    admin = postgres_url.rsplit("/", 1)[0]
+    scratch = f"prov_{uuid.uuid4().hex[:12]}"
+    engine = build_engine(f"{admin}/postgres")
+    try:
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
+    finally:
+        await engine.dispose()
+
+    url = f"{admin}/{scratch}"
+    seeded = new_id()
+    try:
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m09f", direction="up"))
+        scratch_engine = build_engine(url)
+        try:
+            async with scratch_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO titles (id, kind, name, sort_name, field_provenance) "
+                        "VALUES (:id, 'movie', :name, :name, CAST(:provenance AS jsonb))"
+                    ),
+                    {
+                        "id": seeded,
+                        "name": "A Provenance Carrier",
+                        # `overview` is the control: a key nothing renames, so
+                        # a statement that rebuilt the whole object instead of
+                        # editing three keys drops it and fails here.
+                        "provenance": (
+                            '{"community_rating": "tmdb", "vote_count": "tmdb", "overview": "tmdb"}'
+                        ),
+                    },
+                )
+
+            await asyncio.to_thread(run_alembic, url, "head")
+            async with scratch_engine.connect() as conn:
+                above = (
+                    await conn.execute(
+                        text("SELECT field_provenance FROM titles WHERE id = :id"),
+                        {"id": seeded},
+                    )
+                ).scalar_one()
+
+            assert above == {
+                "tmdb_vote_average": "tmdb",
+                "tmdb_vote_count": "tmdb",
+                "overview": "tmdb",
+            }, "the keys moved, the untouched one survived, and no key was invented"
+
+            await asyncio.to_thread(functools.partial(run_alembic, url, "m09f", direction="down"))
+            async with scratch_engine.connect() as conn:
+                below = (
+                    await conn.execute(
+                        text("SELECT field_provenance FROM titles WHERE id = :id"),
+                        {"id": seeded},
+                    )
+                ).scalar_one()
+
+            assert below == {
+                "community_rating": "tmdb",
+                "vote_count": "tmdb",
+                "overview": "tmdb",
+            }, "the downgrade restored every key it renamed, and only those"
+        finally:
+            await scratch_engine.dispose()
+    finally:
+        engine = build_engine(f"{admin}/postgres")
+        try:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
+        finally:
+            await engine.dispose()
+
+
 async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) -> None:
     """`downgrade base` then `upgrade head`, on a throwaway database, with
     the index set compared before and after.
@@ -544,19 +639,34 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `pass`, which no other case in this suite can see -- the shared
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
-        stepped_back = await _index_set(url)
-        # `m09f`'s artefacts, re-pointed here the moment it became head — the
-        # tenth landing in a row to do this, and the second where neither
-        # `_index_set` nor `_column_set` can carry the assertion.
-        #
-        # **`m09f` changes a *storage mode*, which is the least visible thing a
-        # migration in this project has ever changed.** Nothing about the
-        # column's name, type, width, nullability, constraints or indexes
-        # moves — `_column_set`, `_column_type` and `_index_set` all answer
-        # identically on both sides of it, so every reader this file had before
-        # today is blind to the entire revision and a `downgrade()` replaced by
-        # `pass` passes all of them. What moves is `pg_attribute.attstorage`,
-        # `e` at `m09e` and `p` at head, and `_column_storage` exists for that.
+        # **`m10a`'s artefacts, re-pointed here the moment it became head** —
+        # the eleventh landing in a row to do this. `m10a` is a *renaming*
+        # head, so `_column_set` carries it in both directions at once: the
+        # new spellings are absent here and the old ones present, and a
+        # `downgrade()` that renamed only some of them fails on the half it
+        # forgot. One assertion per artefact kind — the columns via
+        # `_column_set`, the constraints via `_constraint_set`, because a
+        # rename that moved a column and left its CHECK named for the old one
+        # is invisible to the column reader.
+        at_m09f_columns = await _column_set(url, "titles")
+        for new in ("tmdb_vote_average", "tmdb_vote_count", "tmdb_popularity"):
+            assert new not in at_m09f_columns, f"{new} should not exist below m10a"
+        for old in ("community_rating", "vote_count", "popularity"):
+            assert old in at_m09f_columns, f"{old} should be back below m10a"
+        # The two added columns, asserted separately: a `downgrade()` that
+        # reversed the renames and forgot the drops satisfies every line above.
+        assert "imdb_num_votes" not in at_m09f_columns
+        assert "imdb_average_rating" not in at_m09f_columns
+
+        at_m09f_constraints = await _constraint_set(url, "titles")
+        assert "ck_titles_community_rating_range" in at_m09f_constraints
+        assert "ck_titles_tmdb_vote_average_range" not in at_m09f_constraints
+
+        # **A named stop at `m09e`, holding `m09f`'s four.** Displaced from the
+        # `-1` half the moment `m10a` became head, and displaced *because they
+        # had teeth*: `-1`-from-`m10a` lands on `m09f`'s applied state, where
+        # `attstorage` is `p` and `== "e"` is false on all three columns.
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m09e", direction="down"))
         for table, column in (
             ("title_embeddings", "embedding"),
             ("user_taste", "centroid"),
@@ -565,12 +675,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
             assert await _column_storage(url, table, column) == "e", (
                 f"{table}.{column} should be back to pgvector's EXTERNAL default here"
             )
-        # The index in the same breath, because `VACUUM FULL` rebuilds it with
-        # the table: a `downgrade()` that reset the storage and lost the graph
-        # would satisfy every assertion above and leave the semantic lane
-        # without an index, which nothing else in this suite would notice —
-        # pgvector answers the same query by sequential scan.
-        assert "ix_title_embeddings_hnsw" in stepped_back
+        assert "ix_title_embeddings_hnsw" in await _index_set(url)
 
         # **A named stop at `m09d`, holding `m09e`'s three.** Displaced from the
         # `-1` half the moment `m09f` became head, and displaced *because they

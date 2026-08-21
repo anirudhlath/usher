@@ -88,9 +88,11 @@ class Title(BaseModel):
     origin_countries: tuple[str, ...]    # ISO 3166-1 alpha-2
     content_rating: str | None
 
-    community_rating: float | None       # provider aggregate, TMDb 0-10 scale
-    vote_count: int | None               # IMDb numVotes until enriched, TMDb's after
-    popularity: float | None
+    tmdb_vote_average: float | None      # TMDb vote_average, 0-10
+    tmdb_vote_count: int | None          # TMDb vote_count
+    tmdb_popularity: float | None        # TMDb popularity
+    imdb_average_rating: float | None    # IMDb averageRating, 0-10
+    imdb_num_votes: int | None           # IMDb numVotes
 
     collection_id: UUID | None
     enrichment_state: EnrichmentState
@@ -106,6 +108,26 @@ lists: `Title` is frozen, and a `list` field is still mutable in place
 worth the ergonomics cost — `field_provenance` stays a plain `dict[str,
 str]`, which is why `Title` is deliberately the one domain model that isn't
 hashable.
+
+🔴 **Five rating columns where there were three, because three of them had two
+writers each and no way to say which one wrote a row.** Until migration `m10a`
+(2026-08-19) the schema carried `community_rating`, `vote_count` and
+`popularity`: `adapters/bulk/imdb.py` wrote IMDb's `averageRating`/`numVotes`
+into the first two and `adapters/tmdb/mapping.py` wrote TMDb's
+`vote_average`/`vote_count` over the top, into the same columns, on scales
+**≈38× apart** (paired: median TMDb 15 against median frozen IMDb 576 over the
+same 130,647 enriched rows). `community_rating`'s collision was **silent** —
+both sources are 0–10, so no CHECK could fire — and `vote_count`'s could not be
+undone by any reader, because **among movies the two writers' ranges overlap**
+(40,518 against 40,695 on the deployed 1,272,870-title catalog). Each column now
+names its source, and `field_provenance`'s three matching JSONB keys moved with
+them. ⚠️ **The columns are split; the historical values on a pre-`m10a` catalog
+are not** — `tmdb_vote_count`/`tmdb_vote_average` still hold whichever writer
+touched a row last until a decontamination runs, which
+[ADR-0040](decisions/0040-rating-columns-name-their-source.md) records as an
+**open decision** rather than a shipped one. IMDb's own numbers are restored
+from source by `usher bootstrap --phase ratings`
+([04](04-catalog-bootstrap.md)), never inferred by a migration data step.
 
 **`genres` holds two importers' vocabularies, and one concept can be spelled
 twice — [ADR-0039](decisions/0039-the-genre-vocabulary-is-usher-owned.md).**

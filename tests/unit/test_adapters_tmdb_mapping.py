@@ -255,18 +255,18 @@ def test_an_unparseable_release_date_is_absent_rather_than_a_parse_error(bad: st
 
 
 def test_an_out_of_range_vote_average_is_dropped() -> None:
-    """`Title.community_rating` is `ge=0, le=10`. TMDb's scale is 0-10, so
+    """`Title.tmdb_vote_average` is `ge=0, le=10`. TMDb's scale is 0-10, so
     this is a defence against a value the mapper has no business trusting
     rather than an observed shape."""
     payload = _movie()
     payload["vote_average"] = 11.5
-    assert _title(payload).community_rating is None
+    assert _title(payload).tmdb_vote_average is None
 
 
 def test_a_negative_popularity_is_dropped() -> None:
     payload = _movie()
     payload["popularity"] = -1.0
-    assert _title(payload).popularity is None
+    assert _title(payload).tmdb_popularity is None
 
 
 def test_an_imdb_id_that_is_not_one_is_dropped() -> None:
@@ -620,7 +620,7 @@ def test_an_infinite_popularity_is_dropped_rather_than_raising() -> None:
     """`1e400` is well-formed JSON, `json.loads` maps it onto `inf`, and this
     module's contract is that **nothing TMDb can put in a payload may raise**.
 
-    Both halves matter and only together. `Title.popularity` carries
+    Both halves matter and only together. `Title.tmdb_popularity` carries
     `allow_inf_nan=False` since M10's F9, so an unfiltered `inf` would leave
     the constructor below as a `pydantic.ValidationError` — which is not a
     `UsherPortError`, so it would escape `EnrichService`'s `except` and kill
@@ -632,7 +632,7 @@ def test_an_infinite_popularity_is_dropped_rather_than_raising() -> None:
     payload.update(json.loads('{"popularity": 1e400}'))
     assert payload["popularity"] == float("inf")
 
-    assert _title(payload).popularity is None
+    assert _title(payload).tmdb_popularity is None
 
 
 def test_a_finite_popularity_still_survives_the_filter() -> None:
@@ -640,4 +640,4 @@ def test_a_finite_popularity_still_survives_the_filter() -> None:
     every popularity."""
     payload = _movie()
     payload["popularity"] = 1739.421
-    assert _title(payload).popularity == 1739.421
+    assert _title(payload).tmdb_popularity == 1739.421

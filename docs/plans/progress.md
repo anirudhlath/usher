@@ -30,6 +30,38 @@ and merged. It is the first thing in this file a reader sees, so it was the
 most-read wrong statement in the repository. Rebuilt from the `## ✅ MN MERGED`
 headings below and from `git log main`.
 
+## Quality-eval phases (from docs/specs/2026-08-18-usher-quality-evals-design.md)
+| Phase | What it delivers | Plan file | Status |
+|---|---|---|---|
+| E1 | Eval skeleton + the suggest surface | docs/plans/2026-08-18-e1-eval-skeleton-and-suggest.md | 🔨 in progress on `spec/quality-evals` — 15 tasks planned; Task 1 landed (`515823a`, `51819bd`): the `usher.eval` package, its extra, and the eleventh import contract |
+| E2 | Search + similarity surfaces | — | not planned |
+| E3 | Judge + curation + rows | — | not planned |
+| E4 | CI — `eval-quick` gate, nightly `eval-full` | — | not planned |
+
+**This is a second table because these are not milestones.** The four phases
+above come from a different spec than the table above them, which is what its
+own heading says, and E1–E4 have no place in an M1–M10 numbering. They sit here
+rather than in a section of their own further down for the reason the milestone
+table sits at the top: a status table nobody scrolls to is the next stale one.
+All three tables are policed by `tests/unit/test_docs_currency.py`, which fails
+if a file in `docs/plans/` is named by none of them.
+
+## Rating provenance (from docs/specs/2026-08-19-rating-provenance-split-design.md)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1–7 | Every rating column names its source; IMDb's numbers re-imported; E1's frame re-anchored | docs/plans/2026-08-19-rating-provenance-split.md | 🔨 in progress on `spec/quality-evals` — 7 tasks planned; Task 1 landed: `m10a` renames the three dual-written columns to `tmdb_*`, adds the `imdb_*` pair, and renames `field_provenance`'s three JSONB keys — **the one statement in it that touches a row**, and a pure rename (measured: all 132,415 rows carrying provenance carry all three keys, every value `tmdb`). No rating value is moved; those are re-imported from source instead. The follow-up commit also restored `title.updated`'s `fields` payload to wire names, which the rename had silently moved |
+
+**This is a third table for the second table's reason, and not for a third
+one.** The rating-provenance split has its own spec
+(`docs/specs/2026-08-19-rating-provenance-split-design.md`), so a row under
+either heading above would have made that heading a false statement in order to
+satisfy a check about documentation being true. It is also the first plan here
+with **no scope segment in its filename** — not `m9`, not `e1`, because it is a
+repair rather than a stage — which is what
+`tests/unit/test_docs_currency.py::test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec`
+now pins: the plan was committed on 2026-08-19 unregistered, and no pattern in
+that file could see it.
+
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)
 

@@ -55,9 +55,12 @@ from line 5 must yield exactly the last two kept rows).
 
 Header plus three rows. Two join onto basics rows; the third (`tt99000090`)
 has no basics row, so a rating for a title the catalog does not hold is
-exercised. Ratings are on IMDb's own 0–10 scale because
-`Title.community_rating` is `Field(ge=0, le=10)` and the schema mirrors that
-as a CHECK — the scale is the contract, the numbers are invented.
+exercised. Ratings are on IMDb's own 0–10 scale because every rating field on
+`Title` — `tmdb_vote_average` and `imdb_average_rating` alike — is
+`Field(ge=0, le=10)` and the schema mirrors that as a CHECK. ADR-0040 split
+the column and did not move the bound, because both sources use 0–10, which is
+exactly why the dual write was silent. The scale is the contract, the numbers
+are invented.
 
 ## `title.akas.slice.tsv`
 

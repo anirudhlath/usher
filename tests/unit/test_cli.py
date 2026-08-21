@@ -103,6 +103,17 @@ def test_an_unknown_phase_is_rejected() -> None:
         build_parser().parse_args(["bootstrap", "--phase", "embeddings"])
 
 
+def test_the_ratings_phase_is_offered_by_the_parser() -> None:
+    """`PHASES` is derived from `BootstrapPhase`, so a member with no arm in
+    `run_bootstrap` is accepted by the parser and then silently does nothing.
+    This case and `test_the_ratings_phase_imports_the_ratings_file_and_nothing_else`
+    (`tests/unit/test_composition.py`) are the two halves; neither alone catches
+    a half-wired phase."""
+    parser = build_parser()
+    args = parser.parse_args(["bootstrap", "--phase", "ratings"])
+    assert args.phase == "ratings"
+
+
 def test_bootstrap_status_is_its_own_command() -> None:
     assert build_parser().parse_args(["bootstrap-status"]).command == "bootstrap-status"
 
@@ -1711,9 +1722,20 @@ def test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first() ->
     Kills a tidy-up that alphabetises `PHASES` -- which would put `aliases`
     and `credit-names` before `imdb` and produce two phases that download
     1.57 GiB, write nothing and report success.
+
+    ⚠️ **`ratings` sits at index 1 and is not one of the edges this case is
+    about.** It is an alias rather than a step
+    (`usher.domain.bootstrap.PHASE_ALIASES`) -- `--phase all` imports that
+    file inside its IMDb arm and never dispatches this member -- so its
+    position is a statement about where an operator reads it in `--help`,
+    beside the phase whose second half it is, and nothing joins on it. The
+    *steps* are still in `FULL_SEQUENCE`'s order and that is what the two
+    measured edges below assert, by name rather than by index, so an alias
+    added between two of them cannot quietly satisfy them.
     """
     assert PHASES == (
         "imdb",
+        "ratings",
         "credit-names",
         "aliases",
         "tmdb-ids",

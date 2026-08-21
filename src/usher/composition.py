@@ -1948,6 +1948,18 @@ async def run_bootstrap(
     browse ordering away from every reader for the length of a rebuild.
     Asserted in `tests/integration/test_admin_bootstrap.py`, not assumed.
 
+    **`RATINGS` is an alias rather than a step
+    (`usher.domain.bootstrap.PHASE_ALIASES`), so its arm tests `is` and names
+    no `ALL`.** `--phase all` reaches those rows through the IMDb arm above,
+    and naming `ALL` here would import the same 8.2 MiB twice and write the
+    same rows twice. Its reason for existing is what `--phase imdb` costs a
+    *live* catalog -- 214.4 MiB of `title.basics.tsv.gz` downloaded to rewrite
+    every name and year, and a changed name stales that title's embedding --
+    against 8.2 MiB that touches two columns nothing embeds (ADR-0040).
+    `_ratings` carries the empty-catalog refusal that keeps a mis-run of it
+    from sterilising `--phase imdb`, and the argument for why that refusal
+    lives in a function rather than in this arm.
+
     Nothing here raises for an upstream failure: `BootstrapService.
     import_dataset` records a `FAILED` `ImportRun` and returns, which is what
     lets `--phase all` continue past one dead upstream and what makes
@@ -1985,6 +1997,8 @@ async def run_bootstrap(
                     ),
                     catalog.apply_ratings,
                 )
+        if phase is BootstrapPhase.RATINGS:
+            await _ratings(settings, client, catalog, service, report)
         if phase in (BootstrapPhase.CREDIT_NAMES, BootstrapPhase.ALL):
             await _credit_names(settings, client, catalog, service, report)
         if phase in (BootstrapPhase.ALIASES, BootstrapPhase.ALL):
@@ -2034,6 +2048,74 @@ def _titles_writer(
         return result.inserted + result.updated
 
     return write
+
+
+async def _ratings(
+    settings: Settings,
+    client: httpx.AsyncClient,
+    catalog: BulkCatalogRepository,
+    service: BootstrapService,
+    report: BootstrapReporter,
+) -> None:
+    """`title.ratings.tsv.gz` -> `titles.imdb_*`, and nothing else.
+
+    **A function rather than an inline arm, and the reason is the refusal
+    below.** Its three siblings (`_credit_names`, `_aliases`, `_movielens`)
+    are functions, so each one's `return` skips *its* phase; the same refusal
+    written inline in `run_bootstrap` returns from the **whole dispatch**.
+    That is not hypothetical -- it was inline until 2026-08-19, and planting
+    the one edit the arm's own comment forbids (`phase in (RATINGS, ALL)`)
+    made `--phase all` over an empty catalog refuse here and abandon
+    `credit-names`, `aliases`, `tmdb-ids`, `crosswalk` and `movielens`,
+    failing with `ValueError: 'wikidata.crosswalk' is not in list` rather than
+    on the doubling the plant was about. A guard whose blast radius depends on
+    where it is written is one refactor away from being a bigger defect than
+    the one it prevents.
+
+    🔴 **The empty-catalog refusal is not a courtesy, and it is the one place
+    in this dispatch where a mis-run phase sterilises a *different* phase.**
+    `apply_ratings` is an `UPDATE ... WHERE t.imdb_id = s.imdb_id`, so against
+    an empty `titles` it matches nothing -- and matching nothing is not an
+    error. The run would reach EOF, write 0 rows, and checkpoint
+    `imdb.title.ratings` COMPLETED at the end. That is the same `import_runs`
+    row `--phase imdb` resumes from, so every later bootstrap would resume at
+    EOF and import no ratings at all. Measured end to end against real
+    Postgres before the guard existed: `--phase ratings` on an empty catalog
+    left `completed / rows_seen=3 / rows_written=0 / position=4`, and the
+    `--phase imdb` that followed left the identical row and a catalog of 5
+    titles with **0** carrying `imdb_num_votes`, `bootstrap-status` green
+    throughout. This is the **fourth** phase joining `titles` on `imdb_id` and
+    the last to gain the refusal the other three always carried; it stood as a
+    *comment* asserting the precondition, and a comment does not run.
+
+    **No `bulk_load_window()`, and not only because it declines on a non-empty
+    `titles`.** `.claude/rules/bootstrap-and-datasets.md` (M9 E5) records that
+    two processes over an *empty* catalog both read that guard as zero, both
+    `DROP INDEX`, and both commit -- and the loser's `CREATE INDEX IF NOT
+    EXISTS` then takes a SHARE lock on `titles` that blocks the winner's batch
+    writes for the length of the rebuild, having already cost the winner the
+    entire saving the window exists for (40.2 s against 35.8 s, a rebuilt pair
+    of 127 MB against 97 MB). Opening it here adds a third racer to that, on a
+    catalog nobody asked to have reindexed.
+
+    **The dataset's name is `imdb.title.ratings`, the same `import_runs` row
+    `--phase imdb` checkpoints against**, deliberately, so the two cannot
+    disagree about what revision this catalog holds. The cost is that a
+    completed run at an unchanged upstream revision resumes at the end and
+    writes nothing; ADR-0040's runbook deletes the row first and asserts on
+    `rows_written`.
+    """
+    if await catalog.count_titles() == 0:
+        report(
+            "ratings needs a catalog to update: title.ratings is keyed on "
+            "imdb_id and titles is empty. Run --phase imdb first."
+        )
+        return
+
+    await service.import_dataset(
+        IMDbRatingDataset(client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size),
+        catalog.apply_ratings,
+    )
 
 
 async def _credit_names(

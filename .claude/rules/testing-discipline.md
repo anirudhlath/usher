@@ -316,7 +316,8 @@ Both halves matter and the second is the general one:
 
 Same round, the third instance in this task of **"has any fixture, anywhere,
 ever set this to the other value?"** — after `media_items.available` and
-`titles.popularity`. Every candidate fixture in *both* arms of
+`titles.popularity` (`titles.tmdb_popularity` since `m10a`/ADR-0040). Every
+candidate fixture in *both* arms of
 `TitleRepositoryCandidateContract` wrote `enrichment_state = ENRICHED`, and the
 port docstring says the read deliberately has no such predicate because the
 skeleton tier is most of the catalog. Planting `enrichment_state = ENRICHED`

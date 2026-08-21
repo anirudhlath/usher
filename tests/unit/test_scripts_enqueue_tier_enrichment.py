@@ -75,7 +75,7 @@ def _title(
         kind=kind,
         name=f"Title {number}",
         sort_name=f"Title {number}",
-        vote_count=votes,
+        imdb_num_votes=votes,
         tmdb_id=tmdb_id,
     )
 
@@ -166,7 +166,7 @@ async def test_the_tier_is_movies_with_a_hundred_votes_and_a_tmdb_id() -> None:
     # walk that enqueued one row because it only ever saw one row would fail
     # here rather than pass the assertion below.
     assert len(titles.stored()) == 4
-    assert too_few_votes.vote_count == 100 - 1
+    assert too_few_votes.imdb_num_votes == 100 - 1
     assert no_tmdb_id.tmdb_id is None
 
     queue = FakeJobQueue()

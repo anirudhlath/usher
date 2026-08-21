@@ -238,7 +238,7 @@ def _title(title_id: uuid.UUID) -> Title:
         name=name,
         sort_name=name.casefold(),
         year=_YEARS.get(title_id, _DEFAULT_YEAR),
-        popularity=popularity,
+        tmdb_popularity=popularity,
     )
 
 
@@ -1056,7 +1056,7 @@ async def test_a_strong_match_is_not_displaced_by_a_popular_weak_one() -> None:
 
 
 async def test_an_unknown_popularity_is_not_a_popularity_of_zero() -> None:
-    """ADR-0014 in a fourth place. `titles.popularity` is `None` for every
+    """ADR-0014 in a fourth place. `titles.tmdb_popularity` is `None` for every
     title TMDb has never described -- most of 1,271,138 rows. Fails:
     `popularity or 0.0` and its SQL twin `coalesce(popularity, 0)`, which rank
     a title nobody measured identically to one measured as unpopular and bury

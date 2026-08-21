@@ -165,7 +165,9 @@ class _Household:
             name=name,
             sort_name=name.lower(),
             genres=tuple(genres),
-            vote_count=vote_count,
+            # The builder's own keyword names are test-local vocabulary and
+            # stay; only the `Title` field they feed moved. ADR-0040.
+            tmdb_vote_count=vote_count,
             enrichment_state=EnrichmentState.ENRICHED,
         )
         await self.titles.add(one)

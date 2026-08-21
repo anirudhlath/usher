@@ -1044,7 +1044,7 @@ class SearchService:
                 owned=hit.title_id in owned,
                 score=_blend(
                     relevance=_RELEVANCE_K / (_RELEVANCE_K + rank),
-                    popularity=_popularity_term(titles[hit.title_id].popularity),
+                    popularity=_popularity_term(titles[hit.title_id].tmdb_popularity),
                     owned=1.0 if hit.title_id in owned else 0.0,
                     # **A small boost, never a demotion, and the direction is
                     # the decision PRD 05 leaves open.** A search is
@@ -1137,7 +1137,8 @@ def _dense_ranks(hits: Sequence[SearchHit]) -> list[int]:
 def _popularity_term(popularity: float | None) -> float | None:
     """`p / (p + midpoint)`, or `None` when nobody has measured it.
 
-    **`None` is not 0.0** -- ADR-0014, in a fourth place. `titles.popularity`
+    **`None` is not 0.0** -- ADR-0014, in a fourth place.
+    `titles.tmdb_popularity`
     is null for every title TMDb's daily export has never described: **all**
     of a `--phase imdb` catalog and **~77%** of a `--phase all` one (Task 36
     measured 291,584 of 1,271,570 titles carrying a popularity, 2026-08-05).
@@ -1307,7 +1308,7 @@ def _result(title: Title, *, owned: bool, score: float) -> SearchResult:
         kind=title.kind,
         name=title.name,
         year=title.year,
-        popularity=title.popularity,
+        popularity=title.tmdb_popularity,
         owned=owned,
         score=score,
     )

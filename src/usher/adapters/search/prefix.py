@@ -51,19 +51,32 @@ _LIKE_ESCAPE = "\\"
 _LIKE_SPECIALS = (_LIKE_ESCAPE, "%", "_")
 
 # **Both tiers order their answers the same way, minus the key tier 1 does not
-# have.** Tier 2 sorts `dist ASC, popularity DESC NULLS LAST, vote_count DESC
-# NULLS LAST, id ASC`; every row here is an exact prefix match, so there is no
-# distance to lead with and the remaining three are identical. A client that
-# paints tier 1 and then replaces it with tier 2 sees the same list rather than
-# one that jumps under the cursor.
+# have.** Tier 2 sorts `dist ASC, tmdb_popularity DESC NULLS LAST,
+# tmdb_vote_count DESC NULLS LAST, id ASC`; every row here is an exact prefix
+# match, so there is no distance to lead with and the remaining three are
+# identical. A client that paints tier 1 and then replaces it with tier 2 sees
+# the same list rather than one that jumps under the cursor.
 #
 # `NULLS LAST` on both keys because a descending sort puts NULLs first by
 # default, which would hand the box to whichever skeleton the scan reached
 # first. Measured on a `--phase all` catalog of 1,271,570 titles: **291,584
 # (22.9%) carry a popularity**, so on the other ~77% this degenerates to
-# `vote_count DESC, id ASC`, and `vote_count` -- written by the bootstrap on
-# 539,350 rows -- is what orders them. The id makes the order total, so a tie
-# cannot come back differently on two runs.
+# `tmdb_vote_count DESC, id ASC`, and that column -- written by the bootstrap
+# on 539,350 rows -- is what orders them. The id makes the order total, so a
+# tie cannot come back differently on two runs.
+#
+# ⚠️ **That 539,350 is dated 2026-08-05 and ADR-0040's Task 2 moved the writer
+# it names (2026-08-19).** `apply_ratings` now fills `imdb_num_votes`, so
+# nothing but TMDb enrichment reaches `tmdb_vote_count` and a bootstrap-only
+# catalog leaves it NULL on **every** row -- at which point, on the rows where
+# `tmdb_popularity` is absent too (all of a `--phase imdb` catalog, ~77% of a
+# `--phase all` one), this `ORDER BY` is `id ASC` alone: insertion order over a
+# UUIDv7 key, which is the state ADR-0002 measured costing 4.2 points of
+# recall@5 overall and 8.3 on the 2-4-character band. The measurement
+# stands for the catalog it was taken on. **Not repaired here**: pointing the
+# key at `imdb_num_votes` is a ranking change owing its own measurement, and it
+# is issue #39. `adapters/search/postgres.py` carries the long form of this
+# note, and `ports/repository/title.py` the third copy.
 #
 # **The union reads `titles` and `title_search_names` as one set, so a
 # director's name reaches their films from the first keystroke.** That is the
@@ -109,7 +122,7 @@ WITH matched AS (
 SELECT m.title_id AS id
 FROM matched AS m
 JOIN titles AS t ON t.id = m.title_id
-ORDER BY t.popularity DESC NULLS LAST, t.vote_count DESC NULLS LAST, m.title_id ASC
+ORDER BY t.tmdb_popularity DESC NULLS LAST, t.tmdb_vote_count DESC NULLS LAST, m.title_id ASC
 LIMIT :limit
 """
 

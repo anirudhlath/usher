@@ -345,12 +345,12 @@ class TitleSearchNameRow(Base):
     without a second migration this milestone has no id for.
 
     **And `popularity` -- PRD 05's fourth column -- is refused, with a
-    number.** `titles.popularity` is NULL on **all 1,271,138 rows**
+    number.** `titles.tmdb_popularity` is NULL on **all 1,271,138 rows**
     (`.claude/rules/search-and-embeddings.md`), which is why M6's shipped
     suggest ordering was inert and why the vote-count tiebreak was added.
     Copying a column that is 100% NULL into a narrow table is precisely the
-    duplication boundary call 3 refused. The re-rank reads `titles.vote_count`,
-    as it already does.
+    duplication boundary call 3 refused. The re-rank reads
+    `titles.tmdb_vote_count`, as it already does.
 
     **The delete scope is `(title_id, kind)`, and it is stated here rather
     than discovered by a loader.** Two writers land in this table in the same

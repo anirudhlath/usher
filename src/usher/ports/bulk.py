@@ -92,16 +92,26 @@ class ImdbTitle:
 
 @dataclass(frozen=True, slots=True)
 class ImdbRating:
-    """One row of IMDb's `title.ratings.tsv.gz`.
+    """One row of `title.ratings.tsv.gz`, named for the source that supplied it.
 
-    `community_rating` is IMDb's `averageRating`, already on the 0-10 scale
-    `Title.community_rating` promises (`Field(ge=0, le=10)`), so no
-    rescaling happens anywhere.
+    `average_rating` is IMDb's `averageRating`, already on the 0-10 scale
+    `titles.imdb_average_rating` promises, so no rescaling happens anywhere.
+
+    **The names carry the source because the columns do.** These were
+    `community_rating` and `vote_count` until ADR-0040, which is how an IMDb
+    import came to overwrite TMDb's figures with nothing recording which
+    source had won. **The gap is ~38x, over one identified population counted
+    both ways**: of the frozen tier's 130,647 enriched rows, median TMDb
+    `vote_count` **15** against a median frozen IMDb `numVotes` of **576**
+    (`.claude/rules/tmdb-and-enrichment.md`, group S3). That pairing is
+    before-and-after over one frozen set of ids rather than two columns read
+    off one row -- no row could hold both until `m10a` and this port's own
+    redirect, which is the entire defect.
     """
 
     imdb_id: str
-    community_rating: float
-    vote_count: int
+    average_rating: float
+    num_votes: int
 
 
 @dataclass(frozen=True, slots=True)

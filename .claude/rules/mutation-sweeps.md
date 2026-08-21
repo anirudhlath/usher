@@ -7679,3 +7679,196 @@ through a bare-name call or a non-session receiver and no other predicate
 claims it either. It is kept as a declaration of intent and is now labelled
 inert — three co-equal load-bearing exemptions was a claim; two-plus-one is the
 measurement.
+## ADR-0040 Task 2 — the IMDb writer redirected, and two arms of one case that each catch a different plant (2026-08-19)
+
+**6 plants over `db/repositories/bulk.py`'s `apply_ratings` and
+`adapters/bulk/imdb.py`'s `parse_ratings_row` — 5 KILLED, 1
+equivalent-mutant control SURVIVED all five gate steps, 0 unintended
+survivors. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0
+DID-NOT-RUN, 0 HUNG.** Every verdict matched its pre-registered expectation,
+including the one written down as a *correction* to the plan's own prediction.
+The three-way split is the one that says something: "5 killed" would report a
+control as a kill and hide the round's subject.
+
+Harness at `/var/tmp/adr40-plants/plants.py`, **outside the working tree** for
+V1's reason and under `/var/tmp` rather than `/tmp`, which is tmpfs on this
+host. Plant list with **expected verdicts** at `/var/tmp/adr40-plants/PLANTS.md`
+(`sha256 3529b100a401…`), written before the first plant was applied. Tree
+committed first, so `git status --porcelain` is the verification — asserted
+empty after every plant, and both files `md5sum`-verified byte-identical to
+their pre-sweep digests afterwards. `PYTHONDONTWRITEBYTECODE=1`, `__pycache__`
+swept under **both** `src/` and `tests/` before every run, `compile()` as the
+dry run, an exact anchor count asserted before each plant, the landing check
+spelled as **byte equality with the intended mutant** (F3's repair), a 900 s
+per-plant timeout, a signal handler restoring from the `cp` backups, and no
+second `-q`.
+
+🔴 **The selection is every test file the commit touches, and round 1's was
+not — which is how this ledger came to state an absolute it had not
+measured.** Round 1 named `test_adapters_bulk_imdb.py`, `test_ports_bulk.py`,
+`test_bulk_repository_contracts.py` and `test_bulk_repository.py` (189 cases)
+while the commit *also* edited `tests/integration/test_bootstrap_end_to_end.py`,
+adding an assertion to it. So a plant that fails there was invisible, and the
+write-up then generalised a four-file result into a claim about the repository
+(see the corrected paragraph below). Round 2 adds that file — **198 cases,
+~10 s a run**, green before and after — and **four of the six counts change**.
+**The floor to carry: a sweep's selection must include every test file its own
+commit touches.** M5's entry reached the same place from the other direction by
+sweeping the whole suite; this is the cheap version of that rule, and the reason
+it is cheap is that the list is `git show --stat`.
+
+The flake check this file's rules require was *done rather than inherited*:
+`test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_
+session_of_its_own` lives in `tests/integration/test_rows_refresh.py`, which is
+in neither selection.
+
+| plant | verdict | cases failed (round 2 / round 1) |
+|---|---|---|
+| P1 the `UPDATE` writes `tmdb_vote_average`/`tmdb_vote_count` again (the whole regression) | KILLED | **2** / 1 — the new case on its **`imdb_*` arm** (`assert None == 613004`), **and** `test_phases_zero_to_two_produce_a_linked_skeleton_catalog` at `At index 4 diff: None != 7.4` |
+| P2 the `UPDATE` writes **both** pairs (the "defensive" half-fix) | KILLED | **2** / 1 — the new case on its **`tmdb_*` arm** (`assert 613004 == 42`), **and** the same bootstrap case at `At index 5 diff: 7.4 != None` |
+| P3 the `IS DISTINCT FROM` guard deleted | KILLED | 1 / 1 — `test_apply_ratings_is_a_no_op_when_nothing_changed`, Postgres arm alone |
+| P4 `parse_ratings_row` swaps `average_rating` and `num_votes` | KILLED | **2** / 1 — `test_ratings_parse_on_imdbs_own_scale` (`assert 12345 == 7.4`) **and** the bootstrap case |
+| C1 the staging **DDL**'s two column definitions written in the other order | SURVIVED all five gate steps | — / — |
+| C1-literal the plan's own spelling of C1 — DDL **and** the `("imdb_id", …)` tuple swapped together, records unchanged | KILLED | **4** / 3 |
+
+**P1 and P2 are the round's subject and they die on two different assertions
+of one case, which is the whole argument for writing both.** The dispatch
+predicted both would die on the `tmdb_*` arm; measured, only P2 does, and the
+reason is assertion *order* rather than coverage. Under P1 the IMDb columns are
+never written at all, so `assert row.imdb_num_votes == 613_004` is reached
+first and fails at `None` — the row reads `(None, None, 613004, 4.7)`, i.e.
+IMDb's figures sitting in TMDb's columns, which is precisely the defect, caught
+one assertion earlier than predicted. Under P2 every `imdb_*` assertion passes
+(the row reads `(613004, 4.7, 613004, 4.7)`) and **within this selection the
+`tmdb_*` arm is one of exactly two assertions that can see it** — the other
+being the bootstrap case's `tmdb_vote_average` column, added by the same
+commit. **So the two arms are each load-bearing and each is load-bearing
+against a different mutant — which is a stronger result than the prediction,
+and a summary saying "both killed by the new case" would have hidden it.**
+Nearest relative is M9 D3's *"killed by a different assertion than predicted"*,
+arriving at a case whose two halves were written for two different regressions
+rather than at one assertion pair.
+
+🔴 **And the sentence that stood here before this correction is the finding
+worth more than the round.** It read *"the `tmdb_*` arm is the only thing in
+the repository that can see it"* — a claim about the **repository**, drawn from
+a run over **four files**, and false: P2 fails two cases, and the second is one
+this very commit added. Nothing about the measurement was wrong; the
+quantifier was. **A sweep measures its selection and licenses statements about
+its selection only. Every "the only", "nothing else" and "anywhere" in a sweep
+write-up is a claim about the tree, so either scope it to the selection with
+its count or go and measure the tree.** This repository's own CLAUDE.md files
+it as the signature failure — *"a negative established by looking in the one
+place the answer was expected is not a negative"* — and it was committed here
+inside the artefact whose purpose is to catch it, three entries below M8 Task
+13's *"a survivor list is only true of the selection it was measured against"*.
+Found in review, not by the round.
+
+⚠️ **Round 2 could not run in the working tree, and the tree-pin check is what
+said so.** A second implementer was writing `src/usher/composition.py`,
+`src/usher/domain/bootstrap.py`, `tests/unit/test_cli.py` and
+`tests/unit/test_composition.py` into the same checkout while this round ran —
+CLAUDE.md is absolute that a sweep mutates in place so nothing else may use the
+tree, and that **disjoint file sets are not enough**. The harness aborted after
+P1 on its post-restore tree-pin assertion (both mutated files were
+`md5sum`-clean; the pin fired on the *other* agent's files appearing), and the
+round was moved to a disposable `git archive HEAD | tar -x` copy at
+`/var/tmp/adr40-sweep-tree` carrying only this task's own patch — the mechanism
+CLAUDE.md names, and never `cp -a`. **Two things to carry: the concurrency rule
+needs a check that enforces it, because "I am the only one in this tree" is an
+assumption a sweep silently rests on for its whole run; and a `git status`-empty
+assertion is that check only for a committed tree, so for an uncommitted one pin
+every reachable file by digest instead of weakening the check to fit.**
+
+🔴 **The plan's own equivalence argument for C1 is false, and C1-literal is the
+measurement rather than the claim.** The plan says *"`_stage`'s column tuple
+and the `CREATE TEMP TABLE` column list are matched positionally to each other,
+so moving both together is inert while moving one is a `COPY` type error."*
+`usher.db.staging.stage_records` ends in `driver.copy_records_to_table(table,
+records=records, columns=list(columns))`, so asyncpg builds `COPY "stg_ratings"
+(imdb_id, imdb_average_rating, imdb_num_votes) FROM STDIN` — **`columns` is
+matched to `records` positionally and to the table's columns by name.** The
+DDL's declaration order is therefore read by nothing (its only consumer is
+`SELECT DISTINCT ON (imdb_id) * FROM stg_ratings`, whose columns the `UPDATE`
+references by name), which is what makes C1-as-corrected a fact about the code;
+and the plan's spelling moves the tuple *away* from the records, which is a
+defect and not a control. Planted, it fails 3 of the 4 cases that stage a
+non-empty batch. **The general form: a control's equivalence argument is a
+claim about the code, so it has to be read out of the code — a plausible
+sentence about "positional matching" in a plan is exactly the shape that gets
+copied into a ledger as evidence.**
+
+**And C1-literal's failure mode is not the one the plan's own module docstring
+predicts, which is worth a line.** `staging.py` records that asyncpg's binary
+`COPY` is strictly typed and *"a `str` into an `integer` column raises
+`TypeError` client-side before a byte reaches Postgres"*. That does not extend
+to `float` into `integer`: `7.4` landed in the staging `imdb_num_votes integer`
+column as `7`, silently, and the kill arrived one statement later as
+`CheckViolationError` on `ck_titles_imdb_average_rating_range` when the staged
+`12345` reached `titles.imdb_average_rating`. The fourth case
+(`test_apply_ratings_deduplicates_within_one_batch`) survived the same mutant
+only because its `DISTINCT ON (imdb_id)` with no tiebreak happened to keep the
+`1.0`/`1` row rather than the `9.0`/`999` one — planner-dependent, which that
+case's own docstring already says is the only thing it can pin.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 the staging DDL's `imdb_average_rating` and `imdb_num_votes` definitions in the other order | PASS | PASS | PASS | PASS (12/0) | PASS (189) |
+
+Its equivalence is a fact about the *code* rather than about what the tools
+look at, argued above from `stage_records`' last line. It is deliberately
+**not** an `__all__` reorder, which `RUF022` rejects, and not a reorder of a
+positional call, which A5's entry is the reason for checking rather than
+assuming.
+
+Gate green before and after on the fully restored tree (`git status` clean,
+both mutated files `md5sum`-verified): `ruff check`, `ruff format --check` (629
+files), `mypy` over 611 files, `lint-imports` **12 kept / 0 broken**, and
+**5,473 passed / 26 skipped** over the whole suite.
+
+## E1 Task 15 — the eval package, and two survivors that a correct prediction hid (2026-08-20)
+
+**19 plants over `usher.eval`, 16 killed, 3 predicted survivors — and the sweep
+found two real coverage gaps, one of them behind a prediction that was right for
+the wrong reason.** Selection: `tests/unit/test_eval_*.py` plus
+`tests/integration/test_eval_*.py` (12 files, 174 cases), scoped because the only
+reach into the package from outside is four lines in `cli.py` — grepped, not
+assumed. Plant list written to `/var/tmp/e1-sweep/PLANTS.md` **before anything
+ran** and hashed (`63fc98ca9f6e7d7439eef6bcf4bed439564539c991ecfe3e3c89171b52a86b06`),
+so a verdict edited afterwards to match a result would be visible. Zero HUNG,
+zero DID-NOT-RUN, zero BROKEN-MUTATION; every anchor pre-checked unique and every
+mutant pre-compiled; tree committed first and `git status` asserted clean after
+every plant.
+
+**T16 — `verdict_for` had no test in the repository at all.** The plant
+`only PENDING → PASS` survived, and `grep -rn "verdict_for" tests/` afterwards
+returned **nothing**. Its four-branch precedence was entirely unpinned. This is
+not latent: `docs/evals/bars.toml` ships three `pending` bars today, and
+`verdict_for` is `exit_code_for`'s input, so the defect is a CI job exiting 0 on
+a run that faced no bar — *"a run that did not run is not a pass"* one level
+down from where this repository usually meets it. Closed by a parametrisation
+over the whole precedence plus the empty-input case; re-planted, it dies.
+
+**C1 — the plan predicted SURVIVE, it survived, and the prediction was wrong.**
+The plant swaps `GATE_BANDS`' `8-11` and `12-19`. The plan's reasoning was "a
+`sample` per band is independent of band order" — which is a true statement
+about `GATE_POOLS`, keyed by band *name*, and a false one about the
+**generator**, which walks that tuple in order against a single `Random(seed)`.
+Measured rather than argued: with the two swapped, the drawn set shares only
+**1,266 of 3,000** cases with the shipped order — 58% of the measurement moves,
+while `check_frame` still passes perfectly, because the pools are untouched and
+only the draw shifts. `build_typo_cases`' own docstring says exactly this ("Any
+other order draws a different set from the same seed") and nothing checked it.
+
+**The shape worth carrying: a correct verdict can hide a live gap, and the
+sweep's own bookkeeping is what conceals it.** A harness that scores
+`got == expected` marks C1 `ok` and moves on. The gap was only visible because
+the plant list recorded the *reason* beside the verdict and the reason did not
+survive contact with the module. **Write the mechanism into the plant list, not
+just the expected verdict — then a survivor whose stated reason is wrong reads
+as a finding rather than as a confirmation.** Nearest relative is M9 F5 and M5's
+`socket_logger`, both of which are predicted verdicts reached by the wrong
+mechanism; this is the first where the wrong mechanism left a real hole.
+
+Both closed in `eb0c7c8` and both re-planted afterwards: **T16 KILLED, C1
+KILLED.**

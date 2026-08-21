@@ -1,0 +1,120 @@
+# Pre-registered bars for the quality-eval harness.
+#
+# **Every ledger row records this file's sha256.** A bar edited after seeing a
+# number is then a hash change in the record rather than a git blame nobody
+# reads.
+#
+# **What that digest proves, exactly, is "this recorded run faced these
+# bytes".** It is computed at run time from whatever is on disk, so on its own
+# it establishes no order: precedence comes only from comparing it against an
+# *earlier recorded run carrying a different hash*. Two ordinary situations
+# leave nothing to compare against -- `--quick` is the default and records no
+# ledger row, so the usual way to see a number leaves no trace; and a bar
+# filled in from a first baseline has no predecessor by construction, because
+# the run that produced the number recorded the *pending* file's hash.
+#
+# **So the procedure below is the durable half, not the digest.** A pending bar
+# is filled in ONCE, from a recorded `--full` run, with that run's digest
+# written into its `source`. A number is NEVER moved to make a run green. A
+# re-baseline that is legitimate replaces the bar *and* names the run that
+# justifies it, in the same `source` -- "the bar changed" and "here is what
+# changed it" arrive together, or the change is not finished.
+#
+# Three kinds:
+#   window  -- the value must stay inside [low, high]. For a number whose
+#              *movement in either direction* means the thing measured is not
+#              the thing that was measured before.
+#   floor   -- the value must be >= low. A regression floor. It may also carry
+#              an optional `high`, which IS enforced -- not an ignored key.
+#              There is no ceiling-only kind, so a bar whose real gate is an
+#              upper bound is written as a floor with `low = 0.0`, which is
+#              what the latency bar below is. The floor half of such a bar
+#              cannot fail for a quantity with no negative value to produce;
+#              it records which direction the number runs, and the `high` is
+#              what gates.
+#   pending -- **no prior measurement exists.** The runner reports the value
+#              and does not gate. The first `--full` run against a reproducing
+#              frame is what fills it in, together with that run's digest.
+#              Writing a number here in advance is the exact failure the design
+#              names: a bar reverse-engineered from the number it judges is not
+#              a bar.
+
+[[bar]]
+surface = "suggest"
+tier = "prefix"
+metric = "recall_at_5"
+stratum = "all"
+kind = "window"
+low = 0.016
+high = 0.028
+source = """ADR-0031 and scripts/measure_suggest_tiers.py bar (4): tier 1 has \
+~2% typo recall by construction -- it is the btree exact-prefix probe. A tier \
+1 that scores *higher* is not the index that was measured, so this is a window \
+in both directions rather than a floor.
+
+WIDENED 2026-08-20, ceiling 0.022 -> 0.028, by ADR-0031's amendment. The old \
+window was one draw (0.019) with a half-width guessed at +/-0.003, and it had \
+never once been reproduced: ADR-0031's own B3 gate run measured 0.0267 against \
+it and recorded FAIL, and E1's first baseline measured 0.023738 and recorded \
+FAIL. Both failures are at the ceiling; no draw has ever gone below 0.016, \
+which is why the floor is unchanged.
+
+The ceiling is now 3 observed draw SD above the observed mean rather than a \
+guess. Eight seeds x two arms (2026-08-20, n=2991 per run, ordering defect \
+present and repaired) give mean 0.021975, SD 0.001853, range 0.0184-0.0244. \
+The window [0.016, 0.028] is centred on 0.022 -- the observed mean to three \
+decimals -- with a half-width of 0.006 = 3.24 SD, and it contains all 16 of \
+those draws, the committed baseline's 0.023738, ADR-0031's own 0.019, and \
+B3's 0.0267. A 2 SD window would exclude B3's draw, i.e. would preserve the \
+defect being repaired.
+
+What it still catches is unchanged in kind and enormous in margin: tier 1 \
+answering as tier 2 scores 0.8094 (29x the ceiling) and a collapsed index \
+scores 0.0. This bar was never a 5%-regression detector -- it detects that \
+the exact-prefix btree probe is no longer what is running."""
+
+[[bar]]
+surface = "suggest"
+tier = "prefix"
+metric = "latency_p95_ms"
+stratum = "all"
+kind = "floor"
+low = 0.0
+high = 10.0
+source = """ADR-0031: p50 0.6 ms, p95 1.0 ms, max 10 ms over the 2,993 typo \
+strings on 1,271,138 rows. Expressed with a ceiling because the failure \
+direction is slow, and 10x the recorded p95 rather than 1x because this is a \
+shared dev box and E1 is not a latency benchmark -- scripts/measure_suggest_tiers.py \
+owns that measurement and its quiet-check."""
+
+[[bar]]
+surface = "suggest"
+tier = "fuzzy"
+metric = "recall_at_5"
+stratum = "all"
+kind = "pending"
+source = """No prior measurement exists over all 2,993 cases at tier 2. \
+ADR-0002's gate recorded per-band figures on the *pre-ADR-0031* configuration \
+(27.8% on 2-4, 68.3% on 5-7, 95.5% on 8-11) and the shipped tier 2 carries a \
+vote tiebreak the gate's rows do not all share. The first --full run against a \
+reproducing frame sets this, with that run's inputs digest beside it."""
+
+[[bar]]
+surface = "suggest"
+tier = "fuzzy"
+metric = "recall_at_5"
+stratum = "band=2-4"
+kind = "pending"
+source = """The band ADR-0002 failed on -- 27.8% against a 0.75 bar. Not \
+written as a floor of 0.278, because that number was measured on a \
+configuration ADR-0031 replaced. Set from the first --full run."""
+
+[[bar]]
+surface = "suggest"
+tier = "fuzzy"
+metric = "recall_at_5"
+stratum = "typo_class=transposition"
+kind = "pending"
+source = """The class ADR-0002 measured at 0.0% on short names. Tracked as its \
+own stratum because a mean over four typo classes describes none of them, and \
+a zero that moves at all is a different finding."""

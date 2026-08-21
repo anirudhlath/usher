@@ -1251,7 +1251,29 @@ def _staging_sources() -> dict[str, tuple[str, type[Any]]]:
     for path in _written_sources():
         tree = ast.parse(path.read_text())
         texts = _module_texts(tree)
-        module = _import_of(path)
+        # **Imported lazily, and only for a module that really stages.**
+        # `_written_sources()` is every module in the package on purpose, and
+        # importing all of them eagerly made this scan depend on every optional
+        # dependency any of them has: `usher/eval/metrics/ir.py` raises
+        # `EvalDependencyMissing` at import time when the `eval` extra is not
+        # synced, so the whole ledger crashed on a module that stages nothing.
+        #
+        # ⚠️ **Not the gate's environment** -- `.github/workflows/ci.yml:63` is
+        # `uv sync --frozen --extra eval`, so CI has `ranx` and this crash does
+        # not reach it. The environment that lacks it is the **shipped image**:
+        # `Dockerfile`'s two syncs are `--no-dev` with no `--extra`, while
+        # `COPY src/ ./src/` puts `usher/eval/` in the image regardless. So an
+        # operator running this audit against a deployment is exactly who hit
+        # it, and a gate-green claim would not have covered them. (This comment
+        # said "which is the gate's own environment" for one commit and that
+        # was false; the fix is right for a reason it got wrong.)
+        #
+        # An exclusion list would go stale the moment `usher/eval/` grew a
+        # writer; deferring the import to the point a staging table is actually
+        # found cannot, because a module with a writer is still imported and
+        # still fails loudly if it cannot be. `module` is only read by
+        # `_sequence_element`.
+        module: Any = None
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
@@ -1270,6 +1292,8 @@ def _staging_sources() -> dict[str, tuple[str, type[Any]]]:
             }
             if not staged:
                 continue
+            if module is None:
+                module = _import_of(path)
             element = _sequence_element(node, module)
             if element is None:
                 # **Per table, not in aggregate.** `if element is None:
@@ -1367,6 +1391,15 @@ _ADD_COLUMN = re.compile(
     re.IGNORECASE,
 )
 _DROP_COLUMN = re.compile(r"ALTER\s+TABLE\s+(\w+)\s+DROP\s+COLUMN\s+(\w+)", re.IGNORECASE)
+
+
+def _text(node: ast.expr, strings: Mapping[str, str]) -> str | None:
+    """A string literal, or a loop variable `_replay_loop` has bound to one."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.Name):
+        return strings.get(node.id)
+    return None
 
 
 def _resolve(node: ast.expr, names: Mapping[str, int]) -> Any:
@@ -1486,6 +1519,26 @@ def _revision_order() -> list[pathlib.Path]:
     return ordered
 
 
+def head_revision() -> str:
+    """The last revision in the chain, derived rather than written down.
+
+    **This exists because the label was hard-coded as `m09f` and went false the
+    moment `m10a` merged**, so a table headed *"m09f / m08b"* was printing
+    today's head under a previous head's name -- the same staleness
+    `.claude/rules/db-and-sql.md` records for `test_migrations.py`'s `-1`
+    assertion, arriving in a *label* instead of an assertion and therefore
+    without even a red test to announce it. `--at` still takes an explicit
+    revision; only the name of "today" is inferred.
+    """
+    ordered = _revision_order()
+    if not ordered:
+        raise DegenerateScan("the migration chain replayed to nothing, so no head exists")
+    revision = _revision_of(ast.parse(ordered[-1].read_text()))
+    if revision is None:
+        raise DegenerateScan(f"the chain's last file {ordered[-1].name} declares no revision")
+    return revision
+
+
 def migration_bounded_columns(stop_after: str | None = None) -> set[tuple[str, str, str]]:
     """The same set as `bounded_columns()`, replayed off the migrations.
 
@@ -1528,7 +1581,7 @@ def migration_bounded_columns(stop_after: str | None = None) -> set[tuple[str, s
             for node in tree.body
             if isinstance(node, ast.FunctionDef) and node.name != "upgrade"
         }
-        _replay_body(upgrade, schema, _imported_ints(tree), helpers)
+        _replay_body(upgrade, schema, _imported_ints(tree), helpers, _module_literals(tree))
         if stop_after is not None and _revision_of(tree) == stop_after:
             break
     return {
@@ -1542,10 +1595,49 @@ def migration_bounded_columns(stop_after: str | None = None) -> set[tuple[str, s
 def _in_order(node: ast.AST) -> Iterator[ast.AST]:
     """Depth-first, source order. `ast.walk` is breadth-first, which reorders a
     migration's own statements -- and `m09e` creates nothing and *alters* two
-    columns, so an out-of-order replay reads the width the chain started at."""
+    columns, so an out-of-order replay reads the width the chain started at.
+
+    **`ast.For` is yielded and not descended into**, because `_replay_body`
+    unrolls it with its loop variables bound; descending here as well would
+    replay every statement in the body a second time with the names unresolved.
+    """
     yield node
+    if isinstance(node, ast.For):
+        return
     for child in ast.iter_child_nodes(node):
         yield from _in_order(child)
+
+
+def _module_literals(tree: ast.Module) -> dict[str, Any]:
+    """Module-level `NAME = <literal>`, for the loop iterables a replay unrolls.
+
+    `m10a` renames six columns as `for old, new, *_ in _RENAMES:
+    op.alter_column("titles", old, new_column_name=new)` -- so the column names
+    are not in the call at all, they are in a module constant one scope up. A
+    replay that reads only `ast.Constant` arguments sees an `alter_column` it
+    cannot interpret and silently keeps the pre-rename name.
+    """
+    literals: dict[str, Any] = {}
+    for node in tree.body:
+        # `ast.AnnAssign` as well as `ast.Assign`: `m10a` declares
+        # `_RENAMES: tuple[tuple[str, str, str, str], ...] = (...)`, and reading
+        # only `Assign` skipped it -- which reached `_replay_loop`'s guard as
+        # "the iterable does not resolve" rather than as a rename.
+        if isinstance(node, ast.AnnAssign):
+            targets: list[ast.expr] = [node.target]
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            targets = list(node.targets)
+            value = node.value
+        else:
+            continue
+        if value is None or len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            continue
+        try:
+            literals[targets[0].id] = ast.literal_eval(value)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            continue
+    return literals
 
 
 def _replay_body(
@@ -1553,6 +1645,8 @@ def _replay_body(
     schema: dict[str, dict[str, str]],
     names: Mapping[str, int],
     helpers: Mapping[str, ast.FunctionDef],
+    literals: Mapping[str, Any] | None = None,
+    strings: Mapping[str, str] | None = None,
 ) -> None:
     """One `upgrade()`, descending one level into its own module's helpers.
 
@@ -1562,7 +1656,12 @@ def _replay_body(
     helper and a general inliner would be a worse thing to trust than a
     disagreement the summary prints.
     """
+    literals = literals or {}
+    strings = strings or {}
     for inner in _in_order(node):
+        if isinstance(inner, ast.For):
+            _replay_loop(inner, schema, names, helpers, literals, strings)
+            continue
         if isinstance(inner, ast.Call):
             called = inner.func
             target = getattr(called, "id", "")
@@ -1573,22 +1672,77 @@ def _replay_body(
                     value = _resolve(argument, names)
                     if isinstance(value, int) and not isinstance(value, bool):
                         bound[parameter.arg] = value
-                _replay_body(helper, schema, bound, {})
+                _replay_body(helper, schema, bound, {}, literals)
                 continue
-            _replay_call(inner, schema, names)
+            _replay_call(inner, schema, names, strings)
         if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
             _replay_sql(inner.value, schema)
 
 
-def _replay_call(
-    node: ast.Call, schema: dict[str, dict[str, str]], names: Mapping[str, int]
+def _replay_loop(
+    node: ast.For,
+    schema: dict[str, dict[str, str]],
+    names: Mapping[str, int],
+    helpers: Mapping[str, ast.FunctionDef],
+    literals: Mapping[str, Any],
+    strings: Mapping[str, str],
 ) -> None:
+    """Unroll `for a, b, ... in <module constant>:` and replay the body per item.
+
+    Only over an iterable that resolves to a literal sequence -- which is the
+    one shape this chain uses (`m10a`'s `_RENAMES`). Anything else raises,
+    rather than replaying the body with the loop variables unbound: a rename
+    whose names do not resolve keeps the *old* column silently, and the whole
+    argument for this instrument is that a scan which cannot see something must
+    say so instead of answering as though there were nothing to see.
+    """
+    iterable = node.iter
+    items: Any = None
+    if isinstance(iterable, ast.Name):
+        items = literals.get(iterable.id)
+    else:
+        try:
+            items = ast.literal_eval(iterable)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            items = None
+    mutating = [
+        call
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and (getattr(call.func, "attr", "") in {"alter_column", "add_column", "drop_column"})
+    ]
+    if items is None:
+        if mutating:
+            raise DegenerateScan(
+                f"a loop at line {node.lineno} performs {len(mutating)} schema "
+                "operation(s) and its iterable does not resolve to a literal, so "
+                "every column it touches would keep its pre-loop name and type"
+            )
+        return
+    targets = node.target.elts if isinstance(node.target, ast.Tuple) else [node.target]
+    for item in items:
+        values = item if isinstance(item, tuple | list) else (item,)
+        bound = dict(strings)
+        for target, value in zip(targets, values, strict=False):
+            if isinstance(target, ast.Name) and isinstance(value, str):
+                bound[target.id] = value
+        for statement in node.body:
+            _replay_body(statement, schema, names, helpers, literals, bound)
+
+
+def _replay_call(
+    node: ast.Call,
+    schema: dict[str, dict[str, str]],
+    names: Mapping[str, int],
+    strings: Mapping[str, str] | None = None,
+) -> None:
+    strings = strings or {}
     called = node.func
     name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
-    if not node.args or not isinstance(node.args[0], ast.Constant):
+    if not node.args:
         return
-    table = node.args[0].value
-    if not isinstance(table, str):
+    table = _text(node.args[0], strings)
+    if table is None:
         return
     if name == "create_table":
         columns: dict[str, str] = {}
@@ -1618,15 +1772,41 @@ def _replay_call(
     elif name == "alter_column" and len(node.args) > 1:
         # `m09e` moves both vector columns to a new width this way, so a replay
         # blind to `type_=` reports the width the chain started at.
-        argument = node.args[1]
+        #
+        # **And `m10a` *renames* six columns this way, which is the second
+        # keyword.** A replay that reads only `type_=` keeps the old name and
+        # never learns the new one, so `--check` reported
+        # `only-metadata=[('titles', 'tmdb_vote_count', …)]` against
+        # `only-migrations=[('titles', 'vote_count', …)]` -- the metadata and
+        # the chain describing the same column under two names. That is the
+        # column-set comparison doing exactly what it is for; it is also the
+        # reason this branch cannot be left at one keyword, because a rename is
+        # the one edit that changes a column's identity without changing
+        # anything the rest of this replay looks at.
+        column = _text(node.args[1], strings)
+        if column is None:
+            return
+        renamed_node = next(
+            (one.value for one in node.keywords if one.arg == "new_column_name"),
+            None,
+        )
         retyped = next(
             (one.value for one in node.keywords if one.arg == "type_"),
             None,
         )
-        if isinstance(argument, ast.Constant) and isinstance(argument.value, str) and retyped:
+        if retyped is not None:
             sql_type = _literal_type(retyped, names)
             if sql_type is not None:
-                schema.setdefault(table, {})[argument.value] = sql_type
+                schema.setdefault(table, {})[column] = sql_type
+        renamed = None if renamed_node is None else _text(renamed_node, strings)
+        if renamed is not None:
+            columns = schema.setdefault(table, {})
+            # `pop` rather than a read-then-delete: a rename of a column this
+            # replay never saw declared (an `op.execute`d `ADD COLUMN` it could
+            # not parse, say) must not invent one under the new name.
+            existing = columns.pop(column, None)
+            if existing is not None:
+                columns[renamed] = existing
 
 
 _SQL_TYPE_RENAMES = {
@@ -2076,10 +2256,25 @@ BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 #: (This comment said "nineteen of the twenty writing sites took ... and
 #: `jobs.attempts` did not", which counted a column as a site and was wrong on
 #: both halves.)
+#:
+#: 🔴 **Every reading gained one `translated` on 2026-08-21, and the cause is
+#: `m10a`/ADR-0040 rather than anything F9 did.** That revision split
+#: `titles.vote_count` -- one `integer` column with two writers -- into
+#: `tmdb_vote_count` and `imdb_num_votes`, and the ledger separates them for
+#: exactly the reason the record split them: `imdb_num_votes` is fed by
+#: `bulk.py:apply_ratings` through `stg_ratings.imdb_num_votes integer`, so it
+#: is **exposed-copy**, and `tmdb_vote_count` is reached only through the ORM,
+#: so it is **translated**. The old column was `exposed-copy` because a COPY
+#: writer touched it at all -- worst case over its writers, which is what a
+#: dual-written column costs. So `exposed-copy` holds station (the IMDb half
+#: inherits the slot), `translated` gains the TMDb half, and the bounded total
+#: goes 79 -> 80. **The provenance split is legible in this instrument without
+#: anyone having taught it about ADR-0040**, which is a corroboration of that
+#: record rather than drift against it.
 PUBLISHED: Mapping[str, Mapping[str, int]] = {
-    "closure": {"safe": 20, "translated": 28, "exposed-copy": 30, "exposed-sqlalchemy": 1},
-    "path": {"safe": 18, "translated": 29, "exposed-copy": 31, "exposed-sqlalchemy": 1},
-    "pydantic": {"safe": 14, "translated": 29, "exposed-copy": 34, "exposed-sqlalchemy": 2},
+    "closure": {"safe": 20, "translated": 29, "exposed-copy": 30, "exposed-sqlalchemy": 1},
+    "path": {"safe": 18, "translated": 30, "exposed-copy": 31, "exposed-sqlalchemy": 1},
+    "pydantic": {"safe": 14, "translated": 30, "exposed-copy": 34, "exposed-sqlalchemy": 2},
 }
 
 #: Same, at M8's head, which is what the roadmap's corrections are scored
@@ -2093,10 +2288,20 @@ PUBLISHED: Mapping[str, Mapping[str, int]] = {
 #: comparable across the two heads is the *column set*, which is what the
 #: roadmap's `67` is scored on; the buckets are a statement about today's
 #: writers and always were.
+#:
+#: 🔴 **And these moved on 2026-08-21 with no M8-era column changing, which is
+#: the warning above paying out.** `m10a` redirected `bulk.py:apply_ratings`
+#: off `vote_count` and onto `imdb_num_votes` -- a column that does not exist
+#: at `m08b` -- so M8's `titles.vote_count` lost its only COPY writer and is
+#: scored **translated** today where it was **exposed-copy** yesterday. Hence
+#: `exposed-copy` -1 and `translated` +1 on every reading, with the bounded
+#: total unchanged at that head. Read as: *a redirect in today's source
+#: reclassified a column M8 shipped*, which is the property this block's
+#: warning describes and not a discovery about M8.
 PUBLISHED_AT_M08B: Mapping[str, Mapping[str, int]] = {
-    "closure": {"safe": 18, "translated": 22, "exposed-copy": 30, "exposed-sqlalchemy": 1},
-    "path": {"safe": 16, "translated": 23, "exposed-copy": 31, "exposed-sqlalchemy": 1},
-    "pydantic": {"safe": 12, "translated": 23, "exposed-copy": 34, "exposed-sqlalchemy": 2},
+    "closure": {"safe": 18, "translated": 23, "exposed-copy": 29, "exposed-sqlalchemy": 1},
+    "path": {"safe": 16, "translated": 24, "exposed-copy": 30, "exposed-sqlalchemy": 1},
+    "pydantic": {"safe": 12, "translated": 24, "exposed-copy": 33, "exposed-sqlalchemy": 2},
 }
 
 
@@ -2108,9 +2313,10 @@ def readings_table() -> str:
     reader who cannot see the other two columns cannot tell a decision from an
     accident.
     """
-    lines = ["reading            safe  transl  copy  sqla  exposed  (m09f / m08b)"]
+    head = head_revision()
+    lines = [f"reading            safe  transl  copy  sqla  exposed  ({head} / m08b)"]
     for reading in READINGS:
-        for label, at in (("m09f", None), ("m08b", "m08b")):
+        for label, at in ((head, None), ("m08b", "m08b")):
             got = counts(build_ledger(reading, at=at))
             exposed = got["exposed-copy"] + got["exposed-sqlalchemy"]
             marker = "*" if reading == DEFAULT_READING else " "
@@ -2241,7 +2447,7 @@ def _drift(reading: str) -> list[str]:
             f"only-migrations={sorted(replayed - metadata_set)}"
         )
     for label, published, at in (
-        ("m09f", PUBLISHED, None),
+        (head_revision(), PUBLISHED, None),
         ("m08b", PUBLISHED_AT_M08B, "m08b"),
     ):
         for name in READINGS:

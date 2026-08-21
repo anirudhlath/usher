@@ -26,7 +26,8 @@ curated shelf fails the same way and costs more, because the operator
 configured an LLM and is paying for a nightly job.
 
 So the pool is built from the four signals that need no model -- unwatched,
-owned, genre affinity, `titles.vote_count`, all inside
+owned, genre affinity, `titles.tmdb_vote_count` (M8 boundary call 5 wrote
+`titles.vote_count`; ADR-0040 renamed the column), all inside
 `TitleRepository.list_unwatched_candidates` -- and the centroid **re-orders**
 what those produced. Four configurations, and each has to be right:
 

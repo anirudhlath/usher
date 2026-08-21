@@ -860,7 +860,16 @@ and says so.
 | `tagline` (weight class C) | 54,567 (41.72%) |
 | `genres` (weight class D) | 130,781 (99.98%) |
 | `keywords` (weight class D) | 82,405 (63.00%) |
-| `field_provenance.vote_count = 'tmdb'` | 130,647 |
+| `field_provenance.vote_count = 'tmdb'` ⚠️ | 130,647 |
+
+⚠️ **That last row's key no longer exists under that name.** `m10a`
+(ADR-0040) renames `field_provenance`'s three rating keys along with the
+columns they mirror, so the same count is `field_provenance.tmdb_vote_count =
+'tmdb'` on any catalog at or above that revision — and a reader who copies the
+row as written queries a key that is absent and gets 0. The measurement itself
+is untouched and stands as taken: the *rename* is what this note records, and
+all 132,415 rows carrying provenance were measured to carry all three keys
+with every value `tmdb`, which is why that rename needed no inference.
 
 **The shortfall is 159 and every one is accounted for**, which is what the
 acceptance asked for: 109 titles TMDb has merged away (404, parked at

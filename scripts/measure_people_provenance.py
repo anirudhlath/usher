@@ -920,7 +920,8 @@ _PROBES: tuple[tuple[str, str, dict[str, Any]], ...] = (
     (
         "suggest tier 1 (prefix)",
         "SELECT t.id, t.name FROM titles t WHERE lower(t.name) LIKE :p "
-        "ORDER BY t.vote_count DESC NULLS LAST, t.popularity DESC NULLS LAST, t.id LIMIT 10",
+        "ORDER BY t.tmdb_vote_count DESC NULLS LAST, t.tmdb_popularity DESC NULLS LAST, "
+        "t.id LIMIT 10",
         {"p": "the quie%"},
     ),
     (

@@ -50,27 +50,64 @@ def test_every_adr_file_is_listed_in_the_decisions_register() -> None:
     assert linked - files == set(), f"register rows pointing at nothing: {sorted(linked - files)}"
 
 
-def test_no_two_decision_records_claim_the_same_number() -> None:
-    """The case above compares **filenames** in both directions, which is
-    why it watched two ADRs numbered 0039 land and stayed green.
+def test_no_two_adrs_claim_the_same_number() -> None:
+    """**The register check above cannot see this one, and 2026-08-20 is how we
+    found that out.** `spec/quality-evals` wrote `0039-the-eval-schema-is-not-a-
+    migration.md` while `main` merged `0039-the-genre-vocabulary-is-usher-
+    owned.md`. Two *different filenames*, so git resolves no conflict and a
+    merge simply keeps both — and every one of the 14 bare `ADR-0039`
+    references on one side and 16 on the other silently stops naming one
+    document.
 
-    Measured 2026-08-20: `milestone/m10-hardening` and `main` each minted an
-    `0039` -- the genre vocabulary on the trunk, the outbound limiter on the
-    branch -- and the merge brought in both. Two distinct filenames, both
-    present as files, both present as register rows, so `files - linked` and
-    `linked - files` were empty and the register looked correct. What was
-    broken is the thing a register is *for*: a bare `ADR-0039` in prose no
-    longer named one decision, across roughly sixty sites.
+    It passes `test_every_adr_file_is_listed_in_the_decisions_register` too:
+    both files exist, both get a row, both directions of that set comparison
+    are clean. A register can be complete and still ambiguous, which is why
+    this is a second case rather than a third assertion in that one.
 
-    The numeric prefix is the identifier every citation actually uses, and
-    nothing parsed it until this case did. The limiter moved to 0040; this
-    is what stops the next parallel branch re-doing it.
+    The check only fires once both files are in one tree — i.e. after the
+    merge, not before it. That is the whole point: the merge is the moment the
+    collision becomes real and the moment nothing else reports it.
+
+    Same non-emptiness control as its neighbour, and for the same reason: a
+    glob that finds nothing has no duplicates either.
+
+    **This case was written twice, independently, and that is the finding.**
+    `spec/quality-evals` wrote it under this name and `milestone/m10-hardening`
+    wrote `test_no_two_decision_records_claim_the_same_number` — same glob, same
+    prefix slice, same duplicate check, neither branch able to see the other
+    doing it. The 2026-08-21 merge is where they met, and folding them into one
+    case is the whole of that resolution.
+
+    **And on the same merge the collision recurred, at two numbers at once**,
+    which retires the sentence the branch's copy ended on (*"the limiter moved
+    to 0040; this is what stops the next parallel branch re-doing it"*). It did
+    not stop it. `main` minted `0040-rating-columns-name-their-source.md` and
+    `0041-the-eval-schema-is-not-a-migration.md`; the branch, having already
+    moved its limiter *to* 0040, held `0040-the-outbound-limiter-...` and
+    `0041-a-bounded-column-...`. Both branches were green in isolation and the
+    merge was red on two numbers.
+
+    **The mechanism is the allocation rule, not the guard.** "Take the next free
+    number" computed against *your own* tree is not a reservation, so two
+    branches that never see each other compute the same answer — and a renumber
+    that also takes the next free number is exposed to the identical race, which
+    is precisely how the branch's 0039 → 0040 repair walked into main's 0040.
+    This case is a *detector*, and a detector that fires at merge time cannot
+    prevent what it detects; the branch ADRs moved to 0042 and 0043 on
+    2026-08-21. Anything that actually fixes this has to make the number
+    unguessable-in-parallel or reserved per branch, and that is not decided
+    here.
     """
     numbers = [path.name[:4] for path in _DECISIONS.glob("0*.md")]
 
-    assert numbers, "the register scan found no ADRs"
-    duplicates = sorted({one for one in numbers if numbers.count(one) > 1})
-    assert duplicates == [], f"two decision records claim one number: {duplicates}"
+    assert len(numbers) >= 35, f"the register scan found only {len(numbers)} ADRs"
+
+    duplicated = sorted({number for number in numbers if numbers.count(number) > 1})
+    assert duplicated == [], (
+        f"these ADR numbers are claimed by more than one file: {duplicated} — "
+        f"a merge that kept both sides of a number collision, which resolves "
+        f"no conflict because the filenames differ"
+    )
 
 
 def test_the_provider_proposal_adr_is_reachable_from_prd_06() -> None:

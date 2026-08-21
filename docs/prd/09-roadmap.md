@@ -324,8 +324,14 @@ carries a measurement they do not.
    same page for a different reason — see
    [06](06-rows-and-recommendations.md): `watch_states` has no `rating` and no
    `favorite`, and neither does `SourceWatchState`, so a *household's* rating
-   on a card is a field with no source. (`titles.community_rating` exists and
-   is a different thing: IMDb's aggregate, not this household's opinion.)
+   on a card is a field with no source. (`titles.tmdb_vote_average` and
+   `titles.imdb_average_rating` exist and are a different thing: a *provider's*
+   aggregate, not this household's opinion. Both were one column named
+   `community_rating` until `m10a` —
+   [ADR-0040](decisions/0040-rating-columns-name-their-source.md) — with two
+   writers and nothing recording which had won, which is the sharper version of
+   the same point: a rating with no named source is a rating you cannot
+   interpret.)
 
 4. **`Person` and `Credit` ARE built, and `Collection` with them, all three
    re-derived from `raw_payloads` with no second network call.** M4's boundary
@@ -1081,6 +1087,26 @@ suspicion.
   *unbounded* column accepting a nonsense value — the opposite defect from the 50
   above, wanting a domain bound rather than a translation. The same correction is
   owed to issue #10's body, which carries the `NUMERIC` spelling.
+  catches it, evidenced by `id_crosswalk.imdb_id` (staging `text`) surfacing as
+  a wrapped `DBAPIError` while `media_items.container` (staging `varchar(32)`)
+  does not. Separately: `Title.popularity: float | None = Field(ge=0)`
+  (`Title.tmdb_popularity` since `m10a`) accepts
+  **infinity** — `float('inf') >= 0` is `True`, Postgres 17's unbounded `NUMERIC`
+  stores it, verified round-trip, reachable via `json.loads('1e400')` from a TMDb
+  payload. `community_rating` — now `tmdb_vote_average`, and joined by
+  `imdb_average_rating` — is safe only by accident of its `le=10`, which is
+  true of the new pair too.
+  **Still needs a scoped decision before an owner, and M9 looked at it and said
+  no with the reason attached** — it is M9's boundary call 8. M9 is the
+  milestone that built the problem vocabulary a leak like this would have to map
+  onto, so it is the milestone where "widen the `except`" was cheapest to try:
+  the measurement above is what stops it, because **31 of the 45 never reach a
+  SQLAlchemy `except` at all**. Mapping them means wrapping the COPY path
+  itself, which is a change to the bulk loader rather than to the error
+  taxonomy, and [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
+  closed the vocabulary at seven members on the evidence of routes that exist.
+  The candidate is unchanged: declare staging columns wide (`bigint`, `text`) so
+  the refusal moves to the `INSERT … SELECT`.
 - **`PortRateLimited.retry_after` reaches no consumer** — an M4 gap found by M8.
   **Six sites across four adapter modules** construct it — `adapters/bulk/
   wikidata.py`, `adapters/bulk/download.py`, `adapters/emby/session.py` (three)

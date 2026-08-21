@@ -9,7 +9,7 @@ otherwise be lost and re-litigated in six months.
 | ADR | Decision | Status |
 |---|---|---|
 | [0001](0001-abc-over-protocol.md) | ABCs, not Protocols, for ports | Accepted |
-| [0002](0002-postgres-first-search.md) | Postgres-first search; Meilisearch gated | Accepted — reverses an earlier call; **gate run 2026-08-03 and failed**, follow-up owned by M9 |
+| [0002](0002-postgres-first-search.md) | Postgres-first search; Meilisearch gated | Accepted — reverses an earlier call; **gate run 2026-08-03 and failed**, follow-up owned by M9; **amended 2026-08-19 by [0040](0040-rating-columns-name-their-source.md)** — its sampling frame is re-anchored on `imdb_num_votes` and its vote-count tiebreak lost its writer |
 | [0003](0003-own-uuid-identity.md) | Usher-owned UUIDs, provider IDs as attributes | Accepted |
 | [0004](0004-push-over-polling.md) | Push events primary, reconcile as backstop | Accepted |
 | [0005](0005-bulk-bootstrap.md) | Pre-build the catalog from bulk datasets | Accepted |
@@ -47,6 +47,8 @@ otherwise be lost and re-litigated in six months.
 | [0037](0037-the-worker-is-a-bounded-pool-of-scopes.md) | The job worker is a bounded pool, and a job's scope is a session | Accepted — corrects PRD 01's concurrency table and PRD 08's recovery rule |
 | [0038](0038-the-embedding-width-is-deployment-wide-ddl.md) | The embedding width is deployment-wide DDL, and the fingerprint's "no migration" stops at it | Accepted — **narrows 0020 and 0022**; corrects PRD 02, 04, 05 and 08 |
 | [0039](0039-the-genre-vocabulary-is-usher-owned.md) | The genre vocabulary is Usher's own; `/browse` is fixed at read time, enrichment stops deleting what TMDb cannot name, and `usher genres --backfill` normalises the column | Accepted — closes issue #30; corrects PRD 02, 03, 05 and 07. **Amended 2026-08-19**: the write-time deferral was priced at ~1.8 h against a real 304 embeddings and is withdrawn |
+| [0040](0040-rating-columns-name-their-source.md) | Rating columns name their source (`tmdb_*` / `imdb_*`), IMDb's values re-imported rather than inferred, and the eval frame re-anchored on `imdb_num_votes` | Accepted — corrects PRD 02, 04 and 05; amends 0002's frame and its suggest tiebreak. ⚠️ **One component is deliberately open, not shipped**: the decontamination of the existing `tmdb_*` values, whose pre-registered rule was measured and misses 57,701 of 407,860 rows |
+| [0041](0041-the-eval-schema-is-not-a-migration.md) | The eval schema is applied by the harness, not by alembic | Accepted — dev-only DDL kept out of every deployment, and `alembic heads` kept at one |
 | [0040](0040-the-outbound-limiter-is-per-source-and-spaces-requests.md) | The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling | Accepted — adds the proactive half of PRD 01's rate-limit promise; PRD 03 and 10. **Renumbered from `0039` on 2026-08-20**, the number having been minted twice |
 | [0041](0041-a-bounded-column-is-a-declared-type-that-refuses.md) | A bounded column is a declared type that refuses; the per-column ledger is generated rather than quoted, under three published readings of what closes a value set; M10 fixes the 22 that reach a translatable exception | Accepted — issue #10's scoped decision; corrects PRD 09's carried-debt arithmetic, of which **two of five figures reproduce and three do not**. **Does not re-open M9's boundary call 8** |
 

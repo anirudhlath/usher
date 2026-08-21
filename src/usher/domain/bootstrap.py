@@ -3,6 +3,7 @@
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Final
 
 from pydantic import AwareDatetime, Field
 
@@ -11,8 +12,10 @@ from usher.domain.ids import new_id
 
 
 class BootstrapPhase(StrEnum):
-    """What one bulk-import run does, and **the members are in execution
-    order** (PRD 04's phased import).
+    """What one bulk-import run does. **The members that are *steps* are in
+    execution order** (PRD 04's phased import) -- `FULL_SEQUENCE` names them;
+    `ALL` and `RATINGS` are aliases and take no position in it, which the
+    paragraph before the members works through.
 
     One vocabulary rather than two, and that is the whole reason it is here
     rather than a tuple in `usher.cli`. Until M9 the set lived as
@@ -48,15 +51,60 @@ class BootstrapPhase(StrEnum):
     is a legitimate `Job.key` (a `--phase all` job is one unit of work, the
     longest in this system), and a nullable path parameter would make the
     route's own vocabulary a different set from the CLI's.
+
+    ⚠️ **Two of these members are not steps, which is why the summary line
+    above is scoped to the other six.** `ALL` and `RATINGS`
+    are *aliases*: each selects a subset of the sequence rather than taking a
+    position in it -- `ALL` selects every step, `RATINGS` selects the second
+    half of `IMDB` -- so neither is a phase `--phase all` ever emits. That
+    distinction was spelled for one member and only inside one test, as a
+    hard-coded `if one is not BootstrapPhase.ALL`, until `RATINGS` made it a
+    two-member set; `FULL_SEQUENCE` and `PHASE_ALIASES` below say it once,
+    in the domain, and `tests/unit/test_composition.py` asserts they
+    partition this enum rather than maintaining a second list. The failure
+    that avoids is the one a hand-maintained list produces: a member in
+    neither collection is offered by `argparse` (`cli.PHASES` is derived from
+    these members), accepted by the route, given no arm in `run_bootstrap`,
+    and silently does nothing.
     """
 
     IMDB = "imdb"
+    # `imdb` runs basics *then* ratings; this runs ratings alone. It exists
+    # because a rating refresh against a live catalog must not re-download
+    # `title.basics.tsv.gz` (214.4 MiB against 8.2) and rewrite every name and
+    # year -- a name change stales the title's embedding. ADR-0040's backfill
+    # is its first caller. It is an **alias**, not a step: `--phase all` reaches
+    # these rows through `imdb`, so `FULL_SEQUENCE` does not name it.
+    RATINGS = "ratings"
     CREDIT_NAMES = "credit-names"
     ALIASES = "aliases"
     TMDB_IDS = "tmdb-ids"
     CROSSWALK = "crosswalk"
     MOVIELENS = "movielens"
     ALL = "all"
+
+
+#: The phases `--phase all` walks, in the order it walks them. **Declared
+#: rather than derived from the enum**, because `BootstrapPhase` holds two
+#: kinds of member: steps of the full run, and aliases that select a subset of
+#: one (`ALL` selects every step, `RATINGS` selects the second half of `IMDB`).
+#: A case asserting the dispatch's order needs the steps; a case asserting
+#: nothing was forgotten needs both, which is what `PHASE_ALIASES` is for.
+FULL_SEQUENCE: Final[tuple[BootstrapPhase, ...]] = (
+    BootstrapPhase.IMDB,
+    BootstrapPhase.CREDIT_NAMES,
+    BootstrapPhase.ALIASES,
+    BootstrapPhase.TMDB_IDS,
+    BootstrapPhase.CROSSWALK,
+    BootstrapPhase.MOVIELENS,
+)
+
+#: The members that are not steps. Spelled as a set beside `FULL_SEQUENCE` so
+#: the two partition the enum and a member added to neither is a red rather
+#: than a phase that silently never runs.
+PHASE_ALIASES: Final[frozenset[BootstrapPhase]] = frozenset(
+    {BootstrapPhase.ALL, BootstrapPhase.RATINGS}
+)
 
 
 class ImportRunStatus(StrEnum):

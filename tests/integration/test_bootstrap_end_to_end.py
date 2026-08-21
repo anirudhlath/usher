@@ -7,9 +7,11 @@ link.
 """
 
 import gzip
+import importlib.util
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
+from types import ModuleType
 
 import httpx
 import pytest
@@ -38,6 +40,24 @@ from usher.ports.events import NullEventPublisher
 from usher.services.bootstrap import BootstrapService
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
+
+
+_ENQUEUE_TIER_SCRIPT = (
+    Path(__file__).resolve().parents[2] / "scripts" / "enqueue_tier_enrichment.py"
+)
+
+
+def _enqueue_tier_module() -> ModuleType:
+    """`scripts/` is not a package, so the tier script is loaded by path.
+
+    The idiom is `tests/unit/test_scripts_enqueue_tier_enrichment.py`'s, which
+    records why it is a path load rather than an `__init__.py`.
+    """
+    spec = importlib.util.spec_from_file_location("usher_ops_tier_probe", _ENQUEUE_TIER_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture
@@ -118,16 +138,52 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
     linked = await catalog.link_crosswalk()
     assert linked.linked == 2
 
+    # `imdb_average_rating` beside `tmdb_vote_average`, and the NULL is the
+    # assertion ADR-0040 bought. Nothing in phases 0-2 enriches, so the IMDb
+    # ratings import above is the only writer of a rating figure anywhere in
+    # this bootstrap -- and before the split it wrote that figure into
+    # `tmdb_vote_average`, so this same projection read 7.4 in the TMDb column
+    # and NULL in the IMDb one, exactly inverted, with nothing recording the
+    # swap. No claim about phase *ordering* is involved: it is the pair of
+    # columns that carries the provenance, which is why both are selected.
+    # This is the whole fix seen from the bootstrap it ships in, rather than
+    # from one repository call.
     result = await session.execute(
         text(
-            "SELECT imdb_id, tmdb_id, tvdb_id, popularity, community_rating, "
-            "enrichment_state FROM titles WHERE imdb_id IN ('tt99000020','tt99000030') "
-            "ORDER BY imdb_id"
+            "SELECT imdb_id, tmdb_id, tvdb_id, tmdb_popularity, imdb_average_rating, "
+            "tmdb_vote_average, enrichment_state FROM titles "
+            "WHERE imdb_id IN ('tt99000020','tt99000030') ORDER BY imdb_id"
         )
     )
     rows = result.all()
-    assert rows[0] == ("tt99000020", 90000020, None, 12.5, 7.4, "skeleton")
-    assert rows[1] == ("tt99000030", 90001399, 91000030, 31.5, 6.8, "skeleton")
+    assert rows[0] == ("tt99000020", 90000020, None, 12.5, 7.4, None, "skeleton")
+    assert rows[1] == ("tt99000030", 90001399, 91000030, 31.5, 6.8, None, "skeleton")
+
+    # **The enrichment tier is non-empty on a bootstrap-only catalog, which is
+    # issue #42 and the reason this assertion exists at all.** After ADR-0040
+    # redirected the IMDb writer, `scripts/enqueue_tier_enrichment.py`'s tier
+    # still read `tmdb_vote_count` -- a column `upsert_titles` omits,
+    # `link_crosswalk` never touches and only TMDb enrichment fills. So a fresh
+    # `--phase all` produced `NULL >= 100` on every row, the tier selected zero,
+    # and the crawl could not start itself: enrichment was the only thing that
+    # filled the column the enrichment queue selected on.
+    #
+    # **The script's own statement is executed rather than transcribed**, which
+    # is what makes this catch the defect rather than describe it: a tier
+    # re-pointed at any column a bootstrap does not fill selects zero rows here
+    # and fails, whatever it is spelled as. Transcribing the predicate would
+    # instead pin this case to agree with whichever spelling it copied --
+    # including the broken one. The committed slice carries numVotes 12,345 and
+    # 4,321, so the script's real `TIER_MIN_VOTES` of 100 is exercised rather
+    # than lowered for the fixture.
+    tier_page = await session.execute(
+        text(_enqueue_tier_module()._PAGE),
+        {"min_votes": _enqueue_tier_module().TIER_MIN_VOTES, "after": None, "size": 100},
+    )
+    assert tier_page.all(), (
+        "a bootstrap-only catalog selects no enrichment tier, so the crawl "
+        "cannot seed itself -- issue #42"
+    )
 
 
 async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, cache: Path) -> None:

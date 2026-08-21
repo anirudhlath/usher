@@ -163,9 +163,11 @@ def test_title_is_not_hashable() -> None:
         ("year", -40),
         ("end_year", -1),
         ("runtime_minutes", -9),
-        ("vote_count", -1),
-        ("popularity", -1.0),
-        ("community_rating", -1.0),
+        ("tmdb_vote_count", -1),
+        ("tmdb_popularity", -1.0),
+        ("tmdb_vote_average", -1.0),
+        ("imdb_num_votes", -1),
+        ("imdb_average_rating", -1.0),
     ],
 )
 def test_negative_values_are_rejected(field: str, value: object) -> None:
@@ -173,14 +175,23 @@ def test_negative_values_are_rejected(field: str, value: object) -> None:
         Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: value})
 
 
-def test_community_rating_rejects_values_outside_the_tmdb_scale() -> None:
+@pytest.mark.parametrize("field", ["tmdb_vote_average", "imdb_average_rating"])
+def test_a_rating_rejects_values_outside_the_zero_to_ten_scale(field: str) -> None:
+    """Both sources use 0-10, which is why the dual write was silent.
+
+    ADR-0040: `community_rating` held IMDb's `averageRating` on a skeleton and
+    TMDb's `vote_average` on an enriched row, and no value was ever out of
+    range -- so the bound is a property of both columns and is asserted on
+    both rather than on whichever one the old name happened to mean.
+    """
     with pytest.raises(ValidationError):
-        Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", community_rating=99.0)
+        Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: 99.0})
 
 
-def test_community_rating_accepts_tmdb_scale_boundaries() -> None:
-    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", community_rating=0.0)
-    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", community_rating=10.0)
+@pytest.mark.parametrize("field", ["tmdb_vote_average", "imdb_average_rating"])
+def test_a_rating_accepts_the_zero_to_ten_boundaries(field: str) -> None:
+    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: 0.0})
+    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: 10.0})
 
 
 def test_empty_name_is_rejected() -> None:
@@ -265,7 +276,7 @@ def test_title_serialization_round_trips() -> None:
 # --- the three unbounded-above numbers, and which of them is a defect ------
 
 
-def test_popularity_refuses_a_non_finite_value() -> None:
+def test_tmdb_popularity_refuses_a_non_finite_value() -> None:
     """PRD 09's carried *"`Title.popularity` accepts infinity"* debt, closed by
     M10's F9.
 
@@ -275,58 +286,82 @@ def test_popularity_refuses_a_non_finite_value() -> None:
     reachable shape and not about `float("inf")`.
 
     `ge=0` alone does not refuse it (`float("inf") >= 0` is `True`), and
-    neither does the column: `titles.popularity` is `sa.Float()` — `double
-    precision`, where IEEE `Infinity` is legal — and `Infinity >= 0` satisfies
-    `ck_titles_popularity_non_negative` too. So this model is the only layer
-    that can say no, which is why ADR-0041 (`docs/prd/decisions/0041-a-bounded-\
-column-is-a-declared-type-that-refuses.md`) leaves it to the field while
-    leaving every *narrower*-than-its-field column to the repository.
+    neither does the column: `titles.tmdb_popularity` is `sa.Float()` —
+    `double precision`, where IEEE `Infinity` is legal — and `Infinity >= 0`
+    satisfies `ck_titles_tmdb_popularity_non_negative` too. So this model is
+    the only layer that can say no, which is why ADR-0041 leaves it to the
+    field while leaving every *narrower*-than-its-field column to the
+    repository.
+
+    **The field is `tmdb_popularity` and was `popularity` when F9 wrote this
+    case; ADR-0040's rename carried the defect across rather than fixing it.**
+    That record split three dual-written columns into five source-named ones
+    and reproduced `Field(default=None, ge=0)` verbatim on the new
+    `tmdb_popularity` — so the debt survived a rename that touched the exact
+    line holding it, which is worth knowing before assuming a rename pass
+    would have caught something like this.
     """
     for value in (json.loads("1e400"), float("inf"), float("nan")):
         with pytest.raises(ValidationError):
-            Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", popularity=value)
+            Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_popularity=value)
 
 
-def test_a_finite_popularity_is_still_accepted() -> None:
+def test_a_finite_tmdb_popularity_is_still_accepted() -> None:
     """The control for the case above: `allow_inf_nan=False` must refuse the
     two non-finite values and nothing else. Without this, "refuses infinity"
     is also satisfied by a field that refuses every float."""
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", popularity=1739.421)
-    assert title.popularity == 1739.421
-    assert Title(kind=TitleKind.MOVIE, name="D", sort_name="D", popularity=0.0).popularity == 0.0
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_popularity=1739.421)
+    assert title.tmdb_popularity == 1739.421
+    bare = Title(kind=TitleKind.MOVIE, name="D", sort_name="D", tmdb_popularity=0.0)
+    assert bare.tmdb_popularity == 0.0
 
 
-def test_community_rating_refuses_a_non_finite_value_by_its_ceiling() -> None:
-    """`community_rating` never had `popularity`'s defect, and the reason is
-    the `le=10` rather than anything about the field being better designed.
+@pytest.mark.parametrize("field", ["tmdb_vote_average", "imdb_average_rating"])
+def test_a_rating_refuses_a_non_finite_value_by_its_ceiling(field: str) -> None:
+    """Neither rating field ever had `tmdb_popularity`'s defect, and the reason
+    is the `le=10` rather than anything about them being better designed.
 
-    Stated as a case because the field carries no `allow_inf_nan=False`: if a
-    later change relaxes or removes that ceiling — TMDb changing scale, say —
-    the protection goes with it silently. This is the thing that notices.
+    Stated as a case because neither carries `allow_inf_nan=False`: if a later
+    change relaxes or removes either ceiling — TMDb changing scale, say — the
+    protection goes with it silently. This is the thing that notices.
+
+    **Parametrised over both because ADR-0040 turned one such field into two.**
+    Before that record this was `community_rating` alone; the split gave IMDb
+    its own `imdb_average_rating` with the same `ge=0, le=10`, so the accident
+    is now load-bearing in two places and a case naming one of them would leave
+    the other free to lose its ceiling unobserved.
     """
     for value in (json.loads("1e400"), float("nan")):
         with pytest.raises(ValidationError):
-            Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", community_rating=value)
+            Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: value})
 
 
-def test_year_and_vote_count_still_accept_a_value_their_column_cannot_hold() -> None:
+def test_year_and_vote_counts_still_accept_a_value_their_column_cannot_hold() -> None:
     """An **excluded** case, asserted rather than left unstated.
 
     `Field(ge=0)` against an `integer` column is what
     `.claude/rules/db-and-sql.md` calls *"the common shape here"*, and
-    `titles.year` and `titles.vote_count` are both live examples: `2**31`
-    constructs cleanly and the column cannot hold it. M10's F9 deliberately
-    does **not** close them, for the reason ADR-0041 gives in its question (5)
-    — the writers that put values in those two columns are
-    `bulk.py:upsert_titles` and `bulk.py:apply_ratings`, which take
+    `titles.year`, `titles.tmdb_vote_count` and `titles.imdb_num_votes` are all
+    live examples: `2**31` constructs cleanly and the column cannot hold it.
+    M10's F9 deliberately does **not** close them, for the reason ADR-0041
+    gives in its question (5) — the writers that put values in those columns
+    are `bulk.py:upsert_titles` and `bulk.py:apply_ratings`, which take
     `ports.bulk.ImdbTitle` and `ports.bulk.ImdbRating` and never construct a
     `Title` at all, so a ceiling here would be invisible to the path that
-    actually overflows them. Both are in ADR-0041's `exposed-copy` bucket,
-    which M9's boundary call 8 keeps out of M10 whole.
+    actually overflows them. All are in ADR-0041's `exposed-copy` bucket, which
+    M9's boundary call 8 keeps out of M10 whole.
 
     The case exists so the exclusion is a recorded state rather than an
     oversight: whoever closes the COPY path will see it go red.
     """
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", year=2**31, vote_count=2**31)
+    title = Title(
+        kind=TitleKind.MOVIE,
+        name="Dune",
+        sort_name="Dune",
+        year=2**31,
+        tmdb_vote_count=2**31,
+        imdb_num_votes=2**31,
+    )
     assert title.year == 2**31
-    assert title.vote_count == 2**31
+    assert title.tmdb_vote_count == 2**31
+    assert title.imdb_num_votes == 2**31

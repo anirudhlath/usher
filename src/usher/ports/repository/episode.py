@@ -33,8 +33,8 @@ class EpisodeCursorPosition:
 
     **`episode_number` is `int` and not `int | None`, and that is the whole of
     why this keyset is simpler than `browse`'s.** ADR-0034's predicate has
-    three arms because `titles.year`, `titles.popularity` and
-    `titles.vote_count` are nullable, so a page boundary can land *inside* the
+    three arms because `titles.year`, `titles.tmdb_popularity` and
+    `titles.tmdb_vote_count` are nullable, so a page boundary can land *inside* the
     unkeyed group and the walk has to resume from it. `episodes.episode_number`
     is `nullable=False` with `ck_episodes_episode_number_non_negative` beside
     it (`db/models/episode.py:86`), so the unkeyed group is provably empty and

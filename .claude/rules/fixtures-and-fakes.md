@@ -254,6 +254,29 @@ two concurrent jobs read `pg_backend_pid()` through their own scope's session
 and the two values have to differ. Ninth divergence, and the first one that is
 about a *fake's shape* rather than about a behaviour it gets wrong.
 
+**`BulkCatalogRepositoryContract`'s five `apply_ratings` cases do not pin
+provenance, and a future refactor should not read them as a second line of
+defence.** Recorded 2026-08-19 alongside ADR-0040, which redirected that method
+off the `tmdb_*` columns and onto `imdb_average_rating`/`imdb_num_votes`. The
+contract runs on both arms and looks like coverage of the change; it is not,
+for a reason that is a fact about the *fake's shape* rather than about any
+case. `FakeBulkCatalogRepository` stores one opaque `rating: tuple[float, int]`
+per title — the pair, under no column name at all — so **no assertion in
+`tests/contract/` can name a column**, and the five cases assert only rowcounts
+(`applied == 1`), in-batch dedup and no-op replay, every one of which is
+identical before and after the redirect. Measured by the task's plant round:
+the whole regression (`SET tmdb_vote_average = …`) leaves all five green on
+both arms. **Provenance is pinned by exactly two assertions in the tree, both
+integration** — `test_bulk_repository.py::test_apply_ratings_writes_only_the_
+imdb_columns` on its `tmdb_*` arm, and `test_bootstrap_end_to_end.py`'s
+`tmdb_vote_average` column. Tenth divergence, and the second about a fake's
+shape rather than a behaviour it gets wrong: the property is not that the fake
+is *wrong*, it is that the fake has no place to be wrong in, so the contract
+cannot ask the question. Same family as `job_scope.py` above — and the general
+form is worth the line: **before crediting a contract suite with covering a
+change, check that the fake has somewhere to store the thing the change is
+about.**
+
 **A fake that hard-codes a real repository's *sentence* is a change detector,
 and the right repair is to leave it diverged and record it (2026-08-20, M10
 F9).** `tests/unit/test_services_bootstrap.py::_ConflictingImportRunRepository`
@@ -271,7 +294,7 @@ the branch that kept its old sentence, so it is still telling the truth about
 the case it models. **It is left alone deliberately**: a fake that tracks a
 repository's message text turns every wording change into a red test, which is
 this project's own definition of a change detector, and `BootstrapService`'s
-behaviour under a `RepositoryConflict` does not depend on the sentence. Tenth
+behaviour under a `RepositoryConflict` does not depend on the sentence. Eleventh
 divergence, and the first that is about a *message* rather than a behaviour —
 so the thing to check when it next looks stale is whether the branch it models
 still exists, not whether the words still match.

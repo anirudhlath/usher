@@ -252,8 +252,8 @@ class BulkCatalogRepositoryContract:
         await repo.upsert_titles([SHAWSHANK])
         applied = await repo.apply_ratings(
             [
-                ImdbRating(imdb_id="tt99000020", community_rating=7.4, vote_count=12_345),
-                ImdbRating(imdb_id="tt99000090", community_rating=1.0, vote_count=3),
+                ImdbRating(imdb_id="tt99000020", average_rating=7.4, num_votes=12_345),
+                ImdbRating(imdb_id="tt99000090", average_rating=1.0, num_votes=3),
             ]
         )
         assert applied == 1
@@ -263,7 +263,7 @@ class BulkCatalogRepositoryContract:
         self, repo: BulkCatalogRepository
     ) -> None:
         await repo.upsert_titles([SHAWSHANK])
-        rating = ImdbRating(imdb_id="tt99000020", community_rating=7.4, vote_count=12_345)
+        rating = ImdbRating(imdb_id="tt99000020", average_rating=7.4, num_votes=12_345)
         assert await repo.apply_ratings([rating]) == 1
         assert await repo.apply_ratings([rating]) == 0
 
@@ -280,8 +280,8 @@ class BulkCatalogRepositoryContract:
         await repo.upsert_titles([SHAWSHANK])
         applied = await repo.apply_ratings(
             [
-                ImdbRating(imdb_id="tt99000020", community_rating=1.0, vote_count=1),
-                ImdbRating(imdb_id="tt99000020", community_rating=9.0, vote_count=999),
+                ImdbRating(imdb_id="tt99000020", average_rating=1.0, num_votes=1),
+                ImdbRating(imdb_id="tt99000020", average_rating=9.0, num_votes=999),
             ]
         )
         assert applied == 1

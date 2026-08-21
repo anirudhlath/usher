@@ -1083,8 +1083,8 @@ async def _seed_equivalence_population(repo: PostgresTitleRepository) -> list[Ti
             name=name,
             sort_name=sort_name,
             year=year,
-            popularity=popularity,
-            vote_count=vote_count,
+            tmdb_popularity=popularity,
+            tmdb_vote_count=vote_count,
         )
         await repo.add(one)
         seeded.append(one)

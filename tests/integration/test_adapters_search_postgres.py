@@ -136,7 +136,8 @@ async def _insert_title(
     """
     columns = (
         "id, kind, name, sort_name, original_name, overview, tagline, "
-        "genres, keywords, credit_names, year, popularity, vote_count, enrichment_state"
+        "genres, keywords, credit_names, year, tmdb_popularity, tmdb_vote_count, "
+        "enrichment_state"
     )
     values = (
         "CAST(:id AS uuid), :kind, :name, :sort_name, :original_name, :overview, "
@@ -145,6 +146,11 @@ async def _insert_title(
         ":popularity, :vote_count, :enrichment_state"
     )
     await session.execute(
+        # **The bind names are not the column names and only the columns
+        # moved.** `:popularity` is read off `SearchDocument.popularity`,
+        # which ADR-0040 deliberately did not rename; the column it lands
+        # in is `titles.tmdb_popularity`. Renaming the bind as well would
+        # have meant renaming the attribute read below with it.
         text(f"INSERT INTO titles ({columns}) VALUES ({values})"),  # noqa: S608
         {
             "id": document.title_id,
@@ -775,10 +781,11 @@ async def test_vote_count_orders_the_box_when_every_popularity_is_null(
     that is what this case exists for.
 
     Measured against a real 1,271,138-row bootstrap on 2026-08-03 (ADR-0002's
-    gate): `titles.popularity` is NULL on **every** row, because nothing in
-    `src/` writes it except TMDb enrichment and boundary call 4's premise is
-    that the enriched tier is 2k-10k titles. So `ORDER BY dist ASC,
-    popularity DESC NULLS LAST, id ASC` degenerates to `dist ASC, id ASC` --
+    gate): `titles.tmdb_popularity` is NULL on **every** row, because on that
+    catalog neither of its two writers had run -- TMDb enrichment, whose
+    premise in boundary call 4 is an enriched tier of 2k-10k titles, and
+    `link_crosswalk`, which needs `--phase crosswalk`. So `ORDER BY dist ASC,
+    tmdb_popularity DESC NULLS LAST, id ASC` degenerates to `dist ASC, id ASC` --
     every equal-distance candidate ordered by a UUIDv7, which is insertion
     order, which is arbitrary. Adding `vote_count DESC NULLS LAST` under
     popularity moved recall@5 from 78.3% to 82.5% over 2,993 real typo cases,

@@ -371,10 +371,10 @@ class FakeTitleRepository(TitleRepository):
         # unpopular title, which is the wrong answer rather than a crash.
         matching.sort(
             key=lambda title: (
-                title.popularity is None,
-                -(title.popularity or 0.0),
-                title.vote_count is None,
-                -(title.vote_count or 0),
+                title.tmdb_popularity is None,
+                -(title.tmdb_popularity or 0.0),
+                title.tmdb_vote_count is None,
+                -(title.tmdb_vote_count or 0),
                 title.id,
             )
         )
@@ -398,8 +398,8 @@ class FakeTitleRepository(TitleRepository):
             key=lambda title: (
                 not self.available_copies.get(title.id),
                 not affine.intersection(title.genres),
-                title.vote_count is None,
-                -(title.vote_count or 0),
+                title.tmdb_vote_count is None,
+                -(title.tmdb_vote_count or 0),
                 title.id,
             )
         )

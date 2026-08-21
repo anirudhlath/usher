@@ -7,6 +7,15 @@ M9 built. Corrects [05](../05-search-and-similarity.md)'s autocomplete section
 and [07](../07-client-api.md)'s `GET /search/suggest` row. Implemented in M9
 (B2 built tier 1, B3 measured it, B5 put both on the wire).
 
+⚠️ **Amended 2026-08-20: bar (4)'s window is widened from `[0.016, 0.022]` to
+`[0.016, 0.028]`, because it had never once been reproduced.** B3's own run
+failed it at 0.0267 and E1's first baseline failed it at 0.023738 — both above
+the ceiling, and no draw has ever fallen below the floor. The old window was one
+draw with a guessed half-width; the new ceiling is 3 observed draw SD above an
+observed mean of sixteen draws. The amendment is worked through under
+*"### Bar (4)'s window was wrong, and this ADR is where it was wrong"* at the end
+of the Evidence section, and the bar itself lives in `docs/evals/bars.toml`.
+
 **Written honestly, because the numbers underneath it are mixed.** Of the four
 bars B3 committed before its run, **two passed and two failed**; both failures
 are attributed away from the shipped code by measurement rather than by
@@ -164,7 +173,7 @@ against a bar committed before the first number.
 | (1) tier-1 p95, `titles` only | ≤ 10 ms | **0.947 ms** | **PASS** |
 | (2) tier-1 p95, union at 10.9M rows | ≤ 10 ms | **1.465 ms** | **PASS** |
 | (3) tier-2 p50 | 33.6 ms ±10% | **39.59 ms** | **FAIL** |
-| (4) tier-1 recall@5 | 1.9% (1.6–2.2) | **2.67%** | **FAIL** |
+| (4) tier-1 recall@5 | 1.9% (1.6–2.2) ⚠️ **the bar was wrong — widened to 1.6–2.8 on 2026-08-20, see below** | **2.67%** | **FAIL** |
 
 **Both failures are attributed away from the shipped code by measurement.**
 Bar (3): a within-run A/B over the identical 2,993 cases, with both `m09a`
@@ -175,7 +184,13 @@ the 6 ms against 2026-08-03 is run-to-run. Bar (4): 2.67% against a 1.6–2.2%
 window is **23 cases out of 2,993**, and tier 1 finds a typo'd name essentially
 only when the edit lands on the last character and leaves a true prefix — so
 recall is a function of the sampled names' lengths, and the draw order the gate
-never recorded is the one input known to differ.
+never recorded is the one input known to differ. ✅ **That attribution was
+right, and 2026-08-20 measured it**: eight independent seeds spread 0.0184 to
+0.0244, an SD of 0.001853, so the draw genuinely moves this number by more than
+the whole width of the window it was being judged against. What the attribution
+got wrong was its conclusion — it treated the failure as a fact about *this
+run* and left the bar standing, when a draw-sensitive number was the reason the
+**bar** was unusable. See below.
 
 **Bar (2) passed, so B2's union arm ships and the narrowing is not made.** The
 plan's pre-recorded failure consequence — narrow tier 1 to `titles` and reach
@@ -244,6 +259,65 @@ ran.
 
 Full tables, the regeneration procedure and the harness findings are in
 `.claude/rules/search-and-embeddings.md`.
+
+### Bar (4)'s window was wrong, and this ADR is where it was wrong
+
+**Amended 2026-08-20, by E1.** The window `1.9% (1.6–2.2)` has been measured
+against three times and has **never once been reproduced**:
+
+| run | value | against `[0.016, 0.022]` |
+|---|---|---|
+| the bar's own source, 2026-08-03 | 0.019 | — it *is* the centre |
+| B3's gate run, 2026-08-12 (above) | **0.0267** | **FAIL** |
+| E1's first baseline, 2026-08-20 | **0.023738** | **FAIL** |
+
+🔴 **Every failure is at the ceiling and none is at the floor**, which is the
+shape that says the window was placed wrongly rather than that the index
+regressed twice. The floor stays at 0.016 for exactly that reason.
+
+**The old ceiling was one draw plus a guess.** 0.019 was a single run, and
+±0.003 around it was never derived from anything — no second draw existed to
+estimate spread from, so the half-width was chosen rather than measured. E1's
+paired restore experiment supplied the missing draws: **eight seeds × two arms,
+n=2991 per run**, on the ordering defect present and repaired.
+
+| | mean | SD | range |
+|---|---|---|---|
+| defect present (today's code) | 0.021825 | 0.001960 | 0.0184–0.0241 |
+| defect repaired (post-#39) | 0.022125 | 0.001862 | 0.0191–0.0244 |
+| **pooled, 16 draws** | **0.021975** | **0.001853** | **0.0184–0.0244** |
+
+So the old window's **half-width of 0.003 was 1.62 pooled draw SD** — narrower
+than the noise it was judging, which is what makes a bar that cannot be
+reproduced. (`docs/evals/2026-08-19-e1-baseline-window-disagreement.md` states
+the same quantity as **1.53 SD**; it is the same half-width against the eight
+damaged-arm draws alone, SD 0.001960, rather than against the pooled sixteen.
+Two estimates of one number, not a disagreement.)
+
+**The new window is `[0.016, 0.028]`:** centred on 0.022, the observed mean to
+three decimals, with a half-width of 0.006 = **3.24 draw SD**. It contains all
+sixteen draws above, the committed baseline's 0.023738, this ADR's own 0.019,
+and B3's 0.0267. A 2 SD window would still exclude B3's draw — it would
+preserve the defect being repaired, which is the check that rules the tighter
+option out.
+
+**Widening a bar is usually how a gate gets quietly disabled, so here is what
+this one still catches.** It was never a 5%-regression detector; ADR-0031's own
+sentence for it is *"a tier 1 that scores higher is not the index that was
+measured."* Tier 1 answering as tier 2 scores **0.8094** — 29× the new
+ceiling — and a collapsed index scores **0.0**, below the floor. Both are
+caught with orders of magnitude to spare, and E1's negative control exercises
+the second on every run.
+
+**Both arms of the paired experiment are inside the new window**, which is the
+property that matters for #39: the ordering defect depresses tier-1 recall by
++0.000300 (2.90 SE), so a window pinned to today's damaged value would have
+**failed on the fix**. That is the "an eval that cannot fail ratifies the bug"
+trap arriving through the bar, and it is why the bar is centred on the pooled
+mean of both arms rather than on either one.
+
+The full derivation, the paired result and the two causes it separates are in
+`docs/evals/2026-08-19-e1-baseline-window-disagreement.md`.
 
 ## Alternatives considered
 
