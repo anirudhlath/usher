@@ -187,7 +187,12 @@ class LedgerRow:
 
 
 def _rendered_type(column: Column[Any]) -> str:
-    return str(column.type.compile(dialect=postgresql.dialect()))
+    # `postgresql.dialect` is `type[PGDialect]` in SQLAlchemy's own stubs with
+    # an untyped `__init__`, so constructing it is a `no-untyped-call`. Ignored
+    # narrowly rather than left standing: `scripts/` is outside `mypy src
+    # tests`, and a file nothing type-checks that would *also* fail if it were
+    # checked is the kind of quiet debt this record argues against.
+    return str(column.type.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
 
 
 class UnknownTypeFamily(RuntimeError):
@@ -417,7 +422,7 @@ _FIXED_POINT_ROUNDS = 12
 # would need this list the moment a repository stopped wrapping them, and
 # because the list is a statement of what reaches the database rather than a
 # minimal working set. The ablation is recorded so nobody re-derives it, and
-# `_check_executing_calls_are_live` below is what stops the list going stale --
+# `_check_call_lists_are_live` below is what stops the list going stale --
 # **which it caught one of on its very first run**: `add_all` was listed here
 # and nothing in `usher` calls it, so it had been contributing nothing while
 # looking exactly like a name that contributed everything.
@@ -435,22 +440,33 @@ _EXECUTING_CALLS = frozenset(
 )
 
 
-def _check_executing_calls_are_live() -> None:
-    """Every name in `_EXECUTING_CALLS` must be called somewhere in the package.
+def _check_call_lists_are_live() -> None:
+    """Every name in **all three** call lists must be called in the package.
 
     A hand-maintained name list degrades by the *code* being renamed, not by
     the list being edited -- and a name that matches nothing contributes
     nothing while looking exactly like a name that matches everything.
+
+    **Pointed at one list, this found one dead entry immediately; pointed at
+    all three, it found two more.** `_ORM_WRITE_CALLS` carried `add_all` and
+    `_ORM_STATEMENT_CALLS` carried `insert`, and nothing in `usher` calls
+    either. A guard aimed at one of three sibling lists is a guard that reports
+    the state of a third of the surface it appears to cover.
     """
     seen: set[str] = set()
     for path in _written_sources():
         seen |= _called_names(ast.parse(path.read_text()))
-    missing = sorted(_EXECUTING_CALLS - seen)
-    if missing:
-        raise DegenerateScan(
-            f"_EXECUTING_CALLS names nothing this package calls: {missing} -- "
-            "the list has gone stale against a rename"
-        )
+    for label, names in (
+        ("_EXECUTING_CALLS", _EXECUTING_CALLS),
+        ("_ORM_WRITE_CALLS", _ORM_WRITE_CALLS),
+        ("_ORM_STATEMENT_CALLS", _ORM_STATEMENT_CALLS),
+    ):
+        missing = sorted(set(names) - seen)
+        if missing:
+            raise DegenerateScan(
+                f"{label} names nothing this package calls: {missing} -- "
+                "the list has gone stale against a rename"
+            )
 
 
 def _called_names(node: ast.AST) -> set[str]:
@@ -493,8 +509,11 @@ def _executing_functions(tree: ast.Module) -> set[str]:
 _ROW_TABLES: Mapping[str, str] = {
     name: getattr(usher.db.models, name).__tablename__ for name in usher.db.models.__all__
 }
-_ORM_WRITE_CALLS = frozenset({"add", "add_all", "flush"})
-_ORM_STATEMENT_CALLS = frozenset({"update", "insert", "delete", "pg_insert"})
+# `add_all` and `insert` were in these two until 2026-08-20 and nothing in
+# `usher` calls either -- found by pointing `_check_call_lists_are_live` at all
+# three lists instead of only at `_EXECUTING_CALLS`.
+_ORM_WRITE_CALLS = frozenset({"add", "flush"})
+_ORM_STATEMENT_CALLS = frozenset({"update", "delete", "pg_insert"})
 
 
 def _orm_destinations(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
@@ -658,7 +677,15 @@ def _load(reference: str) -> type[BaseModel]:
 def _bound_of(annotation: Any, metadata: Sequence[Any]) -> str:
     """How the domain field is bounded, in the vocabulary the ADR uses."""
     if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
-        return "enum"
+        # The **longest member**, not a bare "enum". A closed value set only
+        # keeps a column safe if every member fits it, and classifying on the
+        # word alone would file a future enum member longer than its column as
+        # `safe` while it raised `22001`. The tightest margins in the schema
+        # today are `JobKind` (15 into `varchar(32)`) and `SyncRunKind` (11
+        # into `varchar(16)`), so this is dormant -- and dormant is exactly
+        # what `_fully_bounded`'s substring bug was.
+        longest = max((len(str(member.value)) for member in annotation), default=0)
+        return f"enum(longest={longest})"
     parts: list[str] = []
     for item in metadata:
         for attribute in ("ge", "gt", "le", "lt", "max_length", "min_length"):
@@ -751,7 +778,18 @@ def _staging_sources() -> dict[str, tuple[str, type[Any]]]:
                 continue
             element = _sequence_element(node, module)
             if element is None:
-                continue
+                # **Per table, not in aggregate.** `if element is None:
+                # continue` used to be silent here, and the only backstop was
+                # `if not staged: raise` in `build_ledger`, which fires when
+                # *all sixteen* fail. Dropping one -- `stg_tmdb_ids` -- moved
+                # `safe` 18 -> 17 and `exposed-copy` 31 -> 32 with no error at
+                # all. All sixteen resolve today; dormant and silent is the
+                # combination this whole record argues against.
+                raise DegenerateScan(
+                    f"{path.name}:{node.name} stages {sorted(staged)} and no "
+                    "Sequence[X] parameter of it resolves to a class -- the bound "
+                    "for every column of those tables would silently be 'none'"
+                )
             for name in staged:
                 sources.setdefault(name, (f"{path.name}:{node.name}", element))
     return sources
@@ -968,7 +1006,11 @@ def migration_bounded_columns(stop_after: str | None = None) -> set[tuple[str, s
     there was no way to score that number without checking out M8's tree.
     """
     chain = _revision_order()
-    known = {_revision_of(ast.parse(path.read_text())) for path in chain}
+    known = {
+        revision
+        for path in chain
+        if (revision := _revision_of(ast.parse(path.read_text()))) is not None
+    }
     if stop_after is not None and stop_after not in known:
         # Quality 2: `--at m09b` used to print the head count and exit 0,
         # because the `break` fires only on a match. A revision that does not
@@ -1181,7 +1223,7 @@ def build_ledger(reading: str = DEFAULT_READING, at: str | None = None) -> list[
     """
     if reading not in READINGS:
         raise ValueError(f"unknown reading {reading!r}; expected one of {READINGS}")
-    _check_executing_calls_are_live()
+    _check_call_lists_are_live()
     staging = staging_ddls()
     edges = staged_into()
     sites = write_sites()
@@ -1199,9 +1241,34 @@ def build_ledger(reading: str = DEFAULT_READING, at: str | None = None) -> list[
         raise DegenerateScan("no domain bound found -- the pydantic scan is dead")
     if not staged:
         raise DegenerateScan("no staged bound found -- the source-class scan is dead")
-    missing = sorted(set(edges) - set(staging))
-    if missing:
-        raise DegenerateScan(f"staging tables read but never declared: {missing}")
+    # **Symmetric, and the asymmetry it replaces was the reviewed Critical in
+    # its sibling direction.** Checking only `edges - staging` left
+    # `staged_into() -> {}` silent, and it moves 31 columns from `exposed-copy`
+    # to `exposed-sqlalchemy` -- the two buckets F9 splits on. Losing one
+    # table's destinations moved 8. Both now fail here, in `build_ledger`,
+    # which is what F9 imports; `--check` caught them already and nothing runs
+    # `--check`.
+    unread = sorted(set(edges) - set(staging))
+    if unread:
+        raise DegenerateScan(f"staging tables read but never declared: {unread}")
+    undeclared = sorted(set(staging) - set(edges))
+    if undeclared:
+        raise DegenerateScan(f"staging tables declared but never read: {undeclared}")
+    destinationless = sorted(name for name, targets in edges.items() if not targets)
+    if destinationless:
+        raise DegenerateScan(
+            f"staging tables that feed nothing: {destinationless} -- every staging "
+            "table in this package is read by an INSERT or an UPDATE, so an empty "
+            "destination set is a dead statement scan, not a table nobody uses"
+        )
+    # The backstop for the per-table raise inside `_staging_sources`. That one
+    # fires when a writer's `Sequence[X]` will not resolve; this one fires when
+    # the map arrives short by any other route, because a staging table with no
+    # source class silently gives every one of its columns "no bound" and
+    # drifts them toward `exposed`.
+    unsourced = sorted(set(staging) - set(_staging_sources()))
+    if unsourced:
+        raise DegenerateScan(f"staging tables with no resolved source class: {unsourced}")
 
     feeds: dict[tuple[str, str], StagingColumn] = {}
     for staging_table, destinations in edges.items():
@@ -1324,8 +1391,24 @@ def _classify(
     writer's `except` at all, which is why it is decided first: a value nothing
     can construct never reaches a driver by any route.
     """
-    if bound.text == "enum":
-        return "safe", f"enum-backed, {bound.source}: `.value` off a member closes the set"
+    enum_longest = re.fullmatch(r"enum\(longest=(\d+)\)", bound.text)
+    if enum_longest is not None:
+        declared = re.search(r"\((\d+)\)", sql_type)
+        width = int(declared.group(1)) if declared else 0
+        longest = int(enum_longest.group(1))
+        if longest > width:
+            return "exposed-copy" if shape != SHAPE_SQLA else "exposed-sqlalchemy", (
+                f"enum-backed but NOT safe: its longest member is {longest} "
+                f"characters and the column holds {width} -- {bound.source}"
+            )
+        closure = (
+            "`.value` off a member closes the set"
+            if "via " in bound.source
+            else "the pydantic field validates the member"
+        )
+        return "safe", (
+            f"enum-backed, {bound.source}: {closure}; longest member {longest} of {width}"
+        )
     if (table, column) in _BATCH_BOUNDED:
         return "safe", _BATCH_BOUNDED[(table, column)]
     if _fully_bounded(sql_type, bound.text):
@@ -1521,7 +1604,20 @@ def readings_table() -> str:
     return "\n".join(lines)
 
 
-def summary(rows: Sequence[LedgerRow], reading: str = DEFAULT_READING) -> str:
+def summary(
+    rows: Sequence[LedgerRow], reading: str = DEFAULT_READING, at: str | None = None
+) -> str:
+    """The counts. Under `at`, the sections that read the **live** metadata are
+    withheld rather than printed wrong.
+
+    `staging_shape()` and `check_bounded_columns()` both read
+    `Base.metadata`, which is today's schema whatever `--at` says. Printing
+    them beside a replayed ledger produced one column with two widths in a
+    single run -- `title_embeddings.embedding` as `HALFVEC(384)` in the table
+    and `HALFVEC(1024)` in the summary. The counts were unaffected, and "one
+    rule, two answers" is the defect this file exists to eliminate, so the
+    honest move is to print neither rather than the wrong one.
+    """
     counted = counts(rows)
     families: dict[str, int] = {}
     for row in rows:
@@ -1536,10 +1632,6 @@ def summary(rows: Sequence[LedgerRow], reading: str = DEFAULT_READING) -> str:
             copy_shapes[row.shape] = copy_shapes.get(row.shape, 0) + 1
     safe_narrow = narrow_staged - counted["exposed-copy"]
 
-    check_only = check_bounded_columns()
-    wider, orphans = staging_shape()
-    metadata_set = {(table, column, sql_type) for table, column, sql_type in bounded_columns()}
-    replayed = migration_bounded_columns()
     lines = [
         f"bounded columns (ADR-0041's rule, reading={reading}): {len(rows)}",
         "  by type family: " + ", ".join(f"{k} {v}" for k, v in sorted(families.items())),
@@ -1549,6 +1641,26 @@ def summary(rows: Sequence[LedgerRow], reading: str = DEFAULT_READING) -> str:
         f" -> {narrow_staged} - {safe_narrow} = {counted['exposed-copy']} exposed at the COPY",
         "  COPY-path failure shapes: "
         + (", ".join(f"{k} {v}" for k, v in sorted(copy_shapes.items())) or "none"),
+    ]
+    if at is not None:
+        lines += [
+            "",
+            f"** the CHECK-only and staging-width sections are WITHHELD under --at {at} **",
+            "   Both read the live `Base.metadata`, which is today's schema whatever",
+            "   --at says, so printing them beside a replayed ledger would put one",
+            "   column at two widths in one run. The bucket counts above are unaffected:",
+            "   they are that revision's columns classified with today's source, which",
+            "   is what the header says.",
+            "",
+            readings_table(),
+        ]
+        return "\n".join(lines)
+
+    check_only = check_bounded_columns()
+    wider, orphans = staging_shape()
+    metadata_set = {(table, column, sql_type) for table, column, sql_type in bounded_columns()}
+    replayed = migration_bounded_columns()
+    lines += [
         f"CHECK-only value bounds (excluded by the rule): {len(check_only)}",
         *(f"    {table}.{column}: {body}" for (table, column), body in sorted(check_only.items())),
         f"staging tables: {len(staging_ddls())}",
@@ -1672,7 +1784,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print()
     if arguments.at:
         print(f"** {arguments.at}'s columns, classified with TODAY's source **")
-    print(summary(rows, arguments.reading))
+    print(summary(rows, arguments.reading, at=arguments.at))
     return 0
 
 

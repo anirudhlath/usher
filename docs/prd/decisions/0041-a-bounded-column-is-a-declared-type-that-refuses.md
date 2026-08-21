@@ -56,14 +56,18 @@ safe"* was quoted three times in two milestones and could not be reproduced,
 which is the defect this record exists to close — a throwaway would recreate it
 the moment the next column lands.
 
-⚠️ **Two things it does not do, said here rather than left to be assumed.**
-`ruff check`, `ruff format --check` and `pytest` cover `scripts/`; **`mypy` does
-not** — the gate runs `mypy src tests`, so this file is lint-clean and
-formatted and *not* type-checked, and adding `scripts/` to the gate is a
-separate job on a directory that is not clean today. And **nothing runs it**:
-`--check` is not in the gate and not in CI, so its drift detection is something
-a person does. F9 owns closing that, because F9's guard is a test and tests do
-run.
+⚠️ **Exactly which gate steps touch it, because a paragraph about gate coverage
+is the wrong place to be loose.** `ruff check .` and `ruff format --check .`
+cover `scripts/`. **`mypy` does not** — the gate is `mypy src tests`. **`pytest`
+does not either** — `testpaths = ["tests"]` and no test references this file, so
+the earlier claim that it did was wrong by one tool. It is in fact
+`mypy`-clean when run at it directly, which is stated because a file nothing
+checks that would *also* fail if checked is quiet debt; adding `scripts/` to the
+gate is a separate job on a directory that is not clean today.
+
+And **nothing runs it**: `--check` is not in the gate and not in CI, so its
+drift detection is something a person does. F9 owns closing that, because F9's
+guard is a test and tests do run.
 
 ### 🔴 The first version of this record was internally consistent and externally wrong, and that is the finding it now carries
 
@@ -85,9 +89,17 @@ from the same generator.
 So the ledger's internal consistency is real and **is not evidence of
 correctness**. The repair is not to correct two cells: it is that the bound is
 now **derived from the class the writing method actually takes** — resolved off
-each staging writer's own `Sequence[X]` parameter annotation — and the hand
-table is deleted. That is what makes "one rule, two answers" impossible rather
-than merely noticed.
+each staging writer's own `Sequence[X]` parameter annotation — and the table of
+per-column exceptions that produced the contradiction is deleted. That is what
+makes "one rule, two answers" impossible rather than merely noticed.
+
+⚠️ **One hand-written entry survives, and it is not the deleted one's cousin.**
+`_BATCH_BOUNDED` still names `genome_tags.tag_id`, whose bound is
+`replace_genome_tags`' 1..n contiguity check over the **whole batch** — an
+invariant no per-column scan can express, since the largest value that can reach
+the driver is a property of the sequence handed in rather than of any field. It
+is one entry, it is cited to its check, and it is the only place in this file
+where a classification is asserted rather than derived.
 
 **The migration chain is replayed independently and the two agree column for
 column.** `alembic upgrade head --sql` is unusable offline (it dies at
@@ -159,15 +171,41 @@ that choosing between them is visible rather than fallen into:
 | `pydantic` | stricter: only a bound a **validator runs**, so a frozen dataclass's annotation closes nothing |
 
 **`path` is adopted, and the reason is a mechanism rather than a preference.**
-Every staged bulk writer stages `row.<field>.value`. That expression closes the
-set *by itself*: a `TitleKind` member's `.value` is one of two short strings, and
-anything that is not an enum member has no `.value` at all — a bare `str` raises
-`AttributeError` before a byte reaches the COPY. No validator is needed, so the
-enum counts on `ImdbTitle` and `TmdbId` exactly as it does on `Title`. A
-`pattern`, by contrast, is inert unless something runs it: `Title.imdb_id`
+**Every staged *enum* field is staged as `row.<field>.value`** — six expressions,
+six for six (`people.py:536`, `:541`, `bulk.py:550`, `:879`, `jobs.py:315`,
+`media_item.py:439`). **Three of the six sit under a source comment stating the
+mechanism, written before this record existed**: `people.py`'s *"`enum_column`'s
+storage identifier is the member's `.value`"* covers the first two, and
+`jobs.py:315` carries its own *"`.value`, not the member: asyncpg's binary …"*.
+A fourth such comment sits on `image.py:199`, which is not a staged site. So the
+argument below is this project's own, restated — not one invented to reach a
+number. That expression closes the set *by itself*: a `TitleKind` member's
+`.value` is one of two short strings, and anything that is not an enum member
+has no `.value` at all — a bare `str` raises `AttributeError` before a byte
+reaches the COPY. No validator is needed, so the enum counts on `ImdbTitle` and
+`TmdbId` exactly as it does on `Title`.
+
+⚠️ **That sentence is about enum fields and nothing else.** Non-enum staged
+fields are staged plainly (`row.imdb_id`, `row.year`), where the `.value`
+argument says nothing at all — which is the point, because it is why they are
+not safe. And **ten of the sixteen enum-backed safe columns are never staged**
+(`sources.kind`, `llm_calls.purpose`, `titles.status`, …): for those the closure
+is the pydantic field validating the member, and the ledger's reason string now
+says which of the two it is on each row rather than printing the `.value`
+sentence over a path that has no COPY in it.
+
+A `pattern`, by contrast, is inert unless something runs it: `Title.imdb_id`
 carries `^tt\d{7,8}$` and `bulk.py:upsert_titles` takes
 `ports.bulk.ImdbTitle`, whose `imdb_id` is a bare `str`. Crediting that pattern
 asserts a validator the writing path never runs.
+
+**A closed value set is not sufficient on its own, and the ledger now checks the
+other half.** An enum keeps a column safe only if its longest member fits;
+`_classify` compares them and prints both numbers. The tightest margins today
+are `JobKind` at 15 into `varchar(32)` and `SyncRunKind` at 11 into
+`varchar(16)`, so nothing is close — but classifying on the word "enum" alone
+would have filed a future over-long member as `safe` while it raised `22001`,
+which is the same dormancy this record discloses for `_fully_bounded`.
 
 `closure` is too generous for exactly that reason. `pydantic` is too strict for
 the mirror-image reason: it denies the `.value` argument, which is a fact about
@@ -539,15 +577,20 @@ migration chain.
 2. **The 2 external staging-only columns** — `stg_genome.tmdb_id` and
    `stg_akas.ordering` — widened to `bigint`. One change each, no destination
    statement, no `except` to design.
-3. **A guard**, derived from `scripts/audit_bounded_columns.py` rather than
-   hand-listed. ⚠️ **It must not be spelled "assert the `exposed-sqlalchemy`
+3. **A guard, and it should call `_drift()` rather than assert bucket counts of
+   its own.** ⚠️ **It must not be spelled "assert the `exposed-sqlalchemy`
    bucket is empty", which is how the first version of this record specified
    it** — a totally dead write-site scan satisfies that assertion perfectly, and
-   review demonstrated exactly that by stubbing `write_sites()` to `[]`. The
-   guard asserts the **whole census** against a published figure, in both
-   directions, and it runs `--check`, which now refuses to build a ledger at all
-   when any scan comes back empty. F9 is also where `--check` should join CI:
-   nothing runs it today.
+   review demonstrated exactly that by stubbing `write_sites()` to `[]`.
+   `_drift()` compares the whole census against `PUBLISHED` and
+   `PUBLISHED_AT_M08B` at both heads under all three readings, plus the
+   metadata/migration column set — so a test that is one `assert _drift(…) == []`
+   inherits every check this file has and every check it gains later, and it
+   turns `--check` from a thing a person runs into a thing CI runs. That is the
+   permanent close on the two degeneracy classes review found here: a scan going
+   empty, and a scan going *partial*. F9 updates `PUBLISHED` in the same commit
+   as the fix, which is what makes the count move a decision rather than an
+   observation.
 
 **F9 does not fix the 31 exposed at the COPY, and this is where M9's boundary
 call 8 stands unchanged.** *"31 of the writes never reach a SQLAlchemy `except`
@@ -635,14 +678,23 @@ taxonomy one.
 - **`stg_credit_names.ordinal` is `enumerate(rows)`** (`bulk.py:668`), which is
   the plan's one wrong member in its list of three staging-only exposures; the
   right two are `stg_genome.tmdb_id` and `stg_akas.ordering`.
-- **Degradation was tested rather than assumed.** `write_sites() → []`,
-  `staging_ddls() → {}`, `domain_bounds() → {}` and `staged_bounds() → {}` each
-  now raise `DegenerateScan`; dropping `execute` from `_EXECUTING_CALLS` raises
-  on the `unwritten` bucket. An ablation of that list one name at a time shows
-  **only `execute` moves the answer**, and the staleness guard added beside it
-  **found a dead entry on its first run** — `add_all`, listed and called by
-  nothing in `usher`, contributing nothing while looking exactly like a name
-  that contributed everything.
+- **Degradation was tested rather than assumed, and the second review round
+  found the guard asymmetric one function over from the one it had fixed.**
+  `staged_into() → {}` was silent and moved **31 columns** from `exposed-copy`
+  to `exposed-sqlalchemy` — the two buckets F9 splits on — and losing one
+  table's destinations moved 8. Both now raise, as do `write_sites() → []`,
+  `staging_ddls() → {}`, `domain_bounds() → {}`, `staged_bounds() → {}`, a
+  staging table whose source class will not resolve (measured: dropping
+  `stg_tmdb_ids` moved `safe` 18 → 17 silently), and dropping `execute` from
+  `_EXECUTING_CALLS`. An ablation of that list one name at a time shows **only
+  `execute` moves the answer**.
+- **The staleness guard found a dead entry on its first run, and two more when
+  pointed at the lists next to it.** `add_all` in `_EXECUTING_CALLS`, then
+  `add_all` in `_ORM_WRITE_CALLS` and `insert` in `_ORM_STATEMENT_CALLS` —
+  three names across three sibling lists, called by nothing in `usher`,
+  each contributing nothing while looking exactly like a name that contributed
+  everything. A guard aimed at one of three lists reports the state of a third
+  of the surface it appears to cover.
 - **Line numbers in the task plan had drifted** — `bulk.py:768` is a comment and
   the call is at `:778`; `replace_genome_tags` is at `:446` with its
   `refusals_as_conflict` at `:483`. Every citation in this record was
