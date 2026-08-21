@@ -7,7 +7,7 @@ parametrized tests along with it.
 """
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -20,6 +20,7 @@ from usher.ports.repository import (
     BrowseFacets,
     BrowseSort,
     TitleGenres,
+    TitleReference,
     TitleRepository,
 )
 
@@ -61,6 +62,40 @@ def _provider_id_conflict(candidate: Title, other: Title) -> str | None:
         if kind_scoped and candidate.kind is not other.kind:
             continue
         return constraint
+    return None
+
+
+def resolve_title_reference(
+    wanted: TitleReference, stored: Iterable[TitleReference]
+) -> uuid.UUID | None:
+    """`usher.db.backup_identity.RESOLUTION_ORDER`, in Python: `imdb_id`,
+    then `(kind, tmdb_id)`, then the raw id, first hit wins.
+
+    **One definition, imported by `FakeEpisodeRepository` rather than
+    re-spelled there.** Both fakes resolve a `TitleReference` -- the episode
+    one because `resolve_natural_keys` there does the series and the episode
+    in a single statement against Postgres, so a fake resolving only the
+    numbers would answer a question the port does not ask. Two copies of a
+    three-rung ladder are two chances for one to lose a rung, and the
+    divergence would be invisible: the *title* contract cases would still
+    pass, and only an episode case seeded through the rung that went missing
+    could see it.
+
+    Case-exact on `imdb_id` (`==`, never `casefold`), and `kind`-scoped on
+    `tmdb_id` (ADR-0011) -- both of which the Postgres arm gets from
+    Postgres's own `=` over `text` and from the composite join predicate.
+    """
+    if wanted.imdb_id is not None:
+        for one in stored:
+            if one.imdb_id == wanted.imdb_id:
+                return one.id
+    if wanted.tmdb_id is not None:
+        for one in stored:
+            if one.tmdb_id == wanted.tmdb_id and one.kind is wanted.kind:
+                return one.id
+    for one in stored:
+        if one.id == wanted.id:
+            return one.id
     return None
 
 
@@ -300,6 +335,35 @@ class FakeTitleRepository(TitleRepository):
             for title in self._titles.values()
             if title.tmdb_id in wanted and title.kind is kind and title.tmdb_id is not None
         }
+
+    async def resolve_natural_keys(
+        self, references: Sequence[TitleReference]
+    ) -> dict[TitleReference, uuid.UUID]:
+        # The ladder is `resolve_title_reference` -- one definition, shared
+        # with `FakeEpisodeRepository`, which resolves the same references
+        # because its own `resolve_natural_keys` does the series and the
+        # episode in one statement against Postgres.
+        #
+        # **Where this is more forgiving than the statement.** The real one
+        # is a single `unnest ... WITH ORDINALITY` joined three ways, so
+        # "one statement per call" is a claim only the integration arm can
+        # falsify -- there is no round trip here to count. And a scan over a
+        # dict cannot express the `ix_titles_imdb_id` / `ix_titles_tmdb_id_kind`
+        # index probes the statement plans to, so a rung that quietly became
+        # a sequential scan would be invisible on this arm and slow on the
+        # other.
+        stored = tuple(
+            TitleReference(
+                kind=title.kind, id=title.id, imdb_id=title.imdb_id, tmdb_id=title.tmdb_id
+            )
+            for title in self._titles.values()
+        )
+        found = {}
+        for reference in references:
+            resolved = resolve_title_reference(reference, stored)
+            if resolved is not None:
+                found[reference] = resolved
+        return found
 
     async def credit_names_for(
         self, title_ids: Sequence[uuid.UUID]

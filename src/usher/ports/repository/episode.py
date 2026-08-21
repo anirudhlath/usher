@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from usher.domain.episode import Episode, Season
+from usher.ports.repository._references import EpisodeReference
 from usher.ports.repository._results import BulkWriteResult
 
 __all__ = [
@@ -137,6 +138,37 @@ class EpisodeRepository(ABC):
 
         Absent keys mean "no such episode under this series", never "not
         asked", so a caller iterates its own probes.
+        """
+
+    @abstractmethod
+    async def resolve_natural_keys(
+        self, references: Sequence[EpisodeReference]
+    ) -> dict[EpisodeReference, uuid.UUID]:
+        """`EpisodeReference` -> the id **this** catalog holds it under, in
+        one round trip.
+
+        `resolve_episodes` one method up answers the same question given a
+        `title_id`; this one is what a *backup artifact* can ask, because an
+        artifact holds no id the target agrees with (ADR-0003, ADR-0044).
+        The series is resolved by `TitleReference`'s own ladder -- `imdb_id`,
+        then `(kind, tmdb_id)`, then the raw id, first hit wins -- and the
+        two numbers are matched against `uq_episodes_title_season_episode`.
+
+        **The series and the episode resolve in one statement, not two.**
+        A restore of `watch_states` on a library where 999,827 of 1,126,674
+        items are episodes carries one reference per resumed episode; a
+        title lookup per reference followed by an episode lookup per
+        reference is two round trips per row, which is the same N+1
+        `resolve_episodes` and `next_up` both exist to prevent, doubled.
+
+        **Absent keys mean "this target does not hold it", never "not
+        asked"** -- including the case where the *series* did not resolve,
+        which is deliberately not a distinct answer here. What an operator
+        needs is which references were refused, and
+        `usher.db.backup_identity.resolve_episodes` names them; a caller
+        that wanted to know whether the series or the episode was missing
+        would be asking a diagnostic question this read cannot answer more
+        cheaply than by asking `TitleRepository` too.
         """
 
     @abstractmethod

@@ -17,18 +17,23 @@ from tests.contract.title_repository_contract import (
     TitleRepositoryCandidateContract,
     TitleRepositoryContract,
     TitleRepositoryGenreSweepContract,
+    TitleRepositoryNaturalKeyContract,
     TitleRepositoryOwnedContract,
 )
 from usher.db.models.source import MediaItemRow
 from usher.db.models.title import DERIVED_COLUMNS, TitleRow
 from usher.db.repositories.source import PostgresSourceRepository
-from usher.db.repositories.title import PostgresTitleRepository, _browse_order
+from usher.db.repositories.title import (
+    _RESOLVE_NATURAL_KEYS,
+    PostgresTitleRepository,
+    _browse_order,
+)
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
-from usher.ports.repository import BrowseSort
+from usher.ports.repository import BrowseSort, TitleReference
 
 
 @pytest.fixture
@@ -1256,3 +1261,111 @@ class TestPostgresTitleRepositoryGenreSweep(TitleRepositoryGenreSweepContract):
     @pytest.fixture
     def repo(self, session: AsyncSession) -> PostgresTitleRepository:
         return PostgresTitleRepository(session)
+
+
+class TestPostgresTitleRepositoryNaturalKeys(TitleRepositoryNaturalKeyContract):
+    """`resolve_natural_keys` against real Postgres.
+
+    The half with teeth: `WITH ORDINALITY` over four parallel arrays, three
+    `LEFT JOIN`s whose precedence is a `COALESCE`, and `p.kind` compared
+    against a `VARCHAR(16)` column -- all of which the fake reproduces with a
+    Python scan and could reproduce wrongly. The statement count is one case
+    further down and is Postgres-only by construction.
+    """
+
+    @pytest.fixture
+    def repo(self, session: AsyncSession) -> PostgresTitleRepository:
+        return PostgresTitleRepository(session)
+
+
+async def test_resolving_natural_keys_costs_one_statement_for_a_whole_batch(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    """The N+1 the port refuses, and the only arm that can see it: the fake
+    has no round trip to count.
+
+    Held against a fixed batch count rather than a fixed batch -- a
+    `media_items` restore on the household this project measures carries one
+    reference per linked copy, and a lookup per reference is 1,126,789 round
+    trips. The three-rung ladder is deliberately in the batch, because a
+    per-rung implementation is the other shape of the same defect: three
+    statements a call is not one.
+    """
+    by_imdb = Title(kind=TitleKind.MOVIE, name="A", sort_name="A", imdb_id="tt99000801")
+    by_tmdb = Title(kind=TitleKind.MOVIE, name="B", sort_name="B", tmdb_id=99000802)
+    by_raw = Title(kind=TitleKind.MOVIE, name="C", sort_name="C")
+    for one in (by_imdb, by_tmdb, by_raw):
+        await repo.add(one)
+
+    carried = [
+        TitleReference(kind=TitleKind.MOVIE, id=new_id(), imdb_id="tt99000801"),
+        TitleReference(kind=TitleKind.MOVIE, id=new_id(), tmdb_id=99000802),
+        TitleReference(kind=TitleKind.MOVIE, id=by_raw.id),
+        TitleReference(kind=TitleKind.MOVIE, id=new_id(), imdb_id="tt99000899"),
+    ]
+
+    with _capturing_sql(session) as statements:
+        answers = await repo.resolve_natural_keys(carried[:1])
+        one_key = len(statements)
+        statements.clear()
+        answers = await repo.resolve_natural_keys(carried)
+        whole_batch = len(statements)
+
+    assert one_key == 1, f"one reference cost {one_key} statements: {statements}"
+    assert whole_batch == one_key, (
+        f"{one_key} statement(s) for one reference, {whole_batch} for four"
+    )
+    assert answers == {
+        carried[0]: by_imdb.id,
+        carried[1]: by_tmdb.id,
+        carried[2]: by_raw.id,
+    }, "the premise: all three rungs really resolved, and the fourth really did not"
+
+
+async def test_the_ladder_plans_to_the_indexes_it_was_designed_for(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    """Each rung is an index probe, not a scan of `titles`.
+
+    `titles` is 1,272,888 rows on the deployment this project measures, so a
+    rung that quietly became a sequential scan is three full scans per
+    restore -- correct, and unusable.
+
+    **On the index *names*, deliberately, and this is the case where
+    `db-and-sql.md`'s "assert the `Index Cond`, not the artefact" rule points
+    the other way.** The three rungs are distinguished from each other by
+    *which* index each binds -- `imdb_id` alone, `(tmdb_id, kind)`, the
+    primary key -- so the name is the property rather than a stand-in for
+    it. An `Index Cond` assertion would be satisfied by all three rungs
+    binding the same index, which is one of the wrong implementations this
+    exists to refuse. The absence of a sequential scan is asserted
+    separately, because "three index names appear" does not say that a
+    fourth path did not.
+
+    `enable_seqscan = off` is what separates *not chosen* from *not
+    choosable* on a fixture this small -- the `text_pattern_ops` idiom, one
+    subsystem over -- and it is also what keeps this out of the
+    load-sensitive plan-shape family `.claude/rules/mutation-sweeps.md`
+    records: the disabled-node penalty is 1e10, so no amount of contention
+    moves the choice.
+    """
+    await session.execute(text("SET LOCAL enable_seqscan = off"))
+    plan = "\n".join(
+        str(line)
+        for line in (
+            await session.execute(
+                text("EXPLAIN " + _RESOLVE_NATURAL_KEYS),
+                {
+                    "imdb_ids": ["tt99000901"],
+                    "kinds": [TitleKind.MOVIE.value],
+                    "tmdb_ids": [99000902],
+                    "raw_ids": [new_id()],
+                },
+            )
+        ).scalars()
+    )
+
+    assert "ix_titles_imdb_id" in plan, plan
+    assert "ix_titles_tmdb_id_kind" in plan, plan
+    assert "pk_titles" in plan, plan
+    assert "Seq Scan on titles" not in plan, plan

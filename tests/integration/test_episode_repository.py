@@ -22,6 +22,7 @@ from tests.contract.episode_repository_contract import (
     OTHER_SEEDED_KEYS,
     SEEDED_KEYS,
     EpisodeRepositoryContract,
+    EpisodeRepositoryNaturalKeyContract,
     EpisodeRepositoryNextUpContract,
     MarkPlayed,
     MarkSeriesPlayed,
@@ -38,6 +39,7 @@ from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
 from usher.ports.ingest import WatchStateMerge
+from usher.ports.repository import EpisodeReference, TitleReference
 
 
 @pytest.fixture
@@ -473,3 +475,78 @@ async def test_next_up_reads_the_episode_key_index_and_does_not_scan_episodes(
     assert "uq_episodes_title_season_episode" in plan, plan
     assert "Seq Scan on episodes" not in plan, plan
     assert re.search(r"Index Cond:.*ROW\(season_number, episode_number\)", plan), plan
+
+
+@pytest_asyncio.fixture
+async def series_reference(session: AsyncSession, title_id: uuid.UUID) -> TitleReference:
+    """The `title_id` fixture's own row, given the two provider ids the
+    ladder resolves on.
+
+    An `UPDATE` rather than a second `titles` row: the natural key has to be
+    true of the series the episodes actually hang from, and a fixture that
+    seeded a *different* title would make every case here resolve to nothing
+    while looking like coverage.
+    """
+    await session.execute(
+        text("UPDATE titles SET imdb_id = :imdb, tmdb_id = :tmdb WHERE id = :id"),
+        {"imdb": "tt99001001", "tmdb": 99001001, "id": title_id},
+    )
+    return TitleReference(
+        kind=TitleKind.SERIES, id=title_id, imdb_id="tt99001001", tmdb_id=99001001
+    )
+
+
+@pytest_asyncio.fixture
+async def other_series_reference(
+    session: AsyncSession, other_title_id: uuid.UUID
+) -> TitleReference:
+    await session.execute(
+        text("UPDATE titles SET imdb_id = :imdb, tmdb_id = :tmdb WHERE id = :id"),
+        {"imdb": "tt99001002", "tmdb": 99001002, "id": other_title_id},
+    )
+    return TitleReference(
+        kind=TitleKind.SERIES, id=other_title_id, imdb_id="tt99001002", tmdb_id=99001002
+    )
+
+
+class TestPostgresEpisodeRepositoryNaturalKeys(EpisodeRepositoryNaturalKeyContract):
+    """`resolve_natural_keys` against real Postgres -- the arm that can fail
+    on the four-way join, on `WITH ORDINALITY`, and on the inner join that
+    makes an unresolved series and an unresolved episode one answer."""
+
+
+async def test_resolving_episode_natural_keys_costs_one_statement_for_a_whole_batch(
+    repository: PostgresEpisodeRepository,
+    title_id: uuid.UUID,
+    season_id: uuid.UUID,
+    series_reference: TitleReference,
+    statement_counter: list[str],
+) -> None:
+    """999,827 of the one measured source's 1,126,674 items are episodes, so
+    a restore that resolved the series and then the episode -- two round
+    trips a row -- is the N+1 this port already refuses twice, doubled.
+
+    The fake cannot express this: `title_keys` there is a dict, so there is
+    no round trip to count and `calls` is a stand-in.
+    """
+    await repository.upsert_episodes(
+        [episode(title_id, season_id, number) for number in range(1, 6)]
+    )
+    carried = [
+        EpisodeReference(title=series_reference, season_number=1, episode_number=number)
+        for number in range(1, 6)
+    ]
+
+    statement_counter.clear()
+    await repository.resolve_natural_keys(carried[:1])
+    one_key = len(statement_counter)
+
+    statement_counter.clear()
+    answers = await repository.resolve_natural_keys(carried)
+    whole_batch = len(statement_counter)
+
+    assert one_key == 1, f"one reference cost {one_key} statements: {statement_counter}"
+    assert whole_batch == one_key, (
+        f"{one_key} statement(s) for one reference, {whole_batch} for five"
+    )
+    assert len(answers) == 5, "the premise: every reference in the batch really resolved"

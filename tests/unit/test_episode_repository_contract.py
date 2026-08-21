@@ -16,13 +16,16 @@ from tests.contract.episode_repository_contract import (
     OTHER_SEEDED_KEYS,
     SEEDED_KEYS,
     EpisodeRepositoryContract,
+    EpisodeRepositoryNaturalKeyContract,
     EpisodeRepositoryNextUpContract,
     MarkPlayed,
     MarkSeriesPlayed,
     seed_series,
 )
 from tests.fakes.episode_repository import FakeEpisodeRepository
+from usher.domain.enums import TitleKind
 from usher.domain.ids import new_id
+from usher.ports.repository import TitleReference
 
 
 class TestFakeEpisodeRepository(EpisodeRepositoryContract, EpisodeRepositoryNextUpContract):
@@ -127,3 +130,53 @@ class TestFakeEpisodeRepository(EpisodeRepositoryContract, EpisodeRepositoryNext
         await repository.next_up(user_id, [series_id, other_series_id])
 
         assert repository.calls == 1
+
+
+class TestFakeEpisodeRepositoryNaturalKeys(EpisodeRepositoryNaturalKeyContract):
+    """`resolve_natural_keys` against the fake. The Postgres half is
+    `tests/integration/test_episode_repository.py`, and it is the one that
+    can fail on the four-way join, on `WITH ORDINALITY` and on the "one
+    statement per call" promise -- `title_keys` here is a seeded dict rather
+    than a join, which is this fake's sixth recorded divergence."""
+
+    @pytest.fixture
+    def repository(self) -> FakeEpisodeRepository:
+        return FakeEpisodeRepository()
+
+    @pytest.fixture
+    def series_reference(self, repository: FakeEpisodeRepository) -> TitleReference:
+        """Registered in `title_keys`, which is what makes the reference true
+        of a row this fake holds -- the Postgres arm writes a `titles` row
+        instead."""
+        reference = TitleReference(
+            kind=TitleKind.SERIES, id=new_id(), imdb_id="tt99001001", tmdb_id=99001001
+        )
+        repository.title_keys[reference.id] = reference
+        return reference
+
+    @pytest.fixture
+    def other_series_reference(self, repository: FakeEpisodeRepository) -> TitleReference:
+        reference = TitleReference(
+            kind=TitleKind.SERIES, id=new_id(), imdb_id="tt99001002", tmdb_id=99001002
+        )
+        repository.title_keys[reference.id] = reference
+        return reference
+
+    @pytest.fixture
+    def title_id(self, series_reference: TitleReference) -> uuid.UUID:
+        """The same id the reference names: on the Postgres arm these are one
+        `titles` row, and a fake whose two fixtures disagreed would make every
+        case here vacuous."""
+        return series_reference.id
+
+    @pytest.fixture
+    def other_title_id(self, other_series_reference: TitleReference) -> uuid.UUID:
+        return other_series_reference.id
+
+    @pytest.fixture
+    def season_id(self) -> uuid.UUID:
+        return new_id()
+
+    @pytest.fixture
+    def other_season_id(self) -> uuid.UUID:
+        return new_id()

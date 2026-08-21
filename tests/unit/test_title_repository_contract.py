@@ -15,6 +15,7 @@ from tests.contract.title_repository_contract import (
     TitleRepositoryCandidateContract,
     TitleRepositoryContract,
     TitleRepositoryGenreSweepContract,
+    TitleRepositoryNaturalKeyContract,
     TitleRepositoryOwnedContract,
 )
 from tests.fakes.title_repository import FakeTitleRepository, FakeWatchRow
@@ -151,6 +152,18 @@ class TestFakeTitleRepositoryGenreSweep(TitleRepositoryGenreSweepContract):
     half is `tests/integration/test_title_repository.py`, and it is the one
     that can fail on the `UPDATE ... FROM (VALUES ...)` guard and on
     `rowcount`."""
+
+    @pytest.fixture
+    def repo(self) -> FakeTitleRepository:
+        return FakeTitleRepository()
+
+
+class TestFakeTitleRepositoryNaturalKeys(TitleRepositoryNaturalKeyContract):
+    """`resolve_natural_keys` against the fake. The Postgres half is
+    `tests/integration/test_title_repository.py`, and it is the one that can
+    fail on `WITH ORDINALITY`, on the three `LEFT JOIN`s' precedence, and on
+    the "one statement per call" promise -- a dict has no round trip to
+    count."""
 
     @pytest.fixture
     def repo(self) -> FakeTitleRepository:

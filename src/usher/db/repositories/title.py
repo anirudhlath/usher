@@ -81,6 +81,7 @@ from sqlalchemy import (
     nulls_last,
     or_,
     select,
+    text,
     update,
     values,
 )
@@ -108,8 +109,47 @@ from usher.ports.repository import (
     BrowseFacets,
     BrowseSort,
     TitleGenres,
+    TitleReference,
     TitleRepository,
 )
+
+# The natural-key ladder as one statement: `imdb_id`, then `(kind, tmdb_id)`,
+# then the raw id, first hit wins. `usher.db.backup_identity` argues for the
+# order; this is where it is spelled against Postgres, and the fake's
+# `resolve_title_reference` is where it is spelled in Python.
+#
+# **`WITH ORDINALITY`, not a join back on the probe values.** Two rungs of the
+# probe are nullable by construction -- 980,176 of the live catalog's titles
+# carry no `tmdb_id` and 72 carry no `imdb_id` -- and a join keyed on a
+# nullable probe answers NULL rather than false, which is exactly the
+# three-valued trap ADR-0034 was corrected over one read down. The ordinal is
+# the row's position in the caller's own list and cannot be null.
+#
+# **Three `LEFT JOIN`s, not three statements and not a `UNION`.** Each is an
+# index probe -- `ix_titles_imdb_id`, `ix_titles_tmdb_id_kind`, `pk_titles` --
+# and `COALESCE` is what makes the ladder's precedence a property of the
+# statement rather than of the order a caller happened to iterate in. A
+# `UNION` would answer the set and lose which rung won, so a reference whose
+# `imdb_id` names a merged row and whose raw id names the loser would resolve
+# to whichever Postgres returned first.
+#
+# `p.kind` is `text` and `titles.kind` is `VARCHAR(16)` (`enum_column`'s
+# `native_enum=False`), so the comparison needs no cast -- and the bind
+# carries `TitleKind.value`, which `usher.domain.enums` calls the stable
+# storage identifier, never the member's `.name`.
+_RESOLVE_NATURAL_KEYS = """
+SELECT p.ord AS ord,
+       COALESCE(by_imdb.id, by_tmdb.id, by_raw.id) AS id
+FROM unnest(
+    CAST(:imdb_ids AS text[]),
+    CAST(:kinds AS text[]),
+    CAST(:tmdb_ids AS integer[]),
+    CAST(:raw_ids AS uuid[])
+) WITH ORDINALITY AS p(imdb_id, kind, tmdb_id, raw_id, ord)
+LEFT JOIN titles AS by_imdb ON by_imdb.imdb_id = p.imdb_id
+LEFT JOIN titles AS by_tmdb ON by_tmdb.tmdb_id = p.tmdb_id AND by_tmdb.kind = p.kind
+LEFT JOIN titles AS by_raw ON by_raw.id = p.raw_id
+"""
 
 
 def _to_domain(row: TitleRow) -> Title:
@@ -553,6 +593,39 @@ class PostgresTitleRepository(TitleRepository):
         # NULL by construction, so the narrowing is a type-checker fact
         # rather than a runtime branch.
         return {tmdb_id: title_id for tmdb_id, title_id in rows.all() if tmdb_id is not None}
+
+    async def resolve_natural_keys(
+        self, references: Sequence[TitleReference]
+    ) -> dict[TitleReference, uuid.UUID]:
+        # No statement at all for an empty batch -- `resolve_tmdb_ids`' guard,
+        # for its reason: an empty `unnest` is a round trip to learn nothing.
+        if not references:
+            return {}
+        # Deduplicated before the bind, not after: a household's watch states
+        # name the same title once per state, so the probe list is the
+        # distinct set and the answer is re-expanded by the caller.
+        # `TitleReference` is a frozen dataclass over hashable fields, so
+        # `dict.fromkeys` both dedupes and keeps the order the ordinal is
+        # counted in.
+        unique = list(dict.fromkeys(references))
+        with self._session.no_autoflush:  # see get()'s comment
+            rows = (
+                await self._session.execute(
+                    text(_RESOLVE_NATURAL_KEYS),
+                    {
+                        "imdb_ids": [one.imdb_id for one in unique],
+                        "kinds": [one.kind.value for one in unique],
+                        "tmdb_ids": [one.tmdb_id for one in unique],
+                        "raw_ids": [one.id for one in unique],
+                    },
+                )
+            ).all()
+        # A reference the target does not hold comes back with a NULL `id`
+        # (three `LEFT JOIN`s and a `COALESCE`), and is dropped rather than
+        # mapped to `None`: the port says absent means "not held", and
+        # `usher.db.backup_identity.resolve_titles` is what turns that into a
+        # named refusal a caller can count.
+        return {unique[row.ord - 1]: row.id for row in rows if row.id is not None}
 
     async def credit_names_for(
         self, title_ids: Sequence[uuid.UUID]

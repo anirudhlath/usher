@@ -45,6 +45,7 @@ from usher.ports.repository import (
     BrowseCursorPosition,
     BrowseSort,
     TitleGenres,
+    TitleReference,
     TitleRepository,
 )
 from usher.ports.search import FilterNotSupported
@@ -1953,3 +1954,198 @@ class TitleRepositoryGenreSweepContract:
         """`raw_payloads` outlives `titles` and so does a page read a moment
         ago. An id naming no row is absent from the count, never an error."""
         assert await repo.replace_genres([TitleGenres(id=new_id(), genres=("Drama",))]) == 0
+
+
+class TitleRepositoryNaturalKeyContract:
+    """`resolve_natural_keys` — the read K4's restore is built on.
+
+    Every case here seeds through `add`, so the fixture is the same object
+    on both arms: a `Title`. What differs is what the two implementations
+    resolve *with* — a scan over a dict against three index probes joined
+    inside one statement — which is why the "one statement" half of the
+    port's promise lives in `tests/integration/test_title_repository.py` and
+    not here. A fake has no round trip to count.
+    """
+
+    @staticmethod
+    def _reference(title: Title) -> TitleReference:
+        """The reference an artifact would carry for `title`.
+
+        Spelled here rather than imported from `usher.db.backup_identity`,
+        deliberately: a contract suite that built its probes with the module
+        under test would be asserting that a function agrees with itself.
+        `test_the_reference_a_title_is_carried_as_names_every_key_the_row_has`
+        in `tests/unit/test_backup_identity.py` is what pins the builder
+        against this spelling.
+        """
+        return TitleReference(
+            kind=title.kind, id=title.id, imdb_id=title.imdb_id, tmdb_id=title.tmdb_id
+        )
+
+    async def test_a_reference_resolves_to_the_id_this_catalog_holds(
+        self, repo: TitleRepository
+    ) -> None:
+        """The whole point: the artifact's id is not the answer, the
+        target's is. `db/repositories/bulk.py:611` mints a fresh UUIDv7 per
+        staged row, so two catalogs built from one dump agree on `imdb_id`
+        and on nothing else (ADR-0003, ADR-0044).
+        """
+        held = Title(kind=TitleKind.MOVIE, name="Held", sort_name="Held", imdb_id="tt99000101")
+        await repo.add(held)
+
+        carried = TitleReference(kind=TitleKind.MOVIE, id=new_id(), imdb_id="tt99000101")
+        assert carried.id != held.id, "the premise: the artifact carries a different id"
+
+        assert await repo.resolve_natural_keys([carried]) == {carried: held.id}
+
+    async def test_a_title_with_no_imdb_id_resolves_on_the_tmdb_rung(
+        self, repo: TitleRepository
+    ) -> None:
+        """The fallback the live catalog needs: 72 of 1,272,888 titles carry
+        no `imdb_id` (2026-08-21), and it was 13 eight days earlier.
+
+        Two references in one call, so the case is a statement about the
+        *ladder* rather than about a repository that only ever looks at
+        `tmdb_id` — the sibling resolving on the rung above is the control.
+        """
+        no_imdb = Title(
+            kind=TitleKind.MOVIE, name="Crosswalked", sort_name="Crosswalked", tmdb_id=99000201
+        )
+        has_imdb = Title(
+            kind=TitleKind.MOVIE, name="Skeleton", sort_name="Skeleton", imdb_id="tt99000202"
+        )
+        await repo.add(no_imdb)
+        await repo.add(has_imdb)
+        assert no_imdb.imdb_id is None, "the premise: this title really has no imdb_id"
+
+        first, second = self._reference(no_imdb), self._reference(has_imdb)
+        carried = [
+            TitleReference(kind=first.kind, id=new_id(), tmdb_id=first.tmdb_id),
+            TitleReference(kind=second.kind, id=new_id(), imdb_id=second.imdb_id),
+        ]
+
+        assert await repo.resolve_natural_keys(carried) == {
+            carried[0]: no_imdb.id,
+            carried[1]: has_imdb.id,
+        }
+
+    async def test_the_tmdb_rung_is_namespaced_by_kind(self, repo: TitleRepository) -> None:
+        """ADR-0011: TMDb keys movies and series in separate spaces that
+        overlap on 26,968 measured ids, so `tmdb_id` alone resolves a series'
+        watch state onto whichever film shares the integer.
+
+        Both rows are seeded and both references asked in one call, so a
+        resolver that dropped `kind` cannot pass by answering one of them.
+        """
+        film = Title(kind=TitleKind.MOVIE, name="Film", sort_name="Film", tmdb_id=99000301)
+        show = Title(kind=TitleKind.SERIES, name="Show", sort_name="Show", tmdb_id=99000301)
+        await repo.add(film)
+        await repo.add(show)
+        assert film.id != show.id, "the premise: the shared integer really is two rows"
+
+        carried = [
+            TitleReference(kind=TitleKind.MOVIE, id=new_id(), tmdb_id=99000301),
+            TitleReference(kind=TitleKind.SERIES, id=new_id(), tmdb_id=99000301),
+        ]
+
+        assert await repo.resolve_natural_keys(carried) == {
+            carried[0]: film.id,
+            carried[1]: show.id,
+        }
+
+    async def test_an_imdb_id_that_differs_only_in_case_resolves_to_nothing(
+        self, repo: TitleRepository
+    ) -> None:
+        """A provider id is not a name, so nothing folds it.
+
+        The premise is the exact spelling resolving in the same call, which
+        is what stops this passing against a repository that resolves
+        nothing at all.
+        """
+        held = Title(kind=TitleKind.MOVIE, name="Held", sort_name="Held", imdb_id="tt99000401")
+        await repo.add(held)
+
+        exact = TitleReference(kind=TitleKind.MOVIE, id=new_id(), imdb_id="tt99000401")
+        upper = TitleReference(kind=TitleKind.MOVIE, id=new_id(), imdb_id="TT99000401")
+
+        assert await repo.resolve_natural_keys([exact, upper]) == {exact: held.id}
+
+    async def test_a_raw_id_resolves_only_against_a_target_that_already_holds_it(
+        self, repo: TitleRepository
+    ) -> None:
+        """ADR-0003 makes a title with neither provider id a first-class
+        citizen and the live catalog holds six of them (2026-08-21, against
+        zero on 2026-08-13). The artifact carries the UUID and the target is
+        *asked* rather than trusted.
+
+        Both arms in one case: the id the catalog holds, and one it does not.
+        """
+        orphan = Title(kind=TitleKind.MOVIE, name="Orphan", sort_name="Orphan")
+        await repo.add(orphan)
+        assert orphan.imdb_id is None and orphan.tmdb_id is None, (
+            "the premise: this fixture really has neither provider id"
+        )
+
+        held = self._reference(orphan)
+        stranger = TitleReference(kind=TitleKind.MOVIE, id=new_id())
+
+        assert await repo.resolve_natural_keys([held, stranger]) == {held: orphan.id}
+
+    async def test_the_imdb_rung_wins_over_the_tmdb_one(self, repo: TitleRepository) -> None:
+        """Precedence, asserted rather than left to whichever row a
+        `UNION` happened to return first.
+
+        The fixture is the state a merge leaves behind: two rows, one holding
+        the `imdb_id` the artifact carries and one holding its `tmdb_id`.
+        Rare, and it is exactly the case a ladder exists to be unambiguous
+        about.
+        """
+        by_imdb = Title(
+            kind=TitleKind.MOVIE, name="By IMDb", sort_name="By IMDb", imdb_id="tt99000501"
+        )
+        by_tmdb = Title(kind=TitleKind.MOVIE, name="By TMDb", sort_name="By TMDb", tmdb_id=99000502)
+        await repo.add(by_imdb)
+        await repo.add(by_tmdb)
+        assert by_imdb.id != by_tmdb.id, "the premise: the two rungs name two rows"
+
+        carried = TitleReference(
+            kind=TitleKind.MOVIE, id=new_id(), imdb_id="tt99000501", tmdb_id=99000502
+        )
+
+        assert await repo.resolve_natural_keys([carried]) == {carried: by_imdb.id}
+
+    async def test_a_reference_this_catalog_does_not_hold_is_absent(
+        self, repo: TitleRepository
+    ) -> None:
+        """Absent, never mapped to `None` — the port's contract, and what
+        `usher.db.backup_identity.resolve_titles` turns into a named refusal.
+
+        The premise is a sibling that does resolve in the same call.
+        """
+        held = Title(kind=TitleKind.MOVIE, name="Held", sort_name="Held", imdb_id="tt99000601")
+        await repo.add(held)
+
+        found = self._reference(held)
+        missing = TitleReference(kind=TitleKind.MOVIE, id=new_id(), imdb_id="tt99000602")
+
+        answers = await repo.resolve_natural_keys([found, missing])
+
+        assert answers == {found: held.id}
+        assert missing not in answers
+
+    async def test_an_empty_batch_asks_nothing(self, repo: TitleRepository) -> None:
+        """`unnest` over an empty array is a round trip to learn nothing —
+        `resolve_tmdb_ids`' own guard, one method over."""
+        assert await repo.resolve_natural_keys([]) == {}
+
+    async def test_a_repeated_reference_is_answered_once(self, repo: TitleRepository) -> None:
+        """A household names one title once per watch state, so a batch
+        carrying it twice is the ordinary shape rather than a defect. Two
+        probes for one reference would make the ordinal disagree with the
+        caller's list, which is the failure mode the mapping cannot survive.
+        """
+        held = Title(kind=TitleKind.MOVIE, name="Held", sort_name="Held", imdb_id="tt99000701")
+        await repo.add(held)
+        carried = self._reference(held)
+
+        assert await repo.resolve_natural_keys([carried, carried, carried]) == {carried: held.id}

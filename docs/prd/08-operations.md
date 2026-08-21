@@ -690,6 +690,28 @@ re-derived is re-derived to the same answer, and a link it would not re-derive
 is exactly the operator's judgement. Restore writes one only where the
 target's is `NULL`.
 
+✅ **What those precious rows carry instead of a title id is now decided and
+built** — `src/usher/db/backup_identity.py`, and
+[ADR-0044](decisions/0044-a-backup-carries-natural-keys-not-ids.md) is the
+argument. Five columns in the precious set name a title or an episode **by
+id** and none of those ids survives a bootstrap boundary: `upsert_titles`
+mints `new_id()` per staged row, so two catalogs built from the same IMDb dump
+agree on every natural key and on no id at all. So an artifact carries
+`imdb_id`, falling back to `(kind, tmdb_id)` and then to the raw UUID —
+accepted **only** where the target already holds a title with that exact id,
+which is what makes restore-into-the-same-database an ordinary lookup rather
+than a second mode. An unresolved reference is a named refusal rather than a
+`None`, and what restore does with one differs per table on purpose:
+`watch_states` and `media_items` refuse the row and count it,
+`search_queries.clicked_title_id` is set `NULL` and counted. 🔴 **The
+coverage figure this design was drafted against does not survive
+re-measurement**: on 2026-08-13 the live catalog held **0** titles with
+neither provider id and on 2026-08-21 it held **6** (of 1,272,888, with 72
+carrying no `imdb_id` against 13 eight days earlier), so the raw-id rung is
+exercised by real rows rather than being defensive. `curated_rows` is never
+carried, and its `uuid[]` with no foreign key is why: it is the one
+precious-looking table where a wrong id fails nothing at all.
+
 The precious set is a handful of small tables, and 🚧 **the command that will
 carry them is `usher backup` (M10 Group K, task K3 — not built yet) rather than
 a documented `pg_dump`** — measured

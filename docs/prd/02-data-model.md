@@ -918,6 +918,19 @@ mentioned it last night, for an artefact that is fully re-derivable — the
 delete that can essentially never succeed, which `title_neighbors` refuses
 RESTRICT for by name.
 
+✅ **A second liability is closed by refusing to carry the table at all, and
+that ruling is M10's.** A backup that carried `card_title_ids` verbatim into
+another database would write ids no row there holds — and because there is no
+foreign key, **nothing would fail**: the shelf renders with dead cards and the
+database cannot tell. That makes this the one precious-looking table where a
+naive carry is *silent*, which is why
+[ADR-0044](decisions/0044-a-backup-carries-natural-keys-not-ids.md) never
+carries it and `usher.db.backup_manifest` classifies it rebuildable. One
+completion regenerates it; remapping the ids through the same resolver every
+other reference uses would restore a *rendering* rather than the judgement,
+since a card that failed to resolve would have to be dropped from the middle
+of the ordering ADR-0028 forbids anything from re-sorting.
+
 **One liability the array really does introduce is closed with a CHECK.** A
 `uuid[]` admits a NULL *element*, which a child table's `NOT NULL` column
 could not, and a NULL element reads back as a card that denotes nothing while

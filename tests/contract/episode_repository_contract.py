@@ -18,7 +18,12 @@ from typing import Protocol
 
 from usher.domain.episode import Episode, Season
 from usher.domain.ids import new_id
-from usher.ports.repository import EpisodeCursorPosition, EpisodeRepository
+from usher.ports.repository import (
+    EpisodeCursorPosition,
+    EpisodeReference,
+    EpisodeRepository,
+    TitleReference,
+)
 
 AIR_DATE = date(2011, 4, 17)
 
@@ -991,3 +996,141 @@ class EpisodeRepositoryNextUpContract:
         asks about nothing, and a statement built around `= ANY(ARRAY[])`
         is a round trip whose answer is known before it is sent."""
         assert await repository.next_up(user_id, []) == {}
+
+
+class EpisodeRepositoryNaturalKeyContract:
+    """`resolve_natural_keys` — an episode named the way a backup artifact
+    names one, resolved against whatever ids *this* catalog minted.
+
+    Subclass and provide `repository`, `title_id`, `season_id`,
+    `other_title_id`, `other_season_id`, `series_reference` and
+    `other_series_reference`, where the last two must be true of rows the
+    implementation really holds — a `titles` row on the Postgres arm, a
+    `title_keys` entry on the fake's.
+    """
+
+    @staticmethod
+    def _reference(
+        series: TitleReference, season_number: int, episode_number: int
+    ) -> EpisodeReference:
+        return EpisodeReference(
+            title=series, season_number=season_number, episode_number=episode_number
+        )
+
+    async def test_an_episode_resolves_through_its_series_natural_key(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        series_reference: TitleReference,
+    ) -> None:
+        """The artifact holds no id this catalog agrees with -- neither the
+        series' nor the episode's -- so the series is resolved by its natural
+        key and the episode by `uq_episodes_title_season_episode`."""
+        await repository.upsert_episodes([episode(title_id, season_id, 1)])
+        _, stored = await repository.list_for_title(title_id)
+        assert len(stored) == 1, "the premise: exactly one episode was seeded"
+
+        carried = self._reference(
+            TitleReference(
+                kind=series_reference.kind,
+                id=new_id(),
+                imdb_id=series_reference.imdb_id,
+                tmdb_id=series_reference.tmdb_id,
+            ),
+            1,
+            1,
+        )
+        assert carried.title.id != title_id, "the premise: the artifact carries a foreign id"
+
+        assert await repository.resolve_natural_keys([carried]) == {carried: stored[0].id}
+
+    async def test_the_series_is_part_of_the_key_and_not_a_filter(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        other_season_id: uuid.UUID,
+        series_reference: TitleReference,
+        other_series_reference: TitleReference,
+    ) -> None:
+        """Every series has an S01E01, and 32,409 of them makes a resolution
+        that lost the series scope a certainty rather than a risk.
+
+        Both series' S01E01 are seeded and both references asked in one call,
+        so an implementation that dropped the series cannot pass by answering
+        one of them.
+        """
+        await repository.upsert_episodes([episode(title_id, season_id, 1)])
+        await repository.upsert_episodes([episode(other_title_id, other_season_id, 1)])
+        _, mine = await repository.list_for_title(title_id)
+        _, theirs = await repository.list_for_title(other_title_id)
+        assert mine[0].id != theirs[0].id, "the premise: two S01E01s, two rows"
+
+        carried = [
+            self._reference(series_reference, 1, 1),
+            self._reference(other_series_reference, 1, 1),
+        ]
+
+        assert await repository.resolve_natural_keys(carried) == {
+            carried[0]: mine[0].id,
+            carried[1]: theirs[0].id,
+        }
+
+    async def test_a_number_this_series_does_not_carry_is_absent(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        series_reference: TitleReference,
+    ) -> None:
+        """Absent, never mapped to `None`. The premise is the sibling that
+        resolves in the same call, so this cannot pass against an
+        implementation that resolves nothing."""
+        await repository.upsert_episodes([episode(title_id, season_id, 1)])
+        _, stored = await repository.list_for_title(title_id)
+
+        found = self._reference(series_reference, 1, 1)
+        no_such_episode = self._reference(series_reference, 1, 99)
+        no_such_season = self._reference(series_reference, 99, 1)
+
+        answers = await repository.resolve_natural_keys([found, no_such_episode, no_such_season])
+
+        assert answers == {found: stored[0].id}
+
+    async def test_a_series_this_catalog_does_not_hold_resolves_nothing(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        series_reference: TitleReference,
+    ) -> None:
+        """The title rung failing and the episode rung failing are one
+        answer, deliberately -- the port says so, and an operator needs the
+        refused list rather than which half of the key was missing."""
+        await repository.upsert_episodes([episode(title_id, season_id, 1)])
+        stranger = TitleReference(kind=series_reference.kind, id=new_id())
+
+        assert await repository.resolve_natural_keys([self._reference(stranger, 1, 1)]) == {}
+
+    async def test_an_empty_batch_asks_nothing(self, repository: EpisodeRepository) -> None:
+        """`unnest` over an empty array is a round trip to learn nothing."""
+        assert await repository.resolve_natural_keys([]) == {}
+
+    async def test_a_repeated_reference_is_answered_once(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        series_reference: TitleReference,
+    ) -> None:
+        """A household resumes one episode once per state, so a batch
+        carrying the same reference twice is ordinary. Two probes for one
+        reference would put the ordinal out of step with the caller's list.
+        """
+        await repository.upsert_episodes([episode(title_id, season_id, 1)])
+        _, stored = await repository.list_for_title(title_id)
+        carried = self._reference(series_reference, 1, 1)
+
+        assert await repository.resolve_natural_keys([carried, carried]) == {carried: stored[0].id}

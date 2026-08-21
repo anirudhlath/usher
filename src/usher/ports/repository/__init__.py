@@ -20,6 +20,10 @@ module, one import block here and one `__all__` entry -- never an edit to a
 shared body.
 """
 
+from usher.ports.repository._references import (
+    EpisodeReference,
+    TitleReference,
+)
 from usher.ports.repository._results import (
     BulkWriteResult,
 )
@@ -127,6 +131,7 @@ __all__ = [
     "CrosswalkLinkResult",
     "CuratedRowRepository",
     "EpisodeCursorPosition",
+    "EpisodeReference",
     "EpisodeRepository",
     "GenomeCoverage",
     "GenomeRepository",
@@ -159,6 +164,7 @@ __all__ = [
     "TitleGenres",
     "TitleMatchRepository",
     "TitleNeighborRepository",
+    "TitleReference",
     "TitleRepository",
     "UnmatchedCursorPosition",
     "WatchStateRepository",

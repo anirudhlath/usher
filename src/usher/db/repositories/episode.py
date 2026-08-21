@@ -48,7 +48,12 @@ from usher.db.repositories._errors import constraint_name
 from usher.db.staging import stage_records
 from usher.domain.episode import Episode, Season
 from usher.ports.errors import RepositoryConflict
-from usher.ports.repository import BulkWriteResult, EpisodeCursorPosition, EpisodeRepository
+from usher.ports.repository import (
+    BulkWriteResult,
+    EpisodeCursorPosition,
+    EpisodeReference,
+    EpisodeRepository,
+)
 
 # `ordinal` is the row's index within the batch, and it is what makes
 # deduplication deterministic: `ORDER BY ..., ordinal DESC` is literally
@@ -166,6 +171,41 @@ _RESOLVE_SEASONS = """
 SELECT sn.title_id AS title_id, sn.season_number AS season_number, sn.id AS id
 FROM unnest(CAST(:titles AS uuid[]), CAST(:seasons AS integer[])) AS p(pt, ps)
 JOIN seasons sn ON sn.title_id = p.pt AND sn.season_number = p.ps
+"""
+
+# The same shape one layer out, for a caller that holds no `title_id` because
+# it is reading a backup artifact: `TitleReference`'s ladder and the two
+# numbers, in **one** statement. `usher.db.backup_identity` argues for the
+# ladder and `PostgresTitleRepository._RESOLVE_NATURAL_KEYS` is the title-only
+# half of this join, spelled identically so the two cannot drift on
+# precedence.
+#
+# **`WITH ORDINALITY` for the same reason it is there**: two rungs of the
+# probe are nullable by construction, and a join back on a nullable probe
+# answers NULL rather than false. The ordinal is the reference's position in
+# the caller's own deduplicated list.
+#
+# The final `JOIN` is inner rather than left, which is what makes "the series
+# did not resolve" and "the series resolved and has no such episode" one
+# answer -- deliberately, per the port's docstring: an operator needs the list
+# of refused references, and telling the two apart would cost a second read.
+_RESOLVE_EPISODE_NATURAL_KEYS = """
+SELECT p.ord AS ord, e.id AS id
+FROM unnest(
+    CAST(:imdb_ids AS text[]),
+    CAST(:kinds AS text[]),
+    CAST(:tmdb_ids AS integer[]),
+    CAST(:raw_ids AS uuid[]),
+    CAST(:season_numbers AS integer[]),
+    CAST(:episode_numbers AS integer[])
+) WITH ORDINALITY AS p(imdb_id, kind, tmdb_id, raw_id, season_number, episode_number, ord)
+LEFT JOIN titles AS by_imdb ON by_imdb.imdb_id = p.imdb_id
+LEFT JOIN titles AS by_tmdb ON by_tmdb.tmdb_id = p.tmdb_id AND by_tmdb.kind = p.kind
+LEFT JOIN titles AS by_raw ON by_raw.id = p.raw_id
+JOIN episodes e
+  ON e.title_id = COALESCE(by_imdb.id, by_tmdb.id, by_raw.id)
+ AND e.season_number = p.season_number
+ AND e.episode_number = p.episode_number
 """
 
 _RESOLVE_EPISODES = """
@@ -448,6 +488,35 @@ class PostgresEpisodeRepository(EpisodeRepository):
                 )
             ).all()
         return {(row.title_id, row.season_number, row.episode_number): row.id for row in rows}
+
+    async def resolve_natural_keys(
+        self, references: Sequence[EpisodeReference]
+    ) -> dict[EpisodeReference, uuid.UUID]:
+        if not references:
+            return {}
+        # Deduplicated before the bind, as `resolve_episodes` above does and
+        # for the same reason -- and `EpisodeReference` is a frozen dataclass
+        # over a frozen dataclass, so `dict.fromkeys` both dedupes and fixes
+        # the order the ordinal counts in.
+        unique = list(dict.fromkeys(references))
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(
+                    text(_RESOLVE_EPISODE_NATURAL_KEYS),
+                    {
+                        "imdb_ids": [one.title.imdb_id for one in unique],
+                        "kinds": [one.title.kind.value for one in unique],
+                        "tmdb_ids": [one.title.tmdb_id for one in unique],
+                        "raw_ids": [one.title.id for one in unique],
+                        "season_numbers": [one.season_number for one in unique],
+                        "episode_numbers": [one.episode_number for one in unique],
+                    },
+                )
+            ).all()
+        # An inner join, so an unresolved reference is simply not in the
+        # answer -- never a key mapped to `None`, which a caller would have to
+        # tell apart from "not asked".
+        return {unique[row.ord - 1]: row.id for row in rows}
 
     async def list_by_ids(self, episode_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, Episode]:
         # One statement for the whole page. The alternative already on this

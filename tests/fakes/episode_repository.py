@@ -1,6 +1,6 @@
 """In-memory `EpisodeRepository`.
 
-**Where this is more forgiving than Postgres, on purpose.** Five places, each
+**Where this is more forgiving than Postgres, on purpose.** Six places, each
 of which the paired `tests/integration/test_episode_repository.py` run is
 what actually closes:
 
@@ -26,6 +26,10 @@ what actually closes:
   type.
 - **No transaction**, so a batch that raises part-way cannot leave a session
   poisoned and nothing here exercises the SAVEPOINT.
+- **`resolve_natural_keys` joins a seeded dict**, `title_keys`, where the
+  real one joins `titles` three ways inside one statement. So "one statement
+  per call" is a claim only the integration arm can falsify -- there is no
+  round trip here to count, and `calls` is a stand-in rather than the thing.
 
 `calls` and `reset_calls()` are test-double affordances rather than port
 methods: `IngestService`'s scale case asserts that a page of 500 episodes
@@ -38,8 +42,15 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
+from tests.fakes.title_repository import resolve_title_reference
 from usher.domain.episode import Episode, Season
-from usher.ports.repository import BulkWriteResult, EpisodeCursorPosition, EpisodeRepository
+from usher.ports.repository import (
+    BulkWriteResult,
+    EpisodeCursorPosition,
+    EpisodeReference,
+    EpisodeRepository,
+    TitleReference,
+)
 
 _SeasonKey = tuple[uuid.UUID, int]
 _EpisodeKey = tuple[uuid.UUID, int, int]
@@ -78,6 +89,20 @@ class FakeEpisodeRepository(EpisodeRepository):
         # make the mistake it names structurally unspellable here, and a case
         # that cannot fail is not coverage.
         self._watch: dict[tuple[uuid.UUID, uuid.UUID], tuple[bool, datetime | None]] = {}
+        # `titles`, as much of it as `resolve_natural_keys` reads -- the two
+        # provider ids, the kind and the id. Public and seeded directly, the
+        # affordance `FakeTitleRepository.available_copies` already is and for
+        # the same reason: this fake models one table and that read joins
+        # another, so the alternative is a fake that answers "no such series"
+        # for everything and a contract case that cannot be written.
+        #
+        # **A sixth divergence, and it is that the join is a seeded dict.**
+        # The real statement resolves the series and the episode in one
+        # `unnest ... WITH ORDINALITY` joined four ways, so an episode hung
+        # off a `title_id` no `titles` row carries is unreachable there and
+        # perfectly ordinary here -- the same shape as this fake's missing
+        # foreign keys, one read over.
+        self.title_keys: dict[uuid.UUID, TitleReference] = {}
         self.calls = 0
 
     def reset_calls(self) -> None:
@@ -154,6 +179,24 @@ class FakeEpisodeRepository(EpisodeRepository):
             stored = self._episodes.get(key)
             if stored is not None:
                 found[key] = stored.id
+        return found
+
+    async def resolve_natural_keys(
+        self, references: Sequence[EpisodeReference]
+    ) -> dict[EpisodeReference, uuid.UUID]:
+        # One increment whatever the batch, matching the real one statement --
+        # which is the join `title_keys` exists for.
+        self.calls += 1
+        found = {}
+        for reference in references:
+            title_id = resolve_title_reference(reference.title, self.title_keys.values())
+            if title_id is None:
+                continue
+            stored = self._episodes.get(
+                (title_id, reference.season_number, reference.episode_number)
+            )
+            if stored is not None:
+                found[reference] = stored.id
         return found
 
     async def list_by_ids(self, episode_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, Episode]:

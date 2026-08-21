@@ -17,6 +17,7 @@ from typing import Final
 
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
+from usher.ports.repository._references import TitleReference
 from usher.ports.search import FilterNotSupported
 
 __all__ = [
@@ -319,6 +320,49 @@ class TitleRepository(ABC):
         makes when a title vanishes between the sweep and the claim. An
         implementation that raised would let one deleted title abort a whole
         derivation page.
+        """
+
+    @abstractmethod
+    async def resolve_natural_keys(
+        self, references: Sequence[TitleReference]
+    ) -> dict[TitleReference, uuid.UUID]:
+        """`TitleReference` -> the id **this** catalog holds it under, in one
+        round trip.
+
+        The read K4's restore is built on, and the reason it exists is that
+        no id survives a bootstrap boundary: `db/repositories/bulk.py:611`
+        mints `new_id()` for every row of every batch on the way into the
+        staging table, so two catalogs built from the same
+        `title.basics.tsv.gz` agree on every natural key and on no id at all
+        (ADR-0003, ADR-0044).
+
+        **The ladder is `imdb_id`, then `(kind, tmdb_id)`, then the raw id**,
+        first hit wins, and both arms spell it in that order. Coverage on the
+        live catalog, 2026-08-21: 1,272,888 titles, 72 with no `imdb_id`,
+        980,176 with no `tmdb_id`, **6 with neither**. The last rung is
+        therefore exercised by real rows rather than being defensive -- it
+        was 13 and **0** when this was designed eight days earlier, which is
+        the measurement saying the population moves.
+
+        A raw id is **checked, not trusted**: it resolves only when the
+        target already holds a title with that exact id. That is what makes
+        restore-into-the-same-database an ordinary lookup rather than a
+        second code path, and it is why this method can answer "no" to an
+        artifact from somewhere else without knowing it came from somewhere
+        else.
+
+        **Absent keys mean "this target does not hold it", never "not
+        asked".** A caller iterates its own references;
+        `usher.db.backup_identity.resolve_titles` is what turns an absence
+        into a named `Unresolved` so a refusal can be counted and reported
+        rather than written as a null.
+
+        **One statement for the whole batch, never one per key.** A
+        household's precious set is small by construction, but the same
+        method is what a `media_items` restore reaches with one reference per
+        linked copy -- 180 rows on this deployment and 1,126,789 on the
+        household this project measures -- and a lookup per key is the N+1
+        `resolve_tmdb_ids` and `resolve_episodes` both exist to prevent.
         """
 
     @abstractmethod
