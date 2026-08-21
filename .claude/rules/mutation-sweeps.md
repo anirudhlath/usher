@@ -7440,6 +7440,10 @@ asserted empty after each.
 | M9 | `collection.py:attach_titles` → `IntegrityError` | **the guard alone** | **KILLED**, the guard alone |
 | M10 | `sync.py:add` loses its `is_row_refusal` guard | **SURVIVOR (control)** | **SURVIVED** |
 
+⚠️ **Round 1's "unpinned translations" line said one site and the boundary was
+three; round 2 resolved all three and the correction is below.** Recorded here
+so this table is not read as complete on its own.
+
 **M9 is the one worth carrying, and it was predicted rather than discovered.**
 No case in the suite drives a class-22 refusal through `attach_titles` — it
 binds two `uuid[]`s and writes `titles.collection_id`, which is not a bounded
@@ -7496,3 +7500,113 @@ plausible-looking list naming exactly the cases the mutation was aimed at, and
 means nothing. Every such run here restores the import first and is checked for
 `NameError` and *errors during collection* before its verdict is recorded; all
 ten runs reported 0 of each.
+
+## M10 Task F9, round 2 — the instrument was the defect: 6 mutations, 6 killed, 1 mispredicted blast radius (2026-08-20)
+
+Bar pre-registered at `/var/tmp/m10-f9/BAR-round2.md`,
+`sha256 658735083ee41d6379b7510171fc1469e98bc0a97b11e48f219493a65ad65d08`,
+written 2026-08-20T22:48:43-05:00; round 1's bar re-verified intact at the top
+of every round-2 run. Baseline `4b939a1`, whole suite, same discipline.
+
+**Why a second round at all, and it is the reusable part.** Round 1 aimed ten
+mutations at the *fix* and killed nine. Review then found the defect was in the
+**instrument**: `scripts/audit_bounded_columns.py`'s `_executing_functions`
+takes a transitive closure over call edges to answer *"does this method
+write?"*, while `_translation_of` read one function body to answer *"does this
+method translate?"*. F9 had seen the ledger report five columns exposed,
+concluded the shared helper in `bulk.py` was the problem, copied the translation
+out into five callers, and left a comment telling the next author to keep it
+copied out. **The code had been bent around a blind spot in its own measuring
+instrument, and the sweep could not see that, because every mutation was aimed
+at the code.** Five of the six plants below aim at machinery that did not exist
+when round 1 ran.
+
+| # | mutation | predicted | observed |
+|---|---|---|---|
+| N1 | translation closure `min` → `max` | 2 CLOSURE arms, **no GUARD** | **KILLED**, exactly those 2, GUARD silent |
+| N2 | `_constructed_rows() -> {}` | 4, all `DegenerateScan` | **KILLED**, exactly those 4 |
+| N3 | `bulk.py:_rowcount` untranslated | `ARM[id_crosswalk.imdb_id]` + GUARD | **KILLED**, exactly those 2 |
+| N4 | `bulk.py:_write_result` untranslated | `ARM[titles.imdb_id]` + GUARD | **KILLED**, exactly those 2 |
+| N5 | `title.py:add` → `IntegrityError` | **GUARD alone** | **KILLED**, GUARD alone |
+| N6 | `write_sites() -> []` (round 1's M8, re-run) | 4 | **KILLED**, **5** — see below |
+
+### N1 is the one to keep: the closure has to be narrower than the one next to it
+
+The fix is not "follow the call edge". Following it naively —
+*"callee translates ⇒ caller translates"* — **over-credits a caller that
+delegates one statement and runs another outside the helper**, which is a
+strictly worse answer than the blind spot it replaces, because it fails toward
+safe. So the two closures are deliberately asymmetric:
+
+> **Execution takes `any` refusal point; translation takes the `min` over
+> them**, of `max(what lexically encloses the call, what the callee itself
+> does)`.
+
+N1 is that `min` turned back into a `max`, and it dies on two synthetic methods
+and nothing else. **GUARD staying silent is the informative half**: no shipped
+method in this repository has the mixed shape today, which is exactly why the
+property is pinned on a module the test writes itself rather than against
+whatever `bulk.py` currently looks like. A property that can only be
+demonstrated by the code that happens to exist stops being demonstrable the day
+that code is tidied.
+
+### N6's blast radius was wider than predicted, and the reason is worth more than the miss
+
+Predicted 4, observed 5. The extra is
+`test_a_writer_the_scan_cannot_place_fails_loudly`, which the bar predicted
+would **pass** — it monkeypatches `_constructed_rows` and asserts
+`write_sites()` raises `DegenerateScan`. With `write_sites()` stubbed to return
+`[]` as its first statement, the plant **short-circuits before the check it was
+asserting**, so nothing raises and `pytest.raises` fails. That is a correct
+kill and a wrong prediction, and the general form is worth stating: **a plant
+that returns early from a function makes every case asserting about that
+function's interior fail, including the ones that assert it fails.** Predicting
+"this case is unaffected" needs the plant's position in the function, not just
+its effect.
+
+### The unpinned-translation boundary, resolved
+
+Round 1 declared `bulk.py:upsert_tmdb_ids`'s translation "pinned by nothing"
+and review corrected the list to three. All three are now measured:
+
+- **`bulk.py:upsert_tmdb_ids` — no longer separately unpinned, and not because
+  a case was added.** Reverting `bulk.py` to the shared helper means five
+  writers share one translation, in `_rowcount`/`_write_result`, which N3 and
+  N4 kill. There is no per-site translation left to remove, so the site carries
+  no independent coverage obligation. *A shared implementation is a smaller
+  coverage surface* — which is the second reason the helper spelling is the
+  better one, and it was not the reason it was restored.
+- **`title.py:add` — pinned as of `4b939a1`.** Narrowing it produced nothing at
+  all before the `_orm_destinations` fix and produces six drift complaints
+  after; N5 is that, scored.
+- 🔴 **`jobs.py:enqueue` — still unpinned, and it cannot be pinned today.**
+  Measured: narrowing it to `except IntegrityError` leaves `--check` reporting
+  **no drift** and the suite green. That is not a coverage gap that a case would
+  close, it is a reachability fact — nothing that method writes can produce a
+  class-22 refusal. `jobs.priority` is refused inside the COPY
+  (`stg_jobs.priority integer`), so this `except` never sees it; `jobs.kind`
+  comes off a `JobKind` member's `.value`; `jobs.key`'s only refusal is a
+  unique violation, class 23, which the narrow clause catches anyway. The
+  widening is defensive against the day a bounded column on `jobs` stops being
+  COPY-refused, and it is declared rather than defended.
+
+### The re-raise, promoted from an equivalent-mutant note to a property
+
+Round 1 recorded `sync.py:add` losing its `if not is_row_refusal(exc): raise` as
+one site's equivalent mutant, surviving by design. Review measured the real
+shape: **the guard is invisible to the ledger at all eleven widened sites**
+(`_translation_of` reads the `except` clause's type, never the handler body) and
+to the suite at ten of eleven. Deleting it from `import_run.py:save` left
+`--check` clean and every case green. What is lost when it goes is not a missed
+refusal but the mirror image — a dropped connection or a statement timeout
+reported to a caller as *its row being wrong*, the one distinction
+`ROW_REFUSED_SQLSTATE_CLASSES` exists to preserve.
+
+It is now `test_every_widened_except_re_raises_what_is_not_a_row_refusal`: a
+structural case over every `except DBAPIError` in the two packages, asserting
+each handler both calls `is_row_refusal` and carries a bare `raise`. **A
+structural case rather than eleven behavioural ones because the behaviour needs
+a transport fault, and no fixture in this project can manufacture one against a
+live database.** Verified to have teeth by deleting the guard from
+`import_run.py:save`: it names the site. That is the shape to reach for when a
+property holds at N sites and the suite can only reach one of them.
