@@ -141,16 +141,30 @@ class RowContext:
       every `GET /home` paid a `user_taste` read to fill a field that no
       provider looked at and that could not have carried a value there anyway.
 
-    **The consequence, named rather than hidden: `TasteService.centroid` now
-    has no caller in `src/`.** That is a genuinely larger finding than these
-    two fields and it is deliberately *not* acted on here. Deleting it means
-    deleting `user_taste`, `TasteRepository`, `StoredTaste` and a table in
-    migration `ffa` -- a reversal of Group G's Task 22, with PRD 06's whole
-    taste section to rewrite -- and doing that silently as a side effect of
-    removing a context field would be the opposite of the discipline that found
-    it. It belongs to the PRD/verification pass or to M8, whose
-    `CuratedProvider` is the first plausible consumer of a taste vector.
-    `genre_affinity` is unaffected and is read, via `affinities`.
+    ⚠️ **This paragraph read *"the consequence, named rather than hidden:
+    `TasteService.centroid` now has no caller in `src/`"* until 2026-08-21,
+    and it had been false since M8.** `CurationPoolService` calls it, and the
+    guard immediately above that call exists *because* the call writes. The
+    deferral below was discharged by the milestone it was deferred to: the
+    sentence predicted M8's `CuratedProvider` as *"the first plausible
+    consumer of a taste vector"*, and M8's candidate pool is what became one.
+
+    **The claim that was true, and is what M7 actually found, is narrower: no
+    caller on the request path.** On that path the centroid is structurally
+    `None` -- it needs an embedder the route deliberately holds none of -- so
+    `user_taste` stays empty on a default deployment and is written by a
+    curation run with an embedder configured. That is a property of M7's
+    context and of the route's wiring, not of `TasteService`, and the
+    difference is the whole reason the absolute was wrong. `genre_affinity` is
+    unaffected either way and is read here, via `affinities`.
+
+    **This is the fourth place the same absolute had to be corrected** --
+    `08-operations.md` twice (the prose and, separately, its own M7 table
+    cell), `db/backup_manifest.py`'s ruling on `user_taste`, and here. Each
+    correction was made by following the pointer that reported it rather than
+    by grepping the *claim*, which is why it took four. `testing-discipline.md`
+    already states the rule: amending a document means grepping it, and the
+    code, for the claim being amended.
 
     **`affinities` is the eleventh, and the plan did not foresee it.** Task
     27 says `GenreAffinityProvider` *"reads `TasteService.genre_affinity(
