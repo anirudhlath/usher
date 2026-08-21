@@ -7438,7 +7438,7 @@ asserted empty after each.
 | M7 | `_non_negative_float` loses `math.isfinite` | 1 case | **KILLED**, that case |
 | M8 | `write_sites() -> []` (the review\'s dead scan) | 3 ledger cases | **KILLED**, exactly those 3 |
 | M9 | `collection.py:attach_titles` → `IntegrityError` | **the guard alone** | **KILLED**, the guard alone |
-| M10 | `sync.py:add` loses its `is_row_refusal` guard | **SURVIVOR (control)** | **SURVIVED** |
+| M10 | `sync.py:add` loses its `is_row_refusal` guard | **SURVIVOR (control)** | **SURVIVED** — ⛔ **superseded 2026-08-20, see round 2**: the structural case added there was written to kill exactly this plant, and re-scored it is a **KILL** at all twelve sites rather than a survivor at one. Annotated rather than edited, because a bar is not rewritten to match a later run — but a reader who stops at this row sees a survivor that is no longer one. |
 
 ⚠️ **Round 1's "unpinned translations" line said one site and the boundary was
 three; round 2 resolved all three and the correction is below.** Recorded here
@@ -7520,6 +7520,23 @@ copied out. **The code had been bent around a blind spot in its own measuring
 instrument, and the sweep could not see that, because every mutation was aimed
 at the code.** Five of the six plants below aim at machinery that did not exist
 when round 1 ran.
+
+🔴 **Which round-1 plants were *not* re-run, and the justification that is
+wrong.** The first version of this entry said they were skipped because *"their
+target lines are byte-identical at `4b939a1`"*, and byte-identity of a target
+line says nothing about a blast radius when `bulk.py` moved by 112 lines
+between rounds. The argument that actually holds is about the plants' **host
+methods**: M1 and M2 sit in `upsert_genome_vectors` and `replace_aliases`,
+which are the two `bulk.py` writers that kept their **own** `async with` while
+the five delegating writers moved to the helper — so neither plant's
+surrounding translation changed. The `_errors.py` plant is in a module round 2
+did not touch. `M8` **was** re-run, because `write_sites()` was rewritten
+around the stub it plants.
+
+⛔ **And M10 is not merely un-re-run, it is superseded.** *"The suite gained a
+case that flips a verdict"* is a reason to re-score a plant that has nothing to
+do with whether its target line moved, and it is the one that applied. The
+round-1 table now carries the annotation.
 
 | # | mutation | predicted | observed |
 |---|---|---|---|

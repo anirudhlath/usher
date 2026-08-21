@@ -110,6 +110,55 @@ class Repository:
         await self._session.execute(text("SELECT count(*) FROM titles"))
         return written
 
+    async def bound_read_outside(self) -> int:
+        written = await self._run("UPDATE titles SET name = 'x'", refused="a")
+        await self._session.execute(
+            text("SELECT count(*) FROM titles WHERE tmdb_id = CAST(:probe AS integer)"),
+            {"probe": 1},
+        )
+        return written
+
+    async def get(self) -> int:
+        return await self._session.execute(
+            text("SELECT count(*) FROM titles WHERE id = CAST(:id AS uuid)"), {"id": 1}
+        )
+
+    async def calling_a_foreign_get(self, mapping: dict[str, str]) -> None:
+        async with refusals_as_conflict(self._session, "a"):
+            await self._session.execute(text("INSERT INTO titles (id) VALUES (1)"))
+        mapping.get("k", "")
+
+    async def orm_writing(self) -> None:
+        try:
+            self._session.add(TitleRow())
+            await self._session.flush()
+        except DBAPIError:
+            raise
+
+    async def orm_unwrapped(self) -> None:
+        self._session.add(TitleRow())
+        await self._session.flush()
+
+    async def a_set_add_is_not_an_orm_write(self) -> None:
+        seen = set()
+        seen.add("k")
+        async with refusals_as_conflict(self._session, "a"):
+            await self._session.execute(text("INSERT INTO titles (id) VALUES (1)"))
+
+    async def statement_in_the_handler(self) -> None:
+        try:
+            async with refusals_as_conflict(self._session, "a"):
+                await self._session.execute(text("INSERT INTO titles (id) VALUES (1)"))
+        except DBAPIError:
+            await self._session.execute(text("UPDATE titles SET name = 'x'"))
+
+    async def statement_in_the_finally(self) -> None:
+        try:
+            async with refusals_as_conflict(self._session, "a"):
+                await self._session.execute(text("INSERT INTO titles (id) VALUES (1)"))
+        finally:
+            await self._session.execute(text("DELETE FROM titles"))
+
     async def wrapping_one_of_two(self) -> None:
         async with refusals_as_conflict(self._session, "a"):
             await self._session.execute(text("DELETE FROM titles"))
@@ -137,13 +186,51 @@ class Repository:
         # another outside any wrapper, and that second statement's refusal is
         # what crosses the port boundary raw.
         ("mixed", "none"),
-        # A COPY is not a refusal point: nothing an `except` can write catches
-        # what `copy_records_to_table` raises.
+        # **The third exemption**: a call into a function that reaches no
+        # statement of its own. `_stage` reaches only `stage_records`.
+        #
+        # ⚠️ This case does **not** exercise `_COPY_EXECUTION`, though its
+        # comment used to say so. Measured 2026-08-20: setting that frozenset
+        # empty changes no count, produces no drift and moves none of these
+        # cases -- a COPY reaches the driver through a bare-name call or a
+        # non-session receiver, so no other predicate claims it either. The
+        # exemption is a declaration of intent for the day a repository reaches
+        # a COPY through `self._session`, and it is inert today. Said here
+        # rather than left implied, because three co-equal load-bearing
+        # exemptions is a claim and two-plus-one is the measurement.
         ("staged", "refusals_as_conflict"),
-        # A `SELECT` changes no row, so it cannot be refused for one --
-        # `bulk.py:link_crosswalk` runs its classification query outside its
-        # own translation and must not be penalised for it.
+        # **The second exemption, in its narrow and true form**: a `SELECT`
+        # with **no caller-supplied bind** cannot carry a caller value into a
+        # class-22 refusal. `bulk.py:link_crosswalk` runs its classification
+        # query -- assembled entirely from module constants -- outside its own
+        # translation and must not be penalised for it.
         ("reading_outside", "refusals_as_conflict"),
+        # 🔴 **And the counter-case that made the old rule false.** *"A `SELECT`
+        # changes no row, so it cannot be refused for one"* is wrong: one
+        # carrying a bind raises class 22 routinely (`22P02` on a cast, `22012`
+        # on a division, `22003` on an overflow) and an unwrapped one crosses
+        # the port boundary as raw as an `INSERT`'s would. This method reads
+        # `none` today and read `refusals_as_conflict` until 2026-08-20.
+        ("bound_read_outside", "none"),
+        # 🔴 **A live defect the narrowed predicate found.** `mapping.get(...)`
+        # is a `dict.get` on a caller's argument, and matching bare attribute
+        # names against the module's function names read it as a delegated call
+        # into this module's own `get` -- which is an untranslated read, so its
+        # `none` was carried across an edge that does not exist. A delegation
+        # is `self.<name>(...)` or a bare `<name>(...)`, nothing else.
+        ("calling_a_foreign_get", "refusals_as_conflict"),
+        # The ORM branch, which was pinned only against the real tree.
+        ("orm_writing", "except DBAPIError"),
+        ("orm_unwrapped", "none"),
+        # `_SESSION_RECEIVERS` exists for exactly this and was pinned by
+        # nothing: `add` is in `_ORM_WRITE_CALLS`, and a bare attribute match
+        # would read `seen.add(...)` on a `set` as an untranslated ORM write.
+        ("a_set_add_is_not_an_orm_write", "refusals_as_conflict"),
+        # A handler's own statements are not covered by the handler they are
+        # in, and neither is a `finally`. `import_run.py:save` is cited by name
+        # in `_refusal_points` for the first shape and had no case.
+        ("statement_in_the_handler", "none"),
+        ("statement_in_the_finally", "none"),
         # Lexical, not "the name appears somewhere in the body", which is what
         # the predecessor of this function asked.
         ("wrapping_one_of_two", "none"),

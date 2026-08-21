@@ -261,6 +261,55 @@ def _dbapi_handlers() -> list[tuple[str, str, ast.ExceptHandler]]:
     return found
 
 
+#: Every `except DBAPIError` in the two packages that translate, named rather
+#: than counted.
+#:
+#: 🔴 **This was `assert len(handlers) >= 11` and a floor one below the true
+#: count is a dead-scan guard wearing a narrowing guard's clothes.** There are
+#: twelve; narrowing any one site left eleven and passed. At eleven of the
+#: twelve the ledger's own drift check backstops it -- but at
+#: `jobs.py:enqueue` the two limits **compose**, because that site's widening
+#: is unpinned by the ledger for a reachability reason recorded in
+#: `.claude/rules/mutation-sweeps.md` (nothing it writes can produce a class-22
+#: refusal). Narrowing it moved neither: zero drift complaints, twelve handlers
+#: down to eleven, `>= 11` green. Each limit was declared; their composition
+#: was not, and a census is what closes it.
+#:
+#: A named set rather than `== 12`, so a site that is narrowed *and* a new one
+#: that is widened cannot cancel out.
+WIDENED_SITES = frozenset(
+    {
+        ("_errors.py", "refusals_as_conflict"),
+        ("collection.py", "attach_titles"),
+        ("import_run.py", "save"),
+        ("jobs.py", "enqueue"),
+        ("people.py", "replace_for_titles"),
+        ("postgres.py", "index_many"),
+        ("search.py", "replace"),
+        ("search.py", "upsert_many"),
+        ("sync.py", "add"),
+        ("sync.py", "save"),
+        ("title.py", "add"),
+        ("title.py", "update"),
+    }
+)
+
+
+def test_the_set_of_widened_sites_is_exactly_what_this_file_names() -> None:
+    """A census, not a floor -- see `WIDENED_SITES`.
+
+    Widening a site is a decision (it changes what crosses a port boundary),
+    and so is narrowing one. Either without editing this set fails here, which
+    is what makes the count a decision rather than an observation -- the same
+    thing `PUBLISHED` does for the ledger one directory over.
+    """
+    found = {(module, method) for module, method, _ in _dbapi_handlers()}
+    assert found == set(WIDENED_SITES), (
+        f"widened but not named here: {sorted(found - set(WIDENED_SITES))}; "
+        f"named here but no longer widened: {sorted(set(WIDENED_SITES) - found)}"
+    )
+
+
 def test_every_widened_except_re_raises_what_is_not_a_row_refusal() -> None:
     """The invariant `except DBAPIError` buys its width with, checked once
     across every site instead of once per site.
@@ -285,9 +334,9 @@ def test_every_widened_except_re_raises_what_is_not_a_row_refusal() -> None:
     behavioural case for it.
     """
     handlers = _dbapi_handlers()
-    assert len(handlers) >= 11, (
-        f"only {len(handlers)} `except DBAPIError` handlers found -- the scan is dead, "
-        "and a scan that globs nothing passes exactly like one that passes"
+    assert {(module, method) for module, method, _ in handlers} == set(WIDENED_SITES), (
+        "the handler scan disagrees with WIDENED_SITES -- fix that census first, since "
+        "this case cannot be read until it is known which sites it covered"
     )
 
     unguarded = []

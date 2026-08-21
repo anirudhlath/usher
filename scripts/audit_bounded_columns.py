@@ -162,6 +162,21 @@ class WriteSite:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class RefusalPoint:
+    """One call in a method that can make Postgres refuse a row, with the rank
+    of the translation lexically enclosing it.
+
+    `call` is `""` for a statement the method runs itself and the callee's name
+    for one it delegates. `bound_select` marks the case this file deliberately
+    does **not** answer -- see `_refusal_points`.
+    """
+
+    call: str
+    covered: int
+    bound_select: bool = False
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class LedgerRow:
     """One bounded destination column, with everything the ADR quotes.
 
@@ -272,6 +287,11 @@ _UPDATE = re.compile(r"\bUPDATE\s+\"?(\w+)\"?(?:\s+(?:AS\s+)?\w+)?\s+SET\b", re.
 # foreign key, which is a class-23 refusal an `except` has to be around.
 _DELETE = re.compile(r"\bDELETE\s+FROM\s+\"?(\w+)\"?", re.IGNORECASE)
 _STAGING_NAME = re.compile(r"\bstg_\w+\b")
+#: A SQLAlchemy `text()` bind. `(?<![:\w])` is what keeps it off a Postgres
+#: `::` cast; this package spells every cast `CAST(x AS t)` by house rule
+#: (`.claude/rules/db-and-sql.md`), so the guard is for a statement that stops
+#: following it rather than for one that exists.
+_BIND = re.compile(r"(?<![:\w]):[A-Za-z_]\w*")
 
 
 def _split_ddl_columns(body: str) -> Iterator[tuple[str, str]]:
@@ -648,6 +668,33 @@ def _call_name(node: ast.Call) -> str:
     return called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
 
 
+def _is_local_call(node: ast.Call, local: frozenset[str]) -> bool:
+    """Whether this call really is a call into a function of this module.
+
+    🔴 **The receiver check is not tidiness, and its absence was a live defect
+    found on 2026-08-20 by the narrowed `SELECT` predicate.** Matching a bare
+    attribute name against the module's function names reads
+    `credit_names.get(scoped_id, ())` -- a `dict.get` on a caller's mapping --
+    as a delegated call into `PostgresPersonRepository.get`, because
+    `people.py` happens to define a method by that name. That invented edge
+    carried `get`'s rank into `replace_for_titles` and was invisible until a
+    second scoring pass disagreed with the first.
+
+    A delegation is `self.<name>(...)` or a bare `<name>(...)` -- the second
+    for module-level helpers like `title.py:_to_row`. Anything called on some
+    other object is not this module's function, whatever it is spelled.
+    """
+    called = node.func
+    if isinstance(called, ast.Name):
+        return called.id in local
+    return (
+        isinstance(called, ast.Attribute)
+        and called.attr in local
+        and isinstance(called.value, ast.Name)
+        and called.value.id == "self"
+    )
+
+
 def _is_session_call(node: ast.Call, names: frozenset[str]) -> bool:
     called = node.func
     if not isinstance(called, ast.Attribute) or called.attr not in names:
@@ -694,18 +741,61 @@ def _statement_text(node: ast.Call, texts: Mapping[str, str]) -> str | None:
 
 def _refusal_points(
     node: ast.AST, texts: Mapping[str, str], local: frozenset[str], covered: int = 0
-) -> Iterator[tuple[str, int]]:
+) -> Iterator[RefusalPoint]:
     """Every call in this subtree that can make Postgres refuse a *row*, paired
     with the rank of the translation **lexically enclosing it**.
-
-    Yields `("", rank)` for a statement this function runs itself and
-    `("<name>", rank)` for one it delegates to another function in the same
-    module -- `_translations` resolves the second kind.
 
     The lexical part is the point. The predecessor of this function asked "does
     the name `refusals_as_conflict` appear anywhere in the body", which is
     satisfied by a method that wraps one statement and runs a second outside
     the wrapper.
+
+    **Three exemptions, and they are not co-equal -- one of them is currently
+    inert and is labelled as such rather than presented as load-bearing.**
+
+    1. **A COPY** (`_COPY_EXECUTION`) runs on the raw asyncpg connection,
+       outside SQLAlchemy's translation, and neither shape it raises is
+       catchable by any `except` a repository can write -- both observed, see
+       `tests/integration/test_staging.py`. ⚠️ **Measured 2026-08-20: setting
+       `_COPY_EXECUTION = frozenset()` moves no count, produces no drift and
+       changes no synthetic case.** It is inert because a COPY reaches the
+       driver through a bare-name call (`stage_records(...)`) or through a
+       receiver that is not the session (`connection.copy_records_to_table`),
+       so no *other* predicate here would claim it either. It is kept as a
+       declaration of intent for the day a repository reaches the COPY through
+       `self._session`, and the honest statement is that it implements nothing
+       today.
+    2. **A `SELECT` with no caller-supplied bind.** 🔴 **The rule used to be
+       "a `SELECT` changes no row, so it cannot be refused for one", and that
+       is false.** A `SELECT` carrying a bind raises class 22 routinely --
+       `22P02` on a cast of a bad literal, `22003` on an overflowing
+       expression, `2201B` on a regex -- and an unwrapped one crosses the port
+       boundary exactly as raw as an `INSERT`'s would. Two questions were being
+       conflated: *should this statement be wrapped in `refusals_as_conflict`?*
+       (no -- a class-22 fault in a computed `SELECT` is a **statement** fault,
+       and ADR-0041 question (3) says translating it reports this repository's
+       own bug as the caller's row being wrong) and *does this method leak?*
+       (yes). This ledger's `translation` column is a proxy for the second, so
+       the exemption is now the narrow, true one: **a `SELECT` with no bind
+       cannot carry a caller value into a class-22 refusal.**
+    3. **A call into a function with no refusal point of its own.**
+       `bulk.py:_stage` reaches only `stage_records`.
+
+    ⚠️ **A bind-carrying `SELECT` is marked rather than decided.** There is no
+    *uncovered* one at any write site today (measured), and what such a method
+    should read is genuinely unresolved -- it does not leak in the way an
+    untranslated `INSERT` leaks, and it must not be translated in the way one
+    is. `write_sites` raises if one ever appears, so the question arrives as a
+    failure rather than as an answer somebody invented here. ADR-0041 records
+    it as open.
+
+    ⚠️ **"Writes" is three regexes** -- `_INSERT`, `_UPDATE`, `_DELETE`. A
+    `MERGE`, a `SELECT setval(...)`, a `CALL` into a writing procedure or a
+    `SELECT ... FOR UPDATE` that later mutates would each be read as a
+    bind-free read and exempted, and its method would read `translated` on no
+    evidence. There is none of that in this package today; adding one means
+    adding it here, and the failure mode is optimistic, which is the direction
+    every other guard in this file is arranged against.
     """
     if isinstance(node, ast.AsyncWith | ast.With):
         inner = covered
@@ -716,38 +806,150 @@ def _refusal_points(
             ):
                 inner = max(inner, _TRANSLATION_RANK.index("refusals_as_conflict"))
             yield from _refusal_points(item.context_expr, texts, local, covered)
-        for child in node.body:
-            yield from _refusal_points(child, texts, local, inner)
+        for statement_node in node.body:
+            yield from _refusal_points(statement_node, texts, local, inner)
         return
     if isinstance(node, ast.Try | ast.TryStar):
         guarded = max(covered, _handler_rank(node.handlers))
-        for child in node.body:
-            yield from _refusal_points(child, texts, local, guarded)
+        for guarded_node in node.body:
+            yield from _refusal_points(guarded_node, texts, local, guarded)
         # A handler's own statements are not covered by the handler they are
         # in, and neither is a `finally`. `import_run.py:save` runs a
         # `session.rollback()` in its `except`, which is exactly that shape.
-        for child in (*node.handlers, *node.orelse, *node.finalbody):
-            yield from _refusal_points(child, texts, local, covered)
+        for handler_node in (*node.handlers, *node.orelse, *node.finalbody):
+            yield from _refusal_points(handler_node, texts, local, covered)
         return
     if isinstance(node, ast.Call):
         name = _call_name(node)
         if name in _COPY_EXECUTION:
             pass
-        elif name in local:
-            yield (name, covered)
+        elif _is_local_call(node, local):
+            yield RefusalPoint(name, covered)
         elif _is_session_call(node, _ORM_WRITE_CALLS):
-            yield ("", covered)
-        elif _is_session_call(node, frozenset({"execute"})):
+            yield RefusalPoint("", covered)
+        elif _is_session_call(node, _EXECUTE_CALL):
             statement = _statement_text(node, texts)
             if statement is None or any(
                 pattern.search(statement) for pattern in (_INSERT, _UPDATE, _DELETE)
             ):
-                yield ("", covered)
+                yield RefusalPoint("", covered)
+            elif _carries_binds(node, statement):
+                yield RefusalPoint("", covered, bound_select=True)
         for child in ast.iter_child_nodes(node):
             yield from _refusal_points(child, texts, local, covered)
         return
     for child in ast.iter_child_nodes(node):
         yield from _refusal_points(child, texts, local, covered)
+
+
+_EXECUTE_CALL = frozenset({"execute"})
+
+
+def _carries_binds(node: ast.Call, statement: str) -> bool:
+    """Whether this `execute(...)` can carry a value the caller chose.
+
+    Two independent signals, because either alone is missable: a second
+    argument (the parameter mapping or sequence SQLAlchemy binds), and a
+    `:name` placeholder in the statement itself. `link_crosswalk`'s
+    classification query has neither -- it is assembled entirely from this
+    module's own constants -- which is what makes exempting it correct rather
+    than convenient.
+    """
+    return len(node.args) > 1 or bool(node.keywords) or bool(_BIND.search(statement))
+
+
+def _definitions(tree: ast.Module) -> dict[tuple[str, int], ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Every function in the module, keyed by `(name, lineno)`.
+
+    ⚠️ **Not by bare name, and the escalation is why.** `ast.walk` is flat, so
+    a module with two same-named methods on different classes collapses them --
+    and **40 modules under `src/` have at least one duplicate**
+    (`db/repositories/search.py` has two `count_stale`, `db/repositories/
+    sync.py` has two `get`). While the only consumer was
+    `_executing_functions`, a collision could merely mis-answer *"does this
+    write?"*, and it fails toward "yes", which is the safe direction. Since the
+    translation closure follows call edges it could carry a **wrong rank**
+    across one, and that fails toward `translated`. Each definition is
+    therefore scored on its own, and a call edge resolved by bare name takes
+    the `min` over every definition of that name -- conservative, ambiguous
+    only where the source is, and failing toward `none`.
+    """
+    return {
+        (node.name, node.lineno): node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def _points_of(tree: ast.Module) -> dict[tuple[str, int], list[RefusalPoint]]:
+    functions = _definitions(tree)
+    texts = _module_texts(tree)
+    local = frozenset(name for name, _ in functions)
+    return {key: list(_refusal_points(node, texts, local)) for key, node in functions.items()}
+
+
+def _refusing(points: Mapping[tuple[str, int], list[RefusalPoint]]) -> set[tuple[str, int]]:
+    """Which definitions can be refused at all, transitively.
+
+    A delegated point into a function that reaches no statement is dropped
+    rather than scored `none` -- that is exemption 3.
+    """
+    refusing = {key for key, own in points.items() if any(not one.call for one in own)}
+    names = {key[0] for key in refusing}
+    for _ in range(_FIXED_POINT_ROUNDS):
+        grown = {key for key, own in points.items() if any(one.call in names for one in own)}
+        if grown <= refusing:
+            return refusing
+        refusing |= grown
+        names = {key[0] for key in refusing}
+    raise DegenerateScan(
+        f"the refusal-point closure did not converge in {_FIXED_POINT_ROUNDS} rounds"
+    )
+
+
+def _score(
+    points: Mapping[tuple[str, int], list[RefusalPoint]],
+    refusing: set[tuple[str, int]],
+    *,
+    strict: bool = True,
+) -> dict[tuple[str, int], str]:
+    """The translation of every definition, as a fixed point over call edges.
+
+    `strict=False` drops the bind-carrying `SELECT`s, which is the predicate
+    this file used until 2026-08-20. `write_sites` runs both and refuses to
+    answer where they disagree -- see the second exemption in
+    `_refusal_points`. Where they agree there is nothing to settle: a method
+    whose own untranslated statement already makes it `none` is not made more
+    `none` by a `SELECT` beside it.
+    """
+    top = len(_TRANSLATION_RANK) - 1
+    rank = dict.fromkeys(points, top)
+    for _ in range(_FIXED_POINT_ROUNDS):
+        by_name: dict[str, int] = {}
+        for key in refusing:
+            by_name[key[0]] = min(by_name.get(key[0], top), rank[key])
+        moved = False
+        for key, own in points.items():
+            scored = [
+                max(one.covered, by_name[one.call]) if one.call else one.covered
+                for one in own
+                if (strict or not one.bound_select) and (not one.call or one.call in by_name)
+            ]
+            # **No `else top`.** A definition with no refusal point has no
+            # evidence, and answering `refusals_as_conflict` on no evidence is
+            # the third instance of this file's recurring asymmetry. It is left
+            # at `top` here because most such functions are not write sites and
+            # never consulted; `write_sites` refuses to build one that is.
+            value = min(scored) if scored else top
+            if value != rank[key]:
+                rank[key] = value
+                moved = True
+        if not moved:
+            return {key: _TRANSLATION_RANK[value] for key, value in rank.items()}
+    raise DegenerateScan(
+        f"the translation closure did not converge in {_FIXED_POINT_ROUNDS} rounds -- "
+        "a min over a monotone-decreasing lattice cannot cycle, so this is a bug here"
+    )
 
 
 def _translations(tree: ast.Module) -> dict[str, str]:
@@ -772,56 +974,19 @@ def _translations(tree: ast.Module) -> dict[str, str]:
     statement is enough to make the whole method `none`, which is the truth
     -- that statement's refusal is what crosses the port boundary raw.
 
-    Three kinds of call are deliberately not refusal points, each for a
-    measured reason: a COPY (`_COPY_EXECUTION` -- outside SQLAlchemy's
-    translation, so no `except` reaches it), a `SELECT` (it changes no row, so
-    it cannot be refused for one -- `bulk.py:link_crosswalk` runs its
-    classification query outside its own wrapper and is not penalised for it),
-    and a call into a function that has no refusal point of its own
-    (`bulk.py:_stage` reaches only `stage_records`).
+    Keyed by bare name for callers that want one answer per method; where a
+    module has two definitions of a name, this returns the **weakest** of them,
+    for `_definitions`' reason. `write_sites` scores each definition on its own
+    and does not go through here.
     """
-    functions = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-    }
-    texts = _module_texts(tree)
-    local = frozenset(functions)
-    points = {name: list(_refusal_points(node, texts, local)) for name, node in functions.items()}
-
-    # Which functions can be refused at all. A delegated point into a function
-    # that reaches no statement is dropped rather than scored `none`.
-    refusing = {name for name, own in points.items() if any(not call for call, _ in own)}
-    for _ in range(_FIXED_POINT_ROUNDS):
-        grown = {name for name, own in points.items() if any(call in refusing for call, _ in own)}
-        if grown <= refusing:
-            break
-        refusing |= grown
-    else:  # pragma: no cover - a module deeper than the cap
-        raise DegenerateScan(
-            f"the refusal-point closure did not converge in {_FIXED_POINT_ROUNDS} rounds"
-        )
-
-    top = len(_TRANSLATION_RANK) - 1
-    rank = dict.fromkeys(functions, top)
-    for _ in range(_FIXED_POINT_ROUNDS):
-        moved = False
-        for name, own in points.items():
-            scored = [
-                max(covered, rank[call]) if call else covered
-                for call, covered in own
-                if not call or call in refusing
-            ]
-            value = min(scored) if scored else top
-            if value != rank[name]:
-                rank[name] = value
-                moved = True
-        if not moved:
-            return {name: _TRANSLATION_RANK[value] for name, value in rank.items()}
-    raise DegenerateScan(
-        f"the translation closure did not converge in {_FIXED_POINT_ROUNDS} rounds -- "
-        "a min over a monotone-decreasing lattice cannot cycle, so this is a bug here"
-    )
+    points = _points_of(tree)
+    scored = _score(points, _refusing(points))
+    weakest: dict[str, str] = {}
+    for (name, _), answer in scored.items():
+        current = weakest.get(name)
+        if current is None or _TRANSLATION_RANK.index(answer) < _TRANSLATION_RANK.index(current):
+            weakest[name] = answer
+    return weakest
 
 
 def write_sites() -> list[WriteSite]:
@@ -832,7 +997,10 @@ def write_sites() -> list[WriteSite]:
         constants = _module_texts(tree)
         executing = _executing_functions(tree)
         constructed = _constructed_rows(tree)
-        translations = _translations(tree)
+        points = _points_of(tree)
+        refusing = _refusing(points)
+        translations = _score(points, refusing)
+        without_bound_selects = _score(points, refusing, strict=False)
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
@@ -876,6 +1044,54 @@ def write_sites() -> list[WriteSite]:
                         "can see, and a writer it drops makes its table look translated"
                     )
                 continue
+            key = (node.name, node.lineno)
+            # **A site with no refusal point is a failure, not a translated
+            # site**, and this is the mirror of the `flush`-with-no-destination
+            # raise above -- the same asymmetry, on the other axis, found by
+            # the same review. `_score` answers `refusals_as_conflict` for a
+            # definition it found nothing to score, which is the top of the
+            # lattice on **no evidence**; harmless for the reads that never
+            # reach here, and a laundered writer for anything that does.
+            # `_executing_functions` and `_refusal_points` use different
+            # predicates (`_EXECUTING_CALLS` also carries the COPY primitives),
+            # so a method whose only database access is a COPY is *executing*
+            # with zero refusal points. `bulk.py:_stage` is that shape today
+            # and is saved from being a counter-example only by resolving no
+            # destination -- which is exactly the coincidence this refuses to
+            # rely on.
+            if key not in refusing:
+                raise DegenerateScan(
+                    f"{path.name}:{node.qualname if hasattr(node, 'qualname') else node.name} "
+                    f"writes {sorted(destinations)} and has no refusal point at all -- "
+                    "the translation scan cannot see the statement the destination scan can, "
+                    "and a site scored on no evidence reads fully translated"
+                )
+            # The condition this file deliberately does not answer -- see
+            # `_refusal_points`' second exemption. An *uncovered* bind-carrying
+            # `SELECT` at a write site is a method that can leak a caller's
+            # value as a raw driver exception and that must nonetheless not be
+            # wrapped in `refusals_as_conflict`.
+            #
+            # **Only where counting it changes the verdict.** A method already
+            # reading `none` for an untranslated statement of its own has no
+            # open question:
+            # `media_item.py:mark_unseen_unavailable` runs `_SWEEP_COUNTS` (a
+            # bound `SELECT`) and `_SWEEP` (an `UPDATE`) both outside any
+            # translation, and the second already decides it. So the ledger is
+            # scored both ways and refuses only on a disagreement -- which is
+            # exactly the set where somebody would otherwise have had to invent
+            # an answer. Empty today.
+            if translations[key] != without_bound_selects[key]:
+                site = f"{path.name}:{node.name} -> {sorted(destinations)}"
+                otherwise = without_bound_selects[key]
+                raise DegenerateScan(
+                    f"{site} runs a bind-carrying read outside any translation, and that "
+                    f"read is the only thing keeping it from reading {otherwise!r}. It can "
+                    "leak a caller's value as a raw driver exception on class 22, and "
+                    "wrapping it would report a statement fault as a refused row -- "
+                    "ADR-0041 records the question as open rather than answered, and this "
+                    "is where it has to be settled"
+                )
             sites.append(
                 WriteSite(
                     module=path.name,
@@ -883,7 +1099,7 @@ def write_sites() -> list[WriteSite]:
                     lineno=node.lineno,
                     destinations=tuple(sorted(destinations)),
                     staged=tuple(sorted(staged)),
-                    translation=translations[node.name],
+                    translation=translations[key],
                 )
             )
     return sorted(sites, key=lambda site: (site.module, site.lineno))

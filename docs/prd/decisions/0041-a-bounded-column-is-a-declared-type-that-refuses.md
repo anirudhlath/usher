@@ -789,16 +789,84 @@ outside the helper. So:
 > statement makes the whole method `none`, because that statement's refusal is
 > what crosses the port boundary raw.
 
-Three kinds of call are deliberately **not** refusal points, each on a
-measurement this record already holds: a COPY (outside SQLAlchemy's translation
-— no `except` reaches either of its two shapes, and both are now observed), a
-`SELECT` (it changes no row, so `bulk.py:link_crosswalk` running its
-classification query outside its own wrapper is not a leak), and a call into a
-function with no refusal point of its own (`_stage` reaches only
-`stage_records`). The property is pinned on a module
-`tests/unit/test_bounded_column_ledger.py` writes itself — seven cases,
-including the `mixed` one that must read `none` — rather than against whatever
-`bulk.py` happens to look like today.
+Three kinds of call are **not** refusal points, and they are not co-equal —
+one of them is currently inert and is labelled as such rather than presented as
+load-bearing.
+
+1. **A COPY.** Outside SQLAlchemy's translation; no `except` reaches either of
+   its two shapes, and both are now observed. ⚠️ **Measured: setting
+   `_COPY_EXECUTION = frozenset()` moves no count, produces no drift and
+   changes no case.** It is inert because a COPY reaches the driver through a
+   bare-name call (`stage_records(...)`) or a non-session receiver
+   (`connection.copy_records_to_table`), so no other predicate here claims it
+   either. Kept as a declaration of intent for the day a repository reaches a
+   COPY through `self._session`; it implements nothing today.
+2. 🔴 **A `SELECT` with no caller-supplied bind — and the rule was stated
+   falsely until 2026-08-20.** It read *"a `SELECT` changes no row, so it
+   cannot be refused for one"*, which is not true: a `SELECT` carrying a bind
+   raises class 22 routinely (`22P02` on a cast, `22012` on a division,
+   `22003` on an overflow), and an unwrapped one crosses the port boundary
+   exactly as raw as an `INSERT`'s would. Two questions were being conflated.
+   *Should such a statement be wrapped in `refusals_as_conflict`?* **No** — a
+   class-22 fault in a computed `SELECT` is a **statement** fault, and question
+   (3) above says translating it reports this repository's own bug to a caller
+   as its row being wrong. *Does the method leak?* **Yes.** This ledger's
+   `translation` column is a proxy for the second question, so the exemption is
+   now the narrow, true one: **a `SELECT` with no bind cannot carry a caller
+   value into a class-22 refusal.** `bulk.py:link_crosswalk`'s classification
+   query is assembled entirely from module constants and carries none, which is
+   what makes exempting it correct rather than convenient.
+3. **A call into a function with no refusal point of its own.**
+   `bulk.py:_stage` reaches only `stage_records`.
+
+🔴 **What a bind-carrying, unwrapped `SELECT` at a write site should read is
+OPEN, and is deliberately not answered here.** It leaks in a way an
+untranslated `INSERT` leaks, and it must not be translated in the way one is;
+no answer this record could invent would be evidence. `write_sites` therefore
+**raises** when counting such a statement would change a site's verdict, so the
+question arrives as a failure rather than as a decision nobody made. Scored
+both ways today and the two agree everywhere:
+`media_item.py:mark_unseen_unavailable` runs a bound `SELECT` *and* an
+untranslated `UPDATE`, so its `none` is already decided by the second and there
+is nothing open about it.
+
+⚠️ **"Writes" is three regexes** — `_INSERT`, `_UPDATE`, `_DELETE`. A `MERGE`,
+a `SELECT setval(...)`, a `CALL` into a writing procedure or a
+`SELECT ... FOR UPDATE` that later mutates would each read as a bind-free read,
+be exempted, and take its method to `translated` on no evidence. There is none
+of that in this package; adding one means adding it to that list.
+
+The property is pinned on a module `tests/unit/test_bounded_column_ledger.py`
+writes itself — **eighteen** cases rather than against whatever `bulk.py`
+happens to look like — including `mixed` (must read `none`),
+`bound_read_outside` (the counter-case to the old rule), the ORM `add`/`flush`
+branch, a statement in an `except` body, a statement in a `finally`, and a
+`set.add` that must not read as an ORM write.
+
+### 🔴 Two defects the narrower predicate found in the instrument itself
+
+- **A delegation edge was matched on a bare attribute name with no receiver
+  check**, so `credit_names.get(scoped_id, ())` — a `dict.get` on a caller's
+  mapping — read as a call into `PostgresPersonRepository.get`, which
+  `people.py` happens to define. That invented edge carried an untranslated
+  read's rank into `replace_for_titles` and was invisible until the ledger was
+  scored twice and the two passes disagreed. A delegation is now `self.<name>`
+  or a bare `<name>`, nothing else.
+- **A write site with *zero* refusal points read fully translated**, because
+  `min([])` has no answer and the code returned the top of the lattice. That is
+  the same asymmetry as the `flush`-with-no-destination hole, on the other axis:
+  `_executing_functions` and `_refusal_points` use different predicates, so a
+  method whose only database access is a COPY is *executing* with no refusal
+  point at all. `bulk.py:_stage` is that shape today and was saved from being a
+  counter-example only by resolving no destination. It now raises.
+- **Definitions are keyed `(name, lineno)`, not by bare name.** `ast.walk` is
+  flat and **40 modules under `src/` have at least one duplicate**
+  (`search.py` has two `count_stale`, `sync.py` has two `get`). While the only
+  consumer was `_executing_functions` a collision could merely mis-answer
+  *"does this write?"*, which fails toward "yes" — safe. A closure that follows
+  call edges can carry a **wrong rank** across one, which fails toward
+  `translated`. Each definition is scored on its own and a bare-name edge
+  resolves to the `min` over every definition of that name.
 
 ### 🔴 A second blind spot, pointing the other way: a writer the scan cannot place
 
