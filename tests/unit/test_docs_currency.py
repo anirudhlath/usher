@@ -14,9 +14,10 @@ blockquote spelling the corrected path, and **re-planting the defect then
 satisfied the check on the defect's behalf**. A documentation check that reads
 prose can be answered by prose written to explain the fix.
 
-`docs/plans/progress.md` is 3,000 lines and names a plan file in **six** prose
-headings of the form `## M8 plan: docs/plans/2026-08-06-m8-curation.md`, one per
-milestone that has run. That is this document's habit, not an accident, so the
+`docs/plans/progress.md` is 3,000 lines and names a plan file in **five** prose
+headings of the form `## M8 plan: docs/plans/2026-08-06-m8-curation.md` (M2, M3,
+M4, M5, M8), plus M1's `Plan file:` line and M2's fixture-leak note -- seven
+lines of prose in all. That is this document's habit, not an accident, so the
 next milestone to write such a heading would turn a whole-document scan green
 while its table row stayed missing — which is the drift, restored, with the
 check reporting success. Both tables are therefore harvested from **table rows
@@ -43,17 +44,22 @@ general dated plan name with the spec exclusion carried explicitly rather than
 by narrowness. Every widening and the exclusion it preserves are asserted by
 `test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec`.
 
-**The fourth heading arrived on 2026-08-21 and cost the pattern nothing, which
-is the point of having generalised it.** `2026-08-21-issue-41-resumable-watch-lane.md`
-is a bug fix rather than a milestone, a phase or a repair of a column, and it
-has its own spec -- so it needed a heading of its own by the same argument E1
-and the rating split each needed one, and `_PLAN_FILENAME` harvested it
-unchanged. Two widenings were each provoked by a plan the pattern could not
-see; a third plan arriving and being seen is the evidence that the second
-widening generalised rather than merely accommodating the case in front of it.
-**What the count of headings now measures is the count of specs**, so the union
-grows with the project and no heading is ever asked to name a plan belonging to
-somebody else's spec.
+**The fourth heading landed on 2026-08-25 and cost the pattern nothing.**
+`2026-08-21-issue-41-resumable-watch-lane.md` -- authored 2026-08-21, which is
+the date in its filename -- is a bug fix rather than a milestone, a phase or a
+repair of a column, and it has its own spec, so it needed a heading of its own
+by the same argument E1 and the rating split each needed one. Its harvest was
+*confirmed* rather than assumed, and the confirmation is worth no more than
+that: any dated lowercase-hyphen plan name is harvested by construction now, so
+a third plan being seen is the pattern doing what it says, not evidence about
+its generality. The two widenings are still the only measurements here.
+
+**Four headings against five specs, and the gap is by design.** A *milestone*
+of the v1 design stays in the milestone table even after it gets its own
+detailed spec -- `docs/specs/2026-08-10-m9-api-surface-design.md` has no heading
+because M9 is a milestone, and the milestone heading naming the v1 design is
+true of it. The per-spec-heading rule is for plans that are **not** milestones:
+those have no honest home under an existing heading, so they get their own.
 """
 
 import pathlib
@@ -158,11 +164,13 @@ def test_every_plan_file_is_named_by_every_status_table() -> None:
     per spec. The alternative -- an E1 row under a heading that says
     *"Milestones (from docs/specs/2026-07-28-usher-v1-design.md)"* -- turns that
     heading into a false statement to satisfy a check about documentation being
-    true, which is the trade this whole module exists to refuse. A plan of any
-    later spec is registered under a heading naming that spec, and the union is
-    what keeps the obligation *"every plan file is named"* one obligation. The
-    number of tables is therefore not a constant to be minimised: it is the
-    number of specs, and a fifth arrives with the fifth spec.
+    true, which is the trade this whole module exists to refuse. A plan that is
+    **not a milestone** is registered under a heading naming its own spec, and
+    the union is what keeps the obligation *"every plan file is named"* one
+    obligation. Four headings against five specs is that rule and not a lapse:
+    M9's plan sits under the milestone heading because M9 *is* a milestone of
+    the v1 design that heading names, so no false statement is being made on
+    its behalf even though `2026-08-10-m9-api-surface-design.md` exists.
     """
     on_disk = {path.name for path in _PLANS.glob("*.md")} - {"progress.md"}
 
@@ -187,7 +195,13 @@ def test_every_plan_file_is_named_by_every_status_table() -> None:
     }
 
     for where, named in tables.items():
-        assert not on_disk - named, f"{where} does not name: {sorted(on_disk - named)}"
+        assert not on_disk - named, (
+            f"{where} does not name: {sorted(on_disk - named)}. If this plan belongs "
+            "to a spec with no heading yet, give it its own heading and table naming "
+            "that spec -- a row under an existing heading makes that heading false, "
+            "which is the trade this module exists to refuse. A plan that really is a "
+            "milestone of the v1 design belongs in the milestone table."
+        )
         assert not named - on_disk, (
             f"{where} names a plan file that does not exist: {sorted(named - on_disk)}"
         )
@@ -236,8 +250,8 @@ def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() 
     of that row was the empty set. The first assertion is the widening.
 
     The second is what the widening had to keep. `_PLAN_FILENAME` is narrow so
-    that a `docs/specs/…` path is not harvested as a plan, and both status
-    tables name their own spec in their own heading. A pattern loose enough to
+    that a `docs/specs/…` path is not harvested as a plan, and every status
+    table names its own spec in its own heading. A pattern loose enough to
     read `usher-v1-design` would make the milestone table's title one of its
     own rows, so the exclusion is asserted where a harvest actually happens --
     inside a table row -- rather than against the heading, which
@@ -257,9 +271,12 @@ def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() 
     # All five, and the second is the one with teeth: `m9` is
     # letters-then-digits, so the *old* pattern harvested that spec as a plan
     # and the exclusion was never as complete as its comment claimed. The
-    # fifth was added on 2026-08-21 rather than assumed: a spec arriving with
+    # fifth was added on 2026-08-25 rather than assumed: a spec arriving with
     # a fourth status table is exactly when "the lookahead already refuses it"
     # is a prediction somebody should check, and it costs one line to.
+    #
+    # Five specs, four headings -- M9's is the one with no heading of its own,
+    # because M9 is a milestone and the milestone heading names the v1 design.
     specs = (
         "## Quality-eval phases (from docs/specs/2026-08-18-usher-quality-evals-design.md)\n"
         "| — | — | docs/specs/2026-07-28-usher-v1-design.md | — |\n"
@@ -270,7 +287,7 @@ def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() 
     )
 
     assert _table_rows(specs, _EVAL_PHASE_TABLE) == set(), (
-        "a spec is not a plan, and the four headings name theirs"
+        "a spec is not a plan, and four of these five are named by a heading"
     )
 
     # **The second widening, and the row that forced it.** The rating split
@@ -307,7 +324,7 @@ def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> Non
     **All four** table sections are excluded, and every one after the first is
     why this paragraph exists. `## Quality-eval phases` arrived on 2026-08-18,
     `## Rating provenance` on 2026-08-19 and `## Resumable watch lane` on
-    2026-08-21, and the rows of all three are outside the *milestone* section --
+    2026-08-25, and the rows of all three are outside the *milestone* section --
     so a scan subtracting only that one would have counted a table row as a
     line of prose, and the floor would have kept passing, on evidence it is
     written to exclude. A floor that goes green because the thing it measures
@@ -320,21 +337,32 @@ def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> Non
     because the old `[a-z]+\\d+` scope segment matched `m9` -- so *"all eight
     genuinely prose"* was already one short of true when it was written, and
     the widening that let `2026-08-19-rating-provenance-split.md` in is what
-    exposed it. All seven remaining are genuinely prose: six per-milestone
-    headings plus M2's fixture-leak note. Asserted as a floor and not an
-    equality for the reason above -- the number grows by one per milestone.
+    exposed it. All seven remaining are genuinely prose: **five** per-milestone
+    headings (M2, M3, M4, M5, M8), M1's `Plan file:` line, and M2's
+    fixture-leak note. Asserted as a floor and not an equality for the reason
+    above -- the number grows by one per milestone.
 
-    **The subtraction here and the union in the case above have to move
-    together, and only one of them goes red when they do not** -- which is why
-    the fourth table's registration is two edits in two functions rather than
-    one. Measured on 2026-08-21, when it landed: subtracting three sections
-    instead of four counts **8** lines here rather than 7, because the new
-    table's own row is then read as prose. That is a *different* eight from the
-    paragraph above -- this one is a table row miscounted today, that one was a
-    spec miscounted until 2026-08-19 -- and the thing they have in common is
-    the reason both are written down: `>= 6` passes on every one of these
-    numbers, so neither dilution has ever been able to announce itself. Check
-    the union, not the colour of the run.
+    **The subtraction here and the union in the case above should move
+    together, and only one of them can tell you when they haven't** -- which is
+    why the fourth table's registration is two edits in two functions rather
+    than one. Measured on 2026-08-25, when it landed: subtracting three
+    sections instead of four counts **8** lines here rather than 7, because the
+    new table's own row is then read as prose. That is a *different* eight from
+    the paragraph above -- this one is a table row miscounted today, that one
+    was a spec miscounted until 2026-08-19 -- and the thing they have in common
+    is the reason both are written down: `>= 6` passes on every one of these
+    numbers, so neither dilution could ever announce itself through the count.
+
+    **So the count is not what notices, and the second assertion below is.** A
+    status-table row starts with `|` and a line of prose does not, so a pipe
+    line in `outside` means a section is missing from the subtraction -- a
+    shape rather than a number, with nothing to bump when the next table lands.
+    Measured: zero pipe lines among the current 7, and dropping any one section
+    from `tabled` turns it red naming the row it wrongly counted. **The caveat,
+    because it is a real one:** a future table *elsewhere* in this document
+    legitimately naming a plan file in a row would false-red here and have to
+    be added to `tabled`. That is the direction this repository prefers -- a
+    red that names the row beats a floor that absorbs it in silence.
     """
     text = _PROGRESS.read_text()
     tabled = (
@@ -352,4 +380,10 @@ def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> Non
     assert len(outside) >= 6, (
         "progress.md no longer names a plan file outside its status tables, so "
         f"the scoping above is no longer load-bearing: found {outside!r}"
+    )
+
+    rows = [line for line in outside if line.startswith("|")]
+    assert not rows, (
+        "a status-table row is being counted as prose, so a section is missing "
+        f"from the subtraction above: {rows}"
     )

@@ -46,6 +46,7 @@ Write a new spec if a new plan is needed.
 | Make a decision someone could reasonably dispute | Add an ADR in `decisions/`, link it from the section |
 | Reverse an earlier decision | **Update the existing ADR's status and add the new evidence** — never silently contradict it |
 | Add or complete a section | Update the status table in `docs/prd/README.md` |
+| Write a plan file for a spec that has no status table yet | Give it **its own level-2 heading and table** in `docs/plans/progress.md` naming that spec, and add a row to `docs/prd/README.md`'s implementation-plan table. **Never a row under an existing heading** — that heading names a different spec, so the row makes it false in order to satisfy a check about documentation being true. A plan that really is a *milestone* of the v1 design is the exception and belongs in the milestone table. `tests/unit/test_docs_currency.py` reads every table as one union and fails if a plan file is named by none of them |
 | Discover a load-bearing fact (rate limit, dataset size, API behaviour) | Record it with its source in the relevant section |
 | Learn something that invalidates a stated fact | Correct it and say so — stale "verified" facts are worse than none |
 

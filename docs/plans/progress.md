@@ -65,7 +65,7 @@ that file could see it.
 ## Resumable watch lane (from docs/specs/2026-08-21-issue-41-resumable-watch-lane-design.md)
 | Task | What it delivers | Plan file | Status |
 |---|---|---|---|
-| 1–6 | `sync_runs.position` as a `StartIndex` checkpoint; `latest_incomplete_run` on the sync-run port and both its arms; `watch_state(start_index=…)` on `SourceAdapter`; `WatchStateSyncService` reclaiming its own incomplete run in place; a planted regression to prove the new cases have teeth; the docs the change invalidates | docs/plans/2026-08-21-issue-41-resumable-watch-lane.md | 📋 **planned, nothing landed** — 6 tasks on `fix/41-resumable-watch-lane`, of which this commit is task zero: the design spec, [ADR-0042](../prd/decisions/0042-the-watch-lane-resumes-from-a-startindex-checkpoint.md) and the plan itself. Fixes #41 — the watch lane takes its cursor from the newest *completed* run, so a transient failure anywhere in the ~5,688-page full-history walk restarts it from zero; it has never once completed, and the workaround in force is `USHER_WORKER_ENABLED=false`, which stops the loop by stopping every queued job |
+| 1–6 | `sync_runs.position` as a `StartIndex` checkpoint; `latest_incomplete_run` on the sync-run port and both its arms; `watch_state(start_index=…)` on `SourceAdapter`; `WatchStateSyncService` reclaiming its own incomplete run in place; a planted regression to prove the new cases have teeth; the docs the change invalidates | docs/plans/2026-08-21-issue-41-resumable-watch-lane.md | 📋 **planned, nothing landed** — 6 tasks on `fix/41-resumable-watch-lane`. The design spec, [ADR-0042](../prd/decisions/0042-the-watch-lane-resumes-from-a-startindex-checkpoint.md) and the plan landed together in `aa125da`; the reasoning for the approach is ADR-0042's and is not restated here. Fixes #41 |
 
 **This is a fourth table for the second and third tables' reason, and it is
 worth saying why that reason keeps recurring rather than treating it as
@@ -74,12 +74,18 @@ bookkeeping.** The resumable watch lane has its own spec
 under any of the three headings above would have made *that* heading a false
 statement in order to satisfy a check about documentation being true — and
 there is no honest home for it among them: it is not a milestone, it is not one
-of E1–E4, and it is not the rating split. What the repetition says is that this
-project has stopped numbering its work into one sequence, so the number of
-tables is now the number of specs and will keep growing.
-`tests/unit/test_docs_currency.py` reads all four as a **union**, which is what
-keeps *"every plan file is named by every status table"* one obligation rather
-than four separate ones a plan can fall between.
+of E1–E4, and it is not the rating split.
+
+**Four tables against five specs, and the exception is the rule working.** A
+*milestone* stays in the milestone table even after it gets its own detailed
+spec — `docs/specs/2026-08-10-m9-api-surface-design.md` has no heading of its
+own, because M9 is a milestone of the v1 design the first heading names and
+that heading is true of it. So the rule is not *"one table per spec"* but
+*"a plan that is **not** a milestone gets a heading naming its own spec"*, and
+what the repetition says is that this project has stopped numbering its work
+into one sequence. `tests/unit/test_docs_currency.py` reads all four tables as
+a **union**, which is what keeps *"every plan file is named by every status
+table"* one obligation rather than four separate ones a plan can fall between.
 
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)
