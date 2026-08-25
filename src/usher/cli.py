@@ -48,7 +48,7 @@ from usher.composition import (
 )
 from usher.config import Settings, get_settings, settings_rejection
 from usher.db.base import build_engine, build_session_factory
-from usher.db.repositories.backup import PostgresBackupRepository
+from usher.db.repositories.backup import PostgresBackupRepository, PostgresRestoreRepository
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
@@ -86,6 +86,7 @@ from usher.services.curation_validate import DropReason
 from usher.services.genres import GenreNormalisationService
 from usher.services.home import ComposeReport, HomeService
 from usher.services.reconcile import RETRACTION_ERROR_CODE
+from usher.services.restore import RestoreRefused, RestoreReport, RestoreService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
 from usher.services.search import SearchAnswer, SemanticSearchUnavailable, SuggestTier
@@ -1877,6 +1878,84 @@ async def _backup(settings: Settings, *, output: Path | None) -> None:
     _print_backup_report(report)
 
 
+async def _restore(settings: Settings, *, artifact: Path, dry_run: bool) -> None:
+    """Merge one artifact into this database, in one transaction, or refuse it.
+
+    **Inside ADR-0026's boundary with no handler of its own**, exactly as
+    `usher backup` is. `OSError` covers the artifact that is not there and the
+    directory that is not readable; `DBAPIError` covers the database that is
+    not up; both have been in `OPERATOR_ERRORS` since before this command
+    existed. What is caught here is `RestoreRefused`, and that is not a
+    boundary -- it is the shape ADR-0026 permits and `_curate` already uses
+    twice: a command that knows what a failure *means* renders it. The
+    alternative would be a tenth member of the tuple for a type only this
+    command can raise.
+
+    **The session is `_session_for`'s and there is exactly one**, which is
+    what makes the one-transaction claim true rather than aspirational: the
+    service commits once at the end and rolls back otherwise, and the engine
+    is disposed however the command ends.
+
+    **A run that refused exits non-zero**, `_sync`'s precedent and its
+    argument: the refusals are already on stdout for a human, and cron, CI and
+    a systemd unit read the exit code. `--dry-run` does **not** exit non-zero
+    on its own -- an operator asking what would happen and being told got the
+    answer they asked for -- but a dry run that found refusals does, because
+    that is the same answer `usher restore` would have given.
+    """
+    async with _session_for(settings) as session:
+        service = RestoreService(
+            repository=PostgresRestoreRepository(session),
+            commit=session.commit,
+            rollback=session.rollback,
+        )
+        try:
+            report = await service.restore(artifact, dry_run=dry_run)
+        except RestoreRefused as exc:
+            raise SystemExit(f"usher restore: {exc}") from exc
+    _print_restore_report(report)
+    if report.refused:
+        raise SystemExit(
+            f"{len(report.refused)} {_unit('row', len(report.refused))} could not be "
+            "restored, so nothing was: enrich or import what the lines above name and "
+            "run it again"
+        )
+
+
+def _print_restore_report(report: RestoreReport) -> None:
+    """Three counts per table, then the refusals by name, then one summary.
+
+    **Three numbers rather than one**, which is the whole reason this command
+    reports at all: *"restored 9 rows"* over an artifact holding 50 is the
+    failure it exists to make visible, and an operator at a terminal has no
+    second copy of the database to compare against.
+
+    Every refusal is named and none is summarised away. A restore that stopped
+    at the first missing title would send an operator to enrich one title; a
+    restore that names 41 of them tells them the catalog is not finished,
+    which is a different instruction -- and the keys are `keys_tried`'s
+    rendering, so what is printed is what was looked for rather than a
+    paraphrase of it.
+    """
+    for table in sorted(set(report.written) | set(report.skipped)):
+        written = report.written.get(table, 0)
+        skipped = report.skipped.get(table, 0)
+        print(f"  {table:<24}{written:>9,} written {skipped:>9,} already present")
+    for refusal in report.refused:
+        print(f"  refused {refusal.table:<16}{', '.join(refusal.keys)} -- {refusal.reason}")
+    ending = (
+        "nothing was committed (--dry-run)"
+        if report.dry_run
+        else ("committed" if report.committed else "nothing was committed")
+    )
+    print(
+        f"{report.total_written:,} {_unit('row', report.total_written)} written, "
+        f"{report.total_skipped:,} already present, "
+        f"{len(report.refused)} refused, from {report.path} "
+        f"at schema {report.schema_revision}: {ending}"
+    )
+
+
 def _print_backup_report(report: BackupReport) -> None:
     """One line per table, one summary line, one sentence about the key.
 
@@ -2248,6 +2327,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="where to write it; default usher-backup-<UTC>.jsonl.gz here",
     )
+
+    # The nineteenth subcommand, stated with the date it was measured rather
+    # than maintained -- the habit the row above records, and the correction
+    # this one inherits. **The plan for this task said seventeenth**, which was
+    # the count the parser advertised before `genres` and `backup` landed. On
+    # **2026-08-25** `len(build_parser()._subparsers._group_actions[0].choices)`
+    # is 19 with this row. Cite the parser's own `choices` and never
+    # `grep -c "add_parser("`: that grep answers one too many, because the line
+    # stating the claim contains the literal it searches for.
+    restore = sub.add_parser("restore", help="merge one backup artifact into this database")
+    # **Positional and required**, unlike `backup --output`, and the asymmetry
+    # is the point: a backup with no destination has an obvious default (a
+    # timestamped name here), and a restore with no source has none at all --
+    # picking the newest file in the working directory is exactly the kind of
+    # guess a command that overwrites a household's history must not make.
+    restore.add_argument(
+        "artifact",
+        type=Path,
+        help="the .jsonl.gz `usher backup` wrote",
+    )
+    restore.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="resolve everything, print the identical report, and commit nothing",
+    )
     return parser
 
 
@@ -2511,6 +2615,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
         asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
     elif args.command == "backup":
         asyncio.run(_backup(settings, output=args.output))
+    elif args.command == "restore":
+        asyncio.run(_restore(settings, artifact=args.artifact, dry_run=args.dry_run))
     else:
         # Imported here, not at module scope: uvicorn.run blocks, and nothing
         # about the bootstrap path should pay for importing the server.

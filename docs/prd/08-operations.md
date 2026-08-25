@@ -738,9 +738,10 @@ container, which Usher does not own; adding `postgresql-client` to the runtime
 stage costs **+62.1 MiB, +18% on a 359 MB image**, of which
 `/usr/lib/postgresql` is 3.9 MiB and the rest is libpq, OpenSSL, readline and
 Perl. Either way the point stands: disaster recovery becomes a short restore
-plus a background rebuild instead of a crisis. State this loudly in the
-README — it is the difference between "lost everything" and "lost an afternoon
-of indexing".
+plus a background rebuild instead of a crisis — ✅ and since K4 that sentence
+names a command, `usher restore`, whose own section is below. State this loudly
+in the README — it is the difference between "lost everything" and "lost an
+afternoon of indexing".
 
 **The artifact is gzip-compressed JSON Lines: a header object, then one object
 per row carrying `table` and `row`.** Four properties earn that over any
@@ -784,6 +785,84 @@ authentication tag makes it a diagnosable `PortDataMalformed` naming the ref
 rather than garbage, and `GET /admin/sources/{id}/status` already renders that
 as *re-enter your credentials* below. **Keep `USHER_SECRET_KEY` with the
 artifact.**
+
+#### Restore — one transaction, four refusals, and three counts (K4)
+
+✅ **`usher restore <artifact> [--dry-run]` is built** —
+`src/usher/services/restore.py` owns the file and
+`db/repositories/backup.py`'s `PostgresRestoreRepository` owns the merge.
+
+⚠️ **Its normal path is not an empty database, and reading it as one produces
+a command that cannot work.** `watch_states.title_id` is `ON DELETE RESTRICT`
+(ADR-0010; re-read off `pg_constraint` 2026-08-25), so into an empty catalog
+the load-bearing table's every row fails its foreign key. What this document
+promises two paragraphs up is the honest description and is what ships: **a
+short restore plus a background rebuild.** The importers rebuild the catalog
+(`usher bootstrap --phase all`, then `usher sync`, then `usher work`), and
+restore lands the precious rows on top of it. Verified against a rebuilt
+catalog in `tests/integration/test_restore.py`, including the case that
+re-mints every title id between the backup and the restore — which is what a
+bootstrap does, and the only reason the natural keys exist.
+
+**Four refusals, in order, all before any write, and only the fourth is a
+report.** (1) an artifact that is not readable or is truncated — including a
+gzip member that ends early, which raises a bare `EOFError` and is therefore
+*not* an `OSError` the CLI boundary would have caught; (2) a **schema
+mismatch**, comparing the header's stamp against `database_revision` and
+naming both values, the shape `/health/ready` already logs — against the
+*database's* revision and never `code_head_revision()`, because a container
+whose code is ahead of its database is a broken deployment that `/health/ready`
+is the thing to report; (3) a `table` key the manifest does not classify,
+which is what an artifact from a later schema looks like; (4) **unresolved
+references, collected across the whole file and reported together**. A restore
+that stopped at the first missing title tells an operator to enrich one title;
+one that reports 41 tells them the catalog is not finished.
+
+**One transaction for the whole file.** One session from `cli._session_for`,
+one commit at the end, and a rollback otherwise — so an unresolved reference
+in the last row rolls back the first, and *"refuses rather than
+half-applies"* is a property of the code rather than a promise. ⚠️ **The
+consequence is that the failure mode of a very large artifact is memory**, and
+the bound is stated rather than discovered: the whole file is parsed before
+anything is written and every row stays in one open transaction until the end.
+The precious set is small by construction — 14,259 rows measured here — and
+`--dry-run` resolves everything, prints the identical report and commits
+nothing, which is how an operator learns what would be refused without holding
+a transaction open while they think about it.
+
+**The report separates written, skipped as already present, and refused**, per
+table, with the refused list naming the keys that were looked for. Three
+numbers rather than one, because *"restored 9 rows"* over an artifact holding
+50 is the failure the command exists to make visible. A run with any refusal
+exits non-zero, `usher sync`'s precedent.
+
+**"Insert" is the wrong rule for five of the eight carried tables**:
+
+| table | rule |
+|---|---|
+| `users` | insert if the name is absent (`uq_users_name`); otherwise every reference adopts the id the target already holds |
+| `sources` | insert if the id is absent; **refuse** if a *different* source holds that name |
+| `source_credentials` | insert on `ref`, `DO NOTHING`; refuse if its source is not here |
+| `watch_states` | upsert on `uq_watch_states_user_title` / `uq_watch_states_user_episode`, whichever the row's target names |
+| `llm_calls` | insert on `id`, `DO NOTHING` — append-only, which is what makes restoring one spend ledger twice safe |
+| `row_provider_settings` | upsert on `slug_prefix` |
+| `search_queries` | insert on `id`, `DO NOTHING`, `clicked_title_id` nulled where unresolved |
+| `media_items` | update the two links **only where the target's `title_id` is `NULL`** |
+
+⚠️ **The `sources` refusal cannot lean on the database, and that asymmetry is
+easy to assume away.** Measured on the live schema 2026-08-25: `pg_constraint`
+for `sources` holds **only** `pk_sources PRIMARY KEY (id)` and the count of
+unique indexes on `name` is **0** — so two sources pointing at one server is a
+state this schema permits, an `ON CONFLICT (name)` would not compile, and the
+refusal is an explicit read with a case of its own. `users` really does have
+`uq_users_name`, which is why its rule is one clause and this one is three.
+
+**Restoring the same artifact twice is a no-op on the second run** — every
+table's count identical, asserted table by table — because that is the
+operator's instinct after a partial failure. It is what `DO NOTHING` on
+`llm_calls` buys, and what the `IS DISTINCT FROM` guards on the two upserts
+buy: the second run reports `skipped` rather than claiming to have written
+3,347 rows that did not move.
 
 **M7 added five tables and four of them are rebuildable, which is worth the
 detail because "everything is rebuildable" is the kind of claim that is true

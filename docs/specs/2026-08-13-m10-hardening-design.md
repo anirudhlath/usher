@@ -421,10 +421,18 @@ copy.
 - Grafana renders five dashboards from provisioned JSON in this repository, and
   every panel was observed with real data before its commit.
 - Seven alert rules exist and each has been fired at least once, deliberately.
-- `usher backup` produces an artifact that `usher restore` loads into a **rebuilt
-  catalog** — not an empty database, which `watch_states.title_id`'s `ON DELETE
-  RESTRICT` makes impossible (ADR-0010). PRD 08:586's own words: *a short restore
-  plus a background rebuild*. Verified in a scratch container.
+- ✅ **Done (K3 + K4).** `usher backup` produces an artifact that `usher restore`
+  loads into a **rebuilt catalog** — not an empty database, which
+  `watch_states.title_id`'s `ON DELETE RESTRICT` makes impossible (ADR-0010).
+  PRD 08's own words, in its *Backup — the asymmetry is the point* section:
+  *a short restore plus a background rebuild*. ⚠️ **That citation read
+  `PRD 08:586` until 2026-08-25 and the line had moved** — K1 rewrote the
+  section — which is this repository's standing rule paying out: cite the
+  sentence, never the line. Verified against a scratch
+  `pgvector/pgvector:pg17` container in `tests/integration/test_restore.py`,
+  including the case that re-mints every title id between the backup and the
+  restore, which is what a bootstrap does and the only reason the natural keys
+  exist.
 - A test fails if any table in the schema is unclassified by the backup
   manifest.
 - `usher` has a documented secret-rotation command with a caller and a test.

@@ -335,6 +335,8 @@ uv run usher curate                          # one LLM generation; pool, rows, d
 
 uv run usher backup                          # one gzipped JSON Lines file of everything nothing rebuilds
 uv run usher backup --output /var/tmp/x.jsonl.gz   # default: usher-backup-<UTC>.jsonl.gz here
+uv run usher restore /var/tmp/x.jsonl.gz     # merge it back, in one transaction
+uv run usher restore /var/tmp/x.jsonl.gz --dry-run   # the identical report, committing nothing
 
 uv sync --extra embedding                    # optional: fastembed, 167 MiB, no torch
 ```
@@ -381,6 +383,20 @@ survives a bootstrap boundary. **The artifact carries no key**:
 a different `USHER_SECRET_KEY` restores credentials nobody can decrypt, and the
 command prints that sentence on every run. Counted read-only on 2026-08-25, the
 whole thing is **14,259 rows** on this deployment.
+
+⚠️ **`usher restore` is not "load a database", and its normal target is not an
+empty one.** `watch_states.title_id` is `ON DELETE RESTRICT`, so into an empty
+catalog the load-bearing table's every row fails its foreign key. The order is
+PRD 08's own: rebuild the catalog (`bootstrap --phase all`, `sync`, `work`),
+then restore the precious rows on top of it. It refuses four things before any
+write — an unreadable or truncated artifact, a `schema_revision` that is not
+**the database's** (never `code_head_revision()`), a table the manifest does
+not classify, and unresolved references collected across the whole file and
+reported together — and it does the whole file in **one transaction with one
+commit at the end**, so an unresolved reference in the last row rolls back the
+first. The report separates *written*, *skipped as already present* and
+*refused*, and `--dry-run` prints the identical report and commits nothing.
+Restoring the same artifact twice is a no-op on the second run.
 
 **Nothing runs `usher similar --rebuild` for you**, and that is the one
 freshness gap in the project: a title's neighbours go stale when some *other*

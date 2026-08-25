@@ -8183,3 +8183,149 @@ What is still unmeasured is the same thing round 1 disclosed: no **consumer**
 of the stamp, the ordering or the references exists yet, so every one of these
 cases asserts what the producer wrote and nothing asserts that a restore reads
 it the same way. K4 is where that becomes checkable.
+
+## M10 K4 — `usher restore`, and three plants the fixture had to be rebuilt for (2026-08-25)
+
+**16 mutations, 14 killed, 2 controls surviving every gate step, 0 unintended
+survivors, 0 BAD-ANCHOR.** Harness `/var/tmp/k4/sweep.py` with its plant list
+in `/var/tmp/k4/plants.py`, both outside the tree; every substitution's anchor
+count asserted to be exactly **1** before the edit landed, a `cp` backup per
+file, and the restore verified by `sha256sum` after **every** plant — all 16
+byte-identical. `__pycache__` cleared under `src/` **and** `tests/` before each
+run and `PYTHONDONTWRITEBYTECODE=1` in the subprocess environment, which is the
+defence the `(size, mtime)` collision needs at 8.4 s a run.
+
+**Selection**, diffed against the commit's own file list first: the four files
+that carry assertions about restore behaviour —
+`tests/unit/test_services_restore.py`, `tests/unit/test_cli_restore.py`,
+`tests/unit/test_cli_errors.py` (the argv table and the boundary sweep) and
+`tests/integration/test_restore.py`. Baseline **93 passed in 8.47 s**.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the commit moved inside the per-table loop | KILLED | **6, across both files** |
+| P2 the service keeps only the first refusal per table | KILLED | 2 |
+| P3 the repository keeps only the first unresolved reference | KILLED | **1, and only the count case** |
+| P4 the stamp read from `code_head_revision()` rather than the database | KILLED | **1, and only the arm that moves the database** |
+| P5 `--dry-run` commits | KILLED | 2 |
+| P6 the `media_items` link written over one the target already holds | KILLED | 2 |
+| P7 `llm_calls`/`search_queries` inserted without `ON CONFLICT DO NOTHING` | KILLED | 1 |
+| P8 a source under a name another source holds inserted rather than refused | KILLED | 1 |
+| P9 the unknown-table refusal never fires | KILLED | 2 |
+| P10 the watch-state upsert reports every conflicting row as written | KILLED | 1 |
+| P11 a row whose key set is not the table's is bound rather than refused | KILLED | 1 |
+| P12 the `restore` `_dispatch` arm deleted | KILLED | 5 |
+| P13 every unresolved reference refuses, ignoring the per-table `NULL` rule | KILLED | 1 |
+| P14 the report folds `skipped` into `written` | KILLED | 4 |
+| C1 *control* — the report's two independent keyword arguments swapped | SURVIVED, all five gate steps | — |
+| C2 *control* — `_decode`'s title and episode arms swapped | SURVIVED, all five gate steps | — |
+
+🔴 **P1 is the plant the whole task is about, and it is the one a rolled-back
+integration fixture cannot see.** *"Refuses rather than half-applies"* is a
+claim about **committed** state, and `tests/integration/`'s standard `session`
+fixture is a connection-bound transaction that is rolled back — so inside it a
+service that never committed and a service that committed and had its work
+discarded are the same observation. `test_restore.py` therefore commits for
+real on an engine of its own, reads every assertion on a **second** session,
+and cleans up in foreign-key order (`test_watch_routes.py`'s commit probe is
+the precedent). Planted before the implementation existed and again in the
+sweep: the headline case fails on `a watch state landed even though another row
+in the same file was refused`.
+
+**P2 and P3 are two spellings of one defect and only one case sees both**,
+which is the reason both are in the list. *Keeping the first refusal per file*
+(the service) and *keeping the first per table* (the repository) are different
+edits, and a fixture whose refusals all sit in one table cannot tell them
+apart. `test_every_refusal_is_collected_rather_than_the_first` spreads three
+refusals over two tables against a fake and dies on P2; the integration case
+puts three unresolvable titles in one `watch_states` batch against a real
+catalog and dies on both. **Both assert `len(refused) == 3` and not
+`refused != ()`** — a presence assertion is satisfied by an implementation that
+keeps exactly one, and the plan's instruction to assert the *number* is what
+these two plants measure.
+
+🔴 **P4 is the plant that says which of two equal strings is being read, and
+the first case written for it could not.**
+`test_a_schema_mismatch_names_both_revisions_and_follows_the_database` plants
+`m09e` into the **header** and asserts the message names it and the database's
+revision. That case survives P4 completely: on a healthy container the
+database's revision *is* `code_head_revision()`, so both implementations
+compare `m09e` against the same string and both refuse with the same message.
+What kills P4 is the sibling written afterwards,
+`test_the_stamp_the_refusal_compares_is_the_databases_and_not_the_codes`, which
+moves the **database** to `m09e` inside the suite's rolled-back `session` and
+stamps the artifact with the code's own head — so an implementation reading the
+code sees two equal strings and does not refuse at all. **The two revisions are
+the wrong way round from the first case on purpose, and that is the whole
+difference between a case about the refusal and a case about the comparison.**
+Same family as K3's round-2 R4, one task later and in the consuming direction:
+*when two expressions are equal by construction in every fixture, an assertion
+naming one of them is an assertion about neither.*
+
+**P8 is the refusal the schema cannot make.** Measured on the live schema
+2026-08-25, `pg_constraint` for `sources` holds only `pk_sources PRIMARY KEY
+(id)` and the count of unique indexes on `name` is **0** — so `ON CONFLICT
+(name)` would not compile there and *two sources pointing at one server* is a
+state Postgres permits. Contrast `users`, which really does have
+`uq_users_name` and merges in one clause. The case asserts the constraint's
+**absence** out of `pg_index` before relying on it, because an absence that has
+quietly become a presence would make it pass for the wrong reason, and it
+carries a positive control: the same artifact against a target that does not
+hold the name lands the source.
+
+**P14's blast radius is the argument for three counts rather than one.**
+Folding `skipped` into `written` fails **four** cases across both files — the
+idempotency case, the `media_items` merge, the household-adoption case and the
+unit report case — because every one of them is written about a *distinction*
+between the two numbers rather than about their sum. *"Restored 9 rows"* over
+an artifact holding 50 is the failure this command exists to make visible, and
+that is what the four cases are collectively pinning.
+
+**Both controls, each measured against every gate step separately:**
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 the report's `written=` and `skipped=` keyword arguments swapped | PASS | PASS | PASS | PASS (12/0) | PASS |
+| C2 `_decode`'s `_TITLE_KEYS` and `_EPISODE_KEYS` arms swapped | PASS | PASS | PASS | PASS (12/0) | PASS |
+
+C1's equivalence is a fact about the language rather than about what the tools
+look at: they are keyword arguments to a `dataclass` constructor, so their
+order in the call decides nothing, and they are two independent tallies over
+two disjoint sets of rows with neither computed from the other. `_ledger_row`'s
+`tokens_in`/`tokens_out` control is the precedent. C2's is a fact about the
+data: `_TITLE_KEYS` and `_EPISODE_KEYS` are disjoint frozensets, so no object
+can match both arms and the order between them cannot decide anything. Neither
+is an `__all__` reorder (`RUF022` rejects those) and neither is a
+positional-argument reorder.
+
+**And two defects the sweep did not find, because something else found them
+first — both worth more than a plant.**
+
+🔴 **`JSONDecodeError.lineno` is `1` for every damaged line in this file.** The
+first spelling of refusal 1 reported `exc.lineno`, which is the position inside
+the *one-line string* handed to `json.loads` — so a message about the
+four-thousandth row would have sent an operator to the header. Found by reading
+the code back rather than by a plant, and closed by
+`test_the_damaged_line_is_named_by_its_position_in_the_file`, which asserts
+`json.loads("not json").lineno == 1` as its own premise before asserting the
+message names line 4. **A number that is right for one input and wrong for
+every other is not something a sweep over a single-row fixture can see.**
+
+⚠️ **`(carried,) = await repository.carry("users")` passed alone and failed in
+the whole-suite run**, with `ValueError: too many values to unpack`.
+`tests/integration/` shares one session-scoped container and several files in
+it commit, so `users` is not empty when a case runs — the unpacking was a claim
+about the *neighbours*, not about the column set it was written for. Repaired
+to a `next(... if row["name"] == ...)`. This is *"a suite run one directory at
+a time is not the suite"* arriving through a shared **container** rather than
+through global state in the process.
+
+⚠️ **And one hazard the harness's own rule caught, from the other side.**
+Four `tests/unit/test_bounded_column_ledger.py` cases failed a whole-suite run
+with a `SyntaxError` out of `ast.parse` — because that ledger AST-scans `src/`
+from disk and a source file was being edited while the run was in flight. Not a
+defect and not a flake: it is CLAUDE.md's *"a mutation sweep mutates the working
+tree in place, so nothing else may use that tree while it runs"* rule with the
+two roles swapped, and the general form is **any check that reads `src/` off
+disk makes the whole tree single-writer for the length of the run**, not just
+the sweep harness.

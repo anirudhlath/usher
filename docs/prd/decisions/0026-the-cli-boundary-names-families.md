@@ -99,12 +99,17 @@ stack *because* the stack is one flag away.
 - **`SystemExit` passes through untouched**, and that is free rather than
   arranged: it is a `BaseException` and the handlers name only `Exception`
   subclasses. Pinned anyway, because "free" stops being true the moment
-  somebody widens the tuple — and five places in `cli.py` exit with a message
-  chosen for the failure it describes: `_as_uuid`, the semantic-search guard,
-  `similar`'s cross-argument rule, and both of M8 `usher curate`'s (no LLM
-  configured, and a generation that did not happen). It was three when this
-  ADR was written; the mechanism is what the bullet is about, and the count is
-  restated rather than left stale.
+  somebody widens the tuple — and **eleven** places in `cli.py` exit with a
+  message chosen for the failure they describe, measured 2026-08-25 as
+  `grep -n "raise SystemExit" src/usher/cli.py` minus `main`'s own three and
+  minus `_eval`'s numeric exit: `_as_uuid`, the semantic-search guard,
+  `similar`'s cross-argument rule, `_eval`'s two, M10's `_sync` failed-run
+  exit, both of M8 `usher curate`'s (no LLM configured, and a generation that
+  did not happen), and both of M10 K4's `usher restore` (a refused artifact,
+  and a run in which some row could not be restored). It was three when this
+  ADR was written and five at M10's K3; **the mechanism is what the bullet is
+  about, the count has now drifted twice, and it is restated with the command
+  that measured it** rather than left to drift a third time.
 - **The parametrised case runs over the parser's own subcommand list**, so a
   command added without a row in the table fails rather than quietly sitting
   outside the boundary.
@@ -288,6 +293,17 @@ letting `usher bootstrap-status` answer "what state is my genome in?" with a
 stack, and `cli._curate` turns it into a sentence about last night's screen.
 Both are the per-command handling this ADR permits — a command that knows what
 the message *means* — as distinct from the per-command *boundary* it rejects.
+✅ **M10's K4 is the third and it is the clearest example of the distinction.**
+`cli._restore` catches `RestoreRefused` — a type only `usher restore` can be
+handed, raised about a *file* rather than about an upstream — and renders it
+as one line. It is deliberately **not** a tenth member of `OPERATOR_ERRORS`:
+the tuple's members are families several commands can meet, and a family with
+exactly one raiser and exactly one consumer is a sentence that command owns.
+It also catches `RepositoryConflict` from the merge for the opposite reason —
+that family *is* in the tuple's excluded set precisely because most of its
+raise sites are tripwires for bugs in this project's own code, and translating
+it here is what keeps those stacks while giving a damaged artifact its
+sentence.
 
 **The one cost, named rather than discovered later.**
 `EmbySessionClient`/`EmbySourceAdapter` raise `PortUnavailable("this source

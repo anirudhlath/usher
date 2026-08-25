@@ -30,6 +30,9 @@ from usher.ports.repository._results import (
 from usher.ports.repository.backup import (
     BackupRepository,
     CarriedRow,
+    RestoreRefusal,
+    RestoreRepository,
+    TableOutcome,
 )
 from usher.ports.repository.bulk import (
     AliasWriteResult,
@@ -156,6 +159,8 @@ __all__ = [
     "RawPayloadStore",
     "RecentWatch",
     "RecurringPerson",
+    "RestoreRefusal",
+    "RestoreRepository",
     "RowProviderSettingsRepository",
     "ScoredNeighbor",
     "SearchQueryRecord",
@@ -164,6 +169,7 @@ __all__ = [
     "StoredEmbedding",
     "StoredTaste",
     "SyncRunRepository",
+    "TableOutcome",
     "TasteRepository",
     "TitleEmbeddingRepository",
     "TitleEmbeddingUpsert",

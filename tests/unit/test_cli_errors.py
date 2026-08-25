@@ -97,6 +97,10 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
     "curate": ["curate"],
     "push": ["push"],
     "backup": ["backup"],
+    # A positional, and it names a file that need not exist: every dispatch
+    # coroutine is patched to raise before the path is read, which is what
+    # makes this a case about the *boundary* rather than about the artifact.
+    "restore": ["restore", "usher-backup.jsonl.gz"],
 }
 
 

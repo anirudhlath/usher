@@ -1,10 +1,61 @@
-"""Reading the precious set out, with every reference rewritten on the way.
+"""Reading the precious set out, and merging it back in.
 
-Implements `BackupRepository` (`usher.ports.repository`). It is the one
-place in `src/` that joins K1's *which tables* to K2's *what a reference
-is*, and it is a read path only -- K4's restore is the other direction and
-is a different shape (it resolves against the target, merges for the one
-`PARTIAL` entry, and refuses on a stamp mismatch).
+Implements `BackupRepository` and `RestoreRepository`
+(`usher.ports.repository`). It is the one place in `src/` that joins K1's
+*which tables* to K2's *what a reference is*, in both directions: the read
+half rewrites every reference into a natural key on the way out, and the
+write half resolves every natural key against **this** catalog on the way
+back in.
+
+## The merge rules, and why "insert" is wrong for five of the eight
+
+| table | rule |
+|---|---|
+| `users` | insert if the name is absent; otherwise every reference adopts the id the target holds |
+| `sources` | insert if the id is absent; **refuse** if a *different* source holds that name |
+| `source_credentials` | insert on `ref`, `DO NOTHING`; refuse if its source is not here |
+| `watch_states` | upsert on `uq_watch_states_user_title` / `uq_watch_states_user_episode` |
+| `llm_calls` | insert on `id`, `DO NOTHING` -- append-only, so one ledger restores twice safely |
+| `row_provider_settings` | upsert on `slug_prefix`, the one carried table with no id in it |
+| `search_queries` | insert on `id`, `DO NOTHING`, `clicked_title_id` nulled where unresolved |
+| `media_items` | update the two links **only where the target's `title_id` is `NULL`** |
+
+⚠️ **`sources`' refusal cannot lean on the database, and that asymmetry is
+easy to assume away.** `uq_users_name` is a real unique constraint, so
+`users` merges with `ON CONFLICT (name) DO NOTHING` and Postgres does the
+work. Measured on the live schema 2026-08-25, `pg_constraint` for `sources`
+holds **only** `pk_sources PRIMARY KEY (id)` and the unique-index-on-name
+count is **0** -- so *"two sources pointing at one server"* is a state this
+schema permits and the refusal has to be an explicit read. It is
+`_existing_sources` plus the branch in `_merge_sources`, and it has a case
+of its own because nothing else in the system would notice.
+
+**`media_items`' asymmetry is K1's argument, spelled as a `WHERE`.** The
+table carries no provenance column, so an artifact cannot carry only the
+operator's manual resolutions -- it carries every link, and the merge is
+what keeps that safe. A link the match ladder would have re-derived is
+re-derived to the same answer and skipped; a link it would not re-derive is
+exactly the operator's judgement and lands on the `NULL`. Writing over a
+link the target already holds is the one thing that would lose information
+in both directions at once.
+
+## One statement per row, and the number that makes it affordable
+
+The writes below are one statement per row rather than a batched `VALUES`
+join, which is the opposite of what `bulk.py` and `replace_genres` do. The
+reason is the report: `written` / `skipped` / `refused` is the artefact this
+whole command exists for -- *"restored 9 rows"* over an artifact holding 50
+is the failure it is built to make visible -- and a per-row verdict needs a
+per-row `RETURNING`. `text()` executemany does not aggregate `RETURNING`
+rows and `rowcount` over it is the driver's business rather than a promise.
+
+The cost is bounded by the same measurement the read half is:
+**14,259 rows** on the deployment this project runs against, re-counted
+read-only on 2026-08-25, of which 10,819 are `media_items` and 3,347 are
+`watch_states`. The resolution that precedes them is *not* per row -- it is
+one `resolve_natural_keys` round trip per kind per table, which is the N+1
+`db-and-sql.md` records as the thing to avoid, and it is the half that
+scales with the catalog rather than with the artifact.
 
 ## The column list is derived, in both of the two ways a table can be carried
 
@@ -45,13 +96,20 @@ boundary at all.
 
 ## What is not here
 
-**No decryption.** `source_credentials.ciphertext` is read as bytes and
-handed on as bytes; `build_cipher` is not imported. See the port's
-docstring for the consequence, which `usher backup` prints on every run.
+**No decryption and no re-encryption.** `source_credentials.ciphertext` is
+read as bytes and written back as bytes; `build_cipher` is not imported in
+either direction. See the port's docstring for the consequence, which
+`usher backup` prints on every run and which restore inherits: an artifact
+restored into a deployment holding a different `USHER_SECRET_KEY` restores a
+credential nothing can decrypt.
 
 **No `count(*)`.** The header's per-table counts are `len()` of what was
-read, because a count taken separately can disagree with the body and K4
-reads those counts as a truncation check.
+read, because a count taken separately can disagree with the body and
+restore reads those counts as a truncation check.
+
+**No commit.** Every repository in this package leaves the transaction to
+its caller, and here that is the design rather than the convention:
+`RestoreService` commits once, at the end, over the whole file.
 
 ⚠️ **`from usher.db import models` is load-bearing rather than tidy.** Every
 other repository in this package imports the two or three mapped classes it
@@ -64,29 +122,52 @@ reason. Found by running the unit case, which is the only context where
 nothing else has imported the models first.
 """
 
+import datetime as dt
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final, assert_never
 
+import sqlalchemy as sa
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db import models  # noqa: F401  -- registers every table on `Base.metadata`
+from usher.db.backup_identity import (
+    UNRESOLVED_RULE,
+    Unresolved,
+    UnresolvedRule,
+    resolve_episodes,
+    resolve_titles,
+)
 from usher.db.backup_manifest import MANIFEST, BackupClass, tables_of
 from usher.db.base import Base
 from usher.db.migrations.status import database_revision
+from usher.db.repositories._errors import refusals_as_conflict
+from usher.db.repositories.episode import PostgresEpisodeRepository
+from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import TitleKind
 from usher.ports.errors import RepositoryNotFound
-from usher.ports.repository import BackupRepository, CarriedRow, EpisodeReference, TitleReference
+from usher.ports.repository import (
+    BackupRepository,
+    CarriedRow,
+    EpisodeReference,
+    RestoreRefusal,
+    RestoreRepository,
+    TableOutcome,
+    TitleReference,
+)
 
 __all__ = [
     "CARRIED_RAW",
     "REWRITTEN",
     "PostgresBackupRepository",
+    "PostgresRestoreRepository",
     "carried_tables",
+    "restored_columns",
     "unaccounted_reference_columns",
 ]
 
@@ -170,6 +251,25 @@ def carried_tables() -> tuple[str, ...]:
     that check the accounting below need it without a session.
     """
     return tables_of(BackupClass.PRECIOUS) + tables_of(BackupClass.PARTIAL)
+
+
+def restored_columns(table: str) -> tuple[str, ...]:
+    """The keys one carried table's rows hold in the artifact.
+
+    Column names, except where the artifact carries a natural key instead of
+    an id -- `title` for `title_id`, `user` for `user_id`. Derived from
+    `_carried_columns` and `REWRITTEN` rather than listed, so the writer and
+    the reader cannot disagree about what a row holds.
+
+    A module-level function as well as a method for `carried_tables`' reason:
+    the unit case that pins a fake's declared columns against the real ones
+    needs it without a session, and a fake that declared a column set nobody
+    checked would make every case built on it a test of the fake.
+    """
+    return tuple(
+        REWRITTEN[column].key if column in REWRITTEN else column
+        for column in _carried_columns(table)
+    )
 
 
 def _carried_columns(table: str) -> tuple[str, ...]:
@@ -446,3 +546,561 @@ def _refuse_missing(table: str, wanted: set[uuid.UUID], found: set[uuid.UUID]) -
             f"a carried row references {len(missing)} {table} row(s) this database "
             f"does not hold: {sorted(str(one) for one in missing)[:5]}"
         )
+
+
+#: The artifact's key back to the column it stands for, which is `REWRITTEN`
+#: read the other way. Built here rather than spelled out, so a fifth
+#: rewritten column is restored by the same code that carries it.
+_COLUMN_FOR_KEY: Final[MappingProxyType[str, _Rewrite]] = MappingProxyType(
+    {rule.key: _Rewrite(rule.kind, column) for column, rule in REWRITTEN.items()}
+)
+
+#: The unresolved rule for a table the map does not name. `REFUSE` rather
+#: than `NULL`, because the two are not symmetric: a `NULL` written into a
+#: column that permits it is a decision `backup_identity` makes per table with
+#: an argument attached, and a `NULL` written into one that does not is a
+#: foreign-key error wearing an operator report's clothes.
+_DEFAULT_UNRESOLVED_RULE: Final = UnresolvedRule.REFUSE
+
+#: The `watch_states` columns an upsert adopts from the artifact, and the ones
+#: it compares to decide whether anything changed. `id` is absent because the
+#: conflict target is `(user_id, <target>)` and the row the target already
+#: holds keeps its own primary key; `updated_at` is absent because
+#: `trg_watch_states_set_updated_at` owns it on the update path and assigning
+#: it there would be a value nothing can observe (`db-and-sql.md`).
+_WATCH_STATE_MERGED: Final[tuple[str, ...]] = (
+    "position_seconds",
+    "runtime_seconds",
+    "played",
+    "play_count",
+    "last_played_at",
+    "origin",
+)
+
+
+class PostgresRestoreRepository(RestoreRepository):
+    """Merges one artifact's rows into this database, resolving as it goes.
+
+    Holds a `PostgresTitleRepository` and a `PostgresEpisodeRepository` rather
+    than writing the resolution SQL again: `resolve_natural_keys` is the read
+    K2 built for exactly this, both arms of its contract suite spell the same
+    ladder, and a second copy here would be a second definition of *"what is
+    this title called"* -- which is the failure `_FINGERPRINT_SQL` and the
+    genre vocabulary have each produced once.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._titles = PostgresTitleRepository(session)
+        self._episodes = PostgresEpisodeRepository(session)
+
+    def restored_tables(self) -> tuple[str, ...]:
+        return carried_tables()
+
+    def restored_columns(self, table: str) -> tuple[str, ...]:
+        return restored_columns(table)
+
+    def refusal_for_table(self, table: str) -> str | None:
+        if table in set(carried_tables()):
+            return None
+        if table not in MANIFEST:
+            return (
+                f"{table} is not a table usher.db.backup_manifest classifies at all, "
+                "which is what an artifact written against a later schema looks like"
+            )
+        entry = MANIFEST[table]
+        return (
+            f"the manifest classifies {table} {entry.kind.value}, so restore never "
+            f"writes it ({entry.restore.value})"
+        )
+
+    async def schema_revision(self) -> str | None:
+        # `database_revision`, never `code_head_revision()`: see the port.
+        return await database_revision(self._session)
+
+    async def apply(self, table: str, rows: Sequence[Mapping[str, object]]) -> TableOutcome:
+        refusal = self.refusal_for_table(table)
+        if refusal is not None:
+            raise KeyError(refusal)
+        prepared, refused = await self._prepare(table, rows)
+        # One SAVEPOINT for the table rather than one per row: a refused row
+        # here is a damaged artifact, the whole file is about to be rolled
+        # back either way, and 14,259 savepoints would be the cost of a
+        # distinction nothing acts on. ADR-0043's rule is what makes the
+        # wrapper non-optional -- `watch_states.position_seconds`,
+        # `llm_calls.cost_usd` and `search_queries.result_count` are all
+        # narrower than the value a hand-edited artifact can carry, and an
+        # untranslated write here would put those columns back in the
+        # `exposed-sqlalchemy` bucket that F9 emptied.
+        async with refusals_as_conflict(self._session, f"a restored {table} row is out of bounds"):
+            written, skipped, more = await self._merge(table, prepared)
+        return TableOutcome(written=written, skipped=skipped, refused=(*refused, *more))
+
+    async def _merge(
+        self, table: str, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+        """One table's merge rule. A table with no arm raises rather than
+        falling through to an insert: the manifest's precious set is what
+        `restored_tables` answers, so a table added to K1 and not to this
+        `match` is a loud failure at the moment it is first restored, never a
+        row written under a rule nobody chose.
+        """
+        match table:
+            case "users":
+                return await self._merge_users(rows)
+            case "sources":
+                return await self._merge_sources(rows)
+            case "source_credentials":
+                return await self._merge_source_credentials(rows)
+            case "watch_states":
+                return await self._merge_watch_states(rows)
+            case "row_provider_settings":
+                return await self._merge_row_provider_settings(rows)
+            case "llm_calls" | "search_queries":
+                return await self._append(table, rows)
+            case "media_items":
+                return await self._merge_media_item_links(rows)
+            case _:
+                raise KeyError(
+                    f"usher.db.backup_manifest says restore writes {table} and "
+                    "PostgresRestoreRepository has no merge rule for it"
+                )
+
+    async def _merge_users(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+        """Insert on the name, which `uq_users_name` makes an identity.
+
+        Nothing adopts the artifact's `users.id` when the target already holds
+        the household: the id is carried so a restore into the *same* database
+        writes the row it came from, and every reference in the file travels as
+        the name, so a household the target already has is simply the one every
+        watch state resolves onto.
+        """
+        written = 0
+        for row in rows:
+            result = await self._session.execute(
+                text(_insert("users") + " ON CONFLICT (name) DO NOTHING RETURNING id"), row
+            )
+            written += len(result.all())
+        return written, len(rows) - written, ()
+
+    async def _merge_sources(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+        """Insert on the id, and refuse a name a *different* source holds.
+
+        ⚠️ **The refusal is an explicit read because the schema cannot make
+        it.** `sources` carries `pk_sources` and a `NOT NULL`/non-empty CHECK
+        on `name` and no unique index on `name` at all -- measured on the live
+        schema 2026-08-25, unique-index-on-name count **0** -- so an
+        `ON CONFLICT (name)` here would not compile and a silent insert would
+        leave two sources pointing at one server, which is a state an operator
+        has to resolve and nothing downstream can.
+        """
+        if not rows:
+            return 0, 0, ()
+        held = await self._existing_sources(rows)
+        written = skipped = 0
+        refused: list[RestoreRefusal] = []
+        for row in rows:
+            if row["id"] in held.values():
+                skipped += 1
+                continue
+            owner = held.get(row["name"])
+            if owner is not None:
+                refused.append(
+                    RestoreRefusal(
+                        table="sources",
+                        keys=(f"name={row['name']}", f"id={row['id']}"),
+                        reason=(
+                            f"a different source ({owner}) already has this name, and two "
+                            "sources pointing at one server is a state an operator has to "
+                            "resolve rather than one a restore may create"
+                        ),
+                    )
+                )
+                continue
+            await self._session.execute(text(_insert("sources")), row)
+            written += 1
+        return written, skipped, tuple(refused)
+
+    async def _existing_sources(self, rows: Sequence[Mapping[str, Any]]) -> dict[str, uuid.UUID]:
+        """`name -> id` for every source the target already holds under one of
+        this artifact's ids or names. One statement, never one per row."""
+        found = (
+            await self._session.execute(
+                text("SELECT id, name FROM sources WHERE id = ANY(:ids) OR name = ANY(:names)"),
+                {
+                    "ids": [row["id"] for row in rows],
+                    "names": [row["name"] for row in rows],
+                },
+            )
+        ).all()
+        return {str(row.name): row.id for row in found}
+
+    async def _merge_source_credentials(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+        """Insert on `ref`, and refuse a credential whose source is not here.
+
+        A source refused by the rule above leaves its credential with a
+        `source_id` naming nothing, and `fk_source_credentials_source_id_sources`
+        would answer that with an `IntegrityError` -- a stack, about the wrong
+        row, instead of the sentence naming the source that was actually the
+        problem. So the absence is read and reported rather than provoked.
+
+        The ciphertext is written back exactly as carried. This repository
+        holds no key and does not re-encrypt, which is the sentence
+        `usher backup` prints on every run.
+        """
+        if not rows:
+            return 0, 0, ()
+        present = {
+            row.id
+            for row in (
+                await self._session.execute(
+                    text("SELECT id FROM sources WHERE id = ANY(:ids)"),
+                    {"ids": [row["source_id"] for row in rows]},
+                )
+            ).all()
+        }
+        written = skipped = 0
+        refused: list[RestoreRefusal] = []
+        for row in rows:
+            if row["source_id"] not in present:
+                refused.append(
+                    RestoreRefusal(
+                        table="source_credentials",
+                        keys=(f"ref={row['ref']}", f"source_id={row['source_id']}"),
+                        reason="the source this credential belongs to is not in this database",
+                    )
+                )
+                continue
+            result = await self._session.execute(
+                text(_insert("source_credentials") + " ON CONFLICT (ref) DO NOTHING RETURNING ref"),
+                row,
+            )
+            if result.all():
+                written += 1
+            else:
+                skipped += 1
+        return written, skipped, tuple(refused)
+
+    async def _merge_watch_states(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+        """Upsert on whichever of the two unique constraints the row's target
+        names.
+
+        `ck_watch_states_exactly_one_target` is `num_nonnulls(title_id,
+        episode_id) = 1`, so every row has exactly one of them and the arbiter
+        follows from the row rather than being a choice: a title row conflicts
+        on `uq_watch_states_user_title` and an episode row on
+        `uq_watch_states_user_episode`. A single statement naming one of them
+        would silently insert duplicates of the other kind, because a UNIQUE
+        constraint over a nullable column does not collide on `NULL`.
+
+        **The artifact wins on a conflict**, which is the whole shape of this
+        command: the catalog was rebuilt by importers and the household's
+        history is the thing no importer reproduces. The `IS DISTINCT FROM`
+        guard is not about who wins -- it is what makes the report honest, so a
+        second run of the same file reports `skipped` rather than claiming to
+        have written 3,347 rows that did not move.
+        """
+        written = skipped = 0
+        for row in rows:
+            arbiter = "user_id, title_id" if row["title_id"] is not None else "user_id, episode_id"
+            result = await self._session.execute(text(_upsert_watch_state(arbiter)), row)
+            if result.all():
+                written += 1
+            else:
+                skipped += 1
+        return written, skipped, ()
+
+    async def _merge_row_provider_settings(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+        """Upsert on `slug_prefix`, the one carried table with no id in it.
+
+        `enabled` is the operator's decision and `updated_at` is when they made
+        it; the guard compares only the first, because a re-restored artifact
+        carrying the same choice under a later stamp has not changed anything
+        an operator would call a change.
+        """
+        written = skipped = 0
+        for row in rows:
+            result = await self._session.execute(text(_UPSERT_ROW_PROVIDER_SETTING), row)
+            if result.all():
+                written += 1
+            else:
+                skipped += 1
+        return written, skipped, ()
+
+    async def _append(
+        self, table: str, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+        """`INSERT ... ON CONFLICT (id) DO NOTHING`, for the two append-only
+        tables.
+
+        `llm_calls` is a spend ledger: every row is a call that was made and
+        billed, nothing ever updates one, and *"restoring the same ledger twice
+        is safe"* is exactly what `DO NOTHING` buys. `search_queries` is the
+        same shape -- a record of something that already happened -- and its
+        one reference is the only nullable half of either: an unresolved
+        `clicked_title_id` is written `NULL` rather than refusing the row,
+        because the FK is already `ON DELETE SET NULL` and the analytic value
+        is the query text and the outcome.
+        """
+        written = 0
+        for row in rows:
+            result = await self._session.execute(
+                text(_insert(table) + " ON CONFLICT (id) DO NOTHING RETURNING id"), row
+            )
+            written += len(result.all())
+        return written, len(rows) - written, ()
+
+    async def _merge_media_item_links(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+        """Write the two links **only where the target's `title_id` is NULL**.
+
+        K1's asymmetry argument, as a `WHERE`. `media_items` carries no
+        provenance column, so an artifact cannot carry only the operator's
+        manual resolutions -- it carries every link. A link the match ladder
+        would have re-derived is re-derived to the same answer; a link it would
+        not is the operator's judgement, and it lands on the row the ladder
+        left unmatched. Writing over a link the target already holds is the one
+        move that can lose information on both sides at once.
+
+        **`skipped` here covers two states and says so.** A row the target has
+        already linked, and a row the next source walk has not created yet --
+        `(source_id, external_id)` is `uq_media_items_source_external`, so the
+        update simply matches nothing. Neither is a refusal: the first is the
+        rule working and the second is an artifact that is ahead of the walk.
+        """
+        written = 0
+        for row in rows:
+            result = await self._session.execute(text(_UPDATE_MEDIA_ITEM_LINKS), row)
+            written += len(result.all())
+        return written, len(rows) - written, ()
+
+    async def _prepare(
+        self, table: str, rows: Sequence[Mapping[str, object]]
+    ) -> tuple[list[dict[str, Any]], tuple[RestoreRefusal, ...]]:
+        """Every reference in one table resolved against this catalog, in one
+        round trip per kind rather than one per row.
+
+        The resolution has to happen per table rather than once for the file,
+        because `users` is applied first and every `user` key in the tables
+        after it resolves against the row that insert just wrote. That
+        ordering is `restored_tables`' whole reason for being ordered.
+        """
+        columns = Base.metadata.tables[table].columns
+        titles = await resolve_titles(self._titles, _references(rows, TitleReference))
+        episodes = await resolve_episodes(self._episodes, _references(rows, EpisodeReference))
+        users = await self._user_ids(_named_users(rows))
+        rule = UNRESOLVED_RULE.get(table, _DEFAULT_UNRESOLVED_RULE)
+        prepared: list[dict[str, Any]] = []
+        refused: list[RestoreRefusal] = []
+        for row in rows:
+            params: dict[str, Any] = {}
+            refusal: RestoreRefusal | None = None
+            for key, value in row.items():
+                rewrite = _COLUMN_FOR_KEY.get(key)
+                if rewrite is None:
+                    params[key] = _coerce(columns[key], value)
+                    continue
+                answer = _resolved(value, titles, episodes, users)
+                if isinstance(answer, Unresolved):
+                    if rule is UnresolvedRule.NULL:
+                        params[rewrite.key] = None
+                        continue
+                    refusal = RestoreRefusal(
+                        table=table,
+                        keys=answer.keys_tried,
+                        reason=f"this database holds no {rewrite.kind.value} under any of these",
+                    )
+                    break
+                if isinstance(answer, _UnknownUser):
+                    # Never `NULL`: `watch_states.user_id` and
+                    # `search_queries.user_id` are both `NOT NULL`, so the
+                    # `NULL` rule cannot apply to a household however the table
+                    # is classified -- and a household the `users` pass did not
+                    # create is a file that was edited by hand.
+                    refusal = RestoreRefusal(
+                        table=table,
+                        keys=(f"name={answer.name}",),
+                        reason="this database holds no household under that name",
+                    )
+                    break
+                params[rewrite.key] = answer
+            if refusal is not None:
+                refused.append(refusal)
+                continue
+            prepared.append(params)
+        return prepared, tuple(refused)
+
+    async def _user_ids(self, names: set[str]) -> dict[str, uuid.UUID]:
+        """`users.name -> id`, which `uq_users_name` makes an identity.
+
+        Read for the names actually referenced rather than by loading the
+        table, for `_users`' reason one class up: *"there is only ever one
+        household"* is a property of this deployment and not of the schema.
+        """
+        if not names:
+            return {}
+        rows = (
+            await self._session.execute(
+                text("SELECT id, name FROM users WHERE name = ANY(:names)"),
+                {"names": sorted(names)},
+            )
+        ).all()
+        return {str(row.name): row.id for row in rows}
+
+
+@dataclass(frozen=True, slots=True)
+class _UnknownUser:
+    """A household name the target does not hold.
+
+    A type of its own rather than `Unresolved`, because `Unresolved` carries a
+    `TitleReference | EpisodeReference` and a household is a bare string --
+    there is no reference to put in it, and widening that dataclass to admit
+    one would make `keys_tried` mean two things.
+    """
+
+    name: str
+
+
+def _resolved(
+    value: object,
+    titles: Mapping[TitleReference, uuid.UUID | Unresolved],
+    episodes: Mapping[EpisodeReference, uuid.UUID | Unresolved],
+    users: Mapping[str, uuid.UUID],
+) -> uuid.UUID | Unresolved | _UnknownUser | None:
+    """One carried reference, answered against this catalog.
+
+    **Matched on the value's own type rather than on `_Rewrite.kind`**, which
+    is the mirror of `services/backup.py::_encode` on the way out: the three
+    reference shapes are disjoint types, so the dispatch needs no discriminator
+    beside them and no narrowing assertion to satisfy one. A value that is none
+    of the three under a rewritten key is a decoder bug rather than an operator
+    condition, and `TypeError` keeps its stack accordingly.
+
+    A `None` reference stays `None` -- `watch_states.title_id` is null on
+    exactly the rows whose target is an episode, which
+    `ck_watch_states_exactly_one_target` requires, and
+    `search_queries.clicked_title_id` is null on every search nobody clicked
+    through.
+    """
+    match value:
+        case None:
+            return None
+        case TitleReference():
+            return titles[value]
+        case EpisodeReference():
+            return episodes[value]
+        case str():
+            found = users.get(value)
+            return _UnknownUser(value) if found is None else found
+        case _:
+            raise TypeError(
+                f"a rewritten column cannot hold {type(value).__name__}; "
+                "usher.services.restore decodes the three shapes this resolves"
+            )
+
+
+def _references[ReferenceT: (TitleReference, EpisodeReference)](
+    rows: Sequence[Mapping[str, object]], kind: type[ReferenceT]
+) -> list[ReferenceT]:
+    return [value for row in rows for value in row.values() if isinstance(value, kind)]
+
+
+def _named_users(rows: Sequence[Mapping[str, object]]) -> set[str]:
+    key = REWRITTEN["user_id"].key
+    return {str(row[key]) for row in rows if row.get(key) is not None}
+
+
+def _coerce(column: sa.Column[Any], value: object) -> object:
+    """One JSON scalar, as the type its column takes.
+
+    JSON has three scalar types and this schema has rather more, so the
+    artifact spells a UUID, a timestamp and a `NUMERIC` as strings
+    (`services/backup.py::_encode`) and something has to read them back.
+    That something is here rather than in `usher.services`, because *"what
+    type is this column"* is exactly the schema knowledge the third import
+    contract keeps out of that layer -- and it is driven off `Base.metadata`
+    rather than a per-table list, so a column added to a precious table in a
+    later milestone round-trips with no edit.
+
+    ⚠️ **`Decimal(str)` and not `float(str)`, and the column it matters on is
+    the one this project has already been bitten on.** `llm_calls.cost_usd` is
+    `NUMERIC(12, 8)`; `json.loads` has already turned every unquoted number
+    into a `float`, which is why the writer emits that column as text in the
+    first place, and reading it back as a `float` would put the round trip
+    back where `_encode`'s `:f` found it.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if isinstance(column.type, sa.Uuid):
+            return uuid.UUID(value)
+        if isinstance(column.type, sa.DateTime):
+            return dt.datetime.fromisoformat(value)
+        if isinstance(column.type, sa.Numeric):
+            return Decimal(value)
+    return value
+
+
+def _insert(table: str) -> str:
+    """`INSERT INTO <table> (<carried columns>) VALUES (<binds>)`.
+
+    Every fragment is a table or column name read off `MANIFEST` and
+    `Base.metadata`, never input, and `apply` has already refused a table the
+    manifest does not restore. Derived rather than transcribed for
+    `_carried_columns`' reason: a column added to a precious table is carried
+    by the next backup with no edit, and it has to be restored by the next
+    restore with none either.
+    """
+    columns = _carried_columns(table)
+    names = ", ".join(columns)
+    binds = ", ".join(f":{column}" for column in columns)
+    return f"INSERT INTO {table} ({names}) VALUES ({binds})"  # noqa: S608
+
+
+def _upsert_watch_state(arbiter: str) -> str:
+    """The upsert, with the conflict target the row's own target decides.
+
+    `RETURNING id` with the `WHERE` on the `DO UPDATE` is what separates
+    *written* from *skipped as already present*: a conflicting row whose
+    merged columns already equal the artifact's returns nothing at all.
+    """
+    assignments = ", ".join(f"{column} = excluded.{column}" for column in _WATCH_STATE_MERGED)
+    held = ", ".join(f"watch_states.{column}" for column in _WATCH_STATE_MERGED)
+    offered = ", ".join(f"excluded.{column}" for column in _WATCH_STATE_MERGED)
+    return (
+        f"{_insert('watch_states')} ON CONFLICT ({arbiter}) DO UPDATE SET {assignments} "
+        f"WHERE ({held}) IS DISTINCT FROM ({offered}) RETURNING id"
+    )
+
+
+#: `slug_prefix` is the primary key and `enabled` is the whole of the
+#: decision, so the guard compares that one column: an artifact re-restored
+#: under a later `updated_at` has not changed an operator's choice.
+_UPSERT_ROW_PROVIDER_SETTING: Final = (
+    "INSERT INTO row_provider_settings (slug_prefix, enabled, updated_at) "
+    "VALUES (:slug_prefix, :enabled, :updated_at) "
+    "ON CONFLICT (slug_prefix) DO UPDATE SET enabled = excluded.enabled, "
+    "updated_at = excluded.updated_at "
+    "WHERE row_provider_settings.enabled IS DISTINCT FROM excluded.enabled "
+    "RETURNING slug_prefix"
+)
+
+#: The `PARTIAL` entry's merge, and `AND title_id IS NULL` is the whole of it.
+#: `(source_id, external_id)` is `uq_media_items_source_external`, a real
+#: unique constraint, so the `WHERE` names at most one row.
+_UPDATE_MEDIA_ITEM_LINKS: Final = (
+    "UPDATE media_items SET title_id = :title_id, episode_id = :episode_id "
+    "WHERE source_id = :source_id AND external_id = :external_id AND title_id IS NULL "
+    "RETURNING id"
+)
