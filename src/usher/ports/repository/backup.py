@@ -144,12 +144,22 @@ class BackupRepository(ABC):
         distinction `usher.db.migrations.status.database_revision` already
         draws, and implementations are expected to *be* that function rather
         than to re-read the table. **One definition of "what revision is
-        this" in `src/`** matters here more than usual, because K4's refusal
-        compares this stamp against `code_head_revision()` and that is
-        precisely the comparison `api/routers/health.py::_check_migrations`
-        makes to answer 503 -- PRD 08's *"the app refuses to serve on a
-        schema mismatch rather than guessing"*. Two readers of one fact is
-        how a restore comes to accept what a running service would refuse.
+        this" in `src/`** matters here more than usual, because this is the
+        stamp `usher restore` writes into the artifact and
+        `RestoreRepository.schema_revision` is the value it later refuses
+        against -- and two readers of one fact is how a restore comes to
+        accept what a running service would refuse.
+
+        ⚠️ **This paragraph read *"K4's refusal compares this stamp against
+        `code_head_revision()`"* until 2026-08-25, and that was wrong in the
+        one direction that matters.** Restore compares the artifact's stamp
+        against the **database's** revision;
+        `api/routers/health.py::_check_migrations` is the thing that compares
+        the database against the code, and it answers 503. The two checks
+        share `database_revision` and nothing else, and the sentence had them
+        confused while `RestoreRepository.schema_revision` 130 lines below
+        stated the opposite -- a contradiction inside one module, which is
+        the drift the whole manifest design exists to stop.
         """
 
     @abstractmethod

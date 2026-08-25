@@ -344,10 +344,13 @@ class PostgresBackupRepository(BackupRepository):
 
     async def schema_revision(self) -> str | None:
         # `database_revision`, not a `SELECT version_num` written out here:
-        # K4's refusal compares this against `code_head_revision()` and that
-        # is the comparison `_check_migrations` already makes to answer 503.
-        # Two readers of one fact is how a restore comes to accept what a
-        # running service refuses.
+        # this stamp is what `usher restore` refuses against, and it refuses
+        # against the **database's** revision -- never `code_head_revision()`,
+        # which is `_check_migrations`' comparison and answers 503. Two
+        # readers of one fact is how a restore comes to accept what a running
+        # service refuses. (This comment named the wrong one of the two until
+        # 2026-08-25; `PostgresRestoreRepository.schema_revision` below is the
+        # consumer and has always been right.)
         return await database_revision(self._session)
 
     async def carry(self, table: str) -> tuple[CarriedRow, ...]:
@@ -615,7 +618,13 @@ class PostgresRestoreRepository(RestoreRepository):
         )
 
     async def schema_revision(self) -> str | None:
-        # `database_revision`, never `code_head_revision()`: see the port.
+        # `database_revision`, never `code_head_revision()`: the artifact has
+        # to fit *this database's* columns, and a container whose code is
+        # ahead of its database is a broken deployment `/health/ready` already
+        # reports. See `RestoreRepository.schema_revision` for the argument --
+        # and note that this pointer read "see the port" while the port's
+        # *other* method said the opposite, so a reader following it landed on
+        # the stale copy.
         return await database_revision(self._session)
 
     async def apply(self, table: str, rows: Sequence[Mapping[str, object]]) -> TableOutcome:
@@ -697,17 +706,42 @@ class PostgresRestoreRepository(RestoreRepository):
         `ON CONFLICT (name)` here would not compile and a silent insert would
         leave two sources pointing at one server, which is a state an operator
         has to resolve and nothing downstream can.
+
+        🔴 **The two maps are updated *inside* the loop, and the first version
+        of this method updated neither.** It read the target once before the
+        loop and compared every artifact row against that snapshot, so two
+        rows in one artifact carrying the same `name` under different ids both
+        passed both checks and both landed -- the restore creating, with an
+        empty `refused` list and an exit code of 0, exactly the state the
+        paragraph above says it may not create. Measured against a real
+        schema on 2026-08-25: `written={'sources': 2}`, two rows in the table,
+        and a report claiming success.
+
+        **The precondition is reachable rather than theoretical**, which is
+        what makes it a bug rather than a tidy-up. `PostgresSourceRepository.
+        add` guards `pk_sources` and nothing else, and there is no unique index
+        on the column, so two same-named sources are creatable through the
+        ordinary admin path -- and `usher backup` then carries both. The
+        artifact this restore refuses is one this project can itself produce.
+
+        **Keyed on the id as well as the name, because the name is not a key
+        here.** `_existing_sources` returns both directions for exactly that
+        reason: a target already holding two same-named sources collapses to
+        one entry in a `name -> id` map, and the id membership test built from
+        `.values()` would then miss the second one and drive an insert into a
+        primary-key violation -- a refusal with the wrong message, about the
+        wrong row.
         """
         if not rows:
             return 0, 0, ()
-        held = await self._existing_sources(rows)
+        by_id, by_name = await self._existing_sources(rows)
         written = skipped = 0
         refused: list[RestoreRefusal] = []
         for row in rows:
-            if row["id"] in held.values():
+            if row["id"] in by_id:
                 skipped += 1
                 continue
-            owner = held.get(row["name"])
+            owner = by_name.get(row["name"])
             if owner is not None:
                 refused.append(
                     RestoreRefusal(
@@ -722,12 +756,26 @@ class PostgresRestoreRepository(RestoreRepository):
                 )
                 continue
             await self._session.execute(text(_insert("sources")), row)
+            # The row this run just wrote is now one the target holds, and the
+            # next row of the same artifact has to see it. Both maps, because
+            # both checks above read one each.
+            by_id[row["id"]] = str(row["name"])
+            by_name[str(row["name"])] = row["id"]
             written += 1
         return written, skipped, tuple(refused)
 
-    async def _existing_sources(self, rows: Sequence[Mapping[str, Any]]) -> dict[str, uuid.UUID]:
-        """`name -> id` for every source the target already holds under one of
-        this artifact's ids or names. One statement, never one per row."""
+    async def _existing_sources(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[dict[uuid.UUID, str], dict[str, uuid.UUID]]:
+        """Every source the target already holds under one of this artifact's
+        ids or names, indexed both ways. One statement, never one per row.
+
+        **Both directions rather than one**, because neither column is a key
+        for the other: `id` is `pk_sources` and `name` is constrained by
+        nothing, so a `name -> id` map alone loses a row whenever the target
+        holds two sources under one name -- which is the very state this
+        table's merge rule exists to stop spreading.
+        """
         found = (
             await self._session.execute(
                 text("SELECT id, name FROM sources WHERE id = ANY(:ids) OR name = ANY(:names)"),
@@ -737,7 +785,15 @@ class PostgresRestoreRepository(RestoreRepository):
                 },
             )
         ).all()
-        return {str(row.name): row.id for row in found}
+        by_id = {row.id: str(row.name) for row in found}
+        # First one wins where the target holds two under one name: the
+        # refusal only has to name *a* source that already has it, and which
+        # of two an operator has to reconcile is their question, not this
+        # method's.
+        by_name: dict[str, uuid.UUID] = {}
+        for row in found:
+            by_name.setdefault(str(row.name), row.id)
+        return by_id, by_name
 
     async def _merge_source_credentials(
         self, rows: Sequence[Mapping[str, Any]]
@@ -1033,12 +1089,32 @@ def _coerce(column: sa.Column[Any], value: object) -> object:
     rather than a per-table list, so a column added to a precious table in a
     later milestone round-trips with no edit.
 
-    ⚠️ **`Decimal(str)` and not `float(str)`, and the column it matters on is
-    the one this project has already been bitten on.** `llm_calls.cost_usd` is
-    `NUMERIC(12, 8)`; `json.loads` has already turned every unquoted number
-    into a `float`, which is why the writer emits that column as text in the
-    first place, and reading it back as a `float` would put the round trip
-    back where `_encode`'s `:f` found it.
+    ⚠️ **`Decimal(str)` and not `float(str)` -- and on today's schema that is
+    a guard against a future column, not a repair of a live defect.** This
+    paragraph claimed reading `cost_usd` back as a `float` *"would put the
+    round trip back where `_encode`'s `:f` found it"*, and measurement refutes
+    it. Against a real `pgvector/pgvector:pg17` on 2026-08-25, `Decimal` and
+    `float` store **byte-identical** values across the whole
+    `NUMERIC(12, 8)` range -- `0.00870000`, `0.12345679`, `1234.56789013`,
+    `3E-8` and `9999.99999999` all read back the same text under both --
+    because 12 significant digits sits comfortably inside an IEEE double's
+    15-to-17, so every value this column can hold is exactly recoverable.
+
+    **What the same probe found is where the guard starts paying**, and it is
+    one column widening away: at `NUMERIC(30, 20)`, `0.123456789012345678`
+    stores as `…67800` through `Decimal` and `…67737` through `float`. So the
+    rule is *the scale, not the type* -- `Decimal` costs nothing, is correct
+    at every scale, and is what stops a later `ALTER` silently turning a
+    ledger into an approximation. Stated this way because the previous
+    sentence made a false claim about **this** column, and a refuted
+    measurement in a docstring is a defect in this repository. It also makes
+    the `float` spelling an *equivalent mutant* on the schema as it stands
+    rather than a coverage gap, which the sweep ledger now records.
+
+    (`_encode`'s `:f` is a separate and still-live concern: it is about
+    `Decimal.__str__` switching to scientific notation below an adjusted
+    exponent of -6, which is a readability property of the artifact rather
+    than a precision one.)
     """
     if value is None:
         return None

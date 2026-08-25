@@ -27,9 +27,14 @@ argument is the same one.
 where a case is about the two halves agreeing.** A hand-built file is what
 lets a case plant `m09e` into the header, name a table the manifest does not
 classify, or truncate a row -- none of which a writer will ever produce.
-`test_an_artifact_this_projects_own_backup_wrote_restores_and_a_second_run_is_a_no_op`
+`test_an_artifact_this_projects_own_backup_wrote_restores_into_a_rebuilt_catalog`
 is the one that closes the loop, and it is the reason the hand-built shape
-can be trusted at all.
+can be trusted at all. (This sentence named a function that does not exist --
+`..._and_a_second_run_is_a_no_op` -- for one commit, which is a citation
+nothing checks in a file whose whole subject is citations going stale; the
+second-run claim is
+`test_the_same_artifact_restored_twice_is_a_no_op_on_the_second_run`, a
+different case.)
 """
 
 import base64
@@ -489,25 +494,39 @@ async def test_a_watch_state_whose_title_is_missing_refuses_the_whole_file_and_w
     )
 
 
-async def test_a_schema_mismatch_names_both_revisions_and_follows_the_database(
+async def test_a_schema_mismatch_is_refused_with_both_revisions_in_the_message(
     sessions: async_sessionmaker[AsyncSession],
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **The comparison is live, and `m09e` in the header is what proves it.**
+    """The refusal fires and names both values, and **that is all this case
+    says** -- which is less than its first version claimed.
 
-    The two values compared -- the artifact's stamp and the database's -- are
-    equal on every healthy deployment, which is exactly why an assertion over
-    a matching pair is satisfied by any implementation. K3 shipped that shape
-    and a review found it: `header["schema_revision"] == code_head_revision()`
-    is satisfied by a writer that *returns* `code_head_revision()`.
+    An artifact from a schema this database is not at is refused, and the
+    message carries the artifact's revision and the database's, the shape
+    `api/routers/health.py::_check_migrations` already logs: *"the schema does
+    not match"* without the two values is a sentence an operator cannot act
+    on, and the action differs by direction.
 
-    So this plants a real revision from this chain that is not its head into
-    the header and asserts the message names **both** it and what
-    `database_revision` reports. An implementation reading
-    `code_head_revision()` instead of the database's stamp names the same
-    string here and still passes -- which is why the case also moves the
-    *database* and asserts the message follows that rather than the code.
+    🔴 **What this case does *not* establish, stated here because its first
+    version opened by claiming the opposite in bold.** It read *"the
+    comparison is live, and `m09e` in the header is what proves it"* and went
+    on to say the case *"also moves the database"* -- which it does not; it
+    asserts `live == head` as a **premise** at the line below. Measured on
+    2026-08-25 by planting `code_head_revision()` in place of
+    `database_revision`: this case stays **green**, because on a healthy
+    container the two are the same string, so both implementations compare
+    `m09e` against it and both refuse with the same message. A pair that is
+    equal by construction cannot say which of the two was read.
+
+    `test_the_stamp_the_refusal_compares_is_the_databases_and_not_the_codes`
+    is the falsifying arm -- it moves the **database** and stamps the artifact
+    with the code's head, the two revisions the other way round -- and
+    `tests/unit/test_services_restore.py::
+    test_the_schema_mismatch_names_both_revisions_and_follows_the_database`
+    is the same claim one layer up, where the fake answers `m09f` against a
+    code head of `m10a`. Both kill that plant; this one does not, and its name
+    said it did.
     """
     head = code_head_revision()
     assert head is not None, "the code has no single head, so there is nothing to disagree with"
@@ -1204,17 +1223,23 @@ async def test_the_stamp_the_refusal_compares_is_the_databases_and_not_the_codes
     """🔴 **The mismatch is against `database_revision`, and only a database
     that disagrees with the code can say so.**
 
-    The case above plants a stale revision into the *header* and is satisfied
-    by an implementation reading `code_head_revision()`: the artifact says
-    `m09e`, the code says the head, the two differ, and the refusal fires for
-    the wrong reason. This one moves the **database** instead and stamps the
-    artifact with the code's own head -- so a restore comparing against the
+    `test_a_schema_mismatch_is_refused_with_both_revisions_in_the_message`
+    plants a stale revision into the *header* and is satisfied by an
+    implementation reading `code_head_revision()`: the artifact says `m09e`,
+    the code says the head, the two differ, and the refusal fires for the
+    wrong reason. Measured -- planting `code_head_revision()` leaves that case
+    green and this one red. This one moves the **database** instead and stamps
+    the artifact with the code's own head, so a restore comparing against the
     code sees two equal strings and does not refuse at all, while one
     comparing against the database refuses and names the stale value.
 
-    ⚠️ **The two revisions are the wrong way round from the case above on
+    ⚠️ **The two revisions are the wrong way round from the other case on
     purpose**, and that is what makes this the falsifying arm rather than a
-    second copy.
+    second copy. Its sibling one layer up is
+    `tests/unit/test_services_restore.py::
+    test_the_schema_mismatch_names_both_revisions_and_follows_the_database`,
+    whose fake answers `m09f` against a code head of `m10a` -- so the property
+    has an arm per layer and the same plant dies in both.
 
     It runs on the suite's rolled-back `session` rather than the committing
     factory, which is what makes writing to `alembic_version` safe: the
@@ -1246,3 +1271,376 @@ async def test_the_stamp_the_refusal_compares_is_the_databases_and_not_the_codes
     message = str(refusal.value)
     assert repr(STALE_REVISION) in message, message
     assert repr(head) in message, message
+
+
+async def test_two_sources_in_one_artifact_under_one_name_land_once_and_refuse_once(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """🔴 **The bug the first version of this merge shipped: the refusal read
+    the target once and never saw its own writes.**
+
+    `test_a_second_source_under_the_same_name_is_refused_rather_than_inserted`
+    puts the colliding source in the **target**, and that is the case the rule
+    was written against. It says nothing about two rows colliding *inside one
+    artifact*, and the first implementation built its `name -> id` map before
+    the loop and never updated it -- so both rows passed both checks and both
+    landed, with `refused=()`, `written={'sources': 2}` and an exit code of 0.
+    The restore created the exact state its own docstring and PRD 08 say it
+    may not create, and reported success.
+
+    **The precondition is reachable**, which is what makes this a bug rather
+    than a hardening exercise: `PostgresSourceRepository.add` guards
+    `pk_sources` and nothing else, `sources.name` has no unique index, so two
+    same-named sources are creatable through the ordinary admin path -- and
+    `usher backup` then carries both into an artifact this command has to
+    read.
+
+    The premise is asserted, because *"one source landed"* is also what a
+    restore that writes no source at all produces.
+    """
+    first, second = new_id(), new_id()
+    assert first != second
+    _write_artifact(
+        artifact_path,
+        [
+            ("sources", _source(identifier=first)),
+            ("sources", _source(identifier=second)),
+        ],
+        schema_revision=code_head_revision(),
+    )
+
+    report = await _restore(sessions, artifact_path)
+
+    assert [refusal.table for refusal in report.refused] == ["sources"], report.refused
+    assert str(second) in report.refused[0].keys[1], report.refused
+    assert not report.committed
+    # Rolled back, so neither landed -- and the count that matters is the one
+    # a second session sees, because the whole file is refused together.
+    assert (
+        await _count(sessions, "SELECT count(*) FROM sources WHERE name = :name", name=SOURCE_NAME)
+        == 0
+    ), "a source landed even though the artifact was refused"
+
+    # The positive control: the same artifact with the duplicate removed lands
+    # exactly one source, so the refusal above is about the collision rather
+    # than about `sources` never being written.
+    _write_artifact(
+        artifact_path,
+        [("sources", _source(identifier=first))],
+        schema_revision=code_head_revision(),
+    )
+    clean = await _restore(sessions, artifact_path)
+
+    assert clean.refused == ()
+    assert clean.written["sources"] == 1
+    assert (
+        await _count(sessions, "SELECT count(*) FROM sources WHERE name = :name", name=SOURCE_NAME)
+        == 1
+    )
+
+
+async def test_a_watch_state_the_target_already_holds_adopts_the_artifacts_values(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """🔴 **The artifact wins on a conflict, and `DO NOTHING` in place of the
+    `DO UPDATE SET` passes every other case in this file.**
+
+    This is the operational shape of the whole command. Emby resets a title to
+    unwatched, `usher sync` writes `played=false, play_count=0,
+    position_seconds=0` over the household's real history, and the operator
+    restores last week's artifact to get it back. Under the degraded merge the
+    row conflicts, nothing is written, the report says `skipped`, the command
+    exits 0 -- and the history is not recovered. That is *"restored 9 rows"*
+    over an artifact holding 50 arriving on the one table PRD 08 calls
+    load-bearing.
+
+    The values are asserted field by field against the artifact's rather than
+    checked for having changed, because *"something moved"* is satisfied by a
+    merge that adopted the wrong three columns. Every one of them is
+    deliberately different from what the walk left behind.
+    """
+    movie = _title(kind="movie", imdb_id=HELD_IMDB_ID, tmdb_id=HELD_TMDB_ID)
+    carried = _watch_state(title=movie, position=1_800, played=True, play_count=7)
+    async with sessions() as session:
+        await session.execute(
+            text("INSERT INTO users (id, name, is_default) VALUES (:id, :name, true)"),
+            {"id": new_id(), "name": HOUSEHOLD_NAME},
+        )
+        # What a walk over a reset server writes: the row exists, and every
+        # column the merge touches disagrees with the artifact.
+        await session.execute(
+            text(
+                "INSERT INTO watch_states (id, user_id, title_id, position_seconds, played, "
+                "play_count, origin) VALUES (:id, "
+                "(SELECT id FROM users WHERE name = :household), :title, 0, false, 0, 'source')"
+            ),
+            {"id": new_id(), "household": HOUSEHOLD_NAME, "title": rebuilt["movie"]},
+        )
+        await session.commit()
+
+    async with sessions() as probe:
+        before = (
+            await probe.execute(
+                text(
+                    "SELECT position_seconds, played, play_count FROM watch_states "
+                    "WHERE title_id = :title"
+                ),
+                {"title": rebuilt["movie"]},
+            )
+        ).one()
+    # The premise: the walk really did leave the losing values, so the
+    # assertion below is about the merge rather than about a fixture that
+    # already held the answer.
+    assert (before.position_seconds, before.played, before.play_count) == (0, False, 0)
+
+    _write_artifact(
+        artifact_path,
+        [("users", _user()), ("watch_states", carried)],
+        schema_revision=code_head_revision(),
+    )
+
+    report = await _restore(sessions, artifact_path)
+
+    assert report.committed and not report.refused, report.refused
+    assert report.written["watch_states"] == 1, "a conflicting row was reported as skipped"
+    async with sessions() as probe:
+        after = (
+            await probe.execute(
+                text(
+                    "SELECT position_seconds, played, play_count FROM watch_states "
+                    "WHERE title_id = :title"
+                ),
+                {"title": rebuilt["movie"]},
+            )
+        ).one()
+    assert (after.position_seconds, after.played, after.play_count) == (1_800, True, 7), (
+        "the household's history was not recovered: the merge left the walk's values"
+    )
+    # And exactly one row, so the upsert conflicted rather than inserting a
+    # second watch state beside the first.
+    assert await _watch_states(sessions) == 1
+
+
+async def test_a_row_provider_setting_the_target_holds_adopts_the_artifacts_choice(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """The other upsert, and the same defect: `DO NOTHING` here passes
+    everything else in this file.
+
+    `row_provider_settings` is one operator decision per row -- *"do not show
+    me this shelf"* -- and it is the one carried table with no id in it at
+    all. A restore that silently declined to re-apply the choice would leave
+    the household's home screen showing a row they had turned off, which
+    nothing else in the system would report.
+
+    ⚠️ **The fixture's `enabled` is the value the target does *not* hold**,
+    which the previous version of this file could not say: `_row_provider_
+    setting` took an `enabled` argument with one call site that used the
+    default, so the parameter was scaffolding and every case ran on `False`
+    against a table that had no row at all.
+    """
+    async with sessions() as session:
+        await session.execute(
+            text("INSERT INTO row_provider_settings (slug_prefix, enabled) VALUES (:slug, true)"),
+            {"slug": SLUG_PREFIX},
+        )
+        await session.commit()
+    held = await _count(
+        sessions,
+        "SELECT count(*) FROM row_provider_settings WHERE slug_prefix = :slug AND enabled",
+        slug=SLUG_PREFIX,
+    )
+    # The premise: the target holds the *other* value, so adopting the
+    # artifact's is observable.
+    assert held == 1
+
+    _write_artifact(
+        artifact_path,
+        [("row_provider_settings", _row_provider_setting(enabled=False))],
+        schema_revision=code_head_revision(),
+    )
+
+    report = await _restore(sessions, artifact_path)
+
+    assert report.committed and not report.refused, report.refused
+    assert report.written["row_provider_settings"] == 1
+    assert (
+        await _count(
+            sessions,
+            "SELECT count(*) FROM row_provider_settings WHERE slug_prefix = :slug AND enabled",
+            slug=SLUG_PREFIX,
+        )
+        == 0
+    ), "the operator's choice was not re-applied"
+
+
+async def test_an_episode_media_item_link_carries_the_episode_and_not_only_the_series(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """🔴 **No case anywhere restored an episode link**, so `episode_id`
+    could be written `NULL` with the whole suite green.
+
+    `media_items` carries two link columns and every other case in this file
+    exercises one of them: a movie's row names a title and nothing else. An
+    episode's row names **both** -- the series under `title` and the episode
+    under `episode` (`ports/ingest.py::MediaItemTarget`, and K3's own backup
+    case asserts the writing half) -- and on the household this project
+    measures 999,827 of 1,126,674 items are episodes, so the untested column
+    is the one almost every row uses.
+
+    The damage is quiet: the item stays linked to its *series*, so nothing
+    404s and no foreign key complains, while every episode-level read --
+    `NextUpProvider`, the playback route's episode arm, the unmatched
+    queue -- sees an item that belongs to no episode.
+    """
+    source_id = new_id()
+    series = _title(kind="series", imdb_id=SERIES_IMDB_ID)
+    episode = _episode(series, season=SEASON_NUMBER, episode=EPISODE_NUMBER)
+    async with sessions() as session:
+        await _seed_source(session, source_id)
+        await session.execute(
+            text(
+                "INSERT INTO media_items (id, source_id, external_id, last_seen_at, available) "
+                "VALUES (:id, :source, :external, now(), true)"
+            ),
+            {"id": new_id(), "source": source_id, "external": "emby-episode"},
+        )
+        await session.commit()
+
+    _write_artifact(
+        artifact_path,
+        [
+            (
+                "media_items",
+                _media_item(
+                    source_id=source_id,
+                    external_id="emby-episode",
+                    title=series,
+                    episode=episode,
+                ),
+            )
+        ],
+        schema_revision=code_head_revision(),
+    )
+
+    report = await _restore(sessions, artifact_path)
+
+    assert report.committed and not report.refused, report.refused
+    assert report.written["media_items"] == 1
+    async with sessions() as probe:
+        row = (
+            await probe.execute(
+                text(
+                    "SELECT title_id, episode_id FROM media_items "
+                    "WHERE source_id = :source AND external_id = 'emby-episode'"
+                ),
+                {"source": source_id},
+            )
+        ).one()
+    # Both, and the premise that they are distinguishable: the series' id and
+    # the episode's id are different rows in different tables, so a merge that
+    # wrote one into both, or dropped either, is visible here and nowhere else.
+    assert rebuilt["series"] != rebuilt["episode"]
+    assert row.title_id == rebuilt["series"], "the series link did not land"
+    assert row.episode_id == rebuilt["episode"], (
+        "the episode link was dropped: the item is attached to the series only"
+    )
+
+
+async def test_a_credential_whose_source_is_not_in_this_database_is_refused(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """The branch a hand-edited artifact reaches, disclosed as untested at the
+    first commit and closed here.
+
+    `fk_source_credentials_source_id_sources` would answer a credential whose
+    source is absent with an `IntegrityError` -- a `RepositoryConflict`, which
+    this command renders as *"a value the column will not take"*: a sentence
+    about the wrong thing, naming no source. The absence is read and reported
+    instead, so the refusal names the `ref` and the `source_id` an operator
+    can go and look for.
+
+    The positive control is the same artifact with its `sources` row put back:
+    the credential then lands, so the refusal is about the missing source
+    rather than about `source_credentials` never being written.
+    """
+    source_id = new_id()
+    _write_artifact(
+        artifact_path,
+        [("source_credentials", _source_credential(source_id=source_id))],
+        schema_revision=code_head_revision(),
+    )
+
+    report = await _restore(sessions, artifact_path)
+
+    assert [refusal.table for refusal in report.refused] == ["source_credentials"]
+    assert CREDENTIAL_REF in report.refused[0].keys[0], report.refused
+    assert str(source_id) in report.refused[0].keys[1], report.refused
+    assert not report.committed
+
+    _write_artifact(
+        artifact_path,
+        [
+            ("sources", _source(identifier=source_id)),
+            ("source_credentials", _source_credential(source_id=source_id)),
+        ],
+        schema_revision=code_head_revision(),
+    )
+    clean = await _restore(sessions, artifact_path)
+
+    assert clean.refused == ()
+    assert clean.written["source_credentials"] == 1
+
+
+async def test_a_watch_state_naming_a_household_this_database_does_not_hold_is_refused(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """The other branch disclosed as untested, and the reason it cannot be a
+    `NULL`.
+
+    `watch_states.user_id` and `search_queries.user_id` are both `NOT NULL`,
+    so the per-table `NULL` rule that `search_queries.clicked_title_id` uses
+    cannot apply to a household however the table is classified -- and a
+    household the `users` pass did not create is a file somebody edited, since
+    `usher backup` carries a `users` row for every name it references.
+
+    The artifact here carries a `watch_states` row and **no** `users` row, so
+    the name resolves against nothing. The positive control is the same file
+    with the household put back.
+    """
+    movie = _title(kind="movie", imdb_id=HELD_IMDB_ID, tmdb_id=HELD_TMDB_ID)
+    _write_artifact(
+        artifact_path,
+        [("watch_states", _watch_state(title=movie))],
+        schema_revision=code_head_revision(),
+    )
+
+    report = await _restore(sessions, artifact_path)
+
+    assert [refusal.table for refusal in report.refused] == ["watch_states"]
+    assert report.refused[0].keys == (f"name={HOUSEHOLD_NAME}",), report.refused
+    assert "household" in report.refused[0].reason
+    assert not report.committed
+    assert await _watch_states(sessions) == 0
+
+    _write_artifact(
+        artifact_path,
+        [("users", _user()), ("watch_states", _watch_state(title=movie))],
+        schema_revision=code_head_revision(),
+    )
+    clean = await _restore(sessions, artifact_path)
+
+    assert clean.refused == ()
+    assert clean.written["watch_states"] == 1

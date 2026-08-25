@@ -313,3 +313,98 @@ def test_the_summary_carries_the_path_and_the_schema(
     assert str(ARTIFACT) in out, out
     assert "schema m10a" in out, out
     assert out.rstrip().endswith("committed"), out
+
+
+class _StubService:
+    """A `RestoreService` that answers a scripted report and touches nothing.
+
+    Substituted for the real one at `usher.cli.RestoreService`, so `_restore`
+    still builds its own engine through `_session_for` and still never opens a
+    connection: `build_engine` is lazy, `AsyncSession` is lazy, and
+    `session.commit`/`session.rollback` are only ever *passed* here. That is
+    what lets a case about the **exit code** run in `tests/unit/`.
+    """
+
+    def __init__(self, report: RestoreReport) -> None:
+        self._report = report
+
+    def __call__(self, **_: object) -> "_StubService":
+        return self
+
+    async def restore(self, source: Path, *, dry_run: bool = False) -> RestoreReport:
+        return self._report
+
+
+def test_a_run_that_refused_a_row_exits_non_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """🔴 **The exit code, which nothing measured for one commit.**
+
+    `_restore`'s own docstring makes an operational claim about it -- *"cron,
+    CI and a systemd unit read the exit code"* -- and PRD 08 repeats it, and
+    replacing `if report.refused:` with `if False:` left all 5,946 cases and
+    every gate step green. That is `_sync`'s failed-run defect exactly
+    (2026-08-19: ten consecutive `watch_state` failures, every one of them
+    exit 0, a human reading the terminal saw it and cron did not), arriving in
+    the next command written after it.
+
+    The refusals are already on stdout for a human; this is the half a
+    scheduler reads, so both are asserted -- the message, and that the exit is
+    a `SystemExit` carrying a string, which is what exits 1.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        "usher.cli.RestoreService",
+        _StubService(
+            _report(
+                refused=(
+                    RestoreRefusal(
+                        table="watch_states",
+                        keys=("imdb_id=tt99000599",),
+                        reason="this database holds no title under any of these",
+                    ),
+                ),
+                committed=False,
+            )
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["restore", str(ARTIFACT)])
+
+    assert isinstance(exit_info.value.code, str), "a SystemExit carrying a string exits 1"
+    assert "1 row could not be restored, so nothing was" in str(exit_info.value)
+    # The report still reached stdout: the non-zero exit is *in addition to*
+    # the lines an operator reads, not instead of them.
+    assert "tt99000599" in capsys.readouterr().out
+
+
+def test_a_run_that_refused_nothing_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The positive control, and it is not optional.
+
+    *"A refused run exits non-zero"* is satisfied by a command that exits
+    non-zero **always** -- which would break every cron entry that restores
+    successfully. So the same stub, the same command, an empty `refused`, and
+    no `SystemExit` at all.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr("usher.cli.RestoreService", _StubService(_report()))
+
+    main(["restore", str(ARTIFACT)])
+
+
+def test_a_dry_run_that_refused_nothing_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator asking what would happen and being told got the answer they
+    asked for, so `--dry-run` on a clean artifact is not a failure.
+
+    Stated as a case because the obvious implementation of *"a run that
+    changed nothing exits non-zero"* would break exactly this, and the
+    distinction between *refused* and *not committed* is the whole reason
+    `RestoreReport` carries both.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        "usher.cli.RestoreService", _StubService(_report(dry_run=True, committed=False))
+    )
+
+    main(["restore", str(ARTIFACT), "--dry-run"])

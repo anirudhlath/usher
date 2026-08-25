@@ -8329,3 +8329,165 @@ tree in place, so nothing else may use that tree while it runs"* rule with the
 two roles swapped, and the general form is **any check that reads `src/` off
 disk makes the whole tree single-writer for the length of the run**, not just
 the sweep harness.
+
+## M10 K4, round 2 — the review round: one live bug, three merge rules that degraded to no-ops, and a control that was degenerate (2026-08-25)
+
+**8 mutations, 7 killed, 1 control surviving as designed, 0 unintended
+survivors, 0 BAD-ANCHOR, all 8 restores byte-identical.** Same harness
+(`/var/tmp/k4/sweep.py`), plant list `/var/tmp/k4/plants2.py`, same selection,
+baseline **102 passed in 8.79 s** (from round 1's 93).
+
+**Every one of the seven was a plant that *survived* round 1 whole** — six
+found by review, one by the reviewer's own probe against a real schema. That is
+the finding rather than the count: round 1 swept the command's *refusals* and
+its *transaction*, and the merge rules underneath them were pinned by the fact
+that they wrote **something**, never by what they wrote.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| R1 the `sources` merge never folds its own writes back in (**the shipped bug**) | KILLED | 1 |
+| R2 the `watch_states` upsert degrades to `DO NOTHING` | KILLED | 1 |
+| R3 the `row_provider_settings` upsert degrades to `DO NOTHING` | KILLED | 1 |
+| R4 the `media_items` merge drops the episode link | KILLED | 1 |
+| R5 a run that refused a row exits zero | KILLED | 1 |
+| R6 a credential whose source is absent is inserted rather than refused | KILLED | 1 |
+| R7 an unknown household is not refused | KILLED | 1 |
+| R8 *control* — `cost_usd` read back as `float` rather than `Decimal` | SURVIVED, all five gate steps | — |
+
+**Each of R1–R7 fails exactly the one case written for it**, out of 102. That
+is what says the seven new cases are separable rather than one blanket
+assertion over a fatter fixture.
+
+🔴 **R1 is a live bug the first commit shipped, and the shape is worth more
+than the fix.** `_merge_sources` read the target into a `name -> id` map
+*before* the loop and never updated it, so two artifact rows carrying one
+`name` under different ids both passed both checks and both landed — with
+`refused=()`, `written={'sources': 2}` and exit 0. The restore created exactly
+the state its own docstring calls *"a state an operator has to resolve rather
+than one a restore may create"*, and reported success. **The precondition is
+reachable**: `PostgresSourceRepository.add` guards `pk_sources` and nothing
+else, `sources.name` has no unique index, so two same-named sources are
+creatable through the ordinary admin path and `usher backup` carries both.
+The general form: **a uniqueness rule enforced in application code has two
+populations to check against — the target, and the batch itself — and a check
+written against a snapshot taken before the loop only ever sees the first.**
+The existing case put the collision in the *target*, which is the half that
+reads as the whole problem.
+
+**R2–R4 are three merge rules that degrade to a no-op with the entire gate
+green, and R2 is the operationally severe one.** Emby resets a title to
+unwatched, `usher sync` writes `played=false, play_count=0` over the
+household's real history, the operator restores last week's artifact — and
+under `DO NOTHING` the row conflicts, nothing is written, the report says
+`skipped`, the command exits 0, and the history is **not** recovered. That is
+*"restored 9 rows over an artifact holding 50"* arriving on the one table PRD
+08 calls load-bearing, through the report that exists to make it visible.
+**The mechanism that hid all three: every case asserted the *report*, and the
+report is identical between "wrote the artifact's values" and "found a
+conflict and left the target alone" whenever the row count does not move.**
+A merge is a transformation, and `testing-discipline.md`'s rule for those
+already covers it — *compare the output to the input* — but the "output" of an
+upsert is a row you have to go and read, not the value the call returns.
+
+⚠️ **Two corroborating smells were visible in the source before any plant ran,
+and both are cheap to look for.** `_row_provider_setting(*, enabled: bool =
+False)` had exactly one call site and it used the default — a **parameter
+scaffolded and never exercised**, which is a fixture saying its own case was
+never written. And **no case anywhere restored an episode link**: every
+`media_items` case linked a title, on a table where 999,827 of the measured
+household's 1,126,674 items are episodes, so the untested column was the one
+almost every row uses. *Grep a new test file for parameters whose non-default
+value never appears, and for columns the production population is made of.*
+
+**R5 is `_sync`'s failed-run defect arriving in the next command written after
+it.** Replacing `if report.refused:` with `if False:` left all 5,946 cases and
+every gate step green, while `_restore`'s own docstring and PRD 08 both make an
+operational claim about that exit code (*"cron, CI and a systemd unit read the
+exit code"*). M10's S9 measured the identical hole in `usher sync` on
+2026-08-19 — ten consecutive `watch_state` failures, every one exit 0 — and the
+lesson did not transfer, because a docstring is not a test. The case it needs
+is cheap: substitute the service at `usher.cli.RestoreService`, and since
+`build_engine` and `AsyncSession` are both lazy and `commit`/`rollback` are only
+ever *passed*, a case about the exit code runs in `tests/unit/` with no
+database. **It ships with two positive controls** — a clean run and a clean
+`--dry-run` must both exit zero — because *"a refused run exits non-zero"* is
+satisfied by a command that always exits non-zero, which breaks every cron entry
+that works.
+
+**R6 and R7 close the two branches the first commit disclosed as untested.**
+The disclosure was accurate and it was not the whole list, since R1–R5 also
+survived: **an author's list of what they did not test is bounded by what they
+thought to look at**, and the four things review found were all in code the
+author believed was covered.
+
+### The control that was degenerate, and the one that replaced it
+
+🔴 **Round 1's CTRL1 — "the report's two independent keyword arguments
+swapped" — is not a control, and the ledger it was written into says why two
+entries above it.** Reordering keyword arguments in a `dataclass` call is *the
+same program*: it is not a behavioural change that happens to be unobservable,
+it is no change at all. It therefore demonstrates only that the harness is not
+scoring every run as a kill, which is the weakest thing a control can do. This
+file's own better precedent is cited in the same paragraph it was written under
+— *"two independent `worker.register` calls in `composition.build_worker`
+swapped"* — whose equivalence is **a fact about the code**: the registration
+order is genuinely different and no layer below can observe it.
+
+**R8 is the replacement and it is a real one.** `Decimal(value)` →
+`float(value)` in `_coerce` is a different program taking a different path
+through asyncpg's codecs, and it survives because of a **measured** property of
+this column rather than because nothing changed. Measured against a real
+`pgvector/pgvector:pg17` on 2026-08-25:
+
+| value | stored via `Decimal` | stored via `float` |
+|---|---|---|
+| `0.00870000`, `0.12345679`, `1234.56789013`, `3E-8`, `9999.99999999` | byte-identical | byte-identical |
+| `0.123456789012345678` into `NUMERIC(30,20)` | `…67800` | **`…67737`** |
+
+`NUMERIC(12, 8)` is 12 significant digits and an IEEE double carries 15–17, so
+every value `llm_calls.cost_usd` can hold round-trips exactly through either;
+one column widening away it does not. **`Decimal` is still the right code** —
+free, correct at every scale — and the docstring claiming a `float` *"would put
+the round trip back where `_encode`'s `:f` found it"* was refuted and is
+corrected in place. `db-and-sql.md` already carried the same measurement for
+the *writing* half (*"cost written as a float is an equivalent mutant for
+storage"*); this is the reading half, and the two entries agree. **A refuted
+measurement in a docstring is a defect in this repository, and the repair is to
+say what the guard is really for rather than to delete it.**
+
+### Three prose claims measurement refuted in the same round
+
+- **ADR-0026 said *eleven* message-exits; it is *ten*.**
+  `grep -c "raise SystemExit" src/usher/cli.py` = 14, minus `main`'s three and
+  `_eval`'s numeric exit. The bullet's own enumeration listed ten the whole
+  time, and its closing sentence was *"the count has now drifted twice … rather
+  than left to drift a third time."* **It drifted a third time in the act of
+  saying so.** The general form: *a prose number and an enumeration of the same
+  thing in one paragraph are two claims, and nothing checks that they agree.*
+- **`services/restore.py` said the commit-in-the-loop plant fails *"the one
+  case that reads committed state from a second session"*; it fails **six**,
+  three of them unit cases with no database at all** — and round 1's own ledger
+  row in the same commit said "6, across both files". *A docstring and a ledger
+  disagreeing inside one commit is a stale citation arriving through the author
+  rather than through time.*
+- **A test that found the truth and shipped the refuted version in bold.**
+  `test_a_schema_mismatch_…` opened *"🔴 The comparison is live, and `m09e` in
+  the header is what proves it"* and said *"which is why the case also moves
+  the database"* — which that case does not do; it asserts `live == head` as a
+  premise. The commit message, the ledger and the sibling case all carried the
+  correct version. Renamed to
+  `test_a_schema_mismatch_is_refused_with_both_revisions_in_the_message` and
+  its docstring now states what it does **not** establish. **A correction
+  recorded everywhere except in the artefact a reader hits first is not a
+  correction.** Same family as the ADR-0028 amendment that left the superseded
+  claim standing forty lines below, and as this file's own *"a correction filed
+  below the claim it corrects is a second claim"*.
+- **Two stale sentences inherited from K3 and left standing in files this
+  commit edited.** `ports/repository/backup.py` and
+  `db/repositories/backup.py` both said *"K4's refusal compares this stamp
+  against `code_head_revision()`"* — the exact confusion this commit's own
+  headline finding is about — contradicted 131 and 271 lines later by the
+  methods that do the comparing. Worse, one of them pointed the reader at the
+  other with *"see the port"*. **When a commit's headline is a distinction,
+  grep the tree for the sentences that state it the old way**; the two that
+  matter most are in the files you are already editing.

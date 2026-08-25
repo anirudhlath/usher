@@ -99,17 +99,24 @@ stack *because* the stack is one flag away.
 - **`SystemExit` passes through untouched**, and that is free rather than
   arranged: it is a `BaseException` and the handlers name only `Exception`
   subclasses. Pinned anyway, because "free" stops being true the moment
-  somebody widens the tuple — and **eleven** places in `cli.py` exit with a
+  somebody widens the tuple — and **ten** places in `cli.py` exit with a
   message chosen for the failure they describe, measured 2026-08-25 as
-  `grep -n "raise SystemExit" src/usher/cli.py` minus `main`'s own three and
-  minus `_eval`'s numeric exit: `_as_uuid`, the semantic-search guard,
-  `similar`'s cross-argument rule, `_eval`'s two, M10's `_sync` failed-run
-  exit, both of M8 `usher curate`'s (no LLM configured, and a generation that
-  did not happen), and both of M10 K4's `usher restore` (a refused artifact,
-  and a run in which some row could not be restored). It was three when this
-  ADR was written and five at M10's K3; **the mechanism is what the bullet is
-  about, the count has now drifted twice, and it is restated with the command
-  that measured it** rather than left to drift a third time.
+  `grep -c "raise SystemExit" src/usher/cli.py` = **14**, minus `main`'s own
+  three and minus `_eval`'s numeric exit: `_as_uuid`, the semantic-search
+  guard, `similar`'s cross-argument rule, `_eval`'s two, M10's `_sync`
+  failed-run exit, both of M8 `usher curate`'s (no LLM configured, and a
+  generation that did not happen), and both of M10 K4's `usher restore` (a
+  refused artifact, and a run in which some row could not be restored). It
+  was three when this ADR was written and five at M10's K3.
+  🔴 **This bullet said *eleven* for one commit, and the sentence it said it
+  in was *"the count has now drifted twice … rather than left to drift a
+  third time"*.** The enumeration beside it listed ten the whole way. So the
+  bullet whose entire purpose is to stop a restated count drifting drifted in
+  the act of restating it, and the lesson is narrower than "count carefully":
+  **a prose number and an enumeration of the same thing in one paragraph are
+  two claims, and nothing checks that they agree.** Recount with the `grep`
+  above rather than by hand, and if the two ever disagree again, delete the
+  number and keep the list.
 - **The parametrised case runs over the parser's own subcommand list**, so a
   command added without a row in the table fails rather than quietly sitting
   outside the boundary.

@@ -28,9 +28,19 @@ Every merge rule in `db/repositories/backup.py` is written for that order.
 engine. Every write goes through it and exactly one commit happens, at the
 end, after the last row of the last table. That is what makes *"refuses
 rather than half-applies"* a property of the code rather than a promise:
-**an unresolved reference in the last row rolls back the first.** A commit
-moved inside the per-table loop passes every assertion about counts and
-fails the one case that reads committed state from a second session.
+**an unresolved reference in the last row rolls back the first.**
+
+A commit moved inside the per-table loop fails **six** cases, and the
+distribution is the interesting half: three of them are integration cases
+reading committed state from a second engine, and **three are unit cases with
+no database at all** -- because the transaction boundary is observable twice,
+once as *"what did a second session see"* and once as *"how many times was
+`commit` called"*, and the second needs nothing but a recording callable.
+(This paragraph said *"fails the one case that reads committed state from a
+second session"* until a review counted them against this commit's own sweep
+ledger, which had the six written down. A docstring and a ledger disagreeing
+inside one commit is the same defect as a stale citation, arriving through
+the author rather than through time.)
 
 ⚠️ **So the failure mode of a very large artifact is memory, and the bound
 is stated rather than discovered.** The whole file is parsed into memory
