@@ -1443,3 +1443,123 @@ is no width to widen and no refusal to translate, so the bound went on
 with no ceiling does not exclude `+inf`; a `le=` excludes both `inf` and `NaN`
 for free**, which is the whole of why `community_rating` never had this and
 `popularity` did.
+
+## K5's restore drill: a correctly rebuilt catalog still refused the whole file, on 6 rows (2026-08-25)
+
+**The drill ran for real** — `usher backup` once against `usher-postgres-1`
+read-only, everything else in a scratch `pgvector/pgvector:pg17` created and
+removed by the run. Bar pre-registered and hashed before either arm:
+`/var/tmp/m10-K5/BAR.md`, `sha256
+bef34aaaa89dec3a0f3ed9725d6112371a982670842ce9d83b919ddf112c616b`, re-hashed
+identical afterwards. Transcript `/var/tmp/m10-K5/RUN.md`. **19 predictions, 18
+hit.** The live database's opening and closing snapshots are identical on all
+sixteen counted values.
+
+### 🔴 The finding: `media_items`' `REFUSE` rule is load-bearing on exactly the population `media_items` is least precious about
+
+**6 titles of 1,272,891 carry neither `imdb_id` nor `tmdb_id`, and all 6 are
+`series` rows in `enrichment_state = 'stub'`.** From the catalog's side that is
+0.0005% and reads as negligible. From the *artifact's* side it is **602 of
+16,819 carried title references, one in 28**, because a series stub is
+referenced once per episode file — and those 602 sit in **304 `media_items`
+rows and 0 `watch_states` rows**.
+
+`UNRESOLVED_RULE` gives `media_items` `REFUSE`, restore is one transaction with
+one commit at the end, so:
+
+```
+  media_items                     0 written    10,515 already present
+  watch_states                3,347 written         0 already present
+3,440 rows written, 10,515 already present, 304 refused, … : nothing was committed
+```
+
+**The household, the source, its credential, 3,347 watch states and 89 search
+queries all resolved, were all written inside the transaction, and were all
+rolled back** — because 304 links pointed at 6 unmatched stubs. The control
+that makes this a statement about K2's third rung rather than about a defect:
+the *same* unfiltered artifact into a catalog holding the **original** ids
+restores with **0 refusals** in 5.06 s. Same file, same code, same 304 rows; the
+only variable is whether the target holds the id.
+
+Three consequences worth carrying:
+
+- **A rung-3 refusal is not actionable by the sentence the CLI prints.**
+  *"enrich or import what the lines above name"* is right for `imdb_id` and for
+  `(kind, tmdb_id)` and wrong for the raw id, which is the only rung a *rebuilt*
+  catalog can fail on: the row is in no dump, has no TMDb id to enrich by, and a
+  rebuild mints it a new UUID.
+- **K1's own argument points the other way for this population.** The manifest
+  entry says all links are carried because there is no provenance column, and
+  that *"a link the match ladder would have re-derived is re-derived to the same
+  answer"*. A link to an unmatched stub is precisely such a link — so the rows
+  that cost the whole restore are the rows whose loss costs nothing.
+- **The escape exists because of the format, not by accident.**
+  `zcat … | grep -v '"imdb_id": null, "tmdb_id": null' | gzip` dropped exactly
+  304 lines, all `media_items`, and the result restored with 0 refusals, 3,347
+  watch states and 89 search queries committed. That is design property 3 of
+  `services/backup.py` — *an operator can read it* — paying for itself.
+
+**Not fixed here.** K5 changes nothing in `src/`; the runbooks say to filter and
+`docs/runbooks/restore.md` §5 carries the check that must precede it (if any
+matching line is a `watch_states` row, filtering discards history rather than a
+re-derivable link).
+
+### `skipped` is rendered "already present" and 10,515 of 10,515 were not
+
+`_merge_media_item_links` documents that `skipped` covers two states — a row
+already linked, and *"a row the next source walk has not created yet"* —
+and `cli._print_restore_report` renders the one number as **"already present"**.
+Measured: `media_items 0 written / 10,515 already present` with
+`SELECT count(*) FROM media_items` answering **0**. Both states are legitimate
+and one number is the right shape; the *word* is false for the state that is
+universal on the recovery path this command exists for.
+
+### The header's row counts are written by backup and read by nothing
+
+`services/backup.py` says the per-table counts are `len()` of what was written
+*"which is what lets K4 read a short table as a truncated file rather than as a
+race"*. `services/restore.py` reads exactly one header key, `schema_revision`
+(`:330`); `header["rows"]` appears nowhere in it. Measured rather than read off
+the source: an artifact whose header claims `media_items: 10819` over a body
+holding **10,515** restores with **0 refusals and exit 0**. The affordance is
+real, the check is not written, and the sentence reads like a description of
+behaviour.
+
+### The ordering the drill found, and it is three commands rather than one
+
+**restore → sync → restore.** `media_items` is `PARTIAL`, so its merge writes
+links onto rows that must already exist; those rows come from `usher sync`;
+`sync` needs the `sources` row, which is *precious* and therefore comes out of
+the artifact. So the first restore reports every link skipped and the second
+writes them (**0 → 10,515**, measured, 13.46 s). The corollary is the other
+half: **do not re-add the source through the admin route first.**
+`_merge_sources` refuses a name a *different* source id already holds, so the
+obvious operator instinct refuses the whole file.
+`tests/integration/test_restore_drill.py` pins both orderings.
+
+### Smaller things the run measured
+
+- **`usher backup` against the live database: 14,259 rows, 443,902 bytes, 1.03 s**
+  — 31 bytes a row gzipped. `usher restore`: 5.06 s for 3,440 rows, 13.46 s when
+  the 10,515 links land too. `alembic upgrade head` into an empty database, ~4 s.
+- **Restoring into an empty catalog refuses 14,166 of 14,259 rows** (3,347
+  `watch_states` + 10,819 `media_items`; `search_queries` contributes 0, because
+  all 89 rows carry a NULL `clicked_title_id` and its rule is `NULL` anyway) and
+  prints a **14,176-line** report. *"Every refusal is named and none is
+  summarised away"* is right at 41 and unusable at 14,166.
+- **`--dry-run` really is the identical report.** `diff` of the dry run and the
+  real run over the same state is **one line**: the trailing `(--dry-run)`.
+- **A refused run leaves nothing.** Every precious table read 0 on a second
+  connection after the refusal, twice, at both scales.
+- **The `.env` trap fires here too.** The worktree's `USHER_DATABASE_URL` names
+  the live database, and `alembic/env.py` reads `get_settings()`, so every
+  scratch step in this drill exported an override and asserted the resolved port
+  before running. Restated in `docs/runbooks/restore.md` §0 because a runbook
+  reader has no reason to have read this file.
+- **A plant in `backup_identity.title_reference` does not reach the backup
+  path.** `PostgresBackupRepository._titles` builds the reference from its own
+  four-column projection on purpose (33-column entity, thousands of rows), so
+  nulling the two provider rungs there left the drill's integration case green
+  and failed four unit cases instead. The duplication is pinned by
+  `test_the_projection_built_reference_is_the_one_backup_identity_builds`; the
+  plant that reaches the integration arm has to go in `_titles`.

@@ -804,6 +804,30 @@ catalog in `tests/integration/test_restore.py`, including the case that
 re-mints every title id between the backup and the restore — which is what a
 bootstrap does, and the only reason the natural keys exist.
 
+✅ **Both statements are now a drill rather than a design** — K5, 2026-08-25,
+against a scratch `pgvector/pgvector:pg17` with the development database read
+once and never written. Into an **empty** catalog the real artifact refuses
+**14,166 of 14,259 rows** and commits nothing; into a **rebuilt** one, restore
+is **5.06 s**. The operator-facing sequence is
+[`docs/runbooks/restore.md`](../runbooks/restore.md) and its clock is
+[`docs/runbooks/disaster-recovery.md`](../runbooks/disaster-recovery.md), both
+written from that transcript.
+
+🔴 **The drill refuted one thing the design did not anticipate, and it is the
+raw-id rung meeting `media_items`' `REFUSE`.** The 6 titles carrying neither
+provider id hold **304 `media_items` links**, so a *correctly rebuilt* catalog
+still refuses the whole file — rolling back the household, the source, its
+credential, 3,347 resolved watch states and 89 search queries with it. The
+control is decisive: the same unfiltered artifact into a catalog holding the
+**original** ids restores with **0 refusals**. Two further consequences, both
+recorded rather than fixed: a rung-3 refusal is *not* actionable by the
+command's own *"enrich or import what the lines above name"*, because a stub
+with no provider id is in no dump; and the rows that cost the whole restore are
+the ones this document already calls re-derivable by the next source walk. The
+runbook's escape is a one-line filter over the artifact, which is design
+property 3 — *an operator can read it* — earning its keep.
+`.claude/rules/db-and-sql.md` holds the measurements.
+
 **Four refusals, in order, all before any write, and only the fourth is a
 report.** (1) an artifact that is not readable or is truncated — including a
 gzip member that ends early, which raises a bare `EOFError` and is therefore
@@ -897,7 +921,9 @@ and it is third-party TMDb payloads verbatim, so the rule-1 argument bites
 harder here than it does on the genome. For carrying it: M9's S3 measured
 **130,334 requests over 1.98 h** to fill it, against a server this project does
 not own. The ruling is rebuildable, with that cost stated in the manifest and
-🚧 (K5) in the runbook, and **`usher backup --include-payloads` is deliberately
+✅ in the runbook ([`disaster-recovery.md`](../runbooks/disaster-recovery.md)'s
+clock, which is where the 1.98 h lands in the recovery sequence), and
+**`usher backup --include-payloads` is deliberately
 not built** — a flag that makes the artifact redistribute TMDb payloads is a
 licensing decision rather than an operator convenience.
 
