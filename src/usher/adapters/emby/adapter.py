@@ -420,10 +420,13 @@ class EmbyAdapter(SourceAdapter):
         return value if isinstance(value, bool) else None
 
     async def _walk(
-        self, *, since_param: str, since: AwareDatetime | None
+        self, *, since_param: str, since: AwareDatetime | None, start_index: int = 0
     ) -> AsyncIterator[dict[str, Any]]:
         user_id = await self._session.user_id()
-        start = 0
+        # The resume point (#41, ADR-0042). `list_items` never passes one --
+        # the item lanes restart from their cursor; the watch lane's first
+        # walk is the whole library and has to survive a transient failure.
+        start = start_index
         # `for`, not `while True`: the bound is then part of the loop rather
         # than a counter alongside it, and the raise below cannot be reached
         # by any path that should have returned.
@@ -531,7 +534,9 @@ class EmbyAdapter(SourceAdapter):
                 access_token=await self._session.access_token(),
             )
 
-    def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
+    def watch_state(
+        self, since: AwareDatetime | None = None, *, start_index: int = 0
+    ) -> AsyncIterator[SourceWatchState]:
         """Walk this user's watch state.
 
         **This walk reports `play_count` and `last_played_at` as `None`,
@@ -550,12 +555,23 @@ class EmbyAdapter(SourceAdapter):
         is `COALESCE`-shaped for precisely this value (ADR-0014).
         `get_watch_state` below is the authoritative read, at one request
         per item.
-        """
-        return self._watch_state(since)
 
-    async def _watch_state(self, since: AwareDatetime | None) -> AsyncIterator[SourceWatchState]:
+        `start_index` resumes an interrupted walk at that page offset. Sound
+        here because this walk is ordered by `DateCreated`, which no edit
+        moves, so the prefix already walked does not reorder underneath a
+        resumed attempt; a *deletion* shifts it by one and costs the shifted
+        item this run, which the merge's idempotent upsert picks up on the
+        next one.
+        """
+        return self._watch_state(since, start_index)
+
+    async def _watch_state(
+        self, since: AwareDatetime | None, start_index: int
+    ) -> AsyncIterator[SourceWatchState]:
         user_id = await self._session.user_id()
-        async for payload in self._walk(since_param=USER_DATA_SINCE_PARAM, since=since):
+        async for payload in self._walk(
+            since_param=USER_DATA_SINCE_PARAM, since=since, start_index=start_index
+        ):
             # play_history_is_trustworthy=False: this is the listing route.
             state = to_watch_state(
                 payload, source_user_id=user_id, play_history_is_trustworthy=False

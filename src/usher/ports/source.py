@@ -533,7 +533,9 @@ class SourceAdapter(ABC):
         """
 
     @abstractmethod
-    def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
+    def watch_state(
+        self, since: AwareDatetime | None = None, *, start_index: int = 0
+    ) -> AsyncIterator[SourceWatchState]:
         """Watch state from the source, optionally since a cursor.
 
         Same `since`-inclusivity, no-ordering, possible-duplicates,
@@ -550,6 +552,16 @@ class SourceAdapter(ABC):
         May report `play_count`/`last_played_at` as `None` — "this read
         cannot say" — and must, rather than reporting a zero, whenever the
         listing it walks does not carry them. See `SourceWatchState`.
+
+        `start_index` resumes a walk that was interrupted: it is the number
+        of records to skip, and an implementation that pages an upstream
+        passes it straight through as that page offset. **It is only
+        meaningful under a stable order, which this port does not promise
+        and an adapter may** -- the Emby adapter walks
+        `SortBy=DateCreated,SortName` ascending over an immutable creation
+        date, so its walked prefix does not reorder between attempts. An
+        adapter with no stable order must ignore it rather than skip
+        arbitrary records, and say so.
         """
 
     @abstractmethod

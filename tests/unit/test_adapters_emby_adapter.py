@@ -524,6 +524,52 @@ async def test_a_listing_with_no_items_array_is_malformed() -> None:
         await adapter.aclose()
 
 
+async def test_a_watch_state_walk_resumes_from_the_start_index_it_is_given() -> None:
+    """The whole of #41's resume: the walk asks Emby for the page it stopped
+    at rather than for page one. The walk's own order is
+    `SortBy=DateCreated,SortName` ascending and `DateCreated` is immutable,
+    so the prefix already walked does not reorder between attempts.
+    """
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        requested.append(request.url.params["StartIndex"])
+        return httpx.Response(200, json={"Items": [], "TotalRecordCount": 51_000})
+
+    adapter = _on(handler)
+    try:
+        states = [one async for one in adapter.watch_state(start_index=50_000)]
+    finally:
+        await adapter.aclose()
+
+    assert states == []
+    assert requested == ["50000"], "the walk asked for page one instead of resuming"
+
+
+async def test_an_item_walk_always_starts_at_the_beginning() -> None:
+    """`list_items` shares `_walk` and must not inherit the watch lane's
+    resume point: the item lanes have a working cursor and restart from it.
+    """
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        requested.append(request.url.params["StartIndex"])
+        return httpx.Response(200, json={"Items": [], "TotalRecordCount": 0})
+
+    adapter = _on(handler)
+    try:
+        assert [one async for one in adapter.list_items()] == []
+    finally:
+        await adapter.aclose()
+    assert requested == ["0"]
+
+
 # --- get_item --------------------------------------------------------
 
 

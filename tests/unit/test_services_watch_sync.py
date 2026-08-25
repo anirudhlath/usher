@@ -92,8 +92,10 @@ class _LossySourceAdapter(FakeSourceAdapter):
     asymmetry ADR-0014 exists for.
     """
 
-    async def _walk_states(self, since: AwareDatetime | None) -> AsyncIterator[SourceWatchState]:
-        async for state in super()._walk_states(since):
+    async def _walk_states(
+        self, since: AwareDatetime | None, start_index: int = 0
+    ) -> AsyncIterator[SourceWatchState]:
+        async for state in super()._walk_states(since, start_index):
             yield dataclasses.replace(state, play_count=None, last_played_at=None)
 
 
