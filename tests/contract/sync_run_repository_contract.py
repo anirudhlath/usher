@@ -214,3 +214,91 @@ class SyncRunRepositoryContract:
     ) -> None:
         await repository.add(run(source_id))
         assert await repository.list_for_source(other_source_id) == []
+
+    async def test_the_newest_run_is_offered_for_resumption_when_it_did_not_complete(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """A `FAILED` run is what a crashed walk leaves, and it carries the
+        position that walk committed. `RUNNING` is what an abandoned claim
+        leaves and is resumed on exactly the same terms."""
+        failed = run(
+            source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.FAILED,
+            started_at=EARLIER,
+            position=51_000,
+        )
+        await repository.add(failed)
+
+        found = await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE)
+        assert found is not None
+        assert found.id == failed.id
+        assert found.position == 51_000
+        assert found.started_at == EARLIER
+
+    async def test_a_completed_newest_run_offers_nothing_to_resume(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """The premise this method exists for: a walk that finished is not
+        resumed, it is followed by a fresh delta."""
+        await repository.add(
+            run(
+                source_id,
+                kind=SyncRunKind.WATCH_STATE,
+                status=SyncRunStatus.COMPLETED,
+                started_at=EARLIER,
+            )
+        )
+        assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None
+
+    async def test_an_older_failure_is_not_resumed_behind_a_newer_completion(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """**The case the "newest, and only if not completed" shape is for.**
+        A repository that answered "the newest run that is not completed"
+        would hand back the old failure forever, and every later walk would
+        resume from a position a completed run has already passed.
+        """
+        await repository.add(
+            run(
+                source_id,
+                kind=SyncRunKind.WATCH_STATE,
+                status=SyncRunStatus.FAILED,
+                started_at=EARLIER,
+                position=51_000,
+            )
+        )
+        await repository.add(
+            run(
+                source_id,
+                kind=SyncRunKind.WATCH_STATE,
+                status=SyncRunStatus.COMPLETED,
+                started_at=LATER,
+            )
+        )
+        assert EARLIER < LATER, "the premise: the completion really is the newer run"
+        assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None
+
+    async def test_resumption_is_scoped_by_kind_and_by_source(
+        self, repository: SyncRunRepository, source_id: uuid.UUID, other_source_id: uuid.UUID
+    ) -> None:
+        """The two lanes walk different upstream methods under different
+        filters, so an item-lane failure is not a watch-lane resume point --
+        and neither is another source's."""
+        await repository.add(
+            run(source_id, kind=SyncRunKind.DELTA, status=SyncRunStatus.FAILED, position=7)
+        )
+        await repository.add(
+            run(
+                other_source_id,
+                kind=SyncRunKind.WATCH_STATE,
+                status=SyncRunStatus.FAILED,
+                position=9,
+            )
+        )
+        assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None
+
+    async def test_a_source_that_has_never_run_offers_nothing_to_resume(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None

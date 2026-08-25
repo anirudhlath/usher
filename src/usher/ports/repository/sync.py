@@ -65,6 +65,24 @@ class SyncRunRepository(ABC):
         """
 
     @abstractmethod
+    async def latest_incomplete_run(
+        self, source_id: uuid.UUID, kind: SyncRunKind
+    ) -> SyncRun | None:
+        """The newest run of this kind, **iff it did not complete** -- the
+        walk a resumed run continues. `None` when the newest one completed,
+        and when there is none at all.
+
+        **"The newest, and only if it is not completed", never "the newest
+        one that is not completed."** The second spelling hands back an old
+        failure forever once a later run has completed, so every later walk
+        resumes from a position that completed run has already passed.
+
+        Used by the `WATCH_STATE` lane only (ADR-0042). The item lanes have a
+        working cursor and restart from it; this lane's first walk is the
+        whole library, so a failure has to cost a page rather than the run.
+        """
+
+    @abstractmethod
     async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:
         """Newest first, with `id` as a tiebreak so paging is stable. PRD 10's
         dashboard 3 ("sync run outcomes and duration") and the CLI's

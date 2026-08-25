@@ -13,9 +13,9 @@ what actually closes:
   `ck_sync_runs_items_seen_non_negative` does.
 - **Ordering is Python's, not Postgres's.** `sorted` is stable, so two runs
   sharing a `started_at` keep insertion order here; Postgres promises nothing
-  for equal keys, which is why `list_for_source` breaks the tie on `id` in
-  both and why the real one's index is
-  `(source_id, kind, started_at DESC)`.
+  for equal keys, which is why `list_for_source` and `latest_incomplete_run`
+  both break the tie on `id` in both implementations and why the real one's
+  index is `(source_id, kind, started_at DESC)`.
 - **No transaction and no autoflush**, so nothing here can leave a session
   poisoned and nothing exercises the SAVEPOINT a caught conflict needs.
 """
@@ -64,6 +64,20 @@ class FakeSyncRunRepository(SyncRunRepository):
         if not completed:
             return None
         return max(run.started_at for run in completed)
+
+    async def latest_incomplete_run(
+        self, source_id: uuid.UUID, kind: SyncRunKind
+    ) -> SyncRun | None:
+        # The *newest* run, and then a status test -- never "the newest one
+        # that is not completed", which resumes an old failure forever once
+        # something later has completed.
+        found = [
+            one for one in self._runs.values() if one.source_id == source_id and one.kind is kind
+        ]
+        if not found:
+            return None
+        newest = max(found, key=lambda one: (one.started_at, one.id))
+        return None if newest.status is SyncRunStatus.COMPLETED else newest
 
     async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:
         found = [run for run in self._runs.values() if run.source_id == source_id]

@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from usher.db.models.sync import SyncRunRow
 from usher.db.repositories._errors import constraint_name
 from usher.domain.ids import new_id
-from usher.domain.sync import SyncRun, SyncRunKind
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import CachedPayload, RawPayloadStore, SyncRunRepository
 
@@ -55,6 +55,19 @@ _CURSOR = """
 SELECT started_at FROM sync_runs
 WHERE source_id = :source_id AND kind = :kind AND status = 'completed'
 ORDER BY started_at DESC
+LIMIT 1
+"""
+
+# `ORDER BY started_at DESC, id DESC LIMIT 1` and *then* a status test in
+# Python, rather than `WHERE status <> 'completed'`: the second spelling
+# answers an old failure forever once a later run has completed. `id` breaks a
+# tie on `started_at` for the reason `_LIST` does. `ix_sync_runs_source_kind_started`
+# is (source_id, kind, started_at DESC), so it supplies the leading key and the
+# `id` tiebreak is an incremental sort over one `started_at` group.
+_INCOMPLETE = """
+SELECT * FROM sync_runs
+WHERE source_id = :source_id AND kind = :kind
+ORDER BY started_at DESC, id DESC
 LIMIT 1
 """
 
@@ -167,6 +180,27 @@ class PostgresSyncRunRepository(SyncRunRepository):
                 )
             ).scalar_one_or_none()
         return found
+
+    async def latest_incomplete_run(
+        self, source_id: uuid.UUID, kind: SyncRunKind
+    ) -> SyncRun | None:
+        with self._session.no_autoflush:
+            found = (
+                (
+                    await self._session.execute(
+                        text(_INCOMPLETE), {"source_id": source_id, "kind": kind.value}
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if found is None:
+            return None
+        # `model_validate(dict(row))`, which is what `list_for_source` does with
+        # a `text()` mapping row -- `_to_domain` takes a `SyncRunRow`, and this
+        # statement returns no ORM entity to hand it.
+        newest = SyncRun.model_validate(dict(found))
+        return None if newest.status is SyncRunStatus.COMPLETED else newest
 
     async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:
         if limit <= 0:
