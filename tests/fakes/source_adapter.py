@@ -32,18 +32,6 @@ omits the two fields exactly as Emby 4.9.5.0 does. The fake's job is to
 prove the assertion is expressible without reference to Emby; it is not
 evidence that any adapter needed it.
 
-**Its `start_index` skips over a different set than Emby's does, and the
-difference is the interaction with `since`.** `_walk_states` slices its own
-**insertion order** -- stable, so a resumed walk here means what a resumed
-walk means against Emby's immutable `DateCreated` ordering -- but it slices
-*before* the `since` filter, where Emby's `StartIndex` is an offset into the
-already-filtered result the server computed. The two agree exactly for
-`since=None`, which is the walk #41 is about (a full watch-state walk has no
-cursor to resume from, which is the whole reason it needs a `StartIndex`),
-and diverge for a resumed *delta*. Nothing asks for that combination today;
-a case that did would be asserting this fake's arithmetic rather than the
-port's.
-
 **Its push channel is the same kind of forgiving, and worse.** There is no
 transport under it at all: no handshake, no frames, no close code, no
 backpressure. Its health ledger decays only because a test advanced a clock
@@ -345,15 +333,23 @@ class FakeSourceAdapter(SourceAdapter):
         return self._walk_states(since, start_index)
 
     async def _walk_states(
-        self, since: AwareDatetime | None, start_index: int = 0
+        self, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[SourceWatchState]:
         await self._ready()
         yielded = 0
-        # `start_index` skips records the way a paged upstream does, over this
-        # fake's own insertion order -- which is stable, so a resumed walk
-        # here means what it means against Emby's `DateCreated` ordering.
-        for external_id in list(self._items)[start_index:]:
+        skipped = 0
+        for external_id in list(self._items):
             if since is not None and self._changed_at[external_id] < since:
+                continue
+            # The skip comes *after* the filter, because `start_index` is an
+            # offset into the stream this walk yields rather than into the
+            # source's unfiltered set -- which is what a server that filters
+            # before it pages hands back, and is exactly what
+            # `FakeEmbyServer._list` does (`_ordered` filters, then the slice).
+            # Skipping first would make a resumed delta checkpoint a position
+            # the real adapter cannot produce.
+            if skipped < start_index:
+                skipped += 1
                 continue
             if self._fail_after is not None and yielded >= self._fail_after:
                 raise PortUnavailable("source went away mid-walk")

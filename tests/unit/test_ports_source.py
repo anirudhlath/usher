@@ -519,6 +519,29 @@ def test_get_watch_state_is_on_the_port() -> None:
     assert signature.return_annotation == SourceWatchState | None
 
 
+def test_a_walks_resume_point_is_keyword_only() -> None:
+    """`watch_state` takes a cursor and a resume point, and an `int` would
+    fill either. `since` is positional at every existing call site, so
+    without the `*` a caller can write `watch_state(cursor, 50_000)` — which
+    reads as a sensible cursor-plus-offset pair and silently skips 50,000
+    records of a *delta* walk. The `*` is what makes that unwriteable.
+
+    Pinned on the signature because nothing else in the gate can see it:
+    removing the `*` leaves the whole suite, mypy and the contract suite
+    green, since no caller passes a second positional and no contract case
+    passes `start_index` at all.
+
+    The `0` default is the other half: resumption is opt-in, so every caller
+    written before #41 keeps getting a walk from the beginning.
+    """
+    signature = inspect.signature(SourceAdapter.watch_state)
+    assert list(signature.parameters) == ["self", "since", "start_index"]
+    assert signature.parameters["start_index"].kind is inspect.Parameter.KEYWORD_ONLY, (
+        "a second positional int beside a cursor is what `*` exists to forbid"
+    )
+    assert signature.parameters["start_index"].default == 0
+
+
 def test_probe_push_is_a_concrete_method_every_adapter_inherits() -> None:
     """**The rule that must not be re-derived per adapter.**
 

@@ -93,7 +93,7 @@ class _LossySourceAdapter(FakeSourceAdapter):
     """
 
     async def _walk_states(
-        self, since: AwareDatetime | None, start_index: int = 0
+        self, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[SourceWatchState]:
         async for state in super()._walk_states(since, start_index):
             yield dataclasses.replace(state, play_count=None, last_played_at=None)

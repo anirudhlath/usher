@@ -81,7 +81,7 @@ class _LossyAdapter(FakeSourceAdapter):
         self._blind_to = blind_to
 
     async def _walk_states(
-        self, since: AwareDatetime | None, start_index: int = 0
+        self, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[SourceWatchState]:
         async for state in super()._walk_states(since, start_index):
             if self._blind_to is None or state.external_id in self._blind_to:

@@ -553,9 +553,11 @@ class SourceAdapter(ABC):
         cannot say" — and must, rather than reporting a zero, whenever the
         listing it walks does not carry them. See `SourceWatchState`.
 
-        `start_index` resumes a walk that was interrupted: it is the number
-        of records to skip, and an implementation that pages an upstream
-        passes it straight through as that page offset. **It is only
+        `start_index` resumes a walk that was interrupted. It is the number
+        of records **this walk has already yielded**: an offset into the
+        stream this method produces under the given `since`, never into the
+        source's unfiltered set. An implementation that pages a server which
+        filters before it offsets passes it straight through. **It is only
         meaningful under a stable order, which this port does not promise
         and an adapter may** -- the Emby adapter walks
         `SortBy=DateCreated,SortName` ascending over an immutable creation

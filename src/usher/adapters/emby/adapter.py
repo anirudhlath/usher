@@ -420,12 +420,14 @@ class EmbyAdapter(SourceAdapter):
         return value if isinstance(value, bool) else None
 
     async def _walk(
-        self, *, since_param: str, since: AwareDatetime | None, start_index: int = 0
+        self, *, since_param: str, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[dict[str, Any]]:
         user_id = await self._session.user_id()
-        # The resume point (#41, ADR-0042). `list_items` never passes one --
-        # the item lanes restart from their cursor; the watch lane's first
-        # walk is the whole library and has to survive a transient failure.
+        # The resume point (#41, ADR-0042). Deliberately no default: every
+        # caller states its own, so `list_items` passing 0 is written down
+        # rather than inferred from an absent keyword. The item lanes restart
+        # from their cursor; the watch lane's first walk is the whole library
+        # and has to survive a transient failure.
         start = start_index
         # `for`, not `while True`: the bound is then part of the loop rather
         # than a counter alongside it, and the raise below cannot be reached
@@ -475,7 +477,11 @@ class EmbyAdapter(SourceAdapter):
         return self._list_items(since)
 
     async def _list_items(self, since: AwareDatetime | None) -> AsyncIterator[SourceItem]:
-        async for payload in self._walk(since_param=LIBRARY_SINCE_PARAM, since=since):
+        # `start_index=0` always: the item lanes have a working `since`
+        # cursor, so a failed walk restarts from it rather than resuming.
+        async for payload in self._walk(
+            since_param=LIBRARY_SINCE_PARAM, since=since, start_index=0
+        ):
             item = to_source_item(payload)
             if item is not None:
                 yield item
@@ -556,12 +562,22 @@ class EmbyAdapter(SourceAdapter):
         `get_watch_state` below is the authoritative read, at one request
         per item.
 
-        `start_index` resumes an interrupted walk at that page offset. Sound
-        here because this walk is ordered by `DateCreated`, which no edit
-        moves, so the prefix already walked does not reorder underneath a
-        resumed attempt; a *deletion* shifts it by one and costs the shifted
-        item this run, which the merge's idempotent upsert picks up on the
-        next one.
+        `start_index` resumes an interrupted walk at that page offset --
+        Emby offsets the result it has already filtered, so it is an offset
+        into what this walk yields, which is what the port promises. Sound
+        here because the *order* is `DateCreated`, which no edit moves, so
+        the prefix already walked does not reorder underneath a resumed
+        attempt. Two things do shift it, both bounded to one run:
+
+        - A *deletion* shifts the prefix by one and costs the shifted item
+          this run, which the merge's idempotent upsert picks up on the next.
+        - With a `since`, *membership* is defined by `DateLastSavedForUser`,
+          which every watch event moves -- so an item watched between
+          attempts enters the filtered set, and if its `DateCreated` places
+          it before the resume point, neither attempt yields it. It is not
+          lost either: the reclaimed run keeps its original `started_at`
+          (ADR-0042), and that item was saved after the run began, so it
+          falls inside the next delta's window.
         """
         return self._watch_state(since, start_index)
 
