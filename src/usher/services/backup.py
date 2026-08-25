@@ -22,12 +22,19 @@ has:
    whatever those ids name in the target, which for a
    `RESTRICT` foreign key is a refused insert and for `curated_rows`' unkeyed
    `uuid[]` would have been silence.
-2. **It streams.** `usher.db.staging.raw_connection` already unwraps the
-   live `asyncpg.Connection` and asyncpg 0.31.0 carries `copy_from_query`,
-   so a table can be read out without materialising it. Named because it is
-   the seam a later fast path would use; the shipped writer batches through
-   the repository, because the rewriting has to happen in Python anyway and
-   the carried set is 14,259 rows on the measured deployment.
+2. **The format streams; ⚠️ the shipped writer does not.**
+   `usher.db.staging.raw_connection` already unwraps the live
+   `asyncpg.Connection` and asyncpg 0.31.0 carries `copy_from_query`, so a
+   table *can* be read out without materialising it — named because it is
+   the seam a later fast path would use. What ships **materialises all eight
+   tables, whole, before a byte is written**, with no bound on resident rows:
+   the rewriting has to happen in Python whatever the transport is, and
+   `write` needs the row counts before it can emit the header they go in.
+   (This paragraph said *"the shipped writer batches through the
+   repository"* until a review measured that nothing about it is a batch in
+   any sense. The choice is right at 14,259 rows and the word was wrong; the
+   bound is stated here rather than implied, because the thing that makes it
+   safe is the manifest keeping the carried set small and nothing else.)
 3. **An operator can read it.** This file is the only copy of the money
    ledger and of a household's history. A format that needs `pg_restore` to
    inspect is a format nobody inspects, and `zcat … | head -1` is the whole
@@ -196,12 +203,33 @@ class BackupService:
 
         **Everything is read before anything is opened**, and that ordering
         is the design rather than convenience. It makes the header's counts
-        exactly what the body holds, which is what K4 reads them as; and it
-        means a database that goes away mid-read leaves **no file** rather
-        than a truncated one that gzip will happily decompress up to the
-        point it stops. The cost is holding the carried set in memory, which
-        the port's own docstring prices at 14,259 rows on the deployment this
-        project measures.
+        exactly what the body holds, which is what K4 reads them as. The cost
+        is holding the carried set in memory, which the port's own docstring
+        prices at 14,259 rows on the deployment this project measures.
+
+        🔴 **The destination is written through a scratch sibling and
+        `os.replace`d into place, and it took a review to get there.** This
+        docstring claimed a failed run *"leaves **no file** rather than a
+        truncated one that gzip will happily decompress up to the point it
+        stops"*. That was true of the read phase and **false of the write
+        phase**, which is the phase the sentence describes: `gzip.open(path,
+        "wt")` truncates the destination at open, and the `with` block writes
+        a valid gzip trailer on the way out of an exception. Measured -- a
+        `TypeError` on row 4 of table 2 left a 211-byte file that `zcat`
+        decompresses cleanly, with a header claiming four rows over a body
+        holding three, and a failing run against an existing
+        `nightly.jsonl.gz` **replaced the previous good artifact** with it.
+        For a file this module's own prose calls the only copy of the money
+        ledger and of a household's history, silently destroying last
+        night's copy on a failed run is the wrong default, and a cron entry
+        or CLAUDE.md's own documented invocation reaches it.
+
+        **The guarantee is against a failed run, not against a power cut.**
+        `os.replace` is atomic with respect to *readers* -- a concurrent
+        `zcat` sees the old artifact or the new one, never a partial -- and
+        nothing here `fsync`s, so a machine that loses power mid-write can
+        still leave either file unflushed. Stated rather than implied,
+        because "atomic" is a word that invites the stronger reading.
 
         Raises `OSError` -- a directory that does not exist, a full disk, a
         path that is not writable -- and does not catch it. That family is
@@ -229,15 +257,33 @@ class BackupService:
             # `set(header["rows"])` against the tables actually present.
             "rows": {table: len(rows) for table, rows in carried.items() if rows},
         }
-        # `wt` with an explicit encoding and newline: JSON Lines is defined
-        # as UTF-8 with `\n` separators, and leaving either to the platform
-        # would make an artifact written on one host unreadable as lines on
-        # another.
-        with gzip.open(path, "wt", encoding="utf-8", newline="\n") as handle:
-            handle.write(_line(header))
-            for table, rows in carried.items():
-                for row in rows:
-                    handle.write(_line({"table": table, "row": _encode(dict(row.row))}))
+        # A sibling rather than `tempfile.gettempdir()`: `os.replace` is
+        # atomic only within one filesystem, and `/tmp` on the host this
+        # project runs on is a different mount (and tmpfs, so a large
+        # artifact would be written to RAM on the way to disk). Dot-prefixed
+        # and PID-suffixed so a run that dies without its `finally` leaves
+        # something obviously not-an-artifact, and so two runs aimed at one
+        # destination cannot scribble on each other's scratch.
+        scratch = path.with_name(f".{path.name}.{os.getpid()}.partial")
+        try:
+            # `wt` with an explicit encoding and newline: JSON Lines is
+            # defined as UTF-8 with `\n` separators, and leaving either to
+            # the platform would make an artifact written on one host
+            # unreadable as lines on another.
+            with gzip.open(scratch, "wt", encoding="utf-8", newline="\n") as handle:
+                handle.write(_line(header))
+                for table, rows in carried.items():
+                    for row in rows:
+                        handle.write(_line({"table": table, "row": _encode(dict(row.row))}))
+            os.replace(scratch, path)
+        except BaseException:
+            # `BaseException`, not `Exception`: a `KeyboardInterrupt` during
+            # a backup is the *expected* way an operator stops one, and it
+            # must not be the one path that leaves the scratch file behind.
+            # `missing_ok` because the failure may be `gzip.open` itself,
+            # which creates nothing.
+            scratch.unlink(missing_ok=True)
+            raise
         return BackupReport(
             path=path,
             schema_revision=revision,

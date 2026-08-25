@@ -196,6 +196,17 @@ def unaccounted_reference_columns() -> dict[str, tuple[str, ...]]:
     import against a catalog where it names something else or nothing at
     all. Nothing about that is visible at backup time, which is why it is a
     derived check rather than a list somebody keeps current.
+
+    ⚠️ **It answers *"is this column rewritten?"* and never *"into what?"*,
+    and a review round caught that distinction being read as the stronger
+    one.** A column accounted for here and rewritten into the **wrong value**
+    -- a `kind` stamped `movie` on every reference, a user carried as its id,
+    two episode numbers transposed -- passes this completely, and all three
+    survived the whole suite until
+    `test_every_carried_reference_holds_the_values_of_the_row_it_names`
+    (integration) compared a carried reference to the row it was built from,
+    field by field. The two checks are a structural claim and a value claim;
+    neither subsumes the other and this one is the weaker.
     """
     gaps: dict[str, tuple[str, ...]] = {}
     for table in carried_tables():

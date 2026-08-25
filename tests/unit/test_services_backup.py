@@ -406,6 +406,81 @@ async def test_a_read_that_fails_leaves_no_file_at_all(tmp_path: Path) -> None:
     assert path.exists(), "the premise: this service does write a file when the read works"
 
 
+# The carried set for the two write-failure cases below: an unencodable value
+# in the *fourth* row of the *second* table, so the failure lands with a valid
+# header and three good rows already written -- which is exactly the shape
+# that decompresses cleanly and is wrong.
+_FAILS_MID_WRITE: Mapping[str, Sequence[Mapping[str, object]]] = {
+    "users": [{"name": "one"}],
+    "watch_states": [{"n": 1}, {"n": 2}, {"n": 3}, {"n": object()}],
+}
+
+
+async def test_a_failure_part_way_through_the_write_leaves_no_artifact_behind(
+    tmp_path: Path,
+) -> None:
+    """🔴 **The write phase had the failure the read phase was defended
+    against**, and `write`'s own docstring claimed otherwise until a review
+    measured it.
+
+    `gzip.open(path, "wt")` truncates the destination at open and the `with`
+    block writes a valid gzip trailer on the way out of an exception, so a
+    run that died on row 4 of table 2 left a 211-byte file that `zcat`
+    decompresses **cleanly**, with a header claiming four `watch_states` rows
+    over a body holding three. That is the worst shape an artifact can have:
+    it is not detectably broken, and the only thing that would ever notice is
+    K4 comparing the header's counts against what it read.
+
+    The repair is a scratch sibling plus `os.replace`. Both halves are
+    asserted -- no artifact at the destination, and no scratch left in the
+    directory -- because a repair that merely renamed the truncated file
+    would satisfy the first.
+    """
+    path = tmp_path / "x.jsonl.gz"
+
+    with pytest.raises(TypeError):
+        await _service(_FAILS_MID_WRITE).write(path)
+
+    assert not path.exists(), "a truncated artifact was left at the destination"
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == [], (
+        "the scratch file was left behind"
+    )
+
+    # The premise: this same shape *does* produce a file once the unencodable
+    # row is gone, so the assertions above are about the failure rather than
+    # about a service that writes nothing.
+    await _service({"users": [{"name": "one"}]}).write(path)
+    assert path.exists()
+
+
+async def test_a_failed_run_does_not_destroy_the_previous_artifact(tmp_path: Path) -> None:
+    """**The half that matters for a cron entry**, and the reason the repair
+    is `os.replace` rather than an `unlink` in a `finally`.
+
+    A nightly `usher backup --output nightly.jsonl.gz` writes to one path
+    forever. Under the truncating spelling, the *first failing run* replaced
+    the last good artifact with a short one -- so a household could lose its
+    watch history and its money ledger to a transient failure, on the run
+    that was supposed to protect it, with a file still sitting there that
+    decompresses.
+
+    Asserted on the **bytes**, not on the file's existence: a repair that
+    left an empty or zero-length file at the destination passes an
+    `exists()` check and is the same loss.
+    """
+    path = tmp_path / "nightly.jsonl.gz"
+    await _service({"users": [{"name": "last night"}]}).write(path)
+    good = path.read_bytes()
+    assert _read(path)[1]["row"] == {"name": "last night"}
+
+    with pytest.raises(TypeError):
+        await _service(_FAILS_MID_WRITE).write(path)
+
+    assert path.read_bytes() == good, "the failing run replaced the previous artifact"
+    assert _read(path)[1]["row"] == {"name": "last night"}
+    assert [entry.name for entry in tmp_path.iterdir()] == [path.name]
+
+
 def test_the_credential_warning_names_the_setting_and_the_consequence() -> None:
     """One string, so K5's runbook quotes it rather than paraphrasing it.
 
@@ -472,6 +547,16 @@ def test_every_foreign_key_in_the_carried_set_is_rewritten_or_declared_raw() -> 
     The premise guards matter here as much as the assertion: an accounting
     check over an empty carried set passes trivially, and so does one over a
     set whose tables have no foreign keys at all.
+
+    ⚠️ **This asks whether a column *is* rewritten and never *into what*, so
+    it is the weaker of the two claims about the rewriting path.** A column
+    accounted for here and rewritten into the wrong value passes it -- and
+    three such corruptions survived the whole suite until
+    `tests/integration/test_backup_artifact.py::
+    test_every_carried_reference_holds_the_values_of_the_row_it_names`
+    compared a carried reference to its source row field by field. Recorded
+    because a sweep ledger read this case's kill as evidence for the wider
+    claim, which it is not.
     """
     tables = carried_tables()
     assert tables, "the carried set is empty, so this case proves nothing"

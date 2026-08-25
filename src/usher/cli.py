@@ -2221,10 +2221,20 @@ def build_parser() -> argparse.ArgumentParser:
     # "fourteen the CLI advertised on 2026-08-05" bullet uses and the habit
     # this task's plan did not: written 2026-08-13 it said `backup` would be
     # the sixteenth, and `genres` and `eval` landed in between. On
-    # **2026-08-25** `grep -c "add_parser(" src/usher/cli.py` answers 18 with
-    # this row, and `test_the_argv_table_covers_every_subcommand` compares
+    # **2026-08-25** `len(build_parser()._subparsers…choices)` is 18 with this
+    # row, and `test_the_argv_table_covers_every_subcommand` compares
     # `_MINIMAL_ARGV` against `subparsers.choices` -- so nothing anywhere has
     # to hold the number.
+    #
+    # ⚠️ **The citation was a `grep` for one commit and the grep counted this
+    # comment.** `grep -c "add_parser(" src/usher/cli.py` answered **19**,
+    # because the line stating the claim contained the literal it searched
+    # for -- writing the measurement down is what falsified it. Cite the
+    # parser's own `choices`, which is the source the next sentence already
+    # names and which cannot self-match; if a grep is wanted anyway, the
+    # pattern has to be anchored (`sub\.add_parser(`) and then *that*
+    # spelling has to stay out of the prose. Same family as the harness whose
+    # landing-check was derived from the same guess as its edit.
     backup = sub.add_parser("backup", help="write everything nothing else can rebuild to one file")
     # `type=Path` rather than `str` plus a conversion in `_dispatch`: argparse
     # is where the surface is described, and a `--output` that is a string

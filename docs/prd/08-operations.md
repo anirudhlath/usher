@@ -747,13 +747,21 @@ per row carrying `table` and `row`.** Four properties earn that over any
 Postgres-native format, and the first is the one none of them has — **every
 reference is rewritten on the way out**, which `pg_dump -t watch_states` cannot
 express because there is nowhere in a custom-format archive to put a natural
-key. The other three: it streams (the seam is
-`usher.db.staging.raw_connection` plus asyncpg's `copy_from_query`; the shipped
-writer batches, because at 14,259 rows there is nothing to buy and the
-rewriting happens in Python either way); an operator can read it, which matters
+key. The other three: the *format* streams (the seam is
+`usher.db.staging.raw_connection` plus asyncpg's `copy_from_query`) — ⚠️ **the
+shipped writer does not**, and holds all eight tables in memory before writing
+a byte, which is affordable because the manifest keeps the carried set at
+14,259 rows and for no other reason; an operator can read it, which matters
 because this file is the only copy of the money ledger and of a household's
 history; and it survives a Postgres version change, where `pg_dump -Fc` does
 not restore into an older server.
+
+**The destination is written through a scratch sibling and `os.replace`d into
+place**, so a run that fails part-way leaves the previous artifact intact
+rather than replacing it with a truncated one — and a truncated gzip
+decompresses cleanly up to the point it stops, so the failure it prevents is
+silent. The guarantee is against a failed run and not against a power cut:
+`os.replace` is atomic with respect to readers, and nothing `fsync`s.
 
 **The header carries two stamps and only one of them is enforced by refusal.**
 `schema_revision` is Alembic's head as the *database* reports it, read through

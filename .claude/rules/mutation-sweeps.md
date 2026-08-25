@@ -8016,17 +8016,44 @@ fake repository and a real migrated database), which is a cross-file kill and
 is **not** the claim the plan wanted: that one is about a *consumer* carrying
 the stamp's meaning, and it stays untested until K4 lands.
 
-**P9 is the plant worth keeping.** Removing `user_id` from `REWRITTEN` makes
-every `watch_states` and `search_queries` row carry a raw `users.id` UUID — and
-the integration file's UUID scan **cannot see it**, because that scan
-cross-checks against `titles.id` and a user id is not one. The only thing that
-fails is `test_every_foreign_key_in_the_carried_set_is_rewritten_or_declared_raw`,
-a derived check over `Base.metadata`'s foreign keys against `REWRITTEN` +
+⚠️ **CORRECTED 2026-08-25 by review, and the correction is that the residual
+gap was larger than this paragraph says.** *"The consumer half is untested
+until K4"* is true and it was used here as if it were the whole remainder. The
+**producer** half was checkable at this head and was not checked: every
+assertion on the stamp read `header["schema_revision"] == code_head_revision()`,
+which an implementation returning exactly `code_head_revision()` satisfies
+trivially — and planting that passed ruff, mypy and all 5,891 cases. The two
+values are equal **by construction** in this suite, because `postgres_url` runs
+`alembic upgrade head`, so nothing in the repository could separate them.
+See round 2's R4 below for the repair. **The general form: when two expressions
+are equal by construction in every fixture, an assertion naming one of them is
+an assertion about neither** — the *"two predicates, one selectivity"* entry in
+`testing-discipline.md`, arriving at a fixture-wide invariant rather than at a
+single statement's clauses.
+
+**P9 is the plant worth keeping, and its write-up over-claimed.** Removing
+`user_id` from `REWRITTEN` makes every `watch_states` and `search_queries` row
+carry a raw `users.id` UUID — and the integration file's UUID scan **cannot see
+it**, because that scan cross-checks against `titles.id` and a user id is not
+one. The only thing that fails is
+`test_every_foreign_key_in_the_carried_set_is_rewritten_or_declared_raw`, a
+derived check over `Base.metadata`'s foreign keys against `REWRITTEN` +
 `CARRIED_RAW`. That is exactly why it exists: **a scan written for one table's
 ids is blind to every other table's, and a backup's worst failures are the ones
-that parse.** Same family as the "two predicates, one selectivity" entry — the
-behavioural case looked like coverage of the whole rewriting and covers one
-column family of two.
+that parse.**
+
+⚠️ **CORRECTED 2026-08-25 by review: that check answers *"is this column
+rewritten?"* and never *"into what?"*, so the sentence covers less than it
+reads as covering.** It is derived from `Base.metadata` and therefore sees a
+foreign key nobody accounted for; it is completely blind to an accounted-for
+column rewritten into the **wrong value**, which is a strictly larger family.
+Three such corruptions survived all 5,891 cases when the review planted them —
+every reference stamped `movie`, the user carried as its id, the two episode
+numbers transposed — because every assertion in the file was about *shape*
+(a UUID under an `id` key, an object carrying `kind`) and none compared a
+carried value to the row it came from. Round 2's R1–R3 are the repair.
+**A structural check and a value check are two claims, and this ledger read the
+first as evidence for the second.**
 
 **P7's blast radius was mispredicted and the direction is instructive.** It was
 expected to fail the one service case that asserts the ordering; it fails
@@ -8060,3 +8087,99 @@ NULL` predicate that keeps the artifact off 1,126,789 rows was unobservable —
 time in this repository. A third row with both links `NULL` was added before
 the plant was run, and the row is not hypothetical: 2,720 of the measured
 household's 13,539 `media_items` are unmatched.
+
+## M10 K3, round 2 — the reference-rewriting path had no value assertion at all (2026-08-25)
+
+**9 mutations, 7 killed, 2 controls surviving every gate step.** Harness
+`/var/tmp/k3/sweep2.py`, outside the tree; every substitution's anchor count
+asserted to be exactly 1 before the edit lands, and the restore verified by
+`sha256sum` after **each** plant. All nine restores byte-identical.
+
+**Five of the seven kills are for defects that survived round 1 whole**, which
+is the finding rather than the count: round 1 swept the module's *decisions*
+(which tables, which columns, which order of operations) and the shipped cases
+asserted the artifact's *shape*. Nothing anywhere compared a carried value to
+the row it was built from — and the reference rewriting is the entire reason
+this command exists rather than `pg_dump -t watch_states`.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| R1 every title reference stamped `TitleKind.MOVIE` | KILLED | 1 |
+| R2 the user carried as `users.id` rather than `users.name` | KILLED | 1 |
+| R3 `season_number` and `episode_number` transposed | KILLED | 1 |
+| R4 `schema_revision` returns `code_head_revision()` | KILLED | 1 |
+| R5 the whole `ORDER BY` clause deleted | KILLED | 1 |
+| R6 the destination truncated at open (the pre-review write) | KILLED | 2 |
+| R7 the scratch file left behind on failure | KILLED | 2 |
+| C1 *control* — the two independent header writes swapped | SURVIVED, all five gate steps | — |
+| C2 *control* — `_encode`'s `dict` and `list` arms swapped | SURVIVED, all five gate steps | — |
+
+Each of R1–R5 fails **exactly** the one case written for it, which is what
+says the new cases are separable rather than one blanket equality.
+
+🔴 **R1 is the severe one and it is severe for an ADR's reason, not a
+cosmetic one.** A series reference stamped `movie` does not fail at restore —
+it **resolves**, through K2's `(kind, tmdb_id)` rung, onto a different title,
+because ADR-0011 exists precisely because TMDb's movie and series id spaces
+overlap on 26,968 ids (47.3% of every series id Wikidata knows). That is *"a
+wrong id fails nothing at all"* — the failure `backup_identity`'s whole design
+is built to prevent — arriving through the rung the module declares to be an
+identity. It passed every shape assertion in the file: the object still carries
+`kind`, the UUID still sits under `id`, the reference still offers an
+`imdb_id`.
+
+**The mechanism that hid R1–R3 is worth more than the three plants.** The unit
+cases drive a *fake* repository that is **handed** pre-built `TitleReference`
+and `EpisodeReference` objects, so they pin the service's JSON spelling and
+nothing whatever about construction; the integration cases asserted
+`path[-1] != "id"`, `"kind" in reference`, `any(reference.get("imdb_id"))` —
+all satisfied by a reference built from the wrong row. The fixture had already
+seeded deliberately asymmetric values (`tt99000550` against `tt99000551`, a
+movie against a series, S01**E04**, `"the household"`) and then asserted
+**none** of them against what came out. **When a value crosses a boundary
+transformed, the test that matters compares the output to the input; a test
+that describes the output's shape is satisfied by every transformation with the
+right shape.**
+
+**R5 needed the fixture rebuilt before it could be a plant at all**, and that
+is `testing-discipline.md`'s UUIDv7 trap arriving for the sixth time. `new_id()`
+is monotonic, so rows inserted in id order leave heap order and `ORDER BY id`
+identical and the clause unobservable — deleting the entire `ORDER BY` passed
+all 5,891 cases. The three tables now seed in the **reverse** of their key
+order (two hand-spelled UUIDs, a text key inserted backwards, and `media_items`
+whose `id` the `PARTIAL` set does not carry at all, so it falls back to
+`(source_id, external_id)`), and each arm reads the table back with no
+`ORDER BY` to assert that premise before asserting the artifact.
+
+**R6/R7 are a defect the round-1 write-up asserted the absence of.** `write`'s
+docstring claimed a failed run *"leaves no file rather than a truncated one
+that gzip will happily decompress up to the point it stops"* — true of the read
+phase, false of the write phase, which is the phase the sentence describes.
+Measured: a `TypeError` on row 4 of table 2 left a **211-byte file that `zcat`
+decompresses cleanly**, header claiming 4 rows over a body of 3; and against an
+existing `nightly.jsonl.gz` it **replaced the previous good artifact** with it.
+Repaired with a scratch sibling plus `os.replace`. **A docstring asserting a
+negative is the one kind of claim a passing suite never checks**, and this one
+was written in the same commit as the case that would have caught it, for the
+other phase.
+
+**Both controls, each measured against every gate step separately:**
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 the header's two independent writes swapped | PASS | PASS | PASS | PASS (12/0) | PASS |
+| C2 `_encode`'s `dict` and `list` arms swapped | PASS | PASS | PASS | PASS (12/0) | PASS |
+
+C1's equivalence is a fact about the code: the header is a `dict` serialised by
+`json.dumps` with `sort_keys` off, the two writes read nothing from each other,
+and every assertion anywhere reads it by key. C2's is a fact about the types:
+`dict` and `list` are disjoint, so no value can match both arms and the order
+between them decides nothing. Neither is an `__all__` reorder (`RUF022` rejects
+those) nor a positional-argument reorder.
+
+**And one claim this round could not make.** The review's instruction was to
+verify the new cases kill *the plants that currently survive*, which they do.
+What is still unmeasured is the same thing round 1 disclosed: no **consumer**
+of the stamp, the ordering or the references exists yet, so every one of these
+cases asserts what the producer wrote and nothing asserts that a restore reads
+it the same way. K4 is where that becomes checkable.

@@ -166,11 +166,16 @@ stack *because* the stack is one flag away.
   fourteen the CLI advertised on **2026-08-05** had the defect. Stated with
   its date because it is a measurement rather than a count to keep current —
   and the sentence that stood here (*"the parser advertises fifteen since M8's
-  `usher curate`"*) had gone stale exactly as predicted, by **three**:
-  `grep -c "add_parser(" src/usher/cli.py` answers **18** on **2026-08-25**,
-  M9 having added `genres` and `eval` and M10's K3 `backup`. Every one of them
-  is still inside the one boundary, and nothing needs this number — the
-  parametrised case reads `subparsers.choices` off the parser itself.
+  `usher curate`"*) had gone stale exactly as predicted, by **three**: the
+  parser's own `subparsers.choices` holds **18** on **2026-08-25**, M9 having
+  added `genres` and `eval` and M10's K3 `backup`. Every one of them is still
+  inside the one boundary, and nothing needs this number — the parametrised
+  case reads `subparsers.choices` off the parser itself, which is also why
+  that is the thing to cite. ⚠️ **The first spelling of this correction cited
+  `grep -c "add_parser(" src/usher/cli.py` and the answer is 19, not 18**,
+  because both this line and `cli.py`'s own comment contain the literal being
+  searched for: writing a grep-checkable claim in prose is what makes the grep
+  count the prose. A citation that can self-match is not a measurement.
 - **Truncating or reformatting the exception's own message.** The message is
   the operator's information. The boundary drops the *stack* and keeps the
   message intact — except for a rejected settings value, which is the one

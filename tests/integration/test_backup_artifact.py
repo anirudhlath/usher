@@ -52,7 +52,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.backup_manifest import BackupClass, tables_of
-from usher.db.migrations.status import code_head_revision
+from usher.db.migrations.status import code_head_revision, database_revision
 from usher.db.repositories.backup import PostgresBackupRepository
 from usher.domain.ids import new_id
 from usher.services.backup import MANIFEST_VERSION, BackupService
@@ -69,6 +69,24 @@ SEEDED_REBUILDABLE: tuple[str, ...] = ("titles", "jobs", "raw_payloads")
 MOVIE_IMDB_ID = "tt99000550"
 MOVIE_TMDB_ID = 99000550
 SERIES_IMDB_ID = "tt99000551"
+
+# **Deliberately unequal**, so a transposition of the two is a different
+# artifact rather than the same one. Every series has an S01E01, so a fixture
+# using 1 and 1 would make the swap invisible -- and 32,409 series make that a
+# certainty rather than a risk.
+SEASON_NUMBER = 1
+EPISODE_NUMBER = 4
+
+# The household's name, which is what `watch_states.user_id` and
+# `search_queries.user_id` travel as (`uq_users_name` makes it an identity).
+# Nothing like a UUID, so carrying `users.id` here instead is visible.
+HOUSEHOLD_NAME = "the household"
+
+# A real revision from this chain that is not and will never be its head:
+# `m10a`'s own `down_revision`. Used to move the *database* away from the code
+# so the header's stamp can be shown to follow one rather than the other; the
+# case asserts it differs from `code_head_revision()` before relying on it.
+STALE_REVISION = "m09f"
 
 
 @pytest.fixture
@@ -93,8 +111,14 @@ async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
         "series": new_id(),
         "season": new_id(),
         "episode": new_id(),
-        "watch_movie": new_id(),
-        "watch_episode": new_id(),
+        # **Not `new_id()`, and the whole of the ordering case rests on it.**
+        # `new_id()` is UUIDv7 and monotonic, so a fixture that mints ids in
+        # insertion order makes heap order and `ORDER BY id` identical and the
+        # `ORDER BY` unobservable -- the trap `testing-discipline.md` records
+        # costing M7 five untested orderings. These two are spelled so that
+        # the row inserted **first** sorts **second**.
+        "watch_movie": uuid.UUID("00000000-0000-7000-8000-0000000000b2"),
+        "watch_episode": uuid.UUID("00000000-0000-7000-8000-0000000000a1"),
         "llm_call": new_id(),
         "search_query": new_id(),
         "media_item_movie": new_id(),
@@ -105,7 +129,7 @@ async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
     }
     await session.execute(
         text("INSERT INTO users (id, name, is_default) VALUES (:id, :name, true)"),
-        {"id": ids["user"], "name": "the household"},
+        {"id": ids["user"], "name": HOUSEHOLD_NAME},
     )
     await session.execute(
         text(
@@ -160,16 +184,24 @@ async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
         },
     )
     await session.execute(
-        text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, 1)"),
-        {"id": ids["season"], "title_id": ids["series"]},
+        text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, :season)"),
+        {"id": ids["season"], "title_id": ids["series"], "season": SEASON_NUMBER},
     )
     await session.execute(
         text(
             "INSERT INTO episodes (id, title_id, season_id, season_number, episode_number) "
-            "VALUES (:id, :title_id, :season_id, 1, 4)"
+            "VALUES (:id, :title_id, :season_id, :season, :episode)"
         ),
-        {"id": ids["episode"], "title_id": ids["series"], "season_id": ids["season"]},
+        {
+            "id": ids["episode"],
+            "title_id": ids["series"],
+            "season_id": ids["season"],
+            "season": SEASON_NUMBER,
+            "episode": EPISODE_NUMBER,
+        },
     )
+    # The movie's watch state is inserted first and sorts second; see the id
+    # table above.
     await session.execute(
         text(
             "INSERT INTO watch_states "
@@ -203,10 +235,16 @@ async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
         ),
         {"id": ids["llm_call"], "model": "a-local-model"},
     )
-    await session.execute(
-        text("INSERT INTO row_provider_settings (slug_prefix, enabled) VALUES (:slug, false)"),
-        {"slug": "genre-affinity"},
-    )
+    # Two rows, inserted in reverse of their key order, so `ORDER BY
+    # slug_prefix` is distinguishable from the heap order a missing `ORDER BY`
+    # returns. This is the one carried table whose primary key is neither a
+    # UUID nor carried-by-omission, so it is the plainest statement of the
+    # branch `_order_by` takes for six of the eight.
+    for slug in ("z-continue-watching", "genre-affinity"):
+        await session.execute(
+            text("INSERT INTO row_provider_settings (slug_prefix, enabled) VALUES (:slug, false)"),
+            {"slug": slug},
+        )
     await session.execute(
         text(
             "INSERT INTO search_queries "
@@ -223,14 +261,19 @@ async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
     # The third one is unmatched -- **both** links `NULL` -- and it is the
     # answer to *"has any fixture, anywhere, ever set this to the other
     # value?"*. Without it the `WHERE title_id IS NOT NULL OR episode_id IS
-    # NOT NULL` predicate that keeps the artifact off 1,126,789 rows is
-    # unobservable: every row would be carried either way. It is not a corner
-    # either -- on the measured household 2,720 of 13,539 `media_items` rows
-    # are unmatched, and on a library that has bootstrapped and never run a
-    # match pass, the unmatched population *is* the library.
+    # NOT NULL` predicate is unobservable: every row would be carried either
+    # way. It is not a corner either -- on **this** deployment, read
+    # 2026-08-25, 2,720 of 13,539 `media_items` rows are unmatched, and on a
+    # library that has bootstrapped and never run a match pass the unmatched
+    # population *is* the library.
+    # Inserted `emby-2` first for the reason the two watch-state ids are
+    # spelled by hand: `media_items` does not carry its `id` at all (the
+    # `PARTIAL` entry names two link columns), so `_order_by` falls back to
+    # the carried natural key -- and heap order has to disagree with it for
+    # that fallback to be observable.
     for key, external, title_id, episode_id in (
-        ("media_item_movie", "emby-1", ids["movie"], None),
         ("media_item_episode", "emby-2", ids["series"], ids["episode"]),
+        ("media_item_movie", "emby-1", ids["movie"], None),
         ("media_item_unmatched", "emby-3", None, None),
     ):
         await session.execute(
@@ -282,6 +325,202 @@ async def _write(
     service = BackupService(repository=PostgresBackupRepository(session))
     await service.write(artifact)
     return _read(artifact)
+
+
+def _carried(rows: Sequence[Mapping[str, Any]], table: str) -> list[Mapping[str, Any]]:
+    """Every `row` object one table contributed, in the order it was written."""
+    return [dict(row["row"]) for row in rows if row["table"] == table]
+
+
+async def test_every_carried_reference_holds_the_values_of_the_row_it_names(
+    session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
+) -> None:
+    """🔴 **The case this file shipped without, and the reason the command
+    exists rather than `pg_dump`.**
+
+    Every other assertion here is about *shape* -- a UUID sits under an `id`
+    key, an object carries `kind`, some reference offers an `imdb_id`. Three
+    separate corruptions of the natural key satisfy all of them and survived
+    the whole 5,891-case suite when planted: stamping every reference
+    `TitleKind.MOVIE`, carrying `users.id` under the key `user` instead of
+    `users.name`, and transposing `season_number` with `episode_number`. The
+    unit cases could not see any of them either, because they drive a fake
+    repository that is *handed* pre-built references and therefore pin the
+    JSON spelling and nothing about construction.
+
+    ⚠️ **The `kind` one is severe rather than cosmetic.** ADR-0011 exists
+    because TMDb's movie and series id spaces overlap on 26,968 ids -- 47.3%
+    of every series id Wikidata knows -- so a series reference stamped `movie`
+    does not fail at restore. It **resolves**, through K2's `(kind, tmdb_id)`
+    rung, onto a different title. That is *"a wrong id fails nothing at all"*
+    -- the failure `backup_identity`'s whole design exists to prevent --
+    arriving through the rung it declares to be an identity.
+
+    So this case reads the seeded row back and compares the carried reference
+    to it **field by field**, with the fixture chosen so every field is
+    distinguishable from every other: two titles of different `kind`, one
+    with a `tmdb_id` and one without, an episode whose season and episode
+    numbers differ, and a user whose name is not its id.
+    """
+    # The premises, and they are the case. An equality is only a statement
+    # about the field it names if a wrong field would give a different answer.
+    assert MOVIE_IMDB_ID != SERIES_IMDB_ID
+    assert seeded["movie"] != seeded["series"]
+    assert SEASON_NUMBER != EPISODE_NUMBER, (
+        "the two numbers are equal, so a transposition is unobservable"
+    )
+    assert str(seeded["user"]) != HOUSEHOLD_NAME, (
+        "the household's name equals its id, so carrying the wrong one is unobservable"
+    )
+
+    _, rows = await _write(session, artifact)
+
+    movie_reference = {
+        "kind": "movie",
+        "id": str(seeded["movie"]),
+        "imdb_id": MOVIE_IMDB_ID,
+        "tmdb_id": MOVIE_TMDB_ID,
+    }
+    series_reference = {
+        "kind": "series",
+        "id": str(seeded["series"]),
+        "imdb_id": SERIES_IMDB_ID,
+        # The series carries no `tmdb_id`, which is what makes the two
+        # references distinguishable in a second field as well as in `kind`.
+        "tmdb_id": None,
+    }
+
+    watch_states = _carried(rows, "watch_states")
+    by_title = [row for row in watch_states if row["title"] is not None]
+    by_episode = [row for row in watch_states if row["episode"] is not None]
+    assert len(by_title) == 1 and len(by_episode) == 1, watch_states
+
+    assert by_title[0]["title"] == movie_reference
+    assert by_title[0]["user"] == HOUSEHOLD_NAME
+    assert by_episode[0]["episode"] == {
+        "title": series_reference,
+        "season_number": SEASON_NUMBER,
+        "episode_number": EPISODE_NUMBER,
+    }
+    assert by_episode[0]["user"] == HOUSEHOLD_NAME
+
+    # `search_queries` is the third reference column and the one whose
+    # unresolved rule is `NULL` rather than `REFUSE`, so it travels a
+    # different path in K4 and the same one here.
+    (query,) = _carried(rows, "search_queries")
+    assert query["clicked_title"] == movie_reference
+    assert query["user"] == HOUSEHOLD_NAME
+
+    # And the `PARTIAL` entry, where both links are carried on one row: the
+    # series' own reference under `title` and the episode under `episode`,
+    # which is what `IngestService` writes for an episode file.
+    episode_item = next(row for row in _carried(rows, "media_items") if row["episode"] is not None)
+    assert episode_item["title"] == series_reference
+    assert episode_item["episode"] == {
+        "title": series_reference,
+        "season_number": SEASON_NUMBER,
+        "episode_number": EPISODE_NUMBER,
+    }
+
+
+async def test_the_stamp_is_the_revision_the_database_holds_and_not_the_one_the_code_expects(
+    session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
+) -> None:
+    """🔴 **`schema_revision` is the stamp K4 refuses on, and nothing could
+    tell it from the code's own head.**
+
+    `test_the_header_stamps_the_revision_the_code_expects...` asserts
+    `header["schema_revision"] == code_head_revision()`, which an
+    implementation that *returns* `code_head_revision()` satisfies trivially
+    -- and planting exactly that passed ruff, mypy and the whole suite. The
+    two are equal by construction in this fixture, because `postgres_url`
+    runs `alembic upgrade head`, so no case in the repository could
+    distinguish them.
+
+    A backup stamping the code's head instead of the database's is the one
+    failure that makes K4's refusal **unreachable**: the artifact would claim
+    whatever schema the process that wrote it was compiled for, so a restore
+    could never see a mismatch and would half-apply into a schema that never
+    matched. Three docstrings and a PRD paragraph argue that *"two readers of
+    one fact is how a restore comes to accept what a running service would
+    refuse"*, and the one reader was enforced by nothing.
+
+    The two are separated by moving the *database* and leaving the code
+    alone. `m09f` is the real predecessor of today's head -- the state a
+    deployment running one migration behind is genuinely in -- and the write
+    happens inside this test's own transaction, which the `session` fixture
+    rolls back, so the session-scoped container is untouched.
+    """
+    head = code_head_revision()
+    assert head is not None, "the code has no single head, so there is nothing to disagree with"
+    assert head != STALE_REVISION, (
+        f"{STALE_REVISION} is the current head, so this case cannot separate "
+        "the database's stamp from the code's"
+    )
+    await session.execute(
+        text("UPDATE alembic_version SET version_num = :revision"),
+        {"revision": STALE_REVISION},
+    )
+    # The premise: the database really does report the stale value now, so a
+    # header carrying it is the stamp being read rather than a coincidence.
+    assert await database_revision(session) == STALE_REVISION
+
+    header, _ = await _write(session, artifact)
+
+    assert header["schema_revision"] == STALE_REVISION, (
+        "the header stamped something other than what `alembic_version` holds"
+    )
+
+
+async def test_every_carried_table_is_ordered_by_its_key_rather_than_by_the_heap(
+    session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
+) -> None:
+    """The port promises a stable order *"because a diff between two nights'
+    artifacts is a thing an operator will do"*, and deleting the whole
+    `ORDER BY` clause passed all 5,891 cases: the one place order was
+    observable was a `set` comparison.
+
+    ⚠️ **A UUIDv7 primary key is what makes this hard to test and easy to
+    believe.** `new_id()` is monotonic, so a fixture that inserts rows in id
+    order leaves heap order and `ORDER BY id` identical and the clause
+    unobservable -- `testing-discipline.md` records that trap costing M7 five
+    untested orderings. The fixture therefore inserts every one of these
+    three tables in the *reverse* of its key order, and each arm asserts that
+    premise by reading the table back with no `ORDER BY` at all before
+    asserting what the artifact holds.
+
+    Three tables because `_order_by` has two branches and one of them is
+    reached by a single table: `watch_states` is the UUID primary key,
+    `row_provider_settings` is a **text** primary key, and `media_items` is
+    the entry whose `id` the `PARTIAL` column set does not carry, so it falls
+    back to `(source_id, external_id)` -- a real unique constraint
+    (`uq_media_items_source_external`), which is what makes the fallback a
+    total order rather than a hope.
+    """
+    _, rows = await _write(session, artifact)
+
+    for table, key, read_back in (
+        ("watch_states", "id", "SELECT id::text FROM watch_states"),
+        (
+            "row_provider_settings",
+            "slug_prefix",
+            "SELECT slug_prefix FROM row_provider_settings",
+        ),
+        (
+            "media_items",
+            "external_id",
+            "SELECT external_id FROM media_items "
+            "WHERE title_id IS NOT NULL OR episode_id IS NOT NULL",
+        ),
+    ):
+        heap = [str(row[0]) for row in (await session.execute(text(read_back))).all()]
+        assert len(heap) >= 2, f"{table} seeded fewer than two rows, so it has no order"
+        assert heap != sorted(heap), (
+            f"the premise: {table}'s physical order already equals its key order, "
+            "so a missing ORDER BY would be unobservable"
+        )
+        carried = [str(row[key]) for row in _carried(rows, table)]
+        assert carried == sorted(heap), f"{table} was written in {carried}, not in key order"
 
 
 async def test_the_artifact_carries_every_precious_table_and_no_rebuildable_one(
@@ -437,9 +676,18 @@ async def test_the_media_item_rows_carry_their_natural_key_and_only_the_two_link
 ) -> None:
     """`media_items` is the manifest's one `PARTIAL` entry: every other column
     is rebuilt by the next source walk, and carrying them would take the
-    artifact from kilobytes to the 1,126,789 rows the measured household
-    holds. The columns carried are read off the manifest entry, so this
-    cannot drift from K1.
+    artifact from kilobytes to the whole table. The columns carried are read
+    off the manifest entry, so this cannot drift from K1.
+
+    **Two counts of this table are in circulation and they are about two
+    populations**, which is worth one sentence because this file stated the
+    larger one as current fact until a review caught it: `media_items` on
+    **this** deployment is **13,539 rows** (read 2026-08-25), and the
+    **1,126,789** that `backup_manifest`, PRD 08 and a dozen contract
+    docstrings carry is *"the household this project measures"* -- a
+    different, fully-walked library, 999,827 of whose items are episodes.
+    Neither is wrong; naming which is what stops them being read as a
+    contradiction.
     """
     _, rows = await _write(session, artifact)
     carried = [row["row"] for row in rows if row["table"] == "media_items"]
