@@ -165,8 +165,12 @@ stack *because* the stack is one flag away.
   measurable rather than aesthetic: the finding named two commands, and all
   fourteen the CLI advertised on **2026-08-05** had the defect. Stated with
   its date because it is a measurement rather than a count to keep current —
-  the parser advertises fifteen since M8's `usher curate`, and every one of
-  them is still inside the one boundary.
+  and the sentence that stood here (*"the parser advertises fifteen since M8's
+  `usher curate`"*) had gone stale exactly as predicted, by **three**:
+  `grep -c "add_parser(" src/usher/cli.py` answers **18** on **2026-08-25**,
+  M9 having added `genres` and `eval` and M10's K3 `backup`. Every one of them
+  is still inside the one boundary, and nothing needs this number — the
+  parametrised case reads `subparsers.choices` off the parser itself.
 - **Truncating or reformatting the exception's own message.** The message is
   the operator's information. The boundary drops the *stack* and keeps the
   message intact — except for a rejected settings value, which is the one
@@ -308,6 +312,22 @@ The tuple is public and carries its own comment for that reason. **This
 prediction fired within one milestone**, and not in the direction it was
 looking: the new family was not a new subsystem but the *existing* one growing
 a port boundary that made `httpx.HTTPError` unreachable. See the Amendment.
+
+✅ **It fired a second time, on 2026-08-25, in exactly the direction it was
+looking — and the tuple was already right, which is the part worth recording.**
+M10's K3 added `usher backup`, the first command in this project whose ordinary
+failure is *"the disk is full"* or *"that directory does not exist"*. That is
+the *"filesystem watcher"* clause above arriving, and it cost **no** change to
+`OPERATOR_ERRORS`: `OSError` has been the tuple's first member since M7, put
+there because asyncpg lets a refused TCP connection out **unwrapped** — a
+completely different reason, in a completely different subsystem — and it
+covers a missing directory and a full disk for free. So `usher backup` is
+inside the boundary the way M8's `usher curate` was: a `_dispatch` arm and a
+parser row, nothing else. **Written down because a prediction that resolves
+silently is a prediction nobody learns from**, and the lesson here is the one
+the sentence above does not contain: a family named for *who can act on it*
+rather than for the library that raises it generalises to subsystems it was
+never chosen for.
 
 ⚠️ **`str(exc)` on a SQLAlchemy error includes the statement and its bound
 parameters.** No credential reaches a bound parameter in this system — source

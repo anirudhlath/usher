@@ -570,6 +570,7 @@ forbidden_modules = [
 name = "no aggregate port module imports another"
 type = "independence"
 modules = [
+    "usher.ports.repository.backup",
     "usher.ports.repository.bulk",
     "usher.ports.repository.collection",
     "usher.ports.repository.curation",

@@ -27,6 +27,10 @@ from usher.ports.repository._references import (
 from usher.ports.repository._results import (
     BulkWriteResult,
 )
+from usher.ports.repository.backup import (
+    BackupRepository,
+    CarriedRow,
+)
 from usher.ports.repository.bulk import (
     AliasWriteResult,
     BulkCatalogRepository,
@@ -118,12 +122,14 @@ from usher.ports.repository.watch_state import (
 __all__ = [
     "AddedTitle",
     "AliasWriteResult",
+    "BackupRepository",
     "BrowseCursorPosition",
     "BrowseFacets",
     "BrowseSort",
     "BulkCatalogRepository",
     "BulkWriteResult",
     "CachedPayload",
+    "CarriedRow",
     "CollectionRepository",
     "CreditNamesFillResult",
     "CreditRepository",

@@ -18,6 +18,7 @@ import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 from pydantic import ValidationError
@@ -47,6 +48,7 @@ from usher.composition import (
 )
 from usher.config import Settings, get_settings, settings_rejection
 from usher.db.base import build_engine, build_session_factory
+from usher.db.repositories.backup import PostgresBackupRepository
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
@@ -69,6 +71,11 @@ from usher.ports.jobs import JobRequest
 from usher.ports.rows import RowContext
 from usher.ports.search import SearchFilters, SearchMode
 from usher.ports.source import SourceAdapter
+from usher.services.backup import (
+    CREDENTIAL_KEY_WARNING,
+    BackupReport,
+    BackupService,
+)
 from usher.services.bootstrap import (
     VocabularyState,
     VocabularyVerdict,
@@ -1836,6 +1843,67 @@ def _unit(noun: str, count: int) -> str:
     return noun if count == 1 else f"{noun}s"
 
 
+async def _backup(settings: Settings, *, output: Path | None) -> None:
+    """Write one artifact holding everything nothing else can rebuild.
+
+    **The first command in this project whose ordinary failure is *"the disk
+    is full"* or *"that directory does not exist"*, and it needs no new
+    handler for either.** ADR-0026's Uncertainty section predicted a
+    milestone that *"adds a subprocess, a message broker or a filesystem
+    watcher adds a family with it"*; this is that milestone, the family is
+    `OSError`, and `OPERATOR_ERRORS` has carried it since M7's smoke test --
+    a refused TCP connection reaches asyncpg unwrapped, so it was already
+    there for a completely different reason and covers this for free. So
+    `usher backup` is inside the boundary the way M8's `usher curate` was:
+    a `_dispatch` arm and a parser row, and nothing else. The prediction is
+    noted in the ADR because a prediction that resolves silently is one
+    nobody learns from.
+
+    **It reads and never writes the database**, which makes it safe on a
+    production box -- the bargain `usher index`, `usher derive` and bare
+    `usher genres` already take.
+
+    **The report says the `USHER_SECRET_KEY` thing on every run**, not behind
+    a flag and not only when a credential row exists. `source_credentials`
+    travels as ciphertext and this command holds no key, so an artifact
+    restored into a deployment with a different key restores credentials
+    nobody can decrypt; an operator who learns that at restore time learns it
+    too late, and the run that most needs the sentence is the one against a
+    deployment that has not added its source yet.
+    """
+    async with _session_for(settings) as session:
+        service = BackupService(repository=PostgresBackupRepository(session))
+        report = await service.write(output)
+    _print_backup_report(report)
+
+
+def _print_backup_report(report: BackupReport) -> None:
+    """One line per table, one summary line, one sentence about the key.
+
+    **Every carried table, zeros included**, for `_print_curation_report`'s
+    reason one function down: a table absent from the report and a table
+    nobody carries read the same, and at a terminal there is no second export
+    to compare against. That matters most for `llm_calls`, which is 0 rows on
+    this deployment and is the table PRD 08 calls *"the first thing in this
+    project that is not rebuildable from anything, at any price"* -- a spend
+    ledger silently dropped would be reported by nothing else.
+
+    The size is `stat()` on the written file rather than a sum of what was
+    encoded: gzip's ratio over JSON is the whole reason the format is
+    affordable, and a number an operator can check with `ls -l` is worth more
+    than one only this command can produce.
+    """
+    for table, count in report.rows.items():
+        print(f"  {table:<24}{count:>9,} {_unit('row', count)}")
+    print(
+        f"wrote {report.total_rows:,} {_unit('row', report.total_rows)} "
+        f"from {len(report.rows)} {_unit('table', len(report.rows))} "
+        f"to {report.path} ({report.bytes_written:,} bytes), "
+        f"schema {report.schema_revision}"
+    )
+    print(CREDENTIAL_KEY_WARNING)
+
+
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
     """Probe a source's push channel once, or run the lanes in the foreground.
 
@@ -2147,6 +2215,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="connect, wait, and report what arrived, then exit",
     )
+
+    # The eighteenth subcommand. **The count is stated with the date it was
+    # measured rather than maintained**, which is the habit ADR-0026's own
+    # "fourteen the CLI advertised on 2026-08-05" bullet uses and the habit
+    # this task's plan did not: written 2026-08-13 it said `backup` would be
+    # the sixteenth, and `genres` and `eval` landed in between. On
+    # **2026-08-25** `grep -c "add_parser(" src/usher/cli.py` answers 18 with
+    # this row, and `test_the_argv_table_covers_every_subcommand` compares
+    # `_MINIMAL_ARGV` against `subparsers.choices` -- so nothing anywhere has
+    # to hold the number.
+    backup = sub.add_parser("backup", help="write everything nothing else can rebuild to one file")
+    # `type=Path` rather than `str` plus a conversion in `_dispatch`: argparse
+    # is where the surface is described, and a `--output` that is a string
+    # here and a `Path` there is two spellings of one argument. No `default=`
+    # -- the name embeds the run's own timestamp, so the default has to be
+    # computed at the instant the header is stamped or the two disagree by
+    # however long `Settings` and the engine took to build.
+    backup.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="where to write it; default usher-backup-<UTC>.jsonl.gz here",
+    )
     return parser
 
 
@@ -2408,6 +2499,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
         asyncio.run(_curate(settings))
     elif args.command == "push":
         asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
+    elif args.command == "backup":
+        asyncio.run(_backup(settings, output=args.output))
     else:
         # Imported here, not at module scope: uvicorn.run blocks, and nothing
         # about the bootstrap path should pay for importing the server.

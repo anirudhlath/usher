@@ -96,6 +96,7 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
     "home": ["home"],
     "curate": ["curate"],
     "push": ["push"],
+    "backup": ["backup"],
 }
 
 

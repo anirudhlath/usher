@@ -333,6 +333,9 @@ uv run usher genres --backfill               # rewrite the column; batched, resu
 uv run usher home                            # compose the home screen
 uv run usher curate                          # one LLM generation; pool, rows, drops, tokens, cost
 
+uv run usher backup                          # one gzipped JSON Lines file of everything nothing rebuilds
+uv run usher backup --output /var/tmp/x.jsonl.gz   # default: usher-backup-<UTC>.jsonl.gz here
+
 uv sync --extra embedding                    # optional: fastembed, 167 MiB, no torch
 ```
 
@@ -367,6 +370,17 @@ staled** on the 1,272,869-title catalog, against
 [ADR-0039](docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)'s
 original estimate of ~1.8 h of re-embedding, which priced the whole embedded
 population rather than the 0.2% of it a genre rewrite touches.
+
+**`usher backup` reads and never writes, and it carries what
+`usher.db.backup_manifest` classifies precious** — the 7 precious tables whole,
+plus `media_items`' two link columns keyed by `(source_id, external_id)`, and
+nothing else. Every title, episode and user reference is rewritten into a
+natural key on the way out (`usher.db.backup_identity`), because no title id
+survives a bootstrap boundary. **The artifact carries no key**:
+`source_credentials` travels as ciphertext, so a restore into a deployment with
+a different `USHER_SECRET_KEY` restores credentials nobody can decrypt, and the
+command prints that sentence on every run. Counted read-only on 2026-08-25, the
+whole thing is **14,259 rows** on this deployment.
 
 **Nothing runs `usher similar --rebuild` for you**, and that is the one
 freshness gap in the project: a title's neighbours go stale when some *other*

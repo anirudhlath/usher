@@ -708,13 +708,28 @@ coverage figure this design was drafted against does not survive
 re-measurement**: on 2026-08-13 the live catalog held **0** titles with
 neither provider id and on 2026-08-21 it held **6** (of 1,272,888, with 72
 carrying no `imdb_id` against 13 eight days earlier), so the raw-id rung is
-exercised by real rows rather than being defensive. `curated_rows` is never
+exercised by real rows rather than being defensive. ✅ **Counted in a real
+artifact on 2026-08-25 rather than inferred from the catalog**: `usher backup`
+against the live database carried **16,819 title references naming 7,581
+distinct titles, of which 602 references — 3.6% — resolve by nothing but the
+raw id**, because those same 6 unkeyed titles are referenced many times each.
+A rung reached by 6 rows in 1.27 M reads as negligible from the catalog and is
+one carried reference in 28 from the artifact's side, which is the number that
+matters to a restore. `curated_rows` is never
 carried, and its `uuid[]` with no foreign key is why: it is the one
 precious-looking table where a wrong id fails nothing at all.
 
-The precious set is a handful of small tables, and 🚧 **the command that will
-carry them is `usher backup` (M10 Group K, task K3 — not built yet) rather than
-a documented `pg_dump`** — measured
+✅ **The precious set is a handful of small tables — counted rather than
+asserted since 2026-08-25 — and the command that carries them is `usher backup`
+(M10 Group K, K3) rather than a documented `pg_dump`.** Re-measured read-only
+against the live database on **2026-08-25**, and two of the eight moved enough
+to matter: **1** user, **1** source, **1** credential row, **3,347** watch
+states, **0** `llm_calls`, **1** row-provider setting, **89** search queries and
+**10,819** linked media items of 13,539 — **14,259 rows**, which is the whole
+artifact. ⚠️ The figures K1 and the K3 plan were drafted against on 2026-08-13
+read **0** watch states and **180** links, so the reference-rewriting ladder
+`usher backup` exists for was designed against a table with nothing in it. The
+`pg_dump` half is measured
 2026-08-13, and the reason is that the documented alternative *cannot be run
 from the container this project ships*. The runtime image is
 `python:3.13-slim` and carries neither `pg_dump` nor `psql`, so an operator
@@ -726,6 +741,41 @@ Perl. Either way the point stands: disaster recovery becomes a short restore
 plus a background rebuild instead of a crisis. State this loudly in the
 README — it is the difference between "lost everything" and "lost an afternoon
 of indexing".
+
+**The artifact is gzip-compressed JSON Lines: a header object, then one object
+per row carrying `table` and `row`.** Four properties earn that over any
+Postgres-native format, and the first is the one none of them has — **every
+reference is rewritten on the way out**, which `pg_dump -t watch_states` cannot
+express because there is nowhere in a custom-format archive to put a natural
+key. The other three: it streams (the seam is
+`usher.db.staging.raw_connection` plus asyncpg's `copy_from_query`; the shipped
+writer batches, because at 14,259 rows there is nothing to buy and the
+rewriting happens in Python either way); an operator can read it, which matters
+because this file is the only copy of the money ledger and of a household's
+history; and it survives a Postgres version change, where `pg_dump -Fc` does
+not restore into an older server.
+
+**The header carries two stamps and only one of them is enforced by refusal.**
+`schema_revision` is Alembic's head as the *database* reports it, read through
+`usher.db.migrations.status.database_revision` — the same function
+`/health/ready`'s `_check_migrations` compares against `code_head_revision()`
+to answer 503, so *"the app refuses to serve on a schema mismatch rather than
+guessing"* and *"restore refuses rather than half-applying"* are one definition
+rather than two. `generated_at`, `manifest_version`, `usher_version` and the
+per-table row counts are provenance and a self-check: the counts are `len()` of
+what was written rather than a `count(*)` taken beside it, which is what lets a
+restore read a short table as a truncated file rather than as a race.
+
+⚠️ **`source_credentials` is carried as ciphertext and `usher backup` does not
+decrypt it** — `build_cipher` is not called on that path at all. So **an
+artifact restored into a deployment holding a different `USHER_SECRET_KEY`
+restores credentials nobody can read**, and the command says so in one sentence
+on every run rather than behind a flag, because an operator who learns it at
+restore time learns it too late. The degradation is the correct one: Fernet's
+authentication tag makes it a diagnosable `PortDataMalformed` naming the ref
+rather than garbage, and `GET /admin/sources/{id}/status` already renders that
+as *re-enter your credentials* below. **Keep `USHER_SECRET_KEY` with the
+artifact.**
 
 **M7 added five tables and four of them are rebuildable, which is worth the
 detail because "everything is rebuildable" is the kind of claim that is true

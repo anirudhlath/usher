@@ -7975,3 +7975,88 @@ checked **first** against `grep -rln "getdoc\|__doc__\|ast.unparse\|getsource\|
 ast.parse" tests/` — note the pattern includes `ast.parse`, which F4's fix
 round records the usual census as missing — and **nothing in the suite scans
 `src/usher/db/backup_identity.py`** in any form.
+
+## M10 K3 — `usher backup`, and a plan premise that measurement refuted (2026-08-25)
+
+**10 mutations, 9 killed, 1 control surviving as designed.** Harness:
+`/var/tmp/k3/sweep.py`, outside the tree, `cp` backup per file with the restore
+verified by `sha256sum` after **every** plant rather than at the end — the
+S6 harness finding applied, and all ten restores were byte-identical.
+
+**Selection, diffed against the commit's own file list first** (the S3 review
+round's generalisation): `grep -rln "services.backup\|repositories.backup\|
+BackupService\|BackupRepository\|_print_backup_report" src tests` returns nine
+files, four of them the `src/` under test and four of them tests
+(`tests/unit/test_services_backup.py`, `tests/unit/test_cli_backup.py`,
+`tests/unit/test_ports.py`, `tests/integration/test_backup_artifact.py`). The
+three carrying assertions about behaviour are the selection; `test_ports.py`
+holds only the `ALL_PORTS` registration and no plant here can reach it.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 `carried_tables()` gains `jobs` — a rebuildable table carried | KILLED | 1, the headline case |
+| P2 `schema_revision` dropped from the header | KILLED | **2, in two different files** |
+| P3 *control* — the two independent header writes swapped | SURVIVED, all five gate steps | — |
+| P4 the raw `title_id` carried instead of the reference | KILLED | 1, the UUID scan |
+| P5 the `media_items` link predicate replaced by `true` | KILLED | 1 |
+| P6 the report prints only the tables that carried a row | KILLED | 1 |
+| P7 the destination checked *after* the read instead of before | KILLED | **3** |
+| P8 `str(Decimal)` instead of `f"{value:f}"` | KILLED | 1 |
+| P9 `user_id` removed from `REWRITTEN` | KILLED | **1, and only the accounting check** |
+| P10 header counts from a constant rather than `len()` of the body | KILLED | 2, in two different files |
+
+🔴 **The plan's cross-file target is met in a weaker form than it asks for, and
+saying which is the point.** *"Dropping `schema_revision` from the header must
+fail K4's refusal case, which is what says the two halves agree."* K4 does not
+exist at this head, so that case is unbuildable — the same unmeasurable target
+K2's T3 hit one task earlier, in the same shape. What P2 does deliver is a kill
+in `tests/unit/test_services_backup.py` **and** in
+`tests/integration/test_backup_artifact.py`, i.e. two files and two arms (a
+fake repository and a real migrated database), which is a cross-file kill and
+is **not** the claim the plan wanted: that one is about a *consumer* carrying
+the stamp's meaning, and it stays untested until K4 lands.
+
+**P9 is the plant worth keeping.** Removing `user_id` from `REWRITTEN` makes
+every `watch_states` and `search_queries` row carry a raw `users.id` UUID — and
+the integration file's UUID scan **cannot see it**, because that scan
+cross-checks against `titles.id` and a user id is not one. The only thing that
+fails is `test_every_foreign_key_in_the_carried_set_is_rewritten_or_declared_raw`,
+a derived check over `Base.metadata`'s foreign keys against `REWRITTEN` +
+`CARRIED_RAW`. That is exactly why it exists: **a scan written for one table's
+ids is blind to every other table's, and a backup's worst failures are the ones
+that parse.** Same family as the "two predicates, one selectivity" entry — the
+behavioural case looked like coverage of the whole rewriting and covers one
+column family of two.
+
+**P7's blast radius was mispredicted and the direction is instructive.** It was
+expected to fail the one service case that asserts the ordering; it fails
+three, because both CLI cases assert `FileNotFoundError` by name and with the
+check moved after the read they get `ConnectionRefusedError` instead —
+`USHER_DATABASE_URL` in those cases points at a port nothing listens on. That
+is the *reason* those assertions name the type: `OSError` is the family for
+both, so a case asserting the family passes identically against a run that
+never reached the filesystem.
+
+**The control, measured against every gate step separately** with the harness
+outside the tree:
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| P3 the header's `manifest_version` and `usher_version` writes swapped | PASS | PASS | PASS | PASS (12/0) | PASS |
+
+Its equivalence is a fact about the code rather than about what the tools look
+at: the header is a `dict` serialised by `json.dumps` with `sort_keys` off, the
+two writes are independent literals reading nothing from each other, and every
+assertion anywhere — the unit case's whole-header `==`, the integration case's
+per-key reads, and K4's future parse — reads it **by key**. The one thing the
+swap does change is the *byte order* of the first line, which nothing asserts
+on and nothing should.
+
+**And a defect the sweep did not find, because a fixture found it first.** P5
+was written expecting to fail nothing: the media-items fixture seeded two rows
+and both were linked, so the `WHERE title_id IS NOT NULL OR episode_id IS NOT
+NULL` predicate that keeps the artifact off 1,126,789 rows was unobservable —
+*"has any fixture, anywhere, ever set this to the other value?"* for the third
+time in this repository. A third row with both links `NULL` was added before
+the plant was run, and the row is not hypothetical: 2,720 of the measured
+household's 13,539 `media_items` are unmatched.

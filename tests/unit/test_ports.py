@@ -28,6 +28,7 @@ from usher.ports.jobs import JobQueue
 from usher.ports.llm import LLMClient, LLMPurpose, LLMUsage
 from usher.ports.metadata import MetadataCandidate, MetadataProvider
 from usher.ports.repository import (
+    BackupRepository,
     BulkCatalogRepository,
     CollectionRepository,
     CreditRepository,
@@ -80,6 +81,7 @@ ALL_PORTS: list[type[ABC]] = [
     BulkDataset,
     EventPublisher,
     JobQueue,
+    BackupRepository,
     BulkCatalogRepository,
     CollectionRepository,
     CreditRepository,
