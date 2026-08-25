@@ -11,11 +11,16 @@ what actually closes:
   and `SyncRun`'s own pydantic bounds fire on the way *in*, at a different
   moment and with a different exception type than
   `ck_sync_runs_items_seen_non_negative` does.
-- **Ordering is Python's, not Postgres's.** `sorted` is stable, so two runs
-  sharing a `started_at` keep insertion order here; Postgres promises nothing
-  for equal keys, which is why `list_for_source` and `latest_incomplete_run`
-  both break the tie on `id` in both implementations and why the real one's
-  index is `(source_id, kind, started_at DESC)`.
+- **A tie on `started_at` is decided here and arbitrary in Postgres.** Python's
+  ordering primitives all define what equal keys do -- `sorted` is stable, so
+  `list_for_source` keeps insertion order, and `max` returns the first maximal
+  element, which is what `latest_incomplete_run` would otherwise get. Postgres
+  promises nothing for equal sort keys. So this fake is *deterministic where
+  the real one is not*, and a defect that turns on a tie can pass here and be
+  a coin toss there. Both methods therefore break the tie on `id`
+  explicitly, in both implementations, which is what makes the two arms
+  comparable at all; the real one's index is `(source_id, kind, started_at
+  DESC)` and supplies only the leading key.
 - **No transaction and no autoflush**, so nothing here can leave a session
   poisoned and nothing exercises the SAVEPOINT a caught conflict needs.
 """
@@ -68,9 +73,8 @@ class FakeSyncRunRepository(SyncRunRepository):
     async def latest_incomplete_run(
         self, source_id: uuid.UUID, kind: SyncRunKind
     ) -> SyncRun | None:
-        # The *newest* run, and then a status test -- never "the newest one
-        # that is not completed", which resumes an old failure forever once
-        # something later has completed.
+        # The *newest* run, and then a status test. See the port for why the
+        # other spelling is wrong; it is argued there, once.
         found = [
             one for one in self._runs.values() if one.source_id == source_id and one.kind is kind
         ]

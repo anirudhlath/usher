@@ -58,12 +58,21 @@ ORDER BY started_at DESC
 LIMIT 1
 """
 
-# `ORDER BY started_at DESC, id DESC LIMIT 1` and *then* a status test in
-# Python, rather than `WHERE status <> 'completed'`: the second spelling
-# answers an old failure forever once a later run has completed. `id` breaks a
-# tie on `started_at` for the reason `_LIST` does. `ix_sync_runs_source_kind_started`
-# is (source_id, kind, started_at DESC), so it supplies the leading key and the
-# `id` tiebreak is an incremental sort over one `started_at` group.
+# No `WHERE status <> 'completed'` -- the status test is in Python, on the one
+# row this returns. `SyncRunRepository.latest_incomplete_run` argues why; both
+# spellings die there and this is not the place to repeat it.
+#
+# `id DESC` is for **determinism between the two arms**, not for a reachable
+# input: both service sites stamp `datetime.now(UTC)`, so a production tie
+# needs two runs in one microsecond for one `(source, kind)`. Postgres promises
+# nothing for equal sort keys and the fake's `max` returns the first maximal
+# element, so untied they could answer differently about the same two rows and
+# only one arm would be right.
+#
+# Measured, not assumed: `ix_sync_runs_source_kind_started` is
+# (source_id, kind, started_at DESC), so it supplies the leading key and the
+# `id` tiebreak is an Incremental Sort over one `started_at` group.
+# `test_the_resume_query_uses_the_source_kind_index` pins that plan.
 _INCOMPLETE = """
 SELECT * FROM sync_runs
 WHERE source_id = :source_id AND kind = :kind
@@ -200,6 +209,7 @@ class PostgresSyncRunRepository(SyncRunRepository):
         # a `text()` mapping row -- `_to_domain` takes a `SyncRunRow`, and this
         # statement returns no ORM entity to hand it.
         newest = SyncRun.model_validate(dict(found))
+        # The newest row, and *then* the status test. See the port.
         return None if newest.status is SyncRunStatus.COMPLETED else newest
 
     async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:

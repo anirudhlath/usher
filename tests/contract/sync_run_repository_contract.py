@@ -219,8 +219,10 @@ class SyncRunRepositoryContract:
         self, repository: SyncRunRepository, source_id: uuid.UUID
     ) -> None:
         """A `FAILED` run is what a crashed walk leaves, and it carries the
-        position that walk committed. `RUNNING` is what an abandoned claim
-        leaves and is resumed on exactly the same terms."""
+        position that walk committed. The other unfinished state, `RUNNING`,
+        is `test_a_run_left_running_by_a_killed_process_is_resumed` -- stated
+        there rather than claimed here, because prose asserting coverage is
+        not coverage."""
         failed = run(
             source_id,
             kind=SyncRunKind.WATCH_STATE,
@@ -259,24 +261,28 @@ class SyncRunRepositoryContract:
         would hand back the old failure forever, and every later walk would
         resume from a position a completed run has already passed.
         """
-        await repository.add(
-            run(
-                source_id,
-                kind=SyncRunKind.WATCH_STATE,
-                status=SyncRunStatus.FAILED,
-                started_at=EARLIER,
-                position=51_000,
-            )
+        failed = run(
+            source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.FAILED,
+            started_at=EARLIER,
+            position=51_000,
         )
-        await repository.add(
-            run(
-                source_id,
-                kind=SyncRunKind.WATCH_STATE,
-                status=SyncRunStatus.COMPLETED,
-                started_at=LATER,
-            )
+        await repository.add(failed)
+        completed = run(
+            source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.COMPLETED,
+            started_at=LATER,
         )
-        assert EARLIER < LATER, "the premise: the completion really is the newer run"
+        await repository.add(completed)
+        # Read off the seeded rows, not off the module constants: `LATER` is
+        # defined as `EARLIER + 1 day`, so a guard comparing the two is true
+        # whatever the rows below were given and cannot report on the fixture
+        # it is positioned to guard.
+        assert failed.started_at < completed.started_at, (
+            "the premise: the completion really is the newer run"
+        )
         assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None
 
     async def test_resumption_is_scoped_by_kind_and_by_source(
@@ -285,18 +291,86 @@ class SyncRunRepositoryContract:
         """The two lanes walk different upstream methods under different
         filters, so an item-lane failure is not a watch-lane resume point --
         and neither is another source's."""
-        await repository.add(
-            run(source_id, kind=SyncRunKind.DELTA, status=SyncRunStatus.FAILED, position=7)
+        other_lane = run(source_id, kind=SyncRunKind.DELTA, status=SyncRunStatus.FAILED, position=7)
+        await repository.add(other_lane)
+        other_source = run(
+            other_source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.FAILED,
+            position=9,
         )
-        await repository.add(
-            run(
-                other_source_id,
-                kind=SyncRunKind.WATCH_STATE,
-                status=SyncRunStatus.FAILED,
-                position=9,
-            )
-        )
+        await repository.add(other_source)
+
         assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None
+
+        # The positive controls. Without them this case is `is None` over two
+        # rows it never shows are findable at all, which is equally satisfied
+        # by two seeds that did not land.
+        in_its_own_lane = await repository.latest_incomplete_run(source_id, SyncRunKind.DELTA)
+        assert in_its_own_lane is not None
+        assert in_its_own_lane.id == other_lane.id
+        at_its_own_source = await repository.latest_incomplete_run(
+            other_source_id, SyncRunKind.WATCH_STATE
+        )
+        assert at_its_own_source is not None
+        assert at_its_own_source.id == other_source.id
+
+    async def test_a_run_left_running_by_a_killed_process_is_resumed(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """`RUNNING` is not a rare state, it is the *designed* trace of a hard
+        kill: the lane commits its run before the walk so a killed process
+        leaves a row rather than nothing, and issue #41's deployment held
+        three of them aged 7-11h. A repository that resumed only `FAILED` runs
+        would answer `None` for every one, the caller would mint a fresh run
+        at `position = 0`, and that is #41's restart loop restored on the
+        exact path ADR-0042 calls out.
+        """
+        abandoned = run(
+            source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.RUNNING,
+            started_at=EARLIER,
+            position=51_000,
+        )
+        await repository.add(abandoned)
+
+        found = await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE)
+        assert found is not None
+        assert found.id == abandoned.id
+        assert found.position == 51_000
+
+    async def test_two_runs_sharing_a_started_at_resolve_to_the_later_added_one(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """Both arms break a `started_at` tie on `id` so that they agree.
+        Postgres promises nothing for equal sort keys, and Python's `max`
+        returns the *first* maximal element -- so without the tiebreak the two
+        implementations can answer differently about the same two rows.
+
+        Not a reachable production input: both service sites stamp
+        `datetime.now(UTC)`, so a real tie needs two runs in the same
+        microsecond for one `(source, kind)`. It is reachable in *this file*,
+        where `run()` defaults every run to `EARLIER` -- so a tie is what any
+        future case that omits `started_at` will seed.
+        """
+        first = run(
+            source_id, kind=SyncRunKind.WATCH_STATE, status=SyncRunStatus.FAILED, position=1
+        )
+        await repository.add(first)
+        second = run(
+            source_id, kind=SyncRunKind.WATCH_STATE, status=SyncRunStatus.FAILED, position=2
+        )
+        await repository.add(second)
+        assert first.started_at == second.started_at, "the premise: the two runs really do tie"
+        assert first.id < second.id, (
+            "the premise: UUIDv7 is monotonic, so the later-added run holds the larger id"
+        )
+
+        found = await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE)
+        assert found is not None
+        assert found.id == second.id
+        assert found.position == 2
 
     async def test_a_source_that_has_never_run_offers_nothing_to_resume(
         self, repository: SyncRunRepository, source_id: uuid.UUID
