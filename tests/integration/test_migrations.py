@@ -504,6 +504,98 @@ async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url:
             await engine.dispose()
 
 
+async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str) -> None:
+    """**The one thing `m10b` does that no schema reader in this file can
+    see**: `ADD COLUMN … NOT NULL` against a table that already holds rows.
+
+    Every other case here migrates a *freshly created, empty* database, and
+    `env.py` never passes `compare_server_default` -- so the server default
+    is unobservable to all of them. Measured: deleting
+    `server_default=sa.text("0")` from `m10b.upgrade()`'s `sa.Column` left
+    the whole unit suite and all eleven cases in this file green.
+
+    It is not a hypothetical row. Issue #41 is *"this lane has failed
+    repeatedly"*, so `sync_runs` on any deployment reaching this revision is
+    non-empty by construction, and without the default the migration aborts
+    with `column "position" of relation "sync_runs" contains null values` --
+    the deployment cannot roll forward at all.
+
+    Seeded **below** the revision and read above it, the shape
+    `test_m10a_moves_field_provenance_keys_in_both_directions` uses, because
+    the backfill is only observable across the boundary. One assertion pins
+    three things at once: that the column is `NOT NULL`, that it has a
+    default, and that the default is the 0 a walk restarting from the top
+    means.
+    """
+    admin = postgres_url.rsplit("/", 1)[0]
+    scratch = f"resume_{uuid.uuid4().hex[:12]}"
+    engine = build_engine(f"{admin}/postgres")
+    try:
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
+    finally:
+        await engine.dispose()
+
+    url = f"{admin}/{scratch}"
+    source_id, run_id = new_id(), new_id()
+    try:
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m10a", direction="up"))
+        scratch_engine = build_engine(url)
+        try:
+            async with scratch_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO sources "
+                        "(id, kind, name, base_url, credentials_ref, device_id) "
+                        "VALUES (:id, 'emby', :name, :url, :ref, :device)"
+                    ),
+                    {
+                        "id": source_id,
+                        "name": "A Library That Has Never Finished A Walk",
+                        "url": "http://example.invalid",
+                        "ref": "unused",
+                        "device": "unused",
+                    },
+                )
+                # `failed`, which is the state issue #41 describes: the walk
+                # this column exists to resume is one that has only ever
+                # ended this way.
+                await conn.execute(
+                    text(
+                        "INSERT INTO sync_runs (id, source_id, kind, status) "
+                        "VALUES (:id, :source_id, 'watch_state', 'failed')"
+                    ),
+                    {"id": run_id, "source_id": source_id},
+                )
+                # The premise: the column really is absent below the
+                # revision, so what is read back above it was written by
+                # `m10b.upgrade()` and not by this INSERT.
+                assert "position" not in await _column_set(url, "sync_runs")
+
+            await asyncio.to_thread(run_alembic, url, "head")
+            async with scratch_engine.connect() as conn:
+                backfilled = (
+                    await conn.execute(
+                        text("SELECT position FROM sync_runs WHERE id = :id"), {"id": run_id}
+                    )
+                ).scalar_one()
+
+            assert backfilled == 0, (
+                "a row that predates the column reads back at the top of the walk"
+            )
+        finally:
+            await scratch_engine.dispose()
+    finally:
+        engine = build_engine(f"{admin}/postgres")
+        try:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
+        finally:
+            await engine.dispose()
+
+
 async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) -> None:
     """`downgrade base` then `upgrade head`, on a throwaway database, with
     the index set compared before and after.
@@ -614,9 +706,13 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # what makes it fail the moment `-1` starts landing there. Group F
         # re-pointed it for `ffa`, `af64ba2` for `ffb`, M7 Task 36 for `ffc`,
         # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`, M9 Task M1 for `m09a`,
-        # M9 Task C2 for `m09c`, T4R for `m09d`, issue #41's Task 1 for `m10b`.
-        # It is cheaper than a step count, which keeps
-        # passing for the wrong reason instead of failing for the right one.
+        # M9 Task C2 for `m09c`, T4R for `m09d`, then `m09e`, `m09f` and
+        # `m10a` in turn, and issue #41's Task 1 for `m10b` — twelve. (The
+        # three before `m10b` had been going unrecorded here: the list said
+        # `m09d` while the count below said twelve, so it read as a jump
+        # rather than as the omission it was.) It is cheaper than a step
+        # count, which keeps passing for the wrong reason instead of failing
+        # for the right one.
         #
         # **The direction of the assertion does not decide this.** `m09c`
         # creates a constraint and renames a column, so its artefacts are

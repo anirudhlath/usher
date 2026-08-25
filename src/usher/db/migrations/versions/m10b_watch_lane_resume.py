@@ -22,19 +22,15 @@ resume point is a page position rather than a `since` timestamp (the yielded
 record carries no such field, the walk is not ordered by one, and the field is
 mutable).
 
-The CHECK's body is `'"position" >= 0'` and the quoting is load-bearing:
-`position` is a Postgres keyword, SQLAlchemy quotes the *column* automatically
-and a constraint's raw SQL text does not go through that quoting.
-`curated_rows."position"` (`m08a`) is the precedent.
-
 ## Cost
 
 Catalog-only apart from the CHECK's validation scan. `ADD COLUMN` with a
 non-volatile default has not rewritten a table since PostgreSQL 11 -- the
-default is stored in `pg_attribute` and materialised on the next row write.
-The CHECK scans `sync_runs` under `ACCESS EXCLUSIVE` and is trivially
-satisfied, that table holding a handful of rows per source per day rather than
-a catalog.
+backfill value is stored in `pg_attribute.attmissingval` (with
+`atthasmissing` set) and materialised on the next write of each row, while
+the default *expression* lives in `pg_attrdef`. The CHECK scans `sync_runs`
+under `ACCESS EXCLUSIVE` and is trivially satisfied, that table holding a
+handful of rows per source per day rather than a catalog.
 """
 
 from collections.abc import Sequence

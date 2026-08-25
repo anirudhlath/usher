@@ -55,10 +55,21 @@ class SyncRunRow(Base):
         enum_column(SyncRunStatus, length=16), nullable=False, server_default=text("'running'")
     )
     cursor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The walk's resume point (ADR-0042). Quoted in the CHECK below because
-    # `position` is a Postgres keyword; SQLAlchemy quotes the column itself,
-    # and a constraint's raw SQL text does not go through that quoting --
-    # `curated_rows."position"` sets the same precedent.
+    # The walk's resume point (ADR-0042): a **page offset**, not an ordering
+    # key. `curated_rows.position` in this same schema is the other thing --
+    # a row's ordinal within a generation -- so the two columns share a name
+    # and no concept.
+    #
+    # The CHECK below writes the column quoted, and the reason is narrower
+    # than it looks: `position` is an unreserved keyword, SQLAlchemy does
+    # *not* quote it (it is absent from the postgresql dialect's
+    # RESERVED_WORDS and compiles bare), and the unquoted body works. What
+    # quoting buys is that `pg_get_constraintdef` reprints the identifier
+    # quoted -- `quote_identifier` quotes any keyword that is not plain
+    # unreserved -- so writing it this way keeps the model-side body
+    # textually aligned with the database-side one. Cosmetic even then,
+    # since `test_migrations.py`'s `_normalise_check_body` strips quotes
+    # before comparing.
     position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     items_seen: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
