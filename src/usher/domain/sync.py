@@ -60,6 +60,20 @@ class SyncRun(DomainModel):
     full walk. The *next* cursor is `started_at` (widened by the adapter's
     own one-second rule), and it is advanced only by a run that completed,
     which is why it is read off this table rather than kept in memory.
+
+    `position` is the walk's own resume point: the `start_index` a resumed
+    walk asks the adapter for, advanced per **committed** batch. It is
+    deliberately not `items_seen`. The two coincide on an adapter that
+    yields each item once, and `SourceAdapter.watch_state` explicitly
+    permits duplicates -- under which `items_seen` outruns the page position
+    and resuming from the counter would skip whatever the difference is.
+    Only the `WATCH_STATE` lane advances it (ADR-0042); the item lanes leave
+    it at 0 and restart from their cursor.
+
+    **Nothing reads or writes this field yet.** `watch_state` takes no
+    `start_index` at this revision -- the parameter and the lane that
+    advances the column arrive together, and until they do every row holds
+    the 0 both the field default and the column's server default supply.
     """
 
     id: uuid.UUID = Field(default_factory=new_id)
@@ -67,6 +81,7 @@ class SyncRun(DomainModel):
     kind: SyncRunKind
     status: SyncRunStatus = SyncRunStatus.RUNNING
     cursor_at: AwareDatetime | None = None
+    position: int = Field(default=0, ge=0)
 
     items_seen: int = Field(default=0, ge=0)
     items_matched: int = Field(default=0, ge=0)

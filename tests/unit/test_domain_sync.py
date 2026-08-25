@@ -88,3 +88,19 @@ def test_a_run_rejects_an_unknown_field() -> None:
             kind=SyncRunKind.FULL,
             items_scanned=5,  # type: ignore[call-arg]  # deliberate typo of items_seen
         )
+
+
+def test_a_run_starts_at_position_zero_and_refuses_a_negative_one() -> None:
+    """`position` is the StartIndex a resumed walk starts from, and it is a
+    separate field from `items_seen` on purpose: the port permits an adapter
+    to yield the same item twice, under which `items_seen` outruns the page
+    position, and resuming from the counter would then skip.
+    """
+    one = SyncRun(source_id=new_id(), kind=SyncRunKind.WATCH_STATE)
+    assert one.position == 0
+
+    resumed = one.evolve(position=51_000)
+    assert resumed.position == 51_000
+
+    with pytest.raises(ValidationError):
+        one.evolve(position=-1)

@@ -614,7 +614,8 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # what makes it fail the moment `-1` starts landing there. Group F
         # re-pointed it for `ffa`, `af64ba2` for `ffb`, M7 Task 36 for `ffc`,
         # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`, M9 Task M1 for `m09a`,
-        # M9 Task C2 for `m09c`, T4R for `m09d`. It is cheaper than a step count, which keeps
+        # M9 Task C2 for `m09c`, T4R for `m09d`, issue #41's Task 1 for `m10b`.
+        # It is cheaper than a step count, which keeps
         # passing for the wrong reason instead of failing for the right one.
         #
         # **The direction of the assertion does not decide this.** `m09c`
@@ -636,15 +637,40 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `pass`, which no other case in this suite can see -- the shared
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
-        # **`m10a`'s artefacts, re-pointed here the moment it became head** —
-        # the eleventh landing in a row to do this. `m10a` is a *renaming*
-        # head, so `_column_set` carries it in both directions at once: the
-        # new spellings are absent here and the old ones present, and a
-        # `downgrade()` that renamed only some of them fails on the half it
-        # forgot. One assertion per artefact kind — the columns via
-        # `_column_set`, the constraints via `_constraint_set`, because a
-        # rename that moved a column and left its CHECK named for the old one
-        # is invisible to the column reader.
+        # **`m10b`'s artefact, re-pointed here the moment it became head** —
+        # the twelfth landing in a row to do this. `m10b` *adds* a column, so
+        # the assertion is negative: one step below head that column does not
+        # exist, and only `m10b.upgrade()` creates it.
+        #
+        # Note this block reads `sync_runs` and the one it replaced read
+        # `titles`. The table follows the head, not the block.
+        #
+        # **One artefact, not two**, and the CHECK is the omission worth
+        # naming: `ck_sync_runs_position_non_negative` cannot outlive the
+        # column it constrains, so a `downgrade()` that dropped the column and
+        # forgot the constraint is not a state Postgres can be in. That is the
+        # same redundancy `m08a` shipped an index assertion for and had it
+        # removed.
+        at_m10a_columns = await _column_set(url, "sync_runs")
+        assert "position" not in at_m10a_columns, "position should not exist below m10b"
+        # The premise, for the reason the `m09a` stop below records: an empty
+        # column set satisfies the absence above, so without this the block
+        # would pass at any depth at which `sync_runs` had ceased to exist.
+        assert at_m10a_columns, "the premise: `sync_runs` still exists at `m10a`"
+
+        # **A named stop at `m09f`, holding `m10a`'s seven.** Displaced from
+        # the `-1` half the moment `m10b` became head, and displaced *because
+        # they had teeth*: `-1`-from-`m10b` lands on `m10a`'s applied state,
+        # where the renames have happened and every `not in` below is false.
+        #
+        # `m10a` is a *renaming* head, so `_column_set` carries it in both
+        # directions at once: the new spellings are absent here and the old
+        # ones present, and a `downgrade()` that renamed only some of them
+        # fails on the half it forgot. One assertion per artefact kind — the
+        # columns via `_column_set`, the constraints via `_constraint_set`,
+        # because a rename that moved a column and left its CHECK named for
+        # the old one is invisible to the column reader.
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m09f", direction="down"))
         at_m09f_columns = await _column_set(url, "titles")
         for new in ("tmdb_vote_average", "tmdb_vote_count", "tmdb_popularity"):
             assert new not in at_m09f_columns, f"{new} should not exist below m10a"

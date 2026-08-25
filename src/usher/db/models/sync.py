@@ -27,6 +27,14 @@ class SyncRunRow(Base):
     """One attempt at reconciling a source. A history, not a checkpoint --
     contrast `ImportRunRow`, which is exactly one row per dataset.
 
+    **`position` is the one column that half-excepts that**, and only for
+    the `watch_state` kind: ADR-0042 has a run of that kind reuse its own
+    row across attempts and advance `position` per committed batch, so
+    while such a walk is unfinished its row is being read back as a
+    checkpoint. The table is still a history -- one row per *walk* rather
+    than one per attempt at it -- and the other two kinds leave the column
+    at 0 and restart from `cursor_at`.
+
     No `set_updated_at` trigger and no `updated_at` column: a run's
     interesting timestamps are `started_at` and `finished_at`, and both are
     written explicitly by the one service that owns the row.
@@ -47,6 +55,11 @@ class SyncRunRow(Base):
         enum_column(SyncRunStatus, length=16), nullable=False, server_default=text("'running'")
     )
     cursor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The walk's resume point (ADR-0042). Quoted in the CHECK below because
+    # `position` is a Postgres keyword; SQLAlchemy quotes the column itself,
+    # and a constraint's raw SQL text does not go through that quoting --
+    # `curated_rows."position"` sets the same precedent.
+    position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     items_seen: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     items_matched: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
@@ -72,6 +85,7 @@ class SyncRunRow(Base):
         CheckConstraint("items_matched >= 0", name="ck_sync_runs_items_matched_non_negative"),
         CheckConstraint("items_unmatched >= 0", name="ck_sync_runs_items_unmatched_non_negative"),
         CheckConstraint("items_retracted >= 0", name="ck_sync_runs_items_retracted_non_negative"),
+        CheckConstraint('"position" >= 0', name="ck_sync_runs_position_non_negative"),
     )
 
 

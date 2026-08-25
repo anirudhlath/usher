@@ -195,6 +195,10 @@ def test_every_not_null_column_a_raw_insert_may_omit_has_a_server_default() -> N
         JobRow.__table__.c.created_at,
         JobRow.__table__.c.updated_at,
         SyncRunRow.__table__.c.status,
+        # `position` is here for a second reason as well as the bulk one:
+        # `m10b` adds it to a table that already holds rows, so the server
+        # default is what makes `NOT NULL` addable at all.
+        SyncRunRow.__table__.c.position,
         SyncRunRow.__table__.c.items_seen,
         SyncRunRow.__table__.c.items_matched,
         SyncRunRow.__table__.c.items_unmatched,
@@ -235,6 +239,12 @@ def test_every_pydantic_bound_is_mirrored_by_a_named_check_constraint() -> None:
         "ck_sync_runs_items_matched_non_negative",
         "ck_sync_runs_items_unmatched_non_negative",
         "ck_sync_runs_items_retracted_non_negative",
+        # `SyncRun.position`'s `ge=0`, ADR-0042. Its body is
+        # `'"position" >= 0'` -- the column name is a Postgres keyword, and a
+        # CHECK's raw SQL text does not go through the quoting SQLAlchemy
+        # gives the column itself, as `curated_rows."position"` already had
+        # to discover.
+        "ck_sync_runs_position_non_negative",
     }
     assert _constraint_names(RawPayloadRow, "CheckConstraint") == {
         "ck_raw_payloads_provider_not_empty",
