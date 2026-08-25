@@ -119,6 +119,16 @@ class _Progress:
     states at length: `SyncRun` is frozen, `_flush` saves an evolved copy
     per batch, and a failure handler holding the pre-walk value regresses
     the durable checkpoint to zero on every failure.
+
+    **Since #41 that checkpoint carries `position` too, and regressing
+    *that* is no longer a wrong number on a dashboard.** `items_seen`
+    reading 0 where the walk merged 5,000 states is a misreport an operator
+    can discount; `position` reading 0 is an instruction, and the next
+    attempt obeys it by walking the library from page one -- which is the
+    loop ADR-0042 exists to close, restored by the one binding a failure
+    handler is most likely to reach for. So the two failures this holder
+    prevents are now one failure, and the handler below evolves
+    `progress.run` or the resume is a restart wearing a checkpoint's name.
     """
 
     __slots__ = ("run",)
@@ -178,20 +188,59 @@ class WatchStateSyncService:
         borrowed from a `FULL` or `DELTA` run would skip whatever changed in
         between. Unlike the item lanes there is no "full" variant to protect,
         because nothing here retracts.
+
+        **"The last completed run" was, on its own, a premise that could not
+        be earned** (#41). With none completed there is no cursor, so the
+        walk is the whole library -- ~1.14M items, ~5,688 pages, about eleven
+        hours -- and one transient failure anywhere in it records `FAILED`,
+        which leaves no completed run, which leaves no cursor, which starts
+        the same walk again at page one. It never once finished on the
+        measured deployment, and the only remedy the operator had was to
+        stop the entire worker.
+
+        So an attempt no longer begins by minting a row. It **reclaims the
+        newest incomplete one** and resumes at that row's `position`, so a
+        failure costs the page in flight rather than the walk. The walk is
+        not shorter; it is finishable, which it was not.
+
+        Refusing the cursorless walk was the other candidate, and it is what
+        the push lane does one lane over (`USHER_PUSH_GAP_CLOSE=cursored`,
+        issue #9). It is wrong here for a reason that has nothing to do with
+        taste: this method is never independently triggerable -- it is the
+        unconditional second half of every `sync` job -- so a refusal would
+        have no way to be lifted, because lifting it needs the first
+        completed run that the refusal is what prevents.
         """
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.watch_state") as span:
             span.set_attribute("usher.source", source.name)
-            cursor = await self._runs.latest_completed_cursor(source.id, SyncRunKind.WATCH_STATE)
-            run = SyncRun(source_id=source.id, kind=SyncRunKind.WATCH_STATE, cursor_at=cursor)
-            # Committed `RUNNING` before the walk: an operator watching a
-            # long sync needs a row to watch, and a killed process must
-            # leave a trace rather than nothing.
-            await self._runs.add(run)
+            # **The newest incomplete run is resumed in place** (#41,
+            # ADR-0042): its id, its `cursor_at` and -- load-bearing -- its
+            # `started_at`, so that when the walk finally completes,
+            # `latest_completed_cursor` reads an instant covering everything
+            # saved since the logical walk *began*. A fresh `started_at` per
+            # attempt would skip whatever changed between the first attempt
+            # and the last.
+            resuming = await self._runs.latest_incomplete_run(source.id, SyncRunKind.WATCH_STATE)
+            if resuming is None:
+                cursor = await self._runs.latest_completed_cursor(
+                    source.id, SyncRunKind.WATCH_STATE
+                )
+                run = SyncRun(source_id=source.id, kind=SyncRunKind.WATCH_STATE, cursor_at=cursor)
+                # Committed `RUNNING` before the walk: an operator watching a
+                # long sync needs a row to watch, and a killed process must
+                # leave a trace rather than nothing.
+                await self._runs.add(run)
+            else:
+                cursor = resuming.cursor_at
+                run = resuming.evolve(status=SyncRunStatus.RUNNING, error=None, finished_at=None)
+                await self._runs.save(run)
+            start_index = run.position
+            span.set_attribute("usher.resumed_from", start_index)
             await self._commit()
             progress = _Progress(run)
             try:
-                await self._walk(progress, source.id, adapter, cursor, user_id)
+                await self._walk(progress, source.id, adapter, cursor, user_id, start_index)
                 run = progress.run.evolve(
                     status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC)
                 )
@@ -328,6 +377,7 @@ class WatchStateSyncService:
         adapter: SourceAdapter,
         cursor: AwareDatetime | None,
         user_id: uuid.UUID,
+        start_index: int,
     ) -> None:
         """The nightly walk. **It invalidates no rows and publishes no
         `row.invalidated`, and this is the place somebody would add both.**
@@ -345,19 +395,26 @@ class WatchStateSyncService:
         screen by 04:00:30, which is the honest and entirely adequate answer.
         The push lane is where invalidation belongs, because a push event *is*
         a change -- `services/push.py::_invalidate_rows`.
+
+        `start_index` is where a resumed attempt picks up -- the position the
+        last attempt *committed*, so the batch that was in flight when it
+        died is re-walked. That is free: every write here is an idempotent
+        upsert and this lane retracts nothing.
         """
         batch: list[SourceWatchState] = []
-        async for state in adapter.watch_state(since=cursor):
+        seen = start_index
+        async for state in adapter.watch_state(since=cursor, start_index=start_index):
             batch.append(state)
+            seen += 1
             if len(batch) >= self._batch_size:
-                progress.run = await self._flush(progress.run, source_id, batch, user_id)
+                progress.run = await self._flush(progress.run, source_id, batch, user_id, seen)
                 batch = []
         if batch:
             # The trailing partial batch. A walk's count is almost never a
             # multiple of the batch size, so omitting this drops the last
             # page of nearly every run -- here, a household's most recent
             # resume positions.
-            progress.run = await self._flush(progress.run, source_id, batch, user_id)
+            progress.run = await self._flush(progress.run, source_id, batch, user_id, seen)
 
     async def apply_states(
         self,
@@ -430,6 +487,7 @@ class WatchStateSyncService:
         source_id: uuid.UUID,
         batch: Sequence[SourceWatchState],
         user_id: uuid.UUID,
+        position: int,
     ) -> SyncRun:
         outcome = await self.apply_states(
             source_id, batch, user_id=user_id, observed_at=run.started_at
@@ -442,6 +500,9 @@ class WatchStateSyncService:
             # still one of those.
             items_matched=run.items_matched + len(outcome.merged),
             items_unmatched=run.items_unmatched + outcome.unmatched,
+            # Committed progress, saved with the batch it describes: a crash
+            # re-walks the batch in flight and nothing before it.
+            position=position,
         )
         await self._runs.save(run)
         # One commit per batch, exactly like `ReconcileService`: a crash

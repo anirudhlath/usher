@@ -49,7 +49,7 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind, SyncRunStatus
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.ports.errors import PortUnavailable, UsherPortError
 from usher.ports.events import ClientEventKind
 from usher.ports.ingest import MediaItemTarget, MediaItemUpsert, WatchStateMerge
@@ -115,6 +115,19 @@ class _Fixture:
         self.runs = FakeSyncRunRepository()
         self.queue = FakeJobQueue()
         self.commits = 0
+        self.positions: list[int] = []
+
+        saved = self.runs.save
+
+        async def _record(run: SyncRun) -> None:
+            if run.status is SyncRunStatus.RUNNING:
+                # The per-batch checkpoints only. `sync`'s own closing save
+                # carries the terminal status, and counting it would repeat
+                # the last position and hide a missing trailing flush.
+                self.positions.append(run.position)
+            await saved(run)
+
+        self.runs.save = _record  # type: ignore[method-assign]
         self.service = WatchStateSyncService(
             media_items=self.media_items,
             watch_states=self.watch_states,
@@ -193,6 +206,13 @@ class _Fixture:
 @pytest.fixture
 def fixture() -> _Fixture:
     return _Fixture()
+
+
+@pytest.fixture
+def fixture_batched() -> _Fixture:
+    """Batch size 2, so a five-state walk commits three times and the
+    trailing partial batch is one of them."""
+    return _Fixture(batch_size=2)
 
 
 @pytest.fixture
@@ -1114,4 +1134,222 @@ def _no_ingest() -> IngestService:
         media_items=FakeMediaItemRepository(),
         episodes=FakeEpisodeRepository(),
         queue=queue,
+    )
+
+
+# -- the resume, which is what makes the first full walk completable --------
+
+
+async def test_a_failed_walk_is_resumed_from_the_position_it_committed(
+    fixture_batched: _Fixture,
+) -> None:
+    """**Issue #41.** A crashed walk left no completed run, so the next one
+    had no cursor and re-walked the whole library -- for ~5,688 pages, which
+    is where the next transient failure came from. It resumes instead.
+
+    Batched at 2 deliberately: at the default 1,000 a six-item walk that
+    fails part-way has committed *nothing*, so the position it resumes from
+    would be 0 and the case would pass against a service that never
+    checkpoints at all.
+    """
+    for index in range(6):
+        await fixture_batched.given_matched(f"movie-{index}")
+    fixture_batched.adapter.fail_after(3)
+
+    first = await fixture_batched.service.sync(
+        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
+    )
+    assert first.status is SyncRunStatus.FAILED
+    assert first.position == 2, (
+        "the premise: one batch of two committed before the third yield raised"
+    )
+
+    fixture_batched.adapter.clear_failure()
+    second = await fixture_batched.service.sync(
+        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
+    )
+
+    assert second.id == first.id, "the run row is reclaimed, not duplicated"
+    assert second.status is SyncRunStatus.COMPLETED
+    assert second.started_at == first.started_at, (
+        "the reclaimed row keeps its original start instant, so the next delta's "
+        "`since` covers everything saved since the logical walk began"
+    )
+    assert fixture_batched.adapter.resumed_from == [0, 2], (
+        "the second attempt asked page one again instead of resuming"
+    )
+
+
+async def test_a_walk_whose_newest_run_completed_starts_fresh(fixture: _Fixture) -> None:
+    """The other half: a completed walk is followed by a delta from its
+    `started_at`, at position zero, not by a resume."""
+    await fixture.given_matched("movie-0")
+    done = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert done.status is SyncRunStatus.COMPLETED
+
+    again = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert again.id != done.id, "a completed run is not reclaimed"
+    assert again.position == 0
+    assert again.cursor_at == done.started_at
+    assert fixture.adapter.resumed_from == [0, 0]
+
+
+async def test_the_position_advances_per_committed_batch(fixture_batched: _Fixture) -> None:
+    """`position` is committed progress, never the batch in flight: a crash
+    re-walks exactly the uncommitted batch, which the merge's idempotent
+    upsert makes free."""
+    for index in range(5):
+        await fixture_batched.given_matched(f"movie-{index}")
+
+    run = await fixture_batched.service.sync(
+        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
+    )
+
+    assert run.status is SyncRunStatus.COMPLETED
+    assert run.position == 5
+    assert fixture_batched.positions == [2, 4, 5], (
+        "position must be saved with every batch, including the trailing partial one"
+    )
+
+
+async def test_a_failed_walk_keeps_the_position_it_reached(
+    fixture_batched: _Fixture,
+) -> None:
+    """`_Progress`' reason, extended to the resume point: a failure handler
+    holding the pre-walk run would write `position = 0` over a checkpoint
+    that recorded two, and the next attempt would restart from the top --
+    which is the #41 loop with extra steps.
+    """
+    for index in range(6):
+        await fixture_batched.given_matched(f"movie-{index}")
+    fixture_batched.adapter.fail_after(3)
+
+    run = await fixture_batched.service.sync(
+        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
+    )
+
+    assert run.status is SyncRunStatus.FAILED
+    assert run.position == 2
+    stored = await fixture_batched.runs.get(run.id)
+    assert stored is not None and stored.position == 2, (
+        "the durable checkpoint regressed, so the next attempt restarts from the top"
+    )
+
+
+class _DuplicatingSourceAdapter(_LossySourceAdapter):
+    """A source whose walk yields one record twice.
+
+    The port permits it -- `SourceAdapter.watch_state` promises no ordering
+    and no uniqueness, and ADR-0042 declines to defend against a divergence
+    no source it has measured produces. What it buys the case below is a
+    walk whose *yields* genuinely outnumber its *items*, so "the counter and
+    the checkpoint are the same number" is a claim a fixture can falsify
+    rather than one the arithmetic makes true.
+
+    `start_index` is left to the base walk, which skips source items before
+    the duplication -- so this adapter's offset is not the port's, and the
+    case below only ever asks it for 0.
+    """
+
+    async def _walk_states(
+        self, since: AwareDatetime | None, start_index: int
+    ) -> AsyncIterator[SourceWatchState]:
+        async for state in super()._walk_states(since, start_index):
+            yield state
+            yield state
+
+
+async def test_the_resume_point_is_the_position_and_not_the_counter(
+    fixture_batched: _Fixture,
+) -> None:
+    """**`position` and `items_seen` are two statements, and the migration
+    that added the first is what makes a row carrying both reachable.**
+
+    `m10b` backfills `position = 0` onto every row that predates it --
+    including the three `RUNNING` rows aged 7-11 h that issue #41 observed,
+    each of them carrying a real six-figure `items_seen`. So the very first
+    walk after this lands reclaims a row whose counter says five and whose
+    checkpoint says zero, and it has to believe the checkpoint: `items_seen`
+    counts states *merged*, which nothing promises is a page offset. A
+    `_flush` spelling `position = items_seen + len(batch)` reads identically
+    on every fresh walk in this file and sends the next attempt eight pages
+    past anything this one reached.
+
+    The duplicate is the same distinction arriving from the source instead
+    of from the migration: six yields over three items, merged and counted
+    six times, over a page position that is not a count of merges. Re-walking
+    them costs nothing -- every write on this lane is an idempotent upsert
+    and it retracts nothing -- which is exactly why the cheap number is the
+    wrong one to resume from.
+    """
+    dupes = _DuplicatingSourceAdapter(fixture_batched.source)
+    for index in range(3):
+        await fixture_batched.given_matched(f"movie-{index}")
+        dupes.seed(_item(f"movie-{index}"), T0)
+    await fixture_batched.runs.add(
+        SyncRun(
+            source_id=fixture_batched.source.id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.RUNNING,
+            position=0,
+            items_seen=5,
+        )
+    )
+
+    run = await fixture_batched.service.sync(
+        fixture_batched.source, dupes, user_id=fixture_batched.user_id
+    )
+
+    assert dupes.resumed_from == [0], "the walk resumed from the counter, not the checkpoint"
+    assert run.position == 6, "six yields is six pages of this walk"
+    assert run.items_seen == 11, "the five it inherited, plus the six it merged"
+    assert run.items_seen > run.position, (
+        "the counter and the checkpoint have collapsed into one number"
+    )
+
+
+async def test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned(
+    fixture_batched: _Fixture,
+) -> None:
+    """**`RUNNING` is the designed trace of a hard kill, not an anomaly.**
+
+    `sync` commits `RUNNING` before it walks precisely so a process that
+    dies mid-walk leaves a row behind rather than nothing -- and issue #41's
+    deployment has three of them, aged 7-11 h, which is what a worker
+    killed during an eleven-hour walk looks like. A resume that recognised
+    only `FAILED` would mint a fresh run beside each one and start at page
+    one: #41 again, with the stuck rows still on the operator's dashboard
+    and nothing to say they were ever superseded.
+
+    `latest_incomplete_run` is the read that makes the distinction
+    unnecessary -- newest, then "not completed" -- and this is the case that
+    holds it to that, because "only a `FAILED` run resumes" survives its
+    entire contract suite.
+    """
+    for index in range(6):
+        await fixture_batched.given_matched(f"movie-{index}")
+    abandoned = SyncRun(
+        source_id=fixture_batched.source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.RUNNING,
+        position=3,
+        items_seen=3,
+        items_matched=3,
+    )
+    await fixture_batched.runs.add(abandoned)
+
+    run = await fixture_batched.service.sync(
+        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
+    )
+
+    assert run.id == abandoned.id, "a fresh run was minted beside the abandoned one"
+    assert run.started_at == abandoned.started_at, (
+        "the reclaimed row lost the instant the logical walk began"
+    )
+    assert run.status is SyncRunStatus.COMPLETED
+    assert fixture_batched.adapter.resumed_from == [3], "the abandoned row's position was ignored"
+    assert run.items_seen == 6, "the three it inherited, plus the three still to walk"
+    assert len(await fixture_batched.runs.list_for_source(fixture_batched.source.id)) == 1, (
+        "the stuck row is still there and a second one is beside it"
     )

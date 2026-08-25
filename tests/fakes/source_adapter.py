@@ -113,6 +113,14 @@ class FakeSourceAdapter(SourceAdapter):
         self._auth_rejected = False
         self._lock = asyncio.Lock()
         self.authentications = 0
+        # One entry per `watch_state` walk, in the order the walks were
+        # started: the `start_index` each one was asked for. Recorded rather
+        # than inferred from what came back, because a resumed walk and a
+        # restarted one over an already-merged prefix produce the *same*
+        # stored rows -- the merge is an idempotent upsert -- so the only
+        # observable difference between "resumed from page 2,844" and "walked
+        # the library again" is the number that was asked for.
+        self.resumed_from: list[int] = []
         # The push channel. A ledger of its own shape and the same
         # three-clause health rule, written out below rather than importing
         # `PushHealth` -- for the reason `FakeEmbyServer` defines
@@ -336,6 +344,7 @@ class FakeSourceAdapter(SourceAdapter):
         self, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[SourceWatchState]:
         await self._ready()
+        self.resumed_from.append(start_index)
         yielded = 0
         skipped = 0
         for external_id in list(self._items):
