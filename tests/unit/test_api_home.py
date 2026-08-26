@@ -21,9 +21,11 @@ from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 from pydantic import AwareDatetime
 
+from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
+from tests.fakes.title_repository import FakeTitleRepository
 from tests.unit.rows import NOW, USER, Library, days_ago
 from usher.api.app import create_app
 from usher.api.deps import (
@@ -50,6 +52,7 @@ from usher.services.home import HomeService
 from usher.services.rows import ROW_PROVIDERS
 from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.services.taste import TasteService
+from usher.services.visibility import VisibilityService
 
 EXTERNAL_ID = "emby-item-9f31a2"
 
@@ -751,7 +754,10 @@ async def test_the_route_resolves_the_cache_the_app_actually_built() -> None:
     assert isinstance(app.state.row_refreshes, RefreshQueue)
     assert (
         await get_home_service(
-            app.state.row_cache, app.state.row_refreshes, FakeRowProviderSettingsRepository()
+            app.state.row_cache,
+            app.state.row_refreshes,
+            FakeRowProviderSettingsRepository(),
+            _visibility(),
         )
         is not None
     )
@@ -774,14 +780,21 @@ async def test_the_composition_root_composes_the_registry_minus_what_is_disabled
     cache, refreshes = RowCache(clock=lambda: NOW), RefreshQueue()
     stored = FakeRowProviderSettingsRepository()
 
-    whole = await get_home_service(cache, refreshes, stored)
+    whole = await get_home_service(cache, refreshes, stored, _visibility())
     await stored.set_enabled("seasonal", enabled=False)
-    filtered = await get_home_service(cache, refreshes, stored)
+    filtered = await get_home_service(cache, refreshes, stored, _visibility())
 
     assert _provider_slugs(whole) == [one.slug_prefix for one in ROW_PROVIDERS]
     assert _provider_slugs(filtered) == [
         one.slug_prefix for one in ROW_PROVIDERS if one.slug_prefix != "seasonal"
     ]
+
+
+def _visibility() -> VisibilityService:
+    """A promoter over fakes. `/home` promotes the skeletons it drew (#73), so
+    the composition root takes one; what it *promotes* is asserted in
+    `tests/unit/test_services_home.py`."""
+    return VisibilityService(FakeJobQueue(), FakeTitleRepository())
 
 
 def _provider_slugs(service: HomeService) -> list[str]:

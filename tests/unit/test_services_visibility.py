@@ -15,6 +15,7 @@ from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
+from usher.domain.rows import RowCard
 from usher.domain.title import Title
 from usher.ports.jobs import JobRequest
 from usher.services.visibility import VisibilityService
@@ -200,3 +201,56 @@ async def test_no_ids_reads_nothing_and_enqueues_nothing() -> None:
 
     assert promoted == 0
     assert reads == [], "an empty page must not reach the repository either"
+
+
+# -- the composed screen --------------------------------------------------
+
+
+def _card(title_id: uuid.UUID, state: EnrichmentState) -> RowCard:
+    return RowCard(title_id=title_id, kind=TitleKind.MOVIE, name="A card", enrichment_state=state)
+
+
+async def test_cards_carry_their_own_tier_and_are_not_re_read() -> None:
+    """`RowCard` carries `enrichment_state` -- unlike `SearchResult`, which is
+    why `seen_ids` exists one method up. A screen is nine shelves of up to
+    twenty cards, so resolving what the composer already hydrated would be a
+    second read of the whole screen for a field it is holding.
+
+    The repository is given and asserted untouched, because "it did not read"
+    is not something a passing count can show.
+    """
+    titles = FakeTitleRepository()
+    reads: list[object] = []
+    original = titles.list_by_ids
+
+    async def counting(title_ids: Sequence[uuid.UUID]) -> list[Title]:
+        reads.append(title_ids)
+        return await original(title_ids)
+
+    titles.list_by_ids = counting  # type: ignore[method-assign]
+    queue = FakeJobQueue()
+    skeleton, done = uuid.uuid4(), uuid.uuid4()
+
+    promoted = await VisibilityService(queue, titles).seen_cards(
+        [_card(skeleton, EnrichmentState.SKELETON), _card(done, EnrichmentState.ENRICHED)]
+    )
+
+    assert promoted == 1
+    assert [job.key for job in queue.jobs_of(JobKind.ENRICH)] == [str(skeleton)]
+    assert reads == [], "the card already knew its tier"
+
+
+async def test_one_title_on_two_shelves_of_one_screen_is_promoted_once() -> None:
+    """The composed-screen case for the dedup one method up, and the reason
+    `/home` promotes once for the whole screen rather than once per provider:
+    nine shelves over one catalog, and nothing stops a film being both
+    recently-added and a genre affinity."""
+    queue = FakeJobQueue()
+    on_two = uuid.uuid4()
+
+    promoted = await VisibilityService(queue, FakeTitleRepository()).seen_cards(
+        [_card(on_two, EnrichmentState.SKELETON), _card(on_two, EnrichmentState.SKELETON)]
+    )
+
+    assert promoted == 1
+    assert [job.key for job in queue.jobs_of(JobKind.ENRICH)] == [str(on_two)]

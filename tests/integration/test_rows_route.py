@@ -37,7 +37,9 @@ things are only true here:
 footprint is deliberately narrow: `DELETE FROM jobs WHERE kind = 'curate'` and
 `DELETE FROM row_provider_settings` (which ships empty, so emptying it *is* the
 shipped state), plus the two titles and one source the `screen` fixture plants
-and deletes by id. Nothing else in the suite writes that job kind or that
+and deletes by id -- and, since issue #73, the `enrich` jobs the `GET /home`
+reads below promote for those same two titles. Nothing else in the suite writes
+that job kind or that
 table, and the alternative a sibling file uses (`DELETE FROM jobs` plus the
 default `users` row) would cascade into `watch_states` another committing file
 may have left. The `users` row `DefaultUserIdDep` creates is left standing: it
@@ -458,6 +460,18 @@ async def screen(
             for title_id in (resuming.id, arrived.id):
                 await session.execute(
                     text("DELETE FROM watch_states WHERE title_id = :id"), {"id": title_id}
+                )
+                # `GET /home` promotes every skeleton it draws (issue #73) and
+                # `get_session` commits at the end of a successful request, so
+                # the `_slugs` reads above leave an `enrich` row per title.
+                # **Before the title** -- the job's `key` is the title's id as
+                # text, so once the title row is gone nothing identifies it.
+                await session.execute(
+                    text(
+                        "DELETE FROM jobs WHERE kind = 'enrich' AND key IN "
+                        "(SELECT id::text FROM titles WHERE id = :id)"
+                    ),
+                    {"id": title_id},
                 )
                 await session.execute(text("DELETE FROM titles WHERE id = :id"), {"id": title_id})
             await session.execute(text("DELETE FROM sources WHERE id = :id"), {"id": source.id})

@@ -49,6 +49,7 @@ from collections.abc import Iterable, Sequence
 
 from usher.domain.enums import ENRICHMENT_RANK, EnrichmentState
 from usher.domain.jobs import JobKind, JobPriority
+from usher.domain.rows import RowCard
 from usher.domain.title import Title
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import TitleRepository
@@ -88,7 +89,7 @@ class VisibilityService:
         Deduplicated because one title can sit on two shelves of one composed
         screen, and the count returned is read as "titles promoted".
         """
-        return await self._promote(titles)
+        return await self._promote((title.id, title.enrichment_state) for title in titles)
 
     async def seen_ids(self, title_ids: Sequence[uuid.UUID]) -> int:
         """`seen`, for a surface that never held a `Title`.
@@ -111,13 +112,29 @@ class VisibilityService:
         """
         if not title_ids:
             return 0
-        return await self._promote(await self._titles.list_by_ids(list(title_ids)))
+        return await self.seen(await self._titles.list_by_ids(list(title_ids)))
 
-    async def _promote(self, titles: Iterable[Title]) -> int:
+    async def seen_cards(self, cards: Iterable[RowCard]) -> int:
+        """`seen`, for the composed screen.
+
+        `RowCard` carries its own `enrichment_state` — unlike `SearchResult`,
+        which is the whole reason `seen_ids` exists — so a screen is judged
+        from what the composer already hydrated rather than re-read. Nine
+        shelves of up to twenty cards would otherwise be a second read of the
+        entire screen for a field it is holding.
+
+        Called once for the whole screen rather than once per provider, which
+        is what makes the dedup in `_promote` load-bearing: nothing stops a
+        film being both recently-added and a genre affinity, and without it
+        one title on two shelves is two rows COPYed and one discarded.
+        """
+        return await self._promote((card.title_id, card.enrichment_state) for card in cards)
+
+    async def _promote(self, tiers: Iterable[tuple[uuid.UUID, EnrichmentState]]) -> int:
         unfinished: dict[str, None] = {}
-        for title in titles:
-            if ENRICHMENT_RANK[title.enrichment_state] < _FINISHED:
-                unfinished[str(title.id)] = None
+        for title_id, state in tiers:
+            if ENRICHMENT_RANK[state] < _FINISHED:
+                unfinished[str(title_id)] = None
         if not unfinished:
             return 0
         traceparent = current_traceparent()

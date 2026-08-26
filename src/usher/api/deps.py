@@ -933,6 +933,7 @@ async def get_home_service(
     cache: RowCacheDep,
     refreshes: Annotated[RefreshQueue, Depends(get_refresh_queue)],
     provider_settings: RowProviderSettingsRepositoryDep,
+    visibility: VisibilityServiceDep,
 ) -> HomeService:
     """The composer, over the registry `services/rows/__init__.py` owns, minus
     what an operator has switched off.
@@ -973,6 +974,7 @@ async def get_home_service(
         enabled_row_providers(row_provider_settings(await provider_settings.overrides())),
         cache=cache,
         refresh=refreshes.schedule,
+        visibility=visibility,
     )
 
 
