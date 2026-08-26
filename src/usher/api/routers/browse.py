@@ -32,7 +32,7 @@ from typing import Annotated, Any, Final, cast
 from fastapi import APIRouter, Query
 
 from usher.api.cursor import CursorSpec, CursorType, decode_cursor, over_fetch, paginate
-from usher.api.deps import TitleRepositoryDep
+from usher.api.deps import TitleRepositoryDep, VisibilityServiceDep
 from usher.api.dto.browse import (
     BrowseFacetsResponse,
     BrowseItemResponse,
@@ -140,6 +140,7 @@ def _after(cursor: str | None, *, spec: CursorSpec) -> BrowseCursorPosition | No
 )
 async def browse_catalog(
     titles: TitleRepositoryDep,
+    visibility: VisibilityServiceDep,
     sort: Annotated[BrowseSort, Query()] = BrowseSort.NAME,
     genre: Annotated[str | None, Query()] = None,
     year: Annotated[int | None, Query(ge=0)] = None,
@@ -189,6 +190,16 @@ async def browse_catalog(
         keys=lambda one: (BrowseSort.position_of(one, sort=sort).key, one.id),
         item=BrowseItemResponse.of,
     )
+    # **The page that was served, not the page that was fetched** (issue #73:
+    # a surface promotes what it draws). `over_fetch` asks for one row more
+    # than it serves and `paginate` discards it, so promoting `fetched` would
+    # enqueue one title per page that no client has been shown.
+    #
+    # Sliced by `len(page.items)` rather than by `limit`, so this is *derived
+    # from what was served* rather than a second copy of `paginate`'s
+    # truncation rule -- the two cannot drift, and on the last page (where the
+    # over-fetched row does not exist) the length is already the right one.
+    await visibility.seen(fetched[: len(page.items)])
     return BrowseResponse(
         items=page.items,
         next_cursor=page.next_cursor,
