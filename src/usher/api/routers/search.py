@@ -116,7 +116,7 @@ from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Query, status
 
-from usher.api.deps import DefaultUserIdDep, SearchServiceDep
+from usher.api.deps import DefaultUserIdDep, SearchServiceDep, VisibilityServiceDep
 from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.search import SearchResponse, SuggestResponse
 from usher.api.errors import ProblemException
@@ -233,6 +233,7 @@ _SUGGEST_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
 )
 async def search(
     search_service: SearchServiceDep,
+    visibility: VisibilityServiceDep,
     # **The household, and it is a dependency rather than a query parameter.**
     # PRD 05 keeps `SearchFilters` a closed vocabulary with no user field, and
     # the reason is exactly this route: anything on the query string is
@@ -313,6 +314,14 @@ async def search(
             code=ProblemCode.VALIDATION_FAILED,
             detail=_NO_EMBEDDER_DETAIL,
         ) from exc
+    # **A viewer typed this and got these rows back**, which is the strongest
+    # intent signal in the API (issue #73). `SearchResult` carries no
+    # `enrichment_state` (issue #52), so the tier is resolved rather than read
+    # off the answer -- one `WHERE id = ANY(...)` on the primary key, bounded
+    # by `limit`. After the answer is assembled and never before it: a
+    # promotion is an optimisation for the *next* request, and this one is
+    # already served.
+    await visibility.seen_ids([result.title_id for result in answer.results])
     # `q` rather than `answer`-derived: the service is handed the typed string
     # and hands back what it ran, so echoing the parameter is the one spelling
     # that cannot accidentally echo the rewrite.
@@ -327,6 +336,7 @@ async def search(
 )
 async def suggest(
     search_service: SearchServiceDep,
+    visibility: VisibilityServiceDep,
     q: Annotated[
         str,
         Query(
@@ -396,6 +406,16 @@ async def suggest(
     minimum = _MIN_CHARS_FOR_TIER[tier]
     if len(q.strip()) < minimum:
         return SuggestResponse.of(q, tier=tier, min_query_length=minimum)
+    # Bound once rather than inlined into the DTO, because the promotion below
+    # has to see the same rows the response carries.
+    offered = await search_service.suggest(q, limit=limit, tier=tier)
+    # **This route fires per keystroke**, which makes it the highest-volume
+    # surface on the demand lane (issue #73). Wired anyway: a dropdown of names
+    # a viewer is choosing between is drawn, and the repeat is free at the
+    # database (`GREATEST` under `AND jobs.priority < excluded.priority`), so
+    # holding a key down costs one read per keystroke rather than one write.
+    # The volume question is recorded on the issue rather than answered here.
+    await visibility.seen_ids([result.title_id for result in offered])
     return SuggestResponse.of(
         q,
         tier=tier,
@@ -403,5 +423,5 @@ async def suggest(
         # `tier=tier` and not a tier the service chose: the echo has to be the
         # parameter that selected the index, or a response could report a tier
         # that did not run.
-        results=await search_service.suggest(q, limit=limit, tier=tier),
+        results=offered,
     )

@@ -436,7 +436,10 @@ TitleRepositoryDep = Annotated[TitleRepository, Depends(get_title_repository)]
 EpisodeRepositoryDep = Annotated[EpisodeRepository, Depends(get_episode_repository)]
 
 
-def get_visibility_service(queue: JobQueueDep) -> VisibilityService:
+def get_visibility_service(
+    queue: JobQueueDep,
+    titles: Annotated[TitleRepository, Depends(get_title_repository)],
+) -> VisibilityService:
     """The demand lane for the screens (issue #73).
 
     Request-scoped and holding only the queue, which is what makes it unlike
@@ -446,7 +449,7 @@ def get_visibility_service(queue: JobQueueDep) -> VisibilityService:
     costs an object; enrichment itself still happens on the worker, which is
     the one process that owns the bucket.
     """
-    return VisibilityService(queue)
+    return VisibilityService(queue, titles)
 
 
 VisibilityServiceDep = Annotated[VisibilityService, Depends(get_visibility_service)]
