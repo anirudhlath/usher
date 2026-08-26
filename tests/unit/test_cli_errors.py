@@ -101,6 +101,13 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
     # coroutine is patched to raise before the path is read, which is what
     # makes this a case about the *boundary* rather than about the artifact.
     "restore": ["restore", "usher-backup.jsonl.gz"],
+    # `--new-key-env` is required, and what it carries is a **variable name**
+    # rather than a key -- so this row, unlike every other one here, would be
+    # a place a secret could be written down if the surface had been designed
+    # the other way. It names a variable that need not be set: `_rotate` is
+    # patched to raise before `os.environ` is read, which is what keeps this a
+    # case about the boundary.
+    "rotate-secret": ["rotate-secret", "--new-key-env", "USHER_NEW_SECRET_KEY"],
 }
 
 

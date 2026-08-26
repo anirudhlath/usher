@@ -25,6 +25,7 @@ message by accident. `usher.config.Settings` already holds `database_url`,
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pydantic import SecretStr
@@ -87,3 +88,67 @@ class CredentialStore(ABC):
         """Remove the credentials at `ref`. Idempotent: deleting a ref that
         does not exist is not an error, so a partially-failed source
         deletion can be retried."""
+
+
+class CredentialCiphertextStore(ABC):
+    """Stored credentials as the ciphertext they are stored as, for
+    `usher rotate-secret` and for nothing else.
+
+    **A second port rather than three more methods on `CredentialStore`, and
+    the reason is the sentence `api/deps.py::get_credential_store` already
+    rests on**: *"the return type is the port, so a caller written against
+    this annotation cannot reach a method `CredentialStore` does not have"*.
+    Every route and both services that hold a credential store hold it under
+    that annotation, and a `read_ciphertext` on it would put a raw credential
+    blob one attribute access away from all of them. Split, the reachability
+    argument keeps working and the only thing that can name this port is the
+    composition root that builds the rotation service.
+
+    Two smaller consequences fall out of the split and both are wanted.
+    `FakeCredentialStore` holds plaintext deliberately -- *"a fake that
+    encrypted into a dict would be modelling ceremony rather than
+    behaviour"* -- so it has no ciphertext to hand back and is not asked to
+    invent one. And `CredentialStoreContract` stays a contract about
+    round-tripping a secret, which is what every implementation owes,
+    rather than growing cases that only one backing store can answer.
+
+    **The plaintext key is not here either.** These methods move opaque bytes;
+    which cipher opens them is `usher.services.rotation`'s question, and the
+    two ciphers it holds are built by the composition root. So an
+    implementation of this port needs no `SecretStr` at all, which is the
+    difference between "the rotation store can read every credential in the
+    deployment" and "the rotation store can move bytes it cannot read".
+    """
+
+    @abstractmethod
+    async def list_refs(self) -> Sequence[str]:
+        """Every ref this store holds, in a stable order.
+
+        Unpaged, and that is a bound rather than an oversight: there is one
+        row per configured source, so this is single-digit on any deployment
+        and `usher.db.repositories.credentials` states the measurement. A
+        keyset here would be paging over a table smaller than the page.
+        """
+
+    @abstractmethod
+    async def read_ciphertext(self, ref: str) -> bytes | None:
+        """The stored bytes at `ref`, or `None` if no such ref exists.
+
+        `None` rather than a raise, because the ref may have been listed and
+        then deleted -- rotation commits per row, so a source removed through
+        the admin API part-way through a run is reachable. It does **not**
+        decrypt, so it cannot fail the way `CredentialStore.get` does: a row
+        no key opens is a fact the caller discovers, not an error this port
+        raises.
+        """
+
+    @abstractmethod
+    async def write_ciphertext(self, ref: str, ciphertext: bytes) -> None:
+        """Replace the bytes stored at `ref`.
+
+        An update, never an insert: rotation rewrites rows that exist and
+        mints none, so a ref this store does not hold writes nothing. Same
+        session/transaction ownership as every other repository here --
+        flushes, never commits; the per-row commit belongs to the service
+        that decided the row was worth committing.
+        """

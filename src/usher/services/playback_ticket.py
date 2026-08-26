@@ -37,6 +37,13 @@ correct rather than a bug -- tickets are short-lived, and the alternative would
 be a rotation window during which a superseded key still mints working
 redirects. Written here so it is not rediscovered as a defect.
 
+✅ **And `usher rotate-secret` (M10 K7) does nothing about it, deliberately.**
+That command rotates `source_credentials` -- the one thing this key protects
+that is *persisted* -- and prints the consequence for tickets in a single line
+of its report rather than migrating anything, because nothing here is stored to
+migrate. A holder meets it as `404 ticket_invalid` and the client answers by
+asking `/play` again, which is the same move it makes at expiry.
+
 **No TTL constant lives here.** `redeem`'s `ttl_seconds` is required and has no
 default: this primitive does not get an opinion about how long a client takes
 to press play. The constant, and the reasoning for its value, belong at the one

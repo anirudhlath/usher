@@ -339,6 +339,9 @@ uv run usher restore /var/tmp/x.jsonl.gz     # merge it back, in one transaction
 uv run usher restore /var/tmp/x.jsonl.gz --dry-run   # the identical report, committing nothing
 uv run usher restore /var/tmp/x.jsonl.gz --skip-unresolvable   # drop what this catalog cannot resolve
 
+export USHER_NEW_SECRET_KEY=$(openssl rand -hex 32)            # export, never .env
+uv run usher rotate-secret --new-key-env USHER_NEW_SECRET_KEY  # re-encrypt every stored credential
+
 uv sync --extra embedding                    # optional: fastembed, 167 MiB, no torch
 ```
 
@@ -409,6 +412,28 @@ separately and commits the rest — **opt-in, because the refusal is the headlin
 guarantee.** It covers only what the importers rebuild: a household the target
 does not hold, a source name collision and a credential whose source is absent
 all still refuse with it set.
+
+**`usher rotate-secret` is the whole of what `USHER_SECRET_KEY` rotation is,
+and it is one table.** Exactly two HKDF derivations exist over that key —
+`build_cipher` (`usher.source-credentials.v1`) over
+`source_credentials.ciphertext`, and `build_ticket_cipher`
+(`usher.playback-ticket.v1`) over a playback ticket that is **never stored** —
+so rotation is one row per configured source (**1 row, 48 kB** here,
+2026-08-25) and outstanding tickets are invalidated rather than migrated, which
+a client meets as `404 ticket_invalid` and answers by asking `/play` again.
+⚠️ **`--new-key-env` names a variable, and the variable must be *exported*, not
+written into `.env`**: a key in `argv` is in the shell history and in `ps`
+output, and the same name inside `.env` fails `extra="forbid"` at **every**
+entry point with the new key rendered in pydantic's `input_value=` (measured
+2026-08-26). The new key is checked against `Settings`' own rules
+(`min_length=32`, the placeholder rejection) **before the first row is
+touched**, because a key `Settings` would refuse is a rotation that bricks the
+next start. It **commits per row** — deliberately the opposite of `usher
+restore` — so an interruption leaves a *mixed* state rather than stranding
+every credential, and re-running is the recovery: each row is tried with the
+**new** cipher first, so a second run finishes a half-rotated table and a third
+is a no-op reporting *N already rotated*. Rows that open under neither key are
+named, counted, left untouched, and exit the command non-zero.
 
 **Nothing runs `usher similar --rebuild` for you**, and that is the one
 freshness gap in the project: a title's neighbours go stale when some *other*

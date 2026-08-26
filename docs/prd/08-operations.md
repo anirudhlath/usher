@@ -282,11 +282,13 @@ Rules:
   would add is the credential
   ([ADR-0026](decisions/0026-the-cli-boundary-names-families.md)).
 - Rotating `USHER_SECRET_KEY` re-encrypts on next write; a documented rotation
-  command handles the bulk case. ⚠️ **"On next write" is not a mechanism that
+  command handles the bulk case. ✅ **That command is built** — `usher
+  rotate-secret --new-key-env <VAR>`, M10's K7, and its own section is below.
+  ⚠️ **"On next write" is not a mechanism that
   keeps a deployment limping — there is no such path.** `PostgresCredentialStore.put`
   encrypts with whatever cipher it was built with, so the only "next write" that
-  re-encrypts anything is *a credential an operator re-types*. Until the rotation
-  command exists (M10), rotating the key strands every stored credential. **Until that write happens the old rows are
+  re-encrypts anything is *a credential an operator re-types*. Without the
+  rotation command, rotating the key strands every stored credential. **Until that write happens the old rows are
   unreadable, and that state is rendered rather than raised**: Fernet's
   authentication tag makes a wrong key a diagnosable `PortDataMalformed`, and
   `GET /admin/sources/{id}/status` reports it as an unreachable,
@@ -341,6 +343,100 @@ Rules:
   [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) records
   the reproduction and the two other lines through that logger that could
   carry the same URL.
+
+### Rotation — `usher rotate-secret`, one table, per-row commit (K7)
+
+✅ **`usher rotate-secret --new-key-env <VAR>` is built** —
+`src/usher/services/rotation.py` owns the order of operations and
+`db/repositories/credentials.py`'s `PostgresCredentialRotationStore` owns the
+column.
+
+```bash
+export USHER_NEW_SECRET_KEY=$(openssl rand -hex 32)   # export, never .env
+uv run usher rotate-secret --new-key-env USHER_NEW_SECRET_KEY
+# then set USHER_SECRET_KEY to that value and restart
+```
+
+**What the key protects, surveyed rather than assumed.** There are exactly two
+HKDF-SHA256 derivations over `USHER_SECRET_KEY`, differing only in their `info`
+string: `build_cipher` (`usher.source-credentials.v1`) encrypts the JSON
+`{username, password}` blob in `source_credentials.ciphertext`, and
+`build_ticket_cipher` (`usher.playback-ticket.v1`) encrypts a playback target
+URL inside a ticket that is **never persisted**. So rotation touches **one
+table**, at one row per configured source — measured 2026-08-25 on this
+deployment: `SELECT count(*) FROM source_credentials` is **1** and the relation
+is **48 kB**. Saying that plainly is what keeps the command small.
+
+⚠️ **The ticket cipher needs no rotation, and that is a fact about a ticket's
+lifetime rather than an omission.** Rotating invalidates every outstanding one;
+a client meets that as `404 ticket_invalid` and answers by asking `/play`
+again. **"Short-lived" is five minutes** —
+`api.routers.playback.TICKET_TTL_SECONDS`, re-read 2026-08-26 — and it is a
+constant at the route rather than a setting, deliberately, because
+`services/playback_ticket.py` states that *no TTL constant lives here*
+(`redeem`'s `ttl_seconds` is required with no default) and
+`USHER_PLAYBACK_TICKET_TTL_SECONDS` appears in this repository **only** as the
+name that rule refused: `Settings` has no such field. The report prints the
+consequence in one line and the command does nothing about it. ⚠️ **Keyset
+cursors are outside this entirely**: `api/cursor.py` records that
+`Settings.secret_key` is deliberately *not* what signs one.
+
+**The new key is read from the environment and never from an argument.** A key
+on a command line is in the shell's history file and in `ps` output for every
+user on the box, and neither is undone by the command exiting, so
+`--new-key-env` names the **variable** and the value is never a token
+`argparse` sees. ⚠️ **Export it; do not add it to `.env`.** Measured
+2026-08-25: an exported `USHER_NEW_SECRET_KEY` is invisible to `Settings`
+(pydantic-settings' env source reads only the fields it declares), and the same
+name written into `.env` makes **every** entry point fail
+`usher_new_secret_key: Extra inputs are not permitted` — the `extra="forbid"`
+failure the `USHER_COMPOSE_` namespace exists for, one section up — with the
+new key rendered in the `ValidationError`'s `input_value=`.
+
+**The new key is validated by `Settings`' own rules before the first row is
+touched.** `min_length=32` and the placeholder rejection, reached by
+constructing a real `Settings` rather than by a second copy of the two rules: a
+rotation to a key `Settings` would refuse is a rotation that bricks the next
+start, and that refusal must not arrive from pydantic at the next boot with
+every credential already re-encrypted under it.
+
+**Per-row commit, which is deliberately the opposite of `usher restore`.** One
+transaction over N rows means an interrupted rotation leaves *every* row on the
+old key while the operator has already changed their key — total credential
+loss on the next start. Per-row commit leaves a **mixed** state, and a mixed
+state is recoverable three ways at once:
+
+- **It is diagnosable.** Fernet's authentication tag makes a wrong key a
+  `PortDataMalformed` naming the ref, which `GET /admin/sources/{id}/status`
+  already renders as an unreachable, unauthenticated source with a
+  re-enter-your-credentials detail — the screen this degradation was designed
+  to arrive at.
+- **Re-running is the recovery, and it needs no ledger.** Every row is tried
+  with the **new** cipher first and skipped if it already opens; only then is
+  the old one tried. A second run over a half-rotated table finishes it, and a
+  run over a fully-rotated one is a no-op reporting *N already rotated*. Trying
+  the old cipher first is correct on a fresh table and **double-encrypts** every
+  row a previous run moved — measured, and still perfectly readable, which is
+  why the case that catches it asserts byte-identity rather than readability.
+- **A row that opens under neither key is refused, named and counted**, the run
+  exits non-zero, and the row is left exactly as it was — writing anything onto
+  it would destroy the one copy a restored key could still have read.
+
+⚠️ `PortDataMalformed` is **not** in `cli.OPERATOR_ERRORS` and this command does
+not add it. `CredentialCiphertextStore` does not decrypt, so a row no key opens
+never becomes an exception at all: it is a `None` and a counted refusal, which
+is the per-command *handling*
+[ADR-0026](decisions/0026-the-cli-boundary-names-families.md) permits as
+distinct from the per-command *boundary* it rejects.
+
+**The raw ciphertext is a second port rather than three more methods on
+`CredentialStore`.** `api/deps.py::get_credential_store` returns the port
+precisely so *"a caller written against this annotation cannot reach a method
+`CredentialStore` does not have"*, and a `read_ciphertext` on that port would
+put a credential blob one attribute access away from every route and both
+services that hold one. Split, only the composition root that builds the
+rotation service can name it — and `PostgresCredentialRotationStore` takes no
+`secret_key` at all, so it moves bytes it cannot read.
 
 ## Failure and degradation
 

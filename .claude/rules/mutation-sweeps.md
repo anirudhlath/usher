@@ -8596,3 +8596,134 @@ round 1's withdrawn CTRL1 is that there are now **four** independent tallies
 rather than two, so the reorder is a larger no-op over a wider surface. It is
 still the weak kind of control (the same program), and round 2's D8/R8 pattern
 is the one to prefer where a measured equivalence is available.
+
+## M10 K7 — `usher rotate-secret`: 12 plants, 12 killed, and (a)+(b) measured passing under the defect (c) is for (2026-08-26)
+
+`usher rotate-secret --new-key-env <VAR>` re-encrypts every
+`source_credentials` row from the cipher `USHER_SECRET_KEY` derives to the one
+a new key derives. **12 plants, 12 killed, 0 survivors, 0 equivalent mutants.**
+Every plant was applied by exact-substring substitution through
+`/var/tmp/m10-K7/plant.py`, whose landing check compares the file against the
+*expected result* rather than against the absence of the anchor, and every
+restore was verified byte-identical by `sha256sum -c` against a pre-sweep
+manifest — all four touched sources `OK` at the end.
+
+| # | plant | target case(s) | verdict |
+|---|---|---|---|
+| P1 | try the **old** cipher first, classify the new-cipher fallback as `already`, and write unconditionally | `…is_skipped_rather_than_double_encrypted` (unit, on **(c)** alone) + `…_left_byte_identical` (integration) + `…_a_fully_rotated_table_writes_nothing` | KILLED |
+| P2 | one `commit()` after the loop instead of per row | `…committed_before_the_next_one_is_read` (unit) + `…committed_before_the_next_one_is_written` (integration) + the second-run case | KILLED |
+| P3 | validate the new key **after** `rotate()` returns, building the cipher from the raw environment value | `…refused_before_any_row_is_touched` (integration, second session) — **and nothing else** | KILLED |
+| P4 | swap the two `build_cipher` calls at the composition root (**the control**) | `…no_longer_under_the_old_one` + `…prints_refs_and_never_a_credential_or_a_key` | KILLED |
+| P5 | add a `--new-key` argument that carries the key itself | `test_rotate_secret_takes_a_variable_name_and_never_a_key` alone | KILLED |
+| P6 | delete the `_dispatch` arm | 3 cases in `test_cli_rotation.py`; the run visibly **starts uvicorn** | KILLED |
+| P7 | `write_ciphertext` as an upsert rather than an update | `…a_ref_the_table_does_not_hold_writes_nothing` (a real FK `IntegrityError`) | KILLED |
+| P8 | drop `updated_at` from the write | `test_the_write_moves_updated_at` | KILLED |
+| P9 | `f"…: {exc}"` instead of `settings_rejection` | `…refused_without_printing_it`, on `"values are not shown"` | KILLED |
+| P9b | P9 **plus** passing the raw `str` to `Settings` instead of `SecretStr(raw)` | the same case, now on `"the rejected key reached the message"` | KILLED |
+| P10 | no already-rotated check at all (`old or new`, then write) | 3 unit cases | KILLED |
+| P11 / P12 | the new port removed from `ALL_PORTS`; the `rotate-secret` row removed from `_MINIMAL_ARGV` | `test_every_port_abc_is_registered_in_all_ports`; `test_the_argv_table_covers_every_subcommand` | KILLED |
+
+### The plan's claim about assertion (c), measured rather than restated
+
+The task's plan says the headline case's *"the ciphertext is byte-identical"*
+is the assertion with teeth because **(a)** *both rows decrypt under the new
+key* and **(b)** *the report says `rotated=1, already=1`* are satisfied by the
+double-encryption defect the case is named for. That is a claim about a program
+nobody had written, so it was run: with P1 applied, a direct probe answers
+
+```
+(a) both open under the new key: True
+(b) rotated/already: ('ref-moves',) ('ref-already',) ()
+(c) already-row byte-identical: False
+```
+
+— so (a) is true, (b) is *exactly* the expected tuple, and the case fails on
+(c) and only on (c). **Note what P1 had to be for that to hold.** The naive
+old-first spelling — try the old cipher, refuse if it fails — reports an
+already-rotated row as **refused** and dies on (b), so it is a weaker plant
+that says nothing about (c). The spelling that isolates (c) is *"try old, else
+try new, classify accordingly, write either way"*, which is also the more
+plausible implementation. **A plant chosen to fail the assertion under test has
+to be the version that passes the other assertions**, or the measurement is
+about a different defect.
+
+### 🔴 The rejected key is protected twice, and only one of the two is the thing this repository already knew about
+
+`config-cli-and-deployment.md` records that a pydantic `ValidationError`
+renders `input_value=` and that `settings_rejection` exists to strip it. P9
+replaced that call with `f"…: {exc}"` — and the key **still did not leak**. The
+case failed on the *presence* assertion (`"values are not shown"`), not on the
+absence one. Measured directly:
+
+| what is handed to `Settings(secret_key=…)` | `str(exc)` renders | leaks the rejected key |
+|---|---|---|
+| `SecretStr("too-short-to-be-a-key")` | `input_value=SecretStr('**********'), input_type=SecretStr` | **no** |
+| `"too-short-to-be-a-key"` | `input_value='too-short-to-be-a-key', input_type=str` | **yes** |
+
+So `SecretStr(raw)` at the call site is load-bearing *independently* of
+`settings_rejection`, and P9b — both defects at once — is what makes
+`assert short not in message` fire on its own message. **The general form: when
+two independent controls guard one value, a plant against either alone measures
+the other one.** Two plants, or the absence assertion is credited to whichever
+control the plant did not remove.
+
+### The interruption sweep target is K8's, and this says so rather than faking it
+
+The plan lists four sweep targets and the second is *"committing once at the
+end must fail the interruption case in K8"*. **K8 is not built**, so that case
+does not exist and no run here can score it. What P2 measures instead is the
+two cases K7 does own — a unit event log asserting the **interleaving**
+(`[write, commit, write, commit]`, which a counter cannot distinguish from
+`[write, write, commit]`) and an integration case that reads the *second* row
+on a **separate connection** from inside the commit callable, so per-row
+durability is observed mid-run rather than inferred. Both are red under P2.
+The interruption case itself remains K8's to write.
+
+### One harness defect, and it is the mirror of B7's
+
+The landing check was first spelled `if old in landed or new not in landed`,
+which is right for a replacement and **wrong for a prepend**: P5 inserts a new
+`add_argument` *above* the anchor, so the anchor is a substring of the
+replacement and a plant that had landed perfectly was reported `PLANT DID NOT
+LAND`. B7's harness failed the other way — a guard derived from the same wrong
+guess as the edit, reporting a no-op as a success. Same family, opposite sign:
+**a landing check has to compare against the expected result, not against a
+property the author expects the result to have.**
+
+### One process finding, filed because it cost a run
+
+`cd /var/tmp/m10-K7 && uv run pytest tests/unit/...` in a **single** Bash call
+runs pytest from `/var/tmp` and answers `collected 0 items` — a plant scored
+against a suite that collected nothing, which is this repository's own *"a run
+that did not run is not a pass"* arriving through the shell. Caught by reading
+the `rootdir:` line. Invoke the harness by absolute path and let the working
+directory be the repository's.
+
+### Two things the task's own plan said that measurement refuted
+
+- 🔴 **"the two independent `build_cipher` calls in the service's `__init__`"
+  is not a place they can go.** `build_cipher` lives in
+  `usher.db.repositories.credentials` and `pyproject.toml`'s third contract
+  forbids `usher.services` importing `usher.db`. Measured by planting the
+  import in its isort position with the name bound (so `ruff check` passes —
+  the careless spelling dies on `F401` and proves nothing):
+  `lint-imports` answers **11 kept, 1 broken**, `usher.services.rotation ->
+  usher.db.repositories.credentials`. So the two calls are at the composition
+  root (`cli._rotate`) and `RotationService` is handed two `Fernet` objects,
+  which is also what makes *"the service holds no plaintext key"* a property a
+  test can assert on `vars(service)` rather than a reading of the constructor.
+- 🔴 **`TICKET_TTL_SECONDS` was reported deleted and is not.** A correction
+  supplied with this task stated that
+  `services/playback_ticket.py`'s constant *"NO LONGER EXISTS"* and that the
+  TTL had become `USHER_PLAYBACK_TICKET_TTL_SECONDS`. Re-read 2026-08-26:
+  `TICKET_TTL_SECONDS: Final = 300` is alive at
+  **`api/routers/playback.py:108`** — it *moved to the route*, which is
+  exactly what `playback_ticket.py`'s *"No TTL constant lives here"* sentence
+  says it did — and `USHER_PLAYBACK_TICKET_TTL_SECONDS` appears in this
+  repository **only** as the name that was refused, in two comments that say
+  so. `[f for f in Settings.model_fields if "ttl" in f]` is `[]`. Both halves
+  of the correction were therefore false in the same direction, and the
+  sentence that produced them is one module's *"not here"* read as *"not
+  anywhere"*. **A module docstring's negative is scoped to that module; the
+  thing it denies usually moved rather than died, and the grep that settles it
+  is over `src/`, not over the file the sentence is in.**

@@ -12,7 +12,7 @@ from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.curation import LLMCall
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkDataset
-from usher.ports.credentials import CredentialStore
+from usher.ports.credentials import CredentialCiphertextStore, CredentialStore
 from usher.ports.embedding import Embedder
 from usher.ports.errors import (
     PortAuthFailed,
@@ -72,6 +72,10 @@ ALL_PORTS: list[type[ABC]] = [
     SourceAdapter,
     SourceAdapterFactory,
     CredentialStore,
+    # M10 K7. A second credential port rather than three more methods on
+    # the first, so a route holding a `CredentialStore` still cannot reach
+    # a raw ciphertext -- `ports/credentials.py` carries the argument.
+    CredentialCiphertextStore,
     MetadataProvider,
     SearchIndex,
     SuggestIndex,

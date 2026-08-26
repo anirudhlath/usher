@@ -99,15 +99,18 @@ stack *because* the stack is one flag away.
 - **`SystemExit` passes through untouched**, and that is free rather than
   arranged: it is a `BaseException` and the handlers name only `Exception`
   subclasses. Pinned anyway, because "free" stops being true the moment
-  somebody widens the tuple — and **ten** places in `cli.py` exit with a
-  message chosen for the failure they describe, measured 2026-08-25 as
-  `grep -c "raise SystemExit" src/usher/cli.py` = **14**, minus `main`'s own
+  somebody widens the tuple — and **thirteen** places in `cli.py` exit with a
+  message chosen for the failure they describe, measured 2026-08-26 as
+  `grep -c "raise SystemExit" src/usher/cli.py` = **17**, minus `main`'s own
   three and minus `_eval`'s numeric exit: `_as_uuid`, the semantic-search
   guard, `similar`'s cross-argument rule, `_eval`'s two, M10's `_sync`
   failed-run exit, both of M8 `usher curate`'s (no LLM configured, and a
-  generation that did not happen), and both of M10 K4's `usher restore` (a
-  refused artifact, and a run in which some row could not be restored). It
-  was three when this ADR was written and five at M10's K3.
+  generation that did not happen), both of M10 K4's `usher restore` (a
+  refused artifact, and a run in which some row could not be restored), and
+  the three M10 K7's `usher rotate-secret` adds (`--new-key-env` naming a
+  variable that is unset or empty, a new key `Settings` would refuse, and a
+  run in which some row decrypted under neither key). It was three when this
+  ADR was written and five at M10's K3.
   🔴 **This bullet said *eleven* for one commit, and the sentence it said it
   in was *"the count has now drifted twice … rather than left to drift a
   third time"*.** The enumeration beside it listed ten the whole way. So the
@@ -179,8 +182,10 @@ stack *because* the stack is one flag away.
   its date because it is a measurement rather than a count to keep current —
   and the sentence that stood here (*"the parser advertises fifteen since M8's
   `usher curate`"*) had gone stale exactly as predicted, by **three**: the
-  parser's own `subparsers.choices` holds **18** on **2026-08-25**, M9 having
-  added `genres` and `eval` and M10's K3 `backup`. Every one of them is still
+  parser's own `subparsers.choices` holds **20** on **2026-08-26**, M9 having
+  added `genres` and `eval` and M10's K3, K4 and K7 `backup`, `restore` and
+  `rotate-secret`. (It read 18 on 2026-08-25, one day and two commands ago,
+  which is the habit rather than the number.) Every one of them is still
   inside the one boundary, and nothing needs this number — the parametrised
   case reads `subparsers.choices` off the parser itself, which is also why
   that is the thing to cite. ⚠️ **The first spelling of this correction cited

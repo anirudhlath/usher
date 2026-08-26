@@ -34,6 +34,24 @@ renders on `GET /admin/sources/{id}/status` as *re-enter your credentials* — b
 that is a recovery you have to perform by hand, per source. **Store the key with
 the artifact, or you are restoring six of seven precious tables.**
 
+✅ **One case escapes the hand recovery, and it needs the old key rather than
+the credentials.** If you still hold the key the artifact was taken under, you
+do not have to re-enter anything: restore the file, then run the rotation
+command *from* that key *to* the one this deployment uses.
+
+```fish
+set -x USHER_SECRET_KEY <the key the artifact was taken under>
+set -x USHER_NEW_SECRET_KEY <the key this deployment runs>   # export, never .env
+uv run usher rotate-secret --new-key-env USHER_NEW_SECRET_KEY
+set -x USHER_SECRET_KEY $USHER_NEW_SECRET_KEY                # and restart
+```
+
+It commits per row and re-running is the recovery, so an interrupted attempt is
+safe to repeat. Any row it reports as **refused** is one neither key opens, and
+that one really is a hand re-entry. If you do *not* have the old key at all,
+this buys nothing — there is no path from ciphertext to plaintext without it,
+which is the point of the paragraph above.
+
 ### 🔴 `.env` points at your real database, and `alembic` reads it
 
 Every checkout of this project carries a `.env` whose `USHER_DATABASE_URL` names

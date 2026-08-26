@@ -223,10 +223,21 @@ class SourceCredentialRow(Base):
     leave an encrypted orphan with nothing left to attribute it to.
 
     No `set_updated_at` trigger, unlike titles/sources/media_items: this
-    table has exactly one writer (`PostgresCredentialStore`), which sets
-    `updated_at` on both branches of its upsert. The three existing
-    triggers exist because their tables are also written by bulk `COPY` and
-    raw SQL paths that bypass the ORM; nothing bulk-loads credentials.
+    table's writers are few and every one of them sets `updated_at` itself.
+    The three existing triggers exist because their tables are also written
+    by bulk `COPY` and raw SQL paths that bypass the ORM; nothing bulk-loads
+    credentials.
+
+    ⚠️ **There are two writers as of M10's K7, and this said "exactly one"
+    until then.** `PostgresCredentialStore.put` sets the stamp on both
+    branches of its upsert, and `PostgresCredentialRotationStore.
+    write_ciphertext` sets it on the one `UPDATE` it issues. Absent a trigger
+    that is a rule each new writer has to be told, so the count is stated here
+    rather than the singular implied — a third writer that forgets it would
+    make the column mean *"when the credential last changed"* on some rows and
+    *"when it was last written"* on others, with nothing to tell them apart.
+    `tests/integration/test_rotation.py::test_the_write_moves_updated_at` is
+    what fails when a writer forgets.
     """
 
     __tablename__ = "source_credentials"

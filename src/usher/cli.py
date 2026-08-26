@@ -12,6 +12,7 @@ the same property: nothing downloads unless an operator asks.
 
 import argparse
 import asyncio
+import os
 import sys
 import time
 import uuid
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Final
 
 import httpx
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +52,7 @@ from usher.config import Settings, get_settings, settings_rejection
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.backup import PostgresBackupRepository, PostgresRestoreRepository
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.db.repositories.credentials import PostgresCredentialRotationStore, build_cipher
 from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.users import default_user, ensure_default_user
@@ -88,6 +90,7 @@ from usher.services.genres import GenreNormalisationService
 from usher.services.home import ComposeReport, HomeService
 from usher.services.reconcile import RETRACTION_ERROR_CODE
 from usher.services.restore import RestoreRefused, RestoreReport, RestoreService
+from usher.services.rotation import RotationReport, RotationService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
 from usher.services.search import SearchAnswer, SemanticSearchUnavailable, SuggestTier
@@ -2081,6 +2084,147 @@ def _print_backup_report(report: BackupReport) -> None:
     print(CREDENTIAL_KEY_WARNING)
 
 
+def _new_secret_key(settings: Settings, variable: str) -> SecretStr:
+    """Read the new key out of the environment, and refuse it here or nowhere.
+
+    **The value never appears in `argv`**, which is the whole reason
+    `--new-key-env` names a *variable* rather than taking a key: a key on a
+    command line is in the shell's history file and in `ps` output for every
+    user on the box, and neither is undone by the command finishing. What
+    `argparse` carries is the name, which is why `usher rotate-secret
+    --new-key-env USHER_NEW_SECRET_KEY` is safe to paste into a runbook.
+
+    **Validated by the same rules as the old key, before the engine is
+    built.** `Settings.secret_key` is `Field(min_length=32)` with a
+    `_reject_placeholder_secret_key` validator, and a rotation to a key
+    `Settings` would refuse is a rotation that bricks the next start -- so the
+    refusal has to arrive here rather than from pydantic at the next boot,
+    with the credentials already re-encrypted under it. It is spelled as a
+    real `Settings` construction rather than as a second copy of the two
+    rules, for the reason `db/repositories/_errors.py` exists: two copies of a
+    check are two chances to lose one, and a check that re-implements what it
+    is checking against cannot fail the way the original does.
+
+    `database_url` is passed through so the construction cannot fail for a
+    reason that has nothing to do with the key; everything else re-reads the
+    same environment `get_settings()` already validated.
+
+    ⚠️ **Export the variable; do not put it in `.env`.** Measured 2026-08-25:
+    `USHER_NEW_SECRET_KEY` exported into the environment is invisible to
+    `Settings` (pydantic-settings' env source reads only the fields it
+    declares), and the *same* name written into `.env` makes **every** entry
+    point fail with `usher_new_secret_key: Extra inputs are not permitted` --
+    `extra="forbid"`, the failure `config.COMPOSE_ONLY_PREFIX`'s comment
+    records for `USHER_HOST_PORT`. Worse here than there: a pydantic
+    `ValidationError` renders `input_value=`, so the leftover line leaks the
+    new key into the traceback of anything that reads settings without a
+    boundary. `settings_rejection` is what keeps this path's own refusal
+    clean.
+    """
+    raw = os.environ.get(variable, "")
+    if not raw:
+        raise SystemExit(
+            f"usher rotate-secret: ${variable} is not set -- export the new key into it "
+            f"(e.g. `export {variable}=$(openssl rand -hex 32)`) rather than passing it "
+            "as an argument, and do not add it to .env"
+        )
+    try:
+        return Settings(database_url=settings.database_url, secret_key=SecretStr(raw)).secret_key
+    except ValidationError as exc:
+        # `settings_rejection`, not `str(exc)`: pydantic renders the rejected
+        # *input*, so the naive spelling prints the new secret key at the one
+        # command whose entire subject is secret keys.
+        raise SystemExit(
+            settings_rejection(exc, entry_point=f"usher rotate-secret (${variable})")
+        ) from exc
+
+
+async def _rotate(settings: Settings, *, new_key_env: str) -> None:
+    """Re-encrypt every stored credential under a new `USHER_SECRET_KEY`.
+
+    **Inside ADR-0026's boundary with no handler of its own**, exactly as
+    `usher backup` and `usher restore` are: `DBAPIError` covers a database
+    that is not up and `OSError` a connection that is refused, and both have
+    been in `OPERATOR_ERRORS` since before this command existed. Nothing
+    here catches a port error, because nothing here raises one --
+    `CredentialCiphertextStore` does not decrypt, so a row no key opens is a
+    `None` and a counted refusal rather than a `PortDataMalformed`. That is
+    the per-command *handling* the ADR permits, and it is why this task does
+    not add a tenth member to the tuple.
+
+    **The key is read and validated before `_session_for` opens anything**,
+    so a refused key is a rotation that touched no row -- asserted from a
+    second session in `tests/integration/test_rotation.py`, because *"nothing
+    was written"* against the writer's own session is satisfied by a service
+    that never committed.
+
+    **`build_cipher` twice, here, because this is the composition root.**
+    `pyproject.toml`'s third import contract forbids `usher.services` naming
+    `usher.db`, and the derivation lives in `db/repositories/credentials.py`
+    beside the column it opens. So the service is handed two `Fernet` objects
+    and never a `SecretStr`, which is also what makes the order of the two
+    arguments a thing a test can be about: swapped, every row on the old key
+    is refused and every row already on the new one is rotated *backwards*.
+
+    **A run that refused exits non-zero**, `_sync`'s and `_restore`'s
+    precedent: the refused refs are on stdout for a human, and cron, CI and a
+    systemd unit read the exit code.
+    """
+    new_key = _new_secret_key(settings, new_key_env)
+    async with _session_for(settings) as session:
+        service = RotationService(
+            store=PostgresCredentialRotationStore(session),
+            old_cipher=build_cipher(settings.secret_key),
+            new_cipher=build_cipher(new_key),
+            commit=session.commit,
+        )
+        report = await service.rotate()
+    _print_rotation_report(report, new_key_env=new_key_env)
+    if report.refused:
+        raise SystemExit(
+            f"usher rotate-secret: {len(report.refused)} "
+            f"{_unit('credential', len(report.refused))} could not be decrypted by either key "
+            "and must be re-entered -- re-register those sources with "
+            "`POST /admin/sources` once the new key is in place"
+        )
+
+
+def _print_rotation_report(report: RotationReport, *, new_key_env: str) -> None:
+    """Three counts, the refused refs named, and the sentence about tickets.
+
+    **Refs and no credential**, which is `RotationReport`'s own guarantee
+    rather than this function's discretion -- the report has nowhere to carry
+    one. The refused refs are named in full and not capped the way
+    `_print_restore_report` caps its refusals at `_REFUSALS_NAMED`: that cap
+    exists because a restore can refuse 14,166 rows, and this table is one
+    row per configured source.
+
+    **The ticket sentence is one line and the command does nothing about
+    it.** `services/playback_ticket.py` derives a second subkey from the same
+    `USHER_SECRET_KEY`, and rotating invalidates every outstanding ticket --
+    which is correct rather than a bug, because a ticket is short-lived and
+    never stored, and the alternative is a window in which a superseded key
+    still mints working redirects. A client meets it as a `404
+    ticket_invalid` and answers by asking `/play` again. Said here because an
+    operator watching a dashboard for the next minute should know why.
+    """
+    print(f"rotated  {len(report.rotated):>4}")
+    print(f"already  {len(report.already):>4}")
+    print(f"refused  {len(report.refused):>4}")
+    for ref in report.refused:
+        print(f"  refused: {ref}")
+    print(
+        f"{report.rows} {_unit('stored credential', report.rows)} considered; "
+        f"outstanding playback tickets are invalidated by any key change and "
+        f"clients recover by asking /play again"
+    )
+    if report.rotated:
+        print(
+            f"set USHER_SECRET_KEY to ${new_key_env}'s value and restart, "
+            "or the next start cannot read what this run just wrote"
+        )
+
+
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
     """Probe a source's push channel once, or run the lanes in the foreground.
 
@@ -2468,6 +2612,36 @@ def build_parser() -> argparse.ArgumentParser:
             "instead of refusing the file; the next `usher sync` re-derives them"
         ),
     )
+
+    # The twentieth subcommand, stated with the date it was measured rather
+    # than maintained -- the habit the two rows above record, and the
+    # correction they inherit. On **2026-08-26**
+    # `len(build_parser()._subparsers._group_actions[0].choices)` is 20 with
+    # this row, one day and two commands after the row above read 18. Cite
+    # the parser's own `choices` and never
+    # `grep -c "add_parser("`: that grep answers one too many, because the
+    # line stating the claim contains the literal it searches for.
+    rotate = sub.add_parser(
+        "rotate-secret", help="re-encrypt stored credentials under a new USHER_SECRET_KEY"
+    )
+    # **A variable name, never a key**, and it is required rather than
+    # defaulted. A key passed as `--new-key <value>` is in the shell's history
+    # and in `ps` output; naming the variable keeps the value out of `argv`
+    # entirely, and `test_rotate_secret_takes_a_variable_name_and_never_a_key`
+    # asserts that by running this parser and greping the namespace.
+    #
+    # No `default="USHER_NEW_SECRET_KEY"`: this command rewrites every stored
+    # credential in the deployment, and a default would let a bare
+    # `usher rotate-secret` pick up a variable left over from a previous run.
+    rotate.add_argument(
+        "--new-key-env",
+        required=True,
+        metavar="VAR",
+        help=(
+            "name of an exported environment variable holding the new key "
+            "(e.g. USHER_NEW_SECRET_KEY); export it, do not put it in .env"
+        ),
+    )
     return parser
 
 
@@ -2740,6 +2914,11 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
                 skip_unresolvable=args.skip_unresolvable,
             )
         )
+    elif args.command == "rotate-secret":
+        # The **name** crosses this line and the value never does: the
+        # environment read is inside `_rotate`, so nothing between argparse
+        # and the store ever holds a key in a frame a traceback would print.
+        asyncio.run(_rotate(settings, new_key_env=args.new_key_env))
     else:
         # Imported here, not at module scope: uvicorn.run blocks, and nothing
         # about the bootstrap path should pay for importing the server.

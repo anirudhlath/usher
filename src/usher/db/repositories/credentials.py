@@ -35,19 +35,24 @@ and re-deriving per call would be strictly worse for no benefit.
 import base64
 import json
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from pydantic import SecretStr
-from sqlalchemy import delete
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.source import SourceCredentialRow
-from usher.ports.credentials import CredentialStore, SourceCredentials
+from usher.ports.credentials import (
+    CredentialCiphertextStore,
+    CredentialStore,
+    SourceCredentials,
+)
 from usher.ports.errors import PortDataMalformed, RepositoryConflict
 
 _HKDF_INFO = b"usher.source-credentials.v1"
@@ -59,6 +64,14 @@ def build_cipher(secret_key: SecretStr) -> Fernet:
     Module-level and public so a rotation command (PRD 08's "a documented
     rotation command handles the bulk case") can build both the old and the
     new cipher without instantiating two repositories.
+
+    ✅ **That caller exists since M10's K7** and is `cli._rotate`, which makes
+    the two calls at the composition root -- `usher.services` may not import
+    `usher.db` (`pyproject.toml`'s third contract), so `RotationService` is
+    handed two `Fernet` objects and never a key. This function had **no caller
+    in `src/` from M3 until then**, and the seam is why the rotation service
+    holds no plaintext key: `get_secret_value()` is unwrapped exactly once,
+    here, and only the HKDF output outlives the call.
     """
     derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=_HKDF_INFO).derive(
         secret_key.get_secret_value().encode("utf-8")
@@ -128,4 +141,86 @@ class PostgresCredentialStore(CredentialStore):
     async def delete(self, ref: str) -> None:
         await self._session.execute(
             delete(SourceCredentialRow).where(SourceCredentialRow.ref == ref)
+        )
+
+
+class PostgresCredentialRotationStore(CredentialCiphertextStore):
+    """`source_credentials`' ciphertext, moved without being read.
+
+    **This is the whole of what `USHER_SECRET_KEY` protects that is
+    persisted, and saying the size out loud is what stops the command that
+    uses it being over-built.** There are exactly two HKDF derivations over
+    that key: this module's `build_cipher`
+    (`info=b"usher.source-credentials.v1"`), whose output encrypts the JSON
+    `{username, password}` blob in the column below, and
+    `usher.services.playback_ticket.build_ticket_cipher`
+    (`info=b"usher.playback-ticket.v1"`), whose output encrypts a playback
+    target URL inside a ticket that is **never stored**. So rotation is one
+    table, one row per configured source -- measured 2026-08-25 on the
+    deployment this project runs: `SELECT count(*) FROM source_credentials`
+    is **1** and the table is **48 kB**.
+
+    ⚠️ Two neighbours that look like they belong here and do not.
+    `api/cursor.py` records that `Settings.secret_key` is *deliberately not*
+    what signs a keyset cursor, so cursors are outside this entirely --
+    checked rather than assumed, a cursor being the other opaque string in
+    this API. And the ticket cipher needs no rotation, which is a fact about
+    a ticket's lifetime rather than an omission: rotating the key invalidates
+    every outstanding one, which renders as a `404 ticket_invalid` the client
+    answers by asking `/play` again. **"Short-lived" is five minutes** --
+    `api.routers.playback.TICKET_TTL_SECONDS`, verified 2026-08-26. It lives
+    at the route rather than in this subsystem because
+    `services/playback_ticket.py` says in as many words that *no TTL constant
+    lives here* (`redeem`'s `ttl_seconds` is required with no default), and it
+    is deliberately **not** `USHER_PLAYBACK_TICKET_TTL_SECONDS`: that name
+    appears in both modules only as the setting PRD 08's
+    mechanism-before-the-setting rule refused, and `Settings` has no such
+    field.
+
+    **No `secret_key`, and the absent constructor argument is the design.**
+    `PostgresCredentialStore` takes one because it decrypts; this class moves
+    bytes it cannot open, so an instance of it is not a thing that can leak a
+    credential even if a later caller misuses it.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_refs(self) -> Sequence[str]:
+        # `ORDER BY ref` so a report, a rerun and an interrupted run all name
+        # the rows in the same order. `ref` is the primary key, so this is
+        # the index order rather than a sort.
+        rows = await self._session.execute(
+            select(SourceCredentialRow.ref).order_by(SourceCredentialRow.ref)
+        )
+        return list(rows.scalars().all())
+
+    async def read_ciphertext(self, ref: str) -> bytes | None:
+        # A one-column projection rather than `session.get`, which would put
+        # a `SourceCredentialRow` in the identity map for the length of a
+        # rotation -- and `db-and-sql.md`'s issue #8 entry is what a caught
+        # conflict does to one of those. Nothing here needs the entity.
+        row = await self._session.execute(
+            select(SourceCredentialRow.ciphertext).where(SourceCredentialRow.ref == ref)
+        )
+        return row.scalar_one_or_none()
+
+    async def write_ciphertext(self, ref: str, ciphertext: bytes) -> None:
+        # `updated_at` is set here because `source_credentials` carries no
+        # `set_updated_at` trigger -- see `SourceCredentialRow`'s docstring,
+        # which named `PostgresCredentialStore` as the table's only writer
+        # until this class became the second one. A rotation that left the
+        # column alone would make the stamp say when the *credential* last
+        # changed, which is not what any other table in this schema means by
+        # it and not what an operator diagnosing a half-rotated deployment
+        # needs.
+        #
+        # `synchronize_session=False` because nothing above this call holds a
+        # `SourceCredentialRow`: the read is a projection, so there is no
+        # identity map for the ORM to reconcile.
+        await self._session.execute(
+            update(SourceCredentialRow)
+            .where(SourceCredentialRow.ref == ref)
+            .values(ciphertext=ciphertext, updated_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
         )
