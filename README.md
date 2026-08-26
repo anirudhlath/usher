@@ -115,7 +115,7 @@ see below.
 ```bash
 cp .env.example .env
 openssl rand -hex 32          # paste this into USHER_SECRET_KEY= in .env
-mkdir -p data/images && sudo chown 1000:1000 data/images
+mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images data/bulk
 docker compose up -d --build
 
 curl -sf http://localhost:8100/health        # {"status":"ok"}

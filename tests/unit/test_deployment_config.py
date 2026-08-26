@@ -85,6 +85,35 @@ _DATABASE_URL = "postgresql+asyncpg://usher:usher@localhost:5432/usher"
 #                          the fetch timeout and the CDN base URL) are the
 #                          operator's and are deliberately not here.
 #
+# **The sixth arrived on 2026-08-26, and it arrived as a production incident
+# rather than as a design**, which is the part worth keeping:
+#
+#   USHER_BULK_DATA_DIR    the container side of `volumes:`'s
+#                          `./data/bulk:/data/bulk`, and the same fact as the
+#                          fifth -- except that this one was *missing* for
+#                          five milestones. `.env`'s `data/bulk` resolves
+#                          against WORKDIR `/app`, and `/app` is root-owned
+#                          while the process is uid 1000, so `bootstrap` did
+#                          not merely cache in the wrong place: it died on
+#                          `mkdir` with `PermissionError(13)` before reading a
+#                          byte. Nothing caught it because every bootstrap
+#                          this project has ever run was `uv run usher
+#                          bootstrap` from a dev shell, where the relative
+#                          path is correct -- the defect needed
+#                          `USHER_WORKER_ENABLED=true` *and* a queued
+#                          `bootstrap` job to appear at all. The other two
+#                          `USHER_BULK_*` settings (the batch size and the
+#                          user agent) are the operator's and are not here.
+#
+# **The two entries are the same shape and only one of them was ever
+# checked**, which is the finding this list should carry: `test_every_
+# variable_compose_substitutes_is_a_setting_or_compose_reserved` scans
+# `compose.yml` for `${...}`, and neither of these is written that way, so
+# nothing here relates a *relative* default in `.env.example` to a WORKDIR the
+# container actually has. `test_a_relative_path_setting_is_overridden_for_the_
+# container` below is that check, derived from the settings rather than from a
+# list, so a seventh path setting is a red rather than a silent repeat.
+#
 # Anything else an operator sets in `.env` must reach the container unaltered.
 _TOPOLOGY_OWNED = frozenset(
     {
@@ -93,6 +122,7 @@ _TOPOLOGY_OWNED = frozenset(
         "USHER_PORT",
         "USHER_SECRET_KEY",
         "USHER_IMAGE_CACHE_DIR",
+        "USHER_BULK_DATA_DIR",
     }
 )
 
@@ -338,13 +368,68 @@ def test_compose_overrides_only_what_the_topology_owns() -> None:
     """`environment:` wins over `env_file:`, so anything left in it is a
     setting an operator cannot change from `.env`.
 
-    Keeping that list to the four the compose topology genuinely owns is what
+    Keeping that list to the six the compose topology genuinely owns is what
     stops `environment:` quietly becoming the dead-config list again -- each
-    of the four is named in `_TOPOLOGY_OWNED` above with the reason it is
+    of the six is named in `_TOPOLOGY_OWNED` above with the reason it is
     not the operator's.
     """
     declared = set(_usher_service().get("environment", {}))
     assert declared == set(_TOPOLOGY_OWNED)
+
+
+# A relative `Path` default that the image ships at the same place under
+# `/app`, so the container agrees with a dev shell and no override is wanted.
+# `console_dist_dir` is the only one: the Dockerfile copies the console
+# stage's output to `/app/web/dist`, and `config.py` names `image_cache_dir`
+# as its counterexample in the same comment.
+#
+# A *writable* directory can never be on this list -- `/app` is root-owned and
+# the process is uid 1000, so anything the container has to create under it
+# fails with `PermissionError(13)`, which is what `bulk_data_dir` did in
+# production on 2026-08-26.
+_SHIPPED_IN_THE_IMAGE = frozenset({"console_dist_dir"})
+
+
+def test_a_relative_path_setting_is_overridden_for_the_container() -> None:
+    """A relative default is right for a dev shell and resolves against the
+    container's `WORKDIR` of `/app` -- so every one of them is either
+    overridden here or shipped there, and a new one is a decision rather than
+    a silent repeat.
+
+    This is the check that did not exist when `bulk_data_dir` was added.
+    `image_cache_dir` got its override in M9 and `bulk_data_dir` did not, and
+    nothing related the two: the compose scan reads `${...}` substitutions and
+    neither is written that way, so a second relative writable path was
+    invisible for five milestones. It surfaced as `PermissionError(13)` from
+    `adapters/bulk/download.py` on the first bootstrap the *container* ever
+    ran -- every earlier one was a dev shell, where the path is correct.
+
+    Derived from `Settings.model_fields` rather than from a list, so the
+    seventh path setting fails here until somebody classifies it.
+    """
+    environment = _usher_service().get("environment", {})
+
+    relative = {
+        name: field.default
+        for name, field in Settings.model_fields.items()
+        if isinstance(field.default, Path) and not field.default.is_absolute()
+    }
+    assert relative, "the scan found no relative Path setting, so it is reading the wrong thing"
+    assert "image_cache_dir" in relative, "the scan ran but missed a known relative path setting"
+
+    for name, default in sorted(relative.items()):
+        if name in _SHIPPED_IN_THE_IMAGE:
+            continue
+        variable = f"USHER_{name.upper()}"
+        assert variable in environment, (
+            f"{variable} defaults to the relative {default!r}, which inside the container "
+            f"resolves against WORKDIR /app -- a root-owned directory uid 1000 cannot write. "
+            f"Give it an absolute path in compose's `environment:` and a `volumes:` entry, "
+            f"or add it to _SHIPPED_IN_THE_IMAGE with the reason it needs neither."
+        )
+        assert Path(environment[variable]).is_absolute(), (
+            f"{variable} is overridden as {environment[variable]!r}, which is still relative"
+        )
 
 
 def test_the_worker_switch_reaches_the_container() -> None:
