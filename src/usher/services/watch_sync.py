@@ -180,7 +180,8 @@ class WatchStateSyncService:
         """Walk this source's watch state into the catalog. Never raises a
         `UsherPortError`.
 
-        Always incremental from the last *completed* watch-state run. This
+        Always incremental: from the newest *completed* watch-state run, or
+        resumed in place from the newest incomplete one. This
         lane owns its own cursor: it walks a different method under a
         different upstream filter (`MinDateLastSavedForUser`, measured as
         genuinely different from the item lane's `MinDateLastSaved` -- 29,005
@@ -214,6 +215,18 @@ class WatchStateSyncService:
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.watch_state") as span:
             span.set_attribute("usher.source", source.name)
+            # **This attempt's own instant, bound once.** It is the fresh
+            # run's `started_at` *and* every merge's `observed_at`, which on
+            # a first attempt are the same thing and on a resumed one are
+            # deliberately not: the row keeps the instant the logical walk
+            # began (the cursor's business) while the merges carry the
+            # instant this attempt began (PRD 03's conflict rule's business).
+            # A resumed attempt merging under a days-old `started_at` is
+            # refused by every row a client or the push lane has touched
+            # since, and stamps anything it *inserts* days in the past --
+            # which reorders `list_needing_history` and freezes the taste
+            # watermark.
+            attempt_started = datetime.now(UTC)
             # **The newest incomplete run is resumed in place** (#41,
             # ADR-0042): its id, its `cursor_at` and -- load-bearing -- its
             # `started_at`, so that when the walk finally completes,
@@ -221,26 +234,44 @@ class WatchStateSyncService:
             # saved since the logical walk *began*. A fresh `started_at` per
             # attempt would skip whatever changed between the first attempt
             # and the last.
-            resuming = await self._runs.latest_incomplete_run(source.id, SyncRunKind.WATCH_STATE)
-            if resuming is None:
+            incomplete = await self._runs.latest_incomplete_run(source.id, SyncRunKind.WATCH_STATE)
+            if incomplete is None:
                 cursor = await self._runs.latest_completed_cursor(
                     source.id, SyncRunKind.WATCH_STATE
                 )
-                run = SyncRun(source_id=source.id, kind=SyncRunKind.WATCH_STATE, cursor_at=cursor)
+                run = SyncRun(
+                    source_id=source.id,
+                    kind=SyncRunKind.WATCH_STATE,
+                    cursor_at=cursor,
+                    started_at=attempt_started,
+                )
                 # Committed `RUNNING` before the walk: an operator watching a
                 # long sync needs a row to watch, and a killed process must
                 # leave a trace rather than nothing.
                 await self._runs.add(run)
             else:
-                cursor = resuming.cursor_at
-                run = resuming.evolve(status=SyncRunStatus.RUNNING, error=None, finished_at=None)
+                cursor = incomplete.cursor_at
+                # `error` and `finished_at` cleared, and neither is tidiness.
+                # `usher sync-status` and `usher sync` both render `error=`
+                # for any truthy value whatever the status beside it, so a
+                # `RUNNING` row carrying the last attempt's message reports a
+                # fault as happening *now* -- on the one command an operator
+                # runs to diagnose this lane. A `finished_at` on a running row
+                # is the same lie about the other end of the interval, and it
+                # is what PRD 10's duration panel subtracts.
+                run = incomplete.evolve(status=SyncRunStatus.RUNNING, error=None, finished_at=None)
                 await self._runs.save(run)
-            start_index = run.position
-            span.set_attribute("usher.resumed_from", start_index)
+            # What this attempt inherited, for the telemetry below only.
+            # `_walk` reads the resume point off `progress.run` rather than
+            # taking it from here: two bindings for one number is exactly
+            # what `_Progress` exists to prevent, and the walk's copy is the
+            # one that moves.
+            inherited, resumed_from = run.items_seen, run.position
+            span.set_attribute("usher.resumed_from", resumed_from)
             await self._commit()
             progress = _Progress(run)
             try:
-                await self._walk(progress, source.id, adapter, cursor, user_id, start_index)
+                await self._walk(progress, source.id, adapter, cursor, user_id, attempt_started)
                 run = progress.run.evolve(
                     status=SyncRunStatus.COMPLETED, finished_at=datetime.now(UTC)
                 )
@@ -255,10 +286,20 @@ class WatchStateSyncService:
                     finished_at=datetime.now(UTC),
                 )
                 span.set_attribute("usher.failed", True)
+                # **Both counts, because the run's is cumulative and reading
+                # it as this attempt's is how a stalled resume looks
+                # healthy.** A third attempt that walked two states reports
+                # `run.items_seen` of six, and an operator watching that
+                # number climb across attempts cannot tell a walk that is
+                # converging from one re-walking the same page forever.
+                # `resumed_from` is the number that tells them apart.
                 logger.error(
-                    "watch-state sync of {source} failed after {seen} states: {error}",
+                    "watch-state sync of {source} failed after {attempt} states this attempt "
+                    "({total} for the run, resumed from {resumed_from}): {error}",
                     source=source.name,
-                    seen=run.items_seen,
+                    attempt=run.items_seen - inherited,
+                    total=run.items_seen,
+                    resumed_from=resumed_from,
                     error=str(exc),
                 )
             await self._runs.save(run)
@@ -377,7 +418,7 @@ class WatchStateSyncService:
         adapter: SourceAdapter,
         cursor: AwareDatetime | None,
         user_id: uuid.UUID,
-        start_index: int,
+        observed_at: AwareDatetime,
     ) -> None:
         """The nightly walk. **It invalidates no rows and publishes no
         `row.invalidated`, and this is the place somebody would add both.**
@@ -396,25 +437,31 @@ class WatchStateSyncService:
         The push lane is where invalidation belongs, because a push event *is*
         a change -- `services/push.py::_invalidate_rows`.
 
-        `start_index` is where a resumed attempt picks up -- the position the
-        last attempt *committed*, so the batch that was in flight when it
-        died is re-walked. That is free: every write here is an idempotent
-        upsert and this lane retracts nothing.
+        The walk picks up at `progress.run.position` -- the page the last
+        attempt *committed*, read off the checkpoint rather than passed in,
+        so there is one binding of it and it is the one `_flush` moves. The
+        batch that was in flight when the last attempt died is therefore
+        re-walked, which is free: every write here is an idempotent upsert
+        and this lane retracts nothing.
         """
         batch: list[SourceWatchState] = []
-        seen = start_index
+        seen = start_index = progress.run.position
         async for state in adapter.watch_state(since=cursor, start_index=start_index):
             batch.append(state)
             seen += 1
             if len(batch) >= self._batch_size:
-                progress.run = await self._flush(progress.run, source_id, batch, user_id, seen)
+                progress.run = await self._flush(
+                    progress.run, source_id, batch, user_id, observed_at, position=seen
+                )
                 batch = []
         if batch:
             # The trailing partial batch. A walk's count is almost never a
             # multiple of the batch size, so omitting this drops the last
             # page of nearly every run -- here, a household's most recent
             # resume positions.
-            progress.run = await self._flush(progress.run, source_id, batch, user_id, seen)
+            progress.run = await self._flush(
+                progress.run, source_id, batch, user_id, observed_at, position=seen
+            )
 
     async def apply_states(
         self,
@@ -434,13 +481,22 @@ class WatchStateSyncService:
         they are with `None` included, and a `WATCH_HISTORY` job for every
         played item whose count the read could not determine.
 
-        `observed_at` is the caller's: a walk passes its run's start instant
-        (so the sweep's arithmetic and PRD 03's conflict rule both hold over
-        a walk that takes hours), and the push lane passes the instant the
-        event arrived. Neither may pass `now()` from inside this method -- a
+        `observed_at` is the caller's: a walk passes the instant **that
+        attempt** began, and the push lane passes the instant the event
+        arrived. Neither may pass `now()` from inside this method -- a
         per-row write instant is a different quantity that happens to
         compare the same way, and nothing downstream can recover the first
         from it.
+
+        There is no sweep on this lane, so the reason is PRD 03's conflict
+        rule alone: one instant for a walk that takes hours is what makes a
+        client's resume position, set while the walk was running, beat the
+        older state the walk is carrying. **The attempt's instant and not
+        the run's**, since ADR-0042 made those different things: a resumed
+        run's `started_at` can be days old, and a merge under it loses to
+        every row the push lane has touched since -- so the walk that exists
+        to repair those rows writes nothing to exactly them, and the rows it
+        *creates* are stamped days in the past.
 
         The commit is the caller's too, for the reason it is everywhere else
         in `services/`: a walk commits per batch and the push lane commits
@@ -487,10 +543,12 @@ class WatchStateSyncService:
         source_id: uuid.UUID,
         batch: Sequence[SourceWatchState],
         user_id: uuid.UUID,
+        observed_at: AwareDatetime,
+        *,
         position: int,
     ) -> SyncRun:
         outcome = await self.apply_states(
-            source_id, batch, user_id=user_id, observed_at=run.started_at
+            source_id, batch, user_id=user_id, observed_at=observed_at
         )
         run = run.evolve(
             items_seen=run.items_seen + len(batch),

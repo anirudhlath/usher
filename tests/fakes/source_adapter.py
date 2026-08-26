@@ -338,13 +338,19 @@ class FakeSourceAdapter(SourceAdapter):
     def watch_state(
         self, since: AwareDatetime | None = None, *, start_index: int = 0
     ) -> AsyncIterator[SourceWatchState]:
+        # Recorded here rather than in `_walk_states`, so that it is what the
+        # **port** was asked for. A subclass that overrides the walk -- and
+        # the two in `test_services_watch_sync.py` both do -- would otherwise
+        # record whatever it chose to pass down, which for an adapter that
+        # re-frames `start_index` is a different number from the one the
+        # service asked to resume at.
+        self.resumed_from.append(start_index)
         return self._walk_states(since, start_index)
 
     async def _walk_states(
         self, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[SourceWatchState]:
         await self._ready()
-        self.resumed_from.append(start_index)
         yielded = 0
         skipped = 0
         for external_id in list(self._items):

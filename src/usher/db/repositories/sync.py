@@ -18,6 +18,20 @@ lost track of its own row would otherwise silently write history that never
 happened, and `latest_completed_cursor` reads exactly that history to decide
 what a delta walk may skip.
 
+**And `save` is non-destructive, which ADR-0042 is what made necessary.** A
+`WATCH_STATE` run's row is now reused across attempts, so two walks can reach
+one row -- the job queue serialises `sync` *jobs*, and neither
+`LaneSupervisor._close_gap` nor `usher sync` goes through the queue, the second
+from another process entirely. A plain last-writer-wins `UPDATE` over every
+column then lets a slow attempt that started first un-complete the walk that
+overtook it and pull `position` back to where the loser began -- which is #41's
+restart loop restored by the change that fixed it. The two rules are in **SQL**
+rather than in Python for a reason this session cannot get right on its own: the
+ORM answers `get()` out of its identity map, so a caller whose own session
+already holds the row cannot see the other transaction's committed write at all,
+and under READ COMMITTED a blocked `UPDATE` re-evaluates its `WHERE` against the
+new row version while values a caller already chose in Python stay stale.
+
 **`clock_timestamp()`, not `now()`, in `PostgresRawPayloadStore.put`.**
 `now()` is frozen for the life of a transaction, and an enrichment worker
 that refreshes several payloads in one transaction would stamp them all with
@@ -32,7 +46,7 @@ from datetime import datetime
 from typing import Any, cast
 
 from pydantic import AwareDatetime
-from sqlalchemy import text
+from sqlalchemy import CursorResult, func, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -155,19 +169,51 @@ class PostgresSyncRunRepository(SyncRunRepository):
             ) from exc
 
     async def save(self, run: SyncRun) -> None:
+        stored = run.model_dump()
+        values: dict[str, Any] = {name: stored[name] for name in _MUTABLE}
+        # **`position` may advance and may never regress.** It is a
+        # checkpoint rather than a value, so the honest merge of two attempts'
+        # opinions about it is the further one: a slow attempt saving the page
+        # it started from over a faster one's progress is the #41 loop with a
+        # checkpoint column added. `GREATEST` against the *column* rather than
+        # against a value read a moment ago, because only the column is
+        # re-read under the row lock.
+        values["position"] = func.greatest(SyncRunRow.position, run.position)
         try:
+            # Inside the SAVEPOINT, not before it: these statements autoflush,
+            # so one of them can be what surfaces some other pending row's
+            # IntegrityError on this shared session -- and SQLAlchemy's
+            # rollback-to-SAVEPOINT only cleanly reverts changes it watched
+            # happen within its own scope.
             async with self._session.begin_nested():
-                # Inside the SAVEPOINT, not before it: `session.get()`
-                # autoflushes, so it can be the statement that surfaces some
-                # other pending row's IntegrityError on this shared session --
-                # and SQLAlchemy's rollback-to-SAVEPOINT only cleanly reverts
-                # attribute changes it watched happen within its own scope.
-                row = await self._session.get(SyncRunRow, run.id)
-                if row is None:
+                # **`completed` is absorbing**, and the guard refuses the whole
+                # write rather than the status column alone. A walk that was
+                # overtaken has nothing to contribute to the row that overtook
+                # it: its counters are lower, and its `error` on a completed
+                # run renders through `usher sync-status` as a failure of the
+                # walk that succeeded.
+                #
+                # `synchronize_session="fetch"` is load-bearing, not tidiness:
+                # this is a Core-shaped UPDATE, so a mapped copy of the row in
+                # the identity map would otherwise keep the pre-save values
+                # and `get()` -- which answers out of that map -- would report
+                # them. On Postgres it is carried by RETURNING rather than by a
+                # second round trip.
+                result = await self._session.execute(
+                    update(SyncRunRow)
+                    .where(SyncRunRow.id == run.id, SyncRunRow.status != SyncRunStatus.COMPLETED)
+                    .values(**values)
+                    .execution_options(synchronize_session="fetch")
+                )
+                if cast("CursorResult[Any]", result).rowcount:
+                    return
+                # Nothing matched, and the two reasons are different events.
+                # An id no row carries is the caller's own bug and the thing
+                # this port refuses to paper over with an upsert; a row that
+                # already completed is the overtaken walk above, which is
+                # ordinary and silent. Only the second may return.
+                if await self._session.get(SyncRunRow, run.id) is None:
                     raise RepositoryNotFound(f"no existing sync run {run.id} to update")
-                for name in _MUTABLE:
-                    setattr(row, name, getattr(run, name))
-                await self._session.flush()
         except IntegrityError as exc:
             raise RepositoryConflict(
                 f"sync run {run.id} conflicts with an existing run",

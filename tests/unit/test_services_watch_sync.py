@@ -116,15 +116,24 @@ class _Fixture:
         self.queue = FakeJobQueue()
         self.commits = 0
         self.positions: list[int] = []
+        self.saved: list[SyncRun] = []
 
         saved = self.runs.save
 
         async def _record(run: SyncRun) -> None:
-            if run.status is SyncRunStatus.RUNNING:
-                # The per-batch checkpoints only. `sync`'s own closing save
-                # carries the terminal status, and counting it would repeat
-                # the last position and hide a missing trailing flush.
+            # **`positions` is the per-batch checkpoints, and "per batch" is
+            # spelled as "this save carried states" rather than as "the
+            # status is RUNNING".** `sync`'s reclaim save is `RUNNING` too,
+            # so the status test would report the position an attempt
+            # *started* from as though a batch had committed it -- reading
+            # `[3, 5, 6]` where two batches committed. Every `_flush` save
+            # adds at least one to `items_seen`; nothing else in this
+            # service does. The closing save carries the terminal status and
+            # no new states, so it is out either way.
+            previous = await self.runs.get(run.id)
+            if previous is not None and run.items_seen > previous.items_seen:
                 self.positions.append(run.position)
+            self.saved.append(run)
             await saved(run)
 
         self.runs.save = _record  # type: ignore[method-assign]
@@ -1238,7 +1247,7 @@ async def test_a_failed_walk_keeps_the_position_it_reached(
 
 
 class _DuplicatingSourceAdapter(_LossySourceAdapter):
-    """A source whose walk yields one record twice.
+    """A source whose walk yields every record twice.
 
     The port permits it -- `SourceAdapter.watch_state` promises no ordering
     and no uniqueness, and ADR-0042 declines to defend against a divergence
@@ -1247,17 +1256,23 @@ class _DuplicatingSourceAdapter(_LossySourceAdapter):
     the checkpoint are the same number" is a claim a fixture can falsify
     rather than one the arithmetic makes true.
 
-    `start_index` is left to the base walk, which skips source items before
-    the duplication -- so this adapter's offset is not the port's, and the
-    case below only ever asks it for 0.
+    **`start_index` counts yields here, which is what the port says and what
+    a resumed walk checkpoints.** The base walk is therefore asked for the
+    whole stream and the skip is applied to the *doubled* one: skipping first
+    would make this adapter's offset a raw-item offset, i.e. a resume point
+    it cannot honour, which is the same mistake `FakeSourceAdapter._walk_states`
+    carries a comment against one layer down.
     """
 
     async def _walk_states(
         self, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[SourceWatchState]:
-        async for state in super()._walk_states(since, start_index):
-            yield state
-            yield state
+        yielded = 0
+        async for state in super()._walk_states(since, 0):
+            for _ in range(2):
+                if yielded >= start_index:
+                    yield state
+                yielded += 1
 
 
 async def test_the_resume_point_is_the_position_and_not_the_counter(
@@ -1271,17 +1286,19 @@ async def test_the_resume_point_is_the_position_and_not_the_counter(
     each of them carrying a real six-figure `items_seen`. So the very first
     walk after this lands reclaims a row whose counter says five and whose
     checkpoint says zero, and it has to believe the checkpoint: `items_seen`
-    counts states *merged*, which nothing promises is a page offset. A
-    `_flush` spelling `position = items_seen + len(batch)` reads identically
-    on every fresh walk in this file and sends the next attempt eight pages
-    past anything this one reached.
+    is a running total of states *yielded* over the life of the run
+    (`items_matched` is the merged half), and nothing promises a total
+    accumulated across attempts is a page offset into this one. A `_flush`
+    spelling `position = items_seen + len(batch)` reads identically on every
+    fresh walk in this file and sends the next attempt eight pages past
+    anything this one reached.
 
     The duplicate is the same distinction arriving from the source instead
-    of from the migration: six yields over three items, merged and counted
-    six times, over a page position that is not a count of merges. Re-walking
-    them costs nothing -- every write on this lane is an idempotent upsert
-    and it retracts nothing -- which is exactly why the cheap number is the
-    wrong one to resume from.
+    of from the migration: six yields over three items, counted six times,
+    over a page position that a count of yields is only accidentally equal
+    to. Re-walking them costs nothing -- every write on this lane is an
+    idempotent upsert and it retracts nothing -- which is exactly why the
+    cheap number is the wrong one to resume from.
     """
     dupes = _DuplicatingSourceAdapter(fixture_batched.source)
     for index in range(3):
@@ -1303,7 +1320,7 @@ async def test_the_resume_point_is_the_position_and_not_the_counter(
 
     assert dupes.resumed_from == [0], "the walk resumed from the counter, not the checkpoint"
     assert run.position == 6, "six yields is six pages of this walk"
-    assert run.items_seen == 11, "the five it inherited, plus the six it merged"
+    assert run.items_seen == 11, "the five it inherited, plus the six it yielded"
     assert run.items_seen > run.position, (
         "the counter and the checkpoint have collapsed into one number"
     )
@@ -1326,6 +1343,15 @@ async def test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned(
     unnecessary -- newest, then "not completed" -- and this is the case that
     holds it to that, because "only a `FAILED` run resumes" survives its
     entire contract suite.
+
+    **The reclaim also has to clear the last attempt's verdict**, which is
+    why the row seeded below carries one. `usher sync-status` renders
+    `error=...` for any truthy value whatever status sits beside it, so a
+    `RUNNING` row still holding "source went away mid-walk" reports a fault
+    as happening *now* -- on the one command an operator runs to diagnose
+    this lane, about the walk that is currently repairing it. A
+    `finished_at` on a running row is the same lie about the other end of
+    the interval, and it is what PRD 10's duration panel subtracts.
     """
     for index in range(6):
         await fixture_batched.given_matched(f"movie-{index}")
@@ -1336,6 +1362,8 @@ async def test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned(
         position=3,
         items_seen=3,
         items_matched=3,
+        error="source went away mid-walk",
+        finished_at=T0,
     )
     await fixture_batched.runs.add(abandoned)
 
@@ -1353,3 +1381,135 @@ async def test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned(
     assert len(await fixture_batched.runs.list_for_source(fixture_batched.source.id)) == 1, (
         "the stuck row is still there and a second one is beside it"
     )
+    # Asserted on the *reclaim* save rather than on the returned run, which
+    # is `COMPLETED` and carries a legitimate `finished_at`: the window this
+    # is about is the hours the row spends `RUNNING`, which is the whole time
+    # an operator is watching it.
+    reclaimed = fixture_batched.saved[0]
+    assert reclaimed.status is SyncRunStatus.RUNNING, (
+        "the premise: the first save is the reclaim, before any batch"
+    )
+    assert reclaimed.error is None, "a running walk reports the last attempt's outage as its own"
+    assert reclaimed.finished_at is None, "a running walk carries an instant it finished at"
+
+
+async def test_each_failed_attempt_resumes_further_in_than_the_last(
+    fixture_batched: _Fixture,
+) -> None:
+    """**Three attempts, because two cannot tell a walk that converges from
+    one that is stuck.** Every other case in this file either completes or
+    fails exactly once, and a walk that resumes at the right page *once* and
+    then never advances again satisfies all of them: its `items_seen` still
+    climbs attempt after attempt, so every counter an operator watches reads
+    healthy while the checkpoint sits on the same page forever. That is
+    #41's symptom exactly, with a `position` column added.
+
+    Measured against the shape that produces it -- a `_walk` counting only
+    the states *this attempt* yielded rather than starting the count at the
+    page it resumed from -- which walks `[0, 2, 4]` on the shipped code and
+    `[0, 2, 2]` under the defect, and passes everything else in this file.
+    """
+    for index in range(8):
+        await fixture_batched.given_matched(f"movie-{index}")
+
+    reached = []
+    for _ in range(2):
+        fixture_batched.adapter.fail_after(3)
+        attempt = await fixture_batched.service.sync(
+            fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
+        )
+        assert attempt.status is SyncRunStatus.FAILED, "the premise: this attempt really did fail"
+        reached.append(attempt.position)
+
+    fixture_batched.adapter.clear_failure()
+    done = await fixture_batched.service.sync(
+        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
+    )
+
+    assert reached == sorted(set(reached)), (
+        f"the second failure did not get further than the first: {reached}"
+    )
+    assert done.position > reached[-1]
+    assert fixture_batched.adapter.resumed_from == [0, 2, 4], (
+        "an attempt asked to resume from a page an earlier one had already passed"
+    )
+    assert done.status is SyncRunStatus.COMPLETED
+    assert done.items_seen == 8, "a state was walked twice, or never"
+
+
+async def test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs(
+    fixture_batched: _Fixture,
+) -> None:
+    """**The reclaimed `started_at` is the cursor's, and it must not become
+    the merge's.** PRD 03 settles a conflict on "latest `updated_at` wins",
+    and `watch_states` has a `BEFORE UPDATE` trigger that stamps the *write*
+    instant -- so a row the push lane touched an hour ago reads back an
+    `updated_at` of an hour ago, and a resumed walk merging under a run that
+    began *days* ago loses to it. The walk that exists to repair those rows
+    would write nothing to exactly the rows most recently in play, and the
+    rows it *creates* would be stamped days in the past, which reorders
+    `list_needing_history`'s oldest-first drain and leaves the taste
+    watermark motionless.
+
+    One instant per attempt rather than per batch, which is the property
+    `test_every_merge_carries_the_runs_own_start_instant` states for a first
+    attempt: a walk of 1.14M items takes hours, and a creeping `now()` starts
+    winning races against clients who know more than it does.
+    """
+    seen: list[datetime] = []
+    original = fixture_batched.watch_states.merge_from_source
+
+    async def _record(merges: object) -> int:
+        seen.extend(merge.observed_at for merge in merges)  # type: ignore[attr-defined]
+        return await original(merges)  # type: ignore[arg-type]
+
+    fixture_batched.watch_states.merge_from_source = _record  # type: ignore[method-assign]
+    for index in range(3):
+        await fixture_batched.given_matched(f"movie-{index}")
+    abandoned = SyncRun(
+        source_id=fixture_batched.source.id,
+        kind=SyncRunKind.WATCH_STATE,
+        status=SyncRunStatus.RUNNING,
+        started_at=T0,
+    )
+    await fixture_batched.runs.add(abandoned)
+
+    run = await fixture_batched.service.sync(
+        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
+    )
+
+    assert run.started_at == T0, (
+        "the premise: the row still carries the instant the logical walk began, "
+        "which is what the next delta's `since` will be"
+    )
+    assert len(seen) == 3, "the premise: three states really were merged"
+    assert seen == [seen[0]] * 3, "the instant crept forward between batches"
+    assert seen[0] > T0, "a resumed walk merged under an instant weeks in the past"
+
+
+async def test_the_span_records_the_page_the_walk_resumed_from(
+    fixture_batched: _Fixture, spans: InMemorySpanExporter
+) -> None:
+    """The one number that separates a converging resume from a stuck one,
+    and the only place it is legible without reading `sync_runs`. Emitted
+    since ADR-0042 and asserted here, because an attribute nothing reads is
+    an attribute nothing notices the loss of."""
+    for index in range(6):
+        await fixture_batched.given_matched(f"movie-{index}")
+    await fixture_batched.runs.add(
+        SyncRun(
+            source_id=fixture_batched.source.id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.RUNNING,
+            position=4,
+        )
+    )
+
+    await fixture_batched.service.sync(
+        fixture_batched.source, fixture_batched.adapter, user_id=fixture_batched.user_id
+    )
+
+    walks = [one for one in spans.get_finished_spans() if one.name == "sync.watch_state"]
+    assert walks, [one.name for one in spans.get_finished_spans()]
+    assert walks[0].attributes is not None
+    assert walks[0].attributes["usher.resumed_from"] == 4

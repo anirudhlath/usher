@@ -40,6 +40,29 @@ class SyncRunRepository(ABC):
         `started_at` is not mutable through this call in any meaningful sense:
         it is the sweep's own `seen_since`, so a run that could rewrite it
         after the fact could retract items it had already seen.
+
+        **Non-destructive, and that is a contract rather than an
+        implementation note.** ADR-0042 has a `WATCH_STATE` run reuse one row
+        across attempts, and two attempts really can reach it: the queue
+        coalesces `sync` *jobs*, but `LaneSupervisor._close_gap` and
+        `usher sync` both call the service directly, the second from another
+        process. So two rules, which every arm owes:
+
+        - **`position` may advance and may never regress.** A save carrying a
+          lower one leaves the stored checkpoint where it is. The loser
+          otherwise pulls the resume point back to the page *it* started from,
+          which is exactly the restart loop `position` was added to close.
+        - **`completed` is absorbing.** A save over a run that has already
+          completed writes nothing at all and returns quietly -- not the
+          status alone, the whole row. An overtaken walk's counters are lower
+          and its `error` would render through `usher sync-status` as a
+          failure of the walk that succeeded, and `latest_completed_cursor`
+          would stop answering for a walk that provably finished.
+
+        Neither is an error: the caller has done real work and its merges
+        stand, it simply is not the attempt whose bookkeeping survives. It
+        does mean the `SyncRun` a service holds after a dropped save describes
+        an attempt rather than the stored row.
         """
 
     @abstractmethod

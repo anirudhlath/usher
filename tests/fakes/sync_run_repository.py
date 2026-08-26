@@ -47,9 +47,20 @@ class FakeSyncRunRepository(SyncRunRepository):
         # An update, never an upsert: "the run I started" and "a run I
         # invented while finishing" must not be the same call, or a service
         # that lost its own row silently writes history that never happened.
-        if run.id not in self._runs:
+        stored = self._runs.get(run.id)
+        if stored is None:
             raise RepositoryNotFound(f"no existing sync run {run.id} to update")
-        self._runs[run.id] = run
+        # The two non-destructive rules, in Python because that is all this
+        # arm has and spelled to answer the same as the SQL. `completed` is
+        # absorbing -- an overtaken walk may not un-complete the walk that
+        # overtook it -- and `position` may advance and never regress. This
+        # arm cannot demonstrate *why* the rules belong in the statement:
+        # nothing here has a second transaction to lose an update to, so a
+        # read-modify-write is as sound as an atomic one, which is the whole
+        # of what `tests/integration/test_sync_run_repository.py` is for.
+        if stored.status is SyncRunStatus.COMPLETED:
+            return
+        self._runs[run.id] = run.evolve(position=max(stored.position, run.position))
 
     async def get(self, run_id: uuid.UUID) -> SyncRun | None:
         return self._runs.get(run_id)

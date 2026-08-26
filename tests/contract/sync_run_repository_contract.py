@@ -116,6 +116,95 @@ class SyncRunRepositoryContract:
         with pytest.raises(RepositoryNotFound):
             await repository.save(run(source_id, status=SyncRunStatus.COMPLETED))
 
+    async def test_a_save_advances_the_position(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """The positive control for the clamp below, and it is not optional:
+        "a lower position does not land" is equally satisfied by a `save` that
+        never writes `position` at all, which is a walk that can never
+        resume."""
+        one = run(source_id, kind=SyncRunKind.WATCH_STATE, position=0)
+        await repository.add(one)
+        await repository.save(one.evolve(position=2_844, items_seen=2_844))
+        stored = await repository.get(one.id)
+        assert stored is not None
+        assert stored.position == 2_844
+
+    async def test_a_lower_position_does_not_pull_the_checkpoint_back(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """**A checkpoint merges as the further of two opinions, never as the
+        later one.** ADR-0042 has a `WATCH_STATE` run reuse its row across
+        attempts, and two attempts can hold it at once -- the queue coalesces
+        `sync` jobs, and neither `LaneSupervisor._close_gap` nor `usher sync`
+        goes through the queue. A last-writer-wins column then lets the walk
+        that started first save the page *it* reached over the page a faster
+        one already committed, and the next attempt re-walks the difference
+        for as long as the two keep overlapping: #41's loop, restored by the
+        column added to close it.
+        """
+        one = run(source_id, kind=SyncRunKind.WATCH_STATE, position=0)
+        await repository.add(one)
+        await repository.save(one.evolve(position=5_600, items_seen=5_600))
+
+        await repository.save(one.evolve(position=2_844, items_seen=2_844))
+
+        stored = await repository.get(one.id)
+        assert stored is not None
+        assert stored.position == 5_600, "the slower attempt pulled the checkpoint back"
+        # The rest of the row is the loser's, and deliberately so: it is one
+        # column that merges, not a whole row that does. Asserted so that
+        # "the save was refused entirely" cannot pass as this rule.
+        assert stored.items_seen == 2_844
+
+    @pytest.mark.parametrize("losing", [SyncRunStatus.FAILED, SyncRunStatus.RUNNING])
+    async def test_an_overtaken_walk_cannot_un_complete_the_run_that_overtook_it(
+        self,
+        repository: SyncRunRepository,
+        source_id: uuid.UUID,
+        losing: SyncRunStatus,
+    ) -> None:
+        """**Both non-completed states, because the observed interleaving
+        produces one and the crash that follows it produces the other.**
+        Measured: a gap-closing walk reclaims a running attempt's row,
+        finishes it, and the original attempt then fails and saves `failed`
+        over the completion -- so `latest_completed_cursor` stops answering
+        for a walk that provably finished, and the whole library is walked
+        again. `RUNNING` is the same write one moment earlier, from an
+        attempt that has not died yet.
+
+        The cursor is the assertion that matters. A status column reading
+        `failed` is a wrong row on a dashboard; a cursor that went back to
+        `None` is the next walk being the whole library again.
+        """
+        one = run(source_id, kind=SyncRunKind.WATCH_STATE, started_at=EARLIER, position=0)
+        await repository.add(one)
+        await repository.save(
+            one.evolve(
+                status=SyncRunStatus.COMPLETED,
+                position=5_688,
+                items_seen=1_137_538,
+                finished_at=LATER,
+            )
+        )
+        assert (
+            await repository.latest_completed_cursor(source_id, SyncRunKind.WATCH_STATE) == EARLIER
+        ), "the premise: the faster walk really did complete and leave a cursor"
+
+        await repository.save(
+            one.evolve(status=losing, position=4, items_seen=4, error="source went away mid-walk")
+        )
+
+        stored = await repository.get(one.id)
+        assert stored is not None
+        assert stored.status is SyncRunStatus.COMPLETED, "a finished walk was un-completed"
+        assert stored.position == 5_688
+        assert stored.items_seen == 1_137_538
+        assert stored.error is None, "a completed run is reported as having failed"
+        assert (
+            await repository.latest_completed_cursor(source_id, SyncRunKind.WATCH_STATE) == EARLIER
+        ), "the next walk has no cursor and is the whole library again"
+
     async def test_no_completed_run_means_no_cursor(
         self, repository: SyncRunRepository, source_id: uuid.UUID
     ) -> None:
