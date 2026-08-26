@@ -389,13 +389,7 @@ function Results({ loaded, error, items, density, patched, catalogNote, onOpen, 
 
   if (density === 'grid') {
     return (
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill,minmax(var(--grid-poster-min),1fr))',
-          gap: 'var(--space-4)',
-        }}
-      >
+      <div className="u-poster-grid">
         {items.map((item) => (
           <PosterCard
             key={item.title_id}
@@ -468,13 +462,7 @@ function BrowseSkeleton({ density }: { density: Density }) {
   if (density === 'grid') {
     return (
       <SkeletonRegion busy label="Loading the catalog …">
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill,minmax(var(--grid-poster-min),1fr))',
-            gap: 'var(--space-4)',
-          }}
-        >
+        <div className="u-poster-grid">
           {Array.from({ length: SKELETON_TILES }, (_, index) => (
             <div key={`tile-${index}`} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <Skeleton shape="block" height="auto" style={{ aspectRatio: '2 / 3' }} />

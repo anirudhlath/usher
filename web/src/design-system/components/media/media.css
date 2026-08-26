@@ -12,7 +12,10 @@
 .u-progress{height:var(--progress-height);background:var(--progress-track);border-radius:var(--radius-pill);overflow:hidden;width:100%}
 .u-progress__fill{height:100%;background:var(--progress-fill);border-radius:var(--radius-pill)}
 .u-progress--played .u-progress__fill{background:var(--progress-played)}
-.u-card{position:relative;display:flex;flex-direction:column;gap:var(--space-2x);text-align:left;background:none;border:none;padding:0;cursor:pointer;transition:var(--transition-card);border-radius:var(--radius-artwork)}
+/* A card is a fixed-size tile: `flex:none` so a flex rail (`.u-rail__track`, the
+   Person filmography, the TitleDetail rail) keeps `--card-poster-w`/`--card-landscape-w`
+   and scrolls, rather than shrinking every card below its width to make the row fit. */
+.u-card{position:relative;display:flex;flex:none;flex-direction:column;gap:var(--space-2x);text-align:left;background:none;border:none;padding:0;cursor:pointer;transition:var(--transition-card);border-radius:var(--radius-artwork)}
 .u-card__shot{position:relative;box-shadow:var(--shadow-artwork);border-radius:var(--radius-artwork);overflow:hidden}
 .u-card:hover{transform:var(--hover-card-lift)}
 .u-card:hover .u-card__shot{box-shadow:var(--shadow-3)}
@@ -20,6 +23,12 @@
 .u-card:focus-visible{outline:var(--ring-width) solid var(--border-focus);outline-offset:3px}
 .u-card--poster{width:var(--card-poster-w)}
 .u-card--landscape{width:var(--card-landscape-w)}
+/* Poster grid — Browse and Collection. Tiles are responsive here, not fixed: the
+   `1fr` track sized off `--grid-poster-min` owns the width, so a card fills its
+   cell instead of imposing `--card-poster-w` and overflowing a narrower column
+   (the skeleton poster is already `width:100%` — the real card must match it). */
+.u-poster-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--grid-poster-min),1fr));gap:var(--space-4)}
+.u-poster-grid>.u-card{width:100%}
 .u-card__meta{display:flex;flex-direction:column;gap:1px;padding-inline:1px}
 .u-card__title{font:var(--text-heading-sm);color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .u-card__sub{font:var(--text-mono-xs);letter-spacing:var(--track-mono);color:var(--text-muted);font-variant-numeric:tabular-nums;display:flex;gap:var(--space-1);align-items:center}
