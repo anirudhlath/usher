@@ -705,7 +705,9 @@ without an embedding row, and `count_stale` **0** — 1.14M rows that would matc
 the staleness half and are excluded by the population half.
 
 **Two passes, and the second one's size is the measurement.** `EnrichService`
-enqueues `INDEX` and `DERIVE` together at `BACKFILL` and does not order them,
+enqueues `INDEX` and `DERIVE` together — at `BACKFILL` for a sweep, and since
+2026-08-26 (issue #73) at the `enrich` job's own rung when that is `VISIBLE`
+or above — and does not order them,
 so a title whose `INDEX` is claimed first embeds from a document with an empty
 weight-class-B segment and goes stale the moment `DERIVE` writes
 `credit_names`. Pass one drained both kinds. Pass two —

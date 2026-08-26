@@ -719,6 +719,59 @@ async def test_enrichment_enqueues_index_and_derive_in_one_call(
     assert queue.jobs_of(JobKind.DERIVE)[0].priority == JobPriority.BACKFILL
 
 
+@pytest.mark.parametrize("rung", [JobPriority.DEMAND, JobPriority.VISIBLE])
+async def test_a_demand_enrichment_carries_its_follow_ups_to_its_own_rung(
+    titles: FakeTitleRepository,
+    service: EnrichService,
+    queue: FakeJobQueue,
+    rung: JobPriority,
+) -> None:
+    """`DERIVE` is what writes `images`, so a title a client is looking at
+    right now gets its text promptly and its artwork whenever the background
+    sweep reaches it -- which on this catalog was **130,653 enriched titles
+    carrying no image row at all** (measured 2026-08-26).
+
+    Parametrised over both demand rungs rather than `DEMAND` alone: they reach
+    the enqueue through one expression, and a spelling that hard-codes
+    `DEMAND` answers correctly for the rung a client's *open* uses while
+    leaving every row a client merely *scrolled past* at the sweep's priority.
+
+    Fails against the constant this replaced (`JobPriority.BACKFILL`), which
+    is the shipped behaviour and the reason the images issue is prospective
+    rather than only historical.
+    """
+    title = await _given(titles, state=EnrichmentState.STUB)
+
+    await service.enrich(title.id, priority=rung)
+
+    assert queue.jobs_of(JobKind.DERIVE)[0].priority == rung
+    assert queue.jobs_of(JobKind.INDEX)[0].priority == rung
+
+
+async def test_an_ingested_titles_follow_ups_stay_at_backfill(
+    titles: FakeTitleRepository, service: EnrichService, queue: FakeJobQueue
+) -> None:
+    """**The regression guard on the rung above, and the reason inheritance is
+    clamped rather than plain.**
+
+    `IngestService` enqueues every newly seen title's `enrich` at
+    `JobPriority.NEW` (`services/ingest.py:298`), so an unclamped
+    `priority=job.priority` would put one `derive` **and** one `index` per
+    ingested title at `NEW` -- ahead of a `match` queue that is hundreds of
+    thousands of jobs deep on a first bootstrap, which is exactly the cost
+    `_apply`'s own comment refuses.
+
+    `NEW` is the rung that makes this observable: it is above `BACKFILL`, so a
+    `max()` and a `min()` disagree here and agree on the demand rungs above.
+    """
+    title = await _given(titles, state=EnrichmentState.STUB)
+
+    await service.enrich(title.id, priority=JobPriority.NEW)
+
+    assert queue.jobs_of(JobKind.DERIVE)[0].priority == JobPriority.BACKFILL
+    assert queue.jobs_of(JobKind.INDEX)[0].priority == JobPriority.BACKFILL
+
+
 async def test_the_index_job_is_enqueued_at_backfill_priority(
     titles: FakeTitleRepository, service: EnrichService, queue: FakeJobQueue
 ) -> None:
