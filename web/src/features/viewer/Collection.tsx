@@ -87,10 +87,7 @@ export default function Collection(): ReactElement {
           {/* Release order, exactly as the repository returned it, and NOT
               owned-first: sorting the owned to the top is a plausible "show me
               what I can play" instinct that turns a timeline into two piles. */}
-          <div
-            className="grid gap-4"
-            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(var(--grid-poster-min), 1fr))' }}
-          >
+          <div className="u-poster-grid">
             {films.map((member) => (
               <PosterCard
                 key={member.title_id}

@@ -17,7 +17,7 @@ from tests.contract.sync_run_repository_contract import (
     run,
 )
 from usher.db.repositories.source import PostgresSourceRepository
-from usher.db.repositories.sync import PostgresSyncRunRepository
+from usher.db.repositories.sync import _INCOMPLETE, PostgresSyncRunRepository
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
@@ -111,6 +111,50 @@ async def test_the_cursor_query_uses_the_source_kind_index(
     )
     assert "ix_sync_runs_source_kind_started" in plan, plan
     assert "Sort" not in plan, "the index is supposed to be the ordering, not a sort over it"
+
+
+async def test_the_resume_query_uses_the_source_kind_index(
+    session: AsyncSession, repository: PostgresSyncRunRepository, source_id: uuid.UUID
+) -> None:
+    """`_INCOMPLETE`'s comment claims the index supplies the ordering and that
+    the `id` tiebreak costs only an Incremental Sort over one `started_at`
+    group. The neighbouring `_CURSOR` claim is pinned; this one was resting on
+    a reading of the SQL until this case.
+
+    **Not `"Sort" not in plan`**, which the case above can assert and this one
+    cannot: `Incremental Sort` contains it. The two are very different plans --
+    a full sort over a source's whole history versus a sort of one tied group
+    at the head of an index scan -- so this asserts the node it wants by name,
+    plus the `Presorted Key` that says the index really did supply the leading
+    key rather than the planner sorting everything.
+
+    `_INCOMPLETE` is imported rather than transcribed: the case above pastes
+    `_CURSOR` in, which is why this module would otherwise hold two copies of
+    one statement and a plan assertion that can drift off the statement it
+    describes.
+    """
+    for index in range(500):
+        await repository.add(
+            run(
+                source_id,
+                kind=SyncRunKind.WATCH_STATE,
+                started_at=EARLIER.replace(year=2020) + (LATER - EARLIER) * index,
+            )
+        )
+    await session.execute(text("ANALYZE sync_runs"))
+    plan = "\n".join(
+        (
+            await session.execute(
+                text("EXPLAIN " + _INCOMPLETE),
+                {"source_id": source_id, "kind": SyncRunKind.WATCH_STATE.value},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert "ix_sync_runs_source_kind_started" in plan, plan
+    assert "Incremental Sort" in plan, plan
+    assert "Presorted Key: started_at" in plan, plan
 
 
 async def test_a_negative_counter_is_a_port_error(

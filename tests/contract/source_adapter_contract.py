@@ -564,6 +564,53 @@ class SourceAdapterContract:
         states = {state.external_id async for state in harness.adapter.watch_state(since=T1)}
         assert "movie-1" in states
 
+    async def test_watch_state_start_index_offsets_the_filtered_stream(
+        self, harness: SourceHarness
+    ) -> None:
+        """**`start_index` counts what this walk *yields*, never rows of the
+        source's unfiltered set** -- the port's own words, and until this case
+        existed nothing in the suite said so.
+
+        The two spellings differ only when a `since` is present *and* the
+        offset is non-zero, which is precisely a resumed **delta** walk. Every
+        other resume case in this repository reclaims a run whose `cursor_at`
+        is `None`, so `filter-then-skip` and `skip-then-filter` are the same
+        program in all of them: measured by reverting
+        `FakeSourceAdapter._walk_states` to a bare
+        `list(self._items)[start_index:]`, which left the whole suite green.
+
+        Two items outside the window and two inside, and the walk is resumed
+        past the whole filtered stream. A skip applied to the *raw* set
+        consumes the two excluded items instead and then re-serves both
+        records the first attempt already merged -- which on a real resume
+        is a checkpoint that never advances.
+
+        **Exactness is a property of this harness rather than of the port.**
+        `SourceAdapter.watch_state` promises only at-or-before -- an
+        implementation may re-yield, never skip -- because a client-side drop
+        is invisible to an upstream offset
+        (`test_a_resumed_watch_state_walk_re_yields_what_it_dropped`). No
+        harness seeds a droppable payload, so both arms land exactly here.
+        """
+        await harness.given_item(_filler(0), changed_at=T0)
+        await harness.given_item(_filler(1), changed_at=T0)
+        await harness.given_item(_filler(2), changed_at=T1)
+        await harness.given_item(_filler(3), changed_at=T1)
+
+        walked = {state.external_id async for state in harness.adapter.watch_state(since=T1)}
+        assert walked == {"filler-2", "filler-3"}, (
+            "the premise: `since` really did exclude the two items outside the window"
+        )
+
+        resumed = {
+            state.external_id
+            async for state in harness.adapter.watch_state(since=T1, start_index=len(walked))
+        }
+        assert resumed == set(), (
+            "resuming past the whole filtered stream re-served records it had already "
+            "yielded, so the offset was applied to the unfiltered set"
+        )
+
     async def test_watch_state_raises_rather_than_truncating(self, harness: SourceHarness) -> None:
         await self._seed_library(harness)
         await harness.fail_after_items(3)

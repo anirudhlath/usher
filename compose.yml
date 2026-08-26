@@ -27,7 +27,7 @@ services:
     environment:
       # Only what the compose *topology* owns. `environment:` wins over
       # `env_file:`, so every line here is a setting an operator cannot
-      # change from `.env` -- which is why there are four of them and each
+      # change from `.env` -- which is why there are six of them and each
       # says why.
       #
       # The service's hostname on the compose network. `.env` ships
@@ -56,7 +56,30 @@ services:
       # against the mount. The other three USHER_IMAGE_* settings are the
       # operator's and are deliberately absent from this block.
       USHER_IMAGE_CACHE_DIR: /data/images
-      # **`HF_HUB_OFFLINE` is deliberately not a fifth entry**, though M6's
+      # The bulk-dataset download cache, and the sixth entry -- the same
+      # topology fact as the fifth, arrived at the hard way. `.env` ships
+      # `data/bulk`, which is right for a dev shell and inside the container
+      # resolves against WORKDIR /app to `/app/data/bulk` -- a directory the
+      # image does not create and `usher` (uid 1000) cannot create, because
+      # /app is root-owned. So `bootstrap` did not put the dumps somewhere
+      # awkward, it died on `mkdir`: **PermissionError(13) at
+      # adapters/bulk/download.py's `ensure_local`, observed in production on
+      # 2026-08-26** on both a `--phase all` and a `--phase imdb` job. Worse
+      # than a plain failure, because a job that raises rather than returning
+      # never reaches `JobQueue.fail`, so `attempts` stays 0 and
+      # `job_max_attempts` can never park it -- the two jobs recovered on
+      # lease expiry and crashed again indefinitely.
+      #
+      # Untested for five milestones because nothing in the container had
+      # ever run a bootstrap: every phase this deployment ran was
+      # `uv run usher bootstrap` from a dev shell, where the relative path is
+      # correct and the 682 MB under ./data/bulk is what it wrote. The bug
+      # needed the *worker* switched on to appear at all.
+      #
+      # The other two USHER_BULK_* settings (the batch size and the user
+      # agent) are the operator's and are deliberately absent from this block.
+      USHER_BULK_DATA_DIR: /data/bulk
+      # **`HF_HUB_OFFLINE` is deliberately not a seventh entry**, though M6's
       # plan asked for one as a topology fact. `environment:` beats
       # `env_file:` absolutely, and `usher.composition.embedder` reaches the
       # library through `os.environ.setdefault` -- so hard-setting it here
@@ -86,10 +109,24 @@ services:
       # re-fetch (ADR-0032). **Docker creates the host directory as root if it
       # does not exist**, and the container runs as uid 1000, so a first
       # `docker compose up` on a fresh checkout needs
-      # `mkdir -p data/images && sudo chown 1000:1000 data/images` -- the
-      # Dockerfile's `chown` reaches the image's own /data and a bind mount's
-      # host-side ownership wins once mounted. README.md carries the line.
+      # `mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images
+      # data/bulk` -- the Dockerfile's `chown` reaches the image's own /data
+      # and a bind mount's host-side ownership wins once mounted. README.md
+      # carries the line.
       - ./data/images:/data/images
+      # The bulk-dataset cache, mounted for the reason the image cache is:
+      # `USHER_BULK_DATA_DIR` above points the container at /data/bulk, and
+      # without a mount that is the image's own writable layer -- where the
+      # IMDb dumps (214.4 MiB for `title.basics` alone) and MovieLens'
+      # 350 MB `ml-latest.zip` would be re-downloaded on every
+      # `docker compose up --build` and appear in no `du` against the host.
+      # `DownloadCache`'s whole design is that a dump survives to be re-read,
+      # which a layer that a rebuild discards cannot do.
+      #
+      # This is the mount that lets a *container* bootstrap reuse what a dev
+      # shell already fetched: both now read the same directory, so the
+      # 682 MB already on this host is not downloaded twice.
+      - ./data/bulk:/data/bulk
     networks:
       # Two networks, and the second is why this key exists at all. `default`
       # is what compose would have given implicitly -- it has to be named

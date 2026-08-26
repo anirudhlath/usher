@@ -27,6 +27,13 @@ class SyncRunRepository(ABC):
     which is a checkpoint updated in place. PRD 10's dashboard 3 plots run
     outcomes over time, and ADR-0015's sweep guard rests on being able to say
     *which* run last finished cleanly.
+
+    **`latest_incomplete_run` is the one affordance here that reads against
+    that grain, and only for `WATCH_STATE`** (ADR-0042). It hands a walk back
+    its own unfinished row so the next attempt can continue it in place, which
+    is `ImportRunRepository`'s shape borrowed for one lane. `save` is written
+    for that reuse and is **non-destructive** in the two ways its own
+    docstring sets out.
     """
 
     @abstractmethod
@@ -40,6 +47,38 @@ class SyncRunRepository(ABC):
         `started_at` is not mutable through this call in any meaningful sense:
         it is the sweep's own `seen_since`, so a run that could rewrite it
         after the fact could retract items it had already seen.
+
+        **Non-destructive, and that is a contract rather than an
+        implementation note.** ADR-0042 has a `WATCH_STATE` run reuse one row
+        across attempts, and two attempts really can reach it: the queue
+        coalesces `sync` *jobs*, but `LaneSupervisor._close_gap` and
+        `usher sync` both call the service directly, the second from another
+        process. So two rules, which every arm owes:
+
+        - **`position` may advance and may never regress.** A save carrying a
+          lower one leaves the stored checkpoint where it is. The loser
+          otherwise pulls the resume point back to the page *it* started from,
+          which is exactly the restart loop `position` was added to close.
+        - **`completed` is absorbing.** A save over a run that has already
+          completed writes nothing at all and returns quietly -- not the
+          status alone, the whole row. An overtaken walk's counters are lower
+          and its `error` would render through `usher sync-status` as a
+          failure of the walk that succeeded, and `latest_completed_cursor`
+          would stop answering for a walk that provably finished.
+
+        Neither is an error: the caller has done real work and its merges
+        stand, it simply is not the attempt whose bookkeeping survives.
+
+        **The one consequence that is otherwise invisible**, because nothing
+        raises and nothing logs: after a refused save the `SyncRun` a service
+        holds -- and returns -- describes its own *attempt* rather than the
+        stored row, so `usher sync` can print a `watch_state completed` that
+        `sync_runs` does not carry. Cosmetic, and deliberately so: the merges
+        stand either way and the row belongs to the walk that got further.
+        It is new with ADR-0042, and it is the reason a reader diagnosing
+        this lane trusts the table over the command's last line. (`usher
+        sync` is the only renderer -- the `sync` job handler discards the run
+        it gets back.)
         """
 
     @abstractmethod
@@ -62,6 +101,24 @@ class SyncRunRepository(ABC):
         (`MinDateLastSaved` vs `MinDateLastSavedForUser`, measured as genuinely
         different: 28,934 vs 29,005 items over the same 30-day window), so one
         cursor cannot serve both.
+        """
+
+    @abstractmethod
+    async def latest_incomplete_run(
+        self, source_id: uuid.UUID, kind: SyncRunKind
+    ) -> SyncRun | None:
+        """The newest run of this kind, **iff it did not complete** -- the
+        walk a resumed run continues. `None` when the newest one completed,
+        and when there is none at all.
+
+        **"The newest, and only if it is not completed", never "the newest
+        one that is not completed."** The second spelling hands back an old
+        failure forever once a later run has completed, so every later walk
+        resumes from a position that completed run has already passed.
+
+        Used by the `WATCH_STATE` lane only (ADR-0042). The item lanes have a
+        working cursor and restart from it; this lane's first walk is the
+        whole library, so a failure has to cost a page rather than the run.
         """
 
     @abstractmethod

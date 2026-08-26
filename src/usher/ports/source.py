@@ -533,7 +533,9 @@ class SourceAdapter(ABC):
         """
 
     @abstractmethod
-    def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
+    def watch_state(
+        self, since: AwareDatetime | None = None, *, start_index: int = 0
+    ) -> AsyncIterator[SourceWatchState]:
         """Watch state from the source, optionally since a cursor.
 
         Same `since`-inclusivity, no-ordering, possible-duplicates,
@@ -550,6 +552,31 @@ class SourceAdapter(ABC):
         May report `play_count`/`last_played_at` as `None` — "this read
         cannot say" — and must, rather than reporting a zero, whenever the
         listing it walks does not carry them. See `SourceWatchState`.
+
+        `start_index` resumes a walk that was interrupted. It is the number
+        of records **this walk has already yielded**, and the implementation
+        must place the resumed walk **at or before** that point: it may
+        re-yield records the caller has already seen and must never skip one
+        it has not. Everything on this lane is an idempotent upsert, so a
+        re-yield costs a request and a merge; a skip is a hole.
+
+        **Exact alignment is the goal and is not promised, because an
+        adapter that filters client-side cannot deliver it** (measured
+        2026-08-26 against `EmbyAdapter`). Emby offsets its *own* filtered
+        result, which is the closest thing a paging server can offer, but
+        `to_watch_state` then drops any payload carrying no `UserData` --
+        a drop `StartIndex` cannot see. So the upstream offset counts rows
+        the walk did not yield, the resumed walk lands that many records
+        early, and it re-walks the difference. Bounded and safe in the
+        direction that matters: the lag is one attempt's drops, not a
+        running total, because each attempt checkpoints its own yields.
+
+        **It is only meaningful under a stable order, which this port does
+        not promise and an adapter may** -- the Emby adapter walks
+        `SortBy=DateCreated,SortName` ascending over an immutable creation
+        date, so its walked prefix does not reorder between attempts. An
+        adapter with no stable order must ignore it rather than skip
+        arbitrary records, and say so.
         """
 
     @abstractmethod
