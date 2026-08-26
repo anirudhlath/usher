@@ -1170,6 +1170,20 @@ twice), `test_raw_payload_store.py`, `test_sync_run_repository.py`, and the
 here and not measured; recorded so the next person does not rediscover the
 mechanism from a symptom.
 
+**A live sighting, 2026-08-26 (M10 K6).**
+`test_adapters_search_prefix.py::test_the_tier_one_statement_plans_to_the_prefix_index_and_not_the_near_miss`
+failed **1 of 3 whole-suite runs** on an otherwise unchanged tree — the two
+other whole-suite runs and the file run **alone** were green, so it is
+order-dependent rather than broken. The plan it read was `['pk_titles',
+'ix_title_search_names_name_lower_prefix', 'pk_titles']`: the *second* arm's
+index was reached and the first arm fell off `ix_titles_name_lower_prefix`
+onto the primary key, which is what a `titles` row estimate left behind by
+another file's rolled-back `ANALYZE` produces. **Not repaired** — the commit
+that saw it changed only documentation and a new test module, and moving or
+retrying a test that fails everywhere is not fixing it. Recorded so the rate
+is known: a case that fails one run in three is a case somebody will
+eventually delete as flaky, and the mechanism above is the reason not to.
+
 ## An `id()` is a reusable address, so a test that identifies objects by one is identifying nothing (2026-08-19, issue #7)
 
 `test_rows_refresh.py` classified sessions by `id(session)` inside two

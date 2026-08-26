@@ -98,7 +98,11 @@ uv run usher bootstrap --phase all
 
 # 2. the precious rows, seconds. Brings back the household, the source and
 #    its credential, the history, the ledger and the search log.
-uv run usher restore /var/tmp/nightly.jsonl.gz
+#    ⚠️ --skip-unresolvable, because on this deployment the artifact is refused
+#    whole without it — see §5. --dry-run first, and read WHICH tables the
+#    skipped rows are in before committing.
+uv run usher restore /var/tmp/nightly.jsonl.gz --dry-run --skip-unresolvable
+uv run usher restore /var/tmp/nightly.jsonl.gz --skip-unresolvable
 
 # 3. SERVE. Everything below this line is a background job.
 uv run uvicorn usher.api.app:create_app --factory --host 0.0.0.0 --port 8000
@@ -108,7 +112,7 @@ uv run usher sync --kind full
 uv run usher work
 
 # 5. the operator's link decisions, onto the rows step 4 recreated
-uv run usher restore /var/tmp/nightly.jsonl.gz
+uv run usher restore /var/tmp/nightly.jsonl.gz --skip-unresolvable
 
 # 6. the derived read surface, from the payload cache step 4 refilled
 uv run usher derive --backfill
@@ -121,10 +125,21 @@ uv run usher similar --rebuild                          # ~3.33 h — overnight
 **Step 5 is not a typo.** `media_items` is the manifest's one `PARTIAL` entry:
 restore writes its two link columns onto rows that must already exist, and those
 rows come from the walk in step 4 — which needs the `sources` row that step 2
-restored. The first restore therefore reports every link as skipped and the
-second one writes them. ✅ Measured: **0 written / 10,515 skipped**, then
-**10,515 written**. Restoring the same artifact twice is a no-op on everything
-else, by construction.
+restored. The first restore therefore reports every link under **nothing to
+write onto** and the second one writes them. ✅ Measured 2026-08-25: **0 written
+/ 10,515 with nothing to write onto**, then **10,515 written**. Restoring the
+same artifact twice is a no-op on everything else, by construction.
+
+⚠️ **That column was headed *already present* when the drill ran**, against a
+`media_items` table holding **zero** rows — the same number under the opposite
+instruction. The two states were split into separate columns on 2026-08-25
+([`restore.md`](restore.md) §8). The counts above are the drill's; the heading
+is the current one, and **`skipped` now means something else entirely** — see
+the flag below.
+
+⚠️ **`--skip-unresolvable` is on both restore steps because this deployment's
+artifact is refused without it**, not as a precaution. §5 has the measurement
+and the judgement it asks of you.
 
 ---
 
@@ -166,7 +181,7 @@ written at.** If the artifact is older than this code, upgrade a *scratch*
 database to the artifact's revision, restore there, upgrade it, and back it up
 again. Restore does not guess across a schema change.
 
-### 🔴 A reference with no provider id refuses the whole file, and there is nothing to import
+### 🔴 A reference with no provider id refuses the whole file, and the way through is a flag
 
 Full detail in [`restore.md`](restore.md) §5. The short version, because it is
 the failure this drill actually hit and it will hit you:
@@ -179,16 +194,67 @@ the failure this drill actually hit and it will hit you:
   artifact into a correctly rebuilt catalog was **refused whole on 304
   `media_items` rows**, while all 3,347 watch states resolved and were rolled
   back with them.
-- The escape is one filter, and the format exists to permit it:
+- The way through is **`--skip-unresolvable`**, which is why §3's two restore
+  steps carry it. It drops the rows naming a title or episode this catalog
+  cannot resolve, counts them in a bucket of their own — never folded into
+  *already present*, never written as a null — and commits everything else.
 
   ```bash
-  zcat nightly.jsonl.gz | grep -v '"imdb_id": null, "tmdb_id": null' | gzip > nightly-filtered.jsonl.gz
+  uv run usher restore /var/tmp/nightly.jsonl.gz --dry-run --skip-unresolvable
+  uv run usher restore /var/tmp/nightly.jsonl.gz --skip-unresolvable
   ```
 
-  ✅ In the drill that dropped exactly 304 lines, all `media_items`, and the
-  result restored clean. **Count what it removes first** — if any `watch_states`
-  line matches, you are discarding history rather than a link the next `usher
-  sync` re-derives.
+  ⚠️ **Read the per-table counts on the dry run before you accept it, because
+  the flag is you accepting a loss and the two losses are not the same.** If the
+  skipped rows are `media_items` only — which is what all 304 are here — you lose
+  links the next `usher sync` re-derives to the same answer. **If any are
+  `watch_states`, stop:** that is history no importer rebuilds, and nothing in
+  the command enforces that judgement. [`restore.md`](restore.md) §5 has the
+  table.
+
+  ⚠️ **It does not relax the other three refusals.** A household this database
+  does not hold, a source colliding on a name, and a credential whose source is
+  absent all still refuse the whole file with the flag set — none of them is
+  *"the catalog is at a different bootstrap phase"*, and no `usher sync`
+  re-derives any of them.
+
+#### 🔴 The old escape was a `grep` over the artifact. Do not use it.
+
+Every version of this page before 2026-08-26 told you to filter the file:
+
+```bash
+zcat nightly.jsonl.gz | grep -v '"imdb_id": null, "tmdb_id": null' | gzip > nightly-filtered.jsonl.gz
+```
+
+**That command now fails, and the failure looks like artifact corruption**,
+which is the worst thing for it to look like in the middle of a recovery. The
+header carries a per-table row count and `usher restore` checks the body against
+it — so an artifact with 304 lines removed is refused for being *"truncated or
+was edited"*, naming two numbers that do not match. The check landed on
+2026-08-25 and the filter predates it.
+
+Two further reasons, both of which were true before the check existed: it is a
+substring match on one JSON spelling, so it drops whatever happens to match —
+including a `watch_states` row, **silently**, which is the one loss the bullet
+above tells you to stop for; and `--skip-unresolvable` does the same job with
+the counts printed and `--dry-run` to read them first.
+
+⚠️ **The ✅ this page used to carry here was real and no longer refers to
+anything runnable.** K5's live drill did run that filter, on 2026-08-25, and it
+dropped exactly 304 lines, all `media_items`, and the result restored clean —
+which is how the 304 figure above was established. What that drill measured is
+*which rows are the problem*, and that survives. What it measured about *the
+filter as a procedure* did not survive the truncation check landing the same
+day.
+
+**What has and has not been drilled, stated rather than implied.**
+`--skip-unresolvable` is built and covered by an integration case against a real
+Postgres (`tests/integration/test_restore.py::test_the_flag_skips_the_unresolvable_rows_and_commits_everything_else`,
+plus a mutation plant that turns the flag off and is killed by two cases). **The
+sequence in §3 has not been re-run end to end with the flag against the real
+1,272,891-title catalog** — the live arm of K5's drill used the filter, because
+the flag did not exist yet. Treat §3's *order* as drilled and the flag on its
+two restore lines as the sanctioned replacement for a step that no longer works.
 
 ---
 
@@ -204,6 +270,12 @@ the failure this drill actually hit and it will hit you:
       `zcat artifact | head -1`'s `schema_revision`.
 - [ ] `usher restore --dry-run` before every real run. It prints the identical
       report and commits nothing.
+- [ ] `--skip-unresolvable` on both restore steps, **and the dry run's
+      per-table counts read before committing**. `media_items` only: take it.
+      Any `watch_states`: stop, that is history nothing rebuilds.
+- [ ] The artifact is **the file `usher backup` wrote**, unedited. Do not filter
+      it — the header's row counts are checked against the body, so a `grep`ped
+      or `head`ed file is refused as truncated.
 - [ ] Do **not** re-add the source through the admin route first — the artifact
       carries it, and a hand-added source with the same name refuses the file.
 - [ ] Restore **twice**, with `usher sync` in between, or the 10,819 link

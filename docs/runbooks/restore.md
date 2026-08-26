@@ -165,6 +165,16 @@ uv run usher sync --kind full                             # 2: the walk recreate
 uv run usher restore /var/tmp/nightly.jsonl.gz            # 3: the operator's links land on them
 ```
 
+🔴 **On this deployment, run 1 exactly as written above is refused, and that is
+the command working rather than a damaged file.** The artifact carries 304
+`media_items` links naming titles a rebuilt catalog cannot mint again;
+`media_items`' unresolved rule is `REFUSE` and the whole file is one
+transaction, so the household, the source, its credential and all 3,347 resolved
+watch states are written and rolled back with them. **§5 is what to do about it,
+and the answer is `--skip-unresolvable` on runs 1 and 3** — left off the block
+above because §5 asks you to read the per-table counts and decide, rather than
+paste a flag that accepts a loss on your behalf.
+
 Run 1, real output from the drill's synthetic arm (every identifier below is
 synthetic):
 
@@ -189,13 +199,20 @@ Run 3, after the walk:
 2 rows written, 10 already present, 0 refused, … : committed
 ```
 
-⚠️ **"already present" is the wrong word for `media_items` on run 1, and the
-number is right.** `skipped` covers two states — a row the target has already
-linked, and *a row the walk has not created yet* — and the report renders both
-as "already present". On the real artifact into a correctly rebuilt catalog the
-drill measured **`media_items 0 written / 10,515 already present` with zero rows
-in the table.** Read it as *"not written"*, and check `SELECT count(*) FROM
-media_items` rather than the word.
+⚠️ **Both transcripts above are the pre-split renderer, and "already present" is
+the wrong word for `media_items` on run 1.** `skipped` covered two states — a
+row the target has already linked, and *a row the walk has not created yet* —
+and the report rendered both as "already present". On the real artifact into a
+correctly rebuilt catalog the drill measured **`media_items 0 written / 10,515
+already present` with zero rows in the table**: the same number carrying the
+opposite instruction.
+
+✅ **They are two columns since 2026-08-25**, so the reading advice that used to
+stand here — *read it as "not written" and check `SELECT count(*) FROM
+media_items` rather than the word* — is no longer work you have to do. Run 1
+today reports those rows under **nothing to write onto**, which means *run
+`usher sync`, then restore again*. The blocks above are kept as the drill
+printed them; §8 is the report you will actually see.
 
 `--dry-run` prints the identical report and commits nothing: in the drill the
 two outputs differed by exactly one character sequence, the trailing

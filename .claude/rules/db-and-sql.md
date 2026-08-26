@@ -1504,6 +1504,16 @@ Three consequences worth carrying:
 matching line is a `watch_states` row, filtering discards history rather than a
 re-derivable link).
 
+🔴 **Superseded 2026-08-26, and the filter is now refused rather than merely
+discouraged.** K5b built `usher restore --skip-unresolvable` **and** a
+truncation check comparing the header's per-table counts against the body — so
+a `grep`ped artifact stops with *"truncated or was edited"*, because the header
+still claims the 304 lines the filter removed. The paragraph above stands as
+the record of what K5 shipped; the current instruction in **both** runbooks is
+the flag, with `--dry-run` first and the per-table counts read before
+committing. What survives from the filter's drill is *which* rows are the
+problem, which is where the 304 came from.
+
 ### `skipped` is rendered "already present" and 10,515 of 10,515 were not
 
 `_merge_media_item_links` documents that `skipped` covers two states — a row
