@@ -650,3 +650,100 @@ by its own handler, because the parser answers first.** Ask of any such
 argument: what does the parser print when it does not recognise something, when
 two options are ambiguous, and when a prefix of this flag is typed? Three of
 those five leak paths are argparse's, not the program's.
+
+## K8's rotation drill: the `.env`-first ordering trap, and a refusal count that means two different things (2026-08-26)
+
+**The drill ran for real** against a scratch `pgvector/pgvector:pg17` created and
+removed by the run — never against `usher-postgres-1`, whose single
+`source_credentials` row is a real credential. Bar pre-registered and hashed
+before the container existed: `/var/tmp/m10-K8/BAR.md`, `sha256
+578fa05e5a46bcfc9dd73516417aaa9ee9c45672b991270760a59b0e8ad3e02e`. Transcript
+`/var/tmp/m10-K8/RUN.md`. The live database's `source_credentials` count and
+`md5(ciphertext::text)` were identical before and after.
+
+### 🔴 The ordering trap is a *deployment* fact: rotating needs both keys, and `.env` holds one of them
+
+`cli._rotate` builds `old_cipher` from **`settings.secret_key`** and `new_cipher`
+from the environment variable `--new-key-env` names. So the old key is not an
+argument — it is *whatever the deployment is configured with*. An operator who
+edits `.env` (or their secret store) **before** running the command has made
+both ciphers the same cipher, and every row still on the previous key opens
+under neither.
+
+Measured, three rows, `.env` changed first: `rotated 0, already 0, refused 3`,
+exit 1, and **nothing written** — all three ciphertexts byte-identical
+afterwards, all three still opening under the old key. The premise, so this is a
+statement about the ordering and not about an unrotatable table: the same rows
+and the same command with only the order corrected report `rotated 3`.
+
+**And the printed advice is wrong in exactly that state**, which is the half
+worth carrying:
+
+```
+usher rotate-secret: 3 credentials could not be decrypted by either key and must
+be re-entered -- re-register those sources with `POST /admin/sources`
+```
+
+Every one of those credentials is intact. The command cannot distinguish *"these
+rows are corrupt"* from *"you gave me the wrong old key"*, because both arrive as
+`_plaintext` answering `None` twice — so **`refused == every row` and
+`refused == some rows` are two different diagnoses behind one counter**, and only
+the first is recoverable by putting `USHER_SECRET_KEY` back. Not fixed here (K8
+changes nothing in `src/`); `docs/runbooks/rotation.md` §0 carries the table an
+operator reads the count with. The general form: **a refusal counter whose
+saturation implies a different cause than its partial values needs the
+saturated case named, or the message written for the partial case is what an
+operator acts on.**
+
+### 🔴 A `DBAPIError` from a rotation prints the row's ciphertext
+
+`build_engine` does not pass `hide_parameters=True`, and SQLAlchemy's
+`DBAPIError.__str__` renders the failing statement's bound parameters. For
+`usher rotate-secret` one of those parameters *is* the credential blob:
+
+```
+usher rotate-secret: DBAPIError: … asyncpg.exceptions.RaiseError: …
+[SQL: UPDATE source_credentials SET ciphertext=$1::BYTEA, updated_at=$2 WHERE …]
+[parameters: (b'gAAAAABqj1fYUdfzKZbjsY52knAcAdry…', datetime.datetime(…), 'drill-bravo')]
+```
+
+Ciphertext and not plaintext — opening it still needs the key — so this is not
+the `input_value=` defect at the top of this file repeating. It is one notch
+weaker and worth knowing anyway: encryption at rest exists so the database file
+alone is not enough, and a log line holding the blob moves a copy somewhere with
+different access rules, from the one command whose whole subject is secrets.
+**Not fixed**: the repair is `hide_parameters=True` in `db/base.py`, which is
+outside K8's files and would take parameter diagnostics away from every other
+command. Recorded, and the runbook tells an operator to treat a *failed*
+rotation's output as sensitive.
+
+### The interruption is diagnosable and the re-run is the whole recovery
+
+Injected as a `BEFORE UPDATE` trigger in the **scratch database** rather than as
+a signal or a patched Python, so the command under test is the shipped one with
+shipped `argv` — *"a run that did not run is not a pass"*, and a killed process
+leaves nothing to assert on. Measured: exit 1, one `_operator_problem` line and
+no traceback (`DBAPIError` ∈ `cli.OPERATOR_ERRORS`), row 1 committed and moved,
+row 2's `UPDATE` rolled back and still on the old key, row 3 never read. The
+same command re-run over that table reports `rotated 2, already 1, refused 0`
+and leaves row 1's ciphertext **byte-identical** — the already-rotated row is
+skipped rather than re-encrypted, which only the bytes can see because a
+re-encrypted row reads back perfectly and the report says `already 1` either way.
+
+### Backup artifacts do not rotate, measured from both sides
+
+An artifact taken under the old key holds old-key ciphertext permanently:
+its three `source_credentials` digests were byte-identical to the pre-rotation
+live rows and unchanged after the rotation moved all three. So the documented
+sequence is **rotate → fresh backup → discard the old one**, and K3's warning
+arrives from the other direction: it is not only that a restore needs its key,
+it is that a rotation *strands the artifact you already have*.
+
+### The `.env` guard needs its control, and the control fired
+
+Every scratch step asserted the resolved target by reading `get_settings()` —
+the call `alembic/env.py` makes — rather than by reading back the environment
+variable it had just set, because **the variable being set is not the same claim
+as it having won**. The control: the same assertion with the override removed
+resolved to the live host on port 5432 and refused. A guard that cannot be
+observed refusing is the `sitecustomize.py` installation trap in another costume.

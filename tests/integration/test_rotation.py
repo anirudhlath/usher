@@ -27,7 +27,8 @@ table another committing file shares.
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 
 import pytest
@@ -68,6 +69,25 @@ CANARY = "sup3rs3cret-rotation-canary"
 # inside `.env` makes every entry point fail `extra="forbid"` and renders the
 # key in the `ValidationError`'s `input_value=`.
 VAR = "USHER_NEW_SECRET_KEY"
+
+# Three canaries rather than one, because a rotation that moved row A's
+# plaintext onto row B leaves every row perfectly decryptable and only
+# *distinct* payloads can see it. Two would not do: a swap is its own
+# inverse, so a two-row fixture cannot tell the permutation from its
+# reverse (`testing-discipline.md`'s 3-cycle entry, in the payload domain).
+CANARIES = ("sup3rs3cret-canary-one", "sup3rs3cret-canary-two", "sup3rs3cret-canary-three")
+
+
+class _InterruptedRun(Exception):
+    """How K8's drill spells "the operator killed the command".
+
+    A signal is the obvious spelling and it is the wrong one: a killed
+    process leaves no report, no exception and no frame to assert on, so a
+    case built on one cannot tell "died after row 1" from "never started".
+    An injected failure on the *second* row lands the run at the identical
+    state -- row 1 committed, row 2 written and rolled back, row 3 never
+    read -- and leaves something the case can be about.
+    """
 
 
 @pytest_asyncio.fixture
@@ -466,3 +486,290 @@ async def _updated_at(sessions: async_sessionmaker[AsyncSession], ref: str) -> d
         stamp = row.scalar_one()
         assert isinstance(stamp, datetime)
         return stamp
+
+
+# ---------------------------------------------------------------------------
+# K8's drill, run for real on 2026-08-26 against a scratch
+# `pgvector/pgvector:pg17` and transcribed into `docs/runbooks/rotation.md`.
+# The four arms below are that drill's four arms, held here so the runbook's
+# claims are re-checked by the gate rather than only by the day they were
+# written.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_three(
+    sessions: async_sessionmaker[AsyncSession], *, key: SecretStr = OLD_KEY, tag: str = "row"
+) -> tuple[str, ...]:
+    """Three rows under one key, one distinct canary each, in `ref` order.
+
+    `list_refs` is `ORDER BY ref`, so the returned order is the order a
+    rotation meets them in -- which is what lets a case say *"the run died on
+    the second row"* and mean a particular row.
+    """
+    refs = tuple(f"{REF_PREFIX}{tag}{number}" for number in (1, 2, 3))
+    for ref, canary in zip(refs, CANARIES, strict=True):
+        await _seed(sessions, ref, key, password=canary)
+    return refs
+
+
+@contextmanager
+def _command_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
+    *,
+    secret_key: SecretStr,
+    new_key: SecretStr,
+) -> Iterator[None]:
+    """The environment `usher rotate-secret` reads, and nothing else.
+
+    `USHER_SECRET_KEY` is a parameter rather than a constant because the whole
+    of K8's ordering finding is what happens when it is already the *new* key
+    -- see `test_rotating_after_the_key_was_already_changed_...` below.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)
+    monkeypatch.setenv("USHER_SECRET_KEY", secret_key.get_secret_value())
+    monkeypatch.setenv(VAR, new_key.get_secret_value())
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        get_settings.cache_clear()
+
+
+async def _opens(
+    sessions: async_sessionmaker[AsyncSession], key: SecretStr, ref: str
+) -> str | None:
+    """The password a store built from `key` reads out of `ref`, or `None` if
+    that store cannot open the row.
+
+    A **separately-constructed** store per call, which is the point: a claim
+    about a row's ciphertext must not be able to pass because one long-lived
+    reader happened to hold the right cipher.
+    """
+    async with sessions() as session:
+        try:
+            found = await PostgresCredentialStore(session, key).get(ref)
+        except PortDataMalformed:
+            return None
+    return None if found is None else found.password.get_secret_value()
+
+
+async def test_three_rows_rotate_together_and_each_keeps_its_own_credential(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """K8 arm 1. The happy path over more than one row, asserted per row.
+
+    A one-row case cannot see a rotation that re-encrypts the *wrong*
+    plaintext onto a row: every row still opens under the new key, the report
+    still counts three, and only distinct payloads can tell them apart. Three
+    is the smallest fixture that can, because a two-row permutation is its own
+    inverse.
+    """
+    refs = await _seed_three(sessions)
+    before = {ref: await _ciphertext(sessions, ref) for ref in refs}
+    # The premise the per-row assertion rests on: the three payloads really
+    # are distinguishable from each other.
+    assert len(set(CANARIES)) == 3
+
+    report = await _rotate(sessions)
+
+    assert report.rotated == refs and report.already == () and report.refused == ()
+    for ref in refs:
+        assert await _ciphertext(sessions, ref) != before[ref], f"{ref} did not move"
+    for ref, canary in zip(refs, CANARIES, strict=True):
+        assert await _opens(sessions, NEW_KEY, ref) == canary, f"{ref} came back as another row"
+
+
+async def test_an_interrupted_rotation_leaves_a_mixed_table_that_a_second_run_finishes(
+    sessions: async_sessionmaker[AsyncSession],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """K8 arms 2 and 3: the interruption, and the re-run that is its recovery.
+
+    **The interruption is an injected failure and not a signal**, for
+    `_InterruptedRun`'s reason. It is injected on the `commit` callable --
+    the shipped constructor seam -- on the **second** row, so the run lands
+    exactly where a `kill -9` would: row 1 committed, row 2's `UPDATE` issued
+    and rolled back by the session's own close, row 3 never read.
+
+    **The mixed state is read through two separately-constructed stores**, one
+    per key. That is what makes the claim about the *ciphertext* rather than
+    about a cipher some reader was still holding: a single store asked twice
+    would answer from whatever key it was built with, and a service that had
+    written nothing at all would satisfy "the old key still opens rows 2
+    and 3".
+
+    Its premise, asserted before the injection: **all three rows open under
+    the old key**, so the mixed table is a thing this run produced and not a
+    thing the fixture was.
+    """
+    refs = await _seed_three(sessions, tag="mix")
+    first, second, third = refs
+    before = {ref: await _ciphertext(sessions, ref) for ref in refs}
+    for ref, canary in zip(refs, CANARIES, strict=True):
+        assert await _opens(sessions, OLD_KEY, ref) == canary, "the premise: all three open"
+
+    commits = 0
+
+    async with sessions() as session:
+        service_session = session
+
+        async def commit_until_the_second_row() -> None:
+            nonlocal commits
+            commits += 1
+            if commits == 2:
+                # Before the commit, not after: the row 2 `UPDATE` is issued
+                # and never made durable, which is the state a killed process
+                # leaves and the state the rollback below has to undo.
+                raise _InterruptedRun("the operator killed the command")
+            await service_session.commit()
+
+        with pytest.raises(_InterruptedRun):
+            await RotationService(
+                store=PostgresCredentialRotationStore(session),
+                old_cipher=build_cipher(OLD_KEY),
+                new_cipher=build_cipher(NEW_KEY),
+                commit=commit_until_the_second_row,
+            ).rotate()
+
+    assert commits == 2, "the run did not reach the second row, so nothing was interrupted"
+    interrupted = await _ciphertext(sessions, first)
+    assert interrupted != before[first], "the first row never landed"
+    assert await _ciphertext(sessions, second) == before[second], "the killed write was durable"
+    assert await _ciphertext(sessions, third) == before[third]
+
+    # The mixed table, through one store per key. Both directions on both
+    # sides: "the new key opens row 1" is satisfied by two keys deriving one
+    # cipher unless the old key is also asked and refused.
+    assert await _opens(sessions, NEW_KEY, first) == CANARIES[0]
+    assert await _opens(sessions, OLD_KEY, first) is None
+    for ref, canary in ((second, CANARIES[1]), (third, CANARIES[2])):
+        assert await _opens(sessions, OLD_KEY, ref) == canary
+        assert await _opens(sessions, NEW_KEY, ref) is None
+
+    # Both refusals name the row and neither names what is in it.
+    async with sessions() as session:
+        with pytest.raises(PortDataMalformed) as on_the_old_key:
+            await PostgresCredentialStore(session, OLD_KEY).get(first)
+        with pytest.raises(PortDataMalformed) as on_the_new_key:
+            await PostgresCredentialStore(session, NEW_KEY).get(second)
+    for caught, ref in ((on_the_old_key, first), (on_the_new_key, second)):
+        assert caught.value.detail == f"credentials_ref={ref}"
+        assert ref in str(caught.value)
+        assert not any(canary in str(caught.value) for canary in CANARIES)
+        assert "username" not in str(caught.value)
+
+    # Arm 3: the recovery is the same command again, and it is the **shipped**
+    # command rather than the service, because "re-run it" is what a runbook
+    # tells an operator to do.
+    with _command_environment(monkeypatch, postgres_url, secret_key=OLD_KEY, new_key=NEW_KEY):
+        await _main(["rotate-secret", "--new-key-env", VAR])
+
+    printed = capsys.readouterr().out
+    assert "rotated     2" in printed
+    assert "already     1" in printed
+    assert "refused     0" in printed
+    assert not any(canary in printed for canary in CANARIES)
+    # The row a previous run had already moved is skipped rather than
+    # re-encrypted -- and only the bytes can see that, because a
+    # double-encrypted row reads back perfectly.
+    assert await _ciphertext(sessions, first) == interrupted, "row 1 was re-encrypted"
+    for ref, canary in zip(refs, CANARIES, strict=True):
+        assert await _opens(sessions, NEW_KEY, ref) == canary
+
+
+async def test_a_row_no_key_can_open_is_named_and_the_other_two_still_rotate(
+    sessions: async_sessionmaker[AsyncSession],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """K8 arm 4, through the shipped command over three rows.
+
+    The service-level sibling
+    (`test_a_row_no_key_opens_is_refused_and_the_rest_of_the_table_still_rotates`)
+    makes the same argument over two rows and a row encrypted under a *third*
+    key. This one is the operator-facing half and a different input: bytes
+    that are not a Fernet token at all, the shape a truncated column or a bad
+    restore produces, driven through `usher rotate-secret` so the refusal is
+    read off the report an operator actually sees.
+
+    **The other two rotating is the load-bearing half.** A rotation that
+    aborted on the bad row would leave a table more mixed than the one it
+    started with, and the operator holding a key that opens some unknown
+    subset of it.
+    """
+    refs = await _seed_three(sessions, tag="bad")
+    first, broken, last = refs
+    async with sessions() as session:
+        # Not a Fernet token: no version byte, no HMAC, nothing either cipher
+        # can even attempt. Written through the shipped writer so the row is
+        # the shape the column really holds.
+        await PostgresCredentialRotationStore(session).write_ciphertext(broken, b"not-a-token")
+        await session.commit()
+    corrupted = await _ciphertext(sessions, broken)
+
+    with (
+        _command_environment(monkeypatch, postgres_url, secret_key=OLD_KEY, new_key=NEW_KEY),
+        pytest.raises(SystemExit) as exit_info,
+    ):
+        await _main(["rotate-secret", "--new-key-env", VAR])
+
+    printed = capsys.readouterr().out + str(exit_info.value)
+    assert broken in printed, "the row an operator has to re-enter was not named"
+    assert "rotated     2" in printed and "refused     1" in printed
+    assert not any(canary in printed for canary in CANARIES)
+    # Left exactly as it was: writing onto it would destroy the one copy a
+    # restored key could still have read.
+    assert await _ciphertext(sessions, broken) == corrupted
+    for ref, canary in ((first, CANARIES[0]), (last, CANARIES[2])):
+        assert await _opens(sessions, NEW_KEY, ref) == canary
+
+
+async def test_rotating_after_the_key_was_already_changed_refuses_every_row_and_writes_nothing(
+    sessions: async_sessionmaker[AsyncSession],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """K8's ordering finding, which is the whole reason `rotation.md` states an
+    order rather than a list of steps.
+
+    An operator who edits `.env` **first** and restarts has a deployment whose
+    `USHER_SECRET_KEY` is already the new key -- so `cli._rotate` builds
+    `old_cipher` from *that*, both ciphers are the same cipher, and every row
+    still on the previous key opens under neither. The command refuses all of
+    them, writes nothing, and exits non-zero. That is the good case; the bad
+    one is an operator who reads `refused 3` as *"the credentials are
+    corrupt"* and re-enters them, which is the recovery for a problem they do
+    not have.
+
+    Its premise is the second half: the **same rows**, the **same command**,
+    with only the order corrected, rotate. So "refused 3" is a statement about
+    the ordering rather than about a table nothing could have rotated.
+    """
+    refs = await _seed_three(sessions, tag="ord")
+    before = {ref: await _ciphertext(sessions, ref) for ref in refs}
+
+    with (
+        _command_environment(monkeypatch, postgres_url, secret_key=NEW_KEY, new_key=NEW_KEY),
+        pytest.raises(SystemExit) as exit_info,
+    ):
+        await _main(["rotate-secret", "--new-key-env", VAR])
+
+    printed = capsys.readouterr().out + str(exit_info.value)
+    assert "rotated     0" in printed and "already     0" in printed
+    assert "refused     3" in printed
+    for ref in refs:
+        assert ref in printed
+        assert await _ciphertext(sessions, ref) == before[ref], "a refused run still wrote"
+
+    # The premise: only the order was wrong.
+    with _command_environment(monkeypatch, postgres_url, secret_key=OLD_KEY, new_key=NEW_KEY):
+        await _main(["rotate-secret", "--new-key-env", VAR])
+
+    assert "rotated     3" in capsys.readouterr().out
+    for ref, canary in zip(refs, CANARIES, strict=True):
+        assert await _opens(sessions, NEW_KEY, ref) == canary
