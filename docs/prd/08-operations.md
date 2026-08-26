@@ -957,6 +957,9 @@ is **5.06 s**. The operator-facing sequence is
 [`docs/runbooks/disaster-recovery.md`](../runbooks/disaster-recovery.md), both
 written from that transcript.
 
+**All four runbooks this section asks for — restore, upgrade, disaster recovery
+and rotation — are indexed at [`docs/runbooks/README.md`](../runbooks/README.md).**
+
 🔴 **The drill refuted one thing the design did not anticipate, and it is the
 raw-id rung meeting `media_items`' `REFUSE`.** The 6 titles carrying neither
 provider id hold **304 `media_items` links**, so a *correctly rebuilt* catalog
