@@ -55,15 +55,29 @@ directory) — which is the only thing the hex convention ever bought (Alembic
 orders by `down_revision` and never cared). `m08a` (`curated_rows` +
 `llm_calls`) is the first and `m08b` (`genome_tags`, the genome tag
 vocabulary) shipped 2026-08-07; the rule for the next milestone is now
-mechanical rather than a decision: `m09a`, then `m10a`, then `m11a`.
+mechanical rather than a decision: `m09a`, then `m10a`.
 
 **The rule held — both predictions landed — and a rule is not a ledger, so
-here is the chain as it stands on 2026-08-25**: `m08a`, `m08b`, `m09a`,
+here is the chain as it stands on 2026-08-26**: `m08a`, `m08b`, `m09a`,
 `m09c` (`images`' natural key — **`m09b` was never minted** and is still the
 unallocated spare E4's index request would take), `m09d`, `m09e`, `m09f`,
-`m10a`, `m10b`. Seven of those nine landed after the sentence above was
+`m10a`, `m10b`. **Head is `m10b`**, pinned as a literal at
+`tests/unit/test_db_migration_status.py`, which is the thing to read rather
+than this paragraph. Seven of those nine landed after the sentence above was
 written and none of them extended it, which is why the list is separate from
 the rule now: the rule says what to mint next, the list says what exists.
+
+🔴 **The commit that added that list also appended *"then `m11a`"* to the
+rule above, and no such revision exists.** Removed 2026-08-26, and recorded
+here rather than quietly reverted, because of what it was: an invented fact
+in the one entry whose entire subject is a fact going stale, added by the
+commit that was correcting the staleness. It also falsified both sentences it
+sat beside in the same edit — *"both predictions landed"* over three
+predictions, one unlanded, and *"none of them extended it"* over an edit that
+just had. **A forward-looking rule is not a place to write a revision id**:
+`m11a` is what the next milestone should be *called*, and the only honest
+statement of what exists is the list, checkable against the versions
+directory and against `code_head_revision()`.
 
 **M9 took the convention and shipped one revision where a draft plan wanted
 seven, and the reason generalises.** `m09a` (`images`, `search_queries`,

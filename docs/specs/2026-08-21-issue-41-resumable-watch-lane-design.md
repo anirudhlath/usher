@@ -194,7 +194,7 @@ await self._commit()
 
 ## Honest caveats
 
-- **Resumable ≠ short.** The first full-history walk is still ~5,600 pages; what
+- **Resumable ≠ short.** The first full-history walk is still ~5,688 pages; what
   changes is that a transient failure costs one page, so it converges instead of
   restarting.
 - **Deletion mid-walk shifts `StartIndex`.** A shifted item may be skipped *this

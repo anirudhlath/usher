@@ -14,7 +14,8 @@ blockquote spelling the corrected path, and **re-planting the defect then
 satisfied the check on the defect's behalf**. A documentation check that reads
 prose can be answered by prose written to explain the fix.
 
-`docs/plans/progress.md` is 3,000 lines and names a plan file in **five** prose
+`docs/plans/progress.md` is 3,085 lines (2026-08-26; it grows) and names a plan
+file in **five** prose
 headings of the form `## M8 plan: docs/plans/2026-08-06-m8-curation.md` (M2, M3,
 M4, M5, M8), plus M1's `Plan file:` line and M2's fixture-leak note -- seven
 lines of prose in all. That is this document's habit, not an accident, so the

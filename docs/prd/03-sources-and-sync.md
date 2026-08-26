@@ -441,8 +441,9 @@ what changed and then sweep, which is exactly the combination ADR-0015 exists
 to make unreachable. (`watch_state` is a third lane with its own cursor: it
 walks a different method under a different upstream filter.)
 
-✅ **That third lane's walk is resumable, and until 2026-08-25 it had never
-once completed.** Its cursor is the `started_at` of the newest *completed*
+🔶 **That third lane's walk is resumable as of 2026-08-25, and has still
+never once completed** — the mechanism landed, the walk has not been run.
+Its cursor is the `started_at` of the newest *completed*
 watch-state run, so a deployment that has never finished one has no `since`
 and walks the whole library — 1,137,538 items when #41 was filed, ~5,688
 pages, about eleven hours. Any single transient failure in it recorded
@@ -458,7 +459,13 @@ and the next attempt reclaims that same row — its id, its `cursor_at` and
 its `started_at`, so the eventual cursor still covers everything saved since
 the logical walk *began* — and resumes there. A failure costs the page in
 flight rather than the walk. It is not a shorter walk, it is a finishable
-one. The item lanes are unchanged and leave `position` at 0.
+one — and it is 🔶 **finishable rather than finished**: the measured
+deployment has still completed no `watch_state` run, so the `since` cursor
+this paragraph opens with is still `None` and the first real walk is owed.
+Running it is the operator's step (`POST /admin/sources/{id}/sync`, or
+`usher sync`) — nothing schedules or re-enqueues one — and the branch's own
+review measured convergence at **3–10 attempts**. The item lanes are unchanged and leave
+`position` at 0.
 [ADR-0042](decisions/0042-the-watch-lane-resumes-from-a-startindex-checkpoint.md)
 carries the argument, including why the checkpoint is a page position rather
 than a `since` timestamp, and the two rules that make one row safe for two

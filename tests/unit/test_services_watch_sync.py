@@ -403,14 +403,30 @@ async def test_states_are_resolved_once_per_batch_rather_than_once_per_state(
     assert fixture.media_items.calls == 1, fixture.media_items.calls
 
 
-async def test_every_merge_carries_the_runs_own_start_instant(fixture: _Fixture) -> None:
-    """`observed_at = run.started_at`, not `now()`, and the difference is
-    PRD 03's conflict rule rather than tidiness. A walk of 1,126,674 items
-    takes hours; a client that sets a resume position while it is running
-    knows more than the walk does, and `observed_at` is the only thing that
-    says so. A per-batch `now()` creeps forward as the walk goes and
-    silently starts winning those races -- and every stored value still
-    looks plausible afterwards."""
+async def test_every_merge_in_one_walk_carries_one_instant_not_a_per_batch_now(
+    fixture: _Fixture,
+) -> None:
+    """**One instant for the whole walk, never `now()` per batch**, and the
+    difference is PRD 03's conflict rule rather than tidiness. A walk of
+    1,126,674 items takes hours; a client that sets a resume position while
+    it is running knows more than the walk does, and `observed_at` is the
+    only thing that says so. A per-batch `now()` creeps forward as the walk
+    goes and silently starts winning those races -- and every stored value
+    still looks plausible afterwards.
+
+    ⚠️ **Renamed 2026-08-26, because the rule it was named for is one this
+    branch reversed.** It was
+    `test_every_merge_carries_the_runs_own_start_instant`, and it argued
+    `observed_at = run.started_at`. ADR-0042 made those two different
+    quantities: a reclaimed run's `started_at` can be days old and is the
+    *cursor's* business, while a merge carries the instant **this attempt**
+    began. This case still passes and still has teeth because a fresh run's
+    `attempt_started` *is* its `started_at` -- which is exactly why the old
+    name was dangerous, being the thing a future author greps for and finds
+    apparently-passing evidence of a retracted rule. The half it does not
+    cover, the resumed one, is
+    `test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs`.
+    """
     seen: list[datetime] = []
     original = fixture.watch_states.merge_from_source
 
@@ -426,6 +442,9 @@ async def test_every_merge_carries_the_runs_own_start_instant(fixture: _Fixture)
             SourceWatchState(external_id=f"movie-{index}", position_seconds=1, played=False)
         )
     run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert len(set(seen)) == 1, f"three batches, three different instants: {seen}"
+    # Equal to `started_at` *here* only because this is a fresh run, where the
+    # attempt's instant and the row's are the same value. See the docstring.
     assert seen == [run.started_at] * 5
 
 
@@ -1185,7 +1204,8 @@ async def test_a_failed_walk_is_resumed_from_the_position_it_committed(
         "`since` covers everything saved since the logical walk began"
     )
     assert fixture_batched.adapter.resumed_from == [0, 2], (
-        "the second attempt asked page one again instead of resuming"
+        "the second attempt walked from page one: either it minted a fresh run beside "
+        "the failed one, or it reclaimed the row and ignored its `position`"
     )
 
 
@@ -1226,9 +1246,19 @@ async def test_a_failed_walk_keeps_the_position_it_reached(
     fixture_batched: _Fixture,
 ) -> None:
     """`_Progress`' reason, extended to the resume point: a failure handler
-    holding the pre-walk run would write `position = 0` over a checkpoint
-    that recorded two, and the next attempt would restart from the top --
-    which is the #41 loop with extra steps.
+    holding the pre-walk run reports `position = 0` for an attempt that
+    committed two.
+
+    ⚠️ **What this case can still catch narrowed while the branch was in
+    review, and the assertions below say which half is which.** It was
+    written when a regressing `save` would have pulled the *stored*
+    checkpoint back to zero and sent the next attempt to page one -- the #41
+    loop with extra steps. Task 4's non-destructive `save` makes that
+    unreachable: `position` merges as `GREATEST` on both arms, so the row
+    keeps its 2 whatever a failed attempt hands it. The defect is now visible
+    only on the run the service **returns**, which is asserted first; the
+    durable read after it is a different claim (the per-batch checkpoint
+    reached the repository at all, and the two agree).
     """
     for index in range(6):
         await fixture_batched.given_matched(f"movie-{index}")
@@ -1239,10 +1269,20 @@ async def test_a_failed_walk_keeps_the_position_it_reached(
     )
 
     assert run.status is SyncRunStatus.FAILED
-    assert run.position == 2
+    # **This is the line that catches the regression**, and the durable read
+    # below no longer is. `SyncRunRepository.save` became non-destructive
+    # while this branch was in review -- `position` merges as
+    # `GREATEST(stored, incoming)` on both arms -- so a failure handler
+    # writing 0 over a checkpoint of 2 is refused by the repository and the
+    # row still reads 2. The in-memory run is where the defect is visible.
+    assert run.position == 2, (
+        "the failure handler evolved its pre-walk binding, so the run this attempt "
+        "reports has lost the page it committed"
+    )
     stored = await fixture_batched.runs.get(run.id)
     assert stored is not None and stored.position == 2, (
-        "the durable checkpoint regressed, so the next attempt restarts from the top"
+        "the run the service returned and the row it left behind disagree: the "
+        "per-batch checkpoint never reached the repository"
     )
 
 
@@ -1487,9 +1527,11 @@ async def test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs(
     watermark motionless.
 
     One instant per attempt rather than per batch, which is the property
-    `test_every_merge_carries_the_runs_own_start_instant` states for a first
-    attempt: a walk of 1.14M items takes hours, and a creeping `now()` starts
-    winning races against clients who know more than it does.
+    `test_every_merge_in_one_walk_carries_one_instant_not_a_per_batch_now`
+    states for a first attempt: a walk of 1.14M items takes hours, and a
+    creeping `now()` starts winning races against clients who know more than
+    it does. That case cannot say *which* instant, because on a fresh run the
+    attempt's and the row's are one value; this one is where they differ.
     """
     seen: list[datetime] = []
     original = fixture_batched.watch_states.merge_from_source

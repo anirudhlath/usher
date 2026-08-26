@@ -41,10 +41,21 @@ Integration tests need Docker (`testcontainers`, `pgvector/pgvector:pg17`).
 **Two repo rules that bite on this change:**
 - **Domain models are frozen.** Use `.evolve(**changes)`, never
   `model_copy(update=...)`.
-- **`position` is a Postgres keyword.** SQLAlchemy quotes the column
+- ~~**`position` is a Postgres keyword.** SQLAlchemy quotes the column
   automatically, but a `CheckConstraint`'s raw SQL text does not go through that
-  quoting — write `'"position" >= 0'`. `curated_rows` already does exactly this
-  (`src/usher/db/models/curation.py:352`).
+  quoting — write `'"position" >= 0'`.~~ 🔴 **Measured false while implementing
+  this plan; struck through rather than deleted because other groups transcribe
+  these rules verbatim.** `position` is `catcode = 'C'` in `pg_get_keywords()`
+  (unreserved), it is **absent** from the postgresql dialect's `RESERVED_WORDS`
+  so SQLAlchemy emits it bare in DDL and DML alike, and an unquoted CHECK body
+  migrates cleanly. **Still write `'"position" >= 0'`**, for the narrower reason
+  the shipped code gives: `pg_get_constraintdef` reprints the identifier quoted,
+  so the model-side body stays textually aligned with the database-side one —
+  and even that is cosmetic, since `test_migrations.py`'s
+  `_normalise_check_body` strips quotes before comparing.
+  `curated_rows` sets the same precedent
+  (`src/usher/db/models/curation.py:358`), and the one written-up copy of the
+  measurement is on `SyncRunRow.position` in `src/usher/db/models/sync.py`.
 
 ## File structure
 
@@ -82,9 +93,14 @@ Append to `tests/unit/test_domain_sync.py`:
 ```python
 def test_a_run_starts_at_position_zero_and_refuses_a_negative_one() -> None:
     """`position` is the StartIndex a resumed walk starts from, and it is a
-    separate field from `items_seen` on purpose: the port permits an adapter
-    to yield the same item twice, under which `items_seen` outruns the page
-    position, and resuming from the counter would then skip.
+    separate field from `items_seen` on purpose.
+
+    NOT for the duplicate-yield reason this plan first gave (measured false
+    2026-08-26): `_walk` seeds its counter at the resume point and `_flush`
+    moves both columns by the same batch, so a duplicate moves the two
+    identically. The real divergence is a reclaimed row whose columns already
+    disagree -- `m10b`'s backfill guarantees `position = 0` beside a
+    six-figure `items_seen` on the rows #41 left `RUNNING`.
     """
     one = SyncRun(source_id=new_id(), kind=SyncRunKind.WATCH_STATE)
     assert one.position == 0
@@ -128,10 +144,15 @@ class SyncRun(DomainModel):
 
     `position` is the walk's own resume point: the `start_index` a resumed
     walk asks the adapter for, advanced per **committed** batch. It is
-    deliberately not `items_seen`. The two coincide on an adapter that
-    yields each item once, and `SourceAdapter.watch_state` explicitly
-    permits duplicates -- under which `items_seen` outruns the page position
-    and resuming from the counter would skip whatever the difference is.
+    deliberately not `items_seen` -- and **not** for the duplicate-yield
+    reason this plan first gave, which was measured false on 2026-08-26.
+    `_walk` seeds its counter *at* the resume point and `_flush` moves both
+    columns by the same batch, so `position - items_seen` is fixed for the
+    life of a run. What genuinely separates them is a **reclaimed** row whose
+    two columns already disagree, which `m10b`'s `NOT NULL DEFAULT 0`
+    backfill guarantees on the rows #41 left `RUNNING`: `position = 0` beside
+    a six-figure `items_seen`.
+
     Only the `WATCH_STATE` lane advances it (ADR-0042); the item lanes leave
     it at 0 and restart from their cursor.
     """
@@ -159,12 +180,22 @@ In `src/usher/db/models/sync.py`, add the column after `cursor_at`:
 
 ```python
     cursor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The walk's resume point (ADR-0042). Quoted in the CHECK below because
-    # `position` is a Postgres keyword; SQLAlchemy quotes the column itself,
-    # and a constraint's raw SQL text does not go through that quoting --
-    # `curated_rows."position"` sets the same precedent.
+    # The walk's resume point (ADR-0042): a **page offset**, not an ordering
+    # key. The CHECK below writes it quoted, and the reason is narrower than
+    # it looks: `position` is an unreserved keyword, SQLAlchemy does *not*
+    # quote it, and the unquoted body works. What quoting buys is that
+    # `pg_get_constraintdef` reprints the identifier quoted, so the
+    # model-side body stays aligned with the database-side one.
     position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 ```
+
+> 🔴 **That comment is the corrected one.** The version this plan shipped with
+> said `position` is a Postgres keyword that SQLAlchemy quotes for you and that
+> a `CheckConstraint`'s raw SQL bypasses the quoting. All three clauses were
+> measured false during Task 1 — see the struck-through rule near the top of
+> this file. The snippet is corrected in place rather than annotated because it
+> is *code to paste*, and an annotation beside a code block is the one form of
+> correction a transcriber reliably drops.
 
 and the constraint into `__table_args__`, after the `items_retracted` one:
 
@@ -240,7 +271,7 @@ def downgrade() -> None:
 Run: `uv run pytest tests/integration/test_migrations.py -v`
 Expected: the `-1`-from-head half FAILS. This is the design, not a defect: `-1`
 now lands on `m10a`'s applied state, so `m10a`'s own assertions (which had teeth)
-are false there. `.claude/rules/db-and-sql.md` records this as the eleventh
+are false there. `.claude/rules/db-and-sql.md` records this as the twelfth
 landing in a row to do it.
 
 Repair it: in `tests/integration/test_migrations.py`, move `m10a`'s displaced
@@ -1297,11 +1328,46 @@ git commit -m "docs: the watch lane resumes, and three docstrings said otherwise
 ## After the plan
 
 **Re-enabling the worker is the operator's separate step, not part of this branch.**
-Once this merges and deploys, `USHER_WORKER_ENABLED=false` in `~/code/usher/.env`
-can be removed and the stack restarted; the queued `bootstrap|all`, `bootstrap|imdb`
-and the `match` backlog drain then. Watch the first watch-lane run: it is still the
-whole library, and what has changed is that it converges. `sync_runs.position`
-climbing across attempts is the evidence it is working.
+
+⚠️ **Corrected 2026-08-26 — the three sentences this section carried would not
+have worked as written.** Each is kept below with what it should have said.
+
+- ~~*"`USHER_WORKER_ENABLED=false` in `~/code/usher/.env` can be removed and the
+  stack restarted."*~~ **Only under a single-container topology, and this
+  deployment's is not stated.** `README.md`'s lane-split section and
+  [08](../prd/08-operations.md) both document `USHER_WORKER_ENABLED=false` as
+  the **normal** setting for the API container when `usher work` runs in a
+  second one — `USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` are
+  per **process**, so removing it there gives two workers spending both budgets
+  twice against per-client limits. Read the compose file first: if a second
+  container runs `usher work`, the setting stays and the thing to restart is
+  **that** container.
+- ~~*"Watch the first watch-lane run"*~~ — **nothing triggers one.**
+  `JobKind.SYNC` has exactly one enqueue site in `src/`
+  (`POST /admin/sources/{id}/sync`), there is no scheduler anywhere in this
+  project (M8's boundary call 8, M9's call 6), and `watch.sync` swallows
+  `UsherPortError` — so a failed walk still **completes** its job and the row is
+  deleted. Nothing re-enqueues. The trigger is
+  `POST /admin/sources/{id}/sync` or `usher sync`, issued once per attempt, and
+  **3–10 attempts is what converging looks like** on the measured household.
+- ~~*"`sync_runs.position` climbing across attempts is the evidence."*~~ **No
+  command renders that column.** `usher sync-status` and `usher sync` both print
+  `seen`/`matched`/`unmatched`/`error` and no position; there is no admin HTTP
+  surface for sync-run counters. The two readouts that exist are the
+  `usher.resumed_from` span attribute and raw SQL:
+
+  ```sql
+  SELECT id, status, position, items_seen, started_at, error
+  FROM sync_runs
+  WHERE kind = 'watch_state'
+  ORDER BY started_at DESC
+  LIMIT 5;
+  ```
+
+  `position` climbing across attempts on **one** id — the id is the point, since
+  the row is reclaimed — is the evidence. ⚠️ `items_seen` on that row is
+  cumulative across attempts and over-reports by whatever `m10b` backfilled
+  (ADR-0042's Consequences); `position` is the number to read.
 
 **Do not delete `.env`'s lane-split comment** — rewrite it to say the loop is fixed
 and reference ADR-0042, so the next reader knows the setting was deliberate and why

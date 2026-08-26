@@ -515,8 +515,9 @@ async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str
     the whole unit suite and all eleven cases in this file green.
 
     It is not a hypothetical row. Issue #41 is *"this lane has failed
-    repeatedly"*, so `sync_runs` on any deployment reaching this revision is
-    non-empty by construction, and without the default the migration aborts
+    repeatedly"* — three rows left `running` and aged 7-11 h, plus every
+    attempt before them — so `sync_runs` on any deployment reaching this
+    revision is non-empty by construction, and without the default it aborts
     with `column "position" of relation "sync_runs" contains null values` --
     the deployment cannot roll forward at all.
 
@@ -558,9 +559,15 @@ async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str
                         "device": "unused",
                     },
                 )
-                # `failed`, which is the state issue #41 describes: the walk
-                # this column exists to resume is one that has only ever
-                # ended this way.
+                # Any pre-existing row exercises the backfill; `failed` is
+                # chosen because it is a *terminal* row, so the assertion
+                # below cannot be confused with anything the resume logic
+                # does. ⚠️ It is **not** the shape #41 observed: that
+                # deployment's three stuck rows are `running`, aged 7-11 h,
+                # which is what a worker killed mid-walk leaves. The column
+                # lands identically on both, and the service-level case for
+                # the `running` shape is
+                # `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned`.
                 await conn.execute(
                     text(
                         "INSERT INTO sync_runs (id, source_id, kind, status) "

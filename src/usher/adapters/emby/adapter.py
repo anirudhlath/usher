@@ -562,12 +562,31 @@ class EmbyAdapter(SourceAdapter):
         `get_watch_state` below is the authoritative read, at one request
         per item.
 
-        `start_index` resumes an interrupted walk at that page offset --
-        Emby offsets the result it has already filtered, so it is an offset
-        into what this walk yields, which is what the port promises. Sound
-        here because the *order* is `DateCreated`, which no edit moves, so
-        the prefix already walked does not reorder underneath a resumed
-        attempt. Two things do shift it, both bounded to one run:
+        `start_index` resumes an interrupted walk at that page offset. Emby
+        offsets the result it has already filtered, so it is an offset into
+        the *server's* filtered set -- which **approximates**, and does not
+        equal, the stream this method yields.
+
+        **The gap is `_watch_state`'s own drop, and it is a real divergence
+        from the port's number** (measured 2026-08-26). `to_watch_state`
+        returns `None` for a payload carrying no `UserData` -- the field was
+        not requested, or the item type has none -- and this method drops
+        those rather than yielding them. `StartIndex` cannot see a
+        client-side drop, so after a walk that dropped *d* payloads the
+        run's `position` is *d* short of the upstream offset it reached, and
+        the next attempt asks for a page it has partly walked. **Direction
+        is the safe one**: the resumed walk starts *earlier* than it left
+        off and re-yields up to *d* already-merged records, which the
+        idempotent upsert absorbs; it never starts later, so nothing is
+        skipped. The lag is per-attempt rather than cumulative -- each
+        attempt checkpoints the records *it* yielded, so *d* does not
+        compound across attempts.
+        `test_a_resumed_watch_state_walk_re_yields_what_it_dropped` pins
+        both halves.
+
+        Sound here because the *order* is `DateCreated`, which no edit
+        moves, so the prefix already walked does not reorder underneath a
+        resumed attempt. Two things do shift it, both bounded to one run:
 
         - A *deletion* shifts the prefix by one and costs the shifted item
           this run, which the merge's idempotent upsert picks up on the next.

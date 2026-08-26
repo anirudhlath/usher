@@ -549,6 +549,67 @@ async def test_a_watch_state_walk_resumes_from_the_start_index_it_is_given() -> 
     assert requested == ["50000"], "the walk asked for page one instead of resuming"
 
 
+async def test_a_resumed_watch_state_walk_re_yields_what_it_dropped() -> None:
+    """**The port's `start_index` number and Emby's `StartIndex` are not the
+    same quantity, and this is the case that says by how much.**
+
+    `watch_state` yields a record per payload `to_watch_state` can read, and
+    drops the ones carrying no `UserData`. `StartIndex` is an offset into the
+    server's *filtered* set and cannot see a client-side drop -- so a walk
+    that yielded 4 records out of 6 entries checkpoints `position = 4`, and
+    asking for `start_index=4` re-serves entries 4 and 5, both of which the
+    first walk already yielded and merged.
+
+    Six entries, two without `UserData`, so the divergence is 2 rather than
+    1: a one-payload drop is the kind of margin an off-by-one repair would
+    make disappear for the wrong reason.
+
+    **The direction is the entire safety argument.** The resumed walk lands
+    *early* and re-yields; it never lands late, so no record is skipped, and
+    every write on this lane is an idempotent upsert. The port's docstring
+    promises exactly that bound -- at-or-before, never after -- rather than
+    the exact alignment it claimed until 2026-08-26.
+
+    It is also **per-attempt, not cumulative**: the checkpoint counts the
+    records *this* attempt yielded, so the lag is one attempt's drops and
+    does not compound over the 3-10 attempts a full walk is expected to take.
+    """
+    entries = [
+        {"Id": f"movie-{index}", "Type": "Movie", "Name": f"m{index}"}
+        | ({} if index in (1, 3) else {"UserData": {"PlaybackPositionTicks": 0, "Played": False}})
+        for index in range(6)
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        start = int(request.url.params["StartIndex"])
+        return httpx.Response(
+            200, json={"Items": entries[start:], "TotalRecordCount": len(entries)}
+        )
+
+    adapter = _on(handler)
+    try:
+        first = [one async for one in adapter.watch_state()]
+        resumed = [one async for one in adapter.watch_state(start_index=len(first))]
+    finally:
+        await adapter.aclose()
+
+    assert [one.external_id for one in first] == ["movie-0", "movie-2", "movie-4", "movie-5"], (
+        "the premise: the two entries with no UserData are dropped, not yielded as zero states"
+    )
+    # The promise the port made until 2026-08-26 was `[]` here -- the walk
+    # yielded 4 and is resuming at 4, so an exact offset into what it yields
+    # would be exhausted. It is not: `StartIndex=4` is an offset into the
+    # six the server holds.
+    assert [one.external_id for one in resumed] == ["movie-4", "movie-5"]
+    assert set(one.external_id for one in resumed) <= set(one.external_id for one in first), (
+        "the resume landed *past* its checkpoint and skipped a record, which is the "
+        "one direction the idempotent upsert cannot absorb"
+    )
+
+
 async def test_an_item_walk_always_starts_at_the_beginning() -> None:
     """`list_items` shares `_walk` and must not inherit the watch lane's
     resume point: the item lanes have a working cursor and restart from it.

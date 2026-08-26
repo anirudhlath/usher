@@ -92,9 +92,20 @@ def test_a_run_rejects_an_unknown_field() -> None:
 
 def test_a_run_starts_at_position_zero_and_refuses_a_negative_one() -> None:
     """`position` is the StartIndex a resumed walk starts from, and it is a
-    separate field from `items_seen` on purpose: the port permits an adapter
-    to yield the same item twice, under which `items_seen` outruns the page
-    position, and resuming from the counter would then skip.
+    separate field from `items_seen` on purpose.
+
+    ⚠️ **Not for the duplicate-yield reason this docstring gave until
+    2026-08-26**, which is not operative: `_walk` seeds its counter at the
+    resume point and `_flush` moves both columns by the same batch, so
+    `position - items_seen` is fixed for the life of a run and a duplicated
+    yield moves the two identically. The divergence that is real comes from
+    a **reclaimed row whose two columns already disagree**, which `m10b`'s
+    `NOT NULL DEFAULT 0` backfill guarantees on the rows #41 left `RUNNING`:
+    `position = 0` beside a six-figure `items_seen`. Resuming such a row from
+    its counter opens the stream six figures into pages the run never walked.
+    (The 51,000 below is a plausible mid-walk offset into a ~1.14M-record
+    stream, chosen rather than measured -- what this case pins is the floor
+    and the refusal, not that number.)
     """
     one = SyncRun(source_id=new_id(), kind=SyncRunKind.WATCH_STATE)
     assert one.position == 0

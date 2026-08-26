@@ -192,7 +192,7 @@ real upstream this project talks to has ever produced the header that feeds it.
   two lanes' cursors are independent by design (`MinDateLastSaved` against
   `MinDateLastSavedForUser`, and `latest_completed_cursor` is scoped by
   kind), and on the measured deployment they were in exactly the state that
-  makes this bite: **13 completed item-lane runs against zero completed
+  makes this bite: **13 completed delta runs against zero completed
   `watch_state` runs**. A source in that state passes the guard, closes a
   real delta gap in seconds, and then walks the whole library on the *watch*
   half — ~1.14M items, ~5,688 pages, about eleven hours — issued by

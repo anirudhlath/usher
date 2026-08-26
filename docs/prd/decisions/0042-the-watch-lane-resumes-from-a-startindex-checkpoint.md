@@ -55,7 +55,7 @@ parameter, decoupled from `list_items`.
 
 - **The first full-history walk becomes completable.** A transient failure costs
   one page, not the whole run, so the walk converges. It is not *shorter* —
-  ~5,600 pages still — only resumable.
+  ~5,688 pages still — only resumable.
 - **`sync_runs` becomes a per-source checkpoint for the `WATCH_STATE` kind**,
   where it was pure append-only history. The item lanes are unchanged and their
   rows leave `position = 0`; `reconcile.py`'s "no mid-walk cursor to resume
@@ -125,6 +125,24 @@ parameter, decoupled from `list_items`.
   and holds the taste watermark behind the walk. The row keeps the old
   instant because that is the next delta's `since` and it must cover
   everything saved since the logical walk began.
+- ⚠️ **`items_seen` over-reports on a reclaimed row, by whatever the backfill
+  invented, and PRD 10's dashboard 3 plots that column.** Reuse-in-place keeps
+  the row's accumulated counters, and `m10b` gave the pre-existing rows
+  `position = 0` beside an `items_seen` they had genuinely earned — so the
+  first resumed walk counts those states a second time. Measured on real
+  Postgres at the deployment's exact shape (`RUNNING`, `items_seen = 412000`,
+  `position = 0`): reclaim plus one 1,000-state batch reads
+  `(position = 1000, items_seen = 413000)`, and a completed 1,137,538-item
+  walk on that row would report **1,549,538** — **~36% high**. It is a
+  reporting defect only: `position` is the checkpoint and is unaffected, and
+  the merges are idempotent upserts. `sync`'s own failure log already handles
+  it (`attempt = run.items_seen - inherited`, printed beside `resumed_from`);
+  the **column** does not, and an operator reading the dashboard has no other
+  readout. Not repaired here, because zeroing the counters on reclaim would
+  make a resumed run's row unable to say how much of the *logical walk* is
+  done — which is the question the reuse is for. It decays on its own: only
+  rows that predate `m10b` carry the mismatch, so every walk that completes
+  after this retires one.
 - **No new setting**, unlike S5. The full walk is now completable, so it runs
   whenever the worker is on; re-enabling `USHER_WORKER_ENABLED` is the operator's
   step after this lands, at which point the queued jobs also drain.
