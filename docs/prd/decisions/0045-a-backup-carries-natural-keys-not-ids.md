@@ -1,4 +1,4 @@
-# ADR-0044 — A backup carries natural keys, not ids, and a raw id is a check rather than a trust
+# ADR-0045 — A backup carries natural keys, not ids, and a raw id is a check rather than a trust
 
 **Status:** Accepted — the identity layer M10's Group K restore
 ([08](../08-operations.md)) resolves its references through. Extends
@@ -17,6 +17,14 @@ record above `0041`. `decisions/README.md` carries the account of why "the
 next free number computed against your own tree" is the mechanism that keeps
 failing.
 
+⚠️ **And it moved anyway, to `0045` on 2026-08-26 — checking every branch is
+not a reservation either.** Nothing collided with *this* record: `main` minted
+its own `0042` for issue #41's watch lane, the branch's `0042` moved to `0043`
+to make room, and this one shifted one place as the tail of that cascade. Worth
+stating because the paragraph above reads like a procedure that prevents a
+move, and the honest version is that it prevents a *collision* and cannot
+prevent a *displacement*.
+
 ## Context
 
 `db/repositories/bulk.py`'s `upsert_titles` mints `new_id()` for **every row
@@ -32,7 +40,7 @@ collision with `ON CONFLICT (imdb_id) WHERE imdb_id IS NOT NULL DO UPDATE`
   purpose: *"Every entity has a Usher-owned UUIDv7 primary key … never
   identity"*.
 
-[ADR-0043](0043-a-bounded-column-is-a-declared-type-that-refuses.md)'s
+[ADR-0044](0044-a-bounded-column-is-a-declared-type-that-refuses.md)'s
 neighbour, `usher.db.backup_manifest`, decided **which tables** an artifact
 carries. Five columns in the set it calls precious name a title or an episode
 **by id**, and none of those ids survives a bootstrap boundary. Read off

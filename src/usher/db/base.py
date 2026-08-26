@@ -127,7 +127,7 @@ def build_engine(
     # violation (`23514`), a numeric overflow (`22003`) and a trigger's
     # `RAISE EXCEPTION` (`P0001`), `is_row_refusal()` and `constraint_name()`
     # answer **identically** with it on and off -- they read structured fields
-    # off `exc.orig.__cause__`, never the rendered string, so ADR-0043's whole
+    # off `exc.orig.__cause__`, never the rendered string, so ADR-0044's whole
     # translation ledger is untouched. What is lost is the `[parameters: ...]`
     # line alone: the exception type, the SQLSTATE, the constraint name, the
     # full `[SQL: ...]` text with its `$1` placeholders and Postgres's own

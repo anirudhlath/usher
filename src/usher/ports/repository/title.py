@@ -334,7 +334,7 @@ class TitleRepository(ABC):
         mints `new_id()` for every row of every batch on the way into the
         staging table, so two catalogs built from the same
         `title.basics.tsv.gz` agree on every natural key and on no id at all
-        (ADR-0003, ADR-0044).
+        (ADR-0003, ADR-0045).
 
         **The ladder is `imdb_id`, then `(kind, tmdb_id)`, then the raw id**,
         first hit wins, and both arms spell it in that order. Coverage on the

@@ -107,7 +107,7 @@ async def test_hiding_the_parameters_costs_nothing_the_translation_reads(
     **identically**. They read `exc.orig.__cause__`'s SQLSTATE and constraint
     fields (`db/repositories/_errors.py`), which are structured attributes on
     the asyncpg exception and not parsed out of the rendered string — so
-    `ADR-0043`'s whole ledger is untouched by this change. Asserted rather than
+    `ADR-0044`'s whole ledger is untouched by this change. Asserted rather than
     argued, because "it only affects the message" is exactly the kind of claim
     this repository has been wrong about.
 

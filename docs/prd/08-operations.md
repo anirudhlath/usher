@@ -836,7 +836,7 @@ target's is `NULL`.
 
 ✅ **What those precious rows carry instead of a title id is now decided and
 built** — `src/usher/db/backup_identity.py`, and
-[ADR-0044](decisions/0044-a-backup-carries-natural-keys-not-ids.md) is the
+[ADR-0045](decisions/0045-a-backup-carries-natural-keys-not-ids.md) is the
 argument. Five columns in the precious set name a title or an episode **by
 id** and none of those ids survives a bootstrap boundary: `upsert_titles`
 mints `new_id()` per staged row, so two catalogs built from the same IMDb dump

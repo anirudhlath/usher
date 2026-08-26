@@ -1988,7 +1988,7 @@ class TitleRepositoryNaturalKeyContract:
         """The whole point: the artifact's id is not the answer, the
         target's is. `db/repositories/bulk.py:611` mints a fresh UUIDv7 per
         staged row, so two catalogs built from one dump agree on `imdb_id`
-        and on nothing else (ADR-0003, ADR-0044).
+        and on nothing else (ADR-0003, ADR-0045).
         """
         held = Title(kind=TitleKind.MOVIE, name="Held", sort_name="Held", imdb_id="tt99000101")
         await repo.add(held)

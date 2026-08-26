@@ -149,7 +149,7 @@ class EpisodeRepository(ABC):
 
         `resolve_episodes` one method up answers the same question given a
         `title_id`; this one is what a *backup artifact* can ask, because an
-        artifact holds no id the target agrees with (ADR-0003, ADR-0044).
+        artifact holds no id the target agrees with (ADR-0003, ADR-0045).
         The series is resolved by `TitleReference`'s own ladder -- `imdb_id`,
         then `(kind, tmdb_id)`, then the raw id, first hit wins -- and the
         two numbers are matched against `uq_episodes_title_season_episode`.

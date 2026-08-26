@@ -924,7 +924,7 @@ another database would write ids no row there holds — and because there is no
 foreign key, **nothing would fail**: the shelf renders with dead cards and the
 database cannot tell. That makes this the one precious-looking table where a
 naive carry is *silent*, which is why
-[ADR-0044](decisions/0044-a-backup-carries-natural-keys-not-ids.md) never
+[ADR-0045](decisions/0045-a-backup-carries-natural-keys-not-ids.md) never
 carries it and `usher.db.backup_manifest` classifies it rebuildable. One
 completion regenerates it; remapping the ids through the same resolver every
 other reference uses would restore a *rendering* rather than the judgement,

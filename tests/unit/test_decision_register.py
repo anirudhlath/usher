@@ -97,6 +97,21 @@ def test_no_two_adrs_claim_the_same_number() -> None:
     2026-08-21. Anything that actually fixes this has to make the number
     unguessable-in-parallel or reserved per branch, and that is not decided
     here.
+
+    **A fourth collision, 2026-08-26, at 0042 — and this case is the only thing
+    that reported it.** `main` merged issue #41's
+    `0042-the-watch-lane-resumes-from-a-startindex-checkpoint.md` while
+    `milestone/m10-hardening` held `0042-the-outbound-limiter-...`; two
+    filenames again, no git conflict again, both files in the tree again. It
+    resolved as a *cascade* rather than a swap — `main`'s highest number is
+    0042, so the branch's three records each moved up one, 0042 → 0043 → 0044
+    → 0045, highest-first so that no two files claimed one number on disk at
+    any point. The numbers taken were checked free on **both** sides first,
+    which is the step the 0039 → 0040 repair skipped.
+
+    Four collisions in seven days, all on the same allocation rule, is the
+    argument the paragraph above makes; what this one adds is that the rule
+    survives a renumber *cascade* too, because a cascade still has to guess.
     """
     numbers = [path.name[:4] for path in _DECISIONS.glob("0*.md")]
 

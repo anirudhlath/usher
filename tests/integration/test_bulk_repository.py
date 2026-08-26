@@ -696,11 +696,11 @@ async def test_every_suspendable_index_rebuilds_to_what_the_migration_built(
 
 
 # --------------------------------------------------------------------------
-# ADR-0043's ledger, driven: a value a domain model accepts must not reach an
+# ADR-0044's ledger, driven: a value a domain model accepts must not reach an
 # operator as a raw driver exception.
 # --------------------------------------------------------------------------
 #
-# [ADR-0043](../../docs/prd/decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
+# [ADR-0044](../../docs/prd/decisions/0044-a-bounded-column-is-a-declared-type-that-refuses.md)
 # classifies every bounded column in this schema, and F9 fixes the two buckets
 # below. This is the case that decides whether it did, and it is deliberately
 # written so that it cannot know the answer: **a value a domain model accepts
@@ -883,7 +883,7 @@ async def _refused_image(bed: _Bed, **changes: object) -> None:
 #: own translation, and a statement written here would exercise a second
 #: spelling of the SQL that nothing ships.
 _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
-    # -- exposed at a SQLAlchemy statement (ADR-0043's 20) -------------------
+    # -- exposed at a SQLAlchemy statement (ADR-0044's 20) -------------------
     ("genome_scores", "relevance"): lambda bed: PostgresBulkCatalogRepository(
         bed.session
     ).upsert_genome_vectors(
@@ -906,6 +906,14 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     ("import_runs", "position"): lambda bed: _refused_import_run(bed, position=_OVER_INT32),
     ("import_runs", "rows_seen"): lambda bed: _refused_import_run(bed, rows_seen=_OVER_INT32),
     ("import_runs", "rows_written"): lambda bed: _refused_import_run(bed, rows_written=_OVER_INT32),
+    # `m10b`'s resume checkpoint, in the ledger since issue #41. `ge=0` with no
+    # ceiling against `integer`, this file's standing shape -- and the arm
+    # drives `add` rather than `save` for the reason the header states: the
+    # bucket is worst-case over writers, so one arm per column is what this
+    # parametrisation is, and `add` is the writer that binds the value
+    # unconditionally (`save` binds it through `GREATEST`, which refuses just
+    # the same but says less about why).
+    ("sync_runs", "position"): lambda bed: _refused_sync_run(bed, position=_OVER_INT32),
     ("sync_runs", "items_seen"): lambda bed: _refused_sync_run(bed, items_seen=_OVER_INT32),
     ("sync_runs", "items_matched"): lambda bed: _refused_sync_run(bed, items_matched=_OVER_INT32),
     ("sync_runs", "items_unmatched"): lambda bed: _refused_sync_run(
@@ -943,7 +951,7 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     # `^tt\d{7,8}$`, so the over-long value cannot be constructed there. The
     # bulk loader takes `ports.bulk.ImdbTitle`, whose `imdb_id` is a bare
     # `str`, stages it into `stg_titles.imdb_id text` and meets `varchar(16)`
-    # at the `INSERT ... SELECT`. That gap is ADR-0043's own reason for moving
+    # at the `INSERT ... SELECT`. That gap is ADR-0044's own reason for moving
     # this column out of the `safe` bucket.
     ("titles", "imdb_id"): lambda bed: PostgresBulkCatalogRepository(bed.session).upsert_titles(
         [
@@ -980,7 +988,7 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     ("titles", "content_rating"): lambda bed: _refused_title_update(bed, content_rating="y" * 33),
     ("user_taste", "centroid"): lambda bed: _refused_taste(bed, centroid=(0.1, 0.2, 0.3)),
     ("user_taste", "title_count"): lambda bed: _refused_taste(bed, title_count=_OVER_INT32),
-    # -- already translated: the positive control (ADR-0043's 10) ------------
+    # -- already translated: the positive control (ADR-0044's 10) ------------
     ("curated_rows", "position"): lambda bed: PostgresCuratedRowRepository(
         bed.session
     ).replace_for_user(
@@ -1118,7 +1126,7 @@ async def test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_n
 
 
 # --------------------------------------------------------------------------
-# ADR-0043 scope item 2: the two staging columns with no destination at all
+# ADR-0044 scope item 2: the two staging columns with no destination at all
 # --------------------------------------------------------------------------
 
 

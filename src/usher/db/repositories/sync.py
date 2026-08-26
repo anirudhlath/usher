@@ -163,7 +163,7 @@ class PostgresSyncRunRepository(SyncRunRepository):
                 self._session.add(SyncRunRow(**run.model_dump()))
                 await self._session.flush()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).**
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0044).**
             # `sync_runs` carries four `integer` counters -- `items_seen`, `items_matched`,
             # `items_unmatched`, `items_retracted` -- each fed by a `SyncRun` field bounded `ge=0`
             # and not above. SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto any
@@ -228,7 +228,7 @@ class PostgresSyncRunRepository(SyncRunRepository):
                 if await self._session.get(SyncRunRow, run.id) is None:
                     raise RepositoryNotFound(f"no existing sync run {run.id} to update")
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0043).** The
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0044).** The
             # same four counters as `add`, on the path that writes them at the end of a walk rather
             # than at its start. SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto
             # any classified subclass, so a column refusing a *value* arrives as a bare `DBAPIError`

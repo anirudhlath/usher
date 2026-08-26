@@ -50,9 +50,9 @@ otherwise be lost and re-litigated in six months.
 | [0040](0040-rating-columns-name-their-source.md) | Rating columns name their source (`tmdb_*` / `imdb_*`), IMDb's values re-imported rather than inferred, and the eval frame re-anchored on `imdb_num_votes` | Accepted — corrects PRD 02, 04 and 05; amends 0002's frame and its suggest tiebreak. ⚠️ **One component is deliberately open, not shipped**: the decontamination of the existing `tmdb_*` values, whose pre-registered rule was measured and misses 57,701 of 407,860 rows |
 | [0041](0041-the-eval-schema-is-not-a-migration.md) | The eval schema is applied by the harness, not by alembic | Accepted — dev-only DDL kept out of every deployment, and `alembic heads` kept at one |
 | [0042](0042-the-watch-lane-resumes-from-a-startindex-checkpoint.md) | The watch lane resumes from a `StartIndex` checkpoint (not a `since` cursor), reused in place like `import_runs` | Accepted — fixes #41; makes the cursorless full-history watch walk completable rather than a restart loop, so `USHER_WORKER_ENABLED` can go back on |
-| [0042](0042-the-outbound-limiter-is-per-source-and-spaces-requests.md) | The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling | Accepted — adds the proactive half of PRD 01's rate-limit promise; PRD 03 and 10. **Renumbered twice**: `0039` → `0040` on 2026-08-20, `0040` → `0042` on 2026-08-21, each time because the number had been minted in parallel |
-| [0043](0043-a-bounded-column-is-a-declared-type-that-refuses.md) | A bounded column is a declared type that refuses; the per-column ledger is generated rather than quoted, under three published readings of what closes a value set; M10 fixes the 22 that reach a translatable exception | Accepted — issue #10's scoped decision; corrects PRD 09's carried-debt arithmetic, of which **two of five figures reproduce and three do not**. **Does not re-open M9's boundary call 8**. **Renumbered from `0041` on 2026-08-21** |
-| [0044](0044-a-backup-carries-natural-keys-not-ids.md) | A backup carries natural keys, not ids; an unresolved reference is a named refusal rather than a `None`; and a raw UUID is accepted only when the target already holds it | Accepted — M10's Group K identity layer, on which K4's restore rests. **Minted at `0044` under an explicit authorisation** after checking `main` and all three unmerged remote branches, because the plan that requested it offered `0039` and that number has since been claimed twice |
+| [0043](0043-the-outbound-limiter-is-per-source-and-spaces-requests.md) | The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling | Accepted — adds the proactive half of PRD 01's rate-limit promise; PRD 03 and 10. **Renumbered three times**: `0039` → `0040` on 2026-08-20, `0040` → `0042` on 2026-08-21, `0042` → `0043` on 2026-08-26, each time because the number had been minted in parallel |
+| [0044](0044-a-bounded-column-is-a-declared-type-that-refuses.md) | A bounded column is a declared type that refuses; the per-column ledger is generated rather than quoted, under three published readings of what closes a value set; M10 fixes the 22 that reach a translatable exception | Accepted — issue #10's scoped decision; corrects PRD 09's carried-debt arithmetic, of which **two of five figures reproduce and three do not**. **Does not re-open M9's boundary call 8**. **Renumbered twice**: from `0041` on 2026-08-21, and `0043` → `0044` on 2026-08-26 |
+| [0045](0045-a-backup-carries-natural-keys-not-ids.md) | A backup carries natural keys, not ids; an unresolved reference is a named refusal rather than a `None`; and a raw UUID is accepted only when the target already holds it | Accepted — M10's Group K identity layer, on which K4's restore rests. **Minted at `0044` under an explicit authorisation** after checking `main` and all three unmerged remote branches, because the plan that requested it offered `0039` and that number has since been claimed twice — and **moved to `0045` on 2026-08-26** by the cascade below, without a collision of its own |
 
 **`0039` was assigned twice, then `0040` and `0041` were assigned twice, and
 the branch's records moved every time.** The two 2026-08-20 ADRs were written in
@@ -69,6 +69,31 @@ that caused the collision, so it collided again one day later.** By 2026-08-21
 isolation. The limiter moved a second time, to `0042`, and the bounded column to
 `0043`.
 
+🔴 **And a fourth time, on 2026-08-26, at `0042`.** `main` merged PR #68 (issue
+#41) carrying `0042-the-watch-lane-resumes-from-a-startindex-checkpoint.md`
+while this branch held `0042-the-outbound-limiter-…`. Same shape as every one
+before it: two different filenames, so git resolved no conflict and the merge
+simply kept both. **The three moves this time are a *cascade*, not a
+collision** — `main`'s highest is `0042`, so the branch's three records shift up
+one each, `0042` → `0043` → `0044` → `0045`, and only the first of the three was
+ever duplicated. Done **highest-first** so no two files claim one number on disk
+at any point, and `0043`, `0044` and `0045` were checked free on **both** sides
+before any of them was taken — which is the check the `0039` → `0040` repair
+skipped and is how it walked into `main`'s `0040`.
+
+**Four collisions, and the third one's per-site warning paid out again.** The
+2026-08-21 renumber recorded that a count-delta heuristic misattributes
+citations and named the two files it had caught by reading
+(`src/usher/domain/title.py`, `tests/unit/test_domain_title.py`). It missed two
+more: `scripts/audit_bounded_columns.py` carried `ADR-0040` twice in a comment
+about `m10a` splitting `titles.vote_count` — **main's rating-columns record** —
+and that renumber moved both to `ADR-0042` as if they were the limiter's. They
+are corrected back to `ADR-0040` here, in the same commit as the cascade,
+because a blind `0042` → `0043` would have turned a visibly wrong citation into
+a plausible one (`0043` is the bounded-column record, which that file *is*
+about). **A renumber's residue is found by reading the sites the last renumber
+also had to read, not by re-running its search.**
+
 **The mechanism is the allocation rule and not the guard.** "Take the next free
 number" computed against one tree is not a reservation: two branches that cannot
 see each other compute the same answer, and a *renumber* that also takes the next
@@ -78,7 +103,8 @@ detects this at merge time, which is the earliest moment it is real and too late
 to prevent it. **Anything that actually fixes it has to make the number either
 unguessable in parallel or reserved per branch, and that is not decided here.**
 
-The renumbering is its own commit rather than part of the merge, both times: the
+The renumbering is its own commit rather than part of the merge, all three
+times: the
 bare string `ADR-0040` stood at 150 sites and `ADR-0041` at 90 after the 2026-08-21
 merge, interleaved across `src/`, `tests/`, `docs/` and `.claude/rules/`, with
 *both* meanings live in eight files at once. That is a per-site disambiguation
@@ -114,8 +140,8 @@ stores nothing"*, and the backup identity record it files under K1 while its own
 task text is K2's), which is itself the evidence that "the next free number" was
 being computed independently in more than one place. **One of those two has since
 been written** — as `0044`, on 2026-08-21, under an explicit authorisation and
-after checking every unmerged branch rather than only this one. J3's is still
-unwritten.
+after checking every unmerged branch rather than only this one, and it is
+**`0045`** since the 2026-08-26 cascade. J3's is still unwritten.
 
 **`tests/unit/test_decision_register.py` was green throughout the *first*
 collision and could not have been otherwise.** Its filename comparison runs in

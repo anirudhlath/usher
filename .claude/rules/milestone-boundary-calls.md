@@ -81,7 +81,7 @@ section below this one.
    *membership* differs from M8's; the other two rules give 30 and 34. The scope
    boundary is *everything refused inside `copy_records_to_table`*, not the
    integer. See
-   [ADR-0043](../../docs/prd/decisions/0043-a-bounded-column-is-a-declared-type-that-refuses.md)
+   [ADR-0044](../../docs/prd/decisions/0044-a-bounded-column-is-a-declared-type-that-refuses.md)
    and regenerate rather than quote:
    `uv run python scripts/audit_bounded_columns.py --summary`.
 

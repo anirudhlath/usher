@@ -643,7 +643,7 @@ class PostgresRestoreRepository(RestoreRepository):
         # One SAVEPOINT for the table rather than one per row: a refused row
         # here is a damaged artifact, the whole file is about to be rolled
         # back either way, and 14,259 savepoints would be the cost of a
-        # distinction nothing acts on. ADR-0043's rule is what makes the
+        # distinction nothing acts on. ADR-0044's rule is what makes the
         # wrapper non-optional -- `watch_states.position_seconds`,
         # `llm_calls.cost_usd` and `search_queries.result_count` are all
         # narrower than the value a hand-edited artifact can carry, and an

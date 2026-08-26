@@ -768,7 +768,7 @@ across a CHECK violation (`23514`), a numeric overflow (`22003`) and a trigger's
 | Postgres's own `DETAIL:` | present | **present** |
 | `[parameters: (...)]` | present | replaced by `[SQL parameters hidden due to hide_parameters=True]` |
 
-So **ADR-0043's whole translation ledger is untouched** — the two accessors read
+So **ADR-0044's whole translation ledger is untouched** — the two accessors read
 structured fields off `exc.orig.__cause__`, never the rendered string. On the
 coordinator's own example, a CHECK violation, a developer loses almost nothing,
 because Postgres's `DETAIL: Failing row contains (...)` still shows the failing

@@ -118,7 +118,7 @@ async def test_two_catalogs_built_from_one_dump_share_no_title_id() -> None:
     does not exist. Its first assertion is a statement about `new_id()` that
     K2 does not change; its second is the consequence -- the natural key is
     the only thing the two catalogs agree on, which is why a backup carries
-    that and not the id (ADR-0044).
+    that and not the id (ADR-0045).
     """
     one, two = FakeBulkCatalogRepository(), FakeBulkCatalogRepository()
     await one.upsert_titles(_DUMP)

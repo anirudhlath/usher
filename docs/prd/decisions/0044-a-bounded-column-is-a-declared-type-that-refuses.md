@@ -1,4 +1,4 @@
-# ADR-0043 — A bounded column is a declared type that refuses, and the ledger is generated
+# ADR-0044 — A bounded column is a declared type that refuses, and the ledger is generated
 
 **Status:** Accepted, and **implemented by F9 on 2026-08-20** — see
 *"What F9 did, and the two things it decided"* at the foot of this record,
@@ -902,6 +902,43 @@ narrowing it now produces six drift complaints where it produced none.
 and it is no longer the only refusal that handler sees, so it reads
 `constraint_name(exc)` — which correctly answers `None` for a declared width
 rejecting a value — rather than naming an index that is intact.
+
+### 🔴 A third blind spot, and it is the *same* asymmetry a third time: a Core DML construct (2026-08-26)
+
+**The two above were found by planting; this one arrived on its own, as a red
+on a merge**, which is the only reason it is worth adding to a record measured
+at `8ca21af`. Issue #41 rewrote `PostgresSyncRunRepository.save` from a
+`setattr` loop into `execute(update(SyncRunRow).where(...).values(...)
+.execution_options(synchronize_session="fetch"))`. That statement carries **no
+SQL text**, so `_statement_text` fell through to the only strings in the
+argument — the keyword `"fetch"` — which matches none of `_INSERT`, `_UPDATE`
+or `_DELETE` and carries no bind. The site therefore yielded **no refusal point
+at all**, while `_orm_destinations` resolved the very same call to `sync_runs`
+through `_ORM_STATEMENT_CALLS`.
+
+**That is the instrument-was-the-defect finding one axis over, for the third
+time in this record** — the destination scan following a call edge the
+translation scan would not. It failed **loudly**, as `DegenerateScan` at the
+*"a site with no refusal point is a failure, not a translated site"* raise,
+which is what that raise was added for and is the difference between this and
+the two blind spots above: neither of those could report itself. `_core_dml`
+is the repair, and it reads the *same* `_ORM_STATEMENT_CALLS` the destination
+scan reads, so the two cannot drift apart again by editing one list. It is
+scoped to the argument's own call chain rather than to any `update` in the
+subtree, because a bind whose value is built by a helper of that name is not a
+write.
+
+**What it moved.** `sync_runs.position` (`m10b`, `integer`, `SyncRun.position`
+is `ge=0` with no ceiling — this file's standing shape) enters the ledger as
+`translated`, so every reading gains one and the bounded total goes **80 → 81**.
+It has an arm in
+`test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_never_as_an_encoder_crash`
+like every other column in that bucket, and
+`test_every_ledger_column_in_the_two_scored_buckets_has_an_arm_or_a_reason` is
+what refused to let it land without one. Note the ordering: **the column alone
+would not have moved the number**, because the same commit made its writer
+unreadable — so a scan repair and a schema change arrived together and only the
+`DegenerateScan` separated them.
 
 ### `Title.popularity`, and the two the roadmap leaves open
 

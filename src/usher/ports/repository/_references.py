@@ -16,7 +16,7 @@ driving"*) forbids `usher.ports` reaching `usher.db`, and
 `resolve_natural_keys` has to be typed in terms of something.
 `BrowseCursorPosition` and `EpisodeCursorPosition` are the precedent --
 typed values a caller builds above and hands down, rather than an opaque
-token the port would have to interpret. See ADR-0044.
+token the port would have to interpret. See ADR-0045.
 """
 
 import uuid
@@ -64,7 +64,7 @@ class TitleReference:
     `id` is carried whatever the provider ids say, and it is the rung that
     makes disaster recovery into the database the backup came from an
     ordinary lookup rather than a second mode -- accepted if and only if the
-    target already holds a title with that exact id. See ADR-0044.
+    target already holds a title with that exact id. See ADR-0045.
     """
 
     kind: TitleKind
@@ -97,7 +97,7 @@ class EpisodeReference:
     citizen (ADR-0003) and has nothing else to be named by; an episode
     always has both numbers, so the natural key is total and the
     same-database case is already covered by the series' own raw-id rung.
-    See ADR-0044.
+    See ADR-0045.
     """
 
     title: TitleReference
