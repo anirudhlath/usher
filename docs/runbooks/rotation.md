@@ -41,17 +41,27 @@ refused     3
   refused: drill-alpha
   refused: drill-bravo
   refused: drill-charlie
-usher rotate-secret: 3 credentials could not be decrypted by either key and must
-be re-entered -- re-register those sources with `POST /admin/sources` once the
-new key is in place
+usher rotate-secret: all 3 stored credentials could not be decrypted by either
+key. That almost always means the OLD key is wrong rather than that the rows are
+corrupt -- nothing was written and no credential was lost. USHER_SECRET_KEY must
+still hold the key these rows were encrypted under while this command runs;
+changing it first is what produces exactly this result. Put the previous key
+back and run this again.
 ```
 
-⚠️ **That advice is wrong in this state and you must not follow it.** Those
-three credentials are intact. Nothing was written — all three ciphertexts were
-byte-identical afterwards. The command cannot tell "the rows are corrupt" from
-"you gave me the wrong old key", because both are *"neither cipher opens this"*.
+Those three credentials are intact and nothing was written — all three
+ciphertexts were byte-identical afterwards.
 
-**So read the count, not the sentence:**
+⚠️ **The command said something different here until 2026-08-26, and if you are
+reading an older copy of this page, do not follow it.** It used to answer *"3
+credentials … must be re-entered — re-register those sources with `POST
+/admin/sources`"* for **any** refusal, saturated or not. Obeying that in this
+state re-types every credential in the deployment to fix a problem that is not
+there. The command cannot tell *"the rows are corrupt"* from *"you gave me the
+wrong old key"* — both arrive as *"neither cipher opens this"* — so the **count**
+is what carries the distinction, and it now says so itself.
+
+**Read the count, not just the sentence:**
 
 | what you see | what it almost always means | what to do |
 |---|---|---|
@@ -282,8 +292,13 @@ Stated because this project has been wrong about the boundary of a run before.
   the table is one row per source.
 - **No real credential was decrypted.** The drill's canaries are synthetic and
   the live database was read with `count(*)` and `md5()` only.
-- ⚠️ **A database error during rotation prints the row's ciphertext.**
-  SQLAlchemy renders a failing statement's bound parameters, and for this command
-  one of them is the credential blob. It is ciphertext, not plaintext — opening
-  it still needs the key — but treat the output of a *failed* rotation as
-  sensitive and do not paste it into an issue. Known, not fixed.
+- ✅ **A database error during rotation used to print the row's ciphertext, and
+  no longer does.** SQLAlchemy renders a failing statement's bound parameters,
+  and for this command one of them is the credential blob. Fixed 2026-08-26 —
+  every engine this project builds now passes `hide_parameters=True`, so a
+  failed rotation reports the statement and not the values. ⚠️ **One residue is
+  outside any client's control**: if a refusal comes from a CHECK constraint,
+  Postgres composes its own `DETAIL: Failing row contains (...)` carrying every
+  column of the row, hex-encoded for `bytea`. It is still ciphertext rather than
+  plaintext, and it is still worth treating a failed rotation's output as
+  sensitive rather than pasting it into an issue.

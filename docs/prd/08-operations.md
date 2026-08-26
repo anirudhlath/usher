@@ -458,6 +458,17 @@ state is recoverable three ways at once:
 - **A row that opens under neither key is refused, named and counted**, the run
   exits non-zero, and the row is left exactly as it was — writing anything onto
   it would destroy the one copy a restored key could still have read.
+- 🔴 **A run that refused *every* row is a different diagnosis and says so.**
+  K8's drill measured it: an operator who changes `.env` before running the
+  command makes `old_cipher` and `new_cipher` the same cipher, so every row on
+  the previous key opens under neither and the report reads `refused N` with
+  nothing written. Until 2026-08-26 the exit message told that operator their
+  credentials *"must be re-entered"* — destroying working state to fix a problem
+  that does not exist. `cli._rotation_refusal` now splits the saturated count
+  (`len(refused) == report.rows`) from the partial one: the saturated arm names
+  `USHER_SECRET_KEY`, says nothing was lost, and does not mention
+  re-registration at all. [`docs/runbooks/rotation.md`](../runbooks/rotation.md)
+  §0 is the operator-facing form.
 
 ⚠️ `PortDataMalformed` is **not** in `cli.OPERATOR_ERRORS` and this command does
 not add it. `CredentialCiphertextStore` does not decrypt, so a row no key opens

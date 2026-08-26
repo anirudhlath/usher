@@ -2297,12 +2297,61 @@ async def _rotate(settings: Settings, *, new_key_env: str) -> None:
         report = await service.rotate()
     _print_rotation_report(report, new_key_env=new_key_env)
     if report.refused:
-        raise SystemExit(
-            f"usher rotate-secret: {len(report.refused)} "
-            f"{_unit('credential', len(report.refused))} could not be decrypted by either key "
-            "and must be re-entered -- re-register those sources with "
-            "`POST /admin/sources` once the new key is in place"
+        raise SystemExit(_rotation_refusal(report))
+
+
+def _rotation_refusal(report: RotationReport) -> str:
+    """Two diagnoses behind one counter, and only one of them is destructive.
+
+    🔴 **Measured by M10's K8 drill, 2026-08-26.** With `USHER_SECRET_KEY`
+    already set to the *new* key -- an operator who edited `.env` before
+    running this, which is the likeliest mistake this command has -- `_rotate`
+    builds `old_cipher` from that same key, both ciphers are one cipher, and
+    every row still on the previous key opens under neither. Three seeded rows
+    reported `rotated 0, already 0, refused 3` with **nothing written**: all
+    three ciphertexts byte-identical afterwards and all three still opening
+    under the old key. The same rows and the same command with only the order
+    corrected reported `rotated 3`.
+
+    The command cannot tell that state from three corrupt rows -- both arrive
+    as `_plaintext` answering `None` twice -- so the *count* is what carries
+    the distinction. **A saturated counter implies a different cause than its
+    partial values**, and until this function existed the sentence written for
+    the partial case was the one an operator acted on: *"must be re-entered --
+    re-register those sources"*, said over credentials that were intact,
+    unwritten and one environment variable away from rotating. Obeying it
+    re-types every credential in the deployment to fix a problem that is not
+    there.
+
+    So the saturated arm names the key and **does not mention re-registration
+    at all**. That omission is the fix rather than a tone change, and
+    `tests/unit/test_cli_rotation.py` asserts the absence.
+
+    ⚠️ **The predicate is `len(refused) == report.rows`, not `not
+    report.rotated`.** A second run over a table an earlier run finished
+    reports its rows as `already`, so the shorter spelling would call
+    *"two already, one refused"* saturated and reassure an operator about a row
+    that really is unreadable. The two are distinguishable only when `already`
+    is non-empty, which is exactly the resumption path this command is built
+    around.
+    """
+    count = len(report.refused)
+    if count == report.rows:
+        return (
+            f"usher rotate-secret: all {count} stored "
+            f"{_unit('credential', count)} could not be decrypted by either key. That "
+            "almost always means the OLD key is wrong rather than that the rows are "
+            "corrupt -- nothing was written and no credential was lost. USHER_SECRET_KEY "
+            "must still hold the key these rows were encrypted under while this command "
+            "runs; changing it first is what produces exactly this result. Put the "
+            "previous key back and run this again."
         )
+    return (
+        f"usher rotate-secret: {count} "
+        f"{_unit('credential', count)} could not be decrypted by either key "
+        "and must be re-entered -- re-register those sources with "
+        "`POST /admin/sources` once the new key is in place"
+    )
 
 
 def _print_rotation_report(report: RotationReport, *, new_key_env: str) -> None:

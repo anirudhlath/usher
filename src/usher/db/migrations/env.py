@@ -97,7 +97,16 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    connectable = create_async_engine(_database_url(), poolclass=NullPool)
+    # `hide_parameters=True` for `db/base.py::build_engine`'s reason, and this
+    # is the **second** engine constructor in the project rather than the only
+    # other one being a detail: a reader who grepped `build_engine` alone would
+    # conclude the flag was set everywhere. The image's `CMD` is
+    # `alembic upgrade head && exec python -m usher`, so a data migration that
+    # binds a value and is refused prints that value as the first thing in the
+    # container log -- the same shape as the `settings_rejection` entry at the
+    # top of `.claude/rules/config-cli-and-deployment.md`, which is also about
+    # this file being an entry point that bypassed a control the CLI had.
+    connectable = create_async_engine(_database_url(), poolclass=NullPool, hide_parameters=True)
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()

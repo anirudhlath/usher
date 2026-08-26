@@ -492,12 +492,24 @@ def test_a_run_that_rotated_nothing_does_not_tell_anyone_to_restart(
 
 def test_a_refused_row_exits_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """`_sync`'s and `_restore`'s precedent: the refused refs are on stdout
-    for a human, and cron, CI and a systemd unit read the exit code."""
+    for a human, and cron, CI and a systemd unit read the exit code.
+
+    ⚠️ **The fixture rotates a row as well as refusing one, and that is
+    load-bearing since M10's K8.** It refused a single row out of a single row
+    until then, which is the *saturated* count — and `_rotation_refusal` now
+    reads that as *"the old key is wrong"* and deliberately does not say
+    "re-entered". This case is about the **exit code**, which is non-zero on
+    both arms, so it keeps its subject and its assertion by naming a report
+    only the partial arm can produce.
+    `test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_
+    credentials` asserts the exit code on the other arm, so nothing this case
+    used to cover is now uncovered.
+    """
     _configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
 
     async def _refusing(*_: object, **__: object) -> RotationReport:
-        return RotationReport(rotated=(), already=(), refused=("ref-d",))
+        return RotationReport(rotated=("ref-a",), already=(), refused=("ref-d",))
 
     monkeypatch.setattr("usher.services.rotation.RotationService.rotate", _refusing)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
@@ -547,3 +559,107 @@ class _SessionContext:
 
     async def __aexit__(self, *_: object) -> None:
         return None
+
+
+def test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K8's drill measured the state this message is for, and measured that
+    the message was wrong in it.
+
+    With `USHER_SECRET_KEY` already changed to the new key -- the `.env`-first
+    mistake, and the likeliest operator error this command has -- `cli._rotate`
+    builds `old_cipher` from that same key, both ciphers are one cipher, and
+    every row still on the previous key opens under neither. The rows are
+    **intact**; the run wrote nothing.
+
+    Today's sentence tells that operator their credentials *"must be
+    re-entered"*, and an operator who obeys it re-types every credential in the
+    deployment for a problem they do not have. So the saturated count gets its
+    own diagnosis: a counter whose saturation implies a different cause than
+    its partial values needs the saturated case named, or the message written
+    for the partial case is the one that gets acted on.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setenv(VAR, NEW_KEY)
+
+    async def _all_refused(*_: object, **__: object) -> RotationReport:
+        return RotationReport(rotated=(), already=(), refused=("ref-a", "ref-b", "ref-c"))
+
+    monkeypatch.setattr("usher.services.rotation.RotationService.rotate", _all_refused)
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["rotate-secret", "--new-key-env", VAR])
+
+    message = str(exit_info.value)
+    assert exit_info.value.code != 0
+    # It names the cause an operator can act on, and the setting to act on.
+    assert "USHER_SECRET_KEY" in message
+    # It says plainly that nothing was lost, which is the half that stops the
+    # damage: an operator reading "refused" as "corrupt" re-types everything.
+    assert "nothing was written" in message.lower()
+    assert "no credential was lost" in message.lower()
+    # 🔴 And it must NOT advise the destructive recovery. This is the whole
+    # point of splitting the two diagnoses.
+    assert "re-entered" not in message
+    assert "re-register" not in message
+    assert "POST /admin/sources" not in message
+
+
+def test_a_run_that_refused_only_some_rows_still_says_to_re_register_those(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control, and it is what keeps the case above a statement about the
+    *saturated* count rather than about the message being removed.
+
+    A run that rotated some rows and refused others proves the old key was
+    right, so a row it could not open really is unreadable and really does have
+    to be re-entered. Today's sentence is correct here and is kept verbatim.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setenv(VAR, NEW_KEY)
+
+    async def _partly_refused(*_: object, **__: object) -> RotationReport:
+        return RotationReport(rotated=("ref-a", "ref-b"), already=(), refused=("ref-c",))
+
+    monkeypatch.setattr("usher.services.rotation.RotationService.rotate", _partly_refused)
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["rotate-secret", "--new-key-env", VAR])
+
+    message = str(exit_info.value)
+    assert exit_info.value.code != 0
+    assert "re-entered" in message
+    assert "POST /admin/sources" in message
+    # And it does not claim nothing was written, because two rows were.
+    assert "nothing was written" not in message.lower()
+
+
+def test_a_run_where_every_row_was_already_rotated_and_one_refused_is_not_saturated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boundary the predicate has to get right.
+
+    "Every row refused" is `len(refused) == report.rows`, not `not rotated`. A
+    second run over a table one earlier run had finished reports its rows as
+    `already` rather than `rotated` -- so a predicate spelled `if not
+    report.rotated` would call this saturated and tell an operator their
+    intact, already-rotated credentials were fine when one of them is not.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setenv(VAR, NEW_KEY)
+
+    async def _already_and_one_refused(*_: object, **__: object) -> RotationReport:
+        return RotationReport(rotated=(), already=("ref-a", "ref-b"), refused=("ref-c",))
+
+    monkeypatch.setattr("usher.services.rotation.RotationService.rotate", _already_and_one_refused)
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["rotate-secret", "--new-key-env", VAR])
+
+    message = str(exit_info.value)
+    assert "re-entered" in message, "an old key that opened two rows is not the wrong key"
+    assert "no credential was lost" not in message.lower()

@@ -107,12 +107,45 @@ def build_engine(
     # not one database span is ever produced. Pinned by
     # `tests/integration/test_pipeline_spans.py::
     # test_the_databases_own_spans_nest_under_the_pipeline`.
+    # **`hide_parameters=True` because a `DBAPIError`'s rendered form reaches an
+    # operator's terminal without `--traceback`.** SQLAlchemy's default is
+    # `False`, which appends `[parameters: (...)]` -- every value bound into the
+    # failing statement -- to `str(exc)`. `DBAPIError` is a member of
+    # `cli.OPERATOR_ERRORS`, so `_operator_problem` catches it and prints that
+    # string as one line; M10's K8 drill met it as a rotation whose
+    # `UPDATE source_credentials` failed and printed the row's ciphertext.
+    #
+    # This is PRD 08's *"a rejected request never echoes the body it rejected"*
+    # at a third door. `usher.api.errors` strips pydantic's `input` app-wide and
+    # `cli._settings_problem` drops it from a settings failure; both are about a
+    # rejected **input** being read back, and this is the same failure about a
+    # **statement**. Filed with its measurements in
+    # `.claude/rules/config-cli-and-deployment.md`.
+    #
+    # **Measured 2026-08-26 on `pgvector/pgvector:pg17`, because the cost is
+    # real and had to be priced rather than waved past:** across a CHECK
+    # violation (`23514`), a numeric overflow (`22003`) and a trigger's
+    # `RAISE EXCEPTION` (`P0001`), `is_row_refusal()` and `constraint_name()`
+    # answer **identically** with it on and off -- they read structured fields
+    # off `exc.orig.__cause__`, never the rendered string, so ADR-0043's whole
+    # translation ledger is untouched. What is lost is the `[parameters: ...]`
+    # line alone: the exception type, the SQLSTATE, the constraint name, the
+    # full `[SQL: ...]` text with its `$1` placeholders and Postgres's own
+    # `DETAIL:` all survive.
+    #
+    # ⚠️ **It closes the client-side door and not the server-side one.** A CHECK
+    # violation's `DETAIL: Failing row contains (...)` is composed by Postgres,
+    # carries every column of the failing row, and is unaffected by this flag --
+    # on `source_credentials` it renders `ciphertext` as a `\x` hex literal. No
+    # client setting can suppress that, so this is a necessary and insufficient
+    # control, and saying which half it is here is the point.
     return sa_asyncio.create_async_engine(
         database_url,
         echo=echo,
         pool_pre_ping=True,
         pool_size=pool_size,
         max_overflow=max_overflow,
+        hide_parameters=True,
         connect_args={"timeout": 5},
     )
 

@@ -721,6 +721,11 @@ async def test_a_row_no_key_can_open_is_named_and_the_other_two_still_rotate(
     assert broken in printed, "the row an operator has to re-enter was not named"
     assert "rotated     2" in printed and "refused     1" in printed
     assert not any(canary in printed for canary in CANARIES)
+    # The *partial* arm, and it is the control for the saturated case below:
+    # two rows rotated, so the old key was right and this row really is
+    # unreadable. Here the destructive advice is the correct advice.
+    assert "re-entered" in printed and "POST /admin/sources" in printed
+    assert "no credential was lost" not in printed.lower()
     # Left exactly as it was: writing onto it would destroy the one copy a
     # restored key could still have read.
     assert await _ciphertext(sessions, broken) == corrupted
@@ -765,6 +770,14 @@ async def test_rotating_after_the_key_was_already_changed_refuses_every_row_and_
     for ref in refs:
         assert ref in printed
         assert await _ciphertext(sessions, ref) == before[ref], "a refused run still wrote"
+    # 🔴 And the advice the operator is given, end to end through the shipped
+    # command rather than through `_rotation_refusal` alone: this state is the
+    # ordering mistake, every credential is intact, and telling the operator to
+    # re-enter them destroys working state to fix a problem they do not have.
+    assert "USHER_SECRET_KEY" in printed
+    assert "no credential was lost" in printed.lower()
+    assert "re-entered" not in printed
+    assert "re-register" not in printed
 
     # The premise: only the order was wrong.
     with _command_environment(monkeypatch, postgres_url, secret_key=OLD_KEY, new_key=NEW_KEY):

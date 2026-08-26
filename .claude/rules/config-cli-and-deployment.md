@@ -66,6 +66,19 @@ assertions are not satisfied by a command that printed nothing) plus the
 non-zero exit. Planted and watched to fail before it was believed: with the
 `except` removed the case reports `'hunter2xyzzy' is contained here:
 l://admin:hunter2xyzzy@db:5432/usher', input_type=str]`.
+
+✅ **And a *third* door, closed 2026-08-26 — this one is not a settings failure
+at all.** The two above are about a rejected **input** being read back; the
+third is about a rejected **statement**. SQLAlchemy's `DBAPIError.__str__`
+appends `[parameters: (...)]` — every value bound into the failing statement —
+and `DBAPIError` is a member of `cli.OPERATOR_ERRORS`, so `_operator_problem`
+prints that string as one line **without `--traceback`**, from every command in
+the project. `build_engine` now passes `hide_parameters=True`, and so does
+`db/migrations/env.py`'s own engine, which is the **second** engine constructor
+in `src/` and the one a reader grepping `build_engine` would miss. What it
+costs, and the half of the exposure no client flag can reach, is measured in
+*"K8's rotation drill"* at the foot of this file.
+
 **A refused Postgres connection reaches the CLI as a bare `ConnectionRefusedError`,
 not as a SQLAlchemy error.** asyncpg lets the `OSError` out unwrapped during
 connect, so `except SQLAlchemyError` — the obvious spelling for a database error
@@ -688,12 +701,30 @@ Every one of those credentials is intact. The command cannot distinguish *"these
 rows are corrupt"* from *"you gave me the wrong old key"*, because both arrive as
 `_plaintext` answering `None` twice — so **`refused == every row` and
 `refused == some rows` are two different diagnoses behind one counter**, and only
-the first is recoverable by putting `USHER_SECRET_KEY` back. Not fixed here (K8
-changes nothing in `src/`); `docs/runbooks/rotation.md` §0 carries the table an
-operator reads the count with. The general form: **a refusal counter whose
-saturation implies a different cause than its partial values needs the
-saturated case named, or the message written for the partial case is what an
-operator acts on.**
+the first is recoverable by putting `USHER_SECRET_KEY` back.
+
+✅ **Fixed 2026-08-26.** `cli._rotation_refusal` splits the two. The saturated
+arm names `USHER_SECRET_KEY`, says *"nothing was written and no credential was
+lost"*, and **does not mention re-registration at all** — the omission is the
+repair, not a tone change, and three cases assert the absence. The partial arm
+keeps today's sentence verbatim, because a run that rotated something proves the
+old key was right and a row it could not open really does have to be re-entered.
+
+⚠️ **The predicate is `len(refused) == report.rows`, not `not report.rotated`,
+and the difference is reachable on this command's main recovery path.** A second
+run over a table an earlier run finished reports its rows as `already`, so the
+shorter spelling calls *"two already, one refused"* saturated and reassures an
+operator about a row that really is unreadable. Planted: the `not
+report.rotated` spelling is lint- and type-clean, passes both other message
+cases, and fails **only** the boundary case written for it.
+
+The general form: **a refusal counter whose saturation implies a different cause
+than its partial values needs the saturated case named, or the message written
+for the partial case is what an operator acts on.** And the corollary the
+predicate is about: **when a counter has three buckets, "saturated" is a
+statement about the total, not about the emptiness of the bucket you happened to
+think of.** `docs/runbooks/rotation.md` §0 carries the table an operator reads
+the count with.
 
 ### 🔴 A `DBAPIError` from a rotation prints the row's ciphertext
 
@@ -712,10 +743,52 @@ the `input_value=` defect at the top of this file repeating. It is one notch
 weaker and worth knowing anyway: encryption at rest exists so the database file
 alone is not enough, and a log line holding the blob moves a copy somewhere with
 different access rules, from the one command whose whole subject is secrets.
-**Not fixed**: the repair is `hide_parameters=True` in `db/base.py`, which is
-outside K8's files and would take parameter diagnostics away from every other
-command. Recorded, and the runbook tells an operator to treat a *failed*
-rotation's output as sensitive.
+
+🔴 **And it was never a rotation fact.** `build_engine` is where all but one of
+this project's engines come from, so every repository, every route, the worker
+lane and every CLI command shared it — and `DBAPIError ∈ cli.OPERATOR_ERRORS`
+means `_operator_problem` prints `str(exc)` to a terminal **without
+`--traceback`**. ✅ **Fixed 2026-08-26**: `hide_parameters=True` in
+`build_engine`, and in `db/migrations/env.py`'s engine too, which is the
+**second** constructor — the image's `CMD` is `alembic upgrade head && exec
+python -m usher`, so a refused data migration's parameters are the first thing
+in a misconfigured container's log, which is the same argument the
+`settings_rejection` entry at the top of this file makes about that same file.
+
+**The cost, measured on `pgvector/pgvector:pg17` before the flag was set**,
+across a CHECK violation (`23514`), a numeric overflow (`22003`) and a trigger's
+`RAISE EXCEPTION` (`P0001`):
+
+| | `hide_parameters=False` | `=True` |
+|---|---|---|
+| `is_row_refusal(exc)` | — | **identical** |
+| `constraint_name(exc)` | — | **identical** |
+| `type(exc.orig)` | — | **identical** |
+| `[SQL: ...]` with `$1` placeholders | present | **present** |
+| Postgres's own `DETAIL:` | present | **present** |
+| `[parameters: (...)]` | present | replaced by `[SQL parameters hidden due to hide_parameters=True]` |
+
+So **ADR-0043's whole translation ledger is untouched** — the two accessors read
+structured fields off `exc.orig.__cause__`, never the rendered string. On the
+coordinator's own example, a CHECK violation, a developer loses almost nothing,
+because Postgres's `DETAIL: Failing row contains (...)` still shows the failing
+row. What is genuinely lost is parameters on faults that produce **no**
+row-level DETAIL — a trigger's `RAISE`, an undefined column, a numeric overflow
+— which is where parameters were least diagnostic anyway.
+
+🔴 **The finding that changes what the flag can be claimed to do: it is
+necessary and not sufficient, and the residue is server-side.** `DETAIL: Failing
+row contains (...)` is composed by **Postgres**, carries every column of the
+failing row, and `hide_parameters` does not touch it. Measured on
+`source_credentials` — which has a CHECK (`ck_source_credentials_ref_not_empty`)
+and therefore can reach that DETAIL — the `ciphertext` is rendered there as a
+`\x`-prefixed **hex literal**, truncated. ⚠️ **A naive `canary in str(exc)`
+check reports `False` on it**, because the value is hex-encoded rather than
+literal; the first run of this measurement was fooled exactly that way. No
+client setting suppresses it. So the honest claim is *"the client-side door is
+shut"*, and `tests/integration/test_engine_error_rendering.py` is deliberately
+built on the numeric-overflow family for that reason, with the asymmetry in its
+module docstring.
 
 ### The interruption is diagnosable and the re-run is the whole recovery
 
