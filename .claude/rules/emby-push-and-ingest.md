@@ -185,6 +185,32 @@ real upstream this project talks to has ever produced the header that feeds it.
   records `COMPLETED`, and `latest_completed_cursor` then reads its
   `started_at`, so everything the truncation never reached is skipped by every
   later delta, silently and permanently.
+- ⚠️ **That closure is narrower than the ✅ above reads, and the gap is a
+  second lane — found 2026-08-25 by issue #41.** `_close_gap` runs the item
+  lane *and then* `watch.sync(...)`, and `USHER_PUSH_GAP_CLOSE`'s guard is
+  `cursor_for(source, DELTA)` — **the item lane's cursor, gating both**. The
+  two lanes' cursors are independent by design (`MinDateLastSaved` against
+  `MinDateLastSavedForUser`, and `latest_completed_cursor` is scoped by
+  kind), and on the measured deployment they were in exactly the state that
+  makes this bite: **13 completed delta runs against zero completed
+  `watch_state` runs**. A source in that state passes the guard, closes a
+  real delta gap in seconds, and then walks the whole library on the *watch*
+  half — ~1.14M items, ~5,688 pages, about eleven hours — issued by
+  `uvicorn` with no operator command, which is the exact hazard the ✅ entry
+  is about. Stated as the reachable path rather than as an observed run:
+  that deployment holds the push lane off, and #41's stuck rows came from
+  the worker. Neither log line would name it either: the
+  `WARNING` says *"no **item** sync has ever completed"* and the `INFO` says
+  *"a delta walk of everything changed since {since}"*, and both are true of
+  the half that is cheap.
+  **What holds now:** ADR-0042 makes that walk *resumable* — it checkpoints
+  `StartIndex` on `sync_runs.position` and the next attempt reclaims the row
+  — so it converges instead of restarting, which it never once did before
+  (the deployment carried three `RUNNING` rows aged 7–11 h). It is **not**
+  shorter and it is still unasked. So `USHER_PUSH_GAP_CLOSE=cursored` bounds
+  the item half only; a live run whose request budget has to be *statable*
+  needs `USHER_PUSH_ENABLED=false` or `USHER_PUSH_GAP_CLOSE=never`, both of
+  which return before either walk.
 
 **Emby push works.** Verified 2026-07-29 against the live server with a normal
 non-admin token: `/embywebsocket` upgrades (101), delivers periodic `Sessions`,

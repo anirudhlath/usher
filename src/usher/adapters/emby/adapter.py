@@ -420,10 +420,15 @@ class EmbyAdapter(SourceAdapter):
         return value if isinstance(value, bool) else None
 
     async def _walk(
-        self, *, since_param: str, since: AwareDatetime | None
+        self, *, since_param: str, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[dict[str, Any]]:
         user_id = await self._session.user_id()
-        start = 0
+        # The resume point (#41, ADR-0042). Deliberately no default: every
+        # caller states its own, so `list_items` passing 0 is written down
+        # rather than inferred from an absent keyword. The item lanes restart
+        # from their cursor; the watch lane's first walk is the whole library
+        # and has to survive a transient failure.
+        start = start_index
         # `for`, not `while True`: the bound is then part of the loop rather
         # than a counter alongside it, and the raise below cannot be reached
         # by any path that should have returned.
@@ -472,7 +477,11 @@ class EmbyAdapter(SourceAdapter):
         return self._list_items(since)
 
     async def _list_items(self, since: AwareDatetime | None) -> AsyncIterator[SourceItem]:
-        async for payload in self._walk(since_param=LIBRARY_SINCE_PARAM, since=since):
+        # `start_index=0` always: the item lanes have a working `since`
+        # cursor, so a failed walk restarts from it rather than resuming.
+        async for payload in self._walk(
+            since_param=LIBRARY_SINCE_PARAM, since=since, start_index=0
+        ):
             item = to_source_item(payload)
             if item is not None:
                 yield item
@@ -531,7 +540,9 @@ class EmbyAdapter(SourceAdapter):
                 access_token=await self._session.access_token(),
             )
 
-    def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
+    def watch_state(
+        self, since: AwareDatetime | None = None, *, start_index: int = 0
+    ) -> AsyncIterator[SourceWatchState]:
         """Walk this user's watch state.
 
         **This walk reports `play_count` and `last_played_at` as `None`,
@@ -550,12 +561,52 @@ class EmbyAdapter(SourceAdapter):
         is `COALESCE`-shaped for precisely this value (ADR-0014).
         `get_watch_state` below is the authoritative read, at one request
         per item.
-        """
-        return self._watch_state(since)
 
-    async def _watch_state(self, since: AwareDatetime | None) -> AsyncIterator[SourceWatchState]:
+        `start_index` resumes an interrupted walk at that page offset. Emby
+        offsets the result it has already filtered, so it is an offset into
+        the *server's* filtered set -- which **approximates**, and does not
+        equal, the stream this method yields.
+
+        **The gap is `_watch_state`'s own drop, and it is a real divergence
+        from the port's number** (measured 2026-08-26). `to_watch_state`
+        returns `None` for a payload carrying no `UserData` -- the field was
+        not requested, or the item type has none -- and this method drops
+        those rather than yielding them. `StartIndex` cannot see a
+        client-side drop, so after a walk that dropped *d* payloads the
+        run's `position` is *d* short of the upstream offset it reached, and
+        the next attempt asks for a page it has partly walked. **Direction
+        is the safe one**: the resumed walk starts *earlier* than it left
+        off and re-yields up to *d* already-merged records, which the
+        idempotent upsert absorbs; it never starts later, so nothing is
+        skipped. The lag is per-attempt rather than cumulative -- each
+        attempt checkpoints the records *it* yielded, so *d* does not
+        compound across attempts.
+        `test_a_resumed_watch_state_walk_re_yields_what_it_dropped` pins
+        both halves.
+
+        Sound here because the *order* is `DateCreated`, which no edit
+        moves, so the prefix already walked does not reorder underneath a
+        resumed attempt. Two things do shift it, both bounded to one run:
+
+        - A *deletion* shifts the prefix by one and costs the shifted item
+          this run, which the merge's idempotent upsert picks up on the next.
+        - With a `since`, *membership* is defined by `DateLastSavedForUser`,
+          which every watch event moves -- so an item watched between
+          attempts enters the filtered set, and if its `DateCreated` places
+          it before the resume point, neither attempt yields it. It is not
+          lost either: the reclaimed run keeps its original `started_at`
+          (ADR-0042), and that item was saved after the run began, so it
+          falls inside the next delta's window.
+        """
+        return self._watch_state(since, start_index)
+
+    async def _watch_state(
+        self, since: AwareDatetime | None, start_index: int
+    ) -> AsyncIterator[SourceWatchState]:
         user_id = await self._session.user_id()
-        async for payload in self._walk(since_param=USER_DATA_SINCE_PARAM, since=since):
+        async for payload in self._walk(
+            since_param=USER_DATA_SINCE_PARAM, since=since, start_index=start_index
+        ):
             # play_history_is_trustworthy=False: this is the listing route.
             state = to_watch_state(
                 payload, source_user_id=user_id, play_history_is_trustworthy=False

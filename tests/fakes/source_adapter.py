@@ -113,6 +113,14 @@ class FakeSourceAdapter(SourceAdapter):
         self._auth_rejected = False
         self._lock = asyncio.Lock()
         self.authentications = 0
+        # One entry per `watch_state` walk, in the order the walks were
+        # started: the `start_index` each one was asked for. Recorded rather
+        # than inferred from what came back, because a resumed walk and a
+        # restarted one over an already-merged prefix produce the *same*
+        # stored rows -- the merge is an idempotent upsert -- so the only
+        # observable difference between "resumed from page 2,844" and "walked
+        # the library again" is the number that was asked for.
+        self.resumed_from: list[int] = []
         # The push channel. A ledger of its own shape and the same
         # three-clause health rule, written out below rather than importing
         # `PushHealth` -- for the reason `FakeEmbyServer` defines
@@ -327,14 +335,36 @@ class FakeSourceAdapter(SourceAdapter):
             ),
         ]
 
-    def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
-        return self._walk_states(since)
+    def watch_state(
+        self, since: AwareDatetime | None = None, *, start_index: int = 0
+    ) -> AsyncIterator[SourceWatchState]:
+        # Recorded here rather than in `_walk_states`, so that it is what the
+        # **port** was asked for. A subclass that overrides the walk -- and
+        # the two in `test_services_watch_sync.py` both do -- would otherwise
+        # record whatever it chose to pass down, which for an adapter that
+        # re-frames `start_index` is a different number from the one the
+        # service asked to resume at.
+        self.resumed_from.append(start_index)
+        return self._walk_states(since, start_index)
 
-    async def _walk_states(self, since: AwareDatetime | None) -> AsyncIterator[SourceWatchState]:
+    async def _walk_states(
+        self, since: AwareDatetime | None, start_index: int
+    ) -> AsyncIterator[SourceWatchState]:
         await self._ready()
         yielded = 0
+        skipped = 0
         for external_id in list(self._items):
             if since is not None and self._changed_at[external_id] < since:
+                continue
+            # The skip comes *after* the filter, because `start_index` is an
+            # offset into the stream this walk yields rather than into the
+            # source's unfiltered set -- which is what a server that filters
+            # before it pages hands back, and is exactly what
+            # `FakeEmbyServer._list` does (`_ordered` filters, then the slice).
+            # Skipping first would make a resumed delta checkpoint a position
+            # the real adapter cannot produce.
+            if skipped < start_index:
+                skipped += 1
                 continue
             if self._fail_after is not None and yielded >= self._fail_after:
                 raise PortUnavailable("source went away mid-walk")

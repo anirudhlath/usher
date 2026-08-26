@@ -43,7 +43,7 @@ above come from a different spec than the table above them, which is what its
 own heading says, and E1–E4 have no place in an M1–M10 numbering. They sit here
 rather than in a section of their own further down for the reason the milestone
 table sits at the top: a status table nobody scrolls to is the next stale one.
-All three tables are policed by `tests/unit/test_docs_currency.py`, which fails
+All four tables are policed by `tests/unit/test_docs_currency.py`, which fails
 if a file in `docs/plans/` is named by none of them.
 
 ## Rating provenance (from docs/specs/2026-08-19-rating-provenance-split-design.md)
@@ -61,6 +61,44 @@ repair rather than a stage — which is what
 `tests/unit/test_docs_currency.py::test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec`
 now pins: the plan was committed on 2026-08-19 unregistered, and no pattern in
 that file could see it.
+
+## Resumable watch lane (from docs/specs/2026-08-21-issue-41-resumable-watch-lane-design.md)
+| Task | What it delivers | Plan file | Status |
+|---|---|---|---|
+| 1–6 | `sync_runs.position` as a `StartIndex` checkpoint; `latest_incomplete_run` on the sync-run port and both its arms; `watch_state(start_index=…)` on `SourceAdapter`; `WatchStateSyncService` reclaiming its own incomplete run in place; a planted regression to prove the new cases have teeth; the docs the change invalidates | docs/plans/2026-08-21-issue-41-resumable-watch-lane.md | ✅ **all six landed, not yet merged** — 13 commits from `aa125da` to the tip of `fix/41-resumable-watch-lane`, landed 2026-08-25 → 2026-08-26 (the 2026-08-21 in the plan's filename is its *authoring* date; nothing landed until the 25th). No final sha is named because this row ships *in* that last commit, so any sha it quoted would be the one before the amend that wrote it. The design spec, [ADR-0042](../prd/decisions/0042-the-watch-lane-resumes-from-a-startindex-checkpoint.md) and the plan landed together in `aa125da`; the reasoning for the approach is ADR-0042's and is not restated here. Fixes #41 |
+
+**Two behaviours on that branch are not in the plan above, and both came out
+of review rather than out of a task.** The plan's reuse-in-place rested on
+the design spec's claim that *"no true concurrency exists to race"*, which was
+measured false — `LaneSupervisor._close_gap` and `usher sync` both call
+`WatchStateSyncService.sync` without touching the job queue, the second from
+another process — and a gated probe then reproduced one walk un-completing
+another's row and regressing its checkpoint. So `SyncRunRepository.save`
+became **non-destructive** (`position` may only advance; `completed` is
+absorbing, refusing `FAILED` and `RUNNING` alike), and a resumed walk stamps
+its merges with the **attempt's** instant rather than the reclaimed run's
+`started_at`. ADR-0042's Consequences carry both, with the spec annotated
+rather than rewritten.
+
+**This is a fourth table for the second and third tables' reason, and it is
+worth saying why that reason keeps recurring rather than treating it as
+bookkeeping.** The resumable watch lane has its own spec
+(`docs/specs/2026-08-21-issue-41-resumable-watch-lane-design.md`), so a row
+under any of the three headings above would have made *that* heading a false
+statement in order to satisfy a check about documentation being true — and
+there is no honest home for it among them: it is not a milestone, it is not one
+of E1–E4, and it is not the rating split.
+
+**Four tables against five specs, and the exception is the rule working.** A
+*milestone* stays in the milestone table even after it gets its own detailed
+spec — `docs/specs/2026-08-10-m9-api-surface-design.md` has no heading of its
+own, because M9 is a milestone of the v1 design the first heading names and
+that heading is true of it. So the rule is not *"one table per spec"* but
+*"a plan that is **not** a milestone gets a heading naming its own spec"*, and
+what the repetition says is that this project has stopped numbering its work
+into one sequence. `tests/unit/test_docs_currency.py` reads all four tables as
+a **union**, which is what keeps *"every plan file is named by every status
+table"* one obligation rather than four separate ones a plan can fall between.
 
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)

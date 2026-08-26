@@ -504,6 +504,105 @@ async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url:
             await engine.dispose()
 
 
+async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str) -> None:
+    """**The one thing `m10b` does that no schema reader in this file can
+    see**: `ADD COLUMN … NOT NULL` against a table that already holds rows.
+
+    Every other case here migrates a *freshly created, empty* database, and
+    `env.py` never passes `compare_server_default` -- so the server default
+    is unobservable to all of them. Measured: deleting
+    `server_default=sa.text("0")` from `m10b.upgrade()`'s `sa.Column` left
+    the whole unit suite and all eleven cases in this file green.
+
+    It is not a hypothetical row. Issue #41 is *"this lane has failed
+    repeatedly"* — three rows left `running` and aged 7-11 h, plus every
+    attempt before them — so `sync_runs` on any deployment reaching this
+    revision is non-empty by construction, and without the default it aborts
+    with `column "position" of relation "sync_runs" contains null values` --
+    the deployment cannot roll forward at all.
+
+    Seeded **below** the revision and read above it, the shape
+    `test_m10a_moves_field_provenance_keys_in_both_directions` uses, because
+    the backfill is only observable across the boundary. One assertion pins
+    three things at once: that the column is `NOT NULL`, that it has a
+    default, and that the default is the 0 a walk restarting from the top
+    means.
+    """
+    admin = postgres_url.rsplit("/", 1)[0]
+    scratch = f"resume_{uuid.uuid4().hex[:12]}"
+    engine = build_engine(f"{admin}/postgres")
+    try:
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
+    finally:
+        await engine.dispose()
+
+    url = f"{admin}/{scratch}"
+    source_id, run_id = new_id(), new_id()
+    try:
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m10a", direction="up"))
+        scratch_engine = build_engine(url)
+        try:
+            async with scratch_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO sources "
+                        "(id, kind, name, base_url, credentials_ref, device_id) "
+                        "VALUES (:id, 'emby', :name, :url, :ref, :device)"
+                    ),
+                    {
+                        "id": source_id,
+                        "name": "A Library That Has Never Finished A Walk",
+                        "url": "http://example.invalid",
+                        "ref": "unused",
+                        "device": "unused",
+                    },
+                )
+                # Any pre-existing row exercises the backfill; `failed` is
+                # chosen because it is a *terminal* row, so the assertion
+                # below cannot be confused with anything the resume logic
+                # does. ⚠️ It is **not** the shape #41 observed: that
+                # deployment's three stuck rows are `running`, aged 7-11 h,
+                # which is what a worker killed mid-walk leaves. The column
+                # lands identically on both, and the service-level case for
+                # the `running` shape is
+                # `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned`.
+                await conn.execute(
+                    text(
+                        "INSERT INTO sync_runs (id, source_id, kind, status) "
+                        "VALUES (:id, :source_id, 'watch_state', 'failed')"
+                    ),
+                    {"id": run_id, "source_id": source_id},
+                )
+                # The premise: the column really is absent below the
+                # revision, so what is read back above it was written by
+                # `m10b.upgrade()` and not by this INSERT.
+                assert "position" not in await _column_set(url, "sync_runs")
+
+            await asyncio.to_thread(run_alembic, url, "head")
+            async with scratch_engine.connect() as conn:
+                backfilled = (
+                    await conn.execute(
+                        text("SELECT position FROM sync_runs WHERE id = :id"), {"id": run_id}
+                    )
+                ).scalar_one()
+
+            assert backfilled == 0, (
+                "a row that predates the column reads back at the top of the walk"
+            )
+        finally:
+            await scratch_engine.dispose()
+    finally:
+        engine = build_engine(f"{admin}/postgres")
+        try:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
+        finally:
+            await engine.dispose()
+
+
 async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) -> None:
     """`downgrade base` then `upgrade head`, on a throwaway database, with
     the index set compared before and after.
@@ -534,15 +633,25 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     landed on top -- the failure this case had on the first run after that,
     and a good illustration of why a step count is the wrong pin.
 
-    **Head is `m09c` and the `-1` half is re-pointed at its artefacts.** The
-    previous spelling asserted `m09a`'s four primary keys were *absent*, which
-    held because `-1`-from-`m09a` ran `m09a.downgrade()` and dropped its four
-    tables. `-1`-from-`m09c` runs `m09c.downgrade()` instead and stops at the
-    `m09a` state, where all four are present -- so the inherited assertion
+    **Head is `m10b` and the `-1` half is re-pointed at its artefact** --
+    `sync_runs.position`, asserted absent one step below head, because a
+    column-adding head's `downgrade()` is what removes it. That is the
+    **twelfth** landing in a row to break and re-point this block (`ffa`,
+    `ffb`, `ffc`, `m08a`, `m08b`, `m09a`, `m09c`, `m09d`, `m09e`, `m09f`,
+    `m10a`, `m10b`). ⚠️ Read that number against the *seven* this docstring
+    claimed until 2026-08-25: five landings re-pointed the block and left
+    the prose alone, so the jump is a gap in the record rather than a burst
+    of migrations. `.claude/rules/db-and-sql.md` carries the same count and
+    the same caveat.
+
+    **The worked example below is `m09c` and is kept because it is the
+    better one**, not because it is the head. Its predecessor asserted
+    `m09a`'s four primary keys were *absent*, which held because
+    `-1`-from-`m09a` ran `m09a.downgrade()` and dropped its four tables.
+    `-1`-from-`m09c` runs `m09c.downgrade()` instead and stops at the `m09a`
+    state, where all four are present -- so the inherited assertion
     **failed, loudly and immediately**, and it was run and watched to fail
     before it was touched (`AssertionError: assert 'pk_images' not in {...}`).
-    That is the **seventh** landing in a row to do so (`ffa`, `ffb`, `ffc`,
-    `m08a`, `m08b`, `m09a`, `m09c`).
 
     `m09c` creates no table. It does three things and needs an assertion per
     artefact *kind*, which is the "one per table" rule generalised to a head
@@ -561,9 +670,10 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
       blind spot `_column_set`'s own docstring records for a column-only
       migration.
 
-    `m09a`'s five assertions have moved into the revision-pinned block below,
-    where revision ids do not drift -- displaced *because they had teeth*, on
-    the first run with `m09c` present.
+    Each head's displaced assertions move into the revision-pinned block
+    below, where revision ids do not drift -- displaced *because they had
+    teeth*, on the first run with the new head present. `m09a`'s five moved
+    when `m09c` landed; `m10a`'s seven moved when `m10b` did.
 
     That is the general case rather than this migration's luck, and it is
     worth stating because the opposite was written here first and was wrong:
@@ -574,10 +684,12 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     false. The direction of the assertion has nothing to do with it: `ffc`'s
     was positive (`in`) and broke; `ffb`'s was negative (`not in`) and broke
     too, because `-1`-from-`ffc` lands at the `ffb` state where
-    `blend_fingerprint` is present. Seven landings, seven loud breaks (`ffa`,
-    `ffb`, `ffc`, `m08a`, `m08b`, `m09a`, `m09c`) -- the same seven the
-    paragraph above counts, which is the point of stating the number in both
-    places. **So the
+    `blend_fingerprint` is present. Twelve landings, twelve loud breaks --
+    the same twelve the paragraph above counts, which is the point of stating
+    the number in both places -- which only works if both are maintained.
+    Both said *seven* until 2026-08-25, five landings after they stopped
+    being true, so the redundancy meant to catch a stale count was two stale
+    copies agreeing with each other. **So the
     alarm to watch for is a `-1` half that stays
     green after a new migration**, which means the assertion it inherited
     never had teeth. `.claude/rules/db-and-sql.md` carries the measurement.
@@ -614,8 +726,13 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # what makes it fail the moment `-1` starts landing there. Group F
         # re-pointed it for `ffa`, `af64ba2` for `ffb`, M7 Task 36 for `ffc`,
         # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`, M9 Task M1 for `m09a`,
-        # M9 Task C2 for `m09c`, T4R for `m09d`. It is cheaper than a step count, which keeps
-        # passing for the wrong reason instead of failing for the right one.
+        # M9 Task C2 for `m09c`, T4R for `m09d`, then `m09e`, `m09f` and
+        # `m10a` in turn, and issue #41's Task 1 for `m10b` — twelve. (The
+        # three before `m10b` had been going unrecorded here: the list said
+        # `m09d` while the count below said twelve, so it read as a jump
+        # rather than as the omission it was.) It is cheaper than a step
+        # count, which keeps passing for the wrong reason instead of failing
+        # for the right one.
         #
         # **The direction of the assertion does not decide this.** `m09c`
         # creates a constraint and renames a column, so its artefacts are
@@ -636,15 +753,40 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `pass`, which no other case in this suite can see -- the shared
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
-        # **`m10a`'s artefacts, re-pointed here the moment it became head** —
-        # the eleventh landing in a row to do this. `m10a` is a *renaming*
-        # head, so `_column_set` carries it in both directions at once: the
-        # new spellings are absent here and the old ones present, and a
-        # `downgrade()` that renamed only some of them fails on the half it
-        # forgot. One assertion per artefact kind — the columns via
-        # `_column_set`, the constraints via `_constraint_set`, because a
-        # rename that moved a column and left its CHECK named for the old one
-        # is invisible to the column reader.
+        # **`m10b`'s artefact, re-pointed here the moment it became head** —
+        # the twelfth landing in a row to do this. `m10b` *adds* a column, so
+        # the assertion is negative: one step below head that column does not
+        # exist, and only `m10b.upgrade()` creates it.
+        #
+        # Note this block reads `sync_runs` and the one it replaced read
+        # `titles`. The table follows the head, not the block.
+        #
+        # **One artefact, not two**, and the CHECK is the omission worth
+        # naming: `ck_sync_runs_position_non_negative` cannot outlive the
+        # column it constrains, so a `downgrade()` that dropped the column and
+        # forgot the constraint is not a state Postgres can be in. That is the
+        # same redundancy `m08a` shipped an index assertion for and had it
+        # removed.
+        at_m10a_columns = await _column_set(url, "sync_runs")
+        assert "position" not in at_m10a_columns, "position should not exist below m10b"
+        # The premise, for the reason the `m09a` stop below records: an empty
+        # column set satisfies the absence above, so without this the block
+        # would pass at any depth at which `sync_runs` had ceased to exist.
+        assert at_m10a_columns, "the premise: `sync_runs` still exists at `m10a`"
+
+        # **A named stop at `m09f`, holding `m10a`'s seven.** Displaced from
+        # the `-1` half the moment `m10b` became head, and displaced *because
+        # they had teeth*: `-1`-from-`m10b` lands on `m10a`'s applied state,
+        # where the renames have happened and every `not in` below is false.
+        #
+        # `m10a` is a *renaming* head, so `_column_set` carries it in both
+        # directions at once: the new spellings are absent here and the old
+        # ones present, and a `downgrade()` that renamed only some of them
+        # fails on the half it forgot. One assertion per artefact kind — the
+        # columns via `_column_set`, the constraints via `_constraint_set`,
+        # because a rename that moved a column and left its CHECK named for
+        # the old one is invisible to the column reader.
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m09f", direction="down"))
         at_m09f_columns = await _column_set(url, "titles")
         for new in ("tmdb_vote_average", "tmdb_vote_count", "tmdb_popularity"):
             assert new not in at_m09f_columns, f"{new} should not exist below m10a"

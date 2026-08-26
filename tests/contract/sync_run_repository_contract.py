@@ -116,6 +116,95 @@ class SyncRunRepositoryContract:
         with pytest.raises(RepositoryNotFound):
             await repository.save(run(source_id, status=SyncRunStatus.COMPLETED))
 
+    async def test_a_save_advances_the_position(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """The positive control for the clamp below, and it is not optional:
+        "a lower position does not land" is equally satisfied by a `save` that
+        never writes `position` at all, which is a walk that can never
+        resume."""
+        one = run(source_id, kind=SyncRunKind.WATCH_STATE, position=0)
+        await repository.add(one)
+        await repository.save(one.evolve(position=2_844, items_seen=2_844))
+        stored = await repository.get(one.id)
+        assert stored is not None
+        assert stored.position == 2_844
+
+    async def test_a_lower_position_does_not_pull_the_checkpoint_back(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """**A checkpoint merges as the further of two opinions, never as the
+        later one.** ADR-0042 has a `WATCH_STATE` run reuse its row across
+        attempts, and two attempts can hold it at once -- the queue coalesces
+        `sync` jobs, and neither `LaneSupervisor._close_gap` nor `usher sync`
+        goes through the queue. A last-writer-wins column then lets the walk
+        that started first save the page *it* reached over the page a faster
+        one already committed, and the next attempt re-walks the difference
+        for as long as the two keep overlapping: #41's loop, restored by the
+        column added to close it.
+        """
+        one = run(source_id, kind=SyncRunKind.WATCH_STATE, position=0)
+        await repository.add(one)
+        await repository.save(one.evolve(position=5_600, items_seen=5_600))
+
+        await repository.save(one.evolve(position=2_844, items_seen=2_844))
+
+        stored = await repository.get(one.id)
+        assert stored is not None
+        assert stored.position == 5_600, "the slower attempt pulled the checkpoint back"
+        # The rest of the row is the loser's, and deliberately so: it is one
+        # column that merges, not a whole row that does. Asserted so that
+        # "the save was refused entirely" cannot pass as this rule.
+        assert stored.items_seen == 2_844
+
+    @pytest.mark.parametrize("losing", [SyncRunStatus.FAILED, SyncRunStatus.RUNNING])
+    async def test_an_overtaken_walk_cannot_un_complete_the_run_that_overtook_it(
+        self,
+        repository: SyncRunRepository,
+        source_id: uuid.UUID,
+        losing: SyncRunStatus,
+    ) -> None:
+        """**Both non-completed states, because the observed interleaving
+        produces one and the crash that follows it produces the other.**
+        Measured: a gap-closing walk reclaims a running attempt's row,
+        finishes it, and the original attempt then fails and saves `failed`
+        over the completion -- so `latest_completed_cursor` stops answering
+        for a walk that provably finished, and the whole library is walked
+        again. `RUNNING` is the same write one moment earlier, from an
+        attempt that has not died yet.
+
+        The cursor is the assertion that matters. A status column reading
+        `failed` is a wrong row on a dashboard; a cursor that went back to
+        `None` is the next walk being the whole library again.
+        """
+        one = run(source_id, kind=SyncRunKind.WATCH_STATE, started_at=EARLIER, position=0)
+        await repository.add(one)
+        await repository.save(
+            one.evolve(
+                status=SyncRunStatus.COMPLETED,
+                position=5_688,
+                items_seen=1_137_538,
+                finished_at=LATER,
+            )
+        )
+        assert (
+            await repository.latest_completed_cursor(source_id, SyncRunKind.WATCH_STATE) == EARLIER
+        ), "the premise: the faster walk really did complete and leave a cursor"
+
+        await repository.save(
+            one.evolve(status=losing, position=4, items_seen=4, error="source went away mid-walk")
+        )
+
+        stored = await repository.get(one.id)
+        assert stored is not None
+        assert stored.status is SyncRunStatus.COMPLETED, "a finished walk was un-completed"
+        assert stored.position == 5_688
+        assert stored.items_seen == 1_137_538
+        assert stored.error is None, "a completed run is reported as having failed"
+        assert (
+            await repository.latest_completed_cursor(source_id, SyncRunKind.WATCH_STATE) == EARLIER
+        ), "the next walk has no cursor and is the whole library again"
+
     async def test_no_completed_run_means_no_cursor(
         self, repository: SyncRunRepository, source_id: uuid.UUID
     ) -> None:
@@ -214,3 +303,165 @@ class SyncRunRepositoryContract:
     ) -> None:
         await repository.add(run(source_id))
         assert await repository.list_for_source(other_source_id) == []
+
+    async def test_the_newest_run_is_offered_for_resumption_when_it_did_not_complete(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """A `FAILED` run is what a crashed walk leaves, and it carries the
+        position that walk committed. The other unfinished state, `RUNNING`,
+        is `test_a_run_left_running_by_a_killed_process_is_resumed` -- stated
+        there rather than claimed here, because prose asserting coverage is
+        not coverage."""
+        failed = run(
+            source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.FAILED,
+            started_at=EARLIER,
+            position=51_000,
+        )
+        await repository.add(failed)
+
+        found = await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE)
+        assert found is not None
+        assert found.id == failed.id
+        assert found.position == 51_000
+        assert found.started_at == EARLIER
+
+    async def test_a_completed_newest_run_offers_nothing_to_resume(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """The premise this method exists for: a walk that finished is not
+        resumed, it is followed by a fresh delta."""
+        await repository.add(
+            run(
+                source_id,
+                kind=SyncRunKind.WATCH_STATE,
+                status=SyncRunStatus.COMPLETED,
+                started_at=EARLIER,
+            )
+        )
+        assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None
+
+    async def test_an_older_failure_is_not_resumed_behind_a_newer_completion(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """**The case the "newest, and only if not completed" shape is for.**
+        A repository that answered "the newest run that is not completed"
+        would hand back the old failure forever, and every later walk would
+        resume from a position a completed run has already passed.
+        """
+        failed = run(
+            source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.FAILED,
+            started_at=EARLIER,
+            position=51_000,
+        )
+        await repository.add(failed)
+        completed = run(
+            source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.COMPLETED,
+            started_at=LATER,
+        )
+        await repository.add(completed)
+        # Read off the seeded rows, not off the module constants: `LATER` is
+        # defined as `EARLIER + 1 day`, so a guard comparing the two is true
+        # whatever the rows below were given and cannot report on the fixture
+        # it is positioned to guard.
+        assert failed.started_at < completed.started_at, (
+            "the premise: the completion really is the newer run"
+        )
+        assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None
+
+    async def test_resumption_is_scoped_by_kind_and_by_source(
+        self, repository: SyncRunRepository, source_id: uuid.UUID, other_source_id: uuid.UUID
+    ) -> None:
+        """The two lanes walk different upstream methods under different
+        filters, so an item-lane failure is not a watch-lane resume point --
+        and neither is another source's."""
+        other_lane = run(source_id, kind=SyncRunKind.DELTA, status=SyncRunStatus.FAILED, position=7)
+        await repository.add(other_lane)
+        other_source = run(
+            other_source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.FAILED,
+            position=9,
+        )
+        await repository.add(other_source)
+
+        assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None
+
+        # The positive controls. Without them this case is `is None` over two
+        # rows it never shows are findable at all, which is equally satisfied
+        # by two seeds that did not land.
+        in_its_own_lane = await repository.latest_incomplete_run(source_id, SyncRunKind.DELTA)
+        assert in_its_own_lane is not None
+        assert in_its_own_lane.id == other_lane.id
+        at_its_own_source = await repository.latest_incomplete_run(
+            other_source_id, SyncRunKind.WATCH_STATE
+        )
+        assert at_its_own_source is not None
+        assert at_its_own_source.id == other_source.id
+
+    async def test_a_run_left_running_by_a_killed_process_is_resumed(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """`RUNNING` is not a rare state, it is the *designed* trace of a hard
+        kill: the lane commits its run before the walk so a killed process
+        leaves a row rather than nothing, and issue #41's deployment held
+        three of them aged 7-11h. A repository that resumed only `FAILED` runs
+        would answer `None` for every one, the caller would mint a fresh run
+        at `position = 0`, and that is #41's restart loop restored on the
+        exact path ADR-0042 calls out.
+        """
+        abandoned = run(
+            source_id,
+            kind=SyncRunKind.WATCH_STATE,
+            status=SyncRunStatus.RUNNING,
+            started_at=EARLIER,
+            position=51_000,
+        )
+        await repository.add(abandoned)
+
+        found = await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE)
+        assert found is not None
+        assert found.id == abandoned.id
+        assert found.position == 51_000
+
+    async def test_two_runs_sharing_a_started_at_resolve_to_the_later_added_one(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        """Both arms break a `started_at` tie on `id` so that they agree.
+        Postgres promises nothing for equal sort keys, and Python's `max`
+        returns the *first* maximal element -- so without the tiebreak the two
+        implementations can answer differently about the same two rows.
+
+        Not a reachable production input: both service sites stamp
+        `datetime.now(UTC)`, so a real tie needs two runs in the same
+        microsecond for one `(source, kind)`. It is reachable in *this file*,
+        where `run()` defaults every run to `EARLIER` -- so a tie is what any
+        future case that omits `started_at` will seed.
+        """
+        first = run(
+            source_id, kind=SyncRunKind.WATCH_STATE, status=SyncRunStatus.FAILED, position=1
+        )
+        await repository.add(first)
+        second = run(
+            source_id, kind=SyncRunKind.WATCH_STATE, status=SyncRunStatus.FAILED, position=2
+        )
+        await repository.add(second)
+        assert first.started_at == second.started_at, "the premise: the two runs really do tie"
+        assert first.id < second.id, (
+            "the premise: UUIDv7 is monotonic, so the later-added run holds the larger id"
+        )
+
+        found = await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE)
+        assert found is not None
+        assert found.id == second.id
+        assert found.position == 2
+
+    async def test_a_source_that_has_never_run_offers_nothing_to_resume(
+        self, repository: SyncRunRepository, source_id: uuid.UUID
+    ) -> None:
+        assert await repository.latest_incomplete_run(source_id, SyncRunKind.WATCH_STATE) is None

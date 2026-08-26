@@ -275,9 +275,15 @@ class CuratedRowRow(Base):
         ARRAY(PGUUID(as_uuid=True)), nullable=False
     )
     # The model's own ordering of the rows within one generation, `ge=0`
-    # because it indexes the list the model returned. Quoted in the CHECK
-    # below because `position` is a Postgres keyword; SQLAlchemy quotes the
-    # identifier itself.
+    # because it indexes the list the model returned. The CHECK below writes
+    # the column quoted, and **not for the reason this comment gave until
+    # 2026-08-25**: `position` is not a reserved word anywhere that matters.
+    # It is `catcode = 'C'` in `pg_get_keywords()` (unreserved), it is absent
+    # from the postgresql dialect's `RESERVED_WORDS`, so SQLAlchemy emits it
+    # bare in DDL and DML alike, and an unquoted CHECK body migrates cleanly.
+    # What quoting buys is cosmetic and is written up once, on
+    # `SyncRunRow.position` in `db/models/sync.py` -- deliberately a pointer
+    # rather than a third copy of a measurement.
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     # `title_embeddings.model_name`'s reason (ADR-0020): it makes "these rows
     # were written by a model we no longer run" a query rather than something

@@ -80,8 +80,10 @@ class _LossyAdapter(FakeSourceAdapter):
         super().__init__(source)
         self._blind_to = blind_to
 
-    async def _walk_states(self, since: AwareDatetime | None) -> AsyncIterator[SourceWatchState]:
-        async for state in super()._walk_states(since):
+    async def _walk_states(
+        self, since: AwareDatetime | None, start_index: int
+    ) -> AsyncIterator[SourceWatchState]:
+        async for state in super()._walk_states(since, start_index):
             if self._blind_to is None or state.external_id in self._blind_to:
                 yield dataclasses.replace(state, play_count=None, last_played_at=None)
             else:
