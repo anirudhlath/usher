@@ -573,3 +573,80 @@ than by a comment — which is the point of writing it down this way. **The same
 argument covers any future `OTEL_*` knob**: the SDK reads them from
 `os.environ`, `Settings` refuses them from `.env`, and the two aliased fields
 above are the only ones this project routes through its own configuration.
+
+## `argparse` prefix matching bound a secret into the argument named for its *variable*, and fixing the binding introduces a second leak (2026-08-26, M10 K7 review)
+
+**`allow_abbrev` defaults to `True`.** `usher rotate-secret` takes
+`--new-key-env VAR` — a variable *name*, never a key, because a key in `argv`
+is in the shell history and in `ps` output for every user on the box. `--new-key`
+is an unambiguous **prefix** of it, so
+
+```
+$ usher rotate-secret --new-key "<the operator's real key>"
+usher rotate-secret: $<the operator's real key> is not set -- export the new key
+into it (e.g. `export <the operator's real key>=$(openssl rand -hex 32)`) ...
+```
+
+The key bound to `args.new_key_env`, and the "is not set" message printed it
+back **twice** — once as `$NAME` and once inside an `export NAME=…` an operator
+may well paste, putting it in the history a second time. `--new-key` is the
+single most likely thing to type, because the help text and every document
+about the command say *"the new key"*.
+
+**The case that was supposed to cover this could not.** It parsed a *correct*
+invocation and asserted the namespace had no key in it — and under the defect
+the namespace is exactly the right shape with the wrong value in the right
+field. Same family as *"a membership assertion is not an ordering test"*: a
+shape assertion is satisfied by a program doing something else entirely.
+
+### The measurement, over seven invocations and three candidate fixes
+
+| invocation | `allow_abbrev=False` alone | tripwire alone (abbrev on) | both |
+|---|---|---|---|
+| `--new-key K` | refused, no leak | refused, no leak | refused, no leak |
+| `--new-key K --new-key-env V` | **LEAKS** | refused, no leak | refused, no leak |
+| `--new-k K` | refused, no leak | *ambiguous option*, no leak | refused, no leak |
+| `--new-k K --new-key-env V` | **LEAKS** | *ambiguous*, no leak | **LEAKS** |
+| `--newkey K --new-key-env V` | **LEAKS** | **LEAKS** | **LEAKS** |
+
+🔴 **`allow_abbrev=False` fixes the binding and *introduces* a leak.** The
+residual in every column is argparse's own last step: CPython's `parse_args` is
+`parse_known_args` followed by
+`self.error(_('unrecognized arguments: %s') % ' '.join(argv))`, and on this one
+command an unrecognised value is most likely a key. So the fix is three things,
+not one — and the middle one is the only one that would have been guessed last:
+
+1. `allow_abbrev=False` **on the subparser**. It does **not** propagate:
+   `_SubParsersAction.add_parser` builds a fresh `ArgumentParser` from the
+   keyword arguments it is handed, so a subcommand's prefix matching is the
+   subcommand's own. Measured — with it set on the outer parser only, the
+   abbreviation still binds.
+2. **Declare `--new-key`** with `dest=argparse.SUPPRESS`, `help=argparse.SUPPRESS`
+   and an action that calls `parser.error`. Declared, it is never "unrecognised";
+   suppressed, it is in neither `--help` nor the usage line nor the namespace.
+3. **Refuse that command's unrecognised arguments without echoing them**, in
+   this project's own `parse_args`, keyed on the *parsed* `command` rather than
+   on `argv[0]` (`usher --traceback rotate-secret …` is legal). Every other
+   command keeps argparse's exact wording, because there a refused token is a
+   typo and naming it is the fix.
+
+### And a grammar check is not enough, because the documented key generator emits legal variable names
+
+The remaining door needs no abbreviation at all: the operator uses the **right**
+flag and passes the key to it. `--new-key-env <key>` with a POSIX-name check
+(`[A-Za-z_][A-Za-z0-9_]*`) catches `openssl rand -base64 32` (`+/=`) and any
+hyphenated key — and **not** `openssl rand -hex 32`, this project's own
+documented recipe, whose 64 lowercase hex characters are a legal name whenever
+the first is `a`-`f`. That is 6/16 = **37.5%** analytically and **37.6%**
+measured over 100,000 samples. So the second refusal is *"would `Settings`
+accept this as a `secret_key`?"* — the same predicate the command already
+applies to the key itself, one call reused rather than a length literal
+restated. A well-formed name that cannot be a key is still echoed when unset,
+which is the useful message and is not a secret.
+
+**The general form, and it is why this is filed here rather than only in a
+sweep ledger: an argument whose *value* must never be printed cannot be secured
+by its own handler, because the parser answers first.** Ask of any such
+argument: what does the parser print when it does not recognise something, when
+two options are ambiguous, and when a prefix of this flag is typed? Three of
+those five leak paths are argparse's, not the program's.

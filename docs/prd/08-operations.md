@@ -385,7 +385,44 @@ cursors are outside this entirely**: `api/cursor.py` records that
 on a command line is in the shell's history file and in `ps` output for every
 user on the box, and neither is undone by the command exiting, so
 `--new-key-env` names the **variable** and the value is never a token
-`argparse` sees. ⚠️ **Export it; do not add it to `.env`.** Measured
+`argparse` sees.
+
+🔴 **That was false for one commit, and the way it was false is worth keeping.**
+`argparse`'s `allow_abbrev` defaults to `True`, so `--new-key` — the flag the
+sentence above and every document about this command invite an operator to type
+— was an unambiguous **prefix** of `--new-key-env`, and argparse silently bound
+the key into the field meant for a variable *name*. The "is not set" message
+then printed it back twice, once as `$<key>` and once inside a copy-pasteable
+`export <key>=…`. Found in review 2026-08-26. The case asserting the key is
+absent from the parsed namespace could not see it, because the namespace was
+exactly the right *shape* and the wrong value was in the right field.
+**Four controls ship, and each was measured over the same seven invocations:**
+
+1. **`allow_abbrev=False` on this subparser**, which does not propagate from
+   the parser above it — measured, a subparser inherits nothing.
+2. **`--new-key` is declared** as a suppressed tripwire whose only action is to
+   refuse, naming the flag and never the value. Without it,
+   `allow_abbrev=False` *alone* leaves `--new-key K --new-key-env V` reaching
+   argparse's own `unrecognized arguments: %s`, **which prints the key** —
+   fixing the binding introduces a leak.
+3. **`parse_args` refuses this one command's unrecognised arguments without
+   them**, which closes what is left (`--newkey`, `--new-k`). Every other
+   command keeps argparse's wording, because there a refused token is a typo
+   and naming it is how it gets fixed.
+4. **`--new-key-env`'s value must be an environment variable *name***
+   (`[A-Za-z_][A-Za-z0-9_]*`) and must not be something `Settings` would accept
+   as a key; either refusal prints nothing back. The second is not redundant:
+   `openssl rand -hex 32` — the command this document recommends — emits a
+   **legal variable name** whenever its first character is `a`-`f`, which is
+   6/16 = **37.5%** of the time (measured over 100,000 samples: 37.6%), so a
+   grammar check alone would have echoed better than a third of all real keys
+   handed to the correct flag.
+
+A well-formed name that cannot be a key is still echoed when it is unset,
+deliberately — an operator who forgot the `export` needs to see which variable
+was looked for, and such a name is not a secret.
+
+⚠️ **Export it; do not add it to `.env`.** Measured
 2026-08-25: an exported `USHER_NEW_SECRET_KEY` is invisible to `Settings`
 (pydantic-settings' env source reads only the fields it declares), and the same
 name written into `.env` makes **every** entry point fail

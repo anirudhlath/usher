@@ -20,7 +20,11 @@ rejected key nor a stored credential reaches a message, by seeding a canary
 and asserting its *presence* somewhere first.
 """
 
+import argparse
+import contextlib
+import io
 import os
+import re
 
 import pytest
 from pydantic import SecretStr
@@ -58,6 +62,40 @@ def _settings() -> Settings:
     )
 
 
+#: A key an operator could plausibly have made with the command this project
+#: documents, chosen so that it is a **legal environment variable name**: 64
+#: lowercase hex characters beginning with a letter, which is 6/16 = 37.5% of
+#: `openssl rand -hex 32`'s output space (measured over 100,000 samples:
+#: 37.6%). It is the case a grammar check alone cannot see.
+HEX_KEY_THAT_IS_A_LEGAL_NAME = "f72e4ec32beea584456a" + "a" * 44
+
+#: A key that is *not* a legal name: `openssl rand -base64 32`'s alphabet
+#: carries `+`, `/` and `=`, none of which a variable name may hold. This is
+#: the half the grammar check catches, and the case asserts that premise.
+BASE64_KEY = "aB3/xY+9zQ7wE1rT2uI5oP8kL0jH6gF4dS2aZ1xC3v=="
+
+
+def _merged(argv: list[str]) -> tuple[object, str]:
+    """Run `main` and return its exit code beside **everything an operator
+    sees**: stdout, stderr and the `SystemExit` string, concatenated.
+
+    The three together, because the leak this file's security cases are about
+    was found on the merged stream -- argparse writes its refusals to stderr
+    and this command writes its own to `SystemExit`, so a case reading only
+    one of them can watch a key go past on the other.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    code: object = 0
+    message = ""
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            main(argv)
+    except SystemExit as exc:
+        code = exc.code
+        message = "" if isinstance(exc.code, int) or exc.code is None else str(exc.code)
+    return code, out.getvalue() + err.getvalue() + message
+
+
 def test_rotate_secret_takes_a_variable_name_and_never_a_key() -> None:
     """The acceptance criterion, run through the real parser.
 
@@ -65,13 +103,198 @@ def test_rotate_secret_takes_a_variable_name_and_never_a_key() -> None:
     output for every user on the box, and neither is undone by the command
     exiting. `--new-key-env` names the variable instead, so the value is never
     a token argparse sees.
+
+    ⚠️ **This case asserts a *shape*, and a shape assertion is exactly what the
+    2026-08-26 abbreviation defect satisfied**: `--new-key <the key>` bound to
+    `new_key_env`, so the namespace was this dict with the wrong value in the
+    right field. It is kept because the surface is worth pinning, and the cases
+    below it are the ones with teeth.
     """
-    argv = ["rotate-secret", "--new-key-env", VAR]
-    args = parse_args(argv)
+    args = parse_args(["rotate-secret", "--new-key-env", VAR])
 
     assert vars(args) == {"command": "rotate-secret", "traceback": False, "new_key_env": VAR}
-    # The surface offers nothing that *could* carry a key.
-    assert "--new-key" not in build_parser().format_help()
+    # `--new-key` is a tripwire rather than an alternative, so it stays out of
+    # `--help` -- asserted on the *subparser's* help, because the top-level
+    # help lists subcommand names and would satisfy this vacuously.
+    rotate_help = _rotate_secret_help()
+    assert "--new-key-env" in rotate_help
+    assert not re.search(r"--new-key(?!-env)", rotate_help)
+
+
+def test_a_key_passed_as_new_key_is_refused_and_never_appears_anywhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 **The 2026-08-26 defect, and it was a silent success.**
+
+    `argparse`'s `allow_abbrev` defaults to `True`, so `--new-key` was an
+    unambiguous prefix of `--new-key-env`: the operator's key bound to the
+    field meant for a variable *name*, and the "is not set" message printed it
+    back twice -- once as `$<key>` and once inside a suggested `export
+    <key>=...` that invites a paste into the same history the design exists to
+    keep it out of.
+
+    `--new-key` is the single most likely thing to type, because the help text
+    and every document about this command say *"the new key"*.
+
+    The premise fires first: the key is a token of the invocation, so its
+    absence from the output is a claim about a value that was right there.
+
+    🔴 **The last three assertions are the repair, and the sweep is what asked
+    for them.** *"Exit 2 and the key is absent"* is satisfied by deleting the
+    `--new-key` tripwire entirely: `allow_abbrev=False` then leaves argparse
+    saying *"the following arguments are required: --new-key-env"*, which is a
+    refusal, is silent about the value, and even contains the string
+    `--new-key-env`. Measured -- with the tripwire deleted this file was
+    **19 passed**. So the assertions asserted a rejection and this repository
+    already knows that *"a rejection is not an assertion: two implementations
+    that fail for opposite reasons produce the identical failure value"*.
+
+    What the tripwire actually buys is the **sentence**, and the sentence is
+    the point: an operator who has just typed their new key at a shell has put
+    it in `~/.bash_history` and in `ps` output, and nothing about exiting 2
+    tells them to go and deal with that. So the message is what is pinned.
+    """
+    _configured(monkeypatch)
+    argv = ["rotate-secret", "--new-key", NEW_KEY]
+    assert NEW_KEY in argv, "the premise: the key really is in this invocation"
+
+    code, seen = _merged(argv)
+
+    assert code == 2
+    assert NEW_KEY not in seen
+    assert "--new-key-env" in seen, "the refusal has to say what to do instead"
+    # The teaching half, and the half a bare "required argument" refusal has
+    # none of: *why* the key must not have been there, and therefore what the
+    # operator has to clean up now that it has been.
+    assert "shell history" in seen
+    assert "ps" in seen
+    assert "NAME" in seen
+
+
+def test_an_abbreviation_cannot_bind_a_value_into_the_variable_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`allow_abbrev=False` on this subparser, and the two shapes differ.
+
+    Alone, `--new-k <key>` leaves `--new-key-env` unsatisfied and argparse says
+    so. Beside a real `--new-key-env`, it becomes an *unrecognized argument* --
+    which is the path argparse would print the key on, and the one
+    `_parse_without_echoing_unknown_values` exists for. Both are asserted,
+    because fixing the first is what creates the second.
+    """
+    _configured(monkeypatch)
+
+    for argv in (
+        ["rotate-secret", "--new-k", NEW_KEY],
+        ["rotate-secret", "--new-k", NEW_KEY, "--new-key-env", VAR],
+        ["rotate-secret", "--newkey", NEW_KEY, "--new-key-env", VAR],
+    ):
+        assert NEW_KEY in argv
+        code, seen = _merged(argv)
+        assert code == 2, argv
+        assert NEW_KEY not in seen, argv
+
+
+def test_a_key_given_to_the_variable_flag_itself_is_refused_without_being_echoed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half `allow_abbrev=False` does not reach: the operator uses the
+    **right** flag and passes the key to it.
+
+    Two premises, and the second is the whole reason this case exists.
+    """
+    _configured(monkeypatch)
+    # Premise 1: this really is a legal environment variable name, so the
+    # grammar check cannot be what refuses it.
+    assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", HEX_KEY_THAT_IS_A_LEGAL_NAME)
+    # Premise 2: and it really is a key -- `Settings` accepts it as one, which
+    # is exactly the predicate the refusal uses and the reason it can refuse.
+    accepted = Settings(
+        database_url=SecretStr("postgresql+asyncpg://u:p@127.0.0.1:1/usher"),
+        secret_key=SecretStr(HEX_KEY_THAT_IS_A_LEGAL_NAME),
+    ).secret_key
+    assert accepted.get_secret_value() == HEX_KEY_THAT_IS_A_LEGAL_NAME
+
+    code, seen = _merged(["rotate-secret", "--new-key-env", HEX_KEY_THAT_IS_A_LEGAL_NAME])
+
+    assert code != 0
+    assert HEX_KEY_THAT_IS_A_LEGAL_NAME not in seen
+    assert "NAME" in seen
+
+
+def test_a_name_that_is_not_an_environment_variable_name_is_refused_without_being_echoed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grammar half. `openssl rand -base64 32` carries `+/=` and a
+    hyphenated key carries `-`, none of which is a legal name -- so the
+    commonest way to reach this refusal is to have passed the key, and
+    repeating it is the defect."""
+    _configured(monkeypatch)
+    assert not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", BASE64_KEY), "the premise"
+
+    code, seen = _merged(["rotate-secret", "--new-key-env", BASE64_KEY])
+
+    assert code != 0
+    assert BASE64_KEY not in seen
+    assert "environment variable" in seen
+
+
+def test_an_unrecognised_argument_names_its_value_on_every_command_except_this_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scrub is scoped, and the control is what says so.
+
+    argparse's *"unrecognized arguments: %s"* is how an operator fixes a typo,
+    so it is kept verbatim everywhere else. It is suppressed on
+    `rotate-secret` alone, where an unrecognised value is most likely a key.
+    """
+    _configured(monkeypatch)
+
+    _, elsewhere = _merged(["backup", "--nonsense", NEW_KEY])
+    assert "unrecognized arguments" in elsewhere
+    assert NEW_KEY in elsewhere, "the control: other commands still name what they refused"
+
+    _, here = _merged(["rotate-secret", "--nonsense", NEW_KEY, "--new-key-env", VAR])
+    assert "unrecognized arguments for rotate-secret" in here
+    assert NEW_KEY not in here
+
+
+def test_prefix_matching_is_off_for_this_command_and_on_for_every_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The blast radius of `allow_abbrev=False`, pinned rather than asserted in
+    a comment.
+
+    It is set on this subparser only -- measured, because a subparser does
+    **not** inherit it from the parser that created it -- so exactly three
+    option strings lose prefix matching and nineteen other commands keep it.
+    """
+    _configured(monkeypatch)
+
+    # Off here: an abbreviation of the one real flag no longer parses.
+    with pytest.raises(SystemExit):
+        parse_args(["rotate-secret", "--new-key-e", VAR])
+
+    # On everywhere else: `usher backup --out` still means `--output`.
+    assert parse_args(["backup", "--out", "usher-backup.jsonl.gz"]).output.name == (
+        "usher-backup.jsonl.gz"
+    )
+
+
+def _rotate_secret_help() -> str:
+    """The `rotate-secret` subparser's own help.
+
+    Not `build_parser().format_help()`, which lists subcommand *names* and no
+    option of any of them -- so an assertion about `--new-key` against it
+    passes whatever the subparser declares.
+    """
+    subparsers = next(
+        action
+        for action in build_parser()._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    parser = subparsers.choices["rotate-secret"]
+    return str(parser.format_help())
 
 
 def test_the_key_itself_is_absent_from_argv_and_from_the_parsed_namespace(

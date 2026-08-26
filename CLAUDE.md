@@ -425,7 +425,16 @@ a client meets as `404 ticket_invalid` and answers by asking `/play` again.
 written into `.env`**: a key in `argv` is in the shell history and in `ps`
 output, and the same name inside `.env` fails `extra="forbid"` at **every**
 entry point with the new key rendered in pydantic's `input_value=` (measured
-2026-08-26). The new key is checked against `Settings`' own rules
+2026-08-26).
+🔴 **`--new-key` was silently accepted as a prefix of `--new-key-env` for one
+commit and the command printed the key back** — `argparse`'s `allow_abbrev`
+defaults to `True`. It now takes four controls, one of which the obvious fix
+*introduces* the need for; `.claude/rules/config-cli-and-deployment.md` has the
+seven-invocation matrix. **Before adding any argument whose value must never be
+printed, read that entry**: three of the five leak paths belong to argparse
+rather than to the program, and a case that greps the parsed namespace after a
+*correct* invocation cannot see any of them.
+The new key is checked against `Settings`' own rules
 (`min_length=32`, the placeholder rejection) **before the first row is
 touched**, because a key `Settings` would refuse is a rotation that bricks the
 next start. It **commits per row** — deliberately the opposite of `usher

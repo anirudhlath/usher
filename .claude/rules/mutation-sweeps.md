@@ -8727,3 +8727,68 @@ directory be the repository's.
   anywhere"*. **A module docstring's negative is scoped to that module; the
   thing it denies usually moved rather than died, and the grep that settles it
   is over `src/`, not over the file the sentence is in.**
+
+## M10 K7, round 2 — the review round: `argparse` prefix matching put the key in `argv`, and one of my own repairs was unpinned (2026-08-26)
+
+A reviewer ran `usher rotate-secret --new-key "<a key>"` against the committed
+tree and got the key back on stdout. `allow_abbrev` defaults to `True`,
+`--new-key` is an unambiguous prefix of `--new-key-env`, and the key bound to
+the field meant for a variable *name*. The mechanism, the seven-invocation
+matrix and the three-part fix are in
+`.claude/rules/config-cli-and-deployment.md`, filed there because that file
+loads on `cli.py` and this one does not.
+
+**6 plants, 6 killed, 1 partial — and the partial is the finding.**
+
+| # | plant | target | verdict |
+|---|---|---|---|
+| P14 | `allow_abbrev=False` removed from the subparser | `..._prefix_matching_is_off_for_this_command_and_on_for_every_other` only | **PARTIAL** — see below |
+| P15 | the `--new-key` tripwire deleted | `..._is_refused_and_never_appears_anywhere` | **SURVIVED, then killed after the case was repaired** |
+| P16 | the name-grammar refusal deleted (careful spelling) | `..._is_not_an_environment_variable_name_...` | KILLED |
+| P17 | the *would-`Settings`-accept-this-as-a-key* refusal deleted | `..._given_to_the_variable_flag_itself_...` | KILLED |
+| P18 | `parse_args` reverted to `parser.parse_args` | the abbreviation case **and** the scrub case | KILLED |
+| P19 | the scrub applied to every command, not just this one | the scrub case's control arm | KILLED |
+
+### 🔴 P15 survived, and the assertion it survived was one this file already warns about
+
+Deleting the `--new-key` tripwire left **19 passed**. With
+`allow_abbrev=False` still in place, `--new-key <key>` alone becomes
+*"the following arguments are required: --new-key-env"* — which exits 2, does
+not echo the key, and even contains the string the case greps for. My
+assertions were `code == 2`, `key not in output` and `"--new-key-env" in
+output`, i.e. **an assertion that it was rejected**, and this file's own entry
+says *"a rejection is not an assertion: two implementations that fail for
+opposite reasons produce the identical failure value"*. I wrote the rule's
+counterexample four hours after re-reading the rule.
+
+What the tripwire actually buys is the **sentence** — an operator who has just
+typed their new key at a shell has put it in `~/.bash_history` and in `ps`
+output, and *"the following arguments are required"* does not tell them to go
+and deal with that. The repaired case asserts the message teaches (`"shell
+history"`, `"ps"`, `"NAME"`); re-planted, P15 fails that case alone.
+
+### P14 is partial, and the two controls are each what makes the other's removal safe
+
+Removing `allow_abbrev=False` kills only the blast-radius case: the security
+cases stay green, because with the `--new-key` tripwire declared, `--new-k`
+becomes an **ambiguous option** rather than a prefix match, and argparse's
+ambiguity error names the two options and not the value. So today the tripwire
+alone would hold the line — and `allow_abbrev=False` alone would not (it leaks
+via *unrecognized arguments*, measured). Reported as partial rather than
+rounded to KILLED: **two redundant controls where each covers the other's
+removal look like one control with a spare, and a sweep that only reports
+"killed" cannot tell those apart.** The blast-radius case is what stops the
+`allow_abbrev` half being deleted as dead weight.
+
+### Blast radius, because the reviewer asked before it landed rather than after
+
+`allow_abbrev=False` is set on the `rotate-secret` subparser and nowhere else,
+so it removes prefix matching for exactly three option strings —
+`--new-key-env`, `--new-key`, `--help` — on one of twenty commands. Measured
+that it does **not** inherit from the top-level parser, which is why the narrow
+scope is available at all. `usher backup --out` still means `--output`, and
+`test_prefix_matching_is_off_for_this_command_and_on_for_every_other` asserts
+both halves. Nothing in `tests/`, `docs/` or `README.md` spells an abbreviated
+flag for any command, so the wider setting was available and was declined: one
+measured defect on one command is not evidence about nineteen surfaces an
+operator may have muscle memory for.

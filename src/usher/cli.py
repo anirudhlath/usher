@@ -13,6 +13,7 @@ the same property: nothing downloads unless an operator asks.
 import argparse
 import asyncio
 import os
+import re
 import sys
 import time
 import uuid
@@ -2084,6 +2085,61 @@ def _print_backup_report(report: BackupReport) -> None:
     print(CREDENTIAL_KEY_WARNING)
 
 
+#: What POSIX calls an environment variable name, and what `--new-key-env`
+#: will accept as one. Anything else is refused **without being printed**:
+#: `usher rotate-secret --new-key-env <the key>` is the mistake this exists
+#: for, and a base64 key (`+/=`) or a hyphenated one fails here.
+_ENVIRONMENT_VARIABLE_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+class _RefuseAKeyOnTheCommandLine(argparse.Action):
+    """`--new-key` exists so that typing it is a refusal rather than a leak.
+
+    🔴 **It was a silent success until 2026-08-26.** `argparse`'s
+    `allow_abbrev` defaults to `True`, so `--new-key` was an unambiguous
+    *prefix* of `--new-key-env` and bound to it: the operator's key arrived as
+    `args.new_key_env`, i.e. as a variable *name*, and the "is not set"
+    message printed it back twice -- once as `$<key>` and once inside a
+    suggested `export <key>=...` an operator might paste. Every reason
+    `--new-key-env` exists (shell history, `ps` output) was defeated by an
+    abbreviation, and the case asserting the key is absent from the namespace
+    could not see it because the namespace was exactly the right *shape* --
+    the wrong value was in the right field.
+
+    **Declared rather than merely disallowed**, because the three ways to
+    refuse it are not equally good and this was measured over seven
+    invocation shapes:
+
+    - `allow_abbrev=False` alone stops the binding, but `--new-key K
+      --new-key-env V` then reaches `parse_args`' *"unrecognized arguments:
+      %s"*, **which prints the key**. Fixing the binding introduces a leak.
+    - Declaring `--new-key` catches the exact spelling before any of that,
+      with a message that names the flag and never the value.
+    - `parse_args` refuses this command's unrecognised arguments without
+      them, which closes what is left (`--newkey`, `--new-k`).
+
+    All three ship. `help=argparse.SUPPRESS` keeps it out of `--help` and out
+    of the usage line, so the surface still advertises exactly one way to
+    name a key and this is a tripwire rather than an alternative.
+    """
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        # `parser.error`: exit 2 with usage on stderr, the way every other
+        # argument failure in this CLI exits. The value is not interpolated.
+        parser.error(
+            "--new-key is not an argument of this command, and the value after it is not "
+            "repeated here because it is probably your new key. A key in argv is in your "
+            "shell history and in `ps` output for every user on this box. Export it and "
+            "pass the variable's NAME: --new-key-env USHER_NEW_SECRET_KEY"
+        )
+
+
 def _new_secret_key(settings: Settings, variable: str) -> SecretStr:
     """Read the new key out of the environment, and refuse it here or nowhere.
 
@@ -2120,7 +2176,51 @@ def _new_secret_key(settings: Settings, variable: str) -> SecretStr:
     new key into the traceback of anything that reads settings without a
     boundary. `settings_rejection` is what keeps this path's own refusal
     clean.
+
+    ## 🔴 Two refusals before the environment is read, and the reason is that
+    ## this argument is where an operator puts the key by mistake
+
+    Everything above is true of a *correct* invocation. The defect it does not
+    cover, found in review 2026-08-26: an operator who means "here is the new
+    key" and types it here. `argparse` had already made that easy -- see
+    `build_parser`'s `allow_abbrev` comment -- and this function then printed
+    what it was given, twice, in a message and in a copy-pasteable `export`.
+
+    - **A name that is not an environment variable name is refused, and the
+      name is not printed.** POSIX spells a name `[A-Za-z_][A-Za-z0-9_]*`;
+      `openssl rand -base64 32` contains `+/=` and a hyphenated key contains
+      `-`, so the commonest way to reach this refusal is to have passed a key.
+      Printing it back is the whole defect.
+    - **A name `Settings` would accept as a `secret_key` is refused too, and
+      this is the half a grammar check cannot see.** The documented way to make
+      a key is `openssl rand -hex 32`, whose output is 64 lowercase hex
+      characters -- a *legal* variable name whenever it starts with `a`-`f`,
+      which is **6/16 = 37.5%** of the time (measured over 100,000 samples:
+      37.6%). So better than a third of the time the operator's real key would
+      have sailed through the grammar and been echoed by the "is not set"
+      message below. The predicate is `Settings`' own acceptance rather than a
+      length literal, for the reason the key check below is: `min_length=32` is
+      the bound that decides, and restating it is a second copy to lose.
+
+    **Only after both does the "is not set" message echo the name, and that is
+    deliberate.** A well-formed name that cannot be a key is not a secret, and
+    an operator who forgot the `export` needs to see which variable this
+    command looked for.
     """
+    if not _ENVIRONMENT_VARIABLE_NAME.fullmatch(variable):
+        raise SystemExit(
+            "usher rotate-secret: --new-key-env takes the NAME of an exported environment "
+            "variable ([A-Za-z_][A-Za-z0-9_]*), and what it was given is not one. It is not "
+            "repeated here, because the commonest way to reach this message is to have "
+            "passed the key itself -- export the key into a variable and name the variable"
+        )
+    if isinstance(_key_or_rejection(settings, variable), SecretStr):
+        raise SystemExit(
+            "usher rotate-secret: what --new-key-env was given is a value this deployment "
+            "would accept as a secret key, so it is treated as one and not repeated here. "
+            "Pass the NAME of an exported variable instead. (If it really is a variable "
+            "name, rename it: a name long enough to be a key cannot be told from one.)"
+        )
     raw = os.environ.get(variable, "")
     if not raw:
         raise SystemExit(
@@ -2128,15 +2228,31 @@ def _new_secret_key(settings: Settings, variable: str) -> SecretStr:
             f"(e.g. `export {variable}=$(openssl rand -hex 32)`) rather than passing it "
             "as an argument, and do not add it to .env"
         )
-    try:
-        return Settings(database_url=settings.database_url, secret_key=SecretStr(raw)).secret_key
-    except ValidationError as exc:
+    key = _key_or_rejection(settings, raw)
+    if isinstance(key, ValidationError):
         # `settings_rejection`, not `str(exc)`: pydantic renders the rejected
         # *input*, so the naive spelling prints the new secret key at the one
         # command whose entire subject is secret keys.
         raise SystemExit(
-            settings_rejection(exc, entry_point=f"usher rotate-secret (${variable})")
-        ) from exc
+            settings_rejection(key, entry_point=f"usher rotate-secret (${variable})")
+        ) from key
+    return key
+
+
+def _key_or_rejection(settings: Settings, candidate: str) -> SecretStr | ValidationError:
+    """The `SecretStr` `Settings` would hold for `candidate`, or why it would not.
+
+    One construction with two readers, which is what keeps *"is this a key?"*
+    and *"is this key acceptable?"* the same question asked twice rather than
+    two rules that can drift. `database_url` is passed through so the
+    construction cannot fail for a reason that has nothing to do with the key.
+    """
+    try:
+        return Settings(
+            database_url=settings.database_url, secret_key=SecretStr(candidate)
+        ).secret_key
+    except ValidationError as exc:
+        return exc
 
 
 async def _rotate(settings: Settings, *, new_key_env: str) -> None:
@@ -2621,14 +2737,63 @@ def build_parser() -> argparse.ArgumentParser:
     # the parser's own `choices` and never
     # `grep -c "add_parser("`: that grep answers one too many, because the
     # line stating the claim contains the literal it searches for.
+    #
+    # 🔴 **`allow_abbrev=False`, and it is a security control rather than a
+    # style.** It defaults to `True`, so before 2026-08-26 `--new-key` was an
+    # unambiguous prefix of `--new-key-env` and argparse silently bound the
+    # operator's key into the field meant for a variable *name*.
+    #
+    # **Set here and not on the top-level parser, because a subparser does not
+    # inherit it.** Measured 2026-08-26 on a parser of this exact shape: with
+    # `allow_abbrev=False` on the *outer* parser and nothing on the subparser,
+    # `rotate-secret --new-key <key>` still binds.
+    # `_SubParsersAction.add_parser` constructs a fresh `ArgumentParser` from
+    # the keyword arguments it is handed and inherits nothing else, so a
+    # subcommand's prefix matching is the subcommand's own.
+    #
+    # **Blast radius, stated because a reviewer asked for it before it landed:
+    # this subparser's three option strings and nothing else.**
+    # `--new-key-env`, `--new-key` and `--help`. Abbreviations of those stop
+    # working *on this command only* -- `--new-key-e` was accepted yesterday
+    # and is refused today; `-h` is an exact string and is unaffected. Every
+    # other subcommand keeps prefix matching, so `usher derive --back` still
+    # works. Nothing in `tests/`, `docs/` or `README.md` spells an abbreviated
+    # flag for any command, so the wider setting was available; it is declined
+    # because no other command has an argument whose *value* could be a
+    # credential, and one measured defect is not evidence about nineteen
+    # surfaces an operator may have muscle memory for.
     rotate = sub.add_parser(
-        "rotate-secret", help="re-encrypt stored credentials under a new USHER_SECRET_KEY"
+        "rotate-secret",
+        help="re-encrypt stored credentials under a new USHER_SECRET_KEY",
+        allow_abbrev=False,
+    )
+    # The tripwire, before the real argument so a reader meets the refusal
+    # first. `_RefuseAKeyOnTheCommandLine` carries the measurement.
+    #
+    # `dest=argparse.SUPPRESS` as well as `help=`: the action refuses before it
+    # could ever store anything, so a `new_key` key on the namespace would be a
+    # permanent `None` that exists only to be misread -- and it would weaken
+    # `test_rotate_secret_takes_a_variable_name_and_never_a_key`, whose whole
+    # content is that this command's namespace has exactly three keys and none
+    # of them can hold a key.
+    rotate.add_argument(
+        "--new-key",
+        nargs="?",
+        action=_RefuseAKeyOnTheCommandLine,
+        dest=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     # **A variable name, never a key**, and it is required rather than
     # defaulted. A key passed as `--new-key <value>` is in the shell's history
     # and in `ps` output; naming the variable keeps the value out of `argv`
     # entirely, and `test_rotate_secret_takes_a_variable_name_and_never_a_key`
     # asserts that by running this parser and greping the namespace.
+    #
+    # ⚠️ That case asserts a *shape* and the abbreviation defect satisfied it,
+    # so the ones with teeth are the behavioural pair next to it: the key
+    # passed as `--new-key` and the key passed to `--new-key-env` itself must
+    # each be refused with the value absent from stdout, stderr **and** the
+    # exit message together.
     #
     # No `default="USHER_NEW_SECRET_KEY"`: this command rewrites every stored
     # credential in the deployment, and a default would let a bare
@@ -2638,11 +2803,55 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="VAR",
         help=(
-            "name of an exported environment variable holding the new key "
-            "(e.g. USHER_NEW_SECRET_KEY); export it, do not put it in .env"
+            "NAME of an exported environment variable holding the new key "
+            "(e.g. USHER_NEW_SECRET_KEY) -- the name, not the key; "
+            "export it, do not put it in .env"
         ),
     )
     return parser
+
+
+def _parse_without_echoing_unknown_values(
+    parser: argparse.ArgumentParser, argv: list[str]
+) -> argparse.Namespace:
+    """`parser.parse_args`, except that `rotate-secret`'s unrecognised
+    arguments are refused **without** them.
+
+    🔴 **argparse's own last step prints what it did not recognise**, and on
+    one command in this CLI that is very likely a secret key. CPython's
+    `ArgumentParser.parse_args` is exactly `parse_known_args` followed by
+    `self.error(_('unrecognized arguments: %s') % ' '.join(argv))`, so
+    `usher rotate-secret --new-key <key> --new-key-env VAR` answers
+    `usher: error: unrecognized arguments: --new-key <key>` -- measured
+    2026-08-26, on stderr, with the key in it. That is a leak `allow_abbrev=
+    False` *introduces* rather than removes: with prefix matching on, the same
+    argv bound the key silently instead.
+
+    The body below is that same two-step, faithfully, with one branch: for
+    `rotate-secret` the extras are counted and not shown. Every other command
+    reaches the identical message argparse would have produced, because the
+    refusal there is an ordinary typo and naming it is how an operator fixes
+    it.
+
+    **Keyed on the parsed `command` rather than on `argv[0]`**, because
+    `--traceback` is a top-level flag and `usher --traceback rotate-secret …`
+    is a legal spelling whose first token is not the subcommand.
+    """
+    args, unknown = parser.parse_known_args(argv)
+    if unknown:
+        if getattr(args, "command", None) == "rotate-secret":
+            parser.error(
+                f"unrecognized arguments for rotate-secret ({len(unknown)}, not shown -- on "
+                "this command an unrecognized value is most likely your new key). The only "
+                "way to name a key here is --new-key-env, which takes the NAME of an "
+                "exported environment variable"
+            )
+        # argparse's own wording, kept byte-for-byte so every other command's
+        # refusal reads exactly as it did before this function existed. (Its
+        # `%`-formatting is spelled as an f-string here only because ruff's
+        # UP031 refuses the original.)
+        parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+    return args
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -2657,7 +2866,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     one, and a rule with no reachable test is a comment.
     """
     parser = build_parser()
-    args = parser.parse_args(list(argv))
+    args = _parse_without_echoing_unknown_values(parser, list(argv))
     if args.command == "unmatched" and (args.resolve is None) != (args.title is None):
         # `parser.error`, not a raise: it exits 2 with usage on stderr, the
         # same way every other argument failure does.
