@@ -626,15 +626,25 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     landed on top -- the failure this case had on the first run after that,
     and a good illustration of why a step count is the wrong pin.
 
-    **Head is `m09c` and the `-1` half is re-pointed at its artefacts.** The
-    previous spelling asserted `m09a`'s four primary keys were *absent*, which
-    held because `-1`-from-`m09a` ran `m09a.downgrade()` and dropped its four
-    tables. `-1`-from-`m09c` runs `m09c.downgrade()` instead and stops at the
-    `m09a` state, where all four are present -- so the inherited assertion
+    **Head is `m10b` and the `-1` half is re-pointed at its artefact** --
+    `sync_runs.position`, asserted absent one step below head, because a
+    column-adding head's `downgrade()` is what removes it. That is the
+    **twelfth** landing in a row to break and re-point this block (`ffa`,
+    `ffb`, `ffc`, `m08a`, `m08b`, `m09a`, `m09c`, `m09d`, `m09e`, `m09f`,
+    `m10a`, `m10b`). ⚠️ Read that number against the *seven* this docstring
+    claimed until 2026-08-25: five landings re-pointed the block and left
+    the prose alone, so the jump is a gap in the record rather than a burst
+    of migrations. `.claude/rules/db-and-sql.md` carries the same count and
+    the same caveat.
+
+    **The worked example below is `m09c` and is kept because it is the
+    better one**, not because it is the head. Its predecessor asserted
+    `m09a`'s four primary keys were *absent*, which held because
+    `-1`-from-`m09a` ran `m09a.downgrade()` and dropped its four tables.
+    `-1`-from-`m09c` runs `m09c.downgrade()` instead and stops at the `m09a`
+    state, where all four are present -- so the inherited assertion
     **failed, loudly and immediately**, and it was run and watched to fail
     before it was touched (`AssertionError: assert 'pk_images' not in {...}`).
-    That is the **seventh** landing in a row to do so (`ffa`, `ffb`, `ffc`,
-    `m08a`, `m08b`, `m09a`, `m09c`).
 
     `m09c` creates no table. It does three things and needs an assertion per
     artefact *kind*, which is the "one per table" rule generalised to a head
@@ -653,9 +663,10 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
       blind spot `_column_set`'s own docstring records for a column-only
       migration.
 
-    `m09a`'s five assertions have moved into the revision-pinned block below,
-    where revision ids do not drift -- displaced *because they had teeth*, on
-    the first run with `m09c` present.
+    Each head's displaced assertions move into the revision-pinned block
+    below, where revision ids do not drift -- displaced *because they had
+    teeth*, on the first run with the new head present. `m09a`'s five moved
+    when `m09c` landed; `m10a`'s seven moved when `m10b` did.
 
     That is the general case rather than this migration's luck, and it is
     worth stating because the opposite was written here first and was wrong:
@@ -666,10 +677,12 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     false. The direction of the assertion has nothing to do with it: `ffc`'s
     was positive (`in`) and broke; `ffb`'s was negative (`not in`) and broke
     too, because `-1`-from-`ffc` lands at the `ffb` state where
-    `blend_fingerprint` is present. Seven landings, seven loud breaks (`ffa`,
-    `ffb`, `ffc`, `m08a`, `m08b`, `m09a`, `m09c`) -- the same seven the
-    paragraph above counts, which is the point of stating the number in both
-    places. **So the
+    `blend_fingerprint` is present. Twelve landings, twelve loud breaks --
+    the same twelve the paragraph above counts, which is the point of stating
+    the number in both places -- which only works if both are maintained.
+    Both said *seven* until 2026-08-25, five landings after they stopped
+    being true, so the redundancy meant to catch a stale count was two stale
+    copies agreeing with each other. **So the
     alarm to watch for is a `-1` half that stays
     green after a new migration**, which means the assertion it inherited
     never had teeth. `.claude/rules/db-and-sql.md` carries the measurement.

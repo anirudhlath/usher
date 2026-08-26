@@ -27,6 +27,13 @@ class SyncRunRepository(ABC):
     which is a checkpoint updated in place. PRD 10's dashboard 3 plots run
     outcomes over time, and ADR-0015's sweep guard rests on being able to say
     *which* run last finished cleanly.
+
+    **`latest_incomplete_run` is the one affordance here that reads against
+    that grain, and only for `WATCH_STATE`** (ADR-0042). It hands a walk back
+    its own unfinished row so the next attempt can continue it in place, which
+    is `ImportRunRepository`'s shape borrowed for one lane. `save` is written
+    for that reuse and is **non-destructive** in the two ways its own
+    docstring sets out.
     """
 
     @abstractmethod
@@ -60,9 +67,18 @@ class SyncRunRepository(ABC):
           would stop answering for a walk that provably finished.
 
         Neither is an error: the caller has done real work and its merges
-        stand, it simply is not the attempt whose bookkeeping survives. It
-        does mean the `SyncRun` a service holds after a dropped save describes
-        an attempt rather than the stored row.
+        stand, it simply is not the attempt whose bookkeeping survives.
+
+        **The one consequence that is otherwise invisible**, because nothing
+        raises and nothing logs: after a refused save the `SyncRun` a service
+        holds -- and returns -- describes its own *attempt* rather than the
+        stored row, so `usher sync` can print a `watch_state completed` that
+        `sync_runs` does not carry. Cosmetic, and deliberately so: the merges
+        stand either way and the row belongs to the walk that got further.
+        It is new with ADR-0042, and it is the reason a reader diagnosing
+        this lane trusts the table over the command's last line. (`usher
+        sync` is the only renderer -- the `sync` job handler discards the run
+        it gets back.)
         """
 
     @abstractmethod

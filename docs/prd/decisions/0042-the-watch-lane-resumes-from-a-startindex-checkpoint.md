@@ -1,6 +1,7 @@
 # ADR-0042 — The watch lane resumes from a StartIndex checkpoint
 
-**Status:** Proposed. Fixes [#41](https://github.com/anirudhlath/usher/issues/41).
+**Status:** Accepted. Implemented 2026-08-25.
+Fixes [#41](https://github.com/anirudhlath/usher/issues/41).
 Design spec:
 [`docs/specs/2026-08-21-issue-41-resumable-watch-lane-design.md`](../../specs/2026-08-21-issue-41-resumable-watch-lane-design.md).
 **Date:** 2026-08-21.
@@ -68,9 +69,62 @@ parameter, decoupled from `list_items`.
   the next run.
 - **Resumability is an adapter property, not a port guarantee.** It relies on the
   Emby adapter's stable `DateCreated,SortName` order; the port promises no
-  ordering and permits duplicate yields. `position` is therefore a distinct
-  field from `items_seen` — they coincide only because the Emby walk does no
-  client-side dedup (measured).
+  ordering and permits duplicate yields.
+- 🔴 **`position` is a distinct column from `items_seen`, and the reason
+  first written here was not the operative one.** This ADR argued that a
+  duplicate yield makes `items_seen` outrun the page position; **that is
+  false of the code it describes.** `_walk` sets `seen = start_index` and
+  `seen += 1` per yield; `_flush` sets `items_seen += len(batch)` beside
+  `position = seen`. So `position - items_seen` is fixed at
+  `start_index - initial_items_seen` for the life of a run, and a duplicate
+  moves both sides by the same step — measured on an adapter yielding every
+  record twice, where a fresh walk of three items ends `position = 6,
+  items_seen = 6`. The divergence that is real comes from **persistence**:
+  a reclaimed row whose two columns already disagree, which `m10b`'s
+  `NOT NULL DEFAULT 0` backfill *guarantees* on the three long-`RUNNING`
+  rows #41 observed (`position = 0` beside a six-figure `items_seen`). The
+  first walk after this lands is that row, and resuming it from the counter
+  opens the stream six figures in and skips the whole stretch below it —
+  which the run had not walked, whatever its counter says.
+- 🔴 **Two attempts can genuinely overlap, and the design spec's claim that
+  none can was measured false.** That spec said *"the job queue coalesces
+  `sync` jobs per `(kind, key)` and the worker lease serialises claims"*.
+  Two of the three callers never reach the queue: `LaneSupervisor._close_gap`
+  (`api/lanes.py:470`) calls `pipeline.watch.sync(...)` directly on its own
+  unit of work when a push socket returns, and `usher sync` (`cli.py:394`)
+  calls it from a separate process; `KIND_CONCURRENCY[JobKind.SYNC] = 1`
+  binds only one worker process. PRD 03's reconciliation section has
+  recorded all three callers, and that they overlap, since M9's E3 — so this
+  was a premise available to be checked rather than a fact that changed. A
+  gated probe reproduced the damage on the reuse-in-place design: one walk
+  reclaimed the other's live row, completed it, and the loser's terminal
+  save un-completed it and pulled the checkpoint back to the loser's own
+  starting page.
+- **So `SyncRunRepository.save` is non-destructive, and the rule has to be
+  worded in terms of `completed` rather than of terminality.** **`completed`
+  is absorbing**: a save over an already-completed run writes nothing at
+  all — not the status alone, the whole row — and **both `FAILED` and
+  `RUNNING` are refused over it**. *"A non-terminal status may not overwrite
+  `completed`"* is the tempting phrasing and it does not describe this fix:
+  `FAILED` is terminal, and `FAILED` is exactly what the losing walk writes.
+  Alongside it, **`position` may advance and may never regress** (`GREATEST`
+  on the Postgres arm, the same rule spelled out on the fake). Neither
+  refusal is an error — the loser's merges stand and are not lost, it simply
+  is not the attempt whose bookkeeping survives. The visible residue is that
+  a service holding a refused save returns a `SyncRun` describing its
+  *attempt*, so `usher sync` can print a completion the row does not carry;
+  cosmetic, and recorded on the port.
+- **A resumed walk stamps its merges with the *attempt's* instant, while the
+  reclaimed `started_at` stays the cursor.** These are the same instant on a
+  first attempt and deliberately different afterwards. Stamping merges with
+  a reclaimed `started_at` days in the past breaks both directions of PRD
+  03's "latest `updated_at` wins": every row a client or the push lane has
+  touched since refuses the merge — so the walk that exists to repair those
+  rows writes nothing to exactly them — and every row the walk *creates* is
+  back-dated, which mis-sorts `list_needing_history`'s oldest-first drain
+  and holds the taste watermark behind the walk. The row keeps the old
+  instant because that is the next delta's `since` and it must cover
+  everything saved since the logical walk began.
 - **No new setting**, unlike S5. The full walk is now completable, so it runs
   whenever the worker is on; re-enabling `USHER_WORKER_ENABLED` is the operator's
   step after this lands, at which point the queued jobs also drain.

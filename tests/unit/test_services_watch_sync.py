@@ -1251,10 +1251,22 @@ class _DuplicatingSourceAdapter(_LossySourceAdapter):
 
     The port permits it -- `SourceAdapter.watch_state` promises no ordering
     and no uniqueness, and ADR-0042 declines to defend against a divergence
-    no source it has measured produces. What it buys the case below is a
-    walk whose *yields* genuinely outnumber its *items*, so "the counter and
-    the checkpoint are the same number" is a claim a fixture can falsify
-    rather than one the arithmetic makes true.
+    no source it has measured produces.
+
+    **What it buys the case below is not the divergence, and saying so is
+    the correction (2026-08-25).** A duplicated yield moves `items_seen` and
+    `position` by exactly one step each -- `_walk` seeds its counter at the
+    resume point and `_flush` advances both from the same batch -- so on a
+    fresh run the two stay equal however many times a source repeats itself,
+    and this adapter cannot separate them on its own. The gap of five below
+    is the *reclaimed row's*, seeded to match what `m10b` backfills onto a
+    row #41 left `RUNNING`.
+
+    What the duplication does buy is the **unit**: with six yields over
+    three items, `position == 6` says the checkpoint is an offset into the
+    stream this walk yielded rather than a count of distinct items, which is
+    the reading `start_index` is honoured under one layer down and is
+    unobservable on any adapter that yields each record once.
 
     **`start_index` counts yields here, which is what the port says and what
     a resumed walk checkpoints.** The base walk is therefore asked for the
@@ -1299,6 +1311,18 @@ async def test_the_resume_point_is_the_position_and_not_the_counter(
     to. Re-walking them costs nothing -- every write on this lane is an
     idempotent upsert and it retracts nothing -- which is exactly why the
     cheap number is the wrong one to resume from.
+
+    **What this case does *not* cover, measured rather than assumed
+    (2026-08-25).** It reads as an argument about `_walk`'s `seen =
+    start_index`, and it is blind to that spelling: the row it seeds carries
+    `position = 0`, so `seen = 0` and `seen = start_index` are the same
+    statement here and the `seen = 0` plant passes this case untouched. What
+    it holds is the pair either side of that -- the resume point is read off
+    `position` and not off `items_seen`, and `_flush` checkpoints the page
+    it was handed rather than one derived from the counter. The counter's
+    *origin* is covered by
+    `test_each_failed_attempt_resumes_further_in_than_the_last`, which needs
+    a third attempt to see it at all.
     """
     dupes = _DuplicatingSourceAdapter(fixture_batched.source)
     for index in range(3):
@@ -1406,8 +1430,19 @@ async def test_each_failed_attempt_resumes_further_in_than_the_last(
 
     Measured against the shape that produces it -- a `_walk` counting only
     the states *this attempt* yielded rather than starting the count at the
-    page it resumed from -- which walks `[0, 2, 4]` on the shipped code and
-    `[0, 2, 2]` under the defect, and passes everything else in this file.
+    page it resumed from (`seen = 0` in place of `seen = start_index`) --
+    which walks `[0, 2, 4]` on the shipped code and `[0, 2, 2]` under the
+    defect, and passes everything else in this file.
+
+    **"Everything else" includes the case whose name reads as if it owned
+    this defect**, and that is worth naming rather than leaving to be
+    rediscovered: `test_the_resume_point_is_the_position_and_not_the_counter`
+    seeds `position = 0`, where the two spellings are one statement, so it
+    cannot distinguish them. This is the only case in the file that can, and
+    the mechanism is why three attempts are needed: the mutant's *second*
+    attempt saves the page it started from, `GREATEST` correctly refuses to
+    pull the stored checkpoint back, and the third therefore resumes exactly
+    where the second did.
     """
     for index in range(8):
         await fixture_batched.given_matched(f"movie-{index}")

@@ -1165,10 +1165,17 @@ rolled back looks exactly like one that worked, so it asserts the pages shrank
 files `ANALYZE` a shared table inside the rolled-back `session` and put nothing
 back — `test_title_match_repository.py` (`titles`, twice, at 200,000 rows),
 `test_ingest_end_to_end.py` (`media_items`), `test_job_queue.py` (`jobs`,
-twice), `test_raw_payload_store.py`, `test_sync_run_repository.py`, and the
-`ANALYZE` behind `test_api_surface_schema.py`'s 200,000 images. Not repaired
-here and not measured; recorded so the next person does not rediscover the
-mechanism from a symptom.
+twice), `test_raw_payload_store.py`, `test_sync_run_repository.py`
+(`sync_runs`, **twice** since 2026-08-25 — issue #41's Task 2 added a second
+site for `latest_incomplete_run`'s plan assertion, beside the one already
+here), and the `ANALYZE` behind `test_api_surface_schema.py`'s 200,000
+images. Not repaired here and not measured; recorded so the next person does
+not rediscover the mechanism from a symptom.
+
+**A file already on this list is where a new site is cheapest to add and
+hardest to notice**, which is why the count is now written out rather than
+the filename alone: the ledger read as complete while a second `ANALYZE`
+landed in a file it already named.
 
 ## An `id()` is a reusable address, so a test that identifies objects by one is identifying nothing (2026-08-19, issue #7)
 

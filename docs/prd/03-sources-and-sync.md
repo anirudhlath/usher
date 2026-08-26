@@ -441,6 +441,29 @@ what changed and then sweep, which is exactly the combination ADR-0015 exists
 to make unreachable. (`watch_state` is a third lane with its own cursor: it
 walks a different method under a different upstream filter.)
 
+✅ **That third lane's walk is resumable, and until 2026-08-25 it had never
+once completed.** Its cursor is the `started_at` of the newest *completed*
+watch-state run, so a deployment that has never finished one has no `since`
+and walks the whole library — 1,137,538 items when #41 was filed, ~5,688
+pages, about eleven hours. Any single transient failure in it recorded
+`FAILED`, which left no completed run, which left no cursor, which restarted
+the walk from page one; the only remedy the operator had was
+`USHER_WORKER_ENABLED=false`, which stops the loop by stopping every queued
+job (#41). Refusal — the push lane's answer one row up — is unavailable
+here, because this lane is never independently triggerable and a refused
+walk could never earn the completed run that would lift the refusal.
+
+A run now **checkpoints its committed `StartIndex` on `sync_runs.position`**,
+and the next attempt reclaims that same row — its id, its `cursor_at` and
+its `started_at`, so the eventual cursor still covers everything saved since
+the logical walk *began* — and resumes there. A failure costs the page in
+flight rather than the walk. It is not a shorter walk, it is a finishable
+one. The item lanes are unchanged and leave `position` at 0.
+[ADR-0042](decisions/0042-the-watch-lane-resumes-from-a-startindex-checkpoint.md)
+carries the argument, including why the checkpoint is a page position rather
+than a `since` timestamp, and the two rules that make one row safe for two
+overlapping attempts (`position` only advances; `completed` is absorbing).
+
 **Each batch is committed with the run's counters.** 1,126,674 items is
 hours; a crash must cost the batch in flight rather than the walk, and a
 `sync_runs` row an operator can watch has to exist before the walk starts

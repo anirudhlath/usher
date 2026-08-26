@@ -28,10 +28,22 @@ mutation.
 Batches are committed as they go, with the run's counters, for the same
 reason `BootstrapService` commits a batch and its cursor together: 1,126,674
 items is hours, and a crash must cost the batch in flight rather than the
-walk. Unlike bootstrap there is no mid-walk cursor to resume from -- the
-port offers `since` and nothing finer -- so a crashed full walk is re-run
-from the start, which is safe because every write is an upsert and the sweep
-never ran.
+walk. Unlike bootstrap there is no mid-walk cursor to resume from *on these
+two lanes* -- the port offers `since` and nothing finer for `list_items` --
+so a crashed full walk is re-run from the start, which is safe because every
+write is an upsert and the sweep never ran.
+
+**The watch lane is the exception since ADR-0042**, and the difference is a
+fact about the two lanes' *cursors* rather than a disagreement about design.
+`SourceAdapter.watch_state` grew a `start_index` and
+`WatchStateSyncService` checkpoints it on `sync_runs.position`, because
+restarting costs the two lanes different things. An item lane resumes from
+the newest completed walk of *either* item kind, and the measured deployment
+has 13 completed delta runs, so a restart here costs a delta window. The
+watch lane had never completed a single run, so its `since` was `None` and
+every restart was the whole library -- ~1.14M items, about eleven hours --
+and it never once converged (#41). Nothing on this lane wants that
+machinery; its cursor advances.
 
 A refused sweep fails the *run* and keeps the run's writes. The mirror-image
 bug is real and worse: if a refusal discarded the batches the walk committed,

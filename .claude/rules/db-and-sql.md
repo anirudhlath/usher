@@ -55,8 +55,15 @@ directory) — which is the only thing the hex convention ever bought (Alembic
 orders by `down_revision` and never cared). `m08a` (`curated_rows` +
 `llm_calls`) is the first and `m08b` (`genome_tags`, the genome tag
 vocabulary) shipped 2026-08-07; the rule for the next milestone is now
-mechanical rather than a decision:
-`m09a`, then `m10a`.
+mechanical rather than a decision: `m09a`, then `m10a`, then `m11a`.
+
+**The rule held — both predictions landed — and a rule is not a ledger, so
+here is the chain as it stands on 2026-08-25**: `m08a`, `m08b`, `m09a`,
+`m09c` (`images`' natural key — **`m09b` was never minted** and is still the
+unallocated spare E4's index request would take), `m09d`, `m09e`, `m09f`,
+`m10a`, `m10b`. Seven of those nine landed after the sentence above was
+written and none of them extended it, which is why the list is separate from
+the rule now: the rule says what to mint next, the list says what exists.
 
 **M9 took the convention and shipped one revision where a draft plan wanted
 seven, and the reason generalises.** `m09a` (`images`, `search_queries`,
@@ -99,12 +106,24 @@ because twelve rows happened to be nine.
 **`tests/integration/test_migrations.py`'s down/up cycle needs attention from
 every group that adds a migration, and the `-1` half breaking is the design,
 not the defect.** The `-1`-from-head half asserts on whatever the *current*
-head reverses, so it has to be re-pointed every time. **Six landings, six
-loud breaks** — Group F re-pointed it for `ffa`, `af64ba2` (the `ffb`
+head reverses, so it has to be re-pointed every time. **Twelve landings,
+twelve loud breaks** — Group F re-pointed it for `ffa`, `af64ba2` (the `ffb`
 migration itself) for `ffb`, M7 Task 36 for `ffc`, M8 Task 8 for `m08a`,
-M8 Task 19 for `m08b`, and M9 Task M1 for `m09a`. The sixth was run and
-watched to fail before it was touched: `AssertionError: assert
-'pk_genome_tags' not in {...}`.
+M8 Task 19 for `m08b`, M9 Task M1 for `m09a`, then `m09c`, `m09d`, `m09e`,
+`m09f`, `m10a`, and — with issue #41's `sync_runs.position` — `m10b`. The
+sixth was run and watched to fail before it was touched: `AssertionError:
+assert 'pk_genome_tags' not in {...}`.
+
+⚠️ **Read the jump from six to twelve as a gap in this record, not as a burst
+of migrations.** The count stood at six from `m09a` (2026-08-10) until #41
+brought it current on 2026-08-25: `m09c` through `m10a` each re-pointed the
+block and not one of them wrote it down, so five landings' worth of the
+evidence this entry exists to accumulate went unrecorded. Nothing is
+unrecoverable — every one of them *did* extend
+`test_migrations.py`'s revision-pinned block, which is where the
+displacement chain is legible — but a count that is five landings stale is
+the failure mode this entry was written to prevent, arriving in the entry
+itself. Update it in the commit that re-points the block.
 
 **An inherited `-1` assertion that had teeth cannot survive a new head, and
 the failure is always loud.** Having teeth *means* being true at the state

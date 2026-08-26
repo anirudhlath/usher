@@ -77,6 +77,26 @@ this codebase, which both sync services currently contrast themselves *against*
   step) but the port permits duplicate yields, under which `items_seen` would
   exceed `StartIndex` — and overloading the counter as the resume point would
   then skip. Same care this repo applies to `items_matched`'s meaning.
+
+  > **Correction, 2026-08-25 (against the shipped code, left beside the
+  > original because this is a design record).** The separate column is
+  > right and the argument above for it is not: a duplicate yield cannot
+  > make `items_seen` outrun `position`. `_walk` shipped as
+  > `seen = start_index = progress.run.position` with `seen += 1` per yield,
+  > and `_flush` as `items_seen += len(batch)` beside `position = seen` — so
+  > `position - items_seen` is fixed at `start_index - initial_items_seen`
+  > for the whole run and a duplicate moves both sides identically. On a
+  > fresh walk the two are equal whatever the source does, measured with an
+  > adapter yielding every record twice.
+  >
+  > The divergence that is real arrives from **persistence, not from the
+  > port**: a reclaimed row whose two columns already disagree. `m10b`'s
+  > `NOT NULL DEFAULT 0` backfill guarantees exactly that on the three
+  > long-`RUNNING` rows #41 observed — `position = 0` beside a six-figure
+  > `items_seen` — so the very first walk after this lands is the case, and
+  > resuming it from the counter would skip everything the run never
+  > reached. `tests/unit/test_services_watch_sync.py::
+  > test_the_resume_point_is_the_position_and_not_the_counter` is that row.
 - Alembic migration adds `sync_runs.position integer NOT NULL DEFAULT 0`
   (existing rows → 0). `PostgresSyncRunRepository.save` already writes every
   mutable column, so it persists with no repository change beyond the model.
@@ -114,6 +134,27 @@ await self._commit()
   claims) are the newest incomplete run and are reclaimed and continued, not
   orphaned. No true concurrency exists to race: the job queue coalesces `sync`
   jobs per `(kind, key)` and the worker lease serialises claims.
+
+  > 🔴 **That last sentence is false, measured 2026-08-25 during review. It is
+  > left standing because this is a point-in-time design record; what shipped
+  > is below.** Two of the three callers of `WatchStateSyncService.sync` never
+  > touch the queue at all: `LaneSupervisor._close_gap`
+  > (`src/usher/api/lanes.py:470`) calls it directly on its own unit of work
+  > whenever a push socket comes back, and `usher sync`
+  > (`src/usher/cli.py:394`) calls it from a **separate process**.
+  > `KIND_CONCURRENCY[JobKind.SYNC] = 1` serialises claims within one worker
+  > process and says nothing about either. PRD 03 has recorded these three
+  > callers, and the fact that they genuinely overlap, since M9's E3 — the
+  > premise was available and was not checked.
+  >
+  > A gated probe reproduced the corruption the reuse-in-place introduces:
+  > one walk reclaimed another's live row, completed it, and the loser's
+  > terminal save then un-completed that row and pulled the checkpoint back
+  > to the page the loser had started from. So the design's reuse-in-place is
+  > kept and `SyncRunRepository.save` is made non-destructive instead —
+  > `position` may only advance (`GREATEST`) and `completed` is **absorbing**,
+  > refusing `FAILED` and `RUNNING` alike. ADR-0042's Consequences carry the
+  > rule and both repository arms implement it.
 
 ### 3. The walk (`_walk` / `_flush`)
 
