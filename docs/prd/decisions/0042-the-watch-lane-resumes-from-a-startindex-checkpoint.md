@@ -77,11 +77,142 @@ parameter, decoupled from `list_items`.
 
 ## Evidence
 
-To be filled by the implementation, per this repo's discipline: the TDD cases
-named in the design spec (resume-from-failed-position, fresh-when-newest-is-
-completed, per-batch `position` advance, `FAILED`-preserves-`position`,
-`latest_incomplete_run` semantics, adapter `start_index`, migration round-trip),
-each planted and watched to fail before the implementation, and a mutation sweep
-over the resume logic and the new repository method. The infeasibility of the
-`since`-cursor alternative is recorded in the design spec against exact
-`ports/source.py` and `adapters/emby/adapter.py` line references.
+**16 plants over the finished branch — 16 killed, 3 equivalent-mutant controls
+surviving as designed, 0 unintended survivors, 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Run 2026-08-25 in place at
+`9a2a142`, on a committed tree, with `git status` asserted clean after every
+restore.
+
+**Why this round exists, and it is the load-bearing sentence.** Roughly thirty
+plants were run across this issue's Tasks 1–4 and **every one of them was
+measured against an intermediate state of the branch**. Task 4 alone landed a
+non-destructive `save`, the `observed_at` change, a `_walk` signature change and
+seven new cases *after* most of those measurements were taken, so a verdict
+quoted from an earlier commit is not evidence about this branch. The table below
+re-measures the load-bearing ones against the finished code in one run.
+
+**The plant list and its expected verdicts were written down before the first
+plant was applied**, in `/var/tmp/usher41-t5/PLANTS.md`, `sha256
+6c795cc760d531a4ba0d7c77c96b97f3c496a03875501727532491ed7bc27d80`
+(`/var/tmp`, not `/tmp`, which is tmpfs on this host). Rows the author genuinely
+could not predict were entered as `?`, and two of them are where this round's
+findings came from.
+
+**The selection, stated because a survivor is only a survivor of the selection
+it was measured against:** every plant, including all three controls, was scored
+against the **same 270 cases** — 219 unit
+(`test_services_watch_sync`, `test_sync_run_repository_contract`,
+`test_adapters_emby_adapter`, `test_ports_source`, `test_domain_sync`,
+`test_db_models_ingest`, `test_db_migration_status`) and 51 integration
+(`test_services_watch_sync`, `test_sync_run_repository`, `test_migrations`), at
+~15.5 s a run against real Postgres. Whole-suite baseline on the clean tree
+before the round: **4,406 unit / 4 skipped**, **1,279 integration / 22 skipped**,
+`ruff check`, `ruff format --check` (642 files), `mypy` over **622** files,
+`lint-imports` **12 kept / 0 broken**.
+
+**The harness was proved both ways before any verdict was believed** — P1 must
+die and did (6 cases), C1 must survive and did — under the rules this repo has
+paid for: harness outside the working tree, `PYTHONDONTWRITEBYTECODE=1`,
+`__pycache__` swept under **both** `src/` and `tests/` before every run,
+`compile(source, path, "exec")` as the dry run rather than `ast.parse`, every
+anchor asserted to appear exactly once, every plant asserted landed by **byte
+equality** with the intended mutant, `cp` backups restored by `cp` and verified
+by `sha256sum`, no `-q` (`addopts` already carries one), and a per-plant
+timeout with `HUNG`/`DID-NOT-RUN` as their own verdicts.
+
+| plant | the defect | verdict | cases failed |
+|---|---|---|---|
+| P1 | `incomplete` forced to `None` in `sync` — the pre-fix restart loop | KILLED | **6**: `…_a_failed_walk_is_resumed_from_the_position_it_committed`, `…_the_resume_point_is_the_position_and_not_the_counter`, `…_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned`, `…_each_failed_attempt_resumes_further_in_than_the_last`, `…_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs`, `…_the_span_records_the_page_the_walk_resumed_from` |
+| P2 | the failure handler evolves the pre-walk `run`, not `progress.run` (the `_Progress` regression) | KILLED | **4**: `…_a_walk_that_raises_keeps_the_batches_it_already_merged`, `…_a_failed_walk_keeps_the_position_it_reached`, `…_a_failed_walk_is_resumed_from_the_position_it_committed`, `…_each_failed_attempt_resumes_further_in_than_the_last` |
+| P3 | `seen = 0` instead of `seen = start_index` in `_walk` | KILLED | **1**: `test_each_failed_attempt_resumes_further_in_than_the_last` (`the second failure did not get further than the first: [2, 2]`) |
+| P4 | `_flush` writes `position=run.items_seen + len(batch)` instead of the passed `position` — the **careful** spelling | KILLED | **1**: `test_the_resume_point_is_the_position_and_not_the_counter` (`assert 11 == 6`) |
+| P5 | only a `FAILED` run is reclaimed; a `RUNNING` one is abandoned | KILLED | **4**: `…_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned`, `…_the_resume_point_is_the_position_and_not_the_counter`, `…_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs`, `…_the_span_records_the_page_the_walk_resumed_from` |
+| P6 | the reclaim restamps `started_at` instead of preserving it | KILLED | **3**: `…_a_failed_walk_is_resumed_from_the_position_it_committed`, `…_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned`, `…_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs` |
+| P7a | `position = :position` instead of `GREATEST(sync_runs.position, :position)` — **Postgres arm** | KILLED | **1**: `test_a_lower_position_does_not_pull_the_checkpoint_back` |
+| P7b | the same, **fake arm** | KILLED | **1**: `test_a_lower_position_does_not_pull_the_checkpoint_back` |
+| P8a | the `status != COMPLETED` guard dropped from the save — **Postgres arm** | KILLED | **2**: `test_an_overtaken_walk_cannot_un_complete_the_run_that_overtook_it[failed]` and `[running]` |
+| P8b | the same, **fake arm** | KILLED | **2**: the same two parametrisations |
+| P9 | the walk merges under `run.started_at` instead of the attempt's own instant | KILLED | **1**: `test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs` |
+| P10 | `error=None` / `finished_at=None` dropped from the reclaim | KILLED | **1**: `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned` (`assert 'source went away mid-walk' is None`) |
+| P11 | `m10b`'s `server_default=sa.text("0")` deleted from the `ADD COLUMN` | KILLED | **1**: `test_m10b_gives_an_existing_sync_run_a_zero_position` |
+| P12 | the Emby adapter's `start = start_index` reverted to `start = 0` | KILLED | **1**: `test_a_watch_state_walk_resumes_from_the_start_index_it_is_given` (`assert ['0'] == ['50000']`) |
+| P13a | `latest_incomplete_run` respelled as *"the newest that is not completed"* rather than *"the newest, iff it is not completed"* — **fake arm** | KILLED | **1**: `test_an_older_failure_is_not_resumed_behind_a_newer_completion` |
+| P13b | the same respelling pushed into `_INCOMPLETE`'s `WHERE` — **Postgres arm** | KILLED | **1**: the same case, on the Postgres arm |
+
+### The three controls, each against every gate step
+
+"The gate holds it" and "the suite holds it" are different claims, so each
+control is scored per tool. No `__all__` reorder is used — `RUF022` rejects one,
+so it would demonstrate nothing about the suite. All five gate steps are green
+on the clean tree first, which is what makes a control's PASS mean anything.
+
+| control | `ruff check .` | `ruff format --check .` | `mypy src tests` | `lint-imports` | pytest (270 cases) |
+|---|---|---|---|---|---|
+| C1 — `WatchStateSyncService.__init__`'s `self._media_items` / `self._watch_states` writes swapped | PASS | PASS | PASS | PASS | PASS |
+| C2 — `_merge_for`'s `play_count=` / `last_played_at=` keyword arguments swapped | PASS | PASS | PASS | PASS | PASS |
+| C3 — one sentence of `db/repositories/sync.py`'s module docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+C1 and C2's equivalence is a **fact about the code** rather than about what the
+tools look at: two disjoint attribute writes from two distinct parameters cannot
+observe each other and nothing reads either before both are bound, and keyword
+arguments are evaluated in written order while both of C2's are side-effect-free
+attribute reads of one `SourceWatchState`. C3 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/` — the 31 files it
+finds scan `ports/embedding.py`, `ports/metadata.py`, `ports/repository`
+(existence of a docstring, not its wording), `services/`, `adapters/`, `api/`,
+`domain/rows.py` and the eval package, and **none of them scans
+`db/repositories/`**.
+
+### Where the measurement disagreed with the prediction
+
+Nothing survived, so every correction is about *which* case fires — which is the
+half a kill count hides.
+
+- **P4 was the round's `?` row and it is killed by exactly one case in 270.**
+  `position = items_seen + len(batch)` and the passed `position` are the same
+  program on every fresh walk in this branch, because a fresh run starts both at
+  zero and the walk's counter and its page offset then move together. The only
+  fixture that separates them is
+  `test_the_resume_point_is_the_position_and_not_the_counter`, which reclaims a
+  row carrying `position=0, items_seen=5` — the exact shape `m10b`'s backfill
+  creates on the three long-`RUNNING` rows #41 observed — and drives it with a
+  source that yields every record twice. It fails `assert 11 == 6`. **That case
+  is the whole of this defect's cover**, and deleting it would leave a spelling
+  that sends the next attempt eight pages past anything the last one reached.
+- **P3 — the plant that survived everything before Task 4's last round — now
+  dies, and *not* on the case whose docstring argues about it.**
+  `test_the_resume_point_is_the_position_and_not_the_counter` seeds `position=0`,
+  so `seen = 0` and `seen = start_index` are the same statement there. What
+  catches it is `test_each_failed_attempt_resumes_further_in_than_the_last`,
+  which needs **three** attempts to see it: the mutant's second attempt saves the
+  page it started from, `GREATEST` correctly refuses to regress the stored
+  checkpoint, and the third attempt therefore resumes exactly where the second
+  did — `[2, 2]` where `[2, 4]` was owed. A two-attempt case cannot express it.
+- **P6 is killed first by a *premise guard*, in a case written for something
+  else.** `test_a_failed_walk_is_resumed_from_the_position_it_committed` opens
+  with `assert run.started_at == T0, "the premise: the row still carries the
+  instant the logical walk began, which is what the next delta's `since` will
+  be"`. That guard is not decoration — it is the assertion that fires when the
+  reclaim restamps, which is this repository's standing rule about planting the
+  defect a guard names, paying out.
+- **P1 and P5 each take more cases than predicted** (6 against ≥4, and 4 against
+  1). Both are blast radius rather than surprise: a reclaim that never happens
+  and a reclaim that refuses `RUNNING` rows are the same event to every case
+  about resumption, and both take the span attribute with them.
+- **P8a/P8b take two cases each rather than one**, because
+  `test_an_overtaken_walk_cannot_un_complete_the_run_that_overtook_it` is
+  parametrised over `[failed]` and `[running]` — the two ways an overtaken walk
+  can try to write over a completed row.
+- **P10's `?` resolved to a case that does exist**, and it fails on the sentence
+  rather than on the status: `assert 'source went away mid-walk' is None`. The
+  reclaim's `error=None` is what stops `usher sync-status` reporting the last
+  attempt's outage as a fault happening now.
+
+**Both arms were measured separately for the two repository rules** (P7a/P7b,
+P8a/P8b, P13a/P13b) and each pair dies on the same case name on both arms, which
+is what makes the contract suite's two arms comparable rather than merely both
+green.
+
+The infeasibility of the `since`-cursor alternative is recorded in the design
+spec against exact `ports/source.py` and `adapters/emby/adapter.py` line
+references.
