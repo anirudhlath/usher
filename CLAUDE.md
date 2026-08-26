@@ -337,6 +337,7 @@ uv run usher backup                          # one gzipped JSON Lines file of ev
 uv run usher backup --output /var/tmp/x.jsonl.gz   # default: usher-backup-<UTC>.jsonl.gz here
 uv run usher restore /var/tmp/x.jsonl.gz     # merge it back, in one transaction
 uv run usher restore /var/tmp/x.jsonl.gz --dry-run   # the identical report, committing nothing
+uv run usher restore /var/tmp/x.jsonl.gz --skip-unresolvable   # drop what this catalog cannot resolve
 
 uv sync --extra embedding                    # optional: fastembed, 167 MiB, no torch
 ```
@@ -394,9 +395,20 @@ write — an unreadable or truncated artifact, a `schema_revision` that is not
 not classify, and unresolved references collected across the whole file and
 reported together — and it does the whole file in **one transaction with one
 commit at the end**, so an unresolved reference in the last row rolls back the
-first. The report separates *written*, *skipped as already present* and
-*refused*, and `--dry-run` prints the identical report and commits nothing.
-Restoring the same artifact twice is a no-op on the second run.
+first. The report separates *written*, *already present*, *nothing to write
+onto*, *skipped as unresolvable* and *refused*; `--dry-run` prints the
+identical report and commits nothing. Restoring the same artifact twice is a
+no-op on the second run.
+
+🔴 **A correctly rebuilt catalog refused this deployment's own artifact, and
+`--skip-unresolvable` is the way through.** K5's drill, 2026-08-25: 6 titles of
+1,272,891 carry neither provider id, they are named by 304 `media_items` link
+rows, and those 304 rolled back 3,347 resolved watch states. The flag drops
+rows naming a title or episode this catalog cannot resolve, counts them
+separately and commits the rest — **opt-in, because the refusal is the headline
+guarantee.** It covers only what the importers rebuild: a household the target
+does not hold, a source name collision and a credential whose source is absent
+all still refuse with it set.
 
 **Nothing runs `usher similar --rebuild` for you**, and that is the one
 freshness gap in the project: a title's neighbours go stale when some *other*

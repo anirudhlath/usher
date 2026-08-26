@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Final
 
 import httpx
 from pydantic import ValidationError
@@ -1878,7 +1879,27 @@ async def _backup(settings: Settings, *, output: Path | None) -> None:
     _print_backup_report(report)
 
 
-async def _restore(settings: Settings, *, artifact: Path, dry_run: bool) -> None:
+#: How many refused rows `_print_restore_report` names before it summarises.
+#:
+#: 🔴 **K5's drill printed a 14,176-line report**, restoring the real artifact
+#: into an empty catalog: 14,166 refusals, one line each, plus the per-table
+#: block. *"Every refusal is named and none is summarised away"* is right at 41
+#: and unusable at 14,166 -- a five-figure wall of text is not a report, it is
+#: the thing an operator scrolls past to reach the summary they needed.
+#:
+#: **Twenty because that is a screen.** It is more than the number of carried
+#: tables (8), so a refusal in every table is still visible with room to see the
+#: rungs repeat; and it is small enough that the summary line and the per-table
+#: counts stay on the same screen as the detail, which is the whole point of
+#: printing detail at all. The count is never truncated -- `refused_by_table()`
+#: is exact whatever this is -- so what the cap costs is the *identity* of rows
+#: 21..N, and `--dry-run` plus the artifact itself are where those live.
+_REFUSALS_NAMED: Final = 20
+
+
+async def _restore(
+    settings: Settings, *, artifact: Path, dry_run: bool, skip_unresolvable: bool
+) -> None:
     """Merge one artifact into this database, in one transaction, or refuse it.
 
     **Inside ADR-0026's boundary with no handler of its own**, exactly as
@@ -1910,39 +1931,114 @@ async def _restore(settings: Settings, *, artifact: Path, dry_run: bool) -> None
             rollback=session.rollback,
         )
         try:
-            report = await service.restore(artifact, dry_run=dry_run)
+            report = await service.restore(
+                artifact, dry_run=dry_run, skip_unresolvable=skip_unresolvable
+            )
         except RestoreRefused as exc:
             raise SystemExit(f"usher restore: {exc}") from exc
     _print_restore_report(report)
     if report.refused:
-        raise SystemExit(
-            f"{len(report.refused)} {_unit('row', len(report.refused))} could not be "
-            "restored, so nothing was: enrich or import what the lines above name and "
-            "run it again"
+        raise SystemExit(_restore_refused(report))
+
+
+def _restore_refused(report: RestoreReport) -> str:
+    """The exit line for a run that refused, and what an operator can do next.
+
+    🔴 **It used to say *"enrich or import what the lines above name"*, and for
+    the one rung a correctly rebuilt catalog actually fails on that is false.**
+    K2's ladder is `imdb_id`, then `(kind, tmdb_id)`, then the raw id -- and the
+    third is a *check on the target*, not a key. A title reaches it only by
+    carrying neither provider id, which on the deployment this project measures
+    means an unmatched **stub** the ingest ladder created: it is in no IMDb
+    dump, has no TMDb id to enrich by, and a rebuild mints it a new UUID. So
+    the sentence sent an operator to run an importer that cannot possibly
+    help. Measured 2026-08-25 -- 6 such titles of 1,272,891, accounting for
+    **304 of the artifact's `media_items` rows**, which refused the whole file
+    including 3,347 resolved watch states.
+
+    The line now separates the two: a reference naming a provider id is
+    something an importer fixes, and one naming only an id is not, and the
+    second names the flag rather than an errand.
+    """
+    refused = len(report.refused)
+    unfindable = sum(1 for one in report.refused if all(key.startswith("id=") for key in one.keys))
+    line = (
+        f"{refused:,} {_unit('row', refused)} could not be restored, so nothing was. "
+        f"Per table: {dict(report.refused_by_table())}"
+    )
+    if unfindable:
+        line += (
+            f"\n{unfindable:,} of them name only a raw id, which **no importer can "
+            "supply**: the title carried neither an imdb_id nor a tmdb_id when the "
+            "backup was written, so it is in no dump and a rebuild mints it a new one. "
+            "Re-run with `--skip-unresolvable` to drop those rows and restore the rest "
+            "-- the next `usher sync` re-derives the links among them."
         )
+    if unfindable < refused:
+        line += (
+            "\nThe rest name a provider id: import or enrich what the lines above "
+            "name, then run it again."
+        )
+    return line
 
 
 def _print_restore_report(report: RestoreReport) -> None:
-    """Three counts per table, then the refusals by name, then one summary.
+    """Five counts per table, then the refusals by name up to a cap, then one
+    summary.
 
-    **Three numbers rather than one**, which is the whole reason this command
+    **Five numbers rather than one**, which is the whole reason this command
     reports at all: *"restored 9 rows"* over an artifact holding 50 is the
     failure it exists to make visible, and an operator at a terminal has no
     second copy of the database to compare against.
 
-    Every refusal is named and none is summarised away. A restore that stopped
-    at the first missing title would send an operator to enrich one title; a
-    restore that names 41 of them tells them the catalog is not finished,
-    which is a different instruction -- and the keys are `keys_tried`'s
-    rendering, so what is printed is what was looked for rather than a
-    paraphrase of it.
+    🔴 **`present` and `absent` were one column headed *"already present"*,
+    and K5's drill printed it against a table holding zero rows.**
+    `media_items 0 written / 10,515 already present` where
+    `SELECT count(*) FROM media_items` answered **0** -- the rows were not
+    present, there was nothing there to write onto, and the two are opposite
+    instructions: *already linked* means the restore was unnecessary, *nothing
+    here yet* means run `usher sync` and restore again. That second state is
+    universal on the very recovery path this command exists for, because
+    `media_items` rows come from a walk and the walk needs the `sources` row
+    the artifact carries.
+
+    **The refusal list is capped at `_REFUSALS_NAMED` with an exact tail.**
+    The same drill printed **14,176 lines**. What a cap costs is the identity
+    of rows 21..N; what it keeps is the per-table counts, which are computed
+    from the whole list and are exact whatever is printed -- so *"how bad is
+    it and where"* survives and *"which forty-first row"* moves to `--dry-run`
+    and the artifact. The keys printed are `keys_tried`'s own rendering, so
+    what an operator reads is what was looked for rather than a paraphrase.
     """
-    for table in sorted(set(report.written) | set(report.skipped)):
-        written = report.written.get(table, 0)
-        skipped = report.skipped.get(table, 0)
-        print(f"  {table:<24}{written:>9,} written {skipped:>9,} already present")
-    for refusal in report.refused:
+    for table in report.tables:
+        counts = (
+            f"{report.written.get(table, 0):>9,} written"
+            f"{report.present.get(table, 0):>10,} present"
+            f"{report.absent.get(table, 0):>10,} nothing to write onto"
+        )
+        unresolved = report.unresolved.get(table, 0)
+        if unresolved:
+            counts += f"{unresolved:>10,} skipped as unresolvable"
+        refused = report.refused_by_table().get(table, 0)
+        if refused:
+            counts += f"{refused:>10,} refused"
+        print(f"  {table:<24}{counts}")
+    for refusal in report.refused[:_REFUSALS_NAMED]:
         print(f"  refused {refusal.table:<16}{', '.join(refusal.keys)} -- {refusal.reason}")
+    if len(report.refused) > _REFUSALS_NAMED:
+        rest = len(report.refused) - _REFUSALS_NAMED
+        print(
+            f"  … and {rest:,} more refused, not named here. The per-table counts "
+            "above are exact; `--dry-run` reports the same list without holding a "
+            "transaction open."
+        )
+    if report.total_unresolved:
+        print(
+            f"{report.total_unresolved:,} "
+            f"{_unit('row', report.total_unresolved)} skipped as unresolvable "
+            "(--skip-unresolvable): every one names a title or episode this catalog "
+            "does not hold, and the next `usher sync` re-derives the links among them"
+        )
     ending = (
         "nothing was committed (--dry-run)"
         if report.dry_run
@@ -1950,7 +2046,9 @@ def _print_restore_report(report: RestoreReport) -> None:
     )
     print(
         f"{report.total_written:,} {_unit('row', report.total_written)} written, "
-        f"{report.total_skipped:,} already present, "
+        f"{report.total_present:,} already present, "
+        f"{report.total_absent:,} with nothing to write onto, "
+        f"{report.total_unresolved:,} skipped as unresolvable, "
         f"{len(report.refused)} refused, from {report.path} "
         f"at schema {report.schema_revision}: {ending}"
     )
@@ -2352,6 +2450,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="resolve everything, print the identical report, and commit nothing",
     )
+    # **`--skip-unresolvable`, not `--allow-unresolvable`**, and the verb is the
+    # decision. *Allow* names a permission and reads as *let them through*,
+    # which is the one thing this must not mean: the row is **dropped**, not
+    # written with a null and not written with a guessed id. The flag's name
+    # has to be the thing that happens to the row, because the operator reading
+    # it in a runbook at 3am is deciding whether they can afford it.
+    #
+    # Opt-in with the refusal unconditional by default, which is the operator's
+    # binding decision: *"refuses rather than half-applies"* is the command's
+    # headline guarantee and it is not weakened silently.
+    restore.add_argument(
+        "--skip-unresolvable",
+        action="store_true",
+        help=(
+            "drop rows naming a title or episode this catalog cannot resolve, "
+            "instead of refusing the file; the next `usher sync` re-derives them"
+        ),
+    )
     return parser
 
 
@@ -2616,7 +2732,14 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
     elif args.command == "backup":
         asyncio.run(_backup(settings, output=args.output))
     elif args.command == "restore":
-        asyncio.run(_restore(settings, artifact=args.artifact, dry_run=args.dry_run))
+        asyncio.run(
+            _restore(
+                settings,
+                artifact=args.artifact,
+                dry_run=args.dry_run,
+                skip_unresolvable=args.skip_unresolvable,
+            )
+        )
     else:
         # Imported here, not at module scope: uvicorn.run blocks, and nothing
         # about the bootstrap path should pay for importing the server.

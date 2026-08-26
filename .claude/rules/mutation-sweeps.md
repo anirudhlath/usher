@@ -8491,3 +8491,108 @@ say what the guard is really for rather than to delete it.**
   other with *"see the port"*. **When a commit's headline is a distinction,
   grep the tree for the sentences that state it the old way**; the two that
   matter most are in the files you are already editing.
+
+## M10 K4, round 3 — the drill's four findings, and a survivor that was my own assertion (2026-08-25)
+
+**11 mutations, 10 killed on the first pass, 1 control surviving as designed,
+1 unintended survivor closed and re-planted, 0 BAD-ANCHOR, all 11 restores
+byte-identical.** Harness `/var/tmp/k4/sweep.py`, plants
+`/var/tmp/k4/plants3.py`, selection widened to include
+`tests/integration/test_restore_drill.py`. Baseline **120 passed in 9.70 s**.
+
+**Every plant here is a defect K5's *live* drill found and no sweep had**,
+which is the finding worth carrying: rounds 1 and 2 swept the command's
+decisions and its merge rules against fixtures, and all four of these needed a
+real 1,272,891-title catalog and a real 14,259-row artifact to become visible.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| D1 the flag is ignored, so the artifact is refused whole | KILLED | 2 |
+| D2 the flag skips the household too, dropping watch history | KILLED | 1 |
+| D3 the flag defaults on, so the refusal stops being unconditional | KILLED | 2 |
+| D4 `--dry-run` is dropped when `--skip-unresolvable` is passed | KILLED | 1 |
+| D5 the truncation check never fires | KILLED | **2, in two files** |
+| D6 a header with no counts is accepted rather than refused | KILLED | 1 |
+| D7 *nothing to write onto* is reported as *already present* again | KILLED | **1, and it is the drill's own case** |
+| D8 the refusal report is uncapped again | KILLED | 1 |
+| D9 the per-table refused counts are capped with the list | **SURVIVED**, then KILLED | 1 after repair |
+| D10 a rung-3 refusal is told to run an importer again | KILLED | 1 |
+| D11 *control* — the report's four count maps reordered | SURVIVED, all five gate steps | — |
+
+🔴 **D9 is the one worth the entry, and it is `CLAUDE.md`'s own membership rule
+arriving at a count.** The case asserted *"the per-table counts stay exact
+whatever the cap drops"* as
+`assert "watch_states" in out and "25 refused" in out` — a search over the
+**whole** rendered report. Capping `refused_by_table()` at 20 leaves the
+per-table line reading `20 refused` and the *summary* line reading
+`25 refused, from …`, so the assertion matched the summary and scored the plant
+as caught. The repair reads the table's own line out by itself
+(`(per_table,) = [line for line in out.splitlines() if …startswith("watch_states")]`)
+and the same plant then fails on `assert "25 refused" in per_table`. **The
+general form: when a renderer prints the same number twice at different scopes,
+a substring assertion over its whole output cannot say which scope it read** —
+and the two scopes disagreeing is precisely the defect the case exists for. Same
+family as *"a membership assertion is not an ordering test"* and as
+`len(x) > 0`, in a place nobody had looked: the *output* of a report rather than
+the *result* of a query.
+
+**D7's kill is the drill's own case and that is the point.**
+`test_restore_drill.py` asserted `report.skipped == _tally(media_items=2)` with
+a comment saying *"the rows they belong to were truncated with the source, and
+`usher sync` has not run yet"* — the file **already knew** the two states were
+different and had one number to say it with. Splitting `skipped` into `present`
+and `absent` turned that comment into an assertion, and collapsing them again
+fails it. **A comment that explains why a number means two things is a test
+waiting to be written.**
+
+**D5 and D6 close a hole two files in `src/` had described in the present
+tense.** *"A count that can disagree with the body is worse than no count at
+all, because K4 reads it as a truncation check"* and *"which is what lets K4
+read a short table as a truncated file rather than as a race"* — K4 read
+`schema_revision` and nothing else, and the drill measured it: a header
+claiming 10,819 `media_items` over a body holding 10,515 restored with **0
+refusals and exit 0**. **This is the third pair of forward-looking claims about
+a later task written in the present tense on this milestone** (after the two
+`code_head_revision()` sentences), from the same author and the same commit
+family, and the second that survived two rounds of review because it sits in a
+K3-authored paragraph inside a file K4's diff touched. The check is built rather
+than the sentences deleted; D6 exists because *"no counts in the header"* was
+the obvious way to make the new check vacuous, and a guard that passes when its
+input is missing is the *"a guard that globs nothing passes exactly like a guard
+that passes"* rule this repository has now paid for five times.
+
+**D2 is the plant that pins where the flag's line falls**, and the line is
+narrower than the flag's own name. `--skip-unresolvable` covers references the
+**importers rebuild** — a title or episode stub, re-derived by the next
+`usher sync`, which is K1's own argument for carrying every link. A household is
+rebuilt by nothing, so skipping one would silently drop **every watch state in
+the file**: the exact loss this command exists to carry, arriving through the
+escape hatch built for the opposite case. A source name collision and a
+credential whose source is absent stay refusals for the same reason and have
+their own case. **When a flag relaxes a refusal, enumerate the refusals it does
+*not* relax and plant one of each** — the name will read like it covers all of
+them.
+
+**And a driver limit worth recording, found by running it.**
+`WHERE (source_id, external_id) = ANY(:pairs)` — the obvious spelling of the
+batched pair lookup `present`/`absent` needs — compiles and then fails in the
+driver: `asyncpg.exceptions.UnsupportedClientFeatureError: input of anonymous
+composite types is not supported`, *"PostgreSQL does not implement anonymous
+composite type input"*. A list of tuples cannot be bound without declaring a
+composite type in the schema. `JOIN unnest(CAST(:a AS uuid[]), CAST(:b AS
+text[])) AS wanted(...)` expands two parallel arrays row for row, needs no new
+type, and stays exact — a cross product of the two columns would answer a
+superset. Filed in `db-and-sql.md`.
+
+**The control, measured against every gate step separately:**
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| D11 the report's `written`/`present`/`absent`/`unresolved` keyword arguments reordered | PASS | PASS | PASS | PASS (12/0) | PASS |
+
+Its equivalence is a fact about the language rather than about what the tools
+look at — keyword arguments to a `dataclass` constructor — and its *value* over
+round 1's withdrawn CTRL1 is that there are now **four** independent tallies
+rather than two, so the reorder is a larger no-op over a wider surface. It is
+still the weak kind of control (the same program), and round 2's D8/R8 pattern
+is the one to prefer where a measured equivalence is available.

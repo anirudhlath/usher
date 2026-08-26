@@ -34,7 +34,9 @@ ARTIFACT = Path("/srv/usher/backups/usher-backup-20260825T143000Z.jsonl.gz")
 def _report(
     *,
     written: dict[str, int] | None = None,
-    skipped: dict[str, int] | None = None,
+    present: dict[str, int] | None = None,
+    absent: dict[str, int] | None = None,
+    unresolved: dict[str, int] | None = None,
     refused: tuple[RestoreRefusal, ...] = (),
     dry_run: bool = False,
     committed: bool = True,
@@ -43,7 +45,9 @@ def _report(
         path=ARTIFACT,
         schema_revision="m10a",
         written={"users": 1, "watch_states": 3_347} if written is None else written,
-        skipped={"users": 0, "watch_states": 12} if skipped is None else skipped,
+        present={"users": 0, "watch_states": 12} if present is None else present,
+        absent={} if absent is None else absent,
+        unresolved={} if unresolved is None else unresolved,
         refused=refused,
         dry_run=dry_run,
         committed=committed,
@@ -55,7 +59,7 @@ def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
 
 
-def test_restore_takes_a_required_artifact_and_a_dry_run_flag() -> None:
+def test_restore_takes_a_required_artifact_and_two_flags() -> None:
     """**The artifact is positional and required**, which is the asymmetry with
     `backup --output` and is a decision rather than a style.
 
@@ -71,6 +75,7 @@ def test_restore_takes_a_required_artifact_and_a_dry_run_flag() -> None:
         "traceback": False,
         "artifact": ARTIFACT,
         "dry_run": False,
+        "skip_unresolvable": False,
     }
 
 
@@ -111,7 +116,9 @@ def test_restore_dispatches_to_restore_and_not_to_the_server(
     _configured(monkeypatch)
     ran: list[tuple[Path, bool]] = []
 
-    async def _record(settings: Settings, *, artifact: Path, dry_run: bool) -> None:
+    async def _record(
+        settings: Settings, *, artifact: Path, dry_run: bool, skip_unresolvable: bool
+    ) -> None:
         ran.append((artifact, dry_run))
 
     def _served(*_: object, **__: object) -> None:
@@ -224,8 +231,8 @@ def test_the_traceback_flag_does_not_reopen_a_refusal(
     assert "usher restore: " in str(exit_info.value)
 
 
-def test_the_report_prints_three_counts_per_table(capsys: pytest.CaptureFixture[str]) -> None:
-    """**Three numbers rather than one**, which is the whole reason this
+def test_the_report_prints_five_counts_per_table(capsys: pytest.CaptureFixture[str]) -> None:
+    """**Five numbers rather than one**, which is the whole reason this
     command reports at all: *"restored 9 rows"* over an artifact holding 50 is
     the failure it exists to make visible, and an operator at a terminal has
     no second copy of the database to compare against.
@@ -234,13 +241,74 @@ def test_the_report_prints_three_counts_per_table(capsys: pytest.CaptureFixture[
     `_print_backup_report`'s reason one function down: a table absent from a
     report and a table nobody restored read the same.
     """
-    _print_restore_report(_report(written={"users": 0, "watch_states": 3}, skipped={"users": 1}))
+    _print_restore_report(_report(written={"users": 0, "watch_states": 3}, present={"users": 1}))
 
     out = capsys.readouterr().out
     assert "users" in out and "watch_states" in out, out
     assert "0 written" in out, out
-    assert "1 already present" in out, out
-    assert "3 rows written, 1 already present, 0 refused" in out, out
+    assert "1 present" in out, out
+    assert "3 rows written, 1 already present" in out, out
+    assert "0 refused" in out, out
+
+
+def test_the_report_tells_already_present_from_nothing_to_write_onto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """🔴 **K5's drill printed `10,515 already present` against a table holding
+    zero rows.**
+
+    `media_items`' merge is an `UPDATE` over a row the *source walk* creates,
+    and `RETURNING` cannot tell *"the target already holds this link"* from
+    *"there is no row here at all"* -- both return nothing. One number rendered
+    as *"already present"* therefore said the restore had been unnecessary when
+    what had actually happened is that it was too early, which is the opposite
+    instruction: the second wants `usher sync` and another run.
+
+    That second state is not a corner. It is **universal** on the recovery path
+    this command exists for, because `media_items` rows come from a walk and
+    the walk needs the `sources` row the artifact carries -- so the first
+    restore of a rebuilt deployment lands every link in it.
+
+    The two are asserted as different strings over one report, because a
+    renderer that printed the same word for both is exactly what shipped.
+    """
+    _print_restore_report(
+        _report(
+            written={"media_items": 0},
+            present={"media_items": 0},
+            absent={"media_items": 10_515},
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert "10,515 nothing to write onto" in out, out
+    assert "0 present" in out, out
+    assert "10,515 with nothing to write onto" in out, out
+    # And the false sentence is gone: nothing in this report claims the target
+    # already held 10,515 rows it does not have.
+    assert "10,515 already present" not in out, out
+
+
+def test_rows_skipped_as_unresolvable_are_counted_apart_from_everything_else(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A third skip reason needs a third number, not a bigger second one.
+
+    A row dropped under `--skip-unresolvable` is neither *already present* nor
+    *nothing to write onto*: the target has the row and restore chose not to
+    write it, because the operator accepted losing a link rather than the file.
+    Folding it into either would hide the one number they asked to see, and the
+    line says what happens next -- the next `usher sync` re-derives those
+    links, which is the whole reason the loss is affordable.
+    """
+    _print_restore_report(
+        _report(written={"media_items": 12}, present={}, unresolved={"media_items": 304})
+    )
+
+    out = capsys.readouterr().out
+    assert "304 skipped as unresolvable" in out, out
+    assert "usher sync" in out, out
+    assert "12 rows written" in out, out
 
 
 def test_the_report_names_every_refused_key_rather_than_counting_them(
@@ -331,7 +399,9 @@ class _StubService:
     def __call__(self, **_: object) -> "_StubService":
         return self
 
-    async def restore(self, source: Path, *, dry_run: bool = False) -> RestoreReport:
+    async def restore(
+        self, source: Path, *, dry_run: bool = False, skip_unresolvable: bool = False
+    ) -> RestoreReport:
         return self._report
 
 
@@ -408,3 +478,186 @@ def test_a_dry_run_that_refused_nothing_exits_zero(monkeypatch: pytest.MonkeyPat
     )
 
     main(["restore", str(ARTIFACT), "--dry-run"])
+
+
+def test_the_refusal_list_is_capped_and_the_per_table_counts_stay_exact(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """🔴 **K5's drill printed a 14,176-line report.**
+
+    Restoring the real artifact into an empty catalog refused 14,166 of 14,259
+    rows and named every one. *"Every refusal is named and none is summarised
+    away"* is the right rule at 41 and is unusable at 14,166 -- a five-figure
+    wall of text is not a report, it is what an operator scrolls past to reach
+    the summary they needed.
+
+    **What the cap must not cost is the counts**, which is why both halves are
+    asserted here: 25 refusals produce 20 named lines, a tail naming the
+    remaining 5, and a **per-table** figure of 25. An implementation that
+    capped the list by truncating the *report* rather than the *rendering*
+    would satisfy the first two and fail the third.
+
+    🔴 **That third assertion was `"25 refused" in out` for one round, and the
+    sweep proved it could not fail.** Capping `refused_by_table()` at 20 leaves
+    the summary line reading `25 refused, from …`, so a membership test over
+    the whole output matched the *summary* while the per-table line said 20 --
+    exactly `CLAUDE.md`'s *"a membership assertion is not an ordering test"*
+    arriving at a count. The assertion now reads the per-table line by itself.
+    """
+    refusals = tuple(
+        RestoreRefusal(
+            table="watch_states",
+            keys=(f"imdb_id=tt9900{index:04d}",),
+            reason="this database holds no title under any of these",
+        )
+        for index in range(25)
+    )
+    _print_restore_report(
+        _report(written={"watch_states": 0}, present={}, refused=refusals, committed=False)
+    )
+
+    out = capsys.readouterr().out
+    named = [line for line in out.splitlines() if line.strip().startswith("refused ")]
+    assert len(named) == 20, named
+    assert "… and 5 more refused" in out, out
+    # The premise: the last one really is absent, so the cap is observable
+    # rather than a number that happened to exceed the fixture.
+    assert "tt99000024" not in out, out
+    # And the count is exact whatever the cap dropped -- read off the table's
+    # own line, because the summary line carries the same number and would
+    # satisfy a search over the whole output.
+    (per_table,) = [line for line in out.splitlines() if line.strip().startswith("watch_states")]
+    assert "25 refused" in per_table, per_table
+    assert "25 refused, from" in out, out
+
+
+def test_a_rung_three_refusal_names_the_flag_rather_than_an_impossible_errand(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """🔴 **`enrich or import what the lines above name` is false for the one
+    rung a correctly rebuilt catalog fails on.**
+
+    K2's ladder is `imdb_id`, then `(kind, tmdb_id)`, then the raw id, and the
+    third is a *check on the target* rather than a key. A title reaches it only
+    by carrying neither provider id -- on the deployment this project measures,
+    an unmatched **stub** the ingest ladder created, which is in no IMDb dump,
+    has no TMDb id to enrich by, and gets a fresh UUID from any rebuild. The
+    old sentence sent an operator to run an importer that cannot help.
+    Measured 2026-08-25: 6 such titles of 1,272,891, accounting for 304
+    `media_items` rows, which refused a file carrying 3,347 resolved watch
+    states.
+
+    The two arms are asserted over **one** report carrying both kinds, because
+    a message that named the flag for every refusal would be the mirror defect
+    -- telling an operator to skip rows an importer really would fix.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        "usher.cli.RestoreService",
+        _StubService(
+            _report(
+                refused=(
+                    RestoreRefusal(
+                        table="media_items",
+                        keys=("id=00000000-0000-7000-8000-00000000abcd",),
+                        reason="this database holds no title under any of these",
+                    ),
+                    RestoreRefusal(
+                        table="watch_states",
+                        keys=("imdb_id=tt99000599",),
+                        reason="this database holds no title under any of these",
+                    ),
+                ),
+                committed=False,
+            )
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["restore", str(ARTIFACT)])
+
+    message = str(exit_info.value)
+    assert "no importer can" in message, message
+    assert "--skip-unresolvable" in message, message
+    # And the other arm, which is what stops the flag being advertised for a
+    # refusal an import really does fix.
+    assert "import or enrich" in message, message
+    assert "{'media_items': 1, 'watch_states': 1}" in message, message
+    capsys.readouterr()
+
+
+def test_a_refusal_that_names_a_provider_id_does_not_advertise_the_flag(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The positive control for the case above, and it is not optional.
+
+    *"The message names the flag"* is satisfied by a message that names it
+    always -- which would be worse than the sentence it replaced, because
+    `--skip-unresolvable` discards data and an `imdb_id` refusal is fixed by
+    finishing `usher bootstrap`. Nothing here is unfindable, so nothing here
+    should offer to be skipped.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        "usher.cli.RestoreService",
+        _StubService(
+            _report(
+                refused=(
+                    RestoreRefusal(
+                        table="watch_states",
+                        keys=("imdb_id=tt99000599", "movie+tmdb_id=99000599"),
+                        reason="this database holds no title under any of these",
+                    ),
+                ),
+                committed=False,
+            )
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["restore", str(ARTIFACT)])
+
+    message = str(exit_info.value)
+    assert "--skip-unresolvable" not in message, message
+    assert "import or enrich" in message, message
+    capsys.readouterr()
+
+
+def test_skip_unresolvable_is_off_unless_it_is_asked_for() -> None:
+    """The default is the guarantee, so it is pinned as a parsed value rather
+    than left to the arm that reads it.
+
+    *"Refuses rather than half-applies"* is this command's headline promise;
+    the flag is an operator saying they accept the loss. A default that
+    flipped -- by a `default=True`, by a `store_false`, by anything -- would
+    turn every refusal in this file into a silent skip, and no other case here
+    asserts the parsed value.
+    """
+    assert parse_args(["restore", str(ARTIFACT)]).skip_unresolvable is False
+    assert parse_args(["restore", str(ARTIFACT), "--skip-unresolvable"]).skip_unresolvable is True
+
+
+def test_the_flag_reaches_restore_and_composes_with_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both flags through the `_dispatch` arm, together.
+
+    An arm that forwarded `--skip-unresolvable` and dropped `--dry-run` would
+    commit an artifact an operator asked to be shown, having also discarded
+    rows -- the two worst outcomes of this command in one run, and neither
+    visible to a spy that only counts calls.
+    """
+    _configured(monkeypatch)
+    ran: list[tuple[Path, bool, bool]] = []
+
+    async def _record(
+        settings: Settings, *, artifact: Path, dry_run: bool, skip_unresolvable: bool
+    ) -> None:
+        ran.append((artifact, dry_run, skip_unresolvable))
+
+    monkeypatch.setattr("usher.cli._restore", _record)
+    monkeypatch.setattr("uvicorn.run", lambda *_, **__: None)
+
+    main(["restore", str(ARTIFACT), "--dry-run", "--skip-unresolvable"])
+
+    assert ran == [(ARTIFACT, True, True)]

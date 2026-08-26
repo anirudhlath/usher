@@ -1563,3 +1563,44 @@ obvious operator instinct refuses the whole file.
   and failed four unit cases instead. The duplication is pinned by
   `test_the_projection_built_reference_is_the_one_backup_identity_builds`; the
   plant that reaches the integration arm has to go in `_titles`.
+
+
+## asyncpg cannot bind a list of tuples, so a batched pair lookup is a two-array `unnest` (2026-08-25, M10 K4)
+
+**`WHERE (a, b) = ANY(:pairs)` compiles in SQLAlchemy and fails in the driver.**
+Measured against `pgvector/pgvector:pg17` through
+`PostgresRestoreRepository._existing_media_items`, asking which of an artifact's
+`(source_id, external_id)` keys the target already holds:
+
+```
+asyncpg.exceptions._base.UnsupportedClientFeatureError: query argument $1:
+  input of anonymous composite types is not supported
+DETAIL:  PostgreSQL does not implement anonymous composite type input.
+HINT:  Consider declaring an explicit composite type and using it to cast the argument.
+```
+
+The hint is the whole finding: a list of tuples cannot be bound **at all**
+without a `CREATE TYPE` in the schema. It is a *client feature* limit, not a
+syntax error, so the statement is built, compiled and sent before anything
+notices — the failure arrives as a `sqlalchemy.exc.InterfaceError` wrapping an
+asyncpg exception, i.e. through the same door a dropped connection would.
+
+**The spelling that works, and it is exact rather than a superset:**
+
+```sql
+SELECT m.a, m.b FROM t m
+JOIN unnest(CAST(:as AS uuid[]), CAST(:bs AS text[])) AS wanted(a, b)
+  ON m.a = wanted.a AND m.b = wanted.b
+```
+
+Multi-argument `unnest` in a `FROM` clause expands parallel arrays **row for
+row**, which is what keeps the join a pair lookup. The obvious fallback —
+`WHERE a = ANY(:as) AND b = ANY(:bs)` — binds fine and answers the **cross
+product**, so on an artifact carrying two sources it reports pairs that do not
+exist; for a *membership* question that is a wrong answer rather than a slow
+one. One round trip either way.
+
+**Same family as the two `text()` bind-parameter traps above** (`:p::type`
+silently skipped, `:name` inside a `--` comment silently created): three
+separate ways a bind that reads correctly does not do what it says, all found
+by running the statement rather than by reading it.

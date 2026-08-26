@@ -147,10 +147,14 @@ async def test_a_backup_of_a_seeded_household_restores_into_a_rebuilt_catalog(
         row_provider_settings=1,
         search_queries=1,
     ), report.written
-    # `media_items` is 0 written and 2 skipped: the links are carried, the rows
-    # they belong to were truncated with the source, and `usher sync` has not
-    # run yet. Ordering 1 in this module's docstring.
-    assert report.skipped == _tally(media_items=2), report.skipped
+    # `media_items` is 0 written and 2 **absent**, not 2 "already present":
+    # the links are carried, the rows they belong to were truncated with the
+    # source, and `usher sync` has not run yet. Ordering 1 in this module's
+    # docstring -- and the reason `absent` exists as a bucket of its own since
+    # 2026-08-25, because this run is the one that printed
+    # `10,515 already present` against a table holding zero rows.
+    assert report.absent == _tally(media_items=2), report.absent
+    assert report.present == _tally(), report.present
 
     restored_targets = await _watch_state_targets(session)
     assert restored_targets, "nothing was restored, so the id comparison below proves nothing"
@@ -192,7 +196,7 @@ async def test_a_backup_of_a_seeded_household_restores_into_a_rebuilt_catalog(
 def _tally(**counts: int) -> dict[str, int]:
     """One entry per carried table, defaulting to zero.
 
-    `RestoreReport.written` and `.skipped` carry a key for **every** table the
+    `RestoreReport`'s four count maps carry a key for **every** table the
     artifact holds rows for, zeros included, so an expected dict listing only
     the interesting tables is not the report -- and `==` against a partial dict
     is a comparison that fails for a reason that has nothing to do with the

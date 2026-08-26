@@ -30,7 +30,17 @@ watch states, 0 `llm_calls`, 1 row-provider setting, 89 search queries and
 than asserted. Materialising them is what lets the header's per-table
 counts be **what was written** instead of what a separate `count(*)`
 believed a moment earlier, and a count that can disagree with the body is
-worse than no count at all, because K4 reads it as a truncation check.
+worse than no count at all.
+
+✅ **`usher restore` really does read them as a truncation check, since
+2026-08-25** -- `services/restore.py::_refuse_a_short_body`. 🔴 That sentence
+was here, in the present tense, for a milestone before the check existed:
+K4 read exactly one header key and K5's drill restored an artifact whose
+header claimed 10,819 `media_items` over a body holding 10,515 with **0
+refusals and exit 0**. Recorded rather than quietly corrected, because *"a
+forward-looking claim about the next task, written in the present tense"* is
+now this milestone's most repeated defect and this file has hosted two of
+them.
 
 ⚠️ **The seam a fast path would use, named so nobody has to rediscover
 it.** `usher.db.staging.raw_connection(session)` already unwraps the live
@@ -202,23 +212,43 @@ class RestoreRefusal:
 
 @dataclass(frozen=True, slots=True)
 class TableOutcome:
-    """What one table's rows did to the target.
+    """What one table's rows did to the target: four counts and a list.
 
-    **Three numbers rather than one**, because *"restored 9 rows"* over an
-    artifact holding 50 is the failure this whole command exists to make
-    visible. `written` is rows the target changed for; `skipped` is rows it
-    already held (or, for the one `PARTIAL` entry, rows it holds a link for
-    that restore must not overwrite and rows the next source walk has not
-    created yet); `refused` is rows nothing was attempted for.
+    **Four buckets rather than one, and rather than the three this shipped
+    with.** *"Restored 9 rows"* over an artifact holding 50 is the failure
+    this whole command exists to make visible, and K5's drill found the same
+    failure one level down inside the word *skipped*:
 
-    `written + skipped + len(refused)` is the number of rows submitted, and
-    a service that reported only the first two would be reporting a subset
-    as a total.
+    - `written` -- the target changed because of this row.
+    - `present` -- the target already holds this row's state. The merge rule
+      worked and there was nothing to do.
+    - `absent` -- there is **no row here to write onto**. Only reachable for
+      the one `PARTIAL` entry, whose merge is an `UPDATE` over a row the
+      *source walk* creates, so an artifact restored before the walk has run
+      lands nothing.
+    - `unresolved` -- a reference this catalog cannot resolve, dropped
+      because the operator passed `--skip-unresolvable`. Zero on every
+      default run, because the default refuses.
+
+    🔴 **`present` and `absent` were one number called `skipped` until
+    2026-08-25, and the drill printed the sentence that refuted it**:
+    `media_items 0 written / 10,515 already present` against a `media_items`
+    table holding **zero rows**. *"The target already holds this"* and
+    *"there was nothing here to write onto"* are opposite diagnoses -- the
+    first says the restore was unnecessary, the second says it was too early
+    and the operator should walk the source and run it again -- and the
+    report rendered them identically.
+
+    `written + present + absent + unresolved + len(refused)` is the number of
+    rows submitted, and a service reporting a subset of those as a total is
+    the thing this type exists to prevent.
     """
 
     written: int
-    skipped: int
-    refused: tuple[RestoreRefusal, ...]
+    present: int
+    absent: int = 0
+    unresolved: int = 0
+    refused: tuple[RestoreRefusal, ...] = ()
 
 
 class RestoreRepository(ABC):
@@ -298,7 +328,13 @@ class RestoreRepository(ABC):
         """
 
     @abstractmethod
-    async def apply(self, table: str, rows: Sequence[Mapping[str, object]]) -> TableOutcome:
+    async def apply(
+        self,
+        table: str,
+        rows: Sequence[Mapping[str, object]],
+        *,
+        skip_unresolvable: bool = False,
+    ) -> TableOutcome:
         """Resolve one table's references and merge its rows, writing
         nothing that cannot be resolved.
 
@@ -311,4 +347,21 @@ class RestoreRepository(ABC):
         not hide the other forty. The caller decides what a non-empty
         `refused` means for the transaction, which is what lets `--dry-run`
         take the identical path and commit nothing.
+
+        **`skip_unresolvable` defaults to `False` and that default is the
+        command's headline guarantee**, so it is spelled here rather than
+        left to a caller: a title or episode reference this catalog cannot
+        resolve is a *refusal* unless an operator has explicitly said
+        otherwise, and *"refuses rather than half-applies"* is not weakened
+        silently. With it set, those rows are dropped and counted under
+        `unresolved` -- never written with a null, never folded into
+        `present`.
+
+        ⚠️ **It covers exactly the references K1's manifest says the
+        importers rebuild, and nothing else.** A household name the target
+        does not hold, a source colliding on a name, and a credential whose
+        source is absent all stay refusals however this flag is set: none of
+        them is *"this catalog is at a different bootstrap phase"*, they are
+        a damaged artifact or a conflict only an operator can settle, and no
+        `usher sync` re-derives any of them.
         """

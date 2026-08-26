@@ -627,11 +627,19 @@ class PostgresRestoreRepository(RestoreRepository):
         # the stale copy.
         return await database_revision(self._session)
 
-    async def apply(self, table: str, rows: Sequence[Mapping[str, object]]) -> TableOutcome:
+    async def apply(
+        self,
+        table: str,
+        rows: Sequence[Mapping[str, object]],
+        *,
+        skip_unresolvable: bool = False,
+    ) -> TableOutcome:
         refusal = self.refusal_for_table(table)
         if refusal is not None:
             raise KeyError(refusal)
-        prepared, refused = await self._prepare(table, rows)
+        prepared, refused, unresolved = await self._prepare(
+            table, rows, skip_unresolvable=skip_unresolvable
+        )
         # One SAVEPOINT for the table rather than one per row: a refused row
         # here is a damaged artifact, the whole file is about to be rolled
         # back either way, and 14,259 savepoints would be the cost of a
@@ -642,12 +650,16 @@ class PostgresRestoreRepository(RestoreRepository):
         # untranslated write here would put those columns back in the
         # `exposed-sqlalchemy` bucket that F9 emptied.
         async with refusals_as_conflict(self._session, f"a restored {table} row is out of bounds"):
-            written, skipped, more = await self._merge(table, prepared)
-        return TableOutcome(written=written, skipped=skipped, refused=(*refused, *more))
+            merged = await self._merge(table, prepared)
+        return TableOutcome(
+            written=merged.written,
+            present=merged.present,
+            absent=merged.absent,
+            unresolved=unresolved,
+            refused=(*refused, *merged.refused),
+        )
 
-    async def _merge(
-        self, table: str, rows: Sequence[Mapping[str, Any]]
-    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+    async def _merge(self, table: str, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """One table's merge rule. A table with no arm raises rather than
         falling through to an insert: the manifest's precious set is what
         `restored_tables` answers, so a table added to K1 and not to this
@@ -675,9 +687,7 @@ class PostgresRestoreRepository(RestoreRepository):
                     "PostgresRestoreRepository has no merge rule for it"
                 )
 
-    async def _merge_users(
-        self, rows: Sequence[Mapping[str, Any]]
-    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+    async def _merge_users(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """Insert on the name, which `uq_users_name` makes an identity.
 
         Nothing adopts the artifact's `users.id` when the target already holds
@@ -692,11 +702,9 @@ class PostgresRestoreRepository(RestoreRepository):
                 text(_insert("users") + " ON CONFLICT (name) DO NOTHING RETURNING id"), row
             )
             written += len(result.all())
-        return written, len(rows) - written, ()
+        return TableOutcome(written=written, present=len(rows) - written)
 
-    async def _merge_sources(
-        self, rows: Sequence[Mapping[str, Any]]
-    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+    async def _merge_sources(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """Insert on the id, and refuse a name a *different* source holds.
 
         ⚠️ **The refusal is an explicit read because the schema cannot make
@@ -733,7 +741,7 @@ class PostgresRestoreRepository(RestoreRepository):
         wrong row.
         """
         if not rows:
-            return 0, 0, ()
+            return TableOutcome(written=0, present=0)
         by_id, by_name = await self._existing_sources(rows)
         written = skipped = 0
         refused: list[RestoreRefusal] = []
@@ -762,7 +770,7 @@ class PostgresRestoreRepository(RestoreRepository):
             by_id[row["id"]] = str(row["name"])
             by_name[str(row["name"])] = row["id"]
             written += 1
-        return written, skipped, tuple(refused)
+        return TableOutcome(written=written, present=skipped, refused=tuple(refused))
 
     async def _existing_sources(
         self, rows: Sequence[Mapping[str, Any]]
@@ -795,9 +803,7 @@ class PostgresRestoreRepository(RestoreRepository):
             by_name.setdefault(str(row.name), row.id)
         return by_id, by_name
 
-    async def _merge_source_credentials(
-        self, rows: Sequence[Mapping[str, Any]]
-    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+    async def _merge_source_credentials(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """Insert on `ref`, and refuse a credential whose source is not here.
 
         A source refused by the rule above leaves its credential with a
@@ -811,8 +817,8 @@ class PostgresRestoreRepository(RestoreRepository):
         `usher backup` prints on every run.
         """
         if not rows:
-            return 0, 0, ()
-        present = {
+            return TableOutcome(written=0, present=0)
+        held = {
             row.id
             for row in (
                 await self._session.execute(
@@ -824,7 +830,7 @@ class PostgresRestoreRepository(RestoreRepository):
         written = skipped = 0
         refused: list[RestoreRefusal] = []
         for row in rows:
-            if row["source_id"] not in present:
+            if row["source_id"] not in held:
                 refused.append(
                     RestoreRefusal(
                         table="source_credentials",
@@ -841,11 +847,9 @@ class PostgresRestoreRepository(RestoreRepository):
                 written += 1
             else:
                 skipped += 1
-        return written, skipped, tuple(refused)
+        return TableOutcome(written=written, present=skipped, refused=tuple(refused))
 
-    async def _merge_watch_states(
-        self, rows: Sequence[Mapping[str, Any]]
-    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+    async def _merge_watch_states(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """Upsert on whichever of the two unique constraints the row's target
         names.
 
@@ -872,11 +876,9 @@ class PostgresRestoreRepository(RestoreRepository):
                 written += 1
             else:
                 skipped += 1
-        return written, skipped, ()
+        return TableOutcome(written=written, present=skipped)
 
-    async def _merge_row_provider_settings(
-        self, rows: Sequence[Mapping[str, Any]]
-    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+    async def _merge_row_provider_settings(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """Upsert on `slug_prefix`, the one carried table with no id in it.
 
         `enabled` is the operator's decision and `updated_at` is when they made
@@ -891,11 +893,9 @@ class PostgresRestoreRepository(RestoreRepository):
                 written += 1
             else:
                 skipped += 1
-        return written, skipped, ()
+        return TableOutcome(written=written, present=skipped)
 
-    async def _append(
-        self, table: str, rows: Sequence[Mapping[str, Any]]
-    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+    async def _append(self, table: str, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """`INSERT ... ON CONFLICT (id) DO NOTHING`, for the two append-only
         tables.
 
@@ -914,11 +914,9 @@ class PostgresRestoreRepository(RestoreRepository):
                 text(_insert(table) + " ON CONFLICT (id) DO NOTHING RETURNING id"), row
             )
             written += len(result.all())
-        return written, len(rows) - written, ()
+        return TableOutcome(written=written, present=len(rows) - written)
 
-    async def _merge_media_item_links(
-        self, rows: Sequence[Mapping[str, Any]]
-    ) -> tuple[int, int, tuple[RestoreRefusal, ...]]:
+    async def _merge_media_item_links(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """Write the two links **only where the target's `title_id` is NULL**.
 
         K1's asymmetry argument, as a `WHERE`. `media_items` carries no
@@ -929,21 +927,81 @@ class PostgresRestoreRepository(RestoreRepository):
         left unmatched. Writing over a link the target already holds is the one
         move that can lose information on both sides at once.
 
-        **`skipped` here covers two states and says so.** A row the target has
+        🔴 **`present` and `absent` are two states and were one number until
+        K5's drill printed the sentence that refuted it.** A row the target has
         already linked, and a row the next source walk has not created yet --
         `(source_id, external_id)` is `uq_media_items_source_external`, so the
-        update simply matches nothing. Neither is a refusal: the first is the
-        rule working and the second is an artifact that is ahead of the walk.
+        `UPDATE` matches nothing in both cases and `RETURNING` cannot tell them
+        apart. Neither is a refusal: the first is the rule working and the
+        second is an artifact that is ahead of the walk. **They are opposite
+        instructions to an operator**, which is why the extra read below is
+        worth a round trip: *already linked* means the restore was unnecessary,
+        *nothing here yet* means run `usher sync` and restore again. The drill
+        measured `10,515 already present` against a `media_items` table holding
+        **zero rows**, which is the second state wearing the first's word.
+
+        One batched `SELECT` for the whole table, never one per row: the key
+        list is the artifact's own and on the deployment this project measures
+        that is 10,819 pairs against a real unique index.
         """
-        written = 0
+        held = await self._existing_media_items(rows)
+        written = absent = 0
         for row in rows:
+            if (row["source_id"], row["external_id"]) not in held:
+                absent += 1
+                continue
             result = await self._session.execute(text(_UPDATE_MEDIA_ITEM_LINKS), row)
             written += len(result.all())
-        return written, len(rows) - written, ()
+        return TableOutcome(written=written, present=len(rows) - written - absent, absent=absent)
+
+    async def _existing_media_items(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> set[tuple[uuid.UUID, str]]:
+        """Every `(source_id, external_id)` of this batch the target holds.
+
+        Read as a pair list rather than per row, and compared as a `set` rather
+        than counted, because the question is per row: *is there something here
+        to write onto?* A count would answer how many of the batch exist and
+        not which.
+
+        ⚠️ **Two parallel arrays through a two-argument `unnest`, and the
+        obvious spelling does not run.**
+        `WHERE (source_id, external_id) = ANY(:pairs)` compiles and then fails
+        in the driver: `asyncpg.exceptions.UnsupportedClientFeatureError:
+        input of anonymous composite types is not supported` -- *"PostgreSQL
+        does not implement anonymous composite type input"*, so a list of
+        tuples cannot be bound at all without declaring a composite type in the
+        schema. Measured 2026-08-25 against `pgvector/pgvector:pg17`.
+        `unnest(a, b)` in a `FROM` clause expands two arrays row for row, which
+        needs no new type, keeps the join exact (a cross product of the two
+        columns would answer a *superset*) and stays one round trip.
+        """
+        if not rows:
+            return set()
+        found = (
+            await self._session.execute(
+                text(
+                    "SELECT m.source_id, m.external_id FROM media_items m "
+                    "JOIN unnest(CAST(:sources AS uuid[]), CAST(:externals AS text[])) "
+                    "AS wanted(source_id, external_id) "
+                    "ON m.source_id = wanted.source_id "
+                    "AND m.external_id = wanted.external_id"
+                ),
+                {
+                    "sources": [row["source_id"] for row in rows],
+                    "externals": [str(row["external_id"]) for row in rows],
+                },
+            )
+        ).all()
+        return {(row.source_id, str(row.external_id)) for row in found}
 
     async def _prepare(
-        self, table: str, rows: Sequence[Mapping[str, object]]
-    ) -> tuple[list[dict[str, Any]], tuple[RestoreRefusal, ...]]:
+        self,
+        table: str,
+        rows: Sequence[Mapping[str, object]],
+        *,
+        skip_unresolvable: bool,
+    ) -> tuple[list[dict[str, Any]], tuple[RestoreRefusal, ...], int]:
         """Every reference in one table resolved against this catalog, in one
         round trip per kind rather than one per row.
 
@@ -951,6 +1009,11 @@ class PostgresRestoreRepository(RestoreRepository):
         because `users` is applied first and every `user` key in the tables
         after it resolves against the row that insert just wrote. That
         ordering is `restored_tables`' whole reason for being ordered.
+
+        Answers the prepared rows, the refusals, and **how many rows were
+        dropped for an unresolvable reference** -- a third number rather than a
+        row folded into either of the other two, because it is the one an
+        operator has to decide about. Zero on every default run.
         """
         columns = Base.metadata.tables[table].columns
         titles = await resolve_titles(self._titles, _references(rows, TitleReference))
@@ -959,9 +1022,11 @@ class PostgresRestoreRepository(RestoreRepository):
         rule = UNRESOLVED_RULE.get(table, _DEFAULT_UNRESOLVED_RULE)
         prepared: list[dict[str, Any]] = []
         refused: list[RestoreRefusal] = []
+        unresolved = 0
         for row in rows:
             params: dict[str, Any] = {}
             refusal: RestoreRefusal | None = None
+            dropped = False
             for key, value in row.items():
                 rewrite = _COLUMN_FOR_KEY.get(key)
                 if rewrite is None:
@@ -972,6 +1037,15 @@ class PostgresRestoreRepository(RestoreRepository):
                     if rule is UnresolvedRule.NULL:
                         params[rewrite.key] = None
                         continue
+                    if skip_unresolvable:
+                        # Dropped, never written with a null: the columns this
+                        # rule guards are `NOT NULL` foreign keys on
+                        # `watch_states` and operator-authored links on
+                        # `media_items`, so a null here is either an
+                        # `IntegrityError` or a link silently blanked. The
+                        # operator asked to skip the row, not to damage it.
+                        dropped = True
+                        break
                     refusal = RestoreRefusal(
                         table=table,
                         keys=answer.keys_tried,
@@ -984,6 +1058,15 @@ class PostgresRestoreRepository(RestoreRepository):
                     # `NULL` rule cannot apply to a household however the table
                     # is classified -- and a household the `users` pass did not
                     # create is a file that was edited by hand.
+                    #
+                    # ⚠️ **And never skipped either, whatever
+                    # `skip_unresolvable` says.** That flag is for references
+                    # the *importers* rebuild: a title stub is re-derived by
+                    # the next `usher sync` and losing its link costs nothing.
+                    # A household is rebuilt by nothing, and skipping it would
+                    # silently drop every watch state in the file -- the exact
+                    # loss this command exists to carry, arriving through the
+                    # escape hatch built for the opposite case.
                     refusal = RestoreRefusal(
                         table=table,
                         keys=(f"name={answer.name}",),
@@ -991,11 +1074,14 @@ class PostgresRestoreRepository(RestoreRepository):
                     )
                     break
                 params[rewrite.key] = answer
+            if dropped:
+                unresolved += 1
+                continue
             if refusal is not None:
                 refused.append(refusal)
                 continue
             prepared.append(params)
-        return prepared, tuple(refused)
+        return prepared, tuple(refused), unresolved
 
     async def _user_ids(self, names: set[str]) -> dict[str, uuid.UUID]:
         """`users.name -> id`, which `uq_users_name` makes an identity.

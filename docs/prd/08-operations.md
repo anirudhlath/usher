@@ -854,11 +854,71 @@ The precious set is small by construction — 14,259 rows measured here — and
 nothing, which is how an operator learns what would be refused without holding
 a transaction open while they think about it.
 
-**The report separates written, skipped as already present, and refused**, per
-table, with the refused list naming the keys that were looked for. Three
-numbers rather than one, because *"restored 9 rows"* over an artifact holding
-50 is the failure the command exists to make visible. A run with any refusal
-exits non-zero, `usher sync`'s precedent.
+**The report separates written, already present, nothing-to-write-onto,
+skipped-as-unresolvable, and refused**, per table, with the refused list naming
+the keys that were looked for. Five numbers rather than one, because
+*"restored 9 rows"* over an artifact holding 50 is the failure the command
+exists to make visible. A run with any refusal exits non-zero, `usher sync`'s
+precedent.
+
+⚠️ **Two of those five were one number called *skipped* until K5's drill
+printed it.** `media_items 0 written / 10,515 already present` against a
+`media_items` table holding **zero rows**: its merge is an `UPDATE` over a row
+the source walk creates, so *"the target already holds this link"* and *"there
+is no row here at all"* both write nothing and read identically — while being
+opposite instructions to an operator. The second is the **normal** state of a
+first restore into a rebuilt deployment, because `media_items` rows come from a
+walk and the walk needs the `sources` row the artifact carries.
+
+**The refused list is capped at 20 named rows with an exact tail.** The same
+drill printed a **14,176-line** report restoring into an empty catalog.
+*"Every refusal is named and none is summarised away"* is right at 41 and
+unusable at 14,166; the per-table counts are computed from the whole list and
+stay exact whatever is printed, so *"how bad, and where"* survives the cap.
+
+✅ **The header's per-table row counts are a truncation gate**, compared against
+the body before any write. 🔴 Two paragraphs in `src/` described that check in
+the present tense for a milestone before it existed, and the drill measured the
+gap: an artifact whose header claimed 10,819 `media_items` over a body holding
+10,515 restored with **0 refusals and exit 0** — a subset applied and reported
+as success. The format is what makes the failure ordinary rather than exotic:
+the artifact is gzip'd JSON Lines *so an operator can read and edit it*, and
+every hand-edit that drops a line leaves the header saying how many there
+should have been.
+
+### `--skip-unresolvable`, and why the default does not move
+
+🔴 **A correctly rebuilt catalog refused this deployment's own artifact.**
+Measured 2026-08-25: 6 titles of 1,272,891 carry neither an `imdb_id` nor a
+`tmdb_id` — all 6 `series` stubs the ingest ladder created — and they are named
+by **304 `media_items` link rows**, one per episode file. `media_items`'
+unresolved rule is `REFUSE` and restore is one transaction, so the household,
+the source, its credential, **3,347 resolved watch states** and 89 search
+queries were all written and all rolled back for 304 links. The control that
+makes this K2's third rung rather than a defect: the *same* artifact into a
+catalog holding the original ids restores with **0 refusals in 5.06 s**.
+
+The rows that cost the restore are the rows whose loss costs nothing — K1's own
+argument for carrying every link is that *"a link the match ladder would have
+re-derived is re-derived to the same answer"*, and an unmatched stub's link is
+exactly that.
+
+**`usher restore --skip-unresolvable` drops those rows and commits the rest.
+The default is unchanged and is not weakening.** *"Refuses rather than
+half-applies"* is this command's headline guarantee, so the escape is an
+operator explicitly accepting a loss rather than a heuristic the command
+applies for them, and the dropped rows are counted in a bucket of their own —
+never folded into *already present*, never written as a null. It composes with
+`--dry-run`, which is how an operator learns what the trade costs before taking
+it.
+
+⚠️ **It covers exactly the references the importers rebuild.** A household the
+target does not hold, a source colliding on a name, and a credential whose
+source is absent all still refuse with the flag set: none of them is *"this
+catalog is at a different bootstrap phase"*, and no `usher sync` re-derives any
+of them. Skipping a household would silently drop every watch state in the file
+— the exact loss this command exists to carry, arriving through the escape
+hatch built for the opposite case.
 
 **"Insert" is the wrong rule for five of the eight carried tables**:
 

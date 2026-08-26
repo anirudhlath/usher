@@ -150,7 +150,9 @@ class RestoreReport:
     path: Path
     schema_revision: str | None
     written: Mapping[str, int]
-    skipped: Mapping[str, int]
+    present: Mapping[str, int]
+    absent: Mapping[str, int]
+    unresolved: Mapping[str, int]
     refused: tuple[RestoreRefusal, ...]
     dry_run: bool
     committed: bool
@@ -160,8 +162,42 @@ class RestoreReport:
         return sum(self.written.values())
 
     @property
-    def total_skipped(self) -> int:
-        return sum(self.skipped.values())
+    def total_present(self) -> int:
+        return sum(self.present.values())
+
+    @property
+    def total_absent(self) -> int:
+        return sum(self.absent.values())
+
+    @property
+    def total_unresolved(self) -> int:
+        return sum(self.unresolved.values())
+
+    @property
+    def tables(self) -> tuple[str, ...]:
+        """Every table this run touched, in a stable order.
+
+        Derived rather than kept, so a bucket added later cannot be one the
+        renderer forgets to iterate.
+        """
+        return tuple(
+            sorted(
+                set(self.written)
+                | set(self.present)
+                | set(self.absent)
+                | set(self.unresolved)
+                | {refusal.table for refusal in self.refused}
+            )
+        )
+
+    def refused_by_table(self) -> Mapping[str, int]:
+        """How many rows each table refused. **Exact whatever the renderer
+        caps**, which is the half of K5's finding 4 that a truncated list of
+        lines cannot carry."""
+        counted: dict[str, int] = {}
+        for refusal in self.refused:
+            counted[refusal.table] = counted.get(refusal.table, 0) + 1
+        return counted
 
 
 class RestoreService:
@@ -184,7 +220,13 @@ class RestoreService:
         self._commit = commit
         self._rollback = rollback
 
-    async def restore(self, source: Path, *, dry_run: bool = False) -> RestoreReport:
+    async def restore(
+        self,
+        source: Path,
+        *,
+        dry_run: bool = False,
+        skip_unresolvable: bool = False,
+    ) -> RestoreReport:
         """Apply one artifact, or refuse it whole.
 
         The order below is the order the refusals are declared in, and it is
@@ -197,6 +239,15 @@ class RestoreService:
         that is not there or not readable -- the family
         `cli.OPERATOR_ERRORS` has carried since M7 and the one `usher backup`
         already relies on.
+
+        **`skip_unresolvable` defaults to `False` and the default is the
+        command's headline guarantee.** With it unset the behaviour is
+        byte-for-byte what it was: a title or episode reference this catalog
+        cannot resolve refuses the whole file. With it set those rows are
+        dropped and counted, and everything else -- a household the target does
+        not hold, a source name collision, a credential whose source is absent
+        -- still refuses. See `RestoreRepository.apply` for why that line is
+        where it is.
         """
         header, rows = _read(source)
         revision = await self._repository.schema_revision()
@@ -205,20 +256,29 @@ class RestoreService:
         decoded = _decode_rows(rows, self._repository)
 
         written: dict[str, int] = {}
-        skipped: dict[str, int] = {}
+        present: dict[str, int] = {}
+        absent: dict[str, int] = {}
+        unresolved: dict[str, int] = {}
         refused: list[RestoreRefusal] = []
         for table in self._repository.restored_tables():
             batch = [row for name, row in decoded if name == table]
             if not batch:
                 continue
-            outcome = await self._apply(table, batch)
+            outcome = await self._apply(table, batch, skip_unresolvable=skip_unresolvable)
             written[table] = outcome.written
-            skipped[table] = outcome.skipped
+            present[table] = outcome.present
+            absent[table] = outcome.absent
+            unresolved[table] = outcome.unresolved
             refused.extend(outcome.refused)
 
         # The single decision, after the last table rather than inside the
         # loop. `--dry-run` takes the identical path and lands here with
         # everything resolved, which is what makes its report the same report.
+        #
+        # ⚠️ **`unresolved` is deliberately not a reason to withhold the
+        # commit.** A row dropped under `--skip-unresolvable` is one the
+        # operator asked to drop; treating it as a refusal would make the flag
+        # a slower way of doing nothing.
         committed = not refused and not dry_run
         if committed:
             await self._commit()
@@ -227,17 +287,21 @@ class RestoreService:
         return RestoreReport(
             path=source,
             schema_revision=revision,
-            # Two independent keyword arguments: `written` and `skipped` are
-            # separate tallies over separate rows and neither is computed from
-            # the other, so their *order* in this call decides nothing.
+            # Four independent keyword arguments: each is a tally over a
+            # disjoint set of rows and none is computed from another, so their
+            # *order* in this call decides nothing.
             written=written,
-            skipped=skipped,
+            present=present,
+            absent=absent,
+            unresolved=unresolved,
             refused=tuple(refused),
             dry_run=dry_run,
             committed=committed,
         )
 
-    async def _apply(self, table: str, rows: Sequence[Mapping[str, object]]) -> Any:
+    async def _apply(
+        self, table: str, rows: Sequence[Mapping[str, object]], *, skip_unresolvable: bool
+    ) -> Any:
         """One table, with a refused *row* rendered as a refused *file*.
 
         `RepositoryConflict` is what `db/repositories/_errors.py` raises for a
@@ -251,7 +315,7 @@ class RestoreService:
         distinction is kept without widening the tuple.
         """
         try:
-            return await self._repository.apply(table, rows)
+            return await self._repository.apply(table, rows, skip_unresolvable=skip_unresolvable)
         except RepositoryConflict as exc:
             raise RestoreRefused(
                 f"a {table} row in this artifact holds a value the column will not "
@@ -309,7 +373,70 @@ def _read(source: Path) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
                 f"{source} line {position} is not a backup row: every line after the "
                 f"header carries exactly {sorted(_ROW_KEYS)}"
             )
+    _refuse_a_short_body(source, header, rows)
     return header, rows
+
+
+def _refuse_a_short_body(
+    source: Path, header: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> None:
+    """The header's per-table counts against the body's, which is the
+    truncation check two files had claimed for a milestone.
+
+    🔴 **`services/backup.py` and `ports/repository/backup.py` both described
+    this check in the present tense and it did not exist.** *"A count that can
+    disagree with the body is worse than no count at all, because K4 reads it
+    as a truncation check"*, and *"which is what lets K4 read a short table as
+    a truncated file rather than as a race"* -- K4 read exactly one header key,
+    `schema_revision`, and K5's drill proved it: an artifact whose header
+    claimed `media_items: 10819` over a body holding **10,515** restored with
+    **0 refusals and exit 0**, on 2026-08-25. Two false sentences in `src/`
+    describing a check nobody wrote, from the same origin as the two
+    `code_head_revision()` sentences corrected the round before -- so this is
+    built rather than deleted, and the sentences are now true.
+
+    **What it catches is the failure the format makes easy.** The artifact is
+    gzip'd JSON Lines *so that an operator can read and edit it*, which is
+    design property 3 of the writer and the escape `docs/runbooks/restore.md`
+    used to prescribe -- and every hand-edit that drops a line leaves a header
+    saying how many there should have been. A truncated download and a
+    `head -n` do the same. Without this check the restore quietly applies a
+    subset and reports success, which is the one outcome the whole command is
+    built to prevent.
+
+    **Zero-row tables are absent from both sides by construction.** The writer
+    omits a table that contributed no row (*"a `llm_calls: 0` in the header of
+    an artifact whose body has no `llm_calls` line is a self-check that agrees
+    with itself"*), and a table with no body lines contributes no counted
+    entry, so the two maps are compared whole rather than key by key.
+
+    **A header carrying no `rows` key at all is refused rather than skipped.**
+    `manifest_version` 1 has always written it, so its absence is a damaged
+    header and not an older artifact -- and a check that silently passes when
+    its input is missing is the *"a guard that globs nothing passes exactly
+    like a guard that passes"* rule, which this repository has now paid for
+    five times.
+    """
+    claimed = header.get("rows")
+    if not isinstance(claimed, dict):
+        raise RestoreRefused(
+            f"{source} has no per-table row counts in its header, so it cannot be "
+            "checked for truncation; every artifact `usher backup` writes carries them"
+        )
+    counted: dict[str, int] = {}
+    for row in rows:
+        table = str(row["table"])
+        counted[table] = counted.get(table, 0) + 1
+    if claimed != counted:
+        short = {
+            table: (claimed.get(table, 0), counted.get(table, 0))
+            for table in sorted(set(claimed) | set(counted))
+            if claimed.get(table, 0) != counted.get(table, 0)
+        }
+        raise RestoreRefused(
+            f"{source} is truncated or was edited: its header counts do not match its "
+            f"body. Per table, (header, body): {short}"
+        )
 
 
 def _refuse_a_schema_mismatch(header: Mapping[str, Any], revision: str | None) -> None:

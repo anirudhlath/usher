@@ -404,7 +404,11 @@ def _service(session: AsyncSession) -> RestoreService:
 
 
 async def _restore(
-    sessions: async_sessionmaker[AsyncSession], path: Path, *, dry_run: bool = False
+    sessions: async_sessionmaker[AsyncSession],
+    path: Path,
+    *,
+    dry_run: bool = False,
+    skip_unresolvable: bool = False,
 ) -> RestoreReport:
     """One restore on a session of its own, closed before anything is read.
 
@@ -414,7 +418,9 @@ async def _restore(
     service that never committed at all.
     """
     async with sessions() as session:
-        return await _service(session).restore(path, dry_run=dry_run)
+        return await _service(session).restore(
+            path, dry_run=dry_run, skip_unresolvable=skip_unresolvable
+        )
 
 
 async def _count(sessions: async_sessionmaker[AsyncSession], statement: str, **params: Any) -> int:
@@ -643,7 +649,9 @@ async def test_a_dry_run_reports_what_a_real_run_would_and_commits_nothing(
     assert real.written == dry.written, (
         "the dry run reported a different number of writes from the run it stands in for"
     )
-    assert real.skipped == dry.skipped
+    assert real.present == dry.present
+    assert real.absent == dry.absent
+    assert real.unresolved == dry.unresolved
     assert real.refused == dry.refused
     assert await _watch_states(sessions) == 1
 
@@ -733,7 +741,7 @@ async def test_the_same_artifact_restored_twice_is_a_no_op_on_the_second_run(
     # And the report says so rather than claiming the work again: nothing is
     # written and every row the first run touched is now already present.
     assert second.total_written == 0, second.written
-    assert second.total_skipped == first.total_written + first.total_skipped
+    assert second.total_present == first.total_written + first.total_present
 
 
 async def _table_counts(sessions: async_sessionmaker[AsyncSession]) -> dict[str, int]:
@@ -922,7 +930,7 @@ async def test_a_media_item_link_lands_on_a_null_and_never_over_one_the_target_h
 
     assert report.committed and not report.refused, report.refused
     assert report.written["media_items"] == 1
-    assert report.skipped["media_items"] == 1
+    assert report.present["media_items"] == 1
     async with sessions() as probe:
         links = dict(
             (row.external_id, row.title_id)
@@ -1068,7 +1076,7 @@ async def test_a_household_the_target_already_has_keeps_its_own_id(
 
     report = await _restore(sessions, artifact_path)
 
-    assert report.written["users"] == 0 and report.skipped["users"] == 1
+    assert report.written["users"] == 0 and report.present["users"] == 1
     assert (
         await _count(sessions, "SELECT count(*) FROM users WHERE name = :name", name=HOUSEHOLD_NAME)
         == 1
@@ -1185,7 +1193,8 @@ async def test_every_table_the_manifest_says_restore_writes_has_a_merge_rule(
     assert tables, "the manifest says restore writes nothing, so this case proves nothing"
     for table in tables:
         outcome = await repository.apply(table, [])
-        assert outcome.written == 0 and outcome.skipped == 0 and outcome.refused == ()
+        assert outcome.written == 0 and outcome.present == 0 and outcome.refused == ()
+        assert outcome.absent == 0 and outcome.unresolved == 0
 
 
 async def test_the_artifact_columns_are_what_a_backup_writes(session: AsyncSession) -> None:
@@ -1644,3 +1653,252 @@ async def test_a_watch_state_naming_a_household_this_database_does_not_hold_is_r
 
     assert clean.refused == ()
     assert clean.written["watch_states"] == 1
+
+
+async def test_the_flag_skips_the_unresolvable_rows_and_commits_everything_else(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """🔴 **K5's drill: a correctly rebuilt catalog refused the whole file on
+    rows the manifest calls re-derivable.**
+
+    Measured against the live deployment on 2026-08-25. 6 titles of 1,272,891
+    carry neither an `imdb_id` nor a `tmdb_id` -- all 6 `series` stubs the
+    ingest ladder created -- and they are named by **304 `media_items` link
+    rows**, one per episode file. `UNRESOLVED_RULE["media_items"]` is `REFUSE`
+    and restore is one transaction, so the household, the source, its
+    credential, **3,347 resolved watch states** and 89 search queries were all
+    written and all rolled back, for 304 links that the next `usher sync`
+    re-derives to the same answer.
+
+    The flag is the operator saying they accept that trade. What it must *not*
+    do is quietly write something: the rows are **dropped**, counted under
+    `unresolved`, and everything that did resolve commits.
+
+    Both premises are asserted. The unresolvable title has to be genuinely
+    unresolvable -- no `imdb_id`, no `tmdb_id`, and an id this catalog does not
+    hold, which is K2's rung 3 answering *no* -- and the resolvable rows have
+    to be rows a refusing run would have thrown away, or *"the flag committed
+    something"* is satisfied by an artifact with nothing at stake.
+    """
+    unfindable = {"kind": "series", "id": str(new_id()), "imdb_id": None, "tmdb_id": None}
+    async with sessions() as probe:
+        held = (
+            await probe.execute(
+                text("SELECT count(*) FROM titles WHERE id = :id"), {"id": unfindable["id"]}
+            )
+        ).scalar_one()
+    assert held == 0, "the catalog holds the id, so rung 3 would resolve and nothing is refused"
+
+    source_id = new_id()
+    async with sessions() as session:
+        await _seed_source(session, source_id)
+        await session.execute(
+            text(
+                "INSERT INTO media_items (id, source_id, external_id, last_seen_at, available) "
+                "VALUES (:id, :source, :external, now(), true)"
+            ),
+            {"id": new_id(), "source": source_id, "external": "emby-stub"},
+        )
+        await session.commit()
+
+    movie = _title(kind="movie", imdb_id=HELD_IMDB_ID, tmdb_id=HELD_TMDB_ID)
+    rows: list[tuple[str, Mapping[str, Any]]] = [
+        ("users", _user()),
+        ("sources", _source(identifier=source_id)),
+        ("watch_states", _watch_state(title=movie)),
+        (
+            "media_items",
+            _media_item(source_id=source_id, external_id="emby-stub", title=unfindable),
+        ),
+    ]
+    _write_artifact(artifact_path, rows, schema_revision=code_head_revision())
+
+    # The premise that makes this case about the flag rather than about an
+    # artifact nothing was at stake in: **without** the flag the same file is
+    # refused whole and the watch state does not land.
+    refused = await _restore(sessions, artifact_path)
+    assert [one.table for one in refused.refused] == ["media_items"], refused.refused
+    assert not refused.committed
+    assert await _watch_states(sessions) == 0
+
+    report = await _restore(sessions, artifact_path, skip_unresolvable=True)
+
+    assert report.refused == (), report.refused
+    assert report.committed
+    assert report.unresolved["media_items"] == 1
+    assert report.written["watch_states"] == 1
+    assert await _watch_states(sessions) == 1, "the flag skipped the row and the file with it"
+    # And the skip is a *drop*, never a null written into the link: the row the
+    # walk created keeps the empty link it had, so the next sync re-derives it.
+    async with sessions() as probe:
+        link = (
+            await probe.execute(
+                text(
+                    "SELECT title_id, episode_id FROM media_items "
+                    "WHERE source_id = :source AND external_id = 'emby-stub'"
+                ),
+                {"source": source_id},
+            )
+        ).one()
+    assert link.title_id is None and link.episode_id is None
+
+
+async def test_the_flag_does_not_skip_a_household_the_target_does_not_hold(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """⚠️ **The line the flag draws, and it is narrower than its name.**
+
+    `--skip-unresolvable` is for references the **importers rebuild**: a title
+    stub is re-derived by the next `usher sync` and losing its link costs
+    nothing, which is K1's own argument for carrying all links in the first
+    place. A household is rebuilt by nothing. Skipping it would silently drop
+    **every watch state in the file** -- the exact loss this command exists to
+    carry -- through the escape hatch built for the opposite case, and an
+    operator who typed the flag to get past 304 links would lose 3,347 rows
+    and be told the run committed.
+
+    So a household the target does not hold stays a refusal **with the flag
+    set**, which is what this asserts. The `sources` name collision and a
+    credential whose source is absent are out of scope for the same reason and
+    for the same test: neither is *"this catalog is at a different bootstrap
+    phase"*.
+    """
+    movie = _title(kind="movie", imdb_id=HELD_IMDB_ID, tmdb_id=HELD_TMDB_ID)
+    # No `users` row, so the household resolves against nothing.
+    _write_artifact(
+        artifact_path,
+        [("watch_states", _watch_state(title=movie))],
+        schema_revision=code_head_revision(),
+    )
+
+    report = await _restore(sessions, artifact_path, skip_unresolvable=True)
+
+    assert [one.table for one in report.refused] == ["watch_states"], report.refused
+    assert report.refused[0].keys == (f"name={HOUSEHOLD_NAME}",)
+    assert not report.committed
+    assert report.total_unresolved == 0, "the household was skipped rather than refused"
+    assert await _watch_states(sessions) == 0
+
+
+async def test_a_source_name_collision_is_refused_even_with_the_flag(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """The second half of the line, and it is a different kind of thing again.
+
+    Two sources pointing at one server is a conflict only an operator can
+    settle -- no importer produces it and no `usher sync` resolves it -- so it
+    is not what *"unresolvable"* names and the flag does not reach it. Stated
+    as its own case because `--skip-unresolvable` reads, from its name alone,
+    like *"stop refusing things"*.
+    """
+    async with sessions() as session:
+        await _seed_source(session, new_id())
+        await session.commit()
+    _write_artifact(
+        artifact_path,
+        [("sources", _source(identifier=new_id()))],
+        schema_revision=code_head_revision(),
+    )
+
+    report = await _restore(sessions, artifact_path, skip_unresolvable=True)
+
+    assert [one.table for one in report.refused] == ["sources"], report.refused
+    assert not report.committed
+    assert report.total_unresolved == 0
+
+
+async def test_the_flag_composes_with_dry_run(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """The two flags together are how an operator finds out what the trade
+    costs before taking it.
+
+    A dry run under `--skip-unresolvable` reports the rows that *would* be
+    dropped and the rows that *would* land, and commits nothing -- which is the
+    whole answer to *"can I afford this?"*, and is why the plan required the
+    two to compose rather than assuming they would. The counts are compared
+    against the real run over the same state, so a dry run that resolved
+    nothing would fail the equality rather than pass the absence.
+    """
+    unfindable = {"kind": "series", "id": str(new_id()), "imdb_id": None, "tmdb_id": None}
+    source_id = new_id()
+    async with sessions() as session:
+        await _seed_source(session, source_id)
+        await session.execute(
+            text(
+                "INSERT INTO media_items (id, source_id, external_id, last_seen_at, available) "
+                "VALUES (:id, :source, :external, now(), true)"
+            ),
+            {"id": new_id(), "source": source_id, "external": "emby-stub"},
+        )
+        await session.commit()
+    movie = _title(kind="movie", imdb_id=HELD_IMDB_ID, tmdb_id=HELD_TMDB_ID)
+    _write_artifact(
+        artifact_path,
+        [
+            ("users", _user()),
+            ("sources", _source(identifier=source_id)),
+            ("watch_states", _watch_state(title=movie)),
+            (
+                "media_items",
+                _media_item(source_id=source_id, external_id="emby-stub", title=unfindable),
+            ),
+        ],
+        schema_revision=code_head_revision(),
+    )
+
+    dry = await _restore(sessions, artifact_path, dry_run=True, skip_unresolvable=True)
+
+    assert dry.dry_run and not dry.committed
+    assert dry.unresolved["media_items"] == 1
+    assert dry.written["watch_states"] == 1, "a dry run that resolved nothing reports nothing"
+    assert await _watch_states(sessions) == 0, "a dry run committed a watch state"
+
+    real = await _restore(sessions, artifact_path, skip_unresolvable=True)
+
+    assert real.committed
+    assert real.written == dry.written
+    assert real.unresolved == dry.unresolved
+    assert real.refused == dry.refused
+
+
+async def test_an_artifact_whose_header_over_counts_its_body_is_refused(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """🔴 The check `services/backup.py` and `ports/repository/backup.py` both
+    described in the present tense before it existed, against a real schema.
+
+    K5's drill restored an artifact whose header claimed `media_items: 10819`
+    over a body holding **10,515** and got **0 refusals and exit 0** -- a
+    subset written and reported as success. This builds the same shape at
+    fixture scale and asserts both halves: the file is refused, and nothing
+    reached the database, read on a second session.
+    """
+    rows: list[tuple[str, Mapping[str, Any]]] = [("users", _user()), ("users", _user())]
+    _write_artifact(artifact_path, rows, schema_revision=code_head_revision())
+    # Drop the last body line and leave the header claiming both, which is what
+    # a truncated download or a `zcat | head` produces.
+    with gzip.open(artifact_path, "rt", encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+    with gzip.open(artifact_path, "wt", encoding="utf-8", newline="\n") as handle:
+        for line in lines[:-1]:
+            handle.write(line + "\n")
+
+    with pytest.raises(RestoreRefused) as refusal:
+        await _restore(sessions, artifact_path)
+
+    assert "truncated or was edited" in str(refusal.value), refusal.value
+    assert (
+        await _count(sessions, "SELECT count(*) FROM users WHERE name = :name", name=HOUSEHOLD_NAME)
+        == 0
+    ), "a row landed from an artifact shorter than its own header"

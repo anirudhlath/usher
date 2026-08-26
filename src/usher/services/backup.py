@@ -55,10 +55,19 @@ against `code_head_revision()` and answers 503, under PRD 08's own words --
 Restore reuses both functions rather than re-reading `alembic_version`, so
 there is one definition of *"what revision is this"* in `src/`.
 
-**`generated_at`, `manifest_version`, `usher_version` and the per-table row
-counts** are provenance and a self-check, not a gate. The counts are `len()`
-of what was written rather than a `count(*)` taken beside it, which is what
-lets K4 read a short table as a truncated file rather than as a race.
+**`generated_at`, `manifest_version` and `usher_version`** are provenance,
+not a gate.
+
+**The per-table row counts are a gate**, and since 2026-08-25 they really
+are one: they are `len()` of what was written rather than a `count(*)` taken
+beside it, so a body shorter than its header is a *truncation* rather than a
+race, and `services/restore.py::_refuse_a_short_body` refuses on it. 🔴 This
+paragraph asserted that in the present tense for a milestone before the check
+was written -- *"which is what lets K4 read a short table as a truncated file
+rather than as a race"* -- and K5's drill measured the gap: an artifact whose
+header claimed 10,819 `media_items` over a body holding 10,515 restored with
+**0 refusals and exit 0**. The affordance was real, the reader was not, and
+the sentence described behaviour that did not exist.
 
 ## `usher_version` is in the header, and the plan for this task said it must
 not be

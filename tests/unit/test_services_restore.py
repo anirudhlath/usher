@@ -102,15 +102,23 @@ class FakeRestoreRepository(RestoreRepository):
         revision: str | None = REVISION,
         refusals: Mapping[str, Sequence[RestoreRefusal]] | None = None,
         written: Mapping[str, int] | None = None,
-        skipped: Mapping[str, int] | None = None,
+        present: Mapping[str, int] | None = None,
+        absent: Mapping[str, int] | None = None,
+        unresolved: Mapping[str, int] | None = None,
         raises: Mapping[str, Exception] | None = None,
     ) -> None:
         self._revision = revision
         self._refusals = refusals or {}
         self._written = written or {}
-        self._skipped = skipped or {}
+        self._present = present or {}
+        self._absent = absent or {}
+        self._unresolved = unresolved or {}
         self._raises = raises or {}
         self.applied: list[tuple[str, Sequence[Mapping[str, object]]]] = []
+        #: Every `skip_unresolvable` this fake was called with, in order. A
+        #: flag the service accepted and did not forward is invisible to a
+        #: report assertion, because the fake's answer is scripted either way.
+        self.asked_to_skip: list[bool] = []
 
     def restored_tables(self) -> tuple[str, ...]:
         return tuple(COLUMNS)
@@ -126,15 +134,24 @@ class FakeRestoreRepository(RestoreRepository):
     async def schema_revision(self) -> str | None:
         return self._revision
 
-    async def apply(self, table: str, rows: Sequence[Mapping[str, object]]) -> TableOutcome:
+    async def apply(
+        self,
+        table: str,
+        rows: Sequence[Mapping[str, object]],
+        *,
+        skip_unresolvable: bool = False,
+    ) -> TableOutcome:
         self.applied.append((table, list(rows)))
+        self.asked_to_skip.append(skip_unresolvable)
         raised = self._raises.get(table)
         if raised is not None:
             raise raised
         refused = tuple(self._refusals.get(table, ()))
         return TableOutcome(
             written=self._written.get(table, len(rows) - len(refused)),
-            skipped=self._skipped.get(table, 0),
+            present=self._present.get(table, 0),
+            absent=self._absent.get(table, 0),
+            unresolved=self._unresolved.get(table, 0),
             refused=refused,
         )
 
@@ -193,6 +210,22 @@ def _watch_state_row(
     }
 
 
+def _counts(rows: Sequence[tuple[str, Mapping[str, Any]]]) -> dict[str, int]:
+    """The header's per-table counts, computed from the body.
+
+    🔴 **This helper wrote `"rows": {}` until 2026-08-25**, which every case in
+    this file was happy with because nothing read the key. Since
+    `_refuse_a_short_body` exists it is a truncation claim, and a fixture
+    asserting *"this artifact holds no rows"* over a body holding two is
+    exactly the damaged file the check is for -- so the helper computes it, and
+    a case wanting a mismatch passes `header=` and says so.
+    """
+    counted: dict[str, int] = {}
+    for table, _ in rows:
+        counted[table] = counted.get(table, 0) + 1
+    return counted
+
+
 def _artifact(
     path: Path,
     rows: Sequence[tuple[str, Mapping[str, Any]]],
@@ -210,7 +243,7 @@ def _artifact(
                 "usher_version": "0.0.0+test",
                 "schema_revision": schema_revision,
                 "generated_at": "2026-08-25T14:30:00+00:00",
-                "rows": {},
+                "rows": _counts(rows),
             }
         )
     ]
@@ -663,19 +696,23 @@ async def test_a_value_the_column_will_not_take_is_a_refusal_and_not_a_stack(
     assert ledger.events == [], "the transaction was committed over a refused row"
 
 
-async def test_the_report_separates_written_skipped_and_refused_per_table(
-    tmp_path: Path,
-) -> None:
-    """Three counts, because *"restored 9 rows"* over an artifact holding 50
+async def test_the_report_separates_every_bucket_per_table(tmp_path: Path) -> None:
+    """Five counts, because *"restored 9 rows"* over an artifact holding 50
     is the failure this whole command exists to make visible.
 
-    The three are asserted as three different numbers over one run: a report
-    that summed skipped into written, or dropped refused from the total,
-    answers the same single figure and this is what tells them apart.
+    All five are asserted as different numbers over one run: a report that
+    summed any bucket into another, or dropped refused from the total, answers
+    the same single figure and this is what tells them apart. **`present` and
+    `absent` were one number called `skipped` until 2026-08-25** -- K5's drill
+    printed *"10,515 already present"* against a table holding zero rows -- so
+    the two are given different values here on purpose, and a merge of them
+    fails on both.
     """
     repository = FakeRestoreRepository(
         written={"users": 1, "watch_states": 2},
-        skipped={"users": 0, "watch_states": 5},
+        present={"users": 0, "watch_states": 5},
+        absent={"watch_states": 7},
+        unresolved={"watch_states": 3},
         refusals={
             "watch_states": [
                 RestoreRefusal(table="watch_states", keys=("imdb_id=tt99000593",), reason="absent")
@@ -698,10 +735,15 @@ async def test_the_report_separates_written_skipped_and_refused_per_table(
     )
 
     assert report.written == {"users": 1, "watch_states": 2}
-    assert report.skipped == {"users": 0, "watch_states": 5}
+    assert report.present == {"users": 0, "watch_states": 5}
+    assert report.absent == {"users": 0, "watch_states": 7}
+    assert report.unresolved == {"users": 0, "watch_states": 3}
     assert report.total_written == 3
-    assert report.total_skipped == 5
+    assert report.total_present == 5
+    assert report.total_absent == 7
+    assert report.total_unresolved == 3
     assert len(report.refused) == 1
+    assert report.refused_by_table() == {"watch_states": 1}
     assert report.schema_revision == REVISION
 
 
@@ -734,3 +776,152 @@ async def test_a_first_line_that_is_not_a_header_is_refused(tmp_path: Path) -> N
 
     with pytest.raises(RestoreRefused, match="does not begin with a backup header"):
         await service.restore(path)
+
+
+async def test_a_body_shorter_than_its_header_is_refused(tmp_path: Path) -> None:
+    """🔴 **The check two files in `src/` described in the present tense for a
+    milestone before it existed.**
+
+    `services/backup.py` said the counts are what *"lets K4 read a short table
+    as a truncated file rather than as a race"*, and
+    `ports/repository/backup.py` said a disagreeing count is *"worse than no
+    count at all, because K4 reads it as a truncation check"*. K4 read exactly
+    one header key. K5's drill measured the gap on 2026-08-25: an artifact
+    whose header claimed `media_items: 10819` over a body holding **10,515**
+    restored with **0 refusals and exit 0** -- a subset applied and reported as
+    success, which is the one outcome this whole command is built to prevent.
+
+    The format is what makes the failure easy rather than exotic: the artifact
+    is gzip'd JSON Lines *so an operator can read and edit it*, and every
+    hand-edit that drops a line leaves the header saying how many there should
+    have been. A truncated download and a `head -n` do the same.
+
+    The message names both numbers per table, because *"this file is
+    truncated"* without them cannot tell a lost line from a lost table.
+    """
+    rows = [("users", _user_row()), ("users", _user_row())]
+    path = _artifact(
+        tmp_path / "x.jsonl.gz",
+        rows[:1],
+        header={
+            "manifest_version": 1,
+            "usher_version": "0.0.0+test",
+            "schema_revision": REVISION,
+            "generated_at": "2026-08-25T14:30:00+00:00",
+            "rows": {"users": 2},
+        },
+    )
+    repository = FakeRestoreRepository()
+    service, ledger = _service(repository)
+
+    with pytest.raises(RestoreRefused) as refusal:
+        await service.restore(path)
+
+    message = str(refusal.value)
+    assert "truncated or was edited" in message, message
+    assert "'users': (2, 1)" in message, message
+    assert repository.applied == [], "a table was applied before the counts were compared"
+    assert ledger.events == []
+
+
+async def test_a_body_matching_its_header_is_not_refused(tmp_path: Path) -> None:
+    """The positive control, and it is what stops the check being *"refuse
+    every artifact"*.
+
+    It also pins the writer's deliberate omission: `usher backup` leaves a
+    zero-row table out of the header entirely (*"a `llm_calls: 0` in the header
+    of an artifact whose body has no `llm_calls` line is a self-check that
+    agrees with itself"*), and a body with no lines for a table contributes no
+    counted entry -- so the two maps are equal by *absence* as well as by
+    value. A check comparing key sets against the manifest rather than against
+    each other would refuse every artifact this project writes.
+    """
+    repository = FakeRestoreRepository()
+    service, ledger = _service(repository)
+
+    report = await service.restore(
+        _artifact(tmp_path / "x.jsonl.gz", [("users", _user_row()), ("users", _user_row())])
+    )
+
+    assert report.committed
+    assert ledger.events == ["commit"]
+    assert report.total_written == 2
+
+
+async def test_a_header_with_no_counts_at_all_is_refused_rather_than_skipped(
+    tmp_path: Path,
+) -> None:
+    """A check that silently passes when its input is missing is not a check.
+
+    `manifest_version` 1 has always written `rows`, so its absence is a damaged
+    header rather than an older artifact -- and treating it as *"nothing to
+    compare"* would give anyone editing an artifact a one-key way to switch the
+    truncation check off. Same family as *"a guard that globs nothing passes
+    exactly like a guard that passes"*, which this repository has now paid for
+    five times.
+    """
+    service, _ = _service(FakeRestoreRepository())
+    path = _artifact(
+        tmp_path / "x.jsonl.gz",
+        [("users", _user_row())],
+        header={
+            "manifest_version": 1,
+            "usher_version": "0.0.0+test",
+            "schema_revision": REVISION,
+            "generated_at": "2026-08-25T14:30:00+00:00",
+        },
+    )
+
+    with pytest.raises(RestoreRefused, match="no per-table row counts"):
+        await service.restore(path)
+
+
+async def test_the_skip_flag_reaches_the_repository_and_is_off_by_default(
+    tmp_path: Path,
+) -> None:
+    """The default is the guarantee, so it is asserted as the value the
+    repository was *handed* rather than as a behaviour the fake could fake.
+
+    A service that accepted `skip_unresolvable` and never forwarded it would
+    pass every report assertion in this file -- the fake's answer is scripted
+    either way -- and would leave an operator who typed the flag with the
+    refusal they were trying to get past. Both values, over one artifact, so
+    the assertion is about the forwarding rather than about a constructor
+    default.
+    """
+    rows = [("users", _user_row())]
+
+    default = FakeRestoreRepository()
+    await _service(default)[0].restore(_artifact(tmp_path / "a.jsonl.gz", rows))
+    assert default.asked_to_skip == [False]
+
+    asked = FakeRestoreRepository()
+    await _service(asked)[0].restore(
+        _artifact(tmp_path / "b.jsonl.gz", rows), skip_unresolvable=True
+    )
+    assert asked.asked_to_skip == [True]
+
+
+async def test_rows_skipped_as_unresolvable_do_not_hold_back_the_commit(
+    tmp_path: Path,
+) -> None:
+    """A row the operator asked to drop is not a refusal, and treating it as
+    one would make the flag a slower way of doing nothing.
+
+    The distinction is the whole design: `refused` withholds the commit and
+    `unresolved` does not, so a run with 304 dropped links and no refusals
+    commits the 3,347 watch states that were the point. Asserted together --
+    the count is reported *and* the transaction committed -- because either
+    alone is satisfied by an implementation that folded one into the other.
+    """
+    repository = FakeRestoreRepository(written={"users": 1}, unresolved={"users": 4})
+    service, ledger = _service(repository)
+
+    report = await service.restore(
+        _artifact(tmp_path / "x.jsonl.gz", [("users", _user_row())]), skip_unresolvable=True
+    )
+
+    assert report.total_unresolved == 4
+    assert report.refused == ()
+    assert report.committed is True
+    assert ledger.events == ["commit"]

@@ -94,13 +94,13 @@ $ zcat /var/tmp/nightly.jsonl.gz | head -1 | python3 -m json.tool
 }
 ```
 
-⚠️ **`rows` is provenance, not a gate.** `usher restore` reads exactly one key
-out of this header — `schema_revision` — and never compares `rows` against the
-body. A short artifact restores without complaint; the drill proved it by
-restoring a file whose header claimed 10,819 `media_items` over a body holding
-10,515, with 0 refusals and exit 0. If you want a truncation check, `zcat … |
-wc -l` against the header's own total is it (the file is header + one line per
-row).
+✅ **`rows` is a gate, since 2026-08-25.** `usher restore` compares it against
+the body table by table and refuses a file that is short, naming both numbers —
+so a truncated download, a `zcat | head` or a hand-edit stops rather than
+applying a subset. **It did not before that date**: the drill restored a file
+whose header claimed 10,819 `media_items` over a body holding 10,515 with 0
+refusals and exit 0, which is what the check was built for. `schema_revision`
+is still the only *other* key restore reads.
 
 ---
 
@@ -202,16 +202,18 @@ nothing under a headline.
 | 1 | the artifact is unreadable or truncated — not gzip, ends mid-member, a line that is not JSON, a row missing a column | you have a damaged copy. Take another backup, or restore an older artifact. |
 | 2 | **schema mismatch** — the header's `schema_revision` against **this database's** `alembic_version`, with both named | artifact newer: `uv run alembic upgrade head` here first. Artifact older: `alembic downgrade` a scratch database to that revision, or take a newer backup. Restore does not guess across a schema change. |
 | 3 | a `table` key `usher.db.backup_manifest` does not classify | the artifact was written against a later schema than this code knows. Upgrade Usher. |
-| 4 | **unresolved references**, collected across the whole file and reported together | §5. |
+| 4 | **unresolved references**, collected across the whole file and reported together | §5 — and `--skip-unresolvable` is the way through when they are all links. |
 
 Refusal 4 is the one you will actually see, and the whole file is refused for it
 — **one transaction, one commit at the end**, so an unresolved reference in the
 last row rolls back the first. The drill confirmed it directly: after a refused
 run, every precious table read **0** on a second connection.
 
-⚠️ **The report names every refusal and summarises nothing.** That is right at
-41 and unusable at scale: restoring the real artifact into an empty catalog
-printed a **14,176-line** report. Pipe it.
+✅ **The report names at most 20 refusals and then says how many more there
+were.** It named every one until 2026-08-25, which is right at 41 and unusable
+at scale: restoring the real artifact into an empty catalog printed a
+**14,176-line** report. The per-table counts beside the list are exact whatever
+the cap drops, so you still get *how bad, and where*.
 
 ```bash
 uv run usher restore /var/tmp/nightly.jsonl.gz --dry-run 2>&1 | tee /var/tmp/restore-report.txt
@@ -249,8 +251,11 @@ that restoring into the database the backup came from works with no special
 mode. A title reaches it only by having **neither** an `imdb_id` nor a
 `tmdb_id`, which on this deployment means an unmatched **stub** the ingest ladder
 created. Such a title is in no IMDb dump, has no TMDb id to enrich by, and a
-rebuild mints it a new UUID — so *"enrich or import what the lines above name"*,
-which is what the command prints, **cannot be done**.
+rebuild mints it a new UUID — so *"enrich or import what the lines above name"*
+**cannot be done**. ✅ The command printed exactly that sentence until
+2026-08-25; it now tells the two rungs apart and names `--skip-unresolvable`
+for this one, because sending an operator to run an importer that cannot help
+is worse than saying nothing.
 
 **This is not a corner case.** Measured on the live catalog on 2026-08-25: 6
 titles of 1,272,891 carry neither provider id — and those 6 account for **602 of
@@ -261,45 +266,66 @@ artifact into a *correctly rebuilt* catalog was **refused whole on exactly 304
 resolved cleanly and were thrown away with them:
 
 ```
-  media_items                     0 written    10,515 already present
-  watch_states                3,347 written         0 already present
-3,440 rows written, 10,515 already present, 304 refused, … : nothing was committed
+  media_items                     0 written         0 present    10,515 nothing to write onto
+  watch_states                3,347 written         0 present         0 nothing to write onto
+3,440 rows written, 0 already present, 10,515 with nothing to write onto, 0 skipped as
+unresolvable, 304 refused, … : nothing was committed
 ```
 
-### The escape, and why the format allows it
+*(That block read `10,515 already present` when the drill ran, against a
+`media_items` table holding **zero** rows. The two states are now separate
+columns — see §8.)*
 
-The artifact is gzip'd JSON Lines precisely so an operator can read and edit it.
-A reference with no provider id is spelled with both keys null, so the rows are
-one filter away:
+### The way through: `--skip-unresolvable`
 
 ```bash
-zcat /var/tmp/nightly.jsonl.gz \
-  | grep -v '"imdb_id": null, "tmdb_id": null' \
-  | gzip > /var/tmp/nightly-filtered.jsonl.gz
-uv run usher restore /var/tmp/nightly-filtered.jsonl.gz
+uv run usher restore /var/tmp/nightly.jsonl.gz --dry-run --skip-unresolvable
+uv run usher restore /var/tmp/nightly.jsonl.gz --skip-unresolvable
 ```
 
-In the drill this dropped **exactly 304 lines, all `media_items`**, and the
-result restored with **0 refusals, exit 0, 3,347 watch states and 89 search
-queries committed**.
+The flag drops the rows whose title or episode this catalog cannot resolve,
+counts them under **skipped as unresolvable**, and commits everything else.
+Run it with `--dry-run` first: that reports exactly the same numbers and
+commits nothing, so you see what the trade costs before taking it.
 
-**What you lose by doing that is small and self-repairing**: those links point
-at unmatched stubs, which is exactly the population the match ladder re-derives
-on the next `usher sync`. What you would lose by *not* doing it is the entire
-artifact.
+**What you lose is small and self-repairing.** Those links point at unmatched
+stubs, which is exactly the population the match ladder re-derives on the next
+`usher sync`. What you would lose by not doing it is the entire artifact.
 
-⚠️ **Check what the filter removed before you trust it.** The grep is a substring
-match on one JSON spelling; count it, and confirm every dropped line is a table
-you meant:
+⚠️ **Read the per-table counts before you accept it.** The refusal report names
+which tables the unresolvable rows are in, and the two cases are not the same:
+
+| the skipped rows are in | what you lose | do it? |
+|---|---|---|
+| `media_items` only | links the next `usher sync` re-derives | yes |
+| `watch_states` | **watch history, permanently** | no — see below |
+
+If any are `watch_states`, stop. That is history no importer rebuilds, and the
+right move is to fix the catalog or restore into a database that still holds
+those ids. Nothing in the command enforces that judgement, which is why it is
+here: the flag is an operator accepting a loss, so the operator has to know
+which loss.
+
+⚠️ **The flag does not touch the other three refusals.** A household this
+database does not hold, a source colliding on a name, and a credential whose
+source is absent all still refuse the whole file with `--skip-unresolvable`
+set. None of them is *"the catalog is at a different bootstrap phase"* — the
+first two are a damaged or hand-edited artifact and the third is a conflict
+only you can settle — and no `usher sync` re-derives any of them.
+
+### The old escape, and why it is no longer the answer
+
+Before the flag existed this runbook told you to filter the artifact:
 
 ```bash
-zcat /var/tmp/nightly.jsonl.gz | grep '"imdb_id": null, "tmdb_id": null' \
-  | python3 -c 'import sys,json,collections; print(collections.Counter(json.loads(l)["table"] for l in sys.stdin))'
+zcat nightly.jsonl.gz | grep -v '"imdb_id": null, "tmdb_id": null' | gzip > filtered.jsonl.gz
 ```
 
-If that reports any `watch_states`, **do not filter** — you would be discarding
-watch history rather than a re-derivable link. Fix the catalog instead, or
-restore into a database that still holds those ids.
+**Do not do this now**, for two reasons beyond it being unnecessary. It is a
+substring match on one JSON spelling, so it drops whatever happens to match —
+including `watch_states` rows, silently, which is the one thing the table above
+says to refuse. And since the truncation check landed (§8) the filtered file is
+refused anyway: its header still claims the rows the `grep` removed.
 
 ---
 
@@ -330,3 +356,40 @@ what makes step 3's *"restore, walk, restore"* sequence safe rather than clever.
 **The artifact never wins over a link you already have.** `media_items`' merge
 writes only where the target's `title_id` is `NULL`, because overwriting a link
 the target holds is the one move that can lose information on both sides at once.
+
+---
+
+## 8. Reading the report
+
+Five numbers per table, and the two in the middle are the ones people confuse.
+
+| column | means | what to do |
+|---|---|---|
+| **written** | the row landed | nothing |
+| **present** | this database already holds it | nothing — the restore was unnecessary for that row |
+| **nothing to write onto** | there is no row here to merge into | run `usher sync`, then restore again |
+| **skipped as unresolvable** | dropped, because you passed `--skip-unresolvable` | check *which table* — see §5 |
+| **refused** | nothing was written, anywhere | fix what the lines name, then re-run |
+
+⚠️ **`present` and `nothing to write onto` were one column headed *"already
+present"* until 2026-08-25**, and the drill printed `10,515 already present`
+against a `media_items` table holding **zero** rows. `media_items`' merge is an
+`UPDATE` over a row the source walk creates, so *"the target already holds this
+link"* and *"there is no row here at all"* both write nothing and were reported
+identically — while being opposite instructions. The second is the normal state
+of a first restore into a rebuilt deployment, which is why it now has a column.
+
+**The refusal list is capped at 20 lines**, with a tail saying how many more
+there were. Restoring into an *empty* catalog refused 14,166 rows in the drill
+and printed a 14,176-line report, which is not something anyone reads. **The
+per-table counts beside it are always exact**, so *"how bad, and where"*
+survives the cap; if you need the identity of every refused row, `--dry-run`
+prints the same list without holding a transaction open.
+
+**A truncated artifact is refused rather than partly applied.** The header
+carries a row count per table and the body is checked against it, so a file
+that lost lines — a truncated download, a `zcat | head`, a hand-edit — stops
+with `truncated or was edited` and the two numbers per table. Before
+2026-08-25 that check did not exist: the drill restored an artifact whose
+header claimed 10,819 `media_items` over a body holding 10,515 with 0 refusals
+and exit 0.
