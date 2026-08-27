@@ -55,6 +55,7 @@ from usher.ports.ingest import ProviderRef
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.metadata import EnrichmentResult, MetadataProvider
 from usher.ports.repository import EpisodeRepository, RawPayloadStore, TitleRepository
+from usher.services.rows.cache import RowCache
 
 _tracer = trace.get_tracer("usher.enrich")
 _meter = metrics.get_meter("usher.enrich")
@@ -139,6 +140,7 @@ class EnrichService:
         events: EventPublisher,
         *,
         queue: JobQueue,
+        cache: RowCache | None = None,
         cache_max_age_days: int = 30,
         now: Callable[[], AwareDatetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -159,6 +161,21 @@ class EnrichService:
         # while the other works. It must be the *same* queue `MatchService`
         # and `IngestService` hold, which only a composition root can know.
         self._queue = queue
+        # The process's one `RowCache`, or `None` in a composition root that
+        # composes no screens (`usher work`, `usher sync`) -- exactly
+        # `build_push_applier`'s terms, and for its recorded reason: a service
+        # holding a cache nobody serves from would invalidate a dict with no
+        # reader.
+        #
+        # **Enrichment is the *other* write that stales a built shelf**, and
+        # until this it was the one that said nothing. `PushApplyService` and
+        # `WatchWriteService` both invalidate `WATCH_STATE_ROWS`; enrichment
+        # rewrites a card's `name`, `year`, `enrichment_state` and `artwork`,
+        # which is every field a card carries, on rows with TTLs up to six
+        # hours. `title.updated` does not cover it -- that frame is a
+        # statement to a *client*, and the console's handler is colour-only by
+        # design (patterns.md §7, "it does not refetch").
+        self._cache = cache
         self._max_age = timedelta(days=cache_max_age_days)
         # Injected, the way `EmbySession`, `TmdbClient` and `TMDbIdDataset`
         # all inject theirs: the cache-expiry branch is otherwise only
@@ -276,6 +293,20 @@ class EnrichService:
                 ),
             ]
         )
+        # Every shelf holding this title was built from the row it just
+        # replaced, so it is stale in four fields at once. Dropped here rather
+        # than left to the TTL because the TTLs are the wrong order of
+        # magnitude for a catalog write: `because-you-watched` is six hours,
+        # `seasonal` twelve, and a title enriched inside that window keeps
+        # rendering under its skeleton name with a "No artwork on record"
+        # placeholder until the entry dies of old age.
+        #
+        # **On the success path only**, on the same ADR-0008 argument the
+        # publish below makes: a failure leaves the tier exactly where it was,
+        # so nothing on the card moved and a drop would turn a provider outage
+        # into a cache flush per attempt of a backoff schedule.
+        if self._cache is not None:
+            self._cache.invalidate_titles((enriched.id,))
         # PRD 03's read-through loop, closed: "Completion publishes a
         # `title.updated` event on a Server-Sent Events channel; clients patch
         # in place."
