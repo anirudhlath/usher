@@ -1219,11 +1219,21 @@ def get_search_service(
     transaction. `get_reconcile_service` and `get_similarity_service` already
     take the same `session.commit` for the same reason.
 
-    **`GET /search/suggest` writes nothing, on either tier**, and it shares
-    this dependency: the absence is a property of `SearchService.suggest`
-    rather than of the wiring, argued in that method's docstring and in PRD 10.
-    A keystroke path that wrote a row would out-number the searches by an order
-    of magnitude, and a `SuggestTier` is not a `SearchMode`.
+    **`GET /search/suggest` shares this dependency and can write through it
+    too, since M10's J2** -- one row per answered keystroke, `surface =
+    'suggest'`, `tier` naming the index that ran. This paragraph read *"writes
+    nothing, on either tier"* until then, on the argument that a `SuggestTier`
+    is not a `SearchMode`; `m10c` answered that by giving the table two columns
+    rather than collapsing two vocabularies into `mode`. **What did not change
+    is that this function decides none of it.** The surface is a property of
+    `SearchService.suggest` and the switch
+    (`USHER_SEARCH_SUGGEST_ANALYTICS`, default off because the row measured
+    larger than a tier-1 request) is read once in
+    `composition.build_search_service`, so both boundaries obey the same
+    answer and neither this dependency nor the route branches on it.
+    ⚠️ **The route now also reads `DefaultUserIdDep` beside this**, because
+    `search_queries.user_id` is `NOT NULL` -- that is a second dependency on
+    that route, not a change here.
 
     **The taste term does not depend on the model above, and that is worth
     keeping now that there is one.** PRD 05's sixth ranking term needs a

@@ -1074,6 +1074,16 @@ alone. And anything that later records a *keystroke* multiplies this by the
 suggest path's rate, which is the volume half of PRD 10's argument for why
 `GET /search/suggest` writes no row.
 
+✅ **That last sentence was the prediction and M10's J2 is the run, 2026-08-26:
+the multiplication is real, it is 136% on tier 1, and the writer therefore
+ships behind a setting that defaults off.** The marginal cost measured
+end-to-end through the shipped route is **+3.33 ms on tier 1 and +3.53 ms on
+tier 2** — this entry's 3.957 ms reproducing on a different path three
+milestones later, with `ix_search_queries_at` now on the table — so what the
+keystroke rate multiplies is a *constant*, and what decides the answer is what
+that constant is a fraction of. The section at the end of this file has the
+arms and the caveats.
+
 Caveats, stated because they bound the number rather than decorate it: a fresh
 container with `fsync=on` and an empty table, on an otherwise-idle host, with
 one connection and one prepared statement — so this is the steady-state cost of
