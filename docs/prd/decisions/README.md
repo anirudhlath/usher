@@ -53,6 +53,7 @@ otherwise be lost and re-litigated in six months.
 | [0043](0043-the-outbound-limiter-is-per-source-and-spaces-requests.md) | The outbound limiter is per source, spaces requests, and binds a different regime than the concurrency ceiling | Accepted — adds the proactive half of PRD 01's rate-limit promise; PRD 03 and 10. **Renumbered three times**: `0039` → `0040` on 2026-08-20, `0040` → `0042` on 2026-08-21, `0042` → `0043` on 2026-08-26, each time because the number had been minted in parallel |
 | [0044](0044-a-bounded-column-is-a-declared-type-that-refuses.md) | A bounded column is a declared type that refuses; the per-column ledger is generated rather than quoted, under three published readings of what closes a value set; M10 fixes the 22 that reach a translatable exception | Accepted — issue #10's scoped decision; corrects PRD 09's carried-debt arithmetic, of which **two of five figures reproduce and three do not**. **Does not re-open M9's boundary call 8**. **Renumbered twice**: from `0041` on 2026-08-21, and `0043` → `0044` on 2026-08-26 |
 | [0045](0045-a-backup-carries-natural-keys-not-ids.md) | A backup carries natural keys, not ids; an unresolved reference is a named refusal rather than a `None`; and a raw UUID is accepted only when the target already holds it | Accepted — M10's Group K identity layer, on which K4's restore rests. **Minted at `0044` under an explicit authorisation** after checking `main` and all three unmerged remote branches, because the plan that requested it offered `0039` and that number has since been claimed twice — and **moved to `0045` on 2026-08-26** by the cascade below, without a collision of its own |
+| [0046](0046-the-scheduler-stores-nothing.md) | The scheduler stores nothing and needs no table: a named job with a period, whose `last_done()` is read from the artefact it maintains, off by default because there is no mutual exclusion without a row | Accepted — M10's J3, settling the decision issue #17 deferred; implemented by J4, registered by J5 and J6. **The plan offered `0039`, which [0039](0039-the-genre-vocabulary-is-usher-owned.md) has held since before this branch existed**; `0046` was checked free against this tree *and* `git log origin/main -- docs/prd/decisions/` (highest published: `0042`) before being taken. 🔴 Corrects the plan on three measured points: the migration is **`m10c`**, `computed_at()` reads **`min`** and not `max`, and `JobQueue`'s exclusion is a per-row **lock** rather than a lease |
 
 **`0039` was assigned twice, then `0040` and `0041` were assigned twice, and
 the branch's records moved every time.** The two 2026-08-20 ADRs were written in
@@ -138,10 +139,14 @@ stale rather than be rewritten. It is not the only stale `0039` in that file:
 the same plan also offered the number to two further ADRs (J3's *"the scheduler
 stores nothing"*, and the backup identity record it files under K1 while its own
 task text is K2's), which is itself the evidence that "the next free number" was
-being computed independently in more than one place. **One of those two has since
-been written** — as `0044`, on 2026-08-21, under an explicit authorisation and
+being computed independently in more than one place. **Both have since been
+written, at neither of the numbers the plan offered.** The backup identity
+record went in as `0044` on 2026-08-21, under an explicit authorisation and
 after checking every unmerged branch rather than only this one, and it is
-**`0045`** since the 2026-08-26 cascade. J3's is still unwritten.
+**`0045`** since the 2026-08-26 cascade. J3's is **`0046`**, written 2026-08-27
+— and it is the first of the three to be minted *after* the two-sided check
+became the rule rather than after a collision, so it is the one data point this
+account has for the rule working rather than for it being repaired.
 
 **`tests/unit/test_decision_register.py` was green throughout the *first*
 collision and could not have been otherwise.** Its filename comparison runs in

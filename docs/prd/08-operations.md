@@ -799,6 +799,45 @@ unreachable.
   redacted, and the per-family evidence for the M8 widening are
   [ADR-0026](decisions/0026-the-cli-boundary-names-families.md).
 
+### Scheduled work — two named jobs, no table, and off by default
+
+⏳ **Designed by [ADR-0046](decisions/0046-the-scheduler-stores-nothing.md),
+built by M10's J4.** Read the ADR before changing any of it; the contested part
+is that the component holds no state at all.
+
+Two jobs are registered, and the contract is a **name**, a **period**, a
+`last_done()` and a `run()` — no crontab expression, no calendar, no timezone,
+no dependency graph:
+
+| job | what it runs | `last_done()` reads |
+|---|---|---|
+| the neighbour rebuild | `usher similar --rebuild`'s batch | `min(title_neighbors.computed_at)` |
+| `search_queries` retention | the 90-day `DELETE` [10](10-telemetry-and-dashboards.md) prices | `min(search_queries.at)` |
+
+**`USHER_SCHEDULER_ENABLED` defaults to `false`**, and turning it on is an
+operator decision with a number attached. A fresh deployment has no embeddings,
+so the first tick of an enabled scheduler would eventually start a walk nobody
+asked for: measured from the artefact's own timestamps on this deployment's
+catalog, the most recent completed rebuild took **3.58 hours over 132,442
+seeds** (2026-08-19). And there is no mutual exclusion — the exclusion
+`JobQueue` provides is a lock on a job **row**, and this component has no rows —
+so a deployment running both the server and a separate `usher work` container
+with the scheduler on in each would start that walk twice.
+
+**A period is a minimum interval since last completion, not a wall-clock
+schedule.** *"Every night at 3am"* is not expressible. An operator who wants a
+wall-clock time runs **`usher schedule --once`** from their own cron, which is
+the pre-M10 arrangement kept as a supported path rather than replaced — and it
+is also the answer for anyone who wants the jobs without a long-lived process
+holding them.
+
+⚠️ **A scheduler that is on does not make the artefact complete.** `last_done()`
+answers *when*, not *whether*: measured 2026-08-27, 877 of 133,319 embedded
+titles carry no `title_neighbors` row at all, because they were embedded after
+the last walk started, and `stale_neighbors()` reads **0** throughout — a
+missing row has no fingerprint to disagree. The period is what eventually
+covers a growing population; nothing here is a completeness guarantee.
+
 ### Backup — the asymmetry is the point
 
 ✅ **The split below is now generated from a manifest, and a test enforces
