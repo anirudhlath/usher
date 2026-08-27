@@ -635,6 +635,7 @@ all three and only one of them is a real zero.**
 | a play with **no row at all** | simply **unattributed**. A client that carried no `search_id` — a home row, a deep link, a bookmark — is not a search that led nowhere, and counting it as one would make the denominator the whole library |
 | **no rows from `GET /search/suggest`** | ⚠️ **the ordinary state, and since M10 it means one specific thing rather than "by design".** Through M9 the type-ahead box could not write at all; since M10 it can, and `USHER_SEARCH_SUGGEST_ANALYTICS` **defaults off** because the write is 148% of a tier-1 request, so *no suggest rows* is what a deployment that has not turned it on looks like. A reader must not read it as *"nobody used the box"* — the two are indistinguishable here and only the setting tells them apart. A keystroke below its tier's `min_query_length` is the row below |
 | **no row for a keystroke below its tier's `min_query_length`** | by design, and it is the length bound rather than the switch. `GET /search/suggest` returns before `SearchService.suggest` for a `q` shorter than four characters on `prefix` or one on `fuzzy`, so there is no answered query to record — the same exclusion as *"a blank or whitespace-only query"* below, with a number on it. ⚠️ **The bound is per tier**, so "answered" means different things on the two tiers and the two row counts are **not** directly comparable: a panel dividing one by the other is measuring the bound |
+| **`latency_ms = 0` on a suggest row** | 🔴 **not an absence of a row but an absence of a *number*, and on tier 1 it is the ordinary state rather than a stopped clock.** `latency_ms` is a truncated whole number of milliseconds (`max(0, int(seconds * 1000))`) over a service-side window tier 1 answers inside, so the column records ADR-0031's tier-1 win as a zero. Measured read-only on M10 J2's own disposable clone, 2026-08-27: **14,181 of 14,898** tier-1 suggest rows read exactly **0**, p50 **0 ms**, max **18 ms** — against 1 of 80 on `surface = 'search'`, whose p50 is 29 ms. **So dashboard 4's latency panels are `search`-surface panels**, and a p50 taken over `surface = 'suggest'` is not a latency measurement on tier 1 at all; a tier-1 p50 that has *left* 0 is the reading worth looking at, and the end-to-end figures in [05](05-search-and-similarity.md) are where a real tier-1 cost lives. ⚠️ **It is also the one number in this table that a correct measurement and a broken one render identically** — a window that had silently stopped covering the index probe would also read 0 — which is why `tests/unit/test_services_search.py::test_the_keystrokes_latency_covers_the_index_probe_and_the_hydration` pins what the window *covers* rather than what it reads |
 
 ⚠️ **So the denominator is answered searches, never plays — and since M10 there
 are two of them, which is the first thing any panel over this table has to
@@ -675,16 +676,23 @@ because the absence is invisible in the data:
   a cursor, so a search is one row and cannot become one per scroll. The day
   either grows pagination this is a decision to make again, not a default.
 - **A fraction of the keystrokes.** `USHER_SEARCH_SUGGEST_ANALYTICS` is a
-  `bool` and never a sample rate, and the reason is this very table: all five
-  rows above read a **count**, so a rate makes every one an estimate and adds a
-  sixth absence — *the row that was not written* — which is indistinguishable
-  in the data from the other five. The volume is bounded by retention instead.
-  ⚠️ **And it is a `bool` covering *both tiers*, not one per tier**, for the
-  same reason one step over: a switch that recorded `fuzzy` and not `prefix`
-  would make *"no prefix rows"* mean either "nobody typed four characters" or
-  "that tier is not recorded here", which is the sixth absence arriving on a
-  different axis. Tier 2 could afford the row and tier 1 cannot, so the tier
-  that cannot decides.
+  `bool` and never a sample rate, and the reason is this very table: **every
+  absence in it is exact**, so a rate makes every count over this surface an
+  estimate and adds a further absence — *the row that was not written* — which
+  is indistinguishable in the data from the ones that are real. The volume is
+  bounded by retention instead. ⚠️ **This argument used to be stated as a
+  cardinality — *"all five rows above"* — and the cardinality is what went
+  stale**: the table held five rows when the sentence was written, six the
+  moment M10's suggest writer added the `min_query_length` row, and seven with
+  the `latency_ms` row above. The claim never needed the number, and the same
+  correction is applied to the three code sites that had copied it
+  (`config.py`, `services/search.py`, `eval/surfaces/suggest.py`) rather than
+  re-counted in each. ⚠️ **And it is a `bool` covering *both tiers*, not one
+  per tier**, for the same reason one step over: a switch that recorded
+  `fuzzy` and not `prefix` would make *"no prefix rows"* mean either "nobody
+  typed four characters" or "that tier is not recorded here", which is that
+  same invented absence arriving on a different axis. Tier 2 could afford the
+  row and tier 1 cannot, so the tier that cannot decides.
 
 ✅ **`m10c` landed the columns and M10's suggest writer emits them, so the
 schema and the behaviour are both current as of M10.** The columns exist,

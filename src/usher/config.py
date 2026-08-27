@@ -716,12 +716,14 @@ class Settings(BaseSettings):
     # `search_queries` row (`surface = 'suggest'`, `tier` naming the index
     # that answered). PRD 10's amendment 2; `m10c` landed the columns.
     #
-    # **A `bool` and deliberately not a sample rate.** PRD 10's *"which
-    # absence means what"* table has five rows and every one reads a **count**,
-    # so a rate makes every count an estimate and adds a sixth absence --
+    # **A `bool` and deliberately not a sample rate.** Every absence in PRD
+    # 10's *"which absence means what"* table is **exact**, so a rate makes
+    # every count over this surface an estimate and adds a further absence --
     # *the row that was not written* -- indistinguishable in the data from the
-    # four real ones. Whole-or-nothing keeps that table's contract and the
-    # volume is bounded by retention instead.
+    # ones that are real. Whole-or-nothing keeps that table's contract and the
+    # volume is bounded by retention instead. (This comment counted the table's
+    # rows at *five* until the row count was re-measured at six; the argument
+    # never needed the number and no longer carries one.)
     #
     # 🔴 **`False` because a bar said so, and the bar was written to say the
     # opposite.** The registered position was *both tiers write,

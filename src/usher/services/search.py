@@ -991,10 +991,13 @@ class SearchService:
 
         **Whole or nothing, never sampled.** `self._suggest_analytics` is a
         `bool`, and PRD 10's *"which absence means what"* table is the reason:
-        all five of its rows read a **count**, so a sample rate would make every
-        one an estimate and add a sixth absence -- *the row that was not
-        written* -- indistinguishable in the data from the four real ones. The
-        volume is bounded by retention instead.
+        every absence in it is **exact**, so a sample rate would make every
+        count over this surface an estimate and add a further absence -- *the
+        row that was not written* -- indistinguishable in the data from the
+        ones that are real. The volume is bounded by retention instead. ⚠️
+        **Stated without a cardinality on purpose**: this sentence said *"all
+        five of its rows"* while the table held six, having gone stale on the
+        commit that added the row it is about. PRD 10 carries the correction.
         """
         analytics = self._analytics
         if analytics is None or user_id is None or not self._suggest_analytics:
@@ -1459,6 +1462,21 @@ async def _write_row(analytics: SearchAnalytics, record: SearchQueryRecord) -> u
     out of this module is a bug in Usher, and a bug absorbed into a log line is
     billed as an outage. The guard is defence in depth on both paths, so the
     only way to test it is to inject a repository that raises.
+
+    ⚠️ **So a database that is *unwell* rather than refusing fails the request,
+    and `analytics.commit` being inside the `try` is where.** It is
+    `AsyncSession.commit` itself (`composition.py`), and
+    `refusals_as_conflict` translates only a row refusal on purpose -- its own
+    docstring declines to report *"a dropped connection, a statement timeout or
+    a missing table"* as the row being wrong -- so both statements here can
+    raise a raw `SQLAlchemyError`, which is not a `UsherPortError` and leaves
+    this function as a 500 on a request whose results were already computed.
+    That is F2's shipped shape on `GET /search` and it is unchanged; what M10
+    changed is what it is reachable *from*, because a browser drives
+    `GET /search/suggest` per keystroke. Widening the catch is not the answer
+    -- the paragraph above is why -- and the bound is the switch:
+    `USHER_SEARCH_SUGGEST_ANALYTICS` ships `false`, so the keystroke path pays
+    this only where an operator has opted in.
 
     **Neither the query text nor the surface's own words reach the log line.**
     What somebody typed is household state whose home is

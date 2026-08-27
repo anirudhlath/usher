@@ -28,7 +28,7 @@ a household's clothes is that this module never names one.
 
 **So do not add one.** A household here would make every bar this harness
 scores a contributor to the table those bars are meant to be independent of --
-and PRD 10's *"which absence means what"* table would gain a sixth absence
+and PRD 10's *"which absence means what"* table would gain a further absence
 nobody could name. `tests/integration/test_search_analytics.py::
 test_a_suggest_with_no_household_writes_no_row_and_the_eval_harness_is_that_caller`
 drives this function against a real database and asserts the table stays empty,

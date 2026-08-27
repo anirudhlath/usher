@@ -2165,6 +2165,81 @@ async def test_type_ahead_records_the_surface_and_the_tier_that_answered(
 
 
 @pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_the_keystrokes_latency_covers_the_index_probe_and_the_hydration(
+    tier: SuggestTier,
+) -> None:
+    """What `latency_ms` is a measurement *of*, on the one surface where the
+    number it reads carries no information at all.
+
+    🔴 **On tier 1 this column is almost always literally zero, so no
+    assertion on its value can see what the window covers.** Measured
+    read-only on J2's own disposable clone (`usher_j2`, 2026-08-27):
+    **14,181 of 14,898** tier-1 suggest rows record `latency_ms = 0`, p50
+    **0**, max 18. `_ms` truncates to whole milliseconds and tier 1's
+    service-side window is sub-millisecond (0.664 ms p50 / 0.947 ms p95 at
+    catalog scale, `.claude/rules/search-and-embeddings.md`), and
+    `ck_search_queries_latency_ms_non_negative` permits 0 -- so a window that
+    had silently stopped covering the statement it is about renders **exactly
+    as the shipped code does**, in the column that would otherwise show
+    ADR-0031's tier-1 win.
+
+    **So the window is pinned by moving the clock from inside the
+    collaborators rather than by reading the number**, in two distinguishable
+    amounts, and the failure value names which half was lost: **125** is the
+    probe alone, **62** the hydration alone, **187** both. The plant this
+    exists for is `started = self._clock()` moved *below* the tier's `suggest`
+    call -- which leaves `latency_ms` measuring everything except the index
+    read, survived the whole suite at exit 0 when a review planted it, and is
+    invisible to `test_the_latency_is_the_measured_interval_…` one surface
+    over because that case drives `search`.
+
+    Both advances are dyadic, so `int(seconds * 1000)` is exact at every step
+    rather than an off-by-one waiting to be read as a defect -- the rule
+    `.claude/rules/testing-discipline.md` records for
+    `OpenAICompatibleClient`'s 1,420 ms.
+    """
+    clock = _Clock()
+    recorder = _Recorder()
+    kit = _Ports()
+    index = _ScriptedIndex(SearchOutcome())
+    probing = _ScriptedSuggest((SearchHit(title_id=_QUIET, score=1.0),))
+    service = await _service(
+        index,
+        suggestions=probing,
+        tier=tier,
+        ports=kit,
+        analytics=recorder.bind(),
+        clock=clock,
+    )
+    # Captured *after* `_service` has seeded the catalog, so the hydration
+    # advance counts the read this request makes and not the fixture's own
+    # writes -- and captured as bound methods, so each wrapper delegates to the
+    # behaviour the rest of this file relies on rather than reimplementing it.
+    scripted_probe = probing.suggest
+    scripted_hydrate = kit.titles.list_by_ids
+
+    async def _probe(prefix: str, limit: int = 10) -> list[SearchHit]:
+        clock.advance(0.125)
+        return await scripted_probe(prefix, limit)
+
+    async def _hydrate(title_ids: Sequence[uuid.UUID]) -> list[Title]:
+        clock.advance(0.0625)
+        return await scripted_hydrate(title_ids)
+
+    probing.suggest = _probe  # type: ignore[method-assign]
+    kit.titles.list_by_ids = _hydrate  # type: ignore[method-assign]
+
+    assert len(await service.suggest("vac", tier=tier, user_id=_HOUSEHOLD)) == 1, (
+        "the premise: the box answered, so both collaborators ran"
+    )
+
+    (row,) = recorder.rows
+    assert row.latency_ms == 187, (
+        "125 is the probe alone, 62 the hydration alone, 187 is the whole window"
+    )
+
+
+@pytest.mark.parametrize("tier", list(SuggestTier))
 async def test_type_ahead_with_no_household_records_nothing_on_either_tier(
     tier: SuggestTier,
 ) -> None:
@@ -2204,9 +2279,10 @@ async def test_the_suggest_switch_is_whole_and_leaves_the_search_row_alone(
 ) -> None:
     """`USHER_SEARCH_SUGGEST_ANALYTICS=false`, at the service.
 
-    **Whole or nothing, never sampled**: every row of PRD 10's *"which absence
-    means what"* table reads a count, so a rate would turn each into an
-    estimate and add a sixth absence nobody can name. Asserted on both tiers,
+    **Whole or nothing, never sampled**: every absence in PRD 10's *"which
+    absence means what"* table is exact, so a rate would turn every count over
+    this surface into an estimate and add a further absence nobody can name.
+    Asserted on both tiers,
     because a switch honoured on one is a defect a single-tier case cannot see.
 
     The control is `search` through the same service: this setting narrows the

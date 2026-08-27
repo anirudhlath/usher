@@ -1082,7 +1082,9 @@ suggest path's rate, which is the volume half of PRD 10's argument for why
 `GET /search/suggest` writes no row.
 
 ✅ **That last sentence was the prediction and M10's J2 is the run, 2026-08-26:
-the multiplication is real, it is 136% on tier 1, and the writer therefore
+the multiplication is real, it is 136% on tier 1 **in the main run** — 148% in
+the confirmation run and 146% in an independent third measurement, all three
+labelled where the arms are — and the writer therefore
 ships behind a setting that defaults off.** The marginal cost measured
 end-to-end through the shipped route is **+3.33 ms on tier 1 and +3.53 ms on
 tier 2** — this entry's 3.957 ms reproducing on a different path three
@@ -2042,9 +2044,27 @@ of.** B − A is **+3.33 ms (+136%)** on tier 1 and **+3.53 ms (+7.8%)** on tier
 milestones later, with `ix_search_queries_at` now on the table. Tier 2's 7.8%
 is *inside* the 11.9% PRD 10 already accepted for full text; tier 1's 136% is
 the whole finding. **One switch governs both tiers** — a per-tier switch would
-put a sixth, unnameable absence into PRD 10's *"which absence means what"*
+put a further, unnameable absence into PRD 10's *"which absence means what"*
 table, one axis over from the sample rate that document already refuses — so
 the tier that cannot afford it decides.
+
+⚠️ **This section carries two tier-1 percentages and both are measurements
+rather than a discrepancy — 136% is *this* run's B − A and 148% is the
+confirmation run's, and the heading quotes the latter.** They are the same
+arithmetic over different absolute arms on a box under steady foreign load:
+5.780/2.446 = +136%, 6.289/2.534 = +148%. **A third measurement, independent of
+both** — a different tree, a different harness and a different session,
+2026-08-27 — landed between them at arm A **2.539** / arm B **6.250** =
+**+146%**, on the confirmation run's side. So the quantity is *a tier-1 write
+costs roughly 1.4–1.5× the request it is measuring*, three measurements
+spanning 136–148%, and **the verdict does not depend on which is quoted**: the
+bar is an *absolute* 5.000 ms and B measured 5.78, 6.29 and 6.25. Downstream
+sites quote one or the other and **neither is to be "corrected" into the
+other** — measured 2026-08-27, `148` is in this file's heading,
+`docs/prd/10-telemetry-and-dashboards.md` (twice), `src/usher/config.py`,
+`src/usher/services/search.py`, `tests/integration/test_search_route.py` and
+`tests/unit/test_config.py`; `136` is in this file's table above and in J2's
+commit message. Picking one and sweeping would delete a real run.
 
 🔴 **The household `SELECT` is not measurable at this resolution, and that is
 what retires the route docstring's objection.** `GET /search/suggest` said a
