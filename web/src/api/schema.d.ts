@@ -1668,6 +1668,7 @@ export interface components {
         ImportRunResponse: {
             /** Dataset */
             dataset: string;
+            phase: components["schemas"]["BootstrapPhase"] | null;
             status: components["schemas"]["ImportRunStatus"];
             /** Revision */
             revision: string;

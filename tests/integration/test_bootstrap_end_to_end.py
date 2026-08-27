@@ -225,10 +225,14 @@ async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, c
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         await service.import_dataset(IMDbTitleDataset(client, cache, batch_size=2), write_and_peek)
     assert seen == [2, 4, 5]
-    # 3 batches (2, 2, 1) + the final COMPLETED save -- see
-    # test_commits_once_per_batch_plus_once_at_the_end (tests/unit/
-    # test_services_bootstrap.py) for the same shape against a fake.
-    assert commits == 4
+    # The opening RUNNING commit + 3 batches (2, 2, 1) + the final COMPLETED
+    # save -- see test_commits_once_per_batch_plus_once_at_the_end (tests/unit/
+    # test_services_bootstrap.py) for the same shape against a fake. The first
+    # of the five is what makes the checkpoint readable from another connection
+    # before the first batch lands, which for a dataset whose first batch is a
+    # SPARQL round trip away is the difference between a screen that says a run
+    # is going and one that truthfully says nothing is.
+    assert commits == 5
 
 
 async def test_a_restart_resumes_from_the_stored_checkpoint(

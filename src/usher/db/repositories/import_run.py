@@ -38,6 +38,8 @@ Postgres, both the failure without this rollback and the recovery with it:
 test_the_session_survives_a_conflict_for_the_callers_next_statement`.
 """
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,16 +65,37 @@ class PostgresImportRunRepository(ImportRunRepository):
         self._session = session
 
     async def start(self, dataset: str, revision: str) -> ImportRun:
+        """`started_at` is reset, and the id is not.
+
+        The two were kept together behind one comment reading *"the row's id and
+        started_at are kept so bootstrap-status still shows one row per dataset
+        rather than accumulating history"*. That argument is entirely about the
+        **id** — one row per dataset is what a stable primary key buys — and it
+        was carrying `started_at` along with it for free.
+
+        Every reader treats this column as a duration's left edge: `usher
+        bootstrap-status` prints one, and the console renders
+        `finished_at - started_at` as "measured on this deployment" and
+        `now - started_at` as a running card's `elapsed`. Left unreset it means
+        *first ever imported*, so a dataset re-imported in three minutes on a
+        catalog first built a fortnight ago reported **15.8 days** — measured on
+        this project's own deployment, not hypothesised.
+        """
         existing = await self.get(dataset)
         if existing is None:
             run = ImportRun(dataset=dataset, revision=revision)
         elif existing.revision == revision:
             # Same upstream snapshot: keep the cursor and continue.
-            run = existing.evolve(status=ImportRunStatus.RUNNING, error=None, finished_at=None)
+            run = existing.evolve(
+                status=ImportRunStatus.RUNNING,
+                error=None,
+                finished_at=None,
+                started_at=datetime.now(UTC),
+            )
         else:
-            # Upstream moved. Position 0 restarts the stream; the row's id and
-            # started_at are kept so `bootstrap-status` still shows one row per
-            # dataset rather than accumulating history this table is not for.
+            # Upstream moved. Position 0 restarts the stream; the row's **id**
+            # is kept so `bootstrap-status` still shows one row per dataset
+            # rather than accumulating history this table is not for.
             run = existing.evolve(
                 revision=revision,
                 position=0,
@@ -81,6 +104,7 @@ class PostgresImportRunRepository(ImportRunRepository):
                 status=ImportRunStatus.RUNNING,
                 error=None,
                 finished_at=None,
+                started_at=datetime.now(UTC),
             )
         await self.save(run)
         return run

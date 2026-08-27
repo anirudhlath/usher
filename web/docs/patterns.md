@@ -202,7 +202,7 @@ delight, never mechanism. Anything that only works because a frame arrived is a 
 | `watchstate.updated` | `title_id`, `episode_id?`, `position_seconds`, `played`, `observed_at` | update progress. Fires for other devices too |
 | `row.invalidated` | `slug` | refetch that row only. Never delivered to a `?titles=` subscriber |
 | `sync.progress` | `source`, `kind`, `items_seen/matched/unmatched` | operator surfaces only |
-| `bootstrap.progress` | `dataset`, `phase`, `rows_seen`, `rows_written`, `position` | operator surfaces. **No percent, no denominator** |
+| `bootstrap.progress` | the whole run — `dataset`, `phase` (the owning step), `requested_phase`, `status`, `revision`, `position`, `rows_seen`, `rows_written`, `error`, `started_at`, `heartbeat_at`, `finished_at` | operator surfaces. Patch the run in place. **No percent, no denominator** |
 | `resync_required` | `reason` | discard local state, refetch, say so in the connection indicator |
 
 **Frame arrival**
@@ -240,8 +240,25 @@ and `position`, and deliberately no total.
 the question mark, because the API states a timestamp and the inference is ours. The sweep stops and
 turns amber; the copy says the run may have died and is resumable from this position.
 
-**Polling:** status costs ~0.33 s and is uncached. Poll every **10 s**, and only while at least one run
-is `running`. When nothing runs, say "idle — not polling" rather than polling invisibly forever.
+**Live, not polled — and the fallback is visible.** `bootstrap.progress` carries the whole run and
+fires on every committed batch *and* on start, completion and failure, so a connected stream needs no
+cadence at all: a frame patches its dataset's card in place, and only a terminal frame costs a refetch,
+because `titles` and the genome counts are not on the frame. While the stream is `connected` or `idle`
+the screen MUST NOT poll, and says so.
+
+**When the stream is `off` or `reconnecting`, fall back to the 10 s poll and name the mode.** §7's rule
+is that the UI is fully correct if zero events ever arrive, and this is where that is paid: with
+`usher work` in its own container the frames reach a `NullEventPublisher` and no client is ever told.
+A fallback nobody can see is indistinguishable from a screen that has quietly stopped updating, so the
+indicator says which of the two is running — never a bare "idle".
+
+⚠️ **A poll gate of "only while something is `running`" is self-defeating after a trigger, and it
+shipped that way.** `POST /admin/bootstrap/{phase}` returns 202 before the worker has claimed the job,
+so the one refetch the mutation invalidates sees nothing running, the gate evaluates `false`, and the
+query goes dormant for good. Measured on a real deployment: a `--phase all` press at 00:25:24 was
+followed by a single status read and then **91 seconds of silence**, while all eight datasets imported
+and completed. Any gate on this screen must be able to open on a state the screen has not observed
+yet.
 
 A `failed` run is a **normal, designed state**: status word in bad tone, `error` verbatim, position
 retained, and the trigger relabelled "Resume".

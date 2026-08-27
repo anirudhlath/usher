@@ -1,5 +1,7 @@
 """In-memory ImportRunRepository."""
 
+from datetime import UTC, datetime
+
 from usher.domain.bootstrap import ImportRun, ImportRunStatus
 from usher.ports.repository import ImportRunRepository
 
@@ -13,11 +15,17 @@ class FakeImportRunRepository(ImportRunRepository):
         if existing is None:
             run = ImportRun(dataset=dataset, revision=revision)
         elif existing.revision == revision:
-            run = existing.evolve(status=ImportRunStatus.RUNNING, error=None, finished_at=None)
+            run = existing.evolve(
+                status=ImportRunStatus.RUNNING,
+                error=None,
+                finished_at=None,
+                started_at=datetime.now(UTC),
+            )
         else:
             # Upstream moved: the cursor is meaningless against a new
-            # snapshot. Id and started_at are kept so this stays one row per
-            # dataset rather than accumulating history the table is not for.
+            # snapshot. The **id** is kept so this stays one row per dataset
+            # rather than accumulating history the table is not for;
+            # `started_at` is this run's clock and is reset with the cursor.
             run = existing.evolve(
                 revision=revision,
                 position=0,
@@ -26,6 +34,7 @@ class FakeImportRunRepository(ImportRunRepository):
                 status=ImportRunStatus.RUNNING,
                 error=None,
                 finished_at=None,
+                started_at=datetime.now(UTC),
             )
         await self.save(run)
         return run

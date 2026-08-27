@@ -1,6 +1,7 @@
 """BootstrapService against the in-memory fakes. No Docker, no network."""
 
 from collections.abc import AsyncIterator, Sequence
+from datetime import datetime
 
 import pytest
 
@@ -37,6 +38,7 @@ class ScriptedDataset(BulkDataset[ImdbTitle]):
         *,
         revision: str = "etag-1",
         fail_after: int | None = None,
+        name: str = "scripted",
     ) -> None:
         # `_script`, not `_batches`: `batches` is the port's own method
         # name, and an attribute one underscore away from it is the kind of
@@ -44,13 +46,18 @@ class ScriptedDataset(BulkDataset[ImdbTitle]):
         self._script = batches
         self._revision = revision
         self._fail_after = fail_after
+        # Overridable so a case can use a **real** dataset name and exercise
+        # the `DATASET_PHASES` lookup. Defaulted to a name deliberately absent
+        # from that map, so every case that does not care keeps proving the
+        # unknown-dataset arm reports no phase rather than guessing one.
+        self._name = name
         self.resumed_from: BulkCursor | None = None
         self.revision_requested: str | None = None
         self.closed = False
 
     @property
     def name(self) -> str:
-        return "scripted"
+        return self._name
 
     @property
     def attribution(self) -> str:
@@ -178,13 +185,20 @@ async def test_commits_once_per_batch_plus_once_at_the_end(
 ) -> None:
     """The commit boundary *is* the resumability mechanism. One commit for
     the whole run would make a crash lose everything; a commit between the
-    rows and the cursor would make it lose or duplicate a batch."""
+    rows and the cursor would make it lose or duplicate a batch.
+
+    Five, not four: the opening commit that makes the `RUNNING` row readable
+    from another connection joins the three batches and the final
+    `COMPLETED` save. `start()` flushes and does not commit, so without it
+    the checkpoint exists only inside this transaction for as long as the
+    first batch takes -- see `import_dataset`.
+    """
     commit = CommitSpy()
     dataset = ScriptedDataset([[_title(1)], [_title(2)], [_title(3)]])
     await _service(runs, catalog, commit).import_dataset(
         dataset, lambda rows: _write(catalog, rows)
     )
-    assert commit.count == 4
+    assert commit.count == 5
 
 
 async def test_the_checkpoint_advances_with_every_batch(
@@ -219,7 +233,8 @@ async def test_an_empty_batch_still_checkpoints_and_is_not_end_of_stream(
     stored = await runs.get("scripted")
     assert stored is not None
     assert stored.position == 2  # both batches advanced the cursor
-    assert commit.count == 3  # one per batch (2) + the final COMPLETED save
+    # The opening RUNNING commit + one per batch (2) + the final COMPLETED save.
+    assert commit.count == 4
 
 
 async def test_batches_receives_the_already_resolved_revision(
@@ -432,16 +447,19 @@ async def test_one_progress_frame_lands_per_batch_and_never_before_its_own_commi
     state, so each one is offered *after* the commit that made its batch
     durable.
 
-    **The commit count at publish time is the assertion.** Two batches commit
-    once each and `_finish` commits a third time, so a correct run records
-    frames at counts 1 and 2 -- a publish moved above `self._commit()` records
-    0 and 1, which is the same two events in the same order and the reason a
-    list of frames alone cannot see it.
+    **The commit count at publish time is the assertion.** The opening commit
+    is 1, the two batches are 2 and 3, and `_finish` is 4 -- so a correct run
+    records frames at exactly those counts. A publish moved above its own
+    `self._commit()` records one less at that position, which is the same
+    events in the same order and the reason a list of frames alone cannot see
+    it.
 
-    **Two batches rather than one, and no third frame.** One frame per *run*
-    is the progress bar that jumps from 0% to 100%, which
+    **Two batches rather than one.** One frame per *run* is the progress bar
+    that jumps from 0% to 100%, which
     `ReconcileService._publish_progress` already names for `sync.progress`;
-    with a single batch it is indistinguishable from one per batch.
+    with a single batch it is indistinguishable from one per batch. Asserting
+    the batch frames by *slice* rather than by count keeps that distinction
+    alive now that the run is bracketed by two transition frames.
     """
     commit = CommitSpy()
     spy = ProgressSpy(commit)
@@ -451,9 +469,18 @@ async def test_one_progress_frame_lands_per_batch_and_never_before_its_own_commi
         dataset, lambda rows: _write(catalog, rows)
     )
 
-    assert commit.count == 3, "the premise: two batch commits and the completing one"
-    assert [seen for _, seen in spy.frames] == [1, 2], (
-        "a frame was offered before the commit that made its batch durable"
+    assert commit.count == 4, "the premise: the opening commit, two batches, the completing one"
+    assert [seen for _, seen in spy.frames] == [1, 2, 3, 4], (
+        "a frame was offered before the commit that made its subject durable"
+    )
+    assert [event.data["status"] for event, _ in spy.frames] == [
+        "running",
+        "running",
+        "running",
+        "completed",
+    ]
+    assert [event.data["rows_seen"] for event, _ in spy.frames] == [0, 2, 3, 3], (
+        "the two middle frames are the batches, and they must differ"
     )
 
 
@@ -477,7 +504,9 @@ async def test_a_progress_frame_is_scoped_to_no_title_so_a_detail_screen_never_s
     )
 
     assert spy.frames, "no frame was published, so nothing below measures anything"
-    assert [(event.title_id, event.episode_id) for event, _ in spy.frames] == [(None, None)]
+    assert {(event.title_id, event.episode_id) for event, _ in spy.frames} == {(None, None)}, (
+        "every frame, transitions included -- one scoped frame in the set is one too many"
+    )
 
 
 async def test_a_progress_frame_carries_the_cursor_the_batch_committed(
@@ -491,10 +520,20 @@ async def test_a_progress_frame_carries_the_cursor_the_batch_committed(
     contract is that resuming from it never misses a record, and the Wikidata
     crosswalk pages a SPARQL result set with no total at all.
 
-    `phase` is the `BootstrapPhase` the run was asked for and `dataset` is
-    what is streaming now; the two differ on every `--phase all` run, which is
-    what a single case seeded with `phase=IMDB` and the `scripted` dataset can
-    show and a case where they agreed could not.
+    **The payload is the whole run rather than a cursor**, and the equality
+    below is against a literal document rather than a handful of keys for
+    `test_the_status_route_serialises_the_report_and_invents_nothing`'s
+    reason: a field dropped from the payload renders as a smaller object that
+    every per-key assertion still passes. Every name here is
+    `ImportRunResponse`'s, so a client patching a status document with a frame
+    translates nothing -- and that correspondence is the thing a per-key
+    assertion could not hold on to.
+
+    `requested_phase` is the `BootstrapPhase` the run was asked for, `phase`
+    is the step that owns `dataset`, and `dataset` is what is streaming now.
+    All three differ on this run, which is what a case seeded with
+    `phase=ALL` and a dataset outside the map can show and a case where any
+    two agreed could not.
     """
     commit = CommitSpy()
     spy = ProgressSpy(commit)
@@ -503,13 +542,35 @@ async def test_a_progress_frame_carries_the_cursor_the_batch_committed(
         ScriptedDataset([[_title(1), _title(2)]]), lambda rows: _write(catalog, rows)
     )
 
-    assert [event.kind for event, _ in spy.frames] == [ClientEventKind.BOOTSTRAP_PROGRESS]
-    assert dict(spy.frames[0][0].data) == {
+    assert {event.kind for event, _ in spy.frames} == {ClientEventKind.BOOTSTRAP_PROGRESS}
+    batch = spy.frames[1][0]
+    stored = await runs.get("scripted")
+    assert stored is not None
+
+    # Lifted out before the equality below rather than compared inside it.
+    # `heartbeat_at` is written fresh on every committed batch, so the only
+    # value this case could put on the right-hand side is the one it just read
+    # off the left -- an assertion that cannot fail, dressed as a literal. The
+    # `pop` still holds the *key*'s presence, which is what the whole-document
+    # equality is for, and the two lines under it assert what the field is
+    # actually for: a real aware timestamp, moved on since the run opened.
+    payload = dict(batch.data)
+    heartbeat = payload.pop("heartbeat_at")
+    assert datetime.fromisoformat(str(heartbeat)).tzinfo is not None
+    assert datetime.fromisoformat(str(heartbeat)) >= stored.started_at
+
+    assert payload == {
         "dataset": "scripted",
-        "phase": "all",
+        "phase": None,
+        "requested_phase": "all",
+        "status": "running",
+        "revision": "etag-1",
+        "position": 1,
         "rows_seen": 2,
         "rows_written": 2,
-        "position": 1,
+        "error": None,
+        "started_at": stored.started_at.isoformat(),
+        "finished_at": None,
     }
 
 
@@ -534,5 +595,146 @@ async def test_a_failed_phase_publishes_nothing_it_did_not_commit(
     )
 
     assert run.status is ImportRunStatus.FAILED, "the premise: this run did not complete"
-    assert len(spy.frames) == 2, "one frame per committed batch, and the third never committed"
-    assert [event.data["rows_seen"] for event, _ in spy.frames] == [1, 2]
+    batches = [event for event, _ in spy.frames if event.data["status"] == "running"][1:]
+    assert len(batches) == 2, "one frame per committed batch, and the third never committed"
+    assert [event.data["rows_seen"] for event in batches] == [1, 2]
+    assert spy.frames[-1][0].data["status"] == "failed", (
+        "the run ended and the last frame has to say so"
+    )
+
+
+async def test_a_run_announces_itself_before_it_has_a_single_batch_to_report(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """The frame this service did not send, and the whole reason the console
+    could not be driven by events.
+
+    `bootstrap.progress` fired **only per committed batch**, so between
+    `runs.start()` and the first batch landing there was no frame and -- worse
+    -- no *visible row* either: `start()` flushes and does not commit, so no
+    other connection can see the `RUNNING` checkpoint until some later
+    `_commit()` carries it. For `wikidata.crosswalk`, whose first batch is a
+    SPARQL round trip, that window is the length of the query. An operator who
+    pressed Run watched a screen that said nothing was running, because from
+    every other connection's point of view nothing was.
+
+    So the run announces itself, and the commit count at publish time is the
+    assertion: **1**, not 0. A publish placed after `start()` but before the
+    commit records 0, which is the same frame in the same position and is a
+    claim about a row nobody else can read (ADR-0033).
+    """
+    commit = CommitSpy()
+    spy = ProgressSpy(commit)
+
+    await _service(runs, catalog, commit, events=spy).import_dataset(
+        ScriptedDataset([]), lambda rows: _write(catalog, rows)
+    )
+
+    assert spy.frames, "no frame was published, so nothing below measures anything"
+    opening, commits_at_publish = spy.frames[0]
+    assert opening.data["status"] == "running"
+    assert opening.data["rows_seen"] == 0
+    assert commits_at_publish == 1, "published before the commit that made the row readable"
+
+
+async def test_a_completed_run_says_so_rather_than_going_quiet(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """`_finish` published nothing, so the last thing a client ever heard
+    about a dataset was a batch -- indistinguishable from a run that stalled.
+
+    A screen driven by frames would have shown the card forever. The
+    completion frame carries `finished_at`, which is the field that
+    distinguishes "done" from "quiet", and it lands after `_finish`'s own
+    commit.
+    """
+    commit = CommitSpy()
+    spy = ProgressSpy(commit)
+
+    await _service(runs, catalog, commit, events=spy).import_dataset(
+        ScriptedDataset([[_title(1)]]), lambda rows: _write(catalog, rows)
+    )
+
+    final, commits_at_publish = spy.frames[-1]
+    assert final.data["status"] == "completed"
+    assert final.data["finished_at"] is not None
+    assert commits_at_publish == commit.count, "published before _finish's own commit"
+
+
+async def test_a_failed_run_says_why_rather_than_going_quiet(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """The other half of the same silence, and the one with the sharper cost:
+    a `FAILED` run is a **normal, designed state** whose trigger is relabelled
+    "Resume", and nothing announced it.
+
+    The error crosses verbatim because it is already `str(exc)` on the durable
+    row -- no second, weaker redaction at this layer, for
+    `ImportRunResponse.error`'s reason.
+    """
+    commit = CommitSpy()
+    spy = ProgressSpy(commit)
+    dataset = ScriptedDataset([[_title(1)], [_title(2)], [_title(3)]], fail_after=2)
+
+    run = await _service(runs, catalog, commit, events=spy).import_dataset(
+        dataset, lambda rows: _write(catalog, rows)
+    )
+
+    assert run.status is ImportRunStatus.FAILED, "the premise: this run did not complete"
+    final, commits_at_publish = spy.frames[-1]
+    assert final.data["status"] == "failed"
+    assert final.data["error"] == run.error
+    assert final.data["error"], "a failure frame with no error is not a diagnosis"
+    assert commits_at_publish == commit.count, "published before the failure was committed"
+
+
+async def test_a_frame_names_the_phase_that_owns_the_dataset_and_the_one_that_was_asked_for(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """Two different facts that were one field, and conflating them is what
+    made the frame unusable for the screen it exists to drive.
+
+    `requested_phase` is what the operator pressed and what `Job.key` holds --
+    `all` for a full run -- so it is how a client tells its own request's
+    frames from somebody else's. `phase` is the **step that owns this
+    dataset**, which is the six-member vocabulary a console has a row for, and
+    it agrees with `ImportRunResponse.phase` by construction because both read
+    `DATASET_PHASES`.
+
+    Driven at `phase=ALL` against a real dataset name, because that is the
+    only configuration where the two genuinely differ: seeded with `IMDB` and
+    an imdb dataset they agree, and a case where they agree cannot tell a
+    correct implementation from one that publishes the same value twice.
+    """
+    commit = CommitSpy()
+    spy = ProgressSpy(commit)
+
+    await _service(runs, catalog, commit, events=spy, phase=BootstrapPhase.ALL).import_dataset(
+        ScriptedDataset([[_title(1)]], name="imdb.title.akas"),
+        lambda rows: _write(catalog, rows),
+    )
+
+    assert spy.frames, "no frame was published, so nothing below measures anything"
+    for event, _ in spy.frames:
+        assert event.data["requested_phase"] == "all"
+        assert event.data["phase"] == "aliases"
+
+
+async def test_a_dataset_outside_the_phase_map_reports_no_phase_rather_than_guessing(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """PRD 06's absence rule, in the frame as well as in the response.
+
+    `scripted` is in no phase, and the honest answer is `None` -- not the
+    requested phase, which is the tempting fallback and would make every frame
+    of a `--phase all` run claim to belong to a step called `all`.
+    """
+    commit = CommitSpy()
+    spy = ProgressSpy(commit)
+
+    await _service(runs, catalog, commit, events=spy, phase=BootstrapPhase.ALL).import_dataset(
+        ScriptedDataset([[_title(1)]]), lambda rows: _write(catalog, rows)
+    )
+
+    assert spy.frames, "no frame was published, so nothing below measures anything"
+    assert spy.frames[0][0].data["phase"] is None

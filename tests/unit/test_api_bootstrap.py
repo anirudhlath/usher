@@ -30,7 +30,11 @@ from fastapi import FastAPI
 from tests.fakes.job_queue import FakeJobQueue
 from usher.api.app import create_app
 from usher.api.deps import get_bootstrap_report, get_job_queue
-from usher.api.dto.bootstrap import BootstrapStatusResponse, VocabularyResponse
+from usher.api.dto.bootstrap import (
+    BootstrapStatusResponse,
+    ImportRunResponse,
+    VocabularyResponse,
+)
 from usher.api.routers import bootstrap as bootstrap_router
 from usher.config import Settings
 from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
@@ -321,3 +325,50 @@ def test_the_status_route_is_in_the_openapi_document_with_a_real_shape(app: Fast
     assert schema["properties"]["titles"]["type"] == "integer"
     vocabulary = document["components"]["schemas"]["VocabularyState"]
     assert set(vocabulary["enum"]) == {one.value for one in VocabularyState}
+
+
+async def test_a_run_names_the_phase_it_belongs_to(status_client: FastAPI) -> None:
+    """`dataset` is a checkpoint's identity and `phase` is what an operator
+    pressed, and until now only the first crossed the wire.
+
+    A client holding the six phases -- which is every client, because
+    `POST /admin/bootstrap/{phase}` takes one -- had nothing to join a run to.
+    The console did the obvious thing and compared `run.dataset` against a
+    phase name, which matches **nothing**: the eight dataset names are
+    `imdb.title.basics`, `imdb.title.ratings`, `imdb.credit_names`,
+    `imdb.title.akas`, `tmdb.ids.movie`, `tmdb.ids.series`,
+    `wikidata.crosswalk` and `movielens.genome`, and not one of them is a
+    `BootstrapPhase` value. Every phase read "never run" on a fully imported
+    catalog.
+
+    Read off `DATASET_PHASES` rather than stored, because `import_runs` has no
+    such column and adding one would record *the phase that was requested* --
+    `all` for the run an operator actually starts -- which is not the phase
+    that owns the dataset and is not what a screen needs.
+    """
+    async with LifespanManager(status_client):
+        transport = httpx.ASGITransport(app=status_client)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.get("/admin/bootstrap/status")
+
+    body = response.json()
+    assert [(one["dataset"], one["phase"]) for one in body["runs"]] == [
+        ("imdb.title.basics", "imdb"),
+        ("wikidata.crosswalk", "crosswalk"),
+    ]
+
+
+def test_a_dataset_the_map_does_not_know_reports_no_phase_rather_than_guessing() -> None:
+    """A row written by a version that had a dataset this one does not.
+
+    `None`, never a fallback to the dataset string and never the first phase
+    in the sequence: PRD 06's absence rule, and the same call
+    `traceresponse()` makes for a span that is not recording. A client can
+    render "an import this build does not have a phase for" honestly; it
+    cannot un-believe a phase that was invented for it.
+    """
+    rendered = ImportRunResponse.of(
+        ImportRun(dataset="imdb.title.crew", revision="etag-1"),
+    )
+
+    assert rendered.phase is None

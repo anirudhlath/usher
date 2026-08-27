@@ -162,6 +162,28 @@ export const resolved: Schemas['ResolvedItemResponse'] = {
 /* -------------------------------------------------------------- bootstrap */
 
 /**
+ * ⚠️ **`dataset` is the wire name, never a phase name, and these fixtures said
+ * otherwise for the whole of the console's life.** They spelled it `imdb`,
+ * `movielens` and `crosswalk` — the six phase values — while the real server
+ * sends `imdb.title.basics`, `imdb.title.ratings`, `imdb.credit_names`,
+ * `imdb.title.akas`, `tmdb.ids.movie`, `tmdb.ids.series`, `wikidata.crosswalk`
+ * and `movielens.genome`. Eight names, six phases, and no overlap between the
+ * two sets.
+ *
+ * `Bootstrap.tsx` matched a phase against `run.dataset`, so on a real
+ * deployment every phase read "never run" on a fully imported catalog and no
+ * duration was ever "measured on this deployment". **Every test passed**,
+ * because the fixture was spelled the way the screen wished the server were.
+ * A fake that diverges from its real arm does not fail — it certifies.
+ *
+ * `phase` is the wire field that closes it (`ImportRunResponse.phase`, read
+ * from `usher.domain.bootstrap.DATASET_PHASES`), and it is what the screen
+ * matches on now. `npm run gen:types` against a live server is what keeps the
+ * *shape* honest; only using the real names keeps the *values* honest, and
+ * nothing generates those.
+ */
+
+/**
  * One run mid-flight and one finished, which is what the cursor-progress idiom
  * needs both of.
  *
@@ -172,7 +194,8 @@ export const resolved: Schemas['ResolvedItemResponse'] = {
  * timestamp and the inference is ours.
  */
 export const importRunning: Schemas['ImportRunResponse'] = {
-  dataset: 'imdb',
+  dataset: 'imdb.title.basics',
+  phase: 'imdb',
   status: 'running',
   revision: '2026-08-18',
   position: 418_002,
@@ -185,7 +208,8 @@ export const importRunning: Schemas['ImportRunResponse'] = {
 }
 
 export const importCompleted: Schemas['ImportRunResponse'] = {
-  dataset: 'movielens',
+  dataset: 'movielens.genome',
+  phase: 'movielens',
   status: 'completed',
   revision: 'ml-25m',
   position: 62_423,
@@ -203,7 +227,8 @@ export const importCompleted: Schemas['ImportRunResponse'] = {
  * the trigger is relabelled "Resume".
  */
 export const importFailed: Schemas['ImportRunResponse'] = {
-  dataset: 'crosswalk',
+  dataset: 'wikidata.crosswalk',
+  phase: 'crosswalk',
   status: 'failed',
   revision: '2026-08-16',
   position: 88_140,

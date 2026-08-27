@@ -1253,7 +1253,7 @@ spelling, and no `internal_error` either — nothing emits one.
 | `watchstate.updated` | Title/episode id, position, played | Update progress | ✅ M5 |
 | `row.invalidated` | Row slug | Refetch that row | ✅ M7 |
 | `sync.progress` | Source, counts, phase | Admin UI only | ✅ M5 |
-| `bootstrap.progress` | Phase, dataset, rows seen, rows written, cursor position | Admin UI only | ✅ M9 |
+| `bootstrap.progress` | The whole `ImportRun` — dataset, owning phase, requested phase, status, revision, cursor position, rows seen, rows written, error, started/heartbeat/finished | Admin UI only | ✅ M9 |
 
 > **Built in M9's E7, and this row's payload column is *changed* rather than
 > implemented — so the change is argued here rather than applied silently.**
@@ -1267,6 +1267,39 @@ spelling, and no `internal_error` either — nothing emits one.
 > could not satisfy anyway, so the payload states what the importer knows and
 > a client that wants a bar divides by whatever it knows about the dump.
 >
+> **The payload widened again, to the whole `ImportRun`, because a lean frame
+> costs a request.** It carried five fields — dataset, phase, rows seen, rows
+> written, position — which is enough to say *something moved* and not enough
+> to render. A client had to answer each frame with
+> `GET /admin/bootstrap/status`, which is ~0.33 s, uncached, and re-reads
+> `titles` four times; at 61 frames for `--phase imdb` alone that is strictly
+> worse than the 10 s poll it was meant to replace. Every field is now
+> `ImportRunResponse`'s, spelled identically, so a client patches a status
+> document with a frame and translates nothing.
+>
+> **Two phases, because they are two facts.** `requested_phase` is what the
+> operator pressed and what `Job.key` holds — `all` for a full run — so it is
+> how a client tells its own request's frames from somebody else's. `phase` is
+> the **step that owns the dataset**, read from
+> `usher.domain.bootstrap.DATASET_PHASES`, and it is the six-member vocabulary
+> a console has a row for. They differ on every `--phase all` run, which is
+> exactly the run where a screen needs the second one. A single field could
+> only ever be one of them, and being the wrong one is invisible: matching
+> `dataset` against a phase value matches **none** of the eight dataset names,
+> so every phase reads "never run" on a fully imported catalog.
+>
+> **Three transitions raise a frame that no batch could.** A run starting,
+> completing and failing are not batches, so a per-batch producer announced
+> none of them: a screen driven by frames showed a card when the first batch
+> committed and could never clear it, and a dataset resuming at head committed
+> no batch and ran to completion having said nothing. The opening frame also
+> forced a commit that was missing — `ImportRunRepository.start()` flushes and
+> does not commit, so until then the `RUNNING` checkpoint was invisible to
+> every other connection, including the one answering
+> `GET /admin/bootstrap/status`. For `wikidata.crosswalk`, whose first batch is
+> a SPARQL round trip away, an operator who pressed Run was told nothing was
+> running and was told it truthfully.
+>
 > **The member had no producer until E5 put bootstrap on the queue**, and
 > `ports/events.py` said so in as many words: *"bootstrap runs in the CLI
 > process while the bus is in-process, so there is no channel from one to the
@@ -1277,8 +1310,9 @@ spelling, and no `internal_error` either — nothing emits one.
 > publisher with no wire name is a `KeyError` inside a response that has
 > already answered `200 text/event-stream`.
 >
-> **One frame per committed batch, never one per run**, and never before that
-> batch's own commit ([ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md)).
+> **One frame per committed batch *and one per transition*, never one per
+> run**, and never before the commit that made its subject durable
+> ([ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md)).
 > One at the end is a progress bar that jumps from 0% to 100%, which is the
 > same call `sync.progress` makes. The rate is the smaller of the two: a
 > `--phase imdb` run raises **61** frames at the shipped 50,000-row batch size
@@ -1429,14 +1463,15 @@ proxies that mangle upgrades, and it reconnects natively in browsers.
 > a proxied body, which would otherwise hold every event until a buffer
 > filled.
 >
-> **`bootstrap.progress` is not emitted**, and the reason is structural
-> rather than an omission: `usher bootstrap` is a separate process and M5's
-> bus is in-process, so there is no channel from one to the other. Emitting a
-> type nothing publishes would be a client handler that waits forever — the
-> same argument [10](10-telemetry-and-dashboards.md) makes for a metric
-> nothing records. A cross-process transport is the named second
-> implementation of the `EventPublisher` port and is what would make it
-> emittable.
+> **`bootstrap.progress` was not emitted until M9's E5 put bootstrap on the
+> queue**, and the reason was structural rather than an omission: `usher
+> bootstrap` is a separate process and M5's bus is in-process, so there was no
+> channel from one to the other. A phase started through
+> `POST /admin/bootstrap/{phase}` runs on the worker lane, which in the shipped
+> default is the API process holding the bus, so the channel now exists — see
+> the event table above for what it carries and for the split-deployment
+> degradation that survives. A cross-process transport is still the named
+> second implementation of the `EventPublisher` port.
 >
 > **The nightly watch-state walk publishes nothing**, deliberately, and it is
 > a scale decision rather than an omission: a walk merges up to 1,126,789

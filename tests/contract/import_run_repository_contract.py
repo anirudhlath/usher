@@ -46,6 +46,41 @@ class ImportRunRepositoryContract:
         assert (restarted.position, restarted.rows_seen, restarted.rows_written) == (0, 0, 0)
         assert restarted.revision == "etag-2"
 
+    async def test_a_restart_dates_the_run_it_is_starting_not_the_first_one_ever(
+        self, runs: ImportRunRepository
+    ) -> None:
+        """`started_at` is *this* run's clock, and it was the first run's.
+
+        Every reader treats it as a duration's left edge — `usher
+        bootstrap-status` prints one, and the console renders
+        `finished_at - started_at` as "measured on this deployment" and
+        `now - started_at` as a live run's `elapsed`. Keeping the original value
+        made all three the age of the *dataset*: on the catalog this project
+        measures, `imdb.title.basics` had been re-imported that same day and
+        read **15.8 days**, printed as a measurement of a run that took three
+        minutes.
+
+        The row is still one row per dataset — that is what `id` is for, and it
+        is what the comment defending this actually argued; `started_at` was
+        being carried along with it for free.
+
+        **Both restart branches**, because they are separate arms in both
+        implementations: an unchanged revision keeps the cursor, a moved one
+        resets it, and only a case driving each can tell a fix applied to one
+        from a fix applied to both.
+        """
+        first = await runs.start("imdb.title.basics", "etag-1")
+        resumed = await runs.start("imdb.title.basics", "etag-1")
+        assert resumed.started_at > first.started_at, "a resume is a run and has its own clock"
+
+        moved = await runs.start("imdb.title.basics", "etag-2")
+        assert moved.started_at > resumed.started_at
+        assert moved.id == first.id, "still one row per dataset, which is what id is for"
+
+        stored = await runs.get("imdb.title.basics")
+        assert stored is not None
+        assert stored.started_at == moved.started_at, "the reset has to be persisted"
+
     async def test_start_clears_a_previous_failure(self, runs: ImportRunRepository) -> None:
         """A retry that inherited `status=failed` and a stale `error` would
         report a successful run as failed forever."""
