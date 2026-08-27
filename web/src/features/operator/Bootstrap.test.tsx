@@ -211,6 +211,49 @@ describe('Bootstrap', () => {
     expect(await screen.findByText(/15 m 26 s on this deployment/)).toBeInTheDocument()
   })
 
+  it('measures a phase as the work all its datasets did, not just the last one', async () => {
+    /**
+     * `imdb` writes `title.basics` then `title.ratings`, and `tmdb-ids` writes
+     * one file per kind. Reading the duration off the row a phase's *summary*
+     * happens to point at reports one dataset's clock as the phase's: on the
+     * shipped deployment `title.basics` took 5 s and `title.ratings` resumed at
+     * head in under a second, and the screen said **"measured 0 s"**.
+     *
+     * Summed rather than min-start-to-max-finish, because the two datasets need
+     * not have run in the same sitting — a span would report the gap between
+     * two imports as the time an import took.
+     */
+    server.use(
+      http.get('/admin/bootstrap/status', () =>
+        HttpResponse.json({
+          ...bootstrapStatus,
+          runs: [
+            {
+              ...importCompleted,
+              dataset: 'imdb.title.basics',
+              phase: 'imdb',
+              started_at: '2026-08-18T02:00:00Z',
+              finished_at: '2026-08-18T02:00:41Z',
+              heartbeat_at: '2026-08-18T02:00:41Z',
+            },
+            {
+              ...importCompleted,
+              dataset: 'imdb.title.ratings',
+              phase: 'imdb',
+              started_at: '2026-08-18T02:00:41Z',
+              finished_at: '2026-08-18T02:01:03Z',
+              heartbeat_at: '2026-08-18T02:01:03Z',
+            },
+          ],
+        }),
+      ),
+    )
+    render()
+
+    // 41 s + 22 s, not the 22 s of whichever row is summarised.
+    expect(await screen.findByText(/1 m 03 s on this deployment/)).toBeInTheDocument()
+  })
+
   it('prints genome coverage as counts and as a ratio whose denominator is named', async () => {
     render()
 
@@ -466,6 +509,117 @@ describe('Bootstrap — live rather than polled', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('keeps a frame that arrived before the first status response', async () => {
+    /**
+     * Reported from a real deployment: *"after I hit run, nothing happens right
+     * away on the UI — something flashed and went away."*
+     *
+     * `GET /admin/bootstrap/status` is uncached and re-reads `titles` four
+     * times. Measured at **2.4 s** on the shipped catalog *while a bootstrap
+     * was running* — against the 0.33 s an idle box gives — so the window
+     * between mount and first data is widest exactly when a phase has just been
+     * triggered, because the thing widening it is the phase. Every frame that
+     * lands in it used to be dropped on the floor, because the patch bailed out
+     * when the cache held nothing to merge into.
+     */
+    let release: (() => void) | null = null
+    server.use(
+      http.get('/admin/bootstrap/status', async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return HttpResponse.json(settled)
+      }),
+    )
+    render()
+
+    await screen.findByText('Loading bootstrap status …')
+    sse.latest().open()
+    sse.latest().emit('bootstrap.progress', frame({ rows_seen: 4_242 }))
+
+    // **Asserted while the request is still open**, which is the whole case.
+    // Asserting after the release cannot fail: frames are held in state, so one
+    // dropped from the pre-response window still lands the moment the response
+    // does — the first draft of this case passed against the defect it was
+    // written for, and a mutation sweep is what said so.
+    expect(await screen.findByText('4,242')).toBeInTheDocument()
+    expect(release).not.toBeNull()
+
+    release!()
+    expect(await screen.findByText('1,272,869 titles')).toBeInTheDocument()
+    expect(screen.getByText('4,242')).toBeInTheDocument()
+  })
+
+  it('does not let a refetch already in flight erase a newer frame', async () => {
+    /**
+     * The other half of the same report, and the one that makes a card *flash*
+     * rather than never appear.
+     *
+     * A terminal frame refetches, because `titles` and the genome are not on
+     * the wire. That refetch takes seconds under bootstrap load, and
+     * `--phase all` finishes several datasets inside one second — measured on
+     * the shipped deployment: `imdb.title.basics` completed at 02:36:08, and
+     * `imdb.title.ratings` both started and completed in that same second while
+     * `imdb.credit_names` opened. So a request issued *before* the newest frame
+     * resolves *after* it, carrying a snapshot that predates it.
+     *
+     * Writing frames into the query cache made that a clobber: React Query
+     * replaces the whole entry when a fetch settles and knows nothing of a
+     * manual patch. The card appeared and vanished, which is what was seen.
+     */
+    let served = 0
+    let release: (() => void) | null = null
+    server.use(
+      http.get('/admin/bootstrap/status', async () => {
+        served += 1
+        // The second read is the terminal frame's refetch. Hold it open so the
+        // next frame provably lands while it is still in flight, rather than
+        // racing a timer and hoping.
+        if (served === 2) {
+          await new Promise<void>((resolve) => {
+            release = resolve
+          })
+        }
+        // A distinguishable `titles` per response, because `served` reaching 2
+        // says the request was *issued* and this case is about what happens
+        // when it *lands*. Waiting on the counter asserts before the thing
+        // under test has happened — which is how the first draft of this case
+        // passed against the defect it was written for.
+        return HttpResponse.json({ ...settled, titles: served })
+      }),
+    )
+    render()
+
+    await screen.findByText('Nothing is running')
+
+    sse.latest().open()
+    // Terminal frame for one dataset: this is what starts the slow refetch.
+    sse
+      .latest()
+      .emit('bootstrap.progress', frame({ status: 'completed', finished_at: new Date().toISOString() }))
+    await waitFor(() => expect(release).not.toBeNull())
+
+    // A different dataset starts while that request is still open.
+    sse
+      .latest()
+      .emit(
+        'bootstrap.progress',
+        frame({ dataset: 'imdb.credit_names', phase: 'credit-names', rows_seen: 777_000 }),
+      )
+    expect(await screen.findByText('777,000')).toBeInTheDocument()
+
+    release!()
+
+    // The premise: the stale snapshot has actually landed and been rendered.
+    // Only then is there anything to assert about what it did to the runs.
+    expect(await screen.findByText('2 titles')).toBeInTheDocument()
+
+    // It must carry `titles` and the genome — that is what it was fetched for —
+    // and leave the newer run alone.
+    expect(screen.getByText('777,000')).toBeInTheDocument()
+    expect(screen.queryByText('Nothing is running')).toBeNull()
   })
 
   it('says it is live and not polling, and says the opposite when the stream is down', async () => {

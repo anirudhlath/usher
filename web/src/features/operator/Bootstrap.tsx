@@ -28,7 +28,7 @@
  *   one silently is how "~7%" came to mean four different things.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   Badge,
@@ -57,7 +57,6 @@ import {
   useStartBootstrap,
   type BootstrapPhase,
   type BootstrapProgress,
-  type BootstrapStatusResponse,
   type ImportRun,
 } from '@/api'
 
@@ -196,6 +195,48 @@ function runOfFrame(payload: BootstrapProgress, cached: ImportRun | undefined): 
 }
 
 /**
+ * The fetched runs with everything newer that arrived on the stream laid over
+ * them.
+ *
+ * **Frames are held outside the query cache and merged here, on every read.**
+ * They used to be written into it with `setQueryData`, and that lost them two
+ * ways, both reported from a real deployment as *"nothing happens right away,
+ * something flashed and went away"*:
+ *
+ * · A frame arriving before the first response had nothing to merge into and
+ *   was dropped. `GET /admin/bootstrap/status` is uncached and re-reads
+ *   `titles` four times — **2.4 s measured while a bootstrap was running**,
+ *   against 0.33 s idle — so that window is widest exactly when a phase has
+ *   just been triggered, because the thing widening it is the phase.
+ * · A refetch already in flight replaced the whole cache entry when it landed,
+ *   with a snapshot older than the frame. React Query knows nothing of a manual
+ *   patch, and every terminal frame starts such a refetch: `--phase all`
+ *   finished three datasets inside one second on the shipped deployment.
+ *
+ * Merging at read time has neither failure by construction — there is nothing
+ * for a response to overwrite. `heartbeat_at` is the arbiter rather than
+ * arrival order, so a response that really is newer than the frame still wins,
+ * which is what makes the fetch authoritative again once it catches up.
+ */
+function withFrames(
+  fetched: readonly ImportRun[] | undefined,
+  framed: ReadonlyMap<string, ImportRun>,
+): readonly ImportRun[] | undefined {
+  if (fetched === undefined) return framed.size === 0 ? undefined : [...framed.values()]
+
+  const seen = new Set(fetched.map((run) => run.dataset))
+  const merged = fetched.map((run) => {
+    const frame = framed.get(run.dataset)
+    if (frame === undefined) return run
+    return Date.parse(frame.heartbeat_at) >= Date.parse(run.heartbeat_at) ? frame : run
+  })
+  // A dataset the response has never mentioned — a first-ever import — goes at
+  // the front, which is where the route puts most-recent activity anyway.
+  const fresh = [...framed.values()].filter((run) => !seen.has(run.dataset))
+  return fresh.length === 0 ? merged : [...fresh, ...merged]
+}
+
+/**
  * The run a phase's row speaks for, out of the one or more datasets it owns.
  *
  * **A phase is not a dataset**: `imdb` writes `title.basics` then
@@ -330,29 +371,21 @@ export default function Bootstrap() {
   const [askedAt, setAskedAt] = useState<number | null>(null)
 
   /**
-   * A frame patches its own dataset in place. **No refetch**, which is the
-   * whole reason the payload is the run rather than a cursor: answering each
-   * frame with `GET /admin/bootstrap/status` costs ~0.33 s uncached and four
-   * scans of `titles`, and `--phase imdb` alone raises 61 of them.
+   * What the stream has said, keyed by dataset. **Component state, never the
+   * query cache** — `withFrames` explains what writing it into the cache cost.
+   * Bounded by the number of datasets, which is eight.
    */
-  const applyFrame = useCallback(
-    (payload: BootstrapProgress) => {
-      queries.setQueryData<BootstrapStatusResponse>(['bootstrap-status'], (previous) => {
-        if (previous === undefined) return previous
-        const cached = previous.runs.find((run) => run.dataset === payload.dataset)
-        const next = runOfFrame(payload, cached)
-        if (next === null) return previous
-        return {
-          ...previous,
-          runs:
-            cached === undefined
-              ? [next, ...previous.runs]
-              : previous.runs.map((run) => (run.dataset === next.dataset ? next : run)),
-        }
-      })
-    },
-    [queries],
-  )
+  const [framed, setFramed] = useState<ReadonlyMap<string, ImportRun>>(new Map())
+
+  const applyFrame = useCallback((payload: BootstrapProgress) => {
+    setFramed((previous) => {
+      const next = runOfFrame(payload, previous.get(payload.dataset ?? ''))
+      if (next === null) return previous
+      const merged = new Map(previous)
+      merged.set(next.dataset, next)
+      return merged
+    })
+  }, [])
 
   const stream = useEventStream({
     onEvent: (event) => {
@@ -392,14 +425,24 @@ export default function Bootstrap() {
   })
 
   const data = status.data
-  const runs = data?.runs
+  /**
+   * **`useMemo` is load-bearing, not a micro-optimisation.** `withFrames` maps,
+   * so it hands back a new array on every call, and `useThroughput` keys its
+   * effect on `runs` *identity* — an unmemoised merge makes that effect fire
+   * every render, `setRates` re-render, and the two spin forever. It presents
+   * as a hung test and, in a browser, as a page that renders correctly while
+   * burning a core.
+   */
+  const runs = useMemo(() => withFrames(data?.runs, framed), [data?.runs, framed])
   const throughput = useThroughput(runs)
 
   const anyRunning = (runs ?? []).some((run) => run.status === 'running')
 
   const waiting = stillWaiting(askedAt, runs)
   const live = (runs ?? []).filter((run) => run.status === 'running' || run.status === 'failed')
-  const neverBuilt = data !== undefined && data.runs.length === 0
+  // Read through the merge, or the first frame of a first-ever import leaves the
+  // screen insisting the catalog has never been built while a run streams past.
+  const neverBuilt = data !== undefined && (runs ?? []).length === 0
 
   /**
    * The run a phase's row speaks for. Matched on `phase`, **never on
@@ -411,16 +454,33 @@ export default function Bootstrap() {
 
   /**
    * The only honest duration available: what this deployment actually took,
-   * read off `started_at` and `finished_at` of a run that finished. Anything
-   * else is `NOT_MEASURED` — patterns.md §5 forbids an invented range.
+   * summed across every dataset the phase writes. Anything else is
+   * `NOT_MEASURED` — patterns.md §5 forbids an invented range.
+   *
+   * **Summed, and over all of them.** `imdb` writes `title.basics` then
+   * `title.ratings`; reading the duration off the single run the phase's row
+   * summarises reports one dataset's clock as the phase's, and on the shipped
+   * deployment that read **0 s** — `title.ratings` resumed at head while
+   * `title.basics` took five seconds. A min-start-to-max-finish span is the
+   * other obvious shape and is worse: the two datasets need not have run in
+   * one sitting, so the span reports the gap *between* two imports as the time
+   * an import took.
+   *
+   * Every dataset must have finished, or the number would describe a subset of
+   * the work while claiming to describe the phase.
    */
   const measuredFor = (phase: string): string => {
-    const run = runFor(phase)
-    if (!run || run.finished_at === null) return NOT_MEASURED
-    const started = Date.parse(run.started_at)
-    const finished = Date.parse(run.finished_at)
-    if (Number.isNaN(started) || Number.isNaN(finished)) return NOT_MEASURED
-    return `${formatDuration(finished - started)} on this deployment`
+    const owned = (runs ?? []).filter((run) => run.phase === phase)
+    if (owned.length === 0) return NOT_MEASURED
+    let total = 0
+    for (const run of owned) {
+      if (run.finished_at === null) return NOT_MEASURED
+      const started = Date.parse(run.started_at)
+      const finished = Date.parse(run.finished_at)
+      if (Number.isNaN(started) || Number.isNaN(finished)) return NOT_MEASURED
+      total += finished - started
+    }
+    return `${formatDuration(total)} on this deployment`
   }
 
   const trigger = (target: PhaseSpec | 'all'): void => {
@@ -489,7 +549,7 @@ export default function Bootstrap() {
           </span>
         </div>
 
-        {status.isPending && (
+        {status.isPending && (runs ?? []).length === 0 && (
           <SkeletonRegion busy label="Loading bootstrap status …">
             <Skeleton shape="table" count={6} />
           </SkeletonRegion>
@@ -543,7 +603,15 @@ export default function Bootstrap() {
           </div>
         )}
 
-        {data && !neverBuilt && (
+        {/*
+          Gated on the *runs*, not on `data`. A frame can arrive before the
+          first `GET /admin/bootstrap/status` answers — measured at **2.4 s
+          while a bootstrap was running**, and the thing making it slow is the
+          phase the operator has just started — so requiring `data` here meant
+          the one section that had something to say waited on the three that
+          did not. "Nothing happens right away" was the report.
+        */}
+        {(runs ?? []).length > 0 && !neverBuilt && (
           <OpsSection
             title="Running now"
             note="Six real numbers and a position. There is no total on the wire, so there is no bar to fill."
