@@ -173,6 +173,7 @@ from usher.services.query_expansion import QueryExpansionService
 from usher.services.reconcile import ReconcileService
 from usher.services.rows import row_providers
 from usher.services.rows.cache import RowCache
+from usher.services.scheduler import Scheduler
 from usher.services.search import SearchAnalytics, SearchService
 from usher.services.similar import SimilarityService, blend_fingerprint
 from usher.services.taste import TasteService
@@ -987,6 +988,32 @@ def build_worker(
         batch_size=settings.job_batch_size,
         lease_seconds=settings.job_lease_seconds,
     )
+
+
+def build_scheduler(settings: Settings) -> Scheduler:
+    """The scheduled-work loop, **with an empty registry** (ADR-0046, M10 J4).
+
+    🔴 **Shipping empty is the deliverable, not a stub.** The two registrations
+    ADR-0046 prices are separate tasks -- `search_queries` retention and the
+    neighbour rebuild -- and each is a decision about *when* a multi-hour batch
+    may start unasked. Baking one in here would make that decision invisible;
+    `tests/unit/test_services_scheduler.py::
+    test_the_registry_a_composition_root_builds_ships_empty` is what makes it a
+    line somebody has to delete rather than one nobody reads.
+
+    ⚠️ **A scheduler with no registrations is dead code, and dead code is
+    reverted rather than merged.** This project's own rule in the inverse:
+    *"a kind whose handler is a stub is a queue that grows forever"*
+    (`domain/jobs.py`). If the first registration does not land in this phase,
+    this component and its lane come out.
+
+    Takes settings and nothing else, deliberately: the loop holds no session,
+    no repository and no client, and every job carries whatever it needs to
+    reach a database. A registration that needs a `UnitOfWork` widens this
+    signature in the commit that adds it, which is the same shape
+    `build_worker` above has.
+    """
+    return Scheduler(tick_seconds=settings.scheduler_tick_seconds)
 
 
 def _worker_handlers(
@@ -2523,6 +2550,7 @@ __all__ = [
     "build_pipeline",
     "build_push_applier",
     "build_row_context",
+    "build_scheduler",
     "build_worker",
     "bulk_client",
     "embedder",

@@ -536,6 +536,66 @@ def _observe_sse_connections(options: CallbackOptions) -> Iterable[Observation]:
     return [] if _sse_reader is None else [Observation(_sse_reader())]
 
 
+SchedulerReader = Callable[[], Mapping[str, float]]
+
+# Module global, replaced rather than captured, for the reason `_queue_reader`,
+# `_push_reader` and `_sse_reader` above all state: the SDK keeps only the
+# *first* observable instrument registered under a name and silently discards
+# the rest, so a second registration in one process -- a second `create_app()`,
+# or a second test -- would otherwise leave the first, now-dead reader
+# reporting forever.
+_scheduler_reader: SchedulerReader | None = None
+
+
+def register_scheduler_gauges(read: SchedulerReader) -> None:
+    """PRD 10's `usher.scheduler.job.due` (ADR-0046, M10's J4).
+
+    Seconds since a job's `last_done()` minus its period, per job. **Negative
+    means not due**, so one series answers *"how overdue"* and *"how long
+    left"* without a second instrument -- and the sign is the whole of the
+    reading, because a scheduler with no jobs overdue is the healthy state.
+
+    ⚠️ **`read` is synchronous and hands back a snapshot the scheduler's own
+    loop refreshed, never a query**, and that is not a style preference.
+    `register_queue_gauges` carries the whole argument: OTel invokes an
+    observable callback from the metric reader's *background thread*, every
+    `last_done()` on the shipped registrations is a coroutine on asyncpg, and a
+    callback that queried would have to bounce a coroutine onto the event loop
+    and block the exporter thread on it -- a deadlock whenever the loop is
+    itself blocked. `usher.services.scheduler.Scheduler.read` is the snapshot,
+    taken once per job per tick from the same read the due decision used, so
+    the gauge and the decision cannot disagree.
+
+    A job with no reading has **no entry** -- never run, or a `last_done()`
+    that raised. `Scheduler.read`'s docstring says why a fabricated `0.0` is
+    the one value that would make this series wrong rather than absent.
+
+    Safe to call repeatedly, and the *reader* is what makes it so rather than a
+    guard on the instrument, for `register_queue_gauges`' reason.
+    """
+    global _scheduler_reader
+    _scheduler_reader = read
+    metrics.get_meter("usher.scheduler").create_observable_gauge(
+        "usher.scheduler.job.due",
+        callbacks=[_observe_job_due],
+        unit="s",
+        description="Seconds a scheduled job is overdue; negative means not yet due",
+    )
+
+
+def _observe_job_due(options: CallbackOptions) -> Iterable[Observation]:
+    """No reader means no observation, never a zero.
+
+    A process with the scheduler switched off has no opinion about how overdue
+    anything is, and `0` on this series reads as *"exactly due"* -- which is
+    the one value an alert on it would act on. Same argument `_observations`,
+    `_push_observations` and `_observe_sse_connections` already make.
+    """
+    if _scheduler_reader is None:
+        return []
+    return [Observation(due, {"job": job}) for job, due in _scheduler_reader().items()]
+
+
 @dataclass(frozen=True, slots=True)
 class SearchSnapshot:
     """One reading of the embedding backlog.

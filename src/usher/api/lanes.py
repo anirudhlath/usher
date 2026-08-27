@@ -98,6 +98,7 @@ from usher.composition import (
     UnitOfWork,
     build_push_applier,
     build_row_context,
+    build_scheduler,
     build_worker,
     open_adapter,
     selected_sources,
@@ -115,7 +116,13 @@ from usher.services.jobs import JobWorker
 from usher.services.push import PushOutcome, PushSupervisor
 from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache, StaleScreen
-from usher.telemetry import PushSnapshot, register_queue_gauges, register_search_gauges
+from usher.services.scheduler import Scheduler
+from usher.telemetry import (
+    PushSnapshot,
+    register_queue_gauges,
+    register_scheduler_gauges,
+    register_search_gauges,
+)
 
 _tracer = trace.get_tracer("usher.rows")
 
@@ -181,6 +188,11 @@ class LaneSupervisor:
         self._worker: asyncio.Task[None] | None = None
         self._refresher: asyncio.Task[None] | None = None
         self._rows_lane: asyncio.Task[None] | None = None
+        # The scheduled-work lane (ADR-0046, M10 J4). Built in `start()`
+        # rather than here, and it owns its own task rather than being one of
+        # the four above: `Scheduler.stop()` is what cancels and awaits it,
+        # for the same reason `JobWorker` owns its heartbeat.
+        self._scheduler: Scheduler | None = None
         # What `JobWorker.recover()` measured, kept rather than discarded --
         # see `recovered_claims()` below. `None` until the first recovery pass
         # returns, so a process that runs no worker lane reports *not probed*
@@ -215,6 +227,27 @@ class LaneSupervisor:
             self._rows_lane = asyncio.create_task(
                 self._run_row_refresh(), name="usher.lane.rows.refresh"
             )
+        if self._settings.scheduler_enabled:
+            # **Off by default, unlike the two switches above** -- ADR-0046's
+            # decision 3, and it is why nine existing app fixtures do not have
+            # to grow a third `scheduler_enabled=False`.
+            #
+            # Building and registering here awaits nothing and connects to
+            # nothing, so this method keeps its promise: `build_scheduler`
+            # constructs a loop with an empty registry, the gauge registration
+            # is two `create_observable_gauge` calls, and `Scheduler.start`
+            # creates a task and returns. The first `last_done()` happens
+            # inside that task.
+            self._scheduler = build_scheduler(self._settings)
+            # Registered here rather than unconditionally in `create_app`,
+            # which is where `register_push_gauges` goes: with no scheduler
+            # there is no snapshot to read, and `_observe_job_due` answering
+            # "no reader, no observation" is exactly what keeps a
+            # scheduler-less process from publishing a series about jobs it
+            # does not run. Same placement as `register_queue_gauges`, which
+            # the worker lane makes.
+            register_scheduler_gauges(self._scheduler.read)
+            await self._scheduler.start()
 
     async def stop(self) -> None:
         """Cancel every lane, then close every adapter.
@@ -236,6 +269,12 @@ class LaneSupervisor:
         # would re-raise whatever it crashed with. Neither may stop the rest
         # of shutdown -- and the second would escape the lifespan.
         await asyncio.gather(*tasks, return_exceptions=True)
+        # The scheduler owns its own task, so it is cancelled and awaited
+        # through its own `stop()` rather than joining the gather above. An
+        # in-flight job is cancelled at its next `await`; `ScheduledJob.run`
+        # carries what that obliges an implementation to.
+        if self._scheduler is not None:
+            await self._scheduler.stop()
         self._lanes.clear()
         self._worker = None
         self._refresher = None
@@ -263,6 +302,20 @@ class LaneSupervisor:
 
     def worker_running(self) -> bool:
         return self._worker is not None and not self._worker.done()
+
+    def scheduler_running(self) -> bool:
+        """Whether the scheduled-work lane has a live task.
+
+        **Deliberately not part of `running_sources()` and deliberately not in
+        `ReadinessChecks`**, for `rows_refreshing()`'s reason exactly: it is
+        not a source, and a lane that runs a three-hour batch once a day must
+        not be able to take this process out of a load balancer.
+
+        Reported so a case can state its premise -- *"the lane is up"* -- before
+        waiting on a job, because "the job never ran" and "the lane was never
+        started" are different failures and only the second is a wiring bug.
+        """
+        return self._scheduler is not None and self._scheduler.running()
 
     def recovered_claims(self) -> int | None:
         """The total `JobWorker.recover()` has returned in this process, or

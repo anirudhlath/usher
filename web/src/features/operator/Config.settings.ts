@@ -612,6 +612,24 @@ export const CONFIG: readonly SettingRow[] = [
     secret: false,
     measured: false,
   },
+  {
+    key: 'USHER_SCHEDULER_ENABLED',
+    group: 'lanes',
+    def: 'false',
+    about:
+      'The scheduled-work lane switch, and the only lane that is off by default. A fresh deployment has no embeddings, so an enabled scheduler starts a multi-hour job nobody asked for once the backfill drains; and the scheduler holds no rows, so nothing excludes a second runner. Turn it on in exactly one process, or run `usher schedule --once` from a crontab instead.',
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_SCHEDULER_TICK_SECONDS',
+    group: 'lanes',
+    def: '300.0',
+    about:
+      'How long the loop sleeps between ticks. One query per registered job per tick and nothing else: measured 2026-08-27 against the live 756 MB title_neighbors at 71-73 ms, so about 0.12% duty at 300 s and 7% at 1 s, which is why the floor of 60 is enforced rather than suggested.',
+    secret: false,
+    measured: true,
+  },
 
   /* ------------------------------------------------------------------ sse */
   {

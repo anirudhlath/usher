@@ -315,6 +315,8 @@ uv run usher unmatched --limit 50               # the review queue
 uv run usher unmatched --resolve <media_item_id> --title <title_id>
 uv run usher work --once                        # one pass over the queue
 uv run usher work                               # a worker daemon
+uv run usher schedule --once                    # one tick of the scheduled batches
+uv run usher schedule                           # the scheduler loop
 
 uv run usher index                           # model, stale count, refused count
 uv run usher index --backfill                # enqueue one index job per stale title
@@ -448,6 +450,37 @@ named, counted, left untouched, and exit the command non-zero.
 freshness gap in the project: a title's neighbours go stale when some *other*
 title gets an embedding, which no per-row predicate can decide. It is an
 operator's command or a cron entry after `usher index --backfill`.
+
+⚠️ **`usher schedule` is the component that will close that gap and it does
+not close it yet.** M10's J4 ships the loop, the port and the lane
+([ADR-0046](docs/prd/decisions/0046-the-scheduler-stores-nothing.md)) **with an
+empty registry** — the two registrations, `search_queries` retention and the
+neighbour rebuild, are separate tasks. So today both forms of the command are
+honest and both do nothing: `usher schedule --once` prints `0 of 0 scheduled
+jobs ran`. Three things to know before turning it on:
+
+- **`USHER_SCHEDULER_ENABLED` defaults to `false`**, so the server process runs
+  no scheduler lane unless you say so. `usher schedule` ignores the switch —
+  that is an operator running the loop on purpose, the way `usher work` runs
+  whatever `USHER_WORKER_ENABLED` says.
+- **There is no lock, so turn it on in exactly one process.** The scheduler
+  holds no rows, and `JobQueue`'s exclusion is a row lock rather than a lease,
+  so there is nothing here for a second runner to contend on. Two processes
+  with it on run the same multi-hour rebuild twice.
+- **A period is a minimum interval since the last completion, not a wall
+  clock, and `--once` does not override it.** `usher schedule --once` runs one
+  tick, so a crontab entry controls *when the scheduler looks* and never what
+  it decides — ⚠️ *"every night at 3am"* therefore only happens if the job's
+  period is comfortably under a day, and a period is a property of the job
+  rather than a setting. `usher similar --rebuild` is still the command that
+  runs a batch unconditionally. ADR-0046 sells `--once` as the wall-clock
+  answer without saying this; the decision and its limit are J4's, in
+  `cli._schedule`'s own docstring.
+- **A failed run backs off and does not converge on its own.** The loop spaces
+  retries (doubling, capped at the job's period) so a broken job is not
+  retried every tick forever — but a batch with no resume restarts from the
+  beginning each attempt, so spacing bounds the cost and not the progress.
+  Resumption belongs to the registration.
 
 ### Scripts that are not tests
 

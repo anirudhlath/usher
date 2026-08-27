@@ -862,6 +862,60 @@ class Settings(BaseSettings):
     # added through `POST /admin/sources` gets a lane without a restart.
     push_source_refresh_seconds: float = Field(default=60.0, gt=0)
 
+    # The scheduled-work lane
+    # ([ADR-0046](../../docs/prd/decisions/0046-the-scheduler-stores-nothing.md)),
+    # which is the third lane switch and the only one that is **off** by
+    # default. Two reasons, both measured in that record:
+    #
+    # A fresh deployment has no embeddings, so the first tick of an enabled
+    # scheduler starts a walk over an empty table and then, once
+    # `usher index --backfill` has drained, a multi-hour job nobody asked for.
+    # And nothing excludes a second runner: this component holds no rows, and
+    # `JobQueue`'s exclusion is `FOR UPDATE SKIP LOCKED` on a *row* -- a lock
+    # for the length of a transaction rather than a lease (`ports/jobs.py`
+    # says so explicitly) -- so there is no version of that mechanism a
+    # component with no table can borrow. Two processes with this on, which is
+    # a documented deployment (`USHER_WORKER_ENABLED=false` on the server
+    # beside a `usher work` container), would both start the same rebuild.
+    # Survivable, because each page deletes and re-inserts its own seeds'
+    # rows in one transaction; twice the work and twice the contention for
+    # one artefact, for three and a half hours.
+    #
+    # Read by `usher.api.lanes.LaneSupervisor.start`, and the default-off is
+    # also what keeps every existing app fixture in the suite from having to
+    # say it does not want this lane, the way nine of them already say it for
+    # the other two.
+    scheduler_enabled: bool = False
+    # How long the loop sleeps between ticks. **The floor is measured rather
+    # than stylistic.** A tick issues **one `last_done()` per registered job
+    # and nothing else** -- that is the whole of `ScheduledJob`'s contract, so
+    # it is the whole of what the loop performs -- and for the one
+    # registration to come that read is `SimilarityService.computed_at()`,
+    # `min(computed_at)` over `title_neighbors`. Measured read-only against
+    # this deployment's live 756 MB table on 2026-08-27, the shipped statement
+    # run verbatim, seven samples with the first discarded:
+    #
+    # | read | median | range |
+    # |---|---|---|
+    # | `computed_at()` (ADR-0046's evidence table) | 71.1 ms | 69.2-78.6 |
+    # | `computed_at()`, re-measured here on a busier host | 73.2 ms | 68.4-81.5 |
+    #
+    # So **~71-73 ms per tick** for the one job that will exist: 0.12% of a
+    # minute at this floor, and 7% of a second at `1.0`. ⚠️ ADR-0046 quotes
+    # **~144 ms** by adding `count_stale()` to the tick; that read is J6's own
+    # staleness guard *inside* `run()`, which the loop does not perform, so it
+    # is a cost of the job rather than of the period. The floor survives either
+    # figure. `ge=60.0` rather than `gt=0` because a value that would spend a
+    # meaningful share of the deployment's database budget re-asking a question
+    # whose answer changes every few hours is a configuration nothing wants and
+    # this file can refuse.
+    #
+    # ⚠️ 300 s is a *default*, not a floor: it is five minutes against periods
+    # measured in hours, which makes the phase error on a period irrelevant
+    # while keeping a `--once` run's arithmetic easy to read. Read by
+    # `composition.build_scheduler`.
+    scheduler_tick_seconds: float = Field(default=300.0, ge=60.0)
+
     # The client event channel (PRD 07's SSE surface). Same reasoning as
     # every block above: PRD 08's TOML config layer does not exist yet.
     # Deliberately named `sse_*` rather than `events_*` -- the knob is about

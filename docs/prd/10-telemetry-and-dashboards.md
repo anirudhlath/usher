@@ -167,8 +167,8 @@ that does nothing.
 
 Emitted today (✅) or owned by a later milestone (named). A documented metric
 nothing emits is a permanently empty panel that nothing distinguishes from a
-healthy zero, so this column is maintained rather than aspirational. **37
-rows: 36 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
+healthy zero, so this column is maintained rather than aspirational. **40
+rows: 39 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
 |---|---|---|---|
@@ -209,6 +209,43 @@ rows: 36 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
 | `usher.bootstrap.batch.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.phase.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.failures` | counter | dataset, kind | ✅ M2 |
+| `usher.scheduler.job.duration` | histogram | job | ✅ M10 |
+| `usher.scheduler.job.failures` | counter | job | ✅ M10 |
+| `usher.scheduler.job.due` | gauge | job | ✅ M10 |
+
+**The three scheduler rows, and the one caveat the third carries**
+([ADR-0046](decisions/0046-the-scheduler-stores-nothing.md), M10's J4). `job`
+is `ScheduledJob.name`, which the port documents as stable for exactly this
+reason: renaming one empties a panel and splits a histogram across two series.
+
+- `usher.scheduler.job.duration` is **seconds** and is the one histogram in
+  this table the bucket defect below does not hurt — both registrations this
+  exists for are measured in hours, so the `(0.0, 5.0, 10.0, …)` boundaries
+  separate them fine. It records on a failed run too: a batch that raised
+  after three hours is exactly the one whose duration an operator wants.
+- `usher.scheduler.job.failures` counts a run that raised **and** a tick where
+  `last_done()` itself raised, because a job that cannot say when it was last
+  done is a job that did not run — starting a multi-hour batch on the strength
+  of a read that did not answer is the worse of the two failures. **It is the
+  only series that sees a job being retried**, because a failure spaces the
+  next attempt (doubling, capped at the job's own period) and a job inside that
+  spacing is skipped before its artefact is read.
+- ⚠️ `usher.scheduler.job.due` is **fed from a synchronous snapshot, so it is
+  stale but never wrong** — the same caveat `usher.jobs.queued` carries, and
+  for the identical reason: an OTel observable callback runs on the metric
+  reader's background thread and cannot await an asyncpg query. The value is
+  the reading the last tick took, so a job in flight reports the moment it
+  became due rather than a number that keeps growing. **Negative means not
+  due**, which is what lets one series answer *"how overdue"* and *"how long
+  left"*. A job with no reading — never run, or a `last_done()` that raised —
+  reports **no point at all** rather than a `0` that would read as *exactly
+  due*; the absence is bounded, because a never-run job is due and the tick
+  that observes it runs it. A job inside its retry spacing reports its **last**
+  reading, frozen, for the same reason it reports nothing while unread: the
+  loop does not query an artefact it has already decided not to act on. Its
+  unit is `s`, not the `1` every other gauge
+  here declares, so it stores as `usher_scheduler_job_due_seconds` rather than
+  taking the `_ratio` suffix described below.
 
 🔴 **Every seconds-unit histogram above is currently unreadable below five
 seconds, and this was found the first time one of them was read.** M10's S1

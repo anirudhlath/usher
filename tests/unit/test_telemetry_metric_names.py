@@ -15,20 +15,22 @@ open, and they are independent of each other:
   `http.server.request.duration` at unit `s` instead. Nothing raises. The
   measured half drives one real request and reads the name and the unit back.
 
-**The counts are 36 and 37 and neither is a typo.** The catalogue has **37**
-rows; the AST scan finds **36** declared instrument names; the difference is
+**The counts are 39 and 40 and neither is a typo.** The catalogue has **40**
+rows; the AST scan finds **39** declared instrument names; the difference is
 exactly `http.server.duration`, which Usher does not declare because
 `FastAPIInstrumentor` emits it (`src/usher/api/app.py:168`). Asserting
 `declared == catalogue - {"http.server.duration"}` is what states that in a
 form that cannot go stale silently. *(34/35 until M10's S2 added
-`usher.source.throttle.wait`, the outbound rate gate's own series, and 35/36
-until its S8 added `usher.sync.retraction.fraction`.)*
+`usher.source.throttle.wait`, the outbound rate gate's own series, 35/36 until
+its S8 added `usher.sync.retraction.fraction`, and 36/37 until its J4 added the
+scheduler's three -- `usher.scheduler.job.duration` and `.failures` in
+`services/scheduler.py`, `.due` in `telemetry.py`.)*
 
 **Both halves are scans, and a scan that globs nothing passes exactly like a
 scan that found nothing to report** -- CLAUDE.md's *"a run that did not run is
 not a pass"*. So each carries a premise guard placed *before* the value it
 protects: the instrument walk must find something and must find a named
-anchor; the table parse must find 37 rows, which is the premise a Markdown
+anchor; the table parse must find 40 rows, which is the premise a Markdown
 regex loses the moment the table is reformatted; and the request must have
 produced points before any unit is read off one.
 
@@ -142,8 +144,8 @@ def _declared_instrument_names() -> set[str]:
     caller's premise guard on the anchor is what would notice a wholesale move
     to that spelling.
 
-    ⚠️ **The `name=` branch is dead code today**: all 36 sites pass the name
-    positionally, so 0 of 36 exercise it. It is here because `Meter`'s
+    ⚠️ **The `name=` branch is dead code today**: all 39 sites pass the name
+    positionally, so 0 of 39 exercise it. It is here because `Meter`'s
     signatures accept the keyword and one future call site spelling it that way
     would otherwise vanish from the comparison silently -- but do not read its
     presence as evidence that anything covers it.
@@ -276,7 +278,7 @@ async def test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue(
     assert "usher.jobs.queued" in declared, "the instrument scan missed a known instrument"
 
     catalogue = _catalogue_names()
-    assert len(catalogue) == 37, f"the catalogue table parse found {len(catalogue)} rows"
+    assert len(catalogue) == 40, f"the catalogue table parse found {len(catalogue)} rows"
     assert len(set(catalogue)) == len(catalogue), "the catalogue names are not distinct"
 
     assert declared == set(catalogue) - {_INHERITED}

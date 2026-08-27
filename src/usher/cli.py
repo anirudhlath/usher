@@ -39,6 +39,7 @@ from usher.composition import (
     build_curation_service,
     build_derive_service,
     build_pipeline,
+    build_scheduler,
     build_worker,
     embedder,
     llm_client,
@@ -98,6 +99,7 @@ from usher.services.search import SearchAnswer, SemanticSearchUnavailable
 from usher.telemetry import (
     configure_telemetry,
     register_queue_gauges,
+    register_scheduler_gauges,
     register_search_gauges,
 )
 
@@ -794,6 +796,65 @@ async def _work(settings: Settings, *, once: bool) -> None:
         await aclose_model()
         await aclose_client()
         await engine.dispose()
+
+
+async def _schedule(settings: Settings, *, once: bool) -> None:
+    """Run the scheduled-work loop, or one tick of it (ADR-0046).
+
+    Mirrors `usher work` / `usher work --once`.
+
+    🔴 **`--once` is one tick, and the period still gates it.** The decision is
+    stated here because ADR-0046 does not state it and sells `--once` as the
+    answer for a wall-clock schedule -- an operator's 3am cron -- without
+    saying whether the period still applies. It does, for two reasons. A
+    `--once` that ignored the period would make an operator's crontab entry an
+    unconditional *"start the three-and-a-half-hour rebuild now"*, which is a
+    different and much sharper command than *"tick"*; and it would give the
+    same command two behaviours depending on a flag, so the daemon and the
+    cron would disagree about what is due.
+
+    ⚠️ **The consequence is a real limit on the sentence ADR-0046 writes, and
+    it is not fixed here.** *"Every night at 3am"* is only what an operator
+    gets if the job's period is comfortably under a day -- and a
+    `ScheduledJob.period` is a **property of the job**, not a setting, so
+    nothing an operator configures can lower it. A cron firing exactly one
+    period apart is a coin flip on a boundary comparison, and one firing more
+    often than the period silently no-ops on the ticks in between. The honest
+    statement is that `--once` gives an operator control over *when the
+    scheduler looks*, never over what it decides. `usher similar --rebuild` is
+    still the command that runs a batch unconditionally.
+    `tests/unit/test_cli_schedule.py::
+    test_one_tick_does_not_run_a_job_whose_period_has_not_elapsed` is what
+    pins it.
+
+    ⚠️ **`USHER_SCHEDULER_ENABLED` is not read here**, and that is not an
+    oversight. The setting gates the *lane*, i.e. whether the server process
+    runs the loop unasked; this command is an operator running it on purpose,
+    the way `usher work` runs regardless of `USHER_WORKER_ENABLED`. What the
+    setting still owes an operator who uses this command is the reminder in
+    ADR-0046's decision 3: nothing excludes a second runner, so a crontab
+    entry beside a server with the lane on is two runners for one artefact.
+
+    Builds no engine and opens no connection **at this stage of the
+    milestone**, because the registry ships empty (`build_scheduler`) and a
+    loop over zero jobs asks nothing. A registration widens
+    `build_scheduler`'s signature and this function grows the session factory
+    it needs in the same commit -- which is the honest shape, rather than a
+    connection pool opened here today against work that does not exist.
+    """
+    scheduler = build_scheduler(settings)
+    register_scheduler_gauges(scheduler.read)
+    registered = len(scheduler.jobs)
+    if once:
+        ran = await scheduler.tick()
+        # Both numbers, because `ran` alone cannot distinguish "nothing was
+        # due" from "nothing is registered" -- and at this commit the second
+        # is the shipped state, so a line that hid it would read as a healthy
+        # night on a deployment where the scheduler can never do anything.
+        print(f"{ran} of {registered} scheduled jobs ran")
+        return
+    print(f"scheduling {registered} jobs every {settings.scheduler_tick_seconds:g}s")
+    await scheduler.run()
 
 
 async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
@@ -2576,6 +2637,13 @@ def build_parser() -> argparse.ArgumentParser:
     work = sub.add_parser("work", help="run queued jobs")
     work.add_argument("--once", action="store_true", help="one pass, then exit")
 
+    # `usher work`'s shape exactly, because they are the same bargain one
+    # abstraction apart: a daemon form for a deployment, and a `--once` form
+    # for an operator's own crontab -- which is the supported path for a
+    # wall-clock schedule a `ScheduledJob.period` cannot express (ADR-0046).
+    schedule = sub.add_parser("schedule", help="run scheduled batches whose period has elapsed")
+    schedule.add_argument("--once", action="store_true", help="one tick, then exit")
+
     index = sub.add_parser("index", help="report search-index freshness, or enqueue the work")
     index.add_argument(
         "--backfill",
@@ -3127,6 +3195,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
         )
     elif args.command == "work":
         asyncio.run(_work(settings, once=args.once))
+    elif args.command == "schedule":
+        asyncio.run(_schedule(settings, once=args.once))
     elif args.command == "index":
         asyncio.run(
             _index(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)

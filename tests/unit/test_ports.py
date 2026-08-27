@@ -3,7 +3,7 @@ must fail at instantiation, not at the call site."""
 
 from abc import ABC
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol, get_type_hints
 
@@ -57,6 +57,7 @@ from usher.ports.repository import (
     WatchStateRepository,
 )
 from usher.ports.rows import Row, RowProvider
+from usher.ports.scheduler import ScheduledJob
 from usher.ports.search import (
     FilterNotSupported,
     SearchIndex,
@@ -117,6 +118,13 @@ ALL_PORTS: list[type[ABC]] = [
     WatchStateRepository,
     Row,
     RowProvider,
+    # M10's J4. Not a repository and not a driven adapter: the *loop* is
+    # `usher.services.scheduler`, and this is the shape a batch has to have
+    # to be registered with it. It is on this list because
+    # `test_every_port_abc_is_registered_in_all_ports` below would
+    # otherwise report it missing -- which is the whole reason that case
+    # exists.
+    ScheduledJob,
 ]
 
 
@@ -346,6 +354,59 @@ def test_suggest_index_has_no_write_method() -> None:
     it without deleting this is a failing test.
     """
     assert SuggestIndex.__abstractmethods__ == frozenset({"suggest"})
+
+
+def test_a_scheduled_job_declares_exactly_these_four_members() -> None:
+    """**The exact set, and `name`/`period` being in it is the decision.**
+
+    ADR-0046's contract is a name, a period, a `last_done()` and a `run()`, and
+    the M10 plan sketches the first two as bare annotations (`name: str`). An
+    annotation is satisfied by an implementation that never assigns it, so the
+    first thing to notice would be an `AttributeError` reading a metric label
+    at the first tick -- which is precisely the failure mode ADR-0001 chose
+    ABCs to move to instantiation time. They are abstract properties instead,
+    and a plain class attribute on the subclass satisfies one, so an
+    implementation pays nothing for the enforcement.
+
+    A fifth member added here without that argument being re-made -- a
+    `should_run()`, an `on_failure()`, a `timeout` -- moves this set, and the
+    scheduler holding no state (ADR-0046, decision 2) is what most of those
+    would quietly reverse.
+    """
+    assert ScheduledJob.__abstractmethods__ == frozenset({"name", "period", "last_done", "run"})
+    # Each carries its own reasoning rather than sharing the class docstring:
+    # `period`'s "minimum interval, never a wall clock" and `last_done()`'s
+    # "`min`, not `max`" are the two things an implementer gets wrong, and
+    # neither is inferable from a signature.
+    for member in ("name", "period", "last_done", "run"):
+        assert getattr(ScheduledJob, member).__doc__, f"{member} carries no docstring"
+
+
+def test_a_scheduled_job_that_forgets_its_name_cannot_be_instantiated() -> None:
+    """The behavioural half of the case above, because a `frozenset` equality
+    is satisfied by a class whose abstractness Python does not enforce.
+
+    This is the whole of what ADR-0001 buys over a `Protocol` here, and the
+    plan's bare-annotation spelling is what it would have cost: the job below
+    is a complete implementation *except* for the one member that is only ever
+    read by a metric label and a span name.
+    """
+
+    class _Nameless(ScheduledJob):
+        period = timedelta(hours=1)
+
+        async def last_done(self) -> datetime | None:
+            return None
+
+        async def run(self) -> None:
+            return None
+
+    # `type: ignore[abstract]` and the ignore is itself part of the finding:
+    # mypy refuses this line too, statically, which a bare annotation would
+    # also not have bought. The runtime assertion is what the deployment gets;
+    # the ignore is the record that the type checker agrees.
+    with pytest.raises(TypeError, match="name"):
+        _Nameless()  # type: ignore[abstract]
 
 
 def test_the_cost_ledger_has_no_read_method() -> None:

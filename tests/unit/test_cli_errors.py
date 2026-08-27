@@ -86,6 +86,9 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
     "sync-status": ["sync-status"],
     "unmatched": ["unmatched"],
     "work": ["work", "--once"],
+    # `--once` for `work`'s reason: the daemon form of either never returns,
+    # and every dispatch coroutine here is patched to raise anyway.
+    "schedule": ["schedule", "--once"],
     "index": ["index"],
     "derive": ["derive"],
     "genres": ["genres"],
