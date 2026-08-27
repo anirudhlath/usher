@@ -337,12 +337,21 @@ async def test_the_switch_is_whole_or_nothing_and_leaves_the_search_row_alone(
     """`USHER_SEARCH_SUGGEST_ANALYTICS=false`, and what it does not switch off.
 
     **Sampling is refused and this is the shape of the refusal.** PRD 10's
-    *"which absence means what"* table has five rows and every one reads a
-    **count**; a sample rate makes every count an estimate and adds a sixth row
-    meaning *"the row that was not written"*, indistinguishable in the data
-    from every other absence. So the setting is a `bool` and both tiers obey
-    it together -- asserted by driving *both*, because a switch honoured on one
-    tier is the defect a single-tier case cannot see.
+    *"which absence means what"* table holds **seven** rows and every one reads
+    a **count**; a sample rate makes every count an estimate and adds an
+    **eighth** meaning *"the row that was not written"*, indistinguishable in
+    the data from every other absence. So the setting is a `bool` and both tiers
+    obey it together -- asserted by driving *both*, because a switch honoured on
+    one tier is the defect a single-tier case cannot see.
+
+    ⚠️ **This paragraph said "five rows" and "a sixth", and it was born stale in
+    the very commit that took the table from five to six.** A cardinality
+    transcribed into a docstring is a copy of a fact with nothing checking it,
+    and this one went stale by two before anybody counted: the table gained the
+    `min_query_length` row and the `latency_ms = 0` row in the same milestone.
+    The *argument* is what survives -- every row is a count, so a sample rate
+    adds one more absence nobody can name -- and it does not depend on the
+    number, which is why the number is the part that rotted.
 
     The control is `GET /search` through the same app: this switch is about the
     suggest surface and must not reach the search one.

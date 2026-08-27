@@ -809,10 +809,22 @@ Two jobs are registered, and the contract is a **name**, a **period**, a
 `last_done()` and a `run()` — no crontab expression, no calendar, no timezone,
 no dependency graph:
 
-| job | what it runs | `last_done()` reads |
-|---|---|---|
-| the neighbour rebuild | `usher similar --rebuild`'s batch | `min(title_neighbors.computed_at)` |
-| `search_queries` retention | the 90-day `DELETE` [10](10-telemetry-and-dashboards.md) prices | `min(search_queries.at)` |
+| job | what it runs | `last_done()` reads | period |
+|---|---|---|---|
+| the neighbour rebuild | `usher similar --rebuild`'s batch | `min(title_neighbors.computed_at)` | ⏳ set by its registration (M10's J6) |
+| `search_queries` retention | the 90-day `DELETE` [10](10-telemetry-and-dashboards.md) prices | 🔴 **owed** — see below | ⏳ set by its registration (M10's J5) |
+
+🔴 **`min(search_queries.at)` was named here as retention's `last_done()` and it
+cannot be one.** It is the age of the **oldest surviving row**, written by the
+search path rather than by this job, so after a prune it sits at the retention
+window's age and stays there — the job reads as due on every tick forever, for
+any period shorter than the window, and the period decides nothing. **A
+`last_done()` has to be a reading this job's own runs move**, which is the
+contract `usher.ports.scheduler.ScheduledJob.last_done` states and the ADR's own
+decision 2 now carries. The period column exists for the same reason: a period
+is a property of the job, this table had no column for it, and the one design
+that would have made the reading above behave — pinning the period *exactly* to
+the retention window — was therefore unstatable here.
 
 **`USHER_SCHEDULER_ENABLED` defaults to `false`**, and turning it on is an
 operator decision with a number attached. A fresh deployment has no embeddings,
@@ -1263,7 +1275,7 @@ MB)**, at `m09c`, with 130,647 embeddings, 3,266,225 `title_neighbors`,
 | Postgres, + the IMDb people/credits load | **+3.4 GB** — 12,637,249 credits over 3,215,476 people, measured after `VACUUM FULL` ([ADR-0036](decisions/0036-the-imdb-tmdb-provenance-rule.md)). Not loaded by default. |
 | **Running the `m09d` migration** | **+637 MB transient on `credits`, and 50 s**, at 2,877,486 credits: `UPDATE credits SET source = 'tmdb'` leaves a dead tuple per live one (794 MB → 1,431 MB), and `SET NOT NULL` then scans the table. `VACUUM FULL` settles it at **740 MB, 54 MB *below* baseline** — but the migration does not run one, so **budget the peak**. Both scale with the enriched tier. |
 | Postgres, + `titles.credit_names` | **+624 MB settled, +1,368 MB transient** before a vacuum — the peak is what an operator's disk sees |
-| **Running the `m09e` migration** | 🔶 The only entry here that *frees* space, and the only one whose settled figure is unknown. It deletes every row of `title_embeddings` (130,673, in a 278 MB relation), `user_taste` and `title_neighbors` (3,266,175) and rebuilds the HNSW index empty. It runs no `VACUUM`, so the dead tuples are still on disk when it returns, and the catalog then re-grows: measured 2026-08-13, the backfill of 130,720 titles took **105.9 minutes** and settled at **707 MB** of relation and **340 MB** of index. 🔴 **`usher similar --rebuild` is the expensive half and its cost changed by more than the width did: 594.7 ms/seed against 36.50 at `halfvec(384)`, i.e. a full 130,720-seed walk of 21.6 hours against 80 minutes.** ⚠️ **Both figures are `m09e`'s and `m09f` repaired them** — moving every `halfvec` column to `PLAIN` storage took the exact scan back to **91.7 ms/seed**, so the completed walk measured **130,720 seeds in 11,981 s = 3.33 hours**, not 21.6. The overnight-job conclusion below survives; the number that motivated it does not. `nearest_for` runs under `enable_indexscan = off` by design, so it is an exact scan whose working set now exceeds both `shared_buffers` and this host's L3. Plan the rebuild as an overnight job, not a follow-on step ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)). |
+| **Running the `m09e` migration** | 🔶 The only entry here that *frees* space, and the only one whose settled figure is unknown. It deletes every row of `title_embeddings` (130,673, in a 278 MB relation), `user_taste` and `title_neighbors` (3,266,175) and rebuilds the HNSW index empty. It runs no `VACUUM`, so the dead tuples are still on disk when it returns, and the catalog then re-grows: measured 2026-08-13, the backfill of 130,720 titles took **105.9 minutes** and settled at **707 MB** of relation and **340 MB** of index. 🔴 **`usher similar --rebuild` is the expensive half and its cost changed by more than the width did: 594.7 ms/seed against 36.50 at `halfvec(384)`, i.e. a full 130,720-seed walk of 21.6 hours against 80 minutes.** ⚠️ **Both figures are `m09e`'s and `m09f` repaired them** — moving every `halfvec` column to `PLAIN` storage took the exact scan back to **91.7 ms/seed**, so the completed walk measured **130,720 seeds in 11,981 s = 3.33 hours**, not 21.6. The overnight-job conclusion below survives; the number that motivated it does not. ⚠️ **And 3.33 h is 2026-08-13's; budget a recovery against `### Scheduled work`'s figure above** — the walk this deployment most recently completed is 12,884 s over 132,442 seeds, **97.3 ms/seed**, on 2026-08-19. Both are real, this row records what `m09f` bought, and that section records what to plan against. `nearest_for` runs under `enable_indexscan = off` by design, so it is an exact scan whose working set now exceeds both `shared_buffers` and this host's L3. Plan the rebuild as an overnight job, not a follow-on step ([ADR-0038](decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)). |
 | HNSW (`halfvec`) | 🔶 **~1.5 GB at full embedding coverage was projected at `halfvec(384)` and is now a floor.** Measured immediately before `m09e` on 2026-08-13: **146 MB** of `ix_title_embeddings_hnsw` over **130,673** embeddings, inside a **278 MB** `title_embeddings` total relation. `m09e` widened the lane count to 1024 — 2,048 bytes a vector against 768 — and the rebuilt figures, measured 2026-08-13 after 130,720 titles re-embedded through `bge-m3`, are **340 MB** of index inside a **707 MB** relation: **2.33× and 2.54×**, both under the 2.67× the lane count alone predicts, so the graph and the row headers amortise a little. Extrapolating the old ~1.5 GB projection by the same 2.33× gives ~3.5 GB at full catalog coverage — an extrapolation, and labelled as one. |
 | Image cache | Grows with use, **without bound**. ⚠️ *"capped by a configurable LRU ceiling"* was wrong from the day it was written: there is **no eviction** (`services/images.py:7` says so in as many words) and no ceiling setting. `image_max_bytes` is a **per-image** 5 MiB refusal, not a cache ceiling. Nothing reclaims this directory. |
 | Usher process | ~500 MB–1 GB, plus ~200 MB for the embedding model — **the model half applies to the `fastembed:` runtime only**, and was measured for `bge-small-en-v1.5`. Under `openai:` no model is loaded in this process at all; the memory is the inference server's. |

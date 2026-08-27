@@ -11,7 +11,10 @@ and J5 (`search_queries` retention).
 right about a number.** The M10 plan wrote this record as `0039`. That number
 was taken by
 [0039](0039-the-genre-vocabulary-is-usher-owned.md) before this branch existed,
-and `docs/prd/decisions/` holds `0001`–`0045` with no gaps. **`0046` was
+and `docs/prd/decisions/` **held** `0001`–`0045` with no gaps at the moment this
+record was minted — past tense, because minting it is what made that sentence
+false, and a register census is a claim that expires the instant it is acted
+on. **`0046` was
 checked free on both sides before being taken** — the directory listing here,
 and `git log origin/main -- docs/prd/decisions/`, whose highest published
 record is `0042`. That two-sided check is the step the `0039 → 0040` repair
@@ -83,13 +86,33 @@ the artefact it maintains.**
 | job | `last_done()` | shipped today? |
 |---|---|---|
 | the neighbour rebuild | `SimilarityService.computed_at()` | ✅ yes — `SELECT min(computed_at) FROM title_neighbors` |
-| `search_queries` retention | `min(search_queries.at)` | ❌ no — J5 owns the port method |
+| `search_queries` retention | 🔴 **not `min(search_queries.at)`** — see below | ❌ no — J5 owns the port method *and* the reading |
 
-Both are one query, both are exact, and **both survive a restart because the
+The rebuild's is one query, it is exact, and **it survives a restart because the
 state was never in the scheduler.** A scheduler table would be a second copy of
 a fact the artefact already carries, and the two would drift the first time
 somebody ran the CLI command by hand — which is exactly how the rebuild is run
 today.
+
+🔴 **The second row was wrong when this record was written, and it is wrong in
+the way this whole design is most exposed to: *some timestamp on the artefact*
+is not a completion time.** `min(search_queries.at)` is the age of the **oldest
+surviving row**, and the *search path* writes it — not this job. After a prune
+it sits at the retention window's age and stays there, because rows keep ageing
+into the window from the other end. So under `now - last_done() >= period` the
+job is **due on every tick, forever**, for any period shorter than the window,
+and `period` decides nothing. Measured 2026-08-27 on the `m10c` clone: `min(at)`
+is **14 d 05 h old over 14,978 rows** — due against any period an operator would
+plausibly declare. It behaves only if `period` is pinned *exactly* to the
+retention window, and nothing said so: not this record, not PRD 08's table
+(which has no period column), not PRD 09.
+
+**The obligation a `last_done()` therefore carries is that this job's own runs
+move the reading**, and that is stated as a contract rather than left to be
+inferred: `ScheduledJob.last_done`'s docstring (M10's J4) carries it, with the
+measurement above. **J5 owes a real completion time or a different design**, and
+this row is deliberately left naming the debt rather than a statement that is
+false.
 
 🔴 **`computed_at()` is `min`, not `max`, and the distinction is what makes
 this design safe rather than merely cheap.** The repository comment says why:
@@ -102,6 +125,16 @@ row means a partial artefact reports its oldest part**, which is the honest
 answer and the one a period can be compared against. Any future job registered
 here owes the same argument about its own artefact.
 
+⚠️ **And that choice costs a period, which this record did not price.** At the
+instant a walk *finishes*, `min` already answers the walk's own duration
+earlier — the first page it committed. On this deployment's last completed walk
+that is `max(computed_at) - min(computed_at)` = **12,884 s** (the Evidence
+section below), so a declared period *P* behaves as *P* minus the walk, **at any
+*P* at or under 3.58 h the job is due the moment it completes and runs back to
+back forever**, and the gap widens on its own as the catalog grows.
+`ScheduledJob.last_done` states what that obliges a registration to; it is not
+restated here.
+
 ### 3. It is off by default — `USHER_SCHEDULER_ENABLED=false`
 
 Two reasons, both measured.
@@ -113,7 +146,10 @@ scheduler would start a walk over an empty table and then, once
 **And there is nothing to exclude a second runner.** 🔴 **The M10 plan calls
 `JobQueue`'s mechanism a *lease* and `ports/jobs.py` explicitly says it is
 not** — *"A claim is a lock held for the length of a transaction, not a lease
-with a timestamp. That is why `claim` has no duration argument"*. The exclusion
+with a timestamp. That is why `claim` has no duration argument"*
+([ADR-0037](0037-the-worker-is-a-bounded-pool-of-scopes.md) is the record that
+owns that mechanism, and this is the passage that has to borrow from it and
+cannot). The exclusion
 is `FOR UPDATE SKIP LOCKED` on a **row**, which makes the point here stronger
 rather than weaker: a component with no rows has nothing to lock, so there is
 no version of `JobQueue`'s mechanism that this design can borrow. Two processes
@@ -154,11 +190,28 @@ relies on.
   *fingerprint* query and a missing row has no fingerprint to disagree. So the
   period is what covers a growing population here, and the scheduler must not
   be described as making the artefact complete.
+- 🔴 **A *failed* run is indistinguishable from one that never ran, and that is
+  the sharpest price this design pays.** `SimilarityService.rebuild` deletes and
+  re-inserts per page and has **no resume**
+  (`after: uuid.UUID | None = None` at the top of the walk), so a run that dies
+  at 60% leaves `min(computed_at)` exactly where it was: still due next tick,
+  restarted from page one, forever, with nothing anywhere recording that it
+  failed. *"A failing job does not stop the loop"* is satisfied by a loop that
+  also never makes progress. J4's `Scheduler._back_off` bounds the retry
+  **rate** — doubling, capped at the job's own declared period — and its own
+  docstring says that bounds the cost and not the convergence. **Resumption
+  belongs to the registration**, which is why `ScheduledJob.run` obliges an
+  implementation to be safely re-runnable rather than assuming it.
 - **A period is a minimum interval since last completion, not a wall-clock
   schedule.** *"Every night at 3am"* is not expressible and is not offered. An
   operator who wants that runs `usher schedule --once` from their own cron,
   which is the pre-M10 arrangement **kept as a supported path rather than
-  replaced**.
+  replaced**. ⚠️ **`--once` runs one *tick*, and a tick still consults the
+  period** — so a crontab controls when the scheduler looks and never what it
+  decides, and *"every night at 3am"* only happens where the job's period
+  comfortably clears a day. Stated here because this record sold `--once` as
+  the wall-clock answer without it; `cli._schedule`'s docstring is the
+  operator-facing copy.
 - **The `last_done()` reads are not free, and they are priced below rather than
   in J4.** They run once per tick per job, forever, on a table that grows.
 - [ADR-0020](0020-derived-state-carries-its-fingerprint.md) is **linked rather
@@ -187,7 +240,7 @@ HEAD), `title_neighbors` **756 MB**.
 |---|---|---|---|
 | `SimilarityService.computed_at()` | `_OLDEST_NEIGHBOR`, shipped verbatim | **71.1 ms** | 69.2–78.6 |
 | `count_stale()`, whole table | `_COUNT_STALE_NEIGHBORS`, shipped verbatim, `title_id` NULL | **72.6 ms** | 71.7–83.4 |
-| retention's `min(search_queries.at)` | ⚠️ not shipped — J5 owns it | **0.064 ms** | 0.058–0.168 |
+| retention's `min(search_queries.at)` | ⚠️ not shipped, and not a `last_done()` either — see decision 2 | **0.064 ms** | 0.058–0.168 |
 
 🔴 **Two of the three reads the M10 plan prices do not exist, and one of the two
 it does have is a different statement than the plan names.** Measured, with the
@@ -203,20 +256,42 @@ search that would have found them:
   range 73.1–84.6. It is the dearest of the three and buys nothing
   `count_stale` does not already answer.
 - `min(search_queries.at)` is not in `src/` either — `grep -rn "min(at)"
-  src/usher/` returns nothing. ⚠️ **Its 0.064 ms is a property of the table
-  holding 107 rows, not of the read being cheap**, and `search_queries` carries
-  no index on `at` (J5's own arithmetic is the argument for one). Do not quote
-  it as a steady-state figure.
+  src/usher/` returns nothing. 🔴 **And the reason this record gave for not
+  quoting its 0.064 ms was itself false, by the same method mistake as the two
+  bullets above.** It read *"its 0.064 ms is a property of the table holding 107
+  rows, not of the read being cheap, and `search_queries` carries no index on
+  `at` (J5's own arithmetic is the argument for one)"*. The measurement was
+  taken against `usher_catalog`, which is at **`m10b`**, and then reasoned from
+  *that database's* schema as though it were the code's: **`m10c` creates
+  `ix_search_queries_at`** (`c9a6418`, five commits before this record). So the
+  sentence both misdescribed the schema and sent J5 to argue for an index J1 had
+  already shipped. Re-measured 2026-08-27 on the `m10c` clone — 14,978 rows,
+  **140× the 107** the figure above was taken over —
+  `EXPLAIN (ANALYZE, BUFFERS)` reads **`Index Only Scan using
+  ix_search_queries_at`, `Heap Fetches: 0`, 3 buffers**, and seven `\timing`
+  samples after a discarded warm-up give a median of **0.072 ms** (0.064–0.099).
+  **It is a steady-state figure after all**: the read is one descent to the
+  leftmost leaf, and 140× the rows at the same price is the demonstration.
 
 **The control that makes `count_stale`'s zero a real zero.** *"Zero stale is
 also what an empty table reports"* is this project's own recorded trap, so the
 identical statement was run with a bogus fingerprint: it answers **3,311,050**,
 the whole table. The 0 is a measurement, not an absence.
 
-**A tick is therefore ~144 ms of database work for the one job that exists**
-(71.1 + 72.6), against a period floored at 60 s. That is **0.24% of a minute**
-at the floor and it is the number the `ge=60.0` bound has to be justified
-against, on a table that is now 756 MB and will grow.
+🔴 **A tick is ~71 ms and not ~144, and the extra read is one this record's own
+contract does not perform.** Decision 1 states the contract as a name, a period,
+a `last_done()` and a `run()`; decision 2 gives the rebuild's `last_done()` as
+`computed_at()` **alone**. `count_stale()` is the staleness *guard* the job
+consults inside `run()` — a cost of the job, paid when it runs, not a cost of
+the period paid every tick — so `71.1 + 72.6` added the wrong pair. **A tick is
+one `last_done()` per registered job and nothing else**: 71.1 ms for the one
+registration that existed when this was written, against a period floored at
+60 s. That is **0.12% of a minute** at the floor, and it is the number the
+`ge=60.0` bound has to be justified against, on a table that is now 756 MB and
+will grow. The bound survives either figure, which is why this is a correction
+to the arithmetic rather than to the decision; `config.py`'s comment on
+`scheduler_tick_seconds` carries the same correction and a re-measurement
+(73.2 ms, seven samples, on a busier host).
 
 **The walk a tick might start, from the artefact's own timestamps.** The
 completed rebuild this deployment most recently ran spans

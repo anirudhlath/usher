@@ -674,9 +674,19 @@ def test_the_scheduler_is_off_by_default() -> None:
 
 def test_the_tick_period_has_a_measured_floor() -> None:
     """`ge=60.0`, and the floor is measured rather than stylistic: a tick is
-    ~144 ms of database work for the one job that will exist (ADR-0046's
-    evidence table), which is 0.24% of a minute at the floor and 14% of a
+    **~71 ms** of database work for the one job that will exist -- one
+    `last_done()` per registered job and nothing else, which is the whole of
+    `ScheduledJob`'s contract -- so 0.12% of a minute at the floor and 7% of a
     second at one.
+
+    ⚠️ **This docstring said ~144 ms, and that was ADR-0046's arithmetic over
+    the wrong pair.** It added `count_stale()` to `computed_at()`; the first is
+    the rebuild's own guard *inside* `run()` and not a read the loop performs,
+    so it is a cost of the job rather than of the period. Corrected in the ADR
+    and in `config.py`'s own table; recorded here because a test docstring that
+    restates a figure is one of the places it goes stale. **The floor survives
+    either figure** -- which is why this is an arithmetic correction and not a
+    change to the bound the case asserts.
     """
     for refused in (0.0, 1.0, 59.9):
         with pytest.raises(ValueError, match="scheduler_tick_seconds"):

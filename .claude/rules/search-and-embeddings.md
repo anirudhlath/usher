@@ -1411,15 +1411,37 @@ walk.** `usher similar --rebuild` ran 2026-08-13 18:31:26Z → 21:51:07Z:
 **130,720 seeds, 3,268,000 rows, 11,981 s — 3.33 h at 91.7 ms/seed**, against
 561 ms/seed before the revision.
 
+⚠️ **That run is history and a later one supersedes it for planning.** The walk
+this deployment most recently completed ran 2026-08-19 18:30:43Z → 22:05:27Z:
+**132,442 seeds, 3,311,050 rows, 12,884 s — 3.58 h at 97.3 ms/seed**, read back
+off `title_neighbors`' own `min(computed_at)`/`max(computed_at)` rather than
+timed by a harness (re-read 2026-08-27; `docs/prd/decisions/0046-the-scheduler-stores-nothing.md`
+carries it with its caveats — a `max − min` span covers N−1 page intervals and
+so understates by 0.376%). **Both are real; the 2026-08-13 pair above is what
+`m09f` bought and stays, and the 2026-08-19 pair is the one to plan against**:
+a 1.3% larger seed population on a busier host, which is the direction this
+file's own quadratic-in-population fit predicts.
+
 ⚠️ **This entry said "4.4× on the job" for the first three hours of that run and
 that number was an artefact of when it was taken.** It came from the first 128
 seconds — 1,000 seeds at 128 ms/seed — and was written up with a conclusion
 attached: *"a component speedup is not a job speedup and this one differs by
-40%."* The completed walk refutes it. Steady state is 91.7 ms/seed, the job
-speedup equals the component speedup to within 2%, and the per-seed work the
-scan was supposedly hiding is ~4 ms rather than ~32. **A rate taken from the
-first two minutes of a three-hour job is a measurement of its start-up**, and
-the reasoning built on top of it was the confident part.
+40%."* The completed walk refutes it. Steady state was 91.7 ms/seed on that
+run, the job speedup equals the component speedup to within 2%, and the
+per-seed work the scan was supposedly hiding is ~4 ms rather than ~32. **A rate
+taken from the first two minutes of a three-hour job is a measurement of its
+start-up**, and the reasoning built on top of it was the confident part.
+
+🔴 **And "steady state is 91.7 ms/seed" was written in the present tense, which
+made a *dated run* into a *forward-looking claim* — it is now 97.3.** The two
+sentences differ by one verb and by everything a reader budgets against: the
+2026-08-19 walk above measured 97.28 ms/seed over 132,442 seeds, 6.1% dearer
+over a 1.3% larger population, on a host carrying nineteen containers. Nothing
+here says the price has settled; what the two runs jointly say is that it
+tracks the population and the load, so **the number to plan a rebuild against
+is the most recent completed walk and not this paragraph.** The correction is
+recorded rather than swept because the 40%-refutation above is what this entry
+exists for and it survives either figure.
 
 Two more things fell out of it.
 
@@ -2065,6 +2087,19 @@ other** — measured 2026-08-27, `148` is in this file's heading,
 `src/usher/services/search.py`, `tests/integration/test_search_route.py` and
 `tests/unit/test_config.py`; `136` is in this file's table above and in J2's
 commit message. Picking one and sweeping would delete a real run.
+
+⚠️ **That enumeration is exact for the *token* and incomplete for the *fact*,
+which is the more useful half to know before amending any of it.** Three
+further sites carry the same confirmation run as its **arms** — `2.53 ms` and
+`6.29 ms` — and quote no percentage at all, so a sweep hunting `148` walks past
+every one of them: **`.env.example`**, **`src/usher/api/routers/search.py`** and
+a *second* site in `src/usher/services/search.py` (`suggest`'s own comment,
+distinct from the one in `SearchService.__init__` that the list above finds).
+`src/usher/config.py` and `tests/unit/test_config.py` carry both spellings and
+so appear in both lists. **Amending this run means grepping for the arms as well
+as the ratio** — the same shape `ports-and-error-taxonomy.md` records for the
+`PortRateLimited` census, where one commit shipped two different counts of one
+thing.
 
 🔴 **The household `SELECT` is not measurable at this resolution, and that is
 what retires the route docstring's objection.** `GET /search/suggest` said a

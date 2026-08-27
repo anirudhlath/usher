@@ -114,9 +114,16 @@ FULL`ed since.
 provenance**, which is where this file's one shipped error was -- a
 `title_neighbors` figure copied from a draft that the same plan's own
 corrections table refuted. Each is named at its entry: the embedding
-backfill (105.9 min) and the neighbour walk (91.7 ms/seed over 11,981 s)
-are both 2026-08-13 runs recorded in PRD 08's resource envelope and
-`.claude/rules/search-and-embeddings.md`; the payload crawl (1.98 h) is
+backfill (105.9 min) is a 2026-08-13 run recorded in PRD 08's resource
+envelope, and the neighbour walk is the most recently *completed* one --
+97.3 ms/seed over 12,884 s, 2026-08-19, read off `title_neighbors`' own
+`min`/`max(computed_at)` rather than timed by a harness, superseding the
+91.7 ms/seed over 11,981 s that
+`.claude/rules/search-and-embeddings.md` records for 2026-08-13.
+⚠️ **A duration here is what an operator budgets a recovery against, so it
+tracks the newest completed run** -- which is the opposite of how a
+*superseded* figure is treated in a reason string below, where the point is
+the record of what was wrong. The payload crawl (1.98 h) is
 M9's S3 against the live TMDb API. **No revision label appears in any
 reason string**, for the same reason: `alembic_version` stamped `m09f`
 when this was designed and `m10a` when it landed.
@@ -356,8 +363,11 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
         ),
         "title_neighbors": _rebuildable(
             "3,256,676 rows, 1140 MB -- the largest relation in this database, and still "
-            "rebuildable. The completed walk, 2026-08-13: 130,720 seeds, 3,268,000 rows, "
-            "11,981 s at **91.7 ms/seed = 3.33 h**. ⚠️ Not 594.7 ms/seed and not 21.6 h: "
+            "rebuildable. The most recent completed walk, 2026-08-19: 132,442 seeds, "
+            "3,311,050 rows, 12,884 s at **97.3 ms/seed = 3.58 h** -- budget against this "
+            "one. It supersedes 2026-08-13's 130,720 seeds / 11,981 s / 91.7 ms/seed = "
+            "3.33 h, which is a real run over a 1.3% smaller population and is what "
+            "established the shape. ⚠️ Neither is 594.7 ms/seed and neither is 21.6 h: "
             "those are `m09e`'s figures and `m09f` repaired them by moving every "
             "`halfvec` column to PLAIN storage. At the true cost this is 1.9x the "
             "embedding backfill above it, not the two orders of magnitude a draft of this "

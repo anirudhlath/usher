@@ -9,6 +9,7 @@ directions -- a missing row, or a row pointing at a file that was renamed.
 
 import pathlib
 import re
+from datetime import datetime
 
 _DECISIONS = pathlib.Path(__file__).parents[2] / "docs" / "prd" / "decisions"
 
@@ -218,4 +219,174 @@ def test_every_adr_titles_itself_with_its_own_number() -> None:
     ]
     assert wrong == [], "these ADRs do not name their own number in their heading: " + "; ".join(
         wrong
+    )
+
+
+# -- ADR-0046's numbers, and the three of them that need no database ---------
+
+
+_ADR_0046 = _DECISIONS / "0046-the-scheduler-stores-nothing.md"
+
+
+def _prose(path: pathlib.Path) -> str:
+    """A document with its Markdown emphasis, its code ticks and its line
+    breaks taken out.
+
+    Anchoring on `**12,884 s**` pins where a sentence happened to wrap and
+    which words were bold or ticked on the day, none of which is the fact.
+    Stripping all three means a reflow is not a red and a *changed number* is.
+    """
+    return " ".join(path.read_text().replace("*", "").replace("`", "").split())
+
+
+def _matched(pattern: str, text: str, what: str) -> re.Match[str]:
+    """`re.search` with the premise asserted, because `None` here is the
+    "a plant that did not land looks exactly like a check that passed" shape:
+    a regex that stops matching after a rewrite would otherwise skip the
+    arithmetic silently and report green."""
+    match = re.search(pattern, text)
+    assert match is not None, f"nothing in this document still states {what}"
+    return match
+
+
+def test_adr_0046s_arithmetic_over_its_own_stated_inputs_holds() -> None:
+    """Three of ADR-0046's figures are **derived from other figures in the
+    same sentence**, and those are the ones a test can own.
+
+    This record is measured against a database that is not in this repository,
+    so almost every number in it is dated prose by the convention `13d7b58`
+    established: nothing here can re-run `SELECT count(*)` against a catalog a
+    checkout does not carry, and a test that hard-coded the answer would be a
+    second copy of the measurement rather than a check on it. **But an
+    identity between numbers the document itself states needs no database at
+    all**, and a review on 2026-08-27 falsified ten of this record's figures
+    one at a time and watched all five gate steps stay green. These three are
+    the ones that did not have to survive that:
+
+    - `877 = 133,319 - 132,442` — the seeds with no neighbour row;
+    - `12,884 s = 3.58 hours`, and the 12,884 s is itself the difference
+      between two timestamps the same sentence prints;
+    - `97.3 ms/seed = 12,884 s / 132,442 seeds`.
+
+    A fourth candidate, *"a tick is ~144 ms (71.1 + 72.6)"*, is deliberately
+    **not** pinned: the same review found the addition itself was the defect —
+    `count_stale()` is the job's own guard inside `run()` and not a read the
+    scheduler's contract performs — so the claim was corrected away rather
+    than fastened down. Pinning arithmetic does not make the operands the
+    right ones.
+    """
+    prose = _prose(_ADR_0046)
+
+    population = _matched(
+        r"([\d,]+) rows over ([\d,]+) seeds against ([\d,]+) embedded titles "
+        r"— ([\d,]+) embedded titles have no neighbour row",
+        prose,
+        "the incomplete-artefact count as `<rows> rows over <seeds> seeds "
+        "against <embedded> embedded titles — <missing> embedded titles have "
+        "no neighbour row`",
+    )
+    seeds = int(population.group(2).replace(",", ""))
+    embedded = int(population.group(3).replace(",", ""))
+    missing = int(population.group(4).replace(",", ""))
+    assert embedded - seeds == missing, (
+        f"{embedded:,} embedded titles less {seeds:,} seeds carrying rows is "
+        f"{embedded - seeds:,}, and this record says {missing:,}"
+    )
+
+    walk = _matched(
+        r"min\(computed_at\) (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)Z → "
+        r"max\(computed_at\) (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)Z "
+        r"= ([\d,]+) s = ([\d.]+) hours over ([\d,]+) seeds, ([\d.]+) ms/seed",
+        prose,
+        "the completed walk as `min(computed_at) <t> → max(computed_at) <t> "
+        "= <s> s = <h> hours over <seeds> seeds, <ms> ms/seed`",
+    )
+    started = datetime.strptime(walk.group(1), "%Y-%m-%d %H:%M:%S")
+    finished = datetime.strptime(walk.group(2), "%Y-%m-%d %H:%M:%S")
+    span_seconds = int(walk.group(3).replace(",", ""))
+    hours = float(walk.group(4))
+    walk_seeds = int(walk.group(5).replace(",", ""))
+    per_seed_ms = float(walk.group(6))
+
+    assert (finished - started).total_seconds() == span_seconds, (
+        f"{walk.group(1)}Z to {walk.group(2)}Z is "
+        f"{(finished - started).total_seconds():,.0f} s, and this record says "
+        f"{span_seconds:,} s"
+    )
+    assert round(span_seconds / 3600, 2) == hours, (
+        f"{span_seconds:,} s is {span_seconds / 3600:.2f} hours, and this record says {hours}"
+    )
+    assert round(span_seconds / walk_seeds * 1000, 1) == per_seed_ms, (
+        f"{span_seconds:,} s over {walk_seeds:,} seeds is "
+        f"{span_seconds / walk_seeds * 1000:.1f} ms/seed, and this record says "
+        f"{per_seed_ms}"
+    )
+
+
+def test_the_walk_reads_the_same_length_in_every_document_that_prices_it() -> None:
+    """One walk, four documents, and until this case nothing tied them.
+
+    ADR-0046 measures the rebuild's own duration; PRD 08's `### Scheduled
+    work` prices `USHER_SCHEDULER_ENABLED`'s default against it; PRD 09's M10
+    row prices the same default against it again; and
+    `usher.ports.scheduler.ScheduledJob.last_done` states the obligation it
+    puts on a registration's `period`. **A figure restated in four places is
+    the shape this repository keeps getting wrong** — the 148/136 percentages
+    one subsystem over, `PortRateLimited`'s raise-site census, the twelve
+    landings in `test_migrations.py` — and the failure is always the same: one
+    site is re-measured and the others are not, so a reader's answer depends on
+    which document they opened.
+
+    The port's spelling is `3 h 34 m 44 s` rather than `3.58 h`, so this also
+    checks the two forms are the same span. That is deliberate: the sweep that
+    hunts `3.58` does not find `34 m 44 s`, which is exactly how the old
+    `3.33 h / 91.7 ms/seed` figure survived in four places under a sweep that
+    hunted the hours.
+    """
+    adr = _matched(
+        r"= ([\d,]+) s = ([\d.]+) hours over ([\d,]+) seeds",
+        _prose(_ADR_0046),
+        "ADR-0046's completed walk",
+    )
+    span_seconds = int(adr.group(1).replace(",", ""))
+    hours = float(adr.group(2))
+    seeds = int(adr.group(3).replace(",", ""))
+
+    operations = _matched(
+        r"most recent completed rebuild took ([\d.]+) hours over ([\d,]+) seeds",
+        _prose(_DECISIONS.parent / "08-operations.md"),
+        "PRD 08's `### Scheduled work` price for the default",
+    )
+    assert (float(operations.group(1)), int(operations.group(2).replace(",", ""))) == (
+        hours,
+        seeds,
+    ), f"PRD 08 prices the walk at {operations.group(1)} h over {operations.group(2)} seeds"
+
+    roadmap = _matched(
+        r"the job it would start is ([\d.]+) hours",
+        _prose(_DECISIONS.parent / "09-roadmap.md"),
+        "PRD 09's M10 row pricing the scheduler's default",
+    )
+    assert float(roadmap.group(1)) == hours, (
+        f"PRD 09's M10 row prices the walk at {roadmap.group(1)} hours"
+    )
+
+    port = _prose(pathlib.Path(__file__).parents[2] / "src" / "usher" / "ports" / "scheduler.py")
+    spelled_out = _matched(
+        r"(\d+) h (\d+) m (\d+) s", port, "`ScheduledJob.last_done`'s walk duration"
+    )
+    stated = (
+        int(spelled_out.group(1)) * 3600
+        + int(spelled_out.group(2)) * 60
+        + int(spelled_out.group(3))
+    )
+    assert stated == span_seconds, (
+        f"the port spells the walk {spelled_out.group(0)} = {stated:,} s, and "
+        f"ADR-0046 measured {span_seconds:,} s"
+    )
+    decimal = _matched(
+        r"at or under ([\d.]+) h", port, "`ScheduledJob.last_done`'s back-to-back bound"
+    )
+    assert float(decimal.group(1)) == hours, (
+        f"the port bounds a period at {decimal.group(1)} h against ADR-0046's {hours}"
     )
