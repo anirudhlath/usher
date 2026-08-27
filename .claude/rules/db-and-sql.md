@@ -63,9 +63,13 @@ here is the chain as it stands on 2026-08-26**: `m08a`, `m08b`, `m09a`,
 unallocated spare E4's index request would take), `m09d`, `m09e`, `m09f`,
 `m10a`, `m10b`, `m10c`. **Head is `m10c`**, pinned as a literal at
 `tests/unit/test_db_migration_status.py`, which is the thing to read rather
-than this paragraph. Seven of those ten landed after the sentence above was
-written and none of them extended it, which is why the list is separate from
-the rule now: the rule says what to mint next, the list says what exists.
+than this paragraph. **Eight** of those ten landed after the sentence above
+was written — everything from `m09a` on — and none of them extended it, which
+is why the list is separate from the rule now: the rule says what to mint
+next, the list says what exists. ⚠️ It read *"seven of those ten"* for one
+commit: the parent was correct at *"seven of nine"*, `m10c` moved the
+denominator, and the numerator was left alone. **A ratio restated in prose has
+two numbers to keep and only one of them looks like the thing being edited.**
 
 ⚠️ **`m10a` is the first slug in this scheme a plan reserved and did not
 get.** M10's own plan says *"M10 gets one migration, `m10a`, and Group J owns
@@ -185,9 +189,14 @@ creating head gives you `not in` (`m08a`) and a dropping head gives you `in`
 (`ffc`) — and move the displaced assertion into the revision-pinned block,
 which does not drift. **A table-creating head needs an assertion per table,
 not one** — `m08a` drops `curated_rows` and `llm_calls`, and a `downgrade()`
-that forgets the second passes a check naming only the first; `llm_calls`
-carries no index beyond its primary key, so `pk_llm_calls` is what stands for
-it. Do not pad that block with an assertion an index cannot fail independently
+that forgets the second passes a check naming only the first; `pk_llm_calls`
+is what stands for that table. ⚠️ **The reason given here was *"`llm_calls`
+carries no index beyond its primary key"* and `m10c` falsified it** — that
+table now has `ix_llm_calls_at` and `ix_llm_calls_generation_id`. The
+assertion is unchanged and the reason is now the *other* one this same block
+already gives for `ix_curated_rows_user_newest`: an index cannot outlive its
+table, so below `m08a` both names are absent because the table is, and naming
+them would be strictly redundant rather than a second artefact. Do not pad that block with an assertion an index cannot fail independently
 of its table's primary key — `m08a` shipped one and it was removed as
 redundant.
 Related: `run_alembic` used to infer its direction from the target string, so a

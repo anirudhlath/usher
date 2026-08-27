@@ -2130,6 +2130,28 @@ the third instance of ADR-0040's own finding — *"splitting the column does not
 fix its readers; it exposes them"* — and the first in a measurement harness,
 where the failure mode is a refused run rather than a wrong answer.
 
+✅ **Re-anchored 2026-08-27, and the confirmation is the same shape ADR-0040's
+own repair had.** All three frame sites in that script now read
+`imdb_num_votes >= 500`, and on the live catalog (1,276,210 titles) the five
+pools answer **435 / 2,544 / 7,220 / 20,675 / 18,195** against `GATE_POOLS`'
+432 / 2,532 / 7,178 / 20,520 / 17,887 — **within 1.7% on every band**, against
+an order of magnitude out under the TMDb spelling. `catalog_facts` records
+`with_imdb_num_votes` beside `with_vote_count` from the same commit, because
+which column a catalog has filled is what tells a refused frame apart from an
+unimported dump.
+
+⚠️ **`--check-frame` still refuses, deliberately, and `GATE_POOLS` was not
+touched.** The residual gap is the catalog growing since 2026-08-03 — 81,369
+shared lower-cased names against 81,054 — and `check_frame`'s whole argument is
+that a pool one row out is a different population. Updating those five numbers
+to today's reading would make the check unable to report the drift it exists
+for, so what changed is that the refusal is now *legible*: 435 against 432
+reads as three films arriving, where 80 against 432 read as nothing in
+particular. **The two failure modes are now distinguishable, which is the
+repair** — the wrong column is an order of magnitude, the passage of time is a
+couple of percent — and both are written into the script's own docstring beside
+`check_frame`, where a refused run lands.
+
 ### Not measured, named rather than implied
 
 - **A real client's keystroke rate.** Every probe is a whole mutated name, not

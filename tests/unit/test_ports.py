@@ -355,6 +355,14 @@ def test_the_cost_ledger_has_no_read_method() -> None:
     that, and a read here would be the third surface this project has built
     for a consumer that does not exist.
 
+    ⚠️ **The index half of that deferral landed in `m10c` and this case is
+    what is left of it.** `ix_llm_calls_at` and `ix_llm_calls_generation_id`
+    now exist, ahead of any reader and deliberately — so "no index on the
+    strength of no read" is history, and the *no read* is now asserted here
+    alone rather than doubly by the schema. That makes this case stronger
+    rather than weaker: it is the only thing left standing between the
+    indexes and a `list_since()` that would look like finishing the job.
+
     Not `test_suggest_index_has_no_write_method`'s shape, despite the
     similarity — `SuggestIndex` is deliberately *not* in the parametrisation
     above, so for that port the dedicated case is the only thing asserting a

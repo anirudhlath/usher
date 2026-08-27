@@ -163,7 +163,7 @@ async def test_the_title_search_names_table_and_its_primary_key_exist(
     assert await _primary_key(session, "title_search_names") == "pk_title_search_names"
 
 
-# --- `search_queries` carries PRD 10's nine columns and no tenth -------------
+# --- `search_queries` carries PRD 10's eleven columns and no twelfth ---------
 
 
 async def test_search_queries_carries_prd_tens_columns_and_no_others(
@@ -304,10 +304,15 @@ async def test_every_cascade_in_this_migration_has_an_index_the_lookup_can_use(
 
     **`search_queries` is deliberately absent from this list**, and it is the
     one place in `m09a` where a declared delete rule has no lookup behind it:
-    the table ships no index beyond its primary key, so
+    the table carries no index on `clicked_title_id`, so
     `fk_search_queries_clicked_title_id_titles`' SET NULL scans it on every
     title delete. That is the plan's call, recorded in the migration docstring
-    rather than quietly repaired here.
+    rather than quietly repaired here. ⚠️ **This read *"no index beyond its
+    primary key"* until `m10c`**, which added `ix_search_queries_at` -- on
+    `at`, for PRD 10's retention `DELETE`, which no `SET NULL` on
+    `clicked_title_id` can use. The premise moved and the conclusion did not,
+    so the sentence is narrowed to the column the delete rule needs rather
+    than to the table.
 
     **`images.title_id` has two acceptable answers since `m09c`, and that is a
     measurement rather than a shrug.** `uq_images_owner_provider_path` leads on

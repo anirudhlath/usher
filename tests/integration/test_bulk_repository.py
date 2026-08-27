@@ -1052,20 +1052,25 @@ _NO_CALLER_SUPPLIED_VALUE = {
     # `SearchQueryRecord.mode` is a `SearchMode`, so the longest value that can
     # reach `varchar(16)` is `'full_text'` at nine characters.
     ("search_queries", "mode"): "enum-typed on the port DTO; longest member is 9 of 16",
-    # `m10c`'s two, and neither is caller-supplied *yet*. `record()` writes
-    # `surface` as the literal `'search'` and `tier` as the literal `NULL`,
-    # because `SearchQueryRecord` carries no field for either until the
-    # suggest writer lands -- so no argument of any repository method reaches
-    # these columns and no arm can drive one. **Both are also enum-typed on
-    # the model** (`SearchSurface`, `SuggestTier`), so even once they are bound
-    # the longest reachable value is `'suggest'` at 7 of 8 and `'prefix'` at
-    # **6 of 6** -- an exact fit, so a third `SuggestTier` member with a longer
-    # value is a `22001` at the driver rather than a silent truncation, and
-    # `refusals_as_conflict` translates it like every other refusal on this
-    # table. Delete these two entries and add arms the day the writer binds
-    # them.
-    ("search_queries", "surface"): "written as the literal 'search'; no port DTO field yet",
-    ("search_queries", "tier"): "written as the literal NULL; no port DTO field yet",
+    # `m10c`'s two. ⚠️ **This entry read *"neither is caller-supplied yet"*
+    # and instructed the next author to delete it "the day the writer binds
+    # them"; J2 bound them and the entry stayed.** `SearchQueryRecord` now
+    # carries both fields and `_parameters()` binds both off the record, so
+    # the *reason* moved even though the exclusion did not.
+    #
+    # The exclusion that replaces it is `mode`'s, one entry up and measured
+    # rather than transcribed: both are enum-typed on the port DTO, so the
+    # longest value any caller can reach is `'suggest'` at **7 of 8** and
+    # `'prefix'` at **6 of 6**. No member overflows either column, so no arm
+    # can drive one -- unlike `curated_rows."position"`, where the field is
+    # `ge=0` with no ceiling and `2**31` is a validly constructed model.
+    # `tier`'s exact fit is the one to watch: a third `SuggestTier` member
+    # with a longer value is a `22001` at the driver rather than a silent
+    # truncation, which `refusals_as_conflict` translates like every other
+    # refusal on this table -- so *that* is the day an arm becomes drivable,
+    # and it is DDL rather than a code change.
+    ("search_queries", "surface"): "enum-typed on the port DTO; longest member is 7 of 8",
+    ("search_queries", "tier"): "enum-typed on the port DTO; longest member is 6 of 6",
 }
 
 

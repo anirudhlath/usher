@@ -955,14 +955,18 @@ bounded total goes **81 → 83**.
 Neither has an arm in
 `test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_never_as_an_encoder_crash`,
 and both are in `_NO_CALLER_SUPPLIED_VALUE` with a measurement rather than as a
-gap: `SearchQueryRecord` carries no field for either yet, so `record()` writes
-the literals `'search'` and `NULL`, and no port call can supply a value.
-⚠️ **When the suggest writer binds them the arms are owed**, and the values are
-tight rather than roomy: `SearchSurface`'s longest member is `'suggest'` at
-**7 of 8** and `SuggestTier`'s is `'prefix'` at **6 of 6**. An exact fit is not
-a defect here -- `varchar(n)` raises `22001` rather than truncating, and the
-writer is already translated -- but it means a third `SuggestTier` member with
-a longer value is DDL, not a code change.
+gap. ✅ **This read *"`SearchQueryRecord` carries no field for either yet"* and
+closed on *"when the suggest writer binds them the arms are owed"*; the writer
+landed the commit after `m10c`, the fields are bound, and the arms are
+measured **not** owed.** The reason is now `search_queries.mode`'s, one column
+over: both are enum-typed on the port DTO, so the longest value a caller can
+reach is `'suggest'` at **7 of 8** and `'prefix'` at **6 of 6** -- no member
+overflows, and there is no validly constructed record for an arm to drive,
+unlike `curated_rows."position"`'s `ge=0` against `integer`. An exact fit is
+not a defect here -- `varchar(n)` raises `22001` rather than truncating, and
+the writer is already translated -- but it does mean **`tier` is the one entry
+whose exclusion a third `SuggestTier` member would end**, and that is DDL
+rather than a code change.
 
 ### `Title.popularity`, and the two the roadmap leaves open
 

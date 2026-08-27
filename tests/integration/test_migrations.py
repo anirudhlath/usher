@@ -957,8 +957,15 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `m08a`'s two, displaced from the `-1` half the moment `m08b` became
         # head. One assertion per table, for the reason that block records:
         # a `downgrade()` that drops `curated_rows` and forgets `llm_calls`
-        # passes a check naming only the first, and `llm_calls` carries no
-        # index beyond its primary key.
+        # passes a check naming only the first, so `pk_llm_calls` is what
+        # stands for that table.
+        #
+        # ⚠️ This comment read "and `llm_calls` carries no index beyond its
+        # primary key" until `m10c` gave it `ix_llm_calls_at` and
+        # `ix_llm_calls_generation_id`. The assertion did not move and the
+        # reason did: neither name needs an assertion here for the same reason
+        # `ix_curated_rows_user_newest` does not — an index cannot outlive its
+        # table, so below `m08a` both are absent because `llm_calls` is.
         #
         # There is deliberately no assertion on `ix_curated_rows_user_newest`.
         # It would be **strictly redundant**: an index cannot outlive its

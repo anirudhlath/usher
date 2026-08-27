@@ -107,6 +107,33 @@ comment. Nothing else removes these: a `downgrade()` that dropped only the two
 columns would leave `ix_llm_calls_at` and `ix_llm_calls_generation_id` behind on
 a table that still exists, and `ix_search_queries_at` on a table that still
 exists too. The two spellings look alike, which is why this paragraph is here.
+
+🔴 **This revision is reversible in its *schema* and destructive in its
+*data*, and the second half is stated here because everything else about it
+reads reversible.** `downgrade()` drops `surface` and `tier` from a table it
+does not drop, so a `search_queries` row survives the cycle with both facts
+gone, and `upgrade()` re-applied answers `('search', NULL)` for every one of
+them. On a deployment where J2's writer has run -- `USHER_SEARCH_SUGGEST_ANALYTICS`,
+shipped `false` -- **a down-then-up cycle silently relabels every
+`surface = 'suggest'` row as `'search'` and discards the tier that answered
+it**, which is exactly the two-vocabularies confusion this column was added to
+prevent, arriving from the migration rather than from a writer.
+
+**The backfill's missing `WHERE` is not the mechanism and adding one would be
+theatre.** `UPDATE search_queries SET surface = 'search'` has no predicate, and
+a reviewer reading it reaches for `WHERE surface IS NULL`; that guard can never
+match differently, because the column does not exist when `upgrade()` runs --
+`downgrade()` dropped it, so every row is NULL by construction on the second
+application exactly as on the first. Writing it would move a reader's eye off
+`drop_column`, which is where the data actually goes, onto a predicate that
+cannot fire. There is nowhere to put the values: a column-adding migration's
+inverse is dropping the column, and this schema has no side table to park them
+in. So the destruction is recorded rather than repaired, and it is *measured*
+rather than recorded -- `tests/integration/test_m10_schema.py::
+test_a_down_and_up_cycle_relabels_a_suggest_row_and_the_artefact_check_cannot_see_it`
+drives the cycle over a real row and asserts the relabelling, because the
+five-artefact round trip beside it asserts *presence* and never data, and a
+paragraph nothing runs is how this claim would go stale.
 """
 
 from collections.abc import Sequence
@@ -124,6 +151,14 @@ def upgrade() -> None:
     # Three statements, and the order is the point: nullable, backfilled, then
     # NOT NULL. Never `server_default` -- it would outlive this migration and
     # supply a plausible wrong value to a writer that forgot. `m09d`'s spelling.
+    #
+    # **The `UPDATE` has no `WHERE` and must not grow one** -- see the module
+    # docstring. The statement below runs only against a table where this
+    # column has just been added, so every row is NULL and any predicate
+    # matches all of them; a `WHERE surface IS NULL` here would read as a
+    # guard against re-application and would guard nothing, while pointing
+    # away from `downgrade()`'s `drop_column`, which is what actually
+    # discards a `'suggest'` label.
     op.add_column("search_queries", sa.Column("surface", sa.String(length=8), nullable=True))
     op.execute("UPDATE search_queries SET surface = 'search'")
     op.alter_column("search_queries", "surface", nullable=False)

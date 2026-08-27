@@ -807,10 +807,16 @@ deliberately **not** a tenth column. `played` is `NOT NULL` rather than
 nullable for exactly the reason in this paragraph. `user_id` is `ON DELETE
 RESTRICT` — a household's search history is user state — and
 `clicked_title_id` is `ON DELETE SET NULL`, because a deleted title must not
-delete the record that somebody searched. The table ships **no index beyond
-its primary key**: its readers are the dashboards below, and an index whose
-reader is a later milestone is the failure [09](09-roadmap.md)'s boundary call
-9 names.
+delete the record that somebody searched. The table shipped **no index beyond
+its primary key** from `m09a` to `m10b`: its readers are the dashboards below,
+and an index whose reader is a later milestone is the failure
+[09](09-roadmap.md)'s boundary call 9 names. ⚠️ **That sentence was true when
+it was written and is history as of `m10c`**, twelve lines above — which added
+`ix_search_queries_at` for the *retention* statement rather than for a
+dashboard, so the boundary call is unrepealed rather than overruled. Nothing
+else on this table is indexed, so
+`fk_search_queries_clicked_title_id_titles`' `SET NULL` still scans it on
+every title delete.
 
 🔴 **This paragraph read *"`litellm` reports per-call cost natively, so cost
 analysis is exact SQL rather than estimated counters"* and its premise is

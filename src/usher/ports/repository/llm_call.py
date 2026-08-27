@@ -21,8 +21,13 @@ class LLMCallRepository(ABC):
     central decision and it is a deferral with a date on it: every reader
     named anywhere in the PRD is a Grafana panel M10 builds, `m08a` shipped
     this table with its primary key and no other index *on the strength of
-    this port having no read*, and it wrote the two future indexes out as
-    copy-pasteable `CREATE INDEX` statements beside the query each serves. A
+    this port having no read*, and it wrote the two indexes it was deferring
+    out as copy-pasteable `CREATE INDEX` statements beside the query each
+    serves. ⚠️ **`m10c` shipped both of them verbatim, so the deferral is
+    half discharged and this paragraph's tense is the half that moved.**
+    `ix_llm_calls_at` and `ix_llm_calls_generation_id` exist; the *read* they
+    were written for still does not, and that half is what the rest of this
+    paragraph is about. A
     `list_since()` here would be a method with no caller in `src/`, which this
     repository has shipped twice: `ix_titles_popularity` was an index nothing
     read (dropped by `ffc` after a measurement showed its declared direction

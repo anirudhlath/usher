@@ -81,12 +81,18 @@ _INSERT_QUERY = text(
     # Both widths are `SearchQueryRow`'s own -- 8 for `surface` and 6 for
     # `tier` -- read off that model rather than counting the longest member
     # here, because two spellings of one width is how they stop agreeing.
+    # 🔴 **Which is exactly what happened**: `surface` shipped as `length=7`
+    # for one commit, the width of `'suggest'` counted by hand, against the
+    # model's and `m10c`'s `varchar(8)`. Harmless on the wire -- a bind
+    # parameter's declared width is not enforced, only the column's is -- and
+    # the comment above it was false about the line below it, which is the
+    # failure it exists to name arriving in its own paragraph.
     # Typed for `mode`'s reason and for one more:
     # `tier` binds `None` on every `search` row, and an untyped `NULL` is the
     # shape asyncpg refuses with "could not determine data type of parameter"
     # (`.claude/rules/db-and-sql.md`, and `_RECORD_OUTCOME`'s
     # `clicked_title_id` below is the same trap one statement over).
-    bindparam("surface", type_=enum_column(SearchSurface, length=7)),
+    bindparam("surface", type_=enum_column(SearchSurface, length=8)),
     bindparam("tier", type_=enum_column(SuggestTier, length=6)),
 )
 

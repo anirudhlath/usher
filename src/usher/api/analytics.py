@@ -1,10 +1,14 @@
 """The outcome half of `search_queries`, at the boundary.
 
-PRD 10 gives that table nine columns and says it cannot ship until every one
-of them has a named writer. F2 wrote the seven a search already knows. The
-other two -- `clicked_title_id` and `played` -- are things a *client* does
-afterwards, so their writers are routes, and this module is the one line of
-code all three of them share.
+PRD 10 gives that table eleven columns and says it cannot ship until every one
+of them has a named writer. **Nine until `m10c`**: F2 wrote the seven a search
+already knows, and `m10c`'s `surface` and `tier` are written by that same
+`record()` call -- `search`/`NULL` from `SearchService.search`, and
+`suggest`/the tier that answered from `SearchService.suggest`, which is J2's
+writer and the reason the column has one at all. The other two --
+`clicked_title_id` and `played` -- are things a *client* does afterwards, so
+their writers are routes, and this module is the one line of code all three of
+them share.
 
 **Three call sites, one function, because the interesting part is the
 absorption rather than the call.** `GET /titles/{id}` reports the click,

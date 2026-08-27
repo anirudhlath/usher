@@ -162,12 +162,17 @@ class SearchQueryRepository(ABC):
       never clicked at all. Recorded here as the trade-off it is: the
       alternative (no FK) trades that ambiguity for an unenforced reference a
       dashboard would have to defend against instead, and M1 chose the FK.
-    - **`search_queries` carries no index beyond its primary key**
-      (`genome_tags`' precedent, PRD 09's boundary call 9: an index whose only
-      reader is a later milestone is a cost with no payer), so
-      `fk_search_queries_clicked_title_id_titles`'s `SET NULL` scans this
+    - **`search_queries` carried no index beyond its primary key from `m09a`
+      to `m10b`** (`genome_tags`' precedent, PRD 09's boundary call 9: an
+      index whose only reader is a later milestone is a cost with no payer),
+      so `fk_search_queries_clicked_title_id_titles`'s `SET NULL` scans this
       table on every title delete. M1 recorded the gap rather than repairing
-      it; this task reports it rather than silently adding the index.
+      it; F1 reported it rather than silently adding the index.
+      ⚠️ **`m10c` added `ix_search_queries_at` and that is not this gap
+      closing.** That index is on `at`, for PRD 10's retention `DELETE`; a
+      `SET NULL` on `clicked_title_id` cannot use it, so the scan above is
+      unchanged and the sentence that would go stale here is the *premise*
+      rather than the consequence.
 
     Same session ownership as every other repository here: methods flush and
     return, and never commit.

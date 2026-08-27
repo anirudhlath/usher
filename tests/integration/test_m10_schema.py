@@ -372,3 +372,99 @@ async def test_one_step_back_and_forward_restores_each_artefact(
         assert await present(), f"{artefact} did not come back"
     finally:
         await _drop(admin, scratch)
+
+
+async def test_a_down_and_up_cycle_relabels_a_suggest_row_and_the_artefact_check_cannot_see_it(
+    postgres_url: str,
+) -> None:
+    """🔴 **The five artefacts above come back and the data does not**, and
+    nothing in this file could say so: every assertion beside this one reads
+    `information_schema` or `pg_indexes`, so a cycle that restored the whole
+    schema over silently rewritten rows passes all five.
+
+    `m10c.downgrade()` drops `surface` and `tier` from a table it does not
+    drop, so the values are gone with no side table to park them in; the
+    re-`upgrade()` then backfills `'search'` over every row, which is *true*
+    of every row that existed at `m10c` and **false of every row J2's writer
+    has written since**. The migration's docstring states this and this case
+    is what makes the statement a measurement -- a paragraph nothing runs is
+    how a claim about reversibility goes stale.
+
+    ⚠️ **It is deliberately not a test of the missing `WHERE`.**
+    `WHERE surface IS NULL` on that `UPDATE` would change nothing here,
+    because the column has just been re-added and every row is NULL; the
+    assertions below would read identically with it in place. What is being
+    pinned is the `drop_column`, which is where the values actually go.
+
+    The `search` row is the control. Both rows go round the same cycle, and
+    only one of them comes back carrying a different fact -- without it,
+    *"the suggest row reads `search` afterwards"* is also what a cycle that
+    deleted every row and re-seeded defaults would produce.
+    """
+    admin, scratch, url = await _scratch(postgres_url, "relabel")
+    try:
+        await asyncio.to_thread(run_alembic, url, "head")
+        engine = build_engine(url)
+        user_id, suggest_id, search_id = new_id(), new_id(), new_id()
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("INSERT INTO users (id, name, is_default) VALUES (:id, :n, false)"),
+                    {"id": user_id, "n": f"relabelled-{uuid.uuid4().hex[:8]}"},
+                )
+                for row_id, surface, tier in (
+                    (suggest_id, "suggest", "prefix"),
+                    (search_id, "search", None),
+                ):
+                    await conn.execute(
+                        text(
+                            "INSERT INTO search_queries "
+                            "(id, at, user_id, query, mode, result_count, latency_ms, "
+                            " clicked_title_id, played, surface, tier) "
+                            "VALUES (:id, :at, :user_id, 'the quie', 'full_text', 3, 4, "
+                            "        NULL, false, :surface, :tier)"
+                        ),
+                        {
+                            "id": row_id,
+                            "at": datetime.now(UTC),
+                            "user_id": user_id,
+                            "surface": surface,
+                            "tier": tier,
+                        },
+                    )
+
+            async def read(row_id: uuid.UUID) -> tuple[str, str | None] | None:
+                async with engine.connect() as conn:
+                    found = (
+                        await conn.execute(
+                            text("SELECT surface, tier FROM search_queries WHERE id = :id"),
+                            {"id": row_id},
+                        )
+                    ).one_or_none()
+                return None if found is None else (found[0], found[1])
+
+            # The premise. Without it the assertion after the cycle is about
+            # nothing: a row that never carried `('suggest', 'prefix')` reads
+            # back `('search', None)` for a reason that is not the migration's.
+            assert await read(suggest_id) == ("suggest", "prefix")
+            assert await read(search_id) == ("search", None)
+
+            await asyncio.to_thread(run_alembic, url, "-1")
+            await asyncio.to_thread(functools.partial(run_alembic, url, "m10c", direction="up"))
+
+            # The row survives -- this is a relabelling, not a deletion, which
+            # is what makes it silent. A dropped row would at least be a
+            # missing count somewhere.
+            assert await read(suggest_id) == ("search", None), (
+                "the cycle is data-destructive and the migration docstring says so; "
+                "if this now holds `('suggest', 'prefix')` something restored the "
+                "values and that docstring is the thing to correct"
+            )
+            assert await read(search_id) == ("search", None), (
+                "the control: a `search` row round-trips unchanged, so the "
+                "assertion above is about the surface and not about the cycle"
+            )
+        finally:
+            await engine.dispose()
+    finally:
+        await _drop(admin, scratch)
