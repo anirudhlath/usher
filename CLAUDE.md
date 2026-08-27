@@ -213,7 +213,7 @@ worth carrying.** `mutation-sweeps.md` was the destination of that first split
 and then grew to **5,077 lines / 339,061 bytes** behind `docs/plans/**` — a
 trigger that fires for almost every planning task here, so the same shape
 recurred at the same place within one milestone. Split again 2026-08-21:
-**1,179 lines / 78,283 bytes stay on the trigger, 3,917 lines of per-task
+**1,185 lines / 78,283 bytes stay on the trigger, 3,917 lines of per-task
 ledger moved to `mutation-sweep-ledgers.md`**, a 77% reduction in what a
 planning session loads to reach the mechanics (~85K → ~20K tokens, estimated at
 4 bytes/token, not measured with `count_tokens`). Both halves were checksummed
