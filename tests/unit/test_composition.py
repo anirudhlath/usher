@@ -23,7 +23,7 @@ import pathlib
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
@@ -79,6 +79,7 @@ from usher.domain.curation import LLMPurpose
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority, JobStatus
+from usher.domain.rows import BuiltRow, DisplayHint, RowCard, RowFamily
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.bulk import ImdbTitle
@@ -102,6 +103,7 @@ from usher.services.events import DeferredEventPublisher
 from usher.services.handlers import SourceBinding
 from usher.services.jobs import JobWorker
 from usher.services.rows import ROW_PROVIDERS
+from usher.services.rows.cache import RowCache
 from usher.services.taste import TasteService
 
 #: The size of the pool `_pipeline_over_fakes` puts on the pipeline, and it is
@@ -408,6 +410,113 @@ async def test_the_worker_offers_an_enrichments_frame_after_the_jobs_own_commit(
     assert log.count("publish") == 1, f"the enrichment published {log.count('publish')} frames"
     assert log[-1] == "publish", f"the frame was offered mid-job: {log}"
     assert log[-2] == "commit", f"nothing was committed between the handler and the frame: {log}"
+
+
+async def test_the_worker_hands_the_enrich_service_the_row_cache_it_was_built_with() -> None:
+    """The whole chain, driven rather than read: `build_worker(rows=...)` ->
+    `_worker_handlers` -> `build_enrich_service(cache=...)` -> `EnrichService`.
+
+    `tests/unit/test_services_enrich.py` pins the service against a cache
+    handed to it directly, which says nothing about whether any composition
+    root ever hands it one -- and this file already records why that gap is
+    the expensive kind: *"a dependency every test overrides is a dependency no
+    test covers, and the type checker is what has been holding it."* Four
+    `None`-able keyword arguments are threaded through three functions here,
+    and `mypy` is happy with every one of them defaulting to `None` for ever.
+
+    Driven through `run_once` for
+    `test_the_worker_offers_an_enrichments_frame_after_the_jobs_own_commit`'s
+    stated reason: the claim is about what a running deployment does, and
+    reading `._cache` off the service would pass against a worker that never
+    claims an enrich job at all.
+    """
+    titles = FakeTitleRepository()
+    title = Title(
+        kind=TitleKind.MOVIE,
+        tmdb_id=90000550,
+        name="The Quiet Vacuum",
+        sort_name="quiet vacuum, the",
+        enrichment_state=EnrichmentState.STUB,
+    )
+    await titles.add(title)
+    queue = FakeJobQueue()
+    await queue.enqueue(
+        [JobRequest(kind=JobKind.ENRICH, key=str(title.id), priority=JobPriority.DEMAND)]
+    )
+    pipeline = _pipeline_over_fakes(titles=titles, queue=queue)
+
+    cache = RowCache(clock=lambda: datetime.now(UTC))
+    user_id = uuid.uuid4()
+    row = BuiltRow(
+        slug="because-you-watched",
+        title="Because You Watched",
+        family=RowFamily.SIMILARITY,
+        display_hint=DisplayHint.PORTRAIT,
+        ttl=timedelta(hours=6),
+        cards=(
+            RowCard(
+                title_id=title.id,
+                kind=TitleKind.MOVIE,
+                name="The Quiet Vacuum",
+                enrichment_state=EnrichmentState.SKELETON,
+            ),
+        ),
+    )
+    cache.put_row(user_id, row.slug, row, ttl=row.ttl)
+    cache.put_screen(user_id, (row,), ttl=timedelta(seconds=30))
+
+    worker = build_worker(
+        _work_for(pipeline),
+        _settings(),
+        provider=FakeMetadataProvider(),
+        embedder=None,
+        client=None,
+        registry=_no_sources(),
+        user_id=uuid.uuid4(),
+        rows=cache,
+    )
+    assert cache.size == 2, "the premise: the shelf and the screen are cached before the job runs"
+
+    assert await worker.run_once() == 1
+
+    assert cache.get_row(user_id, "because-you-watched") is None
+    assert cache.get_screen(user_id) is None
+
+
+async def test_a_worker_built_without_a_row_cache_still_enriches() -> None:
+    """`usher work`'s arm. `rows` defaults to `None` all the way down, and a
+    root that composes no screens must not acquire a required collaborator --
+    `build_push_applier`'s recorded terms, and the reason the parameter is
+    optional rather than positional."""
+    titles = FakeTitleRepository()
+    title = Title(
+        kind=TitleKind.MOVIE,
+        tmdb_id=90000550,
+        name="The Quiet Vacuum",
+        sort_name="quiet vacuum, the",
+        enrichment_state=EnrichmentState.STUB,
+    )
+    await titles.add(title)
+    queue = FakeJobQueue()
+    await queue.enqueue(
+        [JobRequest(kind=JobKind.ENRICH, key=str(title.id), priority=JobPriority.DEMAND)]
+    )
+    pipeline = _pipeline_over_fakes(titles=titles, queue=queue)
+
+    worker = build_worker(
+        _work_for(pipeline),
+        _settings(),
+        provider=FakeMetadataProvider(),
+        embedder=None,
+        client=None,
+        registry=_no_sources(),
+        user_id=uuid.uuid4(),
+    )
+
+    assert await worker.run_once() == 1
+    enriched = await titles.get(title.id)
+    assert enriched is not None
+    assert enriched.enrichment_state is EnrichmentState.ENRICHED
 
 
 def test_only_the_worker_defers_and_the_push_and_reconcile_lanes_do_not() -> None:

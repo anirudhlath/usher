@@ -26,14 +26,16 @@ import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 
+from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.api.app import create_app
-from usher.api.deps import get_title_repository
+from usher.api.deps import get_job_queue, get_title_repository
 from usher.api.dto.browse import BrowseFacetsResponse, FacetsOmitted
 from usher.api.routers import browse as browse_router
 from usher.api.routers.browse import _KEYSET_TYPES
 from usher.config import Settings
-from usher.domain.enums import TitleKind
+from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.title import Title
 from usher.ports.repository.title import BrowseFacets, BrowseSort
 
@@ -44,7 +46,21 @@ def titles() -> FakeTitleRepository:
 
 
 @pytest.fixture
-def app(titles: FakeTitleRepository) -> FastAPI:
+def queue() -> FakeJobQueue:
+    """Overridden for every case in this file, not only the demand-lane ones.
+
+    `/browse` promotes the skeletons it draws (issue #73), so the queue is on
+    this route's path now and the real `PostgresJobQueue` points at the
+    unreachable database in `Settings` below -- which is deliberate for the
+    *read* half and fatal for the write. Same treatment the nine fixtures
+    passing `push_enabled=False` get: when a dependency becomes real, the
+    fixture says so rather than leaving it to fail.
+    """
+    return FakeJobQueue()
+
+
+@pytest.fixture
+def app(titles: FakeTitleRepository, queue: FakeJobQueue) -> FastAPI:
     built = create_app(
         Settings(
             database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
@@ -54,6 +70,7 @@ def app(titles: FakeTitleRepository) -> FastAPI:
         )
     )
     built.dependency_overrides[get_title_repository] = lambda: titles
+    built.dependency_overrides[get_job_queue] = lambda: queue
     return built
 
 
@@ -513,3 +530,45 @@ def _without_prose(tree: ast.Module) -> ast.Module:
         ):
             node.body = node.body[1:] or [ast.Pass()]
     return tree
+
+
+# -- the demand lane ------------------------------------------------------
+
+
+async def test_browsing_a_page_of_skeletons_promotes_them_to_visible(
+    client: httpx.AsyncClient, titles: FakeTitleRepository, queue: FakeJobQueue
+) -> None:
+    """`/browse` is the screen with the most to gain and had nothing wired:
+    1,139,982 of 1,273,313 titles were `skeleton` on 2026-08-26, so ~89% of
+    what this route can return is a name and a year, and paging past it was the
+    one interaction guaranteed never to improve it.
+
+    Asserted through a real `create_app()` with the queue overridden rather
+    than on a service in isolation, because the defect this closes is a route
+    that never *called* the service -- and a unit case on `VisibilityService`
+    is green against a router that does not import it.
+    """
+    skeleton = await _seed(titles, "A skeleton")
+    await _seed(titles, "Already done", enrichment_state=EnrichmentState.ENRICHED)
+
+    response = await client.get("/browse")
+
+    assert response.status_code == 200
+    assert [job.key for job in queue.jobs_of(JobKind.ENRICH)] == [str(skeleton.id)]
+    assert queue.jobs_of(JobKind.ENRICH)[0].priority == JobPriority.VISIBLE
+
+
+async def test_browsing_a_fully_enriched_page_enqueues_nothing(
+    client: httpx.AsyncClient, titles: FakeTitleRepository, queue: FakeJobQueue
+) -> None:
+    """The premise the case above rests on, asserted rather than assumed: the
+    promotion is a statement about the *tier* of what was drawn, not something
+    the route does on every request. Without this, a router that promoted every
+    row it returned passes the case above unchanged."""
+    await _seed(titles, "Already done", enrichment_state=EnrichmentState.ENRICHED)
+
+    response = await client.get("/browse")
+
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 1, "the premise: the page was not empty"
+    assert queue.jobs_of(JobKind.ENRICH) == []

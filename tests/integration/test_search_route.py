@@ -120,6 +120,20 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
         # violation rather than into a slow test. Unscoped rather than marked,
         # because this table has no column this file could mark.
         await session.execute(text("DELETE FROM search_queries"))
+        # PRD 03's demand lane, since issue #73: `GET /search` and
+        # `GET /search/suggest` promote the skeletons they answered with, and
+        # `get_session` commits at the end of a successful request -- so a read
+        # route in this file writes `jobs` rows. Scoped to this file's marker,
+        # like the titles below, and run **before** them: the job's `key` is
+        # the title's id as text, so once the title row is gone there is
+        # nothing left to identify this file's jobs by.
+        await session.execute(
+            text(
+                "DELETE FROM jobs WHERE kind = 'enrich' AND key IN "
+                "(SELECT id::text FROM titles WHERE sort_name LIKE :pattern)"
+            ),
+            {"pattern": f"{MARK} %"},
+        )
         await session.execute(
             text("DELETE FROM titles WHERE sort_name LIKE :pattern"), {"pattern": f"{MARK} %"}
         )

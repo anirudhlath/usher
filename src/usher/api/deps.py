@@ -89,6 +89,7 @@ from usher.services.similar import SimilarityService
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
 from usher.services.titles import TitleReadService
+from usher.services.visibility import VisibilityService
 from usher.services.watch_sync import WatchStateSyncService
 from usher.services.watch_write import WatchWriteService
 
@@ -433,6 +434,25 @@ BootstrapReportDep = Annotated[BootstrapReport, Depends(get_bootstrap_report)]
 # between "no such title" and "no copy of it".
 TitleRepositoryDep = Annotated[TitleRepository, Depends(get_title_repository)]
 EpisodeRepositoryDep = Annotated[EpisodeRepository, Depends(get_episode_repository)]
+
+
+def get_visibility_service(
+    queue: JobQueueDep,
+    titles: Annotated[TitleRepository, Depends(get_title_repository)],
+) -> VisibilityService:
+    """The demand lane for the screens (issue #73).
+
+    Request-scoped and holding only the queue, which is what makes it unlike
+    `EnrichService` — the note above explains why *that* one may not be a
+    dependency, and the distinction is the token bucket rather than the shape.
+    This promotes a job and makes no network call, so a per-request instance
+    costs an object; enrichment itself still happens on the worker, which is
+    the one process that owns the bucket.
+    """
+    return VisibilityService(queue, titles)
+
+
+VisibilityServiceDep = Annotated[VisibilityService, Depends(get_visibility_service)]
 
 
 def get_match_service(
@@ -913,6 +933,7 @@ async def get_home_service(
     cache: RowCacheDep,
     refreshes: Annotated[RefreshQueue, Depends(get_refresh_queue)],
     provider_settings: RowProviderSettingsRepositoryDep,
+    visibility: VisibilityServiceDep,
 ) -> HomeService:
     """The composer, over the registry `services/rows/__init__.py` owns, minus
     what an operator has switched off.
@@ -953,6 +974,7 @@ async def get_home_service(
         enabled_row_providers(row_provider_settings(await provider_settings.overrides())),
         cache=cache,
         refresh=refreshes.schedule,
+        visibility=visibility,
     )
 
 

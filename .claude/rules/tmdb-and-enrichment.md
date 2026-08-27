@@ -600,7 +600,13 @@ be heterogeneous in the cost dimension — which is a stronger claim than the
 
 - **Two follow-up jobs per enriched title, always.** `EnrichService` enqueues
   an `INDEX` and a `DERIVE` at `BACKFILL` on every success — 537 enrichments
-  produced exactly 537 of each. The full run therefore writes **261,612**
+  produced exactly 537 of each. ⚠️ **The rung is no longer a constant, as of
+  2026-08-26 (issue #73):** the follow-ups inherit the rung the `enrich` job
+  was claimed at whenever that is `VISIBLE` or above, and stay at `BACKFILL`
+  otherwise. Every number in this section is unaffected — S3 enqueued the tier
+  at `NEW`, which is the clamped branch — but a reader taking "at `BACKFILL`"
+  as a present-tense property of the code will be wrong for anything a client
+  opened or scrolled past. The full run therefore writes **261,612**
   further jobs on top of its 130,806. `DERIVE` drains on the same worker (it
   needs the provider, not the network — zero requests observed). `INDEX` does
   **not**: `composition.embedder` returns `(None, no-op)` unless

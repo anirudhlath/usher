@@ -580,3 +580,61 @@ excludes skeletons, so both sides of every stored pair speak TMDb's vocabulary.
 It becomes real the moment the embedded population widens past the enriched
 tier. That is a trap that is not sprung, written down as unsprung on purpose:
 whoever widens `_POPULATION` owns this term.
+
+## A row TTL is a bet that the catalog does not change, and enrichment is the write that breaks it (2026-08-26)
+
+**The row cache had two invalidation triggers and enrichment was not one of
+them**, so a card built before its title was enriched kept its skeleton name
+and its absent artwork for the length of its TTL. Measured against the deployed
+1,276,208-title catalog, comparing a live `GET /home` against a cold compose of
+the *same eight rows* in a fresh process (`cli._home`'s wiring, cache cleared):
+
+| | live `/home` | cold compose |
+|---|---|---|
+| cards | 145 | 145 |
+| `artwork: null` | **55 (38%)** | **5 (3%)** |
+
+**The null rate is ordered by TTL, which is the finding rather than the
+totals** — and it is what separates "the catalog has no artwork" from "this
+entry is old":
+
+| row | TTL | null |
+|---|---|---|
+| `continue-watching`, `next-up` | 60 s | 0% |
+| `recently-added` | 5 min | 12% |
+| `genre-affinity` | 1 h | 0–5% |
+| `because-you-watched` | **6 h** | **75–90%** |
+
+🔴 **The obvious diagnosis is wrong and the spot-check is what refuted it.**
+"Those titles are skeletons TMDb never reached" fits the shape exactly — only
+132,410 of 1,276,208 titles (10.4%) carry any `images` row, and it is
+`because-you-watched` that draws from the whole catalog while `recently-added`
+and `genre-affinity` draw from the owned library. It is still false: the eight
+null-artwork cards sampled by id were **all `enriched`, all carrying 10 posters
+and 2–21 images each**, and `_PRIMARY_FOR_TITLES` run verbatim against those
+ids returned a `is_primary` poster for every one. The stale entry and the
+absent artwork produce the identical card, and the population statistic
+corroborates the wrong one. **Ask the cache before believing the catalog.**
+
+**`title.updated` is not the repair, and it looks like it should be.**
+`EnrichService` has published that frame since M4 and the console has handled
+it since the design handoff — but the handler is colour-only by design
+(`patterns.md` §7; `Home.tsx` says *"It does not refetch"* in terms), so the
+frame repairs a card that is already on screen and nothing about the cached row
+behind it. **A read-through loop that ends at the client does not close a cache
+the server reads from.**
+
+**The fix is keyed on the title, not on the write, and that is what keeps it
+out of the fan-out the PRD refuses.** `RowCache.invalidate_titles` drops only
+entries whose cards name the enriched title, so a screen of 145 cards is
+invalidated at most 145 times by a backfill of any size — against S3's 130,647
+enrichments in 1.98 h, fewer rebuilds than the 30 s screen TTL forces over the
+same window (237). A `clear()` behind the same name passes every case that
+names a title and has none of this property, which is why
+`test_invalidating_no_titles_drops_nothing` exists.
+
+**Both halves of the cache are scanned.** A screen is stored whole, so a row
+can reach one without ever being written to the row half — dropping only the
+row half is `invalidate`'s own recorded subtle bug (the next request is a
+screen cache hit and the invalidation had no visible effect) arriving through
+the other door.

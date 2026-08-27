@@ -24,11 +24,13 @@ from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
+from usher.domain.rows import BuiltRow, DisplayHint, RowCard, RowFamily
 from usher.domain.title import WIRE_FIELD_NAMES, Title
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.jobs import JobRequest
 from usher.services.enrich import EnrichService
+from usher.services.rows.cache import RowCache
 
 _MOVIE_TMDB_ID = 90000550
 _SERIES_TMDB_ID = 90001399
@@ -537,6 +539,117 @@ async def test_a_failed_enrichment_publishes_nothing(
     assert events.published == []
 
 
+# -- and the screens that were already holding the title --------------------
+
+
+def _cache_holding(title: Title) -> tuple[RowCache, uuid.UUID]:
+    """A row cache with one household's shelf already built from `title`.
+
+    The card carries the *pre*-enrichment name and no artwork, which is the
+    state this whole mechanism is about: a `because-you-watched` shelf has a
+    six-hour TTL, so a title enriched inside that window keeps rendering under
+    its skeleton name with a "No artwork on record" placeholder until the TTL
+    runs out.
+    """
+    cache = RowCache(clock=lambda: datetime.now(UTC))
+    user_id = uuid.uuid4()
+    row = BuiltRow(
+        slug="because-you-watched",
+        title="Because You Watched",
+        family=RowFamily.SIMILARITY,
+        display_hint=DisplayHint.PORTRAIT,
+        ttl=timedelta(hours=6),
+        cards=(
+            RowCard(
+                title_id=title.id,
+                kind=TitleKind.MOVIE,
+                name="From the source",
+                enrichment_state=EnrichmentState.SKELETON,
+            ),
+        ),
+    )
+    cache.put_row(user_id, row.slug, row, ttl=row.ttl)
+    cache.put_screen(user_id, (row,), ttl=timedelta(seconds=30))
+    return cache, user_id
+
+
+async def test_a_successful_enrichment_drops_the_cached_rows_holding_the_title(
+    titles: FakeTitleRepository,
+    episodes: FakeEpisodeRepository,
+    payloads: FakeRawPayloadStore,
+    provider: FakeMetadataProvider,
+    events: FakeEventPublisher,
+    queue: FakeJobQueue,
+) -> None:
+    """`title.updated` is a statement to a *client*, and the console's own
+    handler is colour-only by design -- patterns.md §7, "it does not refetch".
+    So the frame cannot be what repairs a shelf built before the artwork
+    landed; the cache this process serves from has to be told as well.
+    """
+    title = await _given(titles, state=EnrichmentState.SKELETON)
+    cache, user_id = _cache_holding(title)
+
+    async def commit() -> None:
+        return None
+
+    service = EnrichService(
+        titles, episodes, payloads, provider, commit, events, queue=queue, cache=cache
+    )
+    assert cache.get_row(user_id, "because-you-watched") is not None, (
+        "the premise: the shelf is cached before the enrichment runs"
+    )
+
+    await service.enrich(title.id)
+
+    assert cache.get_row(user_id, "because-you-watched") is None
+    assert cache.get_screen(user_id) is None
+
+
+async def test_a_failed_enrichment_drops_no_cached_row(
+    titles: FakeTitleRepository,
+    episodes: FakeEpisodeRepository,
+    payloads: FakeRawPayloadStore,
+    provider: FakeMetadataProvider,
+    events: FakeEventPublisher,
+    queue: FakeJobQueue,
+) -> None:
+    """ADR-0008: a failure leaves the tier exactly where it was, so nothing on
+    the card moved and the shelf is still correct. Dropping it would make a
+    provider outage a cache flush on every attempt of a backoff schedule --
+    the same argument `test_a_failed_enrichment_publishes_nothing` makes about
+    the frame, one collaborator over."""
+    title = await _given(titles, state=EnrichmentState.STUB)
+    cache, user_id = _cache_holding(title)
+    provider.fail_with(PortUnavailable("TMDb is down"))
+
+    async def commit() -> None:
+        return None
+
+    service = EnrichService(
+        titles, episodes, payloads, provider, commit, events, queue=queue, cache=cache
+    )
+    with pytest.raises(PortUnavailable):
+        await service.enrich(title.id)
+
+    assert cache.get_row(user_id, "because-you-watched") is not None
+    assert cache.get_screen(user_id) is not None
+
+
+async def test_a_composition_root_that_serves_no_screens_passes_no_cache(
+    service: EnrichService, titles: FakeTitleRepository
+) -> None:
+    """`None` is `usher work` and `usher sync` -- composition roots that
+    compose no screens, on `build_push_applier`'s recorded terms: a service
+    holding a cache nobody serves from would invalidate a dict with no reader.
+    The `service` fixture is built without one, so this asserts the default
+    arm enriches rather than raising on an absent collaborator."""
+    title = await _given(titles, state=EnrichmentState.SKELETON)
+
+    await service.enrich(title.id)
+
+    assert (await titles.get(title.id)) is not None
+
+
 async def test_the_published_event_names_the_fields_that_changed(
     service: EnrichService, titles: FakeTitleRepository, events: FakeEventPublisher
 ) -> None:
@@ -717,6 +830,59 @@ async def test_enrichment_enqueues_index_and_derive_in_one_call(
     assert (await queue.depth())[JobKind.DERIVE] == 1
     assert [job.key for job in queue.jobs_of(JobKind.DERIVE)] == [str(title.id)]
     assert queue.jobs_of(JobKind.DERIVE)[0].priority == JobPriority.BACKFILL
+
+
+@pytest.mark.parametrize("rung", [JobPriority.DEMAND, JobPriority.VISIBLE])
+async def test_a_demand_enrichment_carries_its_follow_ups_to_its_own_rung(
+    titles: FakeTitleRepository,
+    service: EnrichService,
+    queue: FakeJobQueue,
+    rung: JobPriority,
+) -> None:
+    """`DERIVE` is what writes `images`, so a title a client is looking at
+    right now gets its text promptly and its artwork whenever the background
+    sweep reaches it -- which on this catalog was **130,653 enriched titles
+    carrying no image row at all** (measured 2026-08-26).
+
+    Parametrised over both demand rungs rather than `DEMAND` alone: they reach
+    the enqueue through one expression, and a spelling that hard-codes
+    `DEMAND` answers correctly for the rung a client's *open* uses while
+    leaving every row a client merely *scrolled past* at the sweep's priority.
+
+    Fails against the constant this replaced (`JobPriority.BACKFILL`), which
+    is the shipped behaviour and the reason the images issue is prospective
+    rather than only historical.
+    """
+    title = await _given(titles, state=EnrichmentState.STUB)
+
+    await service.enrich(title.id, priority=rung)
+
+    assert queue.jobs_of(JobKind.DERIVE)[0].priority == rung
+    assert queue.jobs_of(JobKind.INDEX)[0].priority == rung
+
+
+async def test_an_ingested_titles_follow_ups_stay_at_backfill(
+    titles: FakeTitleRepository, service: EnrichService, queue: FakeJobQueue
+) -> None:
+    """**The regression guard on the rung above, and the reason inheritance is
+    clamped rather than plain.**
+
+    `IngestService` enqueues every newly seen title's `enrich` at
+    `JobPriority.NEW` (`services/ingest.py:298`), so an unclamped
+    `priority=job.priority` would put one `derive` **and** one `index` per
+    ingested title at `NEW` -- ahead of a `match` queue that is hundreds of
+    thousands of jobs deep on a first bootstrap, which is exactly the cost
+    `_apply`'s own comment refuses.
+
+    `NEW` is the rung that makes this observable: it is above `BACKFILL`, so a
+    `max()` and a `min()` disagree here and agree on the demand rungs above.
+    """
+    title = await _given(titles, state=EnrichmentState.STUB)
+
+    await service.enrich(title.id, priority=JobPriority.NEW)
+
+    assert queue.jobs_of(JobKind.DERIVE)[0].priority == JobPriority.BACKFILL
+    assert queue.jobs_of(JobKind.INDEX)[0].priority == JobPriority.BACKFILL
 
 
 async def test_the_index_job_is_enqueued_at_backfill_priority(

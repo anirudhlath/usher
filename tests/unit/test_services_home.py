@@ -23,10 +23,13 @@ from collections.abc import Sequence
 
 import pytest
 
+from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
+from tests.fakes.title_repository import FakeTitleRepository
 from tests.unit.rows import NOW, Library
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
+from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.rows import BuiltRow, RowCard, RowFamily
 from usher.domain.taste import GenreAffinity
 from usher.ports.rows import RowContext, ScoredRow
@@ -34,6 +37,7 @@ from usher.services.home import _MAX_PER_FAMILY, HomeService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
 from usher.services.rows.genre_affinity import GenreAffinityProvider
+from usher.services.visibility import VisibilityService
 
 
 @pytest.fixture
@@ -724,3 +728,77 @@ def test_the_overrides_mapping_is_never_bound_outside_the_join_that_defaults_it(
         "a module binds `overrides()` to a name instead of handing it to the join, "
         f"so it can spell its own default: {fetched} fetched, {joined} joined"
     )
+
+
+# -- the demand lane (issue #73) -------------------------------------------
+
+
+def _card_at(state: EnrichmentState) -> RowCard:
+    return RowCard(title_id=new_id(), kind=TitleKind.MOVIE, name="A card", enrichment_state=state)
+
+
+def _row_of(slug: str, *cards: RowCard, score: float) -> FakeRowProvider:
+    return FakeRowProvider(
+        proposals=(ScoredRow(row=FakeRow(slug, cards=cards), score=score),),
+        slug_prefix=slug,
+    )
+
+
+async def test_composing_a_screen_promotes_the_skeletons_it_drew(ctx: RowContext) -> None:
+    """`/home` is nine providers over one catalog, so the promotion is once for
+    the whole screen rather than once per shelf -- `seen_cards` dedupes across
+    it and pays one staged write instead of one per row.
+
+    Both tiers are on the screen, because a composer that promoted every card
+    it drew passes an all-skeleton case unchanged.
+    """
+    queue = FakeJobQueue()
+    skeleton, enriched = _card_at(EnrichmentState.SKELETON), _card_at(EnrichmentState.ENRICHED)
+    service = HomeService(
+        providers=[_row_of("recently-added", skeleton, enriched, score=0.9)],
+        visibility=VisibilityService(queue, FakeTitleRepository()),
+    )
+
+    screen = await service.compose(ctx)
+
+    assert len(screen) == 1, "the premise: the row survived composition"
+    assert [job.key for job in queue.jobs_of(JobKind.ENRICH)] == [str(skeleton.title_id)]
+    assert queue.jobs_of(JobKind.ENRICH)[0].priority == JobPriority.VISIBLE
+
+
+async def test_a_row_the_composer_dropped_is_not_promoted(ctx: RowContext) -> None:
+    """A shelf that lost the cap is never promoted, and the mechanism is
+    `_select` rather than `_order`.
+
+    ⚠️ **The first draft of this case named `_order` and was wrong.**
+    `_select` applies `max_rows` and the family cap *before* anything is built
+    (`[*pinned, *capped][: self._max_rows]`), so a losing candidate is never
+    built at all and its cards never exist to be promoted. `_order` only
+    reorders and displaces. Measured by planting `built` for `screen` at the
+    promotion site, verifying the plant landed, and watching this case stay
+    green: the two collections are identical today, so that substitution is an
+    **equivalent mutant** rather than a defect this case misses.
+
+    What this case does pin is the property that survives either spelling: the
+    cap is upstream of the promotion, so composing far more than is served
+    costs nothing on this lane. `max_rows=1` is the cheapest way to make a row
+    lose, and the assertion is that the loser's card is absent rather than
+    merely that the winner's is present.
+    """
+    queue = FakeJobQueue()
+    drawn, dropped = _card_at(EnrichmentState.SKELETON), _card_at(EnrichmentState.SKELETON)
+    service = HomeService(
+        providers=[
+            _row_of("high", drawn, score=0.9),
+            _row_of("low", dropped, score=0.1),
+        ],
+        max_rows=1,
+        visibility=VisibilityService(queue, FakeTitleRepository()),
+    )
+
+    screen = await service.compose(ctx)
+
+    assert _slugs(screen) == ["high"], "the premise: the low row was dropped"
+    promoted = [job.key for job in queue.jobs_of(JobKind.ENRICH)]
+    assert str(drawn.title_id) in promoted
+    assert str(dropped.title_id) not in promoted, "a row nobody was shown was promoted"

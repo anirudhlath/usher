@@ -55,6 +55,7 @@ from usher.ports.ingest import ProviderRef
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.metadata import EnrichmentResult, MetadataProvider
 from usher.ports.repository import EpisodeRepository, RawPayloadStore, TitleRepository
+from usher.services.rows.cache import RowCache
 
 _tracer = trace.get_tracer("usher.enrich")
 _meter = metrics.get_meter("usher.enrich")
@@ -139,6 +140,7 @@ class EnrichService:
         events: EventPublisher,
         *,
         queue: JobQueue,
+        cache: RowCache | None = None,
         cache_max_age_days: int = 30,
         now: Callable[[], AwareDatetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -159,6 +161,21 @@ class EnrichService:
         # while the other works. It must be the *same* queue `MatchService`
         # and `IngestService` hold, which only a composition root can know.
         self._queue = queue
+        # The process's one `RowCache`, or `None` in a composition root that
+        # composes no screens (`usher work`, `usher sync`) -- exactly
+        # `build_push_applier`'s terms, and for its recorded reason: a service
+        # holding a cache nobody serves from would invalidate a dict with no
+        # reader.
+        #
+        # **Enrichment is the *other* write that stales a built shelf**, and
+        # until this it was the one that said nothing. `PushApplyService` and
+        # `WatchWriteService` both invalidate `WATCH_STATE_ROWS`; enrichment
+        # rewrites a card's `name`, `year`, `enrichment_state` and `artwork`,
+        # which is every field a card carries, on rows with TTLs up to six
+        # hours. `title.updated` does not cover it -- that frame is a
+        # statement to a *client*, and the console's handler is colour-only by
+        # design (patterns.md §7, "it does not refetch").
+        self._cache = cache
         self._max_age = timedelta(days=cache_max_age_days)
         # Injected, the way `EmbySession`, `TmdbClient` and `TMDbIdDataset`
         # all inject theirs: the cache-expiry branch is otherwise only
@@ -166,7 +183,7 @@ class EnrichService:
         # operator reads.
         self._now = now
 
-    async def enrich(self, title_id: uuid.UUID) -> Title:
+    async def enrich(self, title_id: uuid.UUID, *, priority: int = JobPriority.BACKFILL) -> Title:
         """Fill one title in from the provider. Raises `UsherPortError`.
 
         Deliberately re-raises rather than absorbing: `JobWorker` is the only
@@ -185,7 +202,7 @@ class EnrichService:
                 # that names a deleted title five more times.
                 raise PortDataMalformed("no such title to enrich", detail=str(title_id))
             try:
-                enriched = await self._apply(title)
+                enriched = await self._apply(title, priority)
             except UsherPortError as exc:
                 await self._record_failure(title, exc)
                 span.set_attribute("usher.failed", True)
@@ -198,7 +215,7 @@ class EnrichService:
         _enrich_duration.record(time.perf_counter() - started, {"outcome": outcome})
         return enriched
 
-    async def _apply(self, title: Title) -> Title:
+    async def _apply(self, title: Title, priority: int) -> Title:
         ref = self._ref_for(title)
         payload = await self._payload_for(ref)
         result = self._provider.to_result(payload, title.id)
@@ -268,14 +285,46 @@ class EnrichService:
         # `JobPriority` rung that does not exist between `BACKFILL` and `NEW`
         # -- promoting `DERIVE` to `NEW` would put it ahead of a `match` queue
         # that is hundreds of thousands of jobs deep on a first bootstrap.
+        #
+        # **That argument is about the sweep and it is why this is a clamp
+        # rather than plain inheritance.** `DERIVE` is what writes `images`, so
+        # at a constant `BACKFILL` a title a client opened enriches in seconds
+        # and then queues its artwork behind every background job in the
+        # system -- measured 2026-08-26 as **130,653 enriched titles carrying
+        # no image row at all**, on a catalog whose `derive` lane had never
+        # drained. Above `VISIBLE` the rung is a statement that somebody is
+        # looking at this title now, and the follow-up that draws it inherits
+        # that; at `NEW` and below the sentence above still holds and the
+        # follow-up stays where the sweep put it. `IngestService` enqueues
+        # every newly seen title at `NEW`, so this branch is the ordinary one
+        # on a first bootstrap and the inherited rungs are the exception.
+        #
+        # `int` rather than `JobPriority`, because that is what `Job.priority`
+        # is: an integer column bounded `[0, 100]` that a `GREATEST()` runs
+        # over, so a value between two members is representable and reaches
+        # here. A comparison classifies one; `JobPriority(value)` would raise
+        # on it, which is a crashed worker for a row the schema permits.
+        follow_up = priority if priority >= JobPriority.VISIBLE else JobPriority.BACKFILL
         await self._queue.enqueue(
             [
-                JobRequest(kind=JobKind.INDEX, key=str(enriched.id), priority=JobPriority.BACKFILL),
-                JobRequest(
-                    kind=JobKind.DERIVE, key=str(enriched.id), priority=JobPriority.BACKFILL
-                ),
+                JobRequest(kind=JobKind.INDEX, key=str(enriched.id), priority=follow_up),
+                JobRequest(kind=JobKind.DERIVE, key=str(enriched.id), priority=follow_up),
             ]
         )
+        # Every shelf holding this title was built from the row it just
+        # replaced, so it is stale in four fields at once. Dropped here rather
+        # than left to the TTL because the TTLs are the wrong order of
+        # magnitude for a catalog write: `because-you-watched` is six hours,
+        # `seasonal` twelve, and a title enriched inside that window keeps
+        # rendering under its skeleton name with a "No artwork on record"
+        # placeholder until the entry dies of old age.
+        #
+        # **On the success path only**, on the same ADR-0008 argument the
+        # publish below makes: a failure leaves the tier exactly where it was,
+        # so nothing on the card moved and a drop would turn a provider outage
+        # into a cache flush per attempt of a backoff schedule.
+        if self._cache is not None:
+            self._cache.invalidate_titles((enriched.id,))
         # PRD 03's read-through loop, closed: "Completion publishes a
         # `title.updated` event on a Server-Sent Events channel; clients patch
         # in place."

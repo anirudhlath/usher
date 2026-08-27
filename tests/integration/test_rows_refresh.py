@@ -194,6 +194,18 @@ async def owned(
     finally:
         async with sessions() as session:
             for title_id in planted:
+                # `GET /home` promotes every skeleton it draws (issue #73) and
+                # `get_session` commits at the end of a successful request, so
+                # each `/home` below leaves an `enrich` row per planted title.
+                # **Before the title** -- the job's `key` is the title's id as
+                # text, so once the title row is gone nothing identifies it.
+                await session.execute(
+                    text(
+                        "DELETE FROM jobs WHERE kind = 'enrich' AND key IN "
+                        "(SELECT id::text FROM titles WHERE id = :id)"
+                    ),
+                    {"id": title_id},
+                )
                 await session.execute(text("DELETE FROM titles WHERE id = :id"), {"id": title_id})
             await session.commit()
 
