@@ -2332,10 +2332,21 @@ BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 #: destination scan followed an edge the translation scan refused to. It
 #: surfaced as `DegenerateScan` rather than as a laundered column, which is the
 #: whole point of the raise at that site, and `_core_dml` is the repair.
+#:
+#: **Every reading gained two more `translated` on 2026-08-26, from `m10c`, and
+#: this pair moved nothing else.** `search_queries.surface VARCHAR(8)` and
+#: `search_queries.tier VARCHAR(6)` are bounded by declared width, and their
+#: only writers are `search_query.py:record`/`record_outcome`, which already
+#: catch on the SQLSTATE class through `refusals_as_conflict` -- so both land
+#: **translated** with no repair needed and no `except` to widen. The bounded
+#: total goes 81 -> 83. **A widened column with a pre-translated writer is the
+#: cheap case, and it is worth having one in the record**: the two entries
+#: above are both a bucket moving *because of a scan or a redirect*, which
+#: makes them look like the normal shape when they are the interesting one.
 PUBLISHED: Mapping[str, Mapping[str, int]] = {
-    "closure": {"safe": 20, "translated": 30, "exposed-copy": 30, "exposed-sqlalchemy": 1},
-    "path": {"safe": 18, "translated": 31, "exposed-copy": 31, "exposed-sqlalchemy": 1},
-    "pydantic": {"safe": 14, "translated": 31, "exposed-copy": 34, "exposed-sqlalchemy": 2},
+    "closure": {"safe": 20, "translated": 32, "exposed-copy": 30, "exposed-sqlalchemy": 1},
+    "path": {"safe": 18, "translated": 33, "exposed-copy": 31, "exposed-sqlalchemy": 1},
+    "pydantic": {"safe": 14, "translated": 33, "exposed-copy": 34, "exposed-sqlalchemy": 2},
 }
 
 #: Same, at M8's head, which is what the roadmap's corrections are scored

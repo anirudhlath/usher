@@ -73,7 +73,7 @@ from usher.ports.errors import (
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
 from usher.ports.rows import RowContext
-from usher.ports.search import SearchFilters, SearchMode
+from usher.ports.search import SearchFilters, SearchMode, SuggestTier
 from usher.ports.source import SourceAdapter
 from usher.services.backup import (
     CREDENTIAL_KEY_WARNING,
@@ -94,7 +94,7 @@ from usher.services.restore import RestoreRefused, RestoreReport, RestoreService
 from usher.services.rotation import RotationReport, RotationService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
-from usher.services.search import SearchAnswer, SemanticSearchUnavailable, SuggestTier
+from usher.services.search import SearchAnswer, SemanticSearchUnavailable
 from usher.telemetry import (
     configure_telemetry,
     register_queue_gauges,

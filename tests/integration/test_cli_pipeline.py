@@ -73,7 +73,7 @@ from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
-from usher.ports.search import SearchFilters
+from usher.ports.search import SearchFilters, SuggestTier
 from usher.services.curation_validate import (
     ITEM_IDS_KEY,
     REASON_KEY,
@@ -81,7 +81,6 @@ from usher.services.curation_validate import (
     TITLE_KEY,
     DropReason,
 )
-from usher.services.search import SuggestTier
 
 # The blend these arranged rows claim to have been computed under. A literal,
 # never `blend_fingerprint()`: a case that inherits today's fingerprint cannot

@@ -86,7 +86,7 @@ def tier_suggester(session: AsyncSession, settings: Settings, tier: str) -> Sugg
     pay for building a service graph.
     """
     from usher.composition import build_pipeline
-    from usher.services.search import SuggestTier
+    from usher.ports.search import SuggestTier
 
     pipeline = build_pipeline(session, settings)
     chosen = SuggestTier(tier)

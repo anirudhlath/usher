@@ -241,20 +241,34 @@ def test_the_curated_read_index_leads_with_user_id_and_descends_generated_at() -
     ]
 
 
-def test_llm_calls_ships_no_index_beyond_its_primary_key() -> None:
-    """A refusal, asserted so it stays a decision.
+def test_llm_calls_ships_the_two_indexes_m08a_wrote_down_and_no_others() -> None:
+    """A refusal discharged, asserted so it stays a decision.
 
-    Every reader of this table named anywhere in the PRD is a Grafana panel
-    (PRD 10's dashboard 5 and its cost-anomaly alert) and M10 owns those.
-    Task 10's `LLMCallRepository` is append-only and has no read method at
-    all, so after M8 this table has **zero** readers in `src/` — and
-    `ix_titles_popularity`, dropped one migration ago, is this repository's
-    standing example of an index added on the strength of a sentence in a
-    document. The two indexes that would be right, and the query each would
-    serve, are written into `m08a`'s docstring so M10 adds them with a
-    measurement rather than rediscovering the argument.
+    `m08a` shipped this table with its primary key and nothing else, wrote the
+    two indexes that would be right into its own docstring, and asked that
+    they arrive *"with a measurement against a real ledger rather than against
+    this paragraph"*. `m10c` lands exactly those two, and the measurement is
+    **0 rows / 16 kB** on the deployment (read-only, 2026-08-26) plus one row
+    per generation per household per night — a write cost bounded by the
+    curation cadence.
+
+    ⚠️ **They still have no reader in `src/`**: `LLMCallRepository` is
+    append-only with no read method, which
+    `test_the_cost_ledger_has_no_read_method` still asserts. That is not the
+    `ix_titles_popularity` failure repeating, because the constraint is a
+    different one -- M10 gets one migration, and a reader task authoring its
+    own DDL would be a second head.
+
+    A whole-set comparison, not "the two named ones are present": what this
+    guards is a *third* index added on the strength of a sentence, and such an
+    index has no name to check for. `purpose` and `model` are the two most
+    likely, and both are refused in the model's own comment -- a deployment
+    holds one or two values of each.
     """
-    assert cast(Table, LLMCallRow.__table__).indexes == set()
+    assert {index.name for index in cast(Table, LLMCallRow.__table__).indexes} == {
+        "ix_llm_calls_at",
+        "ix_llm_calls_generation_id",
+    }
 
 
 def test_the_user_foreign_key_cascades_and_llm_calls_has_none() -> None:

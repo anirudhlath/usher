@@ -32,8 +32,8 @@ from pydantic import BaseModel
 
 from usher.domain.enums import TitleKind
 from usher.domain.search import SearchResult
-from usher.ports.search import SearchMode
-from usher.services.search import SearchAnswer, SuggestTier
+from usher.ports.search import SearchMode, SuggestTier
+from usher.services.search import SearchAnswer
 
 
 class SearchResultResponse(BaseModel):

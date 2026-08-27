@@ -66,7 +66,7 @@ from usher.ports.bulk import GENOME_TAG_COUNT, ImdbTitle
 from usher.ports.events import NullEventPublisher
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.repository import GenomeCoverage
-from usher.ports.search import SearchFilters, SearchMode
+from usher.ports.search import SearchFilters, SearchMode, SuggestTier
 from usher.services.bootstrap import (
     BootstrapReport,
     BootstrapService,
@@ -75,7 +75,7 @@ from usher.services.bootstrap import (
     bootstrap_report,
     vocabulary_verdict,
 )
-from usher.services.search import SearchAnswer, SuggestTier
+from usher.services.search import SearchAnswer
 
 
 def test_no_arguments_still_means_serve() -> None:

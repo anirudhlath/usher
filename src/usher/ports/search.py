@@ -73,6 +73,62 @@ class SearchMode(StrEnum):
     FUSED = "fused"
 
 
+class SearchSurface(StrEnum):
+    """Which surface asked -- `search_queries.surface`, PRD 10's amendment 2.
+
+    Two members, and the whole point of the column is that they are **not**
+    `SearchMode` values. A suggest request is parameterised by a disjoint
+    `SuggestTier`; storing both under `mode` is the
+    two-vocabularies-under-one-name hazard PRD 10 already refuses for
+    `provider`, and it would make every mode-split panel in dashboards 1 and 4
+    a measure of the type-ahead box.
+
+    `SUGGEST` is declared here by `m10c` and **emitted by the suggest analytics
+    writer in the same phase**. An enum member nothing emits is what
+    `LLMPurpose.QUERY_EXPANSION` was for two milestones; the member does not
+    ship without its writer.
+    """
+
+    SEARCH = "search"
+    SUGGEST = "suggest"
+
+
+class SuggestTier(StrEnum):
+    """Which of the two `SuggestIndex` implementations answers a keystroke.
+
+    ADR-0002's typo-tolerance gate failed and ADR-0031 is what it bought: two
+    indexes, one port, and a caller that says which. `PREFIX` is the btree
+    `lower(name) text_pattern_ops` probe with **1.9% measured typo recall**;
+    `FUZZY` is the trigram + `levenshtein_less_equal` path at **p50 33.6 ms**.
+    Neither is a better version of the other and neither is a fallback for the
+    other -- the split is a division of labour, and the whole reason this enum
+    exists rather than a `typo_tolerant: bool` is that a bool invites reading
+    one as a degraded form of the other.
+
+    **Here, beside `SearchMode`, since `m10c` -- and it lived in
+    `usher.services.search` until then.** That module's own condition for
+    keeping it was *"**no port method anywhere takes a tier**, because a tier
+    *is* the choice of implementation and an implementation cannot be told
+    which implementation it is"*. `search_queries.tier` makes a port method
+    take one, and the layering contract then forces the move rather than
+    inviting it: `SearchQueryRecord` lives in
+    `usher.ports.repository.search_query` and a field typed on a services-layer
+    enum would make `usher.ports` import `usher.services`, an upward import
+    under contract 1 (`layers = ["usher.api", "usher.services", "usher.ports",
+    "usher.domain"]`).
+
+    **The distinction that licenses the move is the direction.** A port takes
+    a tier as a *record of which implementation ran*, never as an instruction;
+    nothing here tells a `SuggestIndex` which index it is. **No alias is left
+    behind in `usher.services.search`**: a second name for one vocabulary is
+    the two-vocabularies-under-one-column hazard this file's neighbour refuses,
+    one layer up.
+    """
+
+    PREFIX = "prefix"
+    FUZZY = "fuzzy"
+
+
 @dataclass(frozen=True, slots=True)
 class SearchDocument:
     """Everything an index needs about one title, assembled by the caller.

@@ -166,14 +166,21 @@ async def test_the_title_search_names_table_and_its_primary_key_exist(
 # --- `search_queries` carries PRD 10's nine columns and no tenth -------------
 
 
-async def test_search_queries_carries_prd_tens_nine_columns_and_no_tenth(
+async def test_search_queries_carries_prd_tens_columns_and_no_others(
     session: AsyncSession,
 ) -> None:
     """`requested_mode` is wire-only. PRD 10 assigns this table to M9 *whole*
     because a half-populated analytics table is worse than an empty metric --
     a dashboard reading it cannot tell a real zero from a column nobody
     filled -- and the other half of "whole" is that nothing is added to it
-    speculatively either."""
+    speculatively either.
+
+    **Nine until `m10c`, eleven now**, and the list stays closed rather than
+    becoming a floor: `m10c` takes PRD 10's amendment 2 -- `surface` and
+    `tier`, both named in that document -- and nothing else. No
+    `keystroke_index`, no `session_id`, no `debounced` flag; a twelfth column
+    is a red here exactly as a tenth was.
+    """
     result = await session.execute(
         text(
             "SELECT column_name FROM information_schema.columns "
@@ -190,21 +197,27 @@ async def test_search_queries_carries_prd_tens_nine_columns_and_no_tenth(
         "latency_ms",
         "clicked_title_id",
         "played",
+        "surface",
+        "tier",
     }
 
 
-async def test_search_queries_ships_no_index_beyond_its_primary_key(
+async def test_search_queries_ships_one_index_beyond_its_primary_key(
     session: AsyncSession,
 ) -> None:
-    """`genome_tags`' precedent, and `genome_scores`' before it. Its readers
-    are PRD 10's dashboards, which do not exist yet; an index whose reader is
-    a later milestone is `ix_titles_popularity` again, and it is the failure
-    PRD 09's boundary call 9 names, inverted."""
+    """`genome_tags`' precedent held until `m10c` and the exception is the
+    thing that makes it a rule: an index whose reader is a later milestone is
+    `ix_titles_popularity` again, and `ix_search_queries_at`'s reader is
+    written out verbatim in PRD 10 today -- `DELETE FROM search_queries WHERE
+    at < now() - interval '90 days'`, an operator's own SQL. That the
+    statement plans onto it is asserted in
+    `tests/integration/test_m10_schema.py`; that no *second* index appeared
+    alongside it is asserted here."""
     result = await session.execute(
         text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = :t"),
         {"t": "search_queries"},
     )
-    assert {row[0] for row in result} == {"pk_search_queries"}
+    assert {row[0] for row in result} == {"pk_search_queries", "ix_search_queries_at"}
 
 
 # --- the delete rules, read off `pg_constraint` ------------------------------

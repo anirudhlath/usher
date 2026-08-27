@@ -53,8 +53,9 @@ from usher.ports.search import (
     SearchOutcome,
     SearchRequest,
     SuggestIndex,
+    SuggestTier,
 )
-from usher.services.search import SearchService, SuggestTier
+from usher.services.search import SearchService
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 UNREACHABLE_DSN = "postgresql+asyncpg://usher:usher@127.0.0.1:1/usher"

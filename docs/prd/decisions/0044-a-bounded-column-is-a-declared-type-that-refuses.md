@@ -940,6 +940,30 @@ would not have moved the number**, because the same commit made its writer
 unreadable — so a scan repair and a schema change arrived together and only the
 `DegenerateScan` separated them.
 
+### Two columns that moved the number and nothing else (2026-08-26, `m10c`)
+
+**Recorded because the three entries above are all a bucket moving for a reason
+that is not the column, and a reader could take that for the normal shape.**
+`m10c` adds `search_queries.surface VARCHAR(8)` and `search_queries.tier
+VARCHAR(6)` -- bounded by declared width, this record's second shape after
+`ge=0`-against-`integer` -- and their only writers are
+`search_query.py:record`/`record_outcome`, which already catch on the SQLSTATE
+class through `refusals_as_conflict`. So both land **translated** with no
+`except` to widen and no scan to repair: every reading gains two and the
+bounded total goes **81 → 83**.
+
+Neither has an arm in
+`test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_never_as_an_encoder_crash`,
+and both are in `_NO_CALLER_SUPPLIED_VALUE` with a measurement rather than as a
+gap: `SearchQueryRecord` carries no field for either yet, so `record()` writes
+the literals `'search'` and `NULL`, and no port call can supply a value.
+⚠️ **When the suggest writer binds them the arms are owed**, and the values are
+tight rather than roomy: `SearchSurface`'s longest member is `'suggest'` at
+**7 of 8** and `SuggestTier`'s is `'prefix'` at **6 of 6**. An exact fit is not
+a defect here -- `varchar(n)` raises `22001` rather than truncating, and the
+writer is already translated -- but it means a third `SuggestTier` member with
+a longer value is DDL, not a code change.
+
 ### `Title.popularity`, and the two the roadmap leaves open
 
 `Title.popularity` carries `allow_inf_nan=False`. The bound is on the *model*

@@ -1051,6 +1051,20 @@ _NO_CALLER_SUPPLIED_VALUE = {
     # `SearchQueryRecord.mode` is a `SearchMode`, so the longest value that can
     # reach `varchar(16)` is `'full_text'` at nine characters.
     ("search_queries", "mode"): "enum-typed on the port DTO; longest member is 9 of 16",
+    # `m10c`'s two, and neither is caller-supplied *yet*. `record()` writes
+    # `surface` as the literal `'search'` and `tier` as the literal `NULL`,
+    # because `SearchQueryRecord` carries no field for either until the
+    # suggest writer lands -- so no argument of any repository method reaches
+    # these columns and no arm can drive one. **Both are also enum-typed on
+    # the model** (`SearchSurface`, `SuggestTier`), so even once they are bound
+    # the longest reachable value is `'suggest'` at 7 of 8 and `'prefix'` at
+    # **6 of 6** -- an exact fit, so a third `SuggestTier` member with a longer
+    # value is a `22001` at the driver rather than a silent truncation, and
+    # `refusals_as_conflict` translates it like every other refusal on this
+    # table. Delete these two entries and add arms the day the writer binds
+    # them.
+    ("search_queries", "surface"): "written as the literal 'search'; no port DTO field yet",
+    ("search_queries", "tier"): "written as the literal NULL; no port DTO field yet",
 }
 
 

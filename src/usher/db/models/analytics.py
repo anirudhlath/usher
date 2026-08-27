@@ -9,6 +9,12 @@ speculatively either — `requested_mode` is wire-only, and if the analytics
 task finds it must be persisted, that is a request rather than a column
 appended here.
 
+**Eleven columns since `m10c`**, and the two it added are the *amendment* PRD
+10's own `## Analytics tables` block asked M10 to plan rather than a tenth
+column appended on a hunch: `surface` and `tier`, and nothing else — no
+`keystroke_index`, no `session_id`, no `debounced` flag. The "whole" rule
+above is what makes that list closed.
+
 **A domain record, not telemetry exhaust.** PRD 10's own framing: durable,
 queryable, exact. It is also the answer to something
 `.claude/rules/search-and-embeddings.md` lists as unsettled by ADR-0002's
@@ -30,6 +36,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Text,
 )
@@ -37,7 +44,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from usher.db.base import Base, enum_column
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
 
 class SearchQueryRow(Base):
@@ -84,19 +91,46 @@ class SearchQueryRow(Base):
     # dashboard reads a real `false` rather than a column nobody filled —
     # which is the failure the "whole" in PRD 10's comment is about.
     played: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # **The tenth and eleventh columns, `m10c`, PRD 10's amendment 2.** They
+    # are two columns rather than a fourth `SearchMode` member because
+    # `SearchMode` is `GET /search`'s `?mode=` and `SearchAnswer`'s two
+    # fields, so a member no search lane can serve would become reachable on a
+    # route that would have to refuse it.
+    #
+    # `NOT NULL` with no default, `played`'s precedent one line up: every row
+    # this table held when `m10c` landed came from `GET /search` or `usher
+    # search`, so `'search'` is what the backfill states rather than what it
+    # guesses, and a surviving `server_default` would supply that same
+    # plausible value to a writer that forgot.
+    surface: Mapped[SearchSurface] = mapped_column(
+        enum_column(SearchSurface, length=8), nullable=False
+    )
+    # **Nullable, and that is the design.** A `search` row has no tier; a
+    # `NOT NULL` here would need a member meaning "not applicable", which is a
+    # third entry in the one vocabulary this pair exists to keep separate.
+    tier: Mapped[SuggestTier | None] = mapped_column(
+        enum_column(SuggestTier, length=6), nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint("query <> ''", name="ck_search_queries_query_not_empty"),
         CheckConstraint("result_count >= 0", name="ck_search_queries_result_count_non_negative"),
         CheckConstraint("latency_ms >= 0", name="ck_search_queries_latency_ms_non_negative"),
-        # **No index beyond the primary key**, on `genome_tags`' precedent and
-        # `genome_scores`' before it. The readers are PRD 10's dashboards,
-        # which do not exist yet, and an index whose reader is a later
-        # milestone is `ix_titles_popularity` again — the failure PRD 09's
-        # boundary call 9 names, inverted.
+        # **One index since `m10c`, and it has a reader named in PRD 10
+        # itself** — `DELETE FROM search_queries WHERE at < now() - interval
+        # '90 days'`, which that document records as a sequential scan
+        # *"until somebody adds one"*. That is what distinguishes it from
+        # `ix_titles_popularity`, whose reader was a milestone away and never
+        # arrived: this statement is already written down, verbatim, as an
+        # operator's own SQL.
         #
-        # The cost is stated rather than hidden: `clicked_title_id`'s SET NULL
-        # has no lookup behind it, so a title delete scans this table. It is
-        # the one declared delete rule in `m09a` without an index, and the
-        # migration's docstring records what would reverse that.
+        # A btree rather than BRIN. `at` is append-only and physically
+        # correlated, which is BRIN's shape — but `record_outcome`'s `UPDATE`
+        # rewrites the heap tuple of every row that gains a click or a play,
+        # and whether those stay on their original page is a `fillfactor`
+        # question nobody here has measured.
+        Index("ix_search_queries_at", "at"),
+        # The cost of `m09a`'s original decision is stated rather than hidden,
+        # and is unchanged by the index above: `clicked_title_id`'s SET NULL
+        # has no lookup behind it, so a title delete still scans this table.
     )

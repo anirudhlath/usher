@@ -8792,3 +8792,86 @@ both halves. Nothing in `tests/`, `docs/` or `README.md` spells an abbreviated
 flag for any command, so the wider setting was available and was declined: one
 measured defect on one command is not evidence about nineteen surfaces an
 operator may have muscle memory for.
+
+## M10 J1 — `m10c`, and `compare_metadata`'s two blindnesses measured rather than quoted (2026-08-26)
+
+Sweep over `src/usher/db/migrations/versions/m10c_suggest_surface_and_retention_indexes.py`,
+**each mutation against the whole suite** (`6088 passed, 26 skipped` at
+baseline) rather than against J1's own selection, driven from
+`/var/tmp/m10-J1-sweep/sweep.py` — outside the working tree. Plant list fixed
+in that file **before the first run**, the three `.pyc` defences in force
+(`PYTHONDONTWRITEBYTECODE=1`, every `__pycache__` under `src/` and `tests/`
+deleted before each run, an equivalent-mutant control), every mutation
+`compile()`d before it was written, every plant asserted *present* after the
+edit, and every restore verified by `sha256` against
+`978bc25191c9c748c3e29043c9bcc886d580550f917c043883e8f65821f3128a`.
+
+**6 plants, 5 killed, 1 control surviving as designed. 0 HUNG, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN.**
+
+| # | plant | verdict | failing cases |
+|---|---|---|---|
+| C1 | the two `llm_calls` `create_index` calls **reordered** | **SURVIVED** — the control | none, and all four static gate steps exit 0 |
+| P1 | `downgrade()` body replaced by `pass` | KILLED | 6 — the five parametrised `-1`-and-back arms plus `test_a_full_down_and_up_cycle_restores_every_index` |
+| P2 | the `UPDATE … SET surface = 'search'` deleted | KILLED | **1, and only 1** — `test_the_backfill_reaches_a_row_that_existed_before_the_migration_ran` |
+| P3 | `WHERE generation_id IS NOT NULL` dropped from the partial index | KILLED | **1** — `test_the_generation_index_is_partial_and_says_so_in_its_own_definition` |
+| P4 | `SET NOT NULL` dropped from `surface` | KILLED | 2 — the `information_schema` shape case **and** `test_migration_matches_the_orm_metadata` |
+| P5 | `ix_search_queries_at` renamed by one character | KILLED | 11 |
+
+### 🔴 The headline is P3 against P4: `compare_metadata` sees a nullability change and does not see a partial index's predicate, and both halves are now measured
+
+The migration's own docstring claims `--autogenerate` is *"blind to a partial
+index's predicate in the direction that matters"*, which is a quotation from
+this repository's standing warning rather than a measurement. The two plants
+score it:
+
+- **P4** (`SET NOT NULL` dropped) fails `test_migration_matches_the_orm_metadata`
+  with alembic logging `Detected NOT NULL on column 'search_queries.surface'`.
+  So the ORM-diff case **is** load-bearing for column nullability, and the
+  `information_schema` case beside it is redundant *for that property* — kept
+  because it also pins the width and the absent `column_default`, neither of
+  which P4 moves.
+- **P3** (the predicate dropped) fails **only** the case that reads
+  `pg_indexes.indexdef` as text, and `test_migration_matches_the_orm_metadata`
+  stays green: `compare_metadata` compared a full index against a partial one
+  and reported no drift. **A full index answers every membership check a
+  partial one does**, so the artefact-existence case beside it cannot see the
+  difference either, by construction — which is why the predicate assertion is
+  a substring match on the catalog's own rendered DDL and not on
+  `Base.metadata`.
+
+Both directions matter and only one of them was written down before.
+
+### P2 fails exactly one case, which is what the case was written to be
+
+An empty-table upgrade satisfies a three-statement backfill exactly as well as
+a correct one, so every other database in the suite — the session-scoped
+schema, the two other scratch databases in `test_m10_schema.py`, the whole-chain
+cycle in `test_migrations.py` — migrates a `search_queries` with no rows and
+notices nothing. The one case that seeds a row against the `m10b` schema before
+upgrading is the whole of the coverage, and the blast radius of 1 is the
+evidence that it is.
+
+Note the *shape* of that failure: without the backfill, `ALTER TABLE … SET NOT
+NULL` refuses the seeded row, so the migration raises rather than the assertion
+firing. A kill either way, and worth knowing before reading the log — the case
+is red on `alembic upgrade`, not on `assert above == ("search", None)`.
+
+### P5's blast radius is 11 and three of them are collateral worth understanding
+
+Renaming the index in `upgrade()` alone leaves `downgrade()` dropping a name
+that does not exist, so **every** case that steps the chain down fails —
+including `test_m10a_moves_field_provenance_keys_in_both_directions`, which is
+about JSONB keys three revisions below and has nothing to do with this index.
+That is the down/up cycle earning its keep in the widest sense: a migration
+whose two halves disagree about a name takes out every neighbour that reverses
+past it, and the failure names the neighbour rather than the defect.
+
+### The control is what makes the five kills mean anything
+
+Reordering two `create_index` calls that touch different columns of one table
+is a genuinely equivalent mutation — the resulting schema is byte-identical —
+and it passed `ruff check`, `ruff format --check`, `mypy src tests`,
+`lint-imports` and the whole suite, all exit 0. A sweep reporting every
+mutation killed cannot distinguish a suite with teeth from a harness that
+scores every run as a kill.

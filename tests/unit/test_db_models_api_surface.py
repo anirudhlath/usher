@@ -120,11 +120,16 @@ def test_every_image_check_and_delete_rule_is_declared() -> None:
         assert next(iter(table.c[owner].foreign_keys)).ondelete == "CASCADE", owner
 
 
-def test_search_queries_carries_prd_10s_nine_columns_and_no_tenth() -> None:
+def test_search_queries_carries_prd_10s_columns_and_no_others() -> None:
     """PRD 10 assigns this table to M9 *whole*, and "whole" cuts both ways:
     nothing is left out and nothing speculative is added. `requested_mode` is
     wire-only; if the analytics task finds it must be persisted, that is a
-    request for a revision rather than a column appended here."""
+    request for a revision rather than a column appended here.
+
+    **Nine until `m10c` and eleven now.** The two it added are PRD 10's own
+    amendment 2 (`surface`, `tier`) and the list is still closed: a twelfth
+    column is a red here exactly as a tenth was.
+    """
     table = cast(Table, SearchQueryRow.__table__)
     assert {c.name for c in table.columns} == {
         "id",
@@ -136,7 +141,23 @@ def test_search_queries_carries_prd_10s_nine_columns_and_no_tenth() -> None:
         "latency_ms",
         "clicked_title_id",
         "played",
+        "surface",
+        "tier",
     }
+
+
+def test_the_surface_column_is_not_null_and_the_tier_column_is_not() -> None:
+    """The nullability is the design and not an oversight, so it is pinned
+    rather than left to the migration.
+
+    `surface` is `NOT NULL` for `played`'s reason one column up -- a nullable
+    analytics column is the state a dashboard cannot tell from a real value.
+    `tier` is nullable because a `search` row has no tier, and the alternative
+    is a `SuggestTier` member meaning "not applicable", i.e. a third entry in
+    the one vocabulary this pair exists to keep separate from `mode`."""
+    table = cast(Table, SearchQueryRow.__table__)
+    assert table.c.surface.nullable is False
+    assert table.c.tier.nullable is True
 
 
 def test_the_search_queries_delete_rules_are_the_asymmetric_pair() -> None:
@@ -156,12 +177,19 @@ def test_the_search_queries_delete_rules_are_the_asymmetric_pair() -> None:
     assert table.c.played.nullable is False
 
 
-def test_search_queries_declares_no_index_at_all() -> None:
-    """`genome_tags`' precedent, and `genome_scores`' before it. Asserted as
-    an empty set rather than "no index named X", because the failure this
-    guards is an index added for a reader that does not exist yet -- which
-    has no name to check for."""
-    assert cast(Table, SearchQueryRow.__table__).indexes == set()
+def test_search_queries_declares_exactly_the_one_index_with_a_written_reader() -> None:
+    """It declared none at all until `m10c`, and the assertion stays a
+    *whole-set* comparison rather than "the index named X is present": the
+    failure being guarded is an index added for a reader that does not exist
+    yet, and such an index has no name to check for.
+
+    `ix_search_queries_at`'s reader does exist and is written out verbatim in
+    PRD 10 -- `DELETE FROM search_queries WHERE at < now() - interval '90
+    days'`, an operator's own pruning SQL, which that document also records as
+    a sequential scan until somebody added this."""
+    assert {index.name for index in cast(Table, SearchQueryRow.__table__).indexes} == {
+        "ix_search_queries_at"
+    }
 
 
 def test_row_provider_settings_keys_on_the_slug_prefix_and_has_no_surrogate_id() -> None:

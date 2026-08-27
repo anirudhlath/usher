@@ -59,6 +59,7 @@ from usher.ports.search import (
     SearchOutcome,
     SearchRequest,
     SuggestIndex,
+    SuggestTier,
 )
 from usher.services.query_expansion import QUERY_KEY, QueryExpansionService
 from usher.services.search import (
@@ -66,7 +67,6 @@ from usher.services.search import (
     SearchAnswer,
     SearchService,
     SemanticSearchUnavailable,
-    SuggestTier,
     _blend,
     _dense_ranks,
 )

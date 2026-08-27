@@ -22,17 +22,31 @@ from usher.db.repositories._errors import refusals_as_conflict
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
 from usher.ports.search import SearchMode
 
-# **Nine columns named explicitly**, never `INSERT INTO search_queries VALUES
+# **Every column named explicitly**, never `INSERT INTO search_queries VALUES
 # (...)`, for the reason `llm_calls`' identical comment gives: positional
 # values shift silently the moment a column is added, and this table gains
 # readers in a later milestone -- a reader is what would find such a shift,
-# possibly years later, in a dashboard.
+# possibly years later, in a dashboard. It was nine columns until `m10c` and
+# is eleven now, which is that comment paying for itself: the statement below
+# had to be edited, loudly, rather than starting to write `tier` into
+# `surface`.
 #
-# `clicked_title_id` and `played` are written as **literals** (`NULL`,
-# `false`) rather than as bind parameters: neither is a fact `record()`'s
-# caller (F2) has, and a column with no default (`played` is `NOT NULL` with
-# none at all) has to get its first value from somewhere. `record_outcome`
-# is the only thing that ever moves them.
+# `clicked_title_id`, `played` and `surface` are written as **literals**
+# (`NULL`, `false`, `'search'`) rather than as bind parameters. For the first
+# two, neither is a fact `record()`'s caller (F2) has, and a column with no
+# default (`played` is `NOT NULL` with none at all) has to get its first value
+# from somewhere; `record_outcome` is the only thing that ever moves them.
+#
+# **`surface` is a literal for a different reason and it is temporary.**
+# `m10c` lands the column `NOT NULL` with no `server_default` -- deliberately,
+# because a default would outlive the migration and supply a plausible wrong
+# value to a writer that forgot -- so this statement has to name it, and
+# `'search'` is the *true* value for every row this method writes: `record()`
+# is reached only from `SearchService._record_search`, which is reached only
+# from `SearchService.search`, whose two callers are `GET /search` and
+# `usher search`. When the suggest writer lands, `surface` and `tier` become
+# bind parameters off `SearchQueryRecord` and this paragraph goes with them.
+# `tier` needs nothing here: it is nullable and a `search` row has no tier.
 #
 # `result_count` and `latency_ms` are deliberately left with no explicit
 # `bindparam` type, following `curated_rows."position"`'s precedent
@@ -43,9 +57,9 @@ from usher.ports.search import SearchMode
 _INSERT_QUERY = text(
     "INSERT INTO search_queries "
     "(id, at, user_id, query, mode, result_count, latency_ms, "
-    " clicked_title_id, played) "
+    " clicked_title_id, played, surface, tier) "
     "VALUES (:id, :at, :user_id, :query, :mode, :result_count, :latency_ms, "
-    "        NULL, false)"
+    "        NULL, false, 'search', NULL)"
 ).bindparams(
     # Typed rather than cast in the statement text -- `:id::uuid` is not an
     # option, `llm_calls`' comment records why: SQLAlchemy's bind-parameter

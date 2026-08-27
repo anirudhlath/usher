@@ -120,8 +120,8 @@ from usher.api.deps import DefaultUserIdDep, SearchServiceDep
 from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.search import SearchResponse, SuggestResponse
 from usher.api.errors import ProblemException
-from usher.ports.search import SearchMode
-from usher.services.search import SemanticSearchUnavailable, SuggestTier
+from usher.ports.search import SearchMode, SuggestTier
+from usher.services.search import SemanticSearchUnavailable
 
 router = APIRouter(tags=["search"])
 

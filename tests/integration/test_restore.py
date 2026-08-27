@@ -329,6 +329,13 @@ def _search_query(*, clicked: Mapping[str, Any] | None) -> dict[str, Any]:
         "latency_ms": 41,
         "clicked_title": None if clicked is None else dict(clicked),
         "played": True,
+        # `m10c`'s two. `surface` is `NOT NULL` with no server default, so an
+        # artifact that omits it is a row this table refuses -- which is the
+        # backup format's own answer to a schema that moved: the header's
+        # `schema_revision` check is what an operator meets first, and a file
+        # written before `m10c` names an older revision.
+        "surface": "search",
+        "tier": None,
     }
 
 

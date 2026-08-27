@@ -61,11 +61,21 @@ mechanical rather than a decision: `m09a`, then `m10a`.
 here is the chain as it stands on 2026-08-26**: `m08a`, `m08b`, `m09a`,
 `m09c` (`images`' natural key — **`m09b` was never minted** and is still the
 unallocated spare E4's index request would take), `m09d`, `m09e`, `m09f`,
-`m10a`, `m10b`. **Head is `m10b`**, pinned as a literal at
+`m10a`, `m10b`, `m10c`. **Head is `m10c`**, pinned as a literal at
 `tests/unit/test_db_migration_status.py`, which is the thing to read rather
-than this paragraph. Seven of those nine landed after the sentence above was
+than this paragraph. Seven of those ten landed after the sentence above was
 written and none of them extended it, which is why the list is separate from
 the rule now: the rule says what to mint next, the list says what exists.
+
+⚠️ **`m10a` is the first slug in this scheme a plan reserved and did not
+get.** M10's own plan says *"M10 gets one migration, `m10a`, and Group J owns
+it"*, written 2026-08-13 when head was `m09f`; `origin/main` then landed the
+rating-provenance split as `m10a` and issue #41's checkpoint as `m10b`, so
+Group J's revision is `m10c`. **A reserved slug is not a reservation** — the
+same lesson ADR numbering learned four collisions ago, arriving at the other
+identifier this project mints by counting. Walk `ScriptDirectory` before
+choosing one; the versions directory sorts correctly by construction and says
+nothing about what another branch has already merged.
 
 🔴 **The commit that added that list also appended *"then `m11a`"* to the
 rule above, and no such revision exists.** Removed 2026-08-26, and recorded
@@ -120,13 +130,16 @@ because twelve rows happened to be nine.
 **`tests/integration/test_migrations.py`'s down/up cycle needs attention from
 every group that adds a migration, and the `-1` half breaking is the design,
 not the defect.** The `-1`-from-head half asserts on whatever the *current*
-head reverses, so it has to be re-pointed every time. **Twelve landings,
-twelve loud breaks** — Group F re-pointed it for `ffa`, `af64ba2` (the `ffb`
+head reverses, so it has to be re-pointed every time. **Thirteen landings,
+thirteen loud breaks** — Group F re-pointed it for `ffa`, `af64ba2` (the `ffb`
 migration itself) for `ffb`, M7 Task 36 for `ffc`, M8 Task 8 for `m08a`,
 M8 Task 19 for `m08b`, M9 Task M1 for `m09a`, then `m09c`, `m09d`, `m09e`,
-`m09f`, `m10a`, and — with issue #41's `sync_runs.position` — `m10b`. The
+`m09f`, `m10a`, with issue #41's `sync_runs.position` `m10b`, and — with
+M10 J1's `search_queries.surface`/`tier` and its three indexes — `m10c`. The
 sixth was run and watched to fail before it was touched: `AssertionError:
-assert 'pk_genome_tags' not in {...}`.
+assert 'pk_genome_tags' not in {...}`; so was the thirteenth,
+`AssertionError: position should not exist below m10b`, which is `m10b`'s
+own assertion meeting the state `-1` now lands on.
 
 ⚠️ **Read the jump from six to twelve as a gap in this record, not as a burst
 of migrations.** The count stood at six from `m09a` (2026-08-10) until #41

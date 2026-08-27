@@ -466,21 +466,39 @@ class LLMCallRow(Base):
             "(ok AND error IS NULL) OR (NOT ok AND error IS NOT NULL AND error <> '')",
             name="ck_llm_calls_ok_error_agree",
         ),
-        # **No index beyond the primary key, deliberately** -- the
-        # `genome_scores` precedent, and the argument is `ffc`'s. Every
-        # reader named anywhere in the PRD is a Grafana panel that M10 builds:
-        # dashboard 5's "spend per day and month" and its cost-anomaly alert
-        # want `(at)`, and its "cost per curated row" join wants
-        # `(generation_id) WHERE generation_id IS NOT NULL` -- partial,
-        # because query-expansion rows carry NULL and are exactly the rows
-        # that join never wants. Task 10's `LLMCallRepository` is append-only
-        # and has no read method, so after M8 this table has **zero** readers
-        # in `src/`, and an index nothing reads is `ix_titles_popularity`
-        # again -- maintained on every write for a consumer that does not
-        # exist. Both are one `CREATE INDEX` away and `m08a`'s docstring says
-        # so, which is what makes this a deferral rather than a deletion.
+        # **The two `m08a` deferred, landed by `m10c`** -- and the deferral is
+        # discharged rather than forgotten. `m08a` refused them because *"an
+        # index nothing reads is `ix_titles_popularity` again: maintained on
+        # every write, for a consumer that does not exist"*, and asked that
+        # they arrive *"with a measurement against a real ledger rather than
+        # against this paragraph"*. The measurement: `llm_calls` holds **0
+        # rows and 16 kB** on this deployment (read-only, 2026-08-26) and
+        # gains one row per generation per household per night thereafter, so
+        # the write cost of both is bounded by the curation cadence and is not
+        # measurable.
         #
-        # Not indexed even then: `purpose` and `model`. A deployment holds
+        # ⚠️ **`LLMCallRepository` is still append-only with no read method,
+        # so these two still have no reader in `src/`.** They ship ahead of
+        # one because M10 gets one migration: a reader task authoring its own
+        # DDL would be a second head, and a pre-allocated chain is a serial
+        # spine across every group holding a link in it.
+        #
+        # `(at)` serves dashboard 5's "spend per day and month" and its
+        # cost-anomaly alert, both `WHERE at >= :since`.
+        Index("ix_llm_calls_at", "at"),
+        # `(generation_id)` serves dashboard 5's "cost per curated row",
+        # joining `curated_rows`. **PARTIAL**, and the predicate is the whole
+        # point: query-expansion rows carry NULL and are the majority of the
+        # table, and they are exactly the rows this join never wants. A full
+        # index answers every membership check a partial one does, and
+        # `compare_metadata` is blind to the difference -- so the assertion
+        # that keeps these two apart reads `pg_indexes.indexdef` as text.
+        Index(
+            "ix_llm_calls_generation_id",
+            "generation_id",
+            postgresql_where=text("generation_id IS NOT NULL"),
+        ),
+        # Not indexed even now: `purpose` and `model`. A deployment holds
         # one or two values of each, so a btree over either is a structure
         # with two entries -- `title_embeddings.model_name`'s refusal, one
         # module over.

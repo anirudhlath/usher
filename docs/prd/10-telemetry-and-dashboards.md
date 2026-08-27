@@ -574,12 +574,15 @@ llm_calls(
 search_queries(                       -- ✅ M9 (`m09a`): the table, whole.
   id, at, user_id, query, mode,       -- ✅ M9 (F2): written per answered search
   result_count, latency_ms,
-  clicked_title_id, played          -- outcome attribution. ✅ M9 (F3)
-)
+  clicked_title_id, played,         -- outcome attribution. ✅ M9 (F3)
+  surface, tier                     -- ✅ M10 (`m10c`): amendment 2 below.
+)                                   --    `tier` is NULL on a `search` row
 ```
 
-✅ **`search_queries` exists as of `m09a` with these nine columns and no tenth,
-and as of F3 every one of them has a named writer.** *Whole* is what the table
+✅ **`search_queries` shipped at `m09a` with nine columns and no tenth, and as
+of F3 every one of them has a named writer. `m10c` makes it eleven, taking
+amendment 2 below and nothing else** — no `keystroke_index`, no `session_id`,
+no `debounced` flag. *Whole* is what the table
 got and it
 was only half of what the paragraph above asks for — the argument for shipping
 all nine at once is that a dashboard reading a half-populated analytics table
@@ -655,6 +658,15 @@ because the absence is invisible in the data:
   either grows pagination this is a decision to make again, not a default.
 - **A keystroke.** See the next paragraph.
 
+⚠️ **`m10c` has landed the columns and the writer is another task's, so this
+paragraph describes the schema as of `m10c` and the *behaviour* as of M9.**
+`GET /search/suggest` still writes no row; what changed is that
+`search_queries` can now record one without collapsing two vocabularies, which
+is the objection below answered rather than absorbed. A stale "verified" fact
+is worse than none, so: the columns exist, `surface` is `'search'` on every
+row in the table, `tier` is NULL on every row, and nothing emits
+`SearchSurface.SUGGEST` yet.
+
 🔴 **`GET /search/suggest` writes no row, on either tier, and what that costs
 is stated rather than hidden.** `mode` is a `SearchMode` — three reachable
 values — and a suggest request is parameterised by a disjoint `SuggestTier`
@@ -678,12 +690,18 @@ one rather than rediscovering the choice:
    `GET /search`'s `?mode=` and `SearchAnswer`'s two fields, so a member no
    search lane can serve becomes reachable on a route that would have to refuse
    it.
-2. **A tenth column** (`surface`, `search | suggest`, or a nullable `tier`). It
-   keeps the two vocabularies apart, which is the objection above answered
+2. ✅ **A tenth column** (`surface`, `search | suggest`, or a nullable `tier`).
+   It keeps the two vocabularies apart, which is the objection above answered
    rather than absorbed, and it costs a migration plus a decision about every
    existing row. It is also the only one of the two that can record *which tier*
    answered, which is the half [ADR-0031](decisions/0031-the-two-tier-suggest.md)
-   would actually want measured.
+   would actually want measured. **Taken by `m10c`, as a tenth *and* an
+   eleventh** — both halves of the parenthesis rather than either, because
+   `surface` alone cannot say which tier answered and `tier` alone cannot tell
+   a `search` row from a suggest row whose tier was not recorded. The decision
+   about every existing row is `'search'`, which is what those rows *are*:
+   `SearchService._record_search` is reachable only from `GET /search` and
+   `usher search`. Amendment 1 is therefore **declined**, not deferred.
 
 Either way the volume argument stands on its own and does not go away with the
 vocabulary one, because of the next paragraph.
@@ -707,8 +725,13 @@ household presses enter, which is why it is tolerable in M9; it is *not* what a
 keystroke-recording amendment above would produce, and pricing the retention is
 part of that amendment rather than a follow-up to it. Pruning is
 `DELETE FROM search_queries WHERE at < now() - interval '90 days'`, an
-operator's SQL, and the table has **no index on `at`**, so that statement is a
-sequential scan until somebody adds one.
+operator's SQL. ✅ **`m10c` added `ix_search_queries_at`, so that statement is
+no longer a sequential scan** — measured rather than asserted: under
+`enable_seqscan = off` the same `EXPLAIN` reads `Seq Scan on search_queries`
+at `m10b` and names the index at `m10c`
+(`tests/integration/test_m10_schema.py`). ⚠️ **The index is not a retention
+job**: nothing in `src/` runs that `DELETE`, so the sentence above this one is
+unchanged and the table still grows monotonically.
 
 The same "whole" cuts the other way: `requested_mode` is wire-only and is
 deliberately **not** a tenth column. `played` is `NOT NULL` rather than

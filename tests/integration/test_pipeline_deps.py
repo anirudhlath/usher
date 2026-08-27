@@ -62,7 +62,8 @@ from usher.api.deps import (
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.users import DEFAULT_USER_NAME
-from usher.services.search import SearchService, SuggestTier
+from usher.ports.search import SuggestTier
+from usher.services.search import SearchService
 
 _PROVIDERS = {
     "titles": get_title_repository,

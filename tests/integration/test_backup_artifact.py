@@ -248,8 +248,10 @@ async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
     await session.execute(
         text(
             "INSERT INTO search_queries "
-            "(id, at, user_id, query, mode, result_count, latency_ms, clicked_title_id, played) "
-            "VALUES (:id, now(), :user_id, :query, 'hybrid', 12, 41, :clicked, true)"
+            "(id, at, user_id, query, mode, result_count, latency_ms, clicked_title_id, "
+            " played, surface, tier) "
+            "VALUES (:id, now(), :user_id, :query, 'hybrid', 12, 41, :clicked, true, "
+            "        'search', NULL)"
         ),
         {
             "id": ids["search_query"],

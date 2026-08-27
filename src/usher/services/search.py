@@ -63,7 +63,6 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
-from enum import StrEnum
 
 from loguru import logger
 from opentelemetry import metrics
@@ -90,6 +89,7 @@ from usher.ports.search import (
     SearchMode,
     SearchRequest,
     SuggestIndex,
+    SuggestTier,
 )
 from usher.services.query_expansion import QueryExpansionService
 
@@ -215,30 +215,16 @@ def compose_document(title: Title, *, credits: Sequence[str] = ()) -> EmbeddingD
     )
 
 
-class SuggestTier(StrEnum):
-    """Which of the two `SuggestIndex` implementations answers a keystroke.
-
-    ADR-0002's typo-tolerance gate failed and ADR-0031 is what it bought: two
-    indexes, one port, and a caller that says which. `PREFIX` is the btree
-    `lower(name) text_pattern_ops` probe with **1.9% measured typo recall**;
-    `FUZZY` is the trigram + `levenshtein_less_equal` path at **p50 33.6 ms**.
-    Neither is a better version of the other and neither is a fallback for the
-    other -- the split is a division of labour, and the whole reason this enum
-    exists rather than a `typo_tolerant: bool` is that a bool invites reading
-    one as a degraded form of the other.
-
-    **Here rather than in `ports/search.py`, unlike `SearchMode`.** That one is
-    a field of `SearchRequest`, so the port genuinely carries it; **no port
-    method anywhere takes a tier**, because a tier *is* the choice of
-    implementation and an implementation cannot be told which implementation it
-    is. Filed in `ports/` it would be a vocabulary the ports layer declares and
-    never reads. `api/dto/search.py` already imports `SearchAnswer` from this
-    module, so the wire reaching in here for a service type is the established
-    direction rather than a new one.
-    """
-
-    PREFIX = "prefix"
-    FUZZY = "fuzzy"
+# `SuggestTier` lived here until `m10c` and now lives in
+# `usher.ports.search`, beside `SearchMode`. It moved because
+# `search_queries.tier` made a port method take one -- as a record of which
+# implementation ran, never as an instruction -- and a `SearchQueryRecord`
+# field typed on a services-layer enum would make `usher.ports` import
+# `usher.services`, which contract 1 reports BROKEN. **No alias is left here
+# on purpose**: a second name for one vocabulary is the
+# two-vocabularies-under-one-column hazard, one layer up. `mypy` is strict
+# with `no_implicit_reexport`, so a re-export would have had to be deliberate
+# anyway.
 
 
 @dataclass(frozen=True, slots=True)
@@ -1320,6 +1306,5 @@ __all__ = [
     "SearchAnswer",
     "SearchService",
     "SemanticSearchUnavailable",
-    "SuggestTier",
     "compose_document",
 ]

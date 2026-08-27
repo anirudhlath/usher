@@ -371,8 +371,9 @@ async def _seed_the_precious_rows(
     await session.execute(
         text(
             "INSERT INTO search_queries (id, at, user_id, query, mode, result_count, "
-            "latency_ms, clicked_title_id, played) "
-            "VALUES (:id, :at, :user, :query, 'hybrid', 12, 41, :clicked, true)"
+            "latency_ms, clicked_title_id, played, surface, tier) "
+            "VALUES (:id, :at, :user, :query, 'hybrid', 12, 41, :clicked, true, "
+            "        'search', NULL)"
         ),
         {
             "id": new_id(),

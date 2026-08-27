@@ -46,7 +46,7 @@ from usher.domain.enums import (
     WatchStateOrigin,
 )
 from usher.domain.title import Title
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
 
 def test_all_core_tables_registered() -> None:
@@ -194,6 +194,17 @@ def test_enum_columns_are_real_enums_not_bare_strings() -> None:
         (ImageRow.__table__.c.kind, ImageKind),
         (SearchQueryRow.__table__.c.mode, SearchMode),
         (TitleSearchNameRow.__table__.c.kind, SearchNameKind),
+        # M10's two, both from `m10c`. They sit beside `mode` and are
+        # deliberately *not* it: `SearchMode` is `GET /search`'s `?mode=`,
+        # `SearchSurface` is which surface asked, and `SuggestTier` is which
+        # of two `SuggestIndex` implementations answered. Three vocabularies,
+        # three columns -- storing any two under one name is the hazard PRD 10
+        # spends a paragraph refusing. `SuggestTier` moved into
+        # `usher.ports.search` with this revision, which is what lets
+        # `SearchQueryRecord` name it without `usher.ports` importing
+        # `usher.services`.
+        (SearchQueryRow.__table__.c.surface, SearchSurface),
+        (SearchQueryRow.__table__.c.tier, SuggestTier),
     ]
     for column, enum_cls in cases:
         column_type = column.type
