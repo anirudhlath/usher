@@ -363,6 +363,79 @@ def test_invalidating_a_row_also_drops_the_screen_that_contained_it(clock: _Cloc
     assert cache.get_screen(user) is None
 
 
+def test_enriching_a_title_drops_every_cached_row_that_names_it(clock: _Clock) -> None:
+    """A row is built from titles, so a title that changed leaves every row
+    holding it stale -- the card carries `name`, `year`, `enrichment_state` and
+    `artwork`, and enrichment rewrites all four.
+
+    The household that never cached the title keeps both halves, which is what
+    makes this a statement about the *title* rather than a `clear()` wearing a
+    narrower name.
+    """
+    cache = RowCache(clock=clock)
+    alice, bob = uuid.uuid4(), uuid.uuid4()
+    cache.put_row(alice, "because-you-watched", _row("enriched"), ttl=_TTL)
+    cache.put_screen(alice, _screen("enriched"), ttl=_TTL)
+    cache.put_row(bob, "because-you-watched", _row("untouched"), ttl=_TTL)
+    cache.put_screen(bob, _screen("untouched"), ttl=_TTL)
+
+    cache.invalidate_titles((_card("enriched").title_id,))
+
+    assert cache.get_row(alice, "because-you-watched") is None
+    assert cache.get_screen(alice) is None
+    assert cache.get_row(bob, "because-you-watched") == _row("untouched")
+    assert cache.get_screen(bob) == _screen("untouched")
+
+
+def test_an_enrichment_reaches_every_household_that_cached_the_title(clock: _Clock) -> None:
+    """`invalidate` takes a household because a play button is one household's
+    act. Enrichment is a **catalog** write -- the same title is stale on every
+    screen holding it at once -- so this one takes no `user_id`, and a
+    per-household spelling would leave the second household serving the first's
+    already-repaired staleness for the rest of its TTL.
+    """
+    cache = RowCache(clock=clock)
+    for user in (uuid.uuid4(), uuid.uuid4()):
+        cache.put_row(user, "because-you-watched", _row("enriched"), ttl=_TTL)
+        cache.put_screen(user, _screen("enriched"), ttl=_TTL)
+
+    cache.invalidate_titles((_card("enriched").title_id,))
+
+    assert cache.size == 0
+
+
+def test_a_screen_naming_the_title_goes_even_when_its_row_was_never_cached(
+    clock: _Clock,
+) -> None:
+    """Both halves are scanned, not just the row half. A screen is stored whole
+    (`put_screen` takes the composed tuple), so a row can reach a screen without
+    ever being written to the row half -- and dropping only the row half would
+    leave the next request a screen cache hit carrying the stale card, which is
+    `invalidate`'s own recorded subtle bug arriving through the other door.
+    """
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    cache.put_screen(user, _screen("enriched"), ttl=_TTL)
+
+    cache.invalidate_titles((_card("enriched").title_id,))
+
+    assert cache.get_screen(user) is None
+
+
+def test_invalidating_no_titles_drops_nothing(clock: _Clock) -> None:
+    """The premise that keeps the three cases above about titles: an empty
+    batch is the shape a job with nothing enriched hands over, and a `clear()`
+    behind this name would satisfy every assertion of theirs while emptying a
+    cache no write had staled."""
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    cache.put_row(user, "because-you-watched", _row("enriched"), ttl=_TTL)
+    cache.put_screen(user, _screen("enriched"), ttl=_TTL)
+
+    cache.invalidate_titles(())
+
+    assert cache.get_row(user, "because-you-watched") == _row("enriched")
+    assert cache.get_screen(user) == _screen("enriched")
+
+
 def test_clearing_empties_both_halves(clock: _Clock) -> None:
     """`usher home --repeat` clears between runs, because a repeat that
     measured cache hits would report a number near zero and mean nothing."""

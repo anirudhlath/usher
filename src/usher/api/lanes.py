@@ -628,6 +628,10 @@ class LaneSupervisor:
                         client=self._client,
                         registry=registry,
                         user_id=await self._user_id(),
+                        # This process serves the screens, so an enrichment
+                        # running here has a cache to invalidate. `usher work`
+                        # passes nothing and composes nothing.
+                        rows=self._rows,
                     )
                 now = time.monotonic()
                 if now - recovered_at >= self._settings.job_lease_seconds / 2:
