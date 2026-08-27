@@ -34,6 +34,7 @@ import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 
+from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.search_index import FakePrefixSuggestIndex, FakeSuggestIndex
 from tests.fakes.taste_repository import FakeTasteRepository
@@ -41,7 +42,7 @@ from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
-from usher.api.deps import get_search_service
+from usher.api.deps import get_search_service, get_visibility_service
 from usher.config import Settings
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
@@ -55,6 +56,7 @@ from usher.ports.search import (
     SuggestIndex,
 )
 from usher.services.search import SearchService, SuggestTier
+from usher.services.visibility import VisibilityService
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 UNREACHABLE_DSN = "postgresql+asyncpg://usher:usher@127.0.0.1:1/usher"
@@ -174,6 +176,14 @@ def _settings() -> Settings:
 def _app(service: SearchService) -> FastAPI:
     built = create_app(_settings())
     built.dependency_overrides[get_search_service] = lambda: service
+    # Since #73 this route promotes the skeletons it offered, so the queue and
+    # the catalog are on its path and `UNREACHABLE_DSN` is exactly what the
+    # name says. What this route *promotes* is asserted in
+    # `test_api_search.py::test_type_ahead_promotes_what_it_offered`; here it
+    # only has to not be the real one.
+    built.dependency_overrides[get_visibility_service] = lambda: VisibilityService(
+        FakeJobQueue(), FakeTitleRepository()
+    )
     return built
 
 

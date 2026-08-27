@@ -381,7 +381,11 @@ The row that is worth revisiting rather than merely correcting is the
 embedding one: embedding is CPU-bound work sharing a worker with two I/O-bound job
 kinds, so a long backfill delays every `match` behind it. M6 bounds the damage
 by enqueueing `index` at `BACKFILL` priority, which is a priority answer to a
-scheduling question and is enough at 2k–10k titles.
+scheduling question and is enough at 2k–10k titles. Since 2026-08-26
+(issue #73) that rung is a floor rather than a constant: a follow-up inherits
+the rung its `enrich` job was claimed at whenever that is `VISIBLE` or above,
+so a title a client is looking at is indexed and derived at the rung the
+client's request carried, and a bulk sweep is unchanged.
 
 A `--worker` entrypoint flag exists from day one so lanes can be moved to a
 separate container later by editing compose, with no code change.

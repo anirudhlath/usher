@@ -106,10 +106,20 @@ SourceResolver = Callable[[str], Awaitable[SourceBinding | None]]
 
 
 def enrich_handler(service: EnrichService) -> Handler:
-    """`enrich` jobs key on a `Title.id`."""
+    """`enrich` jobs key on a `Title.id`.
+
+    **The rung travels with the key**, because `EnrichService` enqueues an
+    `INDEX` and a `DERIVE` of its own and `DERIVE` is what writes `images`.
+    A handler that passed only the key would leave every follow-up at the
+    sweep's priority however urgently its own job was claimed -- so a title a
+    client opened would get its text at `DEMAND` and its artwork whenever the
+    background queue drained, which on this catalog was never. The clamp that
+    keeps a bulk `NEW` ingest off the demand rungs lives in `_apply`, not
+    here: this is the wire, not the policy.
+    """
 
     async def handle(job: Job) -> None:
-        await service.enrich(_title_id(job))
+        await service.enrich(_title_id(job), priority=job.priority)
 
     return handle
 
