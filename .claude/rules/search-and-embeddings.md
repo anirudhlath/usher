@@ -1064,8 +1064,15 @@ survives (no bar is minted, and none is needed), but a reader pricing a future
 change off *"two orders of magnitude"* would be out by 10×.
 
 **Three quarters of it is the commit, not the INSERT**, and that is the part
-worth carrying: `search_queries` has no index beyond its primary key, so the
-INSERT itself is 0.9 ms and the rest is one WAL flush. Two consequences.
+worth carrying: `search_queries` had no index beyond its primary key when this
+was measured, so the INSERT itself is 0.9 ms and the rest is one WAL flush.
+⚠️ **That premise expired at `m10c`**, which added `ix_search_queries_at` — so
+the 0.9 ms is a reading taken against a table with one index and this one now
+has two, and a btree on an append-only, physically correlated column is the
+cheapest kind of maintenance there is but it is not free. The **conclusion**
+survives, because the WAL flush that dominates is unchanged; the 0.9 ms
+specifically is the number to re-measure before anything is priced off it.
+Two consequences.
 `usher search` had no commit at all before F2, so it pays the whole 4 ms. On
 `GET /search` the request *did* already commit through `api/deps.get_session`
 — but on a read-only transaction that commit flushes nothing, so the marginal
