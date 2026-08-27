@@ -52,7 +52,7 @@ from usher.domain.title import WIRE_FIELD_NAMES, Title
 from usher.ports.errors import RepositoryConflict
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface
 from usher.services.titles import TitleReadService
 
 USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
@@ -258,6 +258,7 @@ async def _seed_search(
         mode=SearchMode.FULL_TEXT,
         result_count=3,
         latency_ms=12,
+        surface=SearchSurface.SEARCH,
     )
     await queries.record(record)
     return record.id

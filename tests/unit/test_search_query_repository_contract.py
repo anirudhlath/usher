@@ -50,6 +50,11 @@ class FakeSearchQueryLedger(SearchQueryLedger):
             latency_ms=record.latency_ms,
             clicked_title_id=clicked_title_id,
             played=played,
+            # Read off the record the fake stored rather than defaulted here:
+            # a ledger supplying `SEARCH`/`None` of its own would make the
+            # suggest case pass on this arm whatever the fake did with them.
+            surface=record.surface,
+            tier=record.tier,
         )
 
     async def count(self) -> int:

@@ -88,6 +88,7 @@ from usher.ports.search import (
     SearchIndex,
     SearchMode,
     SearchRequest,
+    SearchSurface,
     SuggestIndex,
     SuggestTier,
 )
@@ -530,6 +531,7 @@ class SearchService:
         embedder: Embedder | None = None,
         expander: QueryExpansionService | None = None,
         analytics: SearchAnalytics | None = None,
+        suggest_analytics: bool = False,
         now: Callable[[], AwareDatetime] = lambda: datetime.now(UTC),
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
@@ -613,6 +615,34 @@ class SearchService:
         # is exactly what it was before F2 and the search is unrecorded rather
         # than wrong.
         self._analytics = analytics
+        # **A second switch beside it, and it narrows one surface rather than
+        # the collaborator.** `analytics=None` is a *caller* state -- a caller
+        # inside a larger unit of work it does not own -- and turns off both
+        # writers; this is an *operator* state, `USHER_SEARCH_SUGGEST_ANALYTICS`,
+        # and turns off only the keystroke one. Two different questions:
+        # collapsing them would make "do not record keystrokes" also mean "do
+        # not record searches", which is a setting nobody asked for and PRD 10
+        # would refuse.
+        #
+        # 🔴 **Defaulting `False` is a measurement rather than an opinion, and
+        # the bar was registered predicting the opposite.** Tier 1 end to end
+        # through the shipped route against a clone of the real catalog: p50
+        # **2.53 ms** without the row, **6.29 ms** with it. The refutation
+        # condition was *under 5 ms with the writer on*, so the position that
+        # both tiers should write unconditionally is refuted and the default
+        # flips rather than the bar bending. `.claude/rules/
+        # search-and-embeddings.md` carries the arms and the caveats.
+        #
+        # **It defaults the same way here as in `Settings`, deliberately.** Two
+        # defaults for one decision is how they come to disagree, and the one
+        # that would have been wrong here is this one: every shipped
+        # construction goes through `composition.build_search_service`, so a
+        # `True` left in this signature would be invisible until somebody built
+        # a `SearchService` by hand -- which is what every unit case does.
+        #
+        # A `bool` and never a rate -- `_record_suggest` has the denominator
+        # argument.
+        self._suggest_analytics = suggest_analytics
 
     async def search(
         self,
@@ -870,7 +900,11 @@ class SearchService:
         results it asked for, while a `TypeError` or a `ValidationError` out of
         this module is a bug in Usher, and a bug absorbed into a log line is
         billed as an outage. `QueryExpansionService.expand` pins the identical
-        distinction in two cases of its own.
+        distinction in two cases of its own. **That catch lives in `_write_row`
+        below rather than here since J2**, because `_record_suggest` needs the
+        identical one and two copies of a measured guard are two chances to
+        lose one -- `api/analytics.py` is the same decision for the outcome
+        half, one layer out.
 
         **The commit is here rather than left to the caller**, and the reason
         is `cli._session_for`: it yields a session and disposes the engine
@@ -890,30 +924,114 @@ class SearchService:
         the exception says what the store refused, and the row that was lost is
         one row.
         """
-        if self._analytics is None or user_id is None:
+        analytics = self._analytics
+        if analytics is None or user_id is None:
             return None
-        record = SearchQueryRecord(
-            id=new_id(),
-            at=self._now(),
-            user_id=user_id,
-            query=query,
-            mode=mode,
-            result_count=results,
-            latency_ms=_ms(elapsed),
+        return await _write_row(
+            analytics,
+            SearchQueryRecord(
+                id=new_id(),
+                at=self._now(),
+                user_id=user_id,
+                query=query,
+                mode=mode,
+                result_count=results,
+                latency_ms=_ms(elapsed),
+                # Stated rather than defaulted. `SearchQueryRecord.surface`
+                # carries no default at all, so this line is what a writer
+                # that forgot cannot omit -- the same refusal `m10c` makes
+                # about `server_default`, one layer up.
+                surface=SearchSurface.SEARCH,
+            ),
         )
-        try:
-            await self._analytics.queries.record(record)
-            await self._analytics.commit()
-        except UsherPortError as exc:
-            logger.error(
-                "the search analytics row was refused; this search is unrecorded: {error}",
-                error=str(exc) or type(exc).__name__,
-            )
-            return None
-        return record.id
+
+    async def _record_suggest(
+        self,
+        prefix: str,
+        *,
+        tier: SuggestTier,
+        user_id: uuid.UUID | None,
+        results: int,
+        elapsed: float,
+    ) -> None:
+        """One `search_queries` row for one answered keystroke -- PRD 10's
+        amendment 2, and the writer `m10c` shipped the columns for.
+
+        **It answers nothing, unlike `_record_search`.** `SearchAnswer` carries
+        a `search_id` because F3's funnel attributes a click and a play against
+        it; `SuggestResponse` carries no such field and no client can report an
+        outcome against a keystroke, so an id published here would be a handle
+        for a funnel that does not exist. The row is written for the *rate*
+        questions PRD 10 wants -- whether real users type 2-4-character queries
+        at all -- and those are counts over `surface = 'suggest'`.
+
+        **`tier` is the parameter that selected the index, never a tier this
+        service chose.** `suggest` passes through the argument it was given,
+        which is the same rule the route already applies to its own echo
+        (*"`tier=tier` and not a tier the service chose"*), so a response and a
+        row can never disagree about which index answered.
+
+        **`mode` is `FULL_TEXT`**: both tiers are btree/GIN reads with no embed
+        and no fusion. The full argument, and the `WHERE surface = 'search'`
+        every mode-split panel now owes, is on `SearchQueryRecord`.
+
+        **No household means no row**, exactly as on the search path -- and
+        that guard is load-bearing here in a way it never was there.
+        `GET /search` and `usher search` both resolve one, so
+        `_record_search`'s `user_id is None` arm is unreachable from a shipped
+        caller. `suggest` has a third caller that resolves none:
+        `usher.eval.surfaces.suggest` drives it once per probe and
+        `usher eval suggest --full` drives thousands, so without this the
+        evaluation harness would write its own traffic into the table as though
+        a household had typed it. PRD 10's *"a search with no household"*
+        exclusion is what makes that the right answer rather than a convenient
+        one, and
+        `test_a_suggest_with_no_household_writes_no_row_and_the_eval_harness_is_that_caller`
+        is what says it stays true.
+
+        **Whole or nothing, never sampled.** `self._suggest_analytics` is a
+        `bool`, and PRD 10's *"which absence means what"* table is the reason:
+        all five of its rows read a **count**, so a sample rate would make every
+        one an estimate and add a sixth absence -- *the row that was not
+        written* -- indistinguishable in the data from the four real ones. The
+        volume is bounded by retention instead.
+        """
+        analytics = self._analytics
+        if analytics is None or user_id is None or not self._suggest_analytics:
+            return
+        await _write_row(
+            analytics,
+            SearchQueryRecord(
+                id=new_id(),
+                at=self._now(),
+                user_id=user_id,
+                query=prefix,
+                mode=SearchMode.FULL_TEXT,
+                result_count=results,
+                latency_ms=_ms(elapsed),
+                surface=SearchSurface.SUGGEST,
+                tier=tier,
+            ),
+        )
 
     async def suggest(
-        self, prefix: str, limit: int = 10, *, tier: SuggestTier
+        self,
+        prefix: str,
+        limit: int = 10,
+        *,
+        tier: SuggestTier,
+        # **`None`-able and mirroring `search`'s, and the default is the
+        # decision.** A household is not a thing this path *uses* -- there is
+        # no blend here, so no watch-state term and no taste term -- it is a
+        # thing the row *needs*, because `search_queries.user_id` is `NOT NULL`
+        # behind `ON DELETE RESTRICT`. Both request boundaries resolve one and
+        # pass it; `usher.eval.surfaces.suggest` resolves none and does not,
+        # so an evaluation probe writes nothing rather than writing evaluation
+        # traffic wearing a household's clothes. Required-with-no-default here
+        # would be the alternative and it is worse: it makes `usher eval`
+        # *state* a household it does not have, which is a value it would then
+        # have to invent.
+        user_id: uuid.UUID | None = None,
     ) -> tuple[SearchResult, ...]:
         """Type-ahead candidates from one tier, hydrated and **not re-ranked**.
 
@@ -943,44 +1061,71 @@ class SearchService:
         it structurally as well as by count -- a duplicated body passes any
         count assertion.
 
-        🔴 **This path writes no `search_queries` row, on either tier, and
-        that is a decision with an argument rather than a measurement
-        deferred.** `search_queries.mode` is a `SearchMode`, which is *"three
-        reachable values"* by its own docstring, and a tier is a disjoint
-        vocabulary (`prefix` | `fuzzy`): storing both under one column is the
-        two-vocabularies-under-one-name hazard PRD 10 already names for
-        `provider`. It would also make every mode-split panel in dashboards 1
-        and 4 a measure of the type-ahead box rather than of search -- tier 1
-        is p50 **0.6 ms** against full text's p50 **33.3 ms** over the same
-        2,993 cases (`.claude/rules/search-and-embeddings.md`), so a client
-        driving this per keystroke would out-number and out-weight the searches
-        by an order of magnitude each.
+        ✅ **This path can write one `search_queries` row per answered
+        keystroke since M10's J2, on both tiers, and the vocabulary objection
+        it used to carry is answered rather than absorbed.** That objection was
+        two vocabularies
+        under one name: `search_queries.mode` is a `SearchMode`, *"three
+        reachable values"*, and a tier is a disjoint vocabulary
+        (`prefix` | `fuzzy`). `m10c` took PRD 10's amendment 2 and gave the
+        table `surface` and `tier`, so the two vocabularies are in two columns
+        and every mode-split panel in dashboards 1 and 4 filters on `surface`
+        -- which is a `WHERE surface = 'search'` those panels did not
+        previously need, and is recorded in PRD 10 rather than discovered from
+        a skewed panel.
 
-        **What that costs is stated rather than hidden**: the question PRD 10
-        most wants this table for -- *whether real users type 2-4-character
-        queries at all* -- is a question about this box, and the table cannot
-        answer it in M9. Recording it needs a fourth `SearchMode` member or a
-        tenth column; both are PRD 10 amendments and both are named there so
-        M10 plans it rather than rediscovering it.
+        **What that bought is the question PRD 10 most wants this table for**
+        -- *whether real users type 2-4-character queries at all* -- which is a
+        question about this box and which M9 could not answer.
 
-        The absence is asserted structurally as well as behaviourally, for the
-        reason the hydration count is: a `suggest` that wrote one row per
-        *refused* prefix and none per answered one would pass a case that only
-        counts rows on the answering path.
+        🔴 **The volume argument did not go away with the vocabulary one, and
+        the measurement it was answered with came back against the writer, so
+        `USHER_SEARCH_SUGGEST_ANALYTICS` ships `false`.** Measured end to end
+        through the shipped route against a clone of the real catalog under a
+        bar written first: tier 1 is p50 **2.53 ms** without the row and
+        **6.29 ms** with it -- the analytics write is 148% of the request on
+        the path ADR-0031 exists to make cheap, against a refutation condition
+        of 5 ms. Tier 2 pays the same ~3.3 ms as 7.8%, inside the 11.9% PRD 10
+        already accepted for full text, and one switch governs both tiers for
+        the reason `_record_suggest` gives, so the tier that cannot afford it
+        decides. `.claude/rules/search-and-embeddings.md` carries the run.
+
+        **The write is outside the measured window and after the hydration**,
+        for `search`'s reason: an INSERT inside it would be counted as suggest
+        latency by the very row recording it. It is also the last thing this
+        method does, because the commit ends the caller's transaction.
+
+        **A short `prefix` is refused before the measurement and therefore
+        before the row.** The route's own length bound returns even earlier
+        (`_MIN_CHARS_FOR_TIER`), so neither a blank keystroke nor one below its
+        tier's minimum is an answered query, and PRD 10's *"a blank or
+        whitespace-only query"* exclusion covers both.
         """
         if not prefix.strip():
             return ()
+        started = self._clock()
         hits = await self._tiers[tier].suggest(prefix, limit=min(limit, self._result_limit))
         by_id = {
             title.id: title
             for title in await self._titles.list_by_ids([hit.title_id for hit in hits])
         }
         owned = await self._media_items.owned_title_ids(list(by_id))
-        return tuple(
+        results = tuple(
             _result(by_id[hit.title_id], owned=hit.title_id in owned, score=hit.score)
             for hit in hits
             if hit.title_id in by_id
         )
+        await self._record_suggest(
+            prefix,
+            # Passed through, never re-derived. The row has to name the index
+            # that ran, and the only thing that knows which one that was is the
+            # argument that selected it out of `self._tiers`.
+            tier=tier,
+            user_id=user_id,
+            results=len(results),
+            elapsed=self._clock() - started,
+        )
+        return results
 
     async def _rank(
         self, hits: Sequence[SearchHit], *, user_id: uuid.UUID | None
@@ -1286,6 +1431,53 @@ def _ms(seconds: float) -> int:
     answered a search correctly.
     """
     return max(0, int(seconds * 1000))
+
+
+async def _write_row(analytics: SearchAnalytics, record: SearchQueryRecord) -> uuid.UUID | None:
+    """Write one `search_queries` row and make it durable, or say it did not.
+
+    **One function for both retrieval writers**, which is the same call
+    `api/analytics.py` makes for the outcome half one layer out: *"three call
+    sites, one function, because the interesting part is the absorption rather
+    than the call"*. `_record_search` and `_record_suggest` differ in which
+    columns they know and in nothing else, and spelled inline the guard below
+    would exist twice -- so a later writer would be the one that forgot it.
+
+    **A refused write answers `None` rather than the id it minted.**
+    `record()` raising means there is no row, so an id handed out anyway would
+    send F3's outcome calls to a `WHERE id = …` matching nothing -- and a no-op
+    update is exactly what a search the household never clicked also produces,
+    so the no-click rate PRD 10 exists to compute would silently absorb every
+    refused row. `_record_suggest` discards the answer because a keystroke has
+    no outcome to attribute; `_record_search` publishes it as
+    `SearchAnswer.search_id`.
+
+    **`except UsherPortError` and deliberately not `except Exception`.** A
+    `RepositoryConflict` means the store refused the row -- a `latency_ms` past
+    the `integer` column, a `user_id` naming no household -- and the caller
+    still gets the results it asked for; a `TypeError` or a `ValidationError`
+    out of this module is a bug in Usher, and a bug absorbed into a log line is
+    billed as an outage. The guard is defence in depth on both paths, so the
+    only way to test it is to inject a repository that raises.
+
+    **Neither the query text nor the surface's own words reach the log line.**
+    What somebody typed is household state whose home is
+    `search_queries.query` -- durable, household-scoped, deletable with the
+    household -- and a Loki record is none of the three. The failure is legible
+    without it: the exception says what the store refused, and the row that was
+    lost is one row.
+    """
+    try:
+        await analytics.queries.record(record)
+        await analytics.commit()
+    except UsherPortError as exc:
+        logger.error(
+            "the {surface} analytics row was refused; this request is unrecorded: {error}",
+            surface=record.surface.value,
+            error=str(exc) or type(exc).__name__,
+        )
+        return None
+    return record.id
 
 
 def _result(title: Title, *, owned: bool, score: float) -> SearchResult:

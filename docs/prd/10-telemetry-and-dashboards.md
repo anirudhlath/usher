@@ -633,14 +633,23 @@ all three and only one of them is a real zero.**
 | a row with `clicked_title_id` set and `played = false` | **also the signal.** A click that never became a play, which is the row `usher search`'s own gate cannot produce and a synthetic typo set cannot imitate |
 | a row with `played = true` and `clicked_title_id IS NULL` | legal and meaningful: the household played a result without ever asking for its detail page, so no click was ever reported. Not a hole |
 | a play with **no row at all** | simply **unattributed**. A client that carried no `search_id` — a home row, a deep link, a bookmark — is not a search that led nowhere, and counting it as one would make the denominator the whole library |
-| **no rows from `GET /search/suggest`** | by design, on either tier (F2, and the two amendments below). The type-ahead box contributes nothing to any rate on this table |
+| **no rows from `GET /search/suggest`** | ⚠️ **the ordinary state, and since M10 it means one specific thing rather than "by design".** Through M9 the type-ahead box could not write at all; since M10 it can, and `USHER_SEARCH_SUGGEST_ANALYTICS` **defaults off** because the write is 148% of a tier-1 request, so *no suggest rows* is what a deployment that has not turned it on looks like. A reader must not read it as *"nobody used the box"* — the two are indistinguishable here and only the setting tells them apart. A keystroke below its tier's `min_query_length` is the row below |
+| **no row for a keystroke below its tier's `min_query_length`** | by design, and it is the length bound rather than the switch. `GET /search/suggest` returns before `SearchService.suggest` for a `q` shorter than four characters on `prefix` or one on `fuzzy`, so there is no answered query to record — the same exclusion as *"a blank or whitespace-only query"* below, with a number on it. ⚠️ **The bound is per tier**, so "answered" means different things on the two tiers and the two row counts are **not** directly comparable: a panel dividing one by the other is measuring the bound |
 
-⚠️ **So the denominator is answered searches, never plays.** *"Plays with no
-search"* and *"searches with no play"* are counted in different tables — the
-first is not in this one at all — and a panel dividing one by the other is
-measuring how often people search rather than how well search works.
+⚠️ **So the denominator is answered searches, never plays — and since M10 there
+are two of them, which is the first thing any panel over this table has to
+choose between.** The retrieval half now carries `surface`, so *answered
+searches* is `WHERE surface = 'search'` and *answered keystrokes* is
+`WHERE surface = 'suggest'`, and an unqualified `count(*)` is neither: at tier
+1's measured rate a type-ahead box out-numbers the searches by an order of
+magnitude, so the pooled denominator is dominated by the box and every rate
+computed over it is a rate about typing. **Every panel states which of the two
+it means.** The older half of the rule is unchanged: *"plays with no search"*
+and *"searches with no play"* are counted in different tables — the first is
+not in this one at all — and a panel dividing one by the other is measuring how
+often people search rather than how well search works.
 
-**One row per *answered* search, and four things that are deliberately not
+**One row per *answered* request, and five things that are deliberately not
 rows.** Each is a decision rather than an omission, and each is stated here
 because the absence is invisible in the data:
 
@@ -649,40 +658,76 @@ because the absence is invisible in the data:
   they would dominate this table exactly as they would dominate the two
   histograms, and the zero-result rate below would become a measure of how fast
   somebody types.
-- **A search with no household.** `user_id` is `NOT NULL` behind a real foreign
-  key, so a search nobody is speaking for has no row rather than a row with a
-  hole in it. Unreachable from either shipped caller — `GET /search` and
-  `usher search` both resolve the singleton default user first.
+- **A keystroke below its tier's minimum.** The same exclusion with a number on
+  it: `GET /search/suggest` returns before the service for a `q` shorter than
+  four characters on `prefix` or one on `fuzzy`, so nothing was answered.
+- **A search or a keystroke with no household.** `user_id` is `NOT NULL` behind
+  a real foreign key, so a request nobody is speaking for has no row rather
+  than a row with a hole in it. Unreachable from all four shipped boundaries —
+  `GET /search`, `usher search`, `GET /search/suggest` and `usher suggest` all
+  resolve the singleton default user first. ⚠️ **It is reachable from one
+  caller that is not a boundary, and that is now the guard's whole job:**
+  `usher.eval.surfaces.suggest` drives `SearchService.suggest` once per probe
+  through the real composition root, so `usher eval suggest --full` would write
+  thousands of rows of evaluation traffic into this table if it resolved one.
+  It deliberately does not.
 - **A page of a search.** Neither `GET /search` nor `SearchService.search` takes
   a cursor, so a search is one row and cannot become one per scroll. The day
   either grows pagination this is a decision to make again, not a default.
-- **A keystroke.** See the next paragraph.
+- **A fraction of the keystrokes.** `USHER_SEARCH_SUGGEST_ANALYTICS` is a
+  `bool` and never a sample rate, and the reason is this very table: all five
+  rows above read a **count**, so a rate makes every one an estimate and adds a
+  sixth absence — *the row that was not written* — which is indistinguishable
+  in the data from the other five. The volume is bounded by retention instead.
+  ⚠️ **And it is a `bool` covering *both tiers*, not one per tier**, for the
+  same reason one step over: a switch that recorded `fuzzy` and not `prefix`
+  would make *"no prefix rows"* mean either "nobody typed four characters" or
+  "that tier is not recorded here", which is the sixth absence arriving on a
+  different axis. Tier 2 could afford the row and tier 1 cannot, so the tier
+  that cannot decides.
 
-⚠️ **`m10c` has landed the columns and the writer is another task's, so this
-paragraph describes the schema as of `m10c` and the *behaviour* as of M9.**
-`GET /search/suggest` still writes no row; what changed is that
-`search_queries` can now record one without collapsing two vocabularies, which
-is the objection below answered rather than absorbed. A stale "verified" fact
-is worse than none, so: the columns exist, `surface` is `'search'` on every
-row in the table, `tier` is NULL on every row, and nothing emits
-`SearchSurface.SUGGEST` yet.
+✅ **`m10c` landed the columns and M10's suggest writer emits them, so the
+schema and the behaviour are both current as of M10.** The columns exist,
+`surface` is `'search'` on every row `GET /search` and `usher search` write and
+`'suggest'` on every row the two type-ahead boundaries write, `tier` is NULL on
+the first and names the index that ran on the second, and
+`SearchSurface.SUGGEST` has an emitter. (This paragraph read *"the writer is
+another task's … nothing emits `SearchSurface.SUGGEST` yet"* for one commit,
+between the migration and the writer; it is kept as a marker of what the
+interval looked like rather than deleted, because a stale "verified" fact is
+worse than none in both directions.)
 
-🔴 **`GET /search/suggest` writes no row, on either tier, and what that costs
-is stated rather than hidden.** `mode` is a `SearchMode` — three reachable
-values — and a suggest request is parameterised by a disjoint `SuggestTier`
+✅ **`GET /search/suggest` writes one row per answered keystroke, on both
+tiers, where an operator has turned it on — and the *vocabulary* objection it
+used to carry is answered rather than absorbed.**
+That objection was: `mode` is a `SearchMode` — three reachable values — and a
+suggest request is parameterised by a disjoint `SuggestTier`
 (`prefix` | `fuzzy`), so storing both under one column is the
 two-vocabularies-under-one-name hazard this document already names for
-`provider`. It would also make every mode-split panel in dashboards 1 and 4 a
+`provider`, and it would make every mode-split panel in dashboards 1 and 4 a
 measure of the type-ahead box: tier 1 is p50 **0.6 ms** against full text's p50
 **33.3 ms** over the same 2,993 cases
 ([05](05-search-and-similarity.md)), so a client driving the box per keystroke
-would out-number *and* out-weight the searches by an order of magnitude each.
+out-numbers *and* out-weights the searches by an order of magnitude each.
 
-**The cost is that this table cannot answer the question below that it is most
-wanted for** — *whether real users type 2–4-character queries at all*, which is
-a question about the suggest box. Two ways to fix it, both **PRD 10
-amendments** and both deliberately out of M9's scope, named here so M10 plans
-one rather than rediscovering the choice:
+**Amendment 2 keeps the two vocabularies in two columns, which answers the
+first half, and hands the dashboards a filter to answer the second.** 🔴 **Every
+mode-split panel in dashboards 1 and 4 now owes a `WHERE surface = 'search'`
+it did not previously need**, and a `mode` histogram taken without one is a
+histogram of the type-ahead box: a suggest row carries `mode = 'full_text'`,
+because both tiers are btree/GIN reads with no embed and no fusion and that is
+what the member already means. It is recorded here rather than left to be
+discovered from a skewed panel, and it is the reason amendment 1 — a fourth
+`SearchMode` member — would not have helped: it puts the two vocabularies in
+*one* column, so no filter can separate them afterwards.
+
+**What the table could not answer before, and now can** — *whether real users
+type 2–4-character queries at all*, which is
+a question about the suggest box. ⚠️ **It is answerable and it is not yet
+answered**: nothing here has been read against real typed traffic, and the
+`min_query_length` bound is per tier, so the two tiers' row counts are not a
+common denominator. Two ways to fix it were named here so M10 would plan one
+rather than rediscover the choice, and M10 took the second:
 
 1. **A fourth `SearchMode` member** (a `suggest` value, or one per tier). It is
    the smaller schema change — no column, no migration for the enum's Postgres
@@ -703,8 +748,9 @@ one rather than rediscovering the choice:
    `SearchService._record_search` is reachable only from `GET /search` and
    `usher search`. Amendment 1 is therefore **declined**, not deferred.
 
-Either way the volume argument stands on its own and does not go away with the
-vocabulary one, because of the next paragraph.
+**The volume argument stands on its own, does not go away with the vocabulary
+one, and is what the next two paragraphs are about.** It is answered by a
+measurement and a switch rather than by an absence.
 
 **What the row costs, measured once rather than assumed:** `record()` plus the
 commit is p50 **3.957 ms** / p95 4.738 ms over 2,000 iterations against a real
@@ -715,6 +761,29 @@ order of magnitude smaller, not the two an earlier estimate assumed, which is
 worth knowing before anything prices a *keystroke* against it. No bar is minted
 and none is needed; the full table and its caveats are in
 `.claude/rules/search-and-embeddings.md`.
+
+🔴 **And what it costs a *keystroke* was measured under a bar written first,
+the bar came back against the writer, and `USHER_SEARCH_SUGGEST_ANALYTICS`
+therefore ships `false`.** M10 registered *"tier 1's end-to-end p50 must stay
+under 5 ms with the writer on"* before the run, with the position it was
+written to refute being *both tiers write, unconditionally, defaulting on*.
+Measured through the shipped route against a clone of the real catalog:
+
+| tier, end to end | writer off | writer on | the row |
+|---|---|---|---|
+| **1 — `prefix`** | p50 **2.53 ms** | p50 **6.29 ms** | +3.76 ms, **+148%** |
+| **2 — `fuzzy`** | p50 **45.0 ms** | p50 **48.6 ms** | +3.53 ms, **+7.8%** |
+
+So the row is roughly a constant ~3.5 ms — PRD 10's own 3.957 ms, of which
+3.0 ms is the WAL flush — and what changes is what it is a fraction *of*. On
+tier 2 that is 7.8%, inside the 11.9% this document already accepted for full
+text. On tier 1, the path
+[ADR-0031](decisions/0031-the-two-tier-suggest.md) exists to make cheap, the
+analytics write costs half again as much as the thing it is measuring. **One
+switch governs both tiers**, for the reason the absence table above gives, so
+the tier that cannot afford it decides. The run, its arms and what it did not
+establish are in `.claude/rules/search-and-embeddings.md`. **It is
+whole-or-nothing and never a sample rate**, for the same reason.
 
 ⚠️ **Nothing owns this table's size, and that is stated rather than left
 implied.** There is no retention job and no scheduler anywhere in `src/` —

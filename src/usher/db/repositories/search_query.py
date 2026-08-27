@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from usher.db.base import enum_column
 from usher.db.repositories._errors import refusals_as_conflict
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
 # **Every column named explicitly**, never `INSERT INTO search_queries VALUES
 # (...)`, for the reason `llm_calls`' identical comment gives: positional
@@ -31,22 +31,28 @@ from usher.ports.search import SearchMode
 # had to be edited, loudly, rather than starting to write `tier` into
 # `surface`.
 #
-# `clicked_title_id`, `played` and `surface` are written as **literals**
-# (`NULL`, `false`, `'search'`) rather than as bind parameters. For the first
-# two, neither is a fact `record()`'s caller (F2) has, and a column with no
-# default (`played` is `NOT NULL` with none at all) has to get its first value
-# from somewhere; `record_outcome` is the only thing that ever moves them.
+# `clicked_title_id` and `played` are written as **literals** (`NULL`,
+# `false`) rather than as bind parameters: neither is a fact `record()`'s
+# caller has, and a column with no default (`played` is `NOT NULL` with none
+# at all) has to get its first value from somewhere. `record_outcome` is the
+# only thing that ever moves them.
 #
-# **`surface` is a literal for a different reason and it is temporary.**
-# `m10c` lands the column `NOT NULL` with no `server_default` -- deliberately,
-# because a default would outlive the migration and supply a plausible wrong
-# value to a writer that forgot -- so this statement has to name it, and
-# `'search'` is the *true* value for every row this method writes: `record()`
-# is reached only from `SearchService._record_search`, which is reached only
-# from `SearchService.search`, whose two callers are `GET /search` and
-# `usher search`. When the suggest writer lands, `surface` and `tier` become
-# bind parameters off `SearchQueryRecord` and this paragraph goes with them.
-# `tier` needs nothing here: it is nullable and a `search` row has no tier.
+# 🔴 **`surface` was the literal `'search'` for exactly one commit and is a
+# bind parameter now.** `m10c` landed the column `NOT NULL` with no
+# `server_default` -- deliberately, because a default would outlive the
+# migration and supply a plausible wrong value to a writer that forgot -- so
+# this statement had to name it, and at `m10c` `'search'` was the *true* value
+# for every row this method wrote: the one caller was
+# `SearchService._record_search`. J2 gives it a second caller
+# (`SearchService.suggest`, both tiers), so the literal would now be the
+# plausible wrong value the migration refused to install, one layer up. It
+# comes off `SearchQueryRecord.surface`, which is required and undefaulted for
+# the same reason.
+#
+# `tier` is a bind parameter beside it rather than a `NULL` literal, and the
+# pairing is the point: `SearchQueryRecord` refuses the two combinations that
+# are not states -- a `search` row with a tier, a `suggest` row without one --
+# so these two binds can never disagree about which index answered.
 #
 # `result_count` and `latency_ms` are deliberately left with no explicit
 # `bindparam` type, following `curated_rows."position"`'s precedent
@@ -59,7 +65,7 @@ _INSERT_QUERY = text(
     "(id, at, user_id, query, mode, result_count, latency_ms, "
     " clicked_title_id, played, surface, tier) "
     "VALUES (:id, :at, :user_id, :query, :mode, :result_count, :latency_ms, "
-    "        NULL, false, 'search', NULL)"
+    "        NULL, false, :surface, :tier)"
 ).bindparams(
     # Typed rather than cast in the statement text -- `:id::uuid` is not an
     # option, `llm_calls`' comment records why: SQLAlchemy's bind-parameter
@@ -72,6 +78,16 @@ _INSERT_QUERY = text(
     # member-to-value conversion is one implementation rather than a `.value`
     # spelled by hand here and a `values_callable` spelled there.
     bindparam("mode", type_=enum_column(SearchMode, length=16)),
+    # Both widths are `SearchQueryRow`'s own -- 8 for `surface` and 6 for
+    # `tier` -- read off that model rather than counting the longest member
+    # here, because two spellings of one width is how they stop agreeing.
+    # Typed for `mode`'s reason and for one more:
+    # `tier` binds `None` on every `search` row, and an untyped `NULL` is the
+    # shape asyncpg refuses with "could not determine data type of parameter"
+    # (`.claude/rules/db-and-sql.md`, and `_RECORD_OUTCOME`'s
+    # `clicked_title_id` below is the same trap one statement over).
+    bindparam("surface", type_=enum_column(SearchSurface, length=7)),
+    bindparam("tier", type_=enum_column(SuggestTier, length=6)),
 )
 
 # **Two columns, two different conditions, deliberately not one shared
@@ -163,7 +179,11 @@ class PostgresSearchQueryRepository(SearchQueryRepository):
 
 
 def _parameters(record: SearchQueryRecord) -> dict[str, object]:
-    """The seven F2 columns, spelled out.
+    """The nine columns a caller supplies, spelled out.
+
+    Seven until `m10c`; `surface` and `tier` are the two the amendment added
+    and they arrive here rather than in the statement text, which is what
+    stops the INSERT from writing `'search'` onto a keystroke.
 
     A `dataclasses.asdict()` would be shorter and would couple the
     statement's parameter names to the record's field names, so a field
@@ -179,4 +199,6 @@ def _parameters(record: SearchQueryRecord) -> dict[str, object]:
         "mode": record.mode,
         "result_count": record.result_count,
         "latency_ms": record.latency_ms,
+        "surface": record.surface,
+        "tier": record.tier,
     }

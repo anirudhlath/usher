@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from pydantic import AwareDatetime
 
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
 __all__ = [
     "SearchQueryRecord",
@@ -21,8 +21,8 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class SearchQueryRecord:
-    """One search, exactly as `SearchService` already knows it the moment it
-    answers -- the retrieval half of `search_queries`' nine columns
+    """One answered request, exactly as `SearchService` already knows it the
+    moment it answers -- the retrieval half of `search_queries`' eleven columns
     (`docs/prd/10-telemetry-and-dashboards.md`'s two-halves table).
 
     **`clicked_title_id` and `played` are deliberately not fields here.**
@@ -53,6 +53,35 @@ class SearchQueryRecord:
     `LLMCall.id` and every other UUIDv7 primary key in this schema -- the
     repository does not choose it, so a caller that needs the id before the
     row is durable (`record_outcome` is keyed by it) already has one.
+
+    **`surface` is required and is deliberately not defaulted to `SEARCH`.**
+    A default here is the *"supply a plausible wrong value to a writer that
+    forgot"* failure `m09d`'s own migration comment names, one layer up from
+    the database: `m10c` lands the column `NOT NULL` with no `server_default`
+    for exactly that reason, and a dataclass default would put the hazard back
+    where no migration can see it. Every writer states which surface it is.
+
+    **`mode` on a `SUGGEST` row is `SearchMode.FULL_TEXT`**, and the choice is
+    stated here beside `surface` because `mode` is the column every dashboard 1
+    and 4 panel groups by. Both suggest tiers are btree/GIN reads with no embed
+    and no fusion, which is what that member already means; a suggest row
+    landing under `FUSED` would attribute a keystroke to a lane that has never
+    run. The consequence travels with it and is recorded in PRD 10 rather than
+    discovered from a skewed panel: **every mode-split panel now has to filter
+    on `surface`**, which is a `WHERE surface = 'search'` those panels did not
+    previously need. Keeping the two vocabularies in two columns is the whole
+    of amendment 2 -- a fourth `SearchMode` member was the alternative and was
+    declined, because `SearchMode` is `GET /search`'s `?mode=`.
+
+    **The invariant, and both directions of it.** `surface == SEARCH` implies
+    `tier is None`; `surface == SUGGEST` implies `tier is not None`. It is
+    checked here rather than by a CHECK constraint, because this schema's
+    constraints are Pydantic's (`db/base.py`'s `enum_column`: *"Pydantic owns
+    membership validation, not the database"*) -- and it is checked in **both**
+    directions, because a validator that refuses only one of them passes a test
+    that only tries one. A `search` row with a tier would claim an index the
+    search lanes do not have; a `suggest` row without one is the half ADR-0031
+    actually wants measured, silently absent.
     """
 
     id: uuid.UUID
@@ -62,6 +91,25 @@ class SearchQueryRecord:
     mode: SearchMode
     result_count: int
     latency_ms: int
+    surface: SearchSurface
+    #: `None` on a `search` row and never on a `suggest` one -- see the
+    #: invariant above. Last and defaulted because it is the one field of the
+    #: nine here that is genuinely *absent* rather than unknown; `surface`
+    #: above it is required precisely so this default cannot be reached by a
+    #: writer that forgot which surface it was.
+    tier: SuggestTier | None = None
+
+    def __post_init__(self) -> None:
+        if self.surface is SearchSurface.SEARCH and self.tier is not None:
+            raise ValueError(
+                f"a {SearchSurface.SEARCH.value} row carries no tier, and this one names "
+                f"{self.tier.value}: no search lane is a SuggestIndex"
+            )
+        if self.surface is SearchSurface.SUGGEST and self.tier is None:
+            raise ValueError(
+                f"a {SearchSurface.SUGGEST.value} row must name the tier that answered; "
+                "which of the two indexes ran is what ADR-0031 exists to measure"
+            )
 
 
 class SearchQueryRepository(ABC):
@@ -80,6 +128,13 @@ class SearchQueryRepository(ABC):
 
     - `id`, `at`, `user_id`, `query`, `mode`, `result_count`, `latency_ms` --
       **F2**, written together by `record()` at the moment a search answers.
+    - `surface`, `tier` -- **M10's `m10c` and J2**, written by the same
+      `record()` call, because which surface asked is known at the instant it
+      answers and never afterwards. `surface` is `search` from
+      `SearchService.search` and `suggest` from `SearchService.suggest`; `tier`
+      is the `SuggestTier` the caller selected on the second and `None` on the
+      first. **Two callers where there was one**, which is the amendment PRD 10
+      named for M10 to plan rather than rediscover.
     - `clicked_title_id`, `played` -- **F3**, written later by
       `record_outcome()`, one column per client action and never both by one
       caller: `GET /titles/{id}?search_id=…` reports the click and

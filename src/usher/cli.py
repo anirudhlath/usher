@@ -1283,10 +1283,31 @@ async def _suggest(settings: Settings, *, prefix: str, limit: int, tier: str) ->
     the short end of B3's curve; refusing it here would take a capability away
     from the one caller that can, and diagnosing tier 1 at one character is
     exactly what an operator would open this command to do.
+
+    **A household, since M10's J2, resolved exactly as `usher search` resolves
+    one** -- `ensure_default_user`, not `default_user`, because this command
+    needs an id and nothing else and PRD 01's authentication seam is a
+    singleton row until a request has one to carry. Nothing on this path reads
+    it except the `search_queries` row, whose `user_id` is `NOT NULL` behind a
+    real foreign key.
+
+    **Not committed here, and that is what makes the row survive.**
+    `_session_for` yields a session and disposes the engine without ever
+    committing, so the household row and the analytics row are both durable
+    only because `SearchService` commits them itself -- a suggest writer that
+    inherited the caller's commit boundary would be correct on the route and
+    silently lose every row this command wrote. The two rows are in one
+    transaction, so a commit carrying the analytics row without its household
+    would be refused rather than silently partial.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
-        results = await pipeline.search.suggest(prefix, limit=limit, tier=SuggestTier(tier))
+        results = await pipeline.search.suggest(
+            prefix,
+            limit=limit,
+            tier=SuggestTier(tier),
+            user_id=await ensure_default_user(session),
+        )
     for result in results:
         year = f" ({result.year})" if result.year else ""
         print(f"{result.score:6.4f}  {result.name}{year}  {result.title_id}")

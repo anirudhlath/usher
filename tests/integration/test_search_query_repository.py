@@ -26,7 +26,7 @@ from tests.contract.search_query_repository_contract import (
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.domain.ids import new_id
 from usher.ports.errors import RepositoryConflict
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
 _READ_ONE = "SELECT * FROM search_queries WHERE id = CAST(:id AS uuid)"
 
@@ -51,6 +51,12 @@ class PostgresSearchQueryLedger(SearchQueryLedger):
             latency_ms=mapping["latency_ms"],
             clicked_title_id=mapping["clicked_title_id"],
             played=mapping["played"],
+            # `SearchSurface(...)` rather than the raw string: `surface` is
+            # `VARCHAR(8)` with no CHECK on the live table (`enum_column`
+            # compiles `native_enum=False`), so a value outside the vocabulary
+            # would store happily and only a constructor here can say so.
+            surface=SearchSurface(mapping["surface"]),
+            tier=None if mapping["tier"] is None else SuggestTier(mapping["tier"]),
         )
 
     async def count(self) -> int:

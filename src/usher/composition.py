@@ -758,6 +758,12 @@ def build_search_service(
         analytics=SearchAnalytics(
             queries=PostgresSearchQueryRepository(session), commit=session.commit
         ),
+        # Ten: the one surface an operator can turn off. It is read here rather
+        # than at either boundary because `usher suggest` and
+        # `GET /search/suggest` must obey it identically -- a switch honoured
+        # by the route and not by the command is a table whose contents depend
+        # on which door the keystroke came through.
+        suggest_analytics=settings.search_suggest_analytics,
     )
 
 

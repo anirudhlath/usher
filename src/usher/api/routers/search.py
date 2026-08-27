@@ -99,11 +99,28 @@ the full argument and the alternatives.
 **Hence `_MIN_PREFIX_CHARS`, which is this route's answer and the only lever a
 request boundary has.** See its own comment for why four.
 
-**No household, unlike `GET /search`.** `SearchService.suggest` takes no
-`user_id` — the suggest path runs no blend, so there is no watch-state term, no
-taste term and nothing for a household to change. A `DefaultUserIdDep` here
-would be a `SELECT` (and, on a first run, an `INSERT`) **per keystroke** to
-resolve an id nothing downstream reads.
+**A household, since M10's J2, and the objection this paragraph used to make
+is retired by a measurement rather than by an argument.** It read: *"a
+`DefaultUserIdDep` here would be a `SELECT` (and, on a first run, an `INSERT`)
+per keystroke to resolve an id nothing downstream reads."* Two of its three
+clauses still hold — the suggest path runs no blend, so there is no
+watch-state term and no taste term for a household to change, and the read
+really is one `SELECT` per keystroke against `users` (the `INSERT` happens on
+the deployment's first request, once). The clause that stopped being true is
+the last one: **something downstream reads it.** `search_queries.user_id` is
+`NOT NULL` behind `ON DELETE RESTRICT`, and PRD 10 refuses the alternative in
+terms — *"a search nobody is speaking for has no row rather than a row with a
+hole in it"* — so the column does not become nullable and the row is not
+written without one.
+
+**The `SELECT` is measured rather than waved through**, end to end against the
+real catalog, and the number is in `.claude/rules/search-and-embeddings.md`
+with tier 1's own budget beside it. ⚠️ **It is paid on the short-`q` arm too**,
+because FastAPI resolves a dependency before the handler body runs and the
+length bound is in the body — so the one request shape that writes no row still
+resolves a household. That is stated here rather than left to be found in a
+profile; moving the bound into a dependency to avoid it would put a latency
+budget in the dependency graph.
 
 **No completion is ever bought on this path, on either tier**, and that is
 structural rather than a rule to remember: `QueryExpansionService.expand` is
@@ -327,6 +344,14 @@ async def search(
 )
 async def suggest(
     search_service: SearchServiceDep,
+    # **The household, and it is here for the row rather than for the answer.**
+    # `GET /search` reads this because the blend has a watch-state term; this
+    # route has no blend and reads it because `search_queries.user_id` is
+    # `NOT NULL` behind a real foreign key, so a keystroke nobody is speaking
+    # for has no row. Resolved the same way `GET /search` and `PUT /watch/…`
+    # resolve it, so the day a request carries an identity one dependency
+    # changes and this line does not.
+    user_id: DefaultUserIdDep,
     q: Annotated[
         str,
         Query(
@@ -380,19 +405,55 @@ async def suggest(
     have installed. Both tiers are btree/GIN reads over tables `m09a` creates
     unconditionally.
 
-    🔴 **And no `search_queries` row, on either tier or either arm** — argued
-    rather than deferred (F2). `search_queries.mode` is a `SearchMode`, three
-    reachable values; a tier is a disjoint vocabulary, so storing both under
-    one column is two vocabularies under one name. And this route is driven
-    per keystroke at tier 1's p50 of 0.6 ms against full text's 33.3 ms, so its
-    rows would out-number *and* out-weight the searches by an order of
-    magnitude each in every mode-split panel PRD 10 builds. What it costs is
-    that the question PRD 10 most wants that table for — whether real users
-    type two- to four-character queries at all — is a question about *this* box, and
-    cannot be answered in M9. The two amendments that would answer it are
-    named in PRD 10; neither is a decision this route may take on its own,
-    exactly as with the problem code above.
+    **Where a deployment has turned type-ahead analytics on, an answered
+    request is recorded and a refused one is not.** One row per request that
+    clears its tier's `min_query_length`, naming the surface that asked and the
+    tier that answered; a shorter `q` returns before the service and is
+    recorded nowhere, exactly as a blank one is. It is **off by default**,
+    because on the prefix tier the write costs more than the request it
+    measures. The row carries no id a client can use — a keystroke has no click
+    or play to attribute against it. Nothing about the request or this response
+    changes either way.
     """
+    # **The writer, and why the paragraph above is short.** A route handler's
+    # docstring is published as the operation's `description` in
+    # `/openapi.json` (`.claude/rules/api-telemetry-and-lanes.md`), so the
+    # internal half of this argument is a comment: three descriptions in this
+    # API already leak a rules-file path and this must not be a fourth.
+    #
+    # ✅ **One `search_queries` row per answered request, on both tiers, since
+    # M10's J2 -- behind a switch that ships off, see the last paragraph.**
+    # PRD 10's amendment 2, which that document named for M10 to
+    # plan rather than rediscover. The objection this route used to carry was
+    # two vocabularies under one name: `search_queries.mode` is a `SearchMode`,
+    # three reachable values, and a tier is a disjoint vocabulary. `m10c`
+    # answered it with two columns rather than a fourth `SearchMode` member --
+    # `surface` says which box asked and `tier` says which index ran -- so the
+    # question PRD 10 most wants that table for, *whether real users type two-
+    # to four-character queries at all*, is now a question the table can
+    # answer. **Every mode-split panel owes a `WHERE surface = 'search'` it did
+    # not previously need**, recorded in PRD 10 in the same commit.
+    #
+    # 🔴 **The short-`q` arm below writes nothing, and that is this route's
+    # decision rather than the service's.** It returns before
+    # `SearchService.suggest` is called at all, so there is no answered query
+    # to record: PRD 10 excludes *"a blank or whitespace-only query"* because a
+    # search box sends one between every character, and a `q` below its tier's
+    # minimum is that same exclusion with a number on it. A writer moved above
+    # this line would be a row per keystroke a client never meant to send.
+    #
+    # 🔴 **What the row costs was measured under a bar written first, and the
+    # bar came back against it, so `USHER_SEARCH_SUGGEST_ANALYTICS` defaults
+    # `false`.** Through *this* route against a clone of the real catalog:
+    # tier 1 p50 **2.53 ms** without the row and **6.29 ms** with it, against a
+    # refutation condition of 5 ms. `record()` plus its commit is p50 3.957 ms
+    # of which 3.0 ms is the WAL flush (PRD 10), and that lands on a tier whose
+    # own statement is 0.6 ms. Tier 2 absorbs it at 7.8%. The switch is
+    # whole-or-nothing rather than a sample rate, because every row of PRD 10's
+    # *"which absence means what"* table is a count, and it covers both tiers
+    # rather than one, because a per-tier switch would add the same
+    # unnameable absence one axis over. The run is in
+    # `.claude/rules/search-and-embeddings.md`.
     minimum = _MIN_CHARS_FOR_TIER[tier]
     if len(q.strip()) < minimum:
         return SuggestResponse.of(q, tier=tier, min_query_length=minimum)
@@ -402,6 +463,9 @@ async def suggest(
         min_query_length=minimum,
         # `tier=tier` and not a tier the service chose: the echo has to be the
         # parameter that selected the index, or a response could report a tier
-        # that did not run.
-        results=await search_service.suggest(q, limit=limit, tier=tier),
+        # that did not run. **The same argument now also governs the row** --
+        # `SearchService.suggest` writes `search_queries.tier` from this very
+        # argument, so a response and a row cannot disagree about which index
+        # answered.
+        results=await search_service.suggest(q, limit=limit, tier=tier, user_id=user_id),
     )

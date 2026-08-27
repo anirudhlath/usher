@@ -8875,3 +8875,72 @@ and it passed `ruff check`, `ruff format --check`, `mypy src tests`,
 `lint-imports` and the whole suite, all exit 0. A sweep reporting every
 mutation killed cannot distinguish a suite with teeth from a harness that
 scores every run as a kill.
+
+## M10 J2 — the suggest analytics writer, and a household guard the Postgres arm could not see (2026-08-27)
+
+Sweep over `src/usher/services/search.py` and `src/usher/api/routers/search.py`,
+**each mutation against the whole suite** (`6111 passed, 26 skipped` at
+baseline), driven from `/var/tmp/m10-J2/sweep.py` — outside the working tree.
+Plant list fixed in that file **before the first run**, the three `.pyc`
+defences in force (`PYTHONDONTWRITEBYTECODE=1`, every `__pycache__` under
+`src/` and `tests/` deleted before each run, an equivalent-mutant control),
+every mutation `compile()`d before it was written, every plant asserted
+*present* **and** the original asserted *absent* after the edit, and every
+restore verified by `sha256` against the digest taken before anything moved.
+
+**7 plants, 6 killed, 1 control surviving as designed. 0 HUNG, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN.**
+
+| # | plant | verdict | failing cases |
+|---|---|---|---|
+| C1 | the four keyword arguments of the `_record_suggest` call **reordered** | **SURVIVED** — the control | none; `6111 passed, 26 skipped`, identical to baseline |
+| P1 | `surface=SUGGEST, tier=tier` → `surface=SEARCH, tier=None` | KILLED | **11** |
+| P2 | `tier=tier` → `tier=SuggestTier.PREFIX` | KILLED | **6** — including exactly one arm of each parametrised pair |
+| P3 | `or user_id is None` dropped from `_record_suggest`'s guard | KILLED | **2 → 3**, and the difference is the finding below |
+| P4 | `or not self._suggest_analytics` dropped | KILLED | **3** |
+| P5 | `except UsherPortError` → `except Exception` in `_write_row` | KILLED | **3** — both surfaces, which is what says the two writers share one guard |
+| P6 | the route's short-`q` early return moved *after* the service call | KILLED | **10** |
+
+### 🔴 P3: the arm with the real constraint could not see the defect, and the *fake* is what had teeth
+
+`_record_suggest` refuses to write when `user_id is None` — PRD 10's *"a search
+with no household"* exclusion, which matters because `usher.eval.surfaces.
+suggest` drives `SearchService.suggest` once per probe and resolves no
+household. The obvious case for it is
+`tests/integration/test_search_analytics.py::
+test_a_suggest_with_no_household_writes_no_row_and_the_eval_harness_is_that_caller`,
+which drives the real harness against real Postgres and counts rows.
+
+**With the guard planted away, that case stayed green.** A `NULL` `user_id`
+violates `search_queries`' own `NOT NULL`, `refusals_as_conflict` translates it
+to `RepositoryConflict`, and `_write_row` absorbs it by design — so **the
+database produced the absence the guard exists to produce**, and the plant was
+visible only as an error log line per probe (thousands under
+`usher eval suggest --full`). The two cases that killed it were the *unit* pair,
+and only because `FakeSearchQueryRepository` has no foreign keys to refuse
+with.
+
+**The inversion is the transferable part.** This file already records fakes
+being *more forgiving* than Postgres as a hazard; here that forgiveness is the
+only thing with teeth, and the arm carrying the real constraint is the blind
+one. The repair is not a stricter fake — it is to assert **that nothing was
+attempted** rather than that nothing landed: the case now captures the loguru
+sink and asserts no *"analytics row was refused"* line, with a positive control
+that fires one deliberately (a `user_id` naming no `users` row) so the two
+negative assertions are about the writer rather than about logging. Re-planted,
+P3 fails **3** cases and the integration one is among them.
+
+**Ask it of any guard in front of a write the store would also refuse**: if the
+column, the constraint or the foreign key produces the same outcome, a
+row-count assertion is a test of the schema. The guard's own observable is
+usually a log line, a metric or a request that never happened.
+
+### P2's shape, worth one line
+
+`tier` hard-coded to `PREFIX` fails **exactly one arm of each parametrised
+pair** — the `fuzzy` arms — which is what a `@pytest.mark.parametrize` over the
+enum is for and what a single-tier case would have missed entirely. Same for P1
+on the `surface` axis: the *careless* spelling of that plant
+(`surface=SEARCH` with `tier=tier` left alone) is not a defect at all but a
+`ValueError` out of `SearchQueryRecord.__post_init__`, so the plant that
+reaches the suite is the careful one that moves both fields together.

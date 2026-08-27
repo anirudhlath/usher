@@ -67,7 +67,7 @@ from pydantic import AwareDatetime
 from usher.domain.ids import new_id
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
 #: When the search happened, not when the row is inserted -- `search_queries.at`
 #: carries no server default for exactly that reason (`llm_calls.at`'s
@@ -96,6 +96,8 @@ def search_query_record(
     mode: SearchMode = SearchMode.SEMANTIC,
     result_count: int = RESULT_COUNT,
     latency_ms: int = LATENCY_MS,
+    surface: SearchSurface = SearchSurface.SEARCH,
+    tier: SuggestTier | None = None,
 ) -> SearchQueryRecord:
     """One `SearchQueryRecord`, with the fields a case does not care about
     filled in.
@@ -104,6 +106,14 @@ def search_query_record(
     rather than `SearchMode`'s first member (`FULL_TEXT`) deliberately: a
     write that hardcoded the default would still pass a case that never
     varied it.
+
+    ⚠️ **`surface` is defaulted here and is required on the record itself**,
+    and the asymmetry is deliberate rather than an oversight. `m10c` refuses a
+    `server_default` and `SearchQueryRecord` refuses a field default for the
+    same reason -- a plausible wrong value supplied to a writer that forgot --
+    but a *test-double builder* has no writer to forget: every case here states
+    the surface it is about, and the one that varies it is the pair below. A
+    default in the fixture cannot reach production; one on the record can.
     """
     return SearchQueryRecord(
         id=record_id if record_id is not None else new_id(),
@@ -113,6 +123,8 @@ def search_query_record(
         mode=mode,
         result_count=result_count,
         latency_ms=latency_ms,
+        surface=surface,
+        tier=tier,
     )
 
 
@@ -133,6 +145,8 @@ class StoredSearchQuery:
     latency_ms: int
     clicked_title_id: uuid.UUID | None
     played: bool
+    surface: SearchSurface
+    tier: SuggestTier | None
 
 
 class SearchQueryLedger(ABC):
@@ -206,7 +220,57 @@ class SearchQueryRepositoryContract:
         assert stored.mode is SearchMode.SEMANTIC
         assert stored.result_count == RESULT_COUNT
         assert stored.latency_ms == LATENCY_MS
+        assert stored.surface is SearchSurface.SEARCH
+        assert stored.tier is None
         assert await ledger.count() == 1
+
+    async def test_a_suggest_row_stores_the_surface_and_the_tier_that_answered(
+        self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
+    ) -> None:
+        """`m10c`'s two columns, round-tripped -- PRD 10's amendment 2.
+
+        **Both tiers, in one case, because a write that hard-coded either
+        member passes a case that only ever stores the other.** The pairing is
+        also what says the two columns are not filled from each other:
+        `surface` reads `suggest` on both rows while `tier` differs, which no
+        single-row assertion can distinguish.
+
+        The wrong implementations this kills: `surface` written as the literal
+        `'search'`, which is what shipped at `m10c` and was correct only while
+        `SearchService.search` was the sole caller; `tier` dropped from the
+        statement, leaving the column NULL on a row that names the surface
+        whose whole point is which index ran; and the two bound the wrong way
+        round, which no `NOT NULL` can catch because both columns take a
+        string.
+
+        `mode` is `FULL_TEXT` here rather than the file's `SEMANTIC` default,
+        because that is the value a suggest row really carries: neither tier
+        embeds and neither fuses.
+        """
+        rows = {
+            tier: search_query_record(
+                user_id=user_id,
+                query=f"{QUERY[: 4 + len(tier.value)]}",
+                mode=SearchMode.FULL_TEXT,
+                surface=SearchSurface.SUGGEST,
+                tier=tier,
+            )
+            for tier in SuggestTier
+        }
+        assert len(rows) == len(SuggestTier) > 1, "the premise: both tiers are distinct rows"
+
+        for record in rows.values():
+            await repository.record(record)
+
+        stored = {tier: await ledger.get(record.id) for tier, record in rows.items()}
+        assert all(one is not None for one in stored.values()), stored
+        assert {tier: one.surface for tier, one in stored.items() if one is not None} == dict(
+            dict.fromkeys(SuggestTier, SearchSurface.SUGGEST)
+        )
+        assert {tier: one.tier for tier, one in stored.items() if one is not None} == {
+            tier: tier for tier in SuggestTier
+        }
+        assert await ledger.count() == len(SuggestTier)
 
     async def test_a_recorded_query_starts_with_no_click_and_not_played(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID

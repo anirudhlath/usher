@@ -3,6 +3,7 @@ must fail at instantiation, not at the call site."""
 
 from abc import ABC
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol, get_type_hints
 
@@ -11,6 +12,7 @@ import pytest
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.curation import LLMCall
 from usher.domain.enums import TitleKind
+from usher.domain.ids import new_id
 from usher.ports.bulk import BulkDataset
 from usher.ports.credentials import CredentialCiphertextStore, CredentialStore
 from usher.ports.embedding import Embedder
@@ -43,6 +45,7 @@ from usher.ports.repository import (
     RawPayloadStore,
     RestoreRepository,
     RowProviderSettingsRepository,
+    SearchQueryRecord,
     SearchQueryRepository,
     SourceRepository,
     SyncRunRepository,
@@ -59,7 +62,9 @@ from usher.ports.search import (
     SearchIndex,
     SearchMode,
     SearchRequest,
+    SearchSurface,
     SuggestIndex,
+    SuggestTier,
 )
 from usher.ports.source import SourceAdapter, SourceAdapterFactory, SourceNotSupported
 
@@ -523,3 +528,76 @@ def test_metadata_candidate_uses_the_canonical_kind_vocabulary() -> None:
 
 def test_complete_title_repository_implementation_instantiates() -> None:
     assert isinstance(FakeTitleRepository(), TitleRepository)
+
+
+# --- SearchQueryRecord's surface/tier invariant -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("surface", "tier"),
+    [
+        (SearchSurface.SEARCH, SuggestTier.PREFIX),
+        (SearchSurface.SEARCH, SuggestTier.FUZZY),
+        (SearchSurface.SUGGEST, None),
+    ],
+)
+def test_a_row_may_not_claim_a_surface_and_a_tier_that_do_not_go_together(
+    surface: SearchSurface, tier: SuggestTier | None
+) -> None:
+    """`surface == SEARCH` implies `tier is None`; `surface == SUGGEST` implies
+    `tier is not None`. **Both directions, in one parametrisation**, because a
+    validator that refuses only one of them passes a test that only tries one.
+
+    **Asserted here rather than as a CHECK constraint**, because this schema's
+    constraints are Pydantic's -- `enum_column`'s own docstring says *"Pydantic
+    owns membership validation, not the database"* -- and because the wrong
+    combinations are caller-assembly mistakes rather than storage faults: a
+    `search` row carrying a tier claims an index the search lanes do not have,
+    and a `suggest` row without one silently drops the half ADR-0031 exists to
+    measure. `search_queries.tier` is nullable on both, so neither is
+    refusable by the column.
+
+    Fails: `__post_init__` deleted; either arm of it deleted, which is what the
+    two `SEARCH` rows and the one `SUGGEST` row exist to separate.
+    """
+    with pytest.raises(ValueError, match="tier"):
+        SearchQueryRecord(
+            id=new_id(),
+            at=datetime(2026, 8, 26, 12, 0, tzinfo=UTC),
+            user_id=new_id(),
+            query="the quiet vacuum",
+            mode=SearchMode.FULL_TEXT,
+            result_count=1,
+            latency_ms=1,
+            surface=surface,
+            tier=tier,
+        )
+
+
+@pytest.mark.parametrize(
+    ("surface", "tier"),
+    [(SearchSurface.SEARCH, None), *((SearchSurface.SUGGEST, one) for one in SuggestTier)],
+)
+def test_the_combinations_that_are_states_are_accepted(
+    surface: SearchSurface, tier: SuggestTier | None
+) -> None:
+    """The control the case above needs: a validator refusing *everything*
+    satisfies every `pytest.raises` written about it, and this is the
+    enumeration that says the three legal shapes are still constructible.
+
+    Together the two parametrisations partition `SearchSurface x
+    (SuggestTier | None)` exactly -- 3 refused, 3 accepted, over 2 x 3 -- so
+    neither can be satisfied by a rule about something else.
+    """
+    record = SearchQueryRecord(
+        id=new_id(),
+        at=datetime(2026, 8, 26, 12, 0, tzinfo=UTC),
+        user_id=new_id(),
+        query="the quiet vacuum",
+        mode=SearchMode.FULL_TEXT,
+        result_count=1,
+        latency_ms=1,
+        surface=surface,
+        tier=tier,
+    )
+    assert (record.surface, record.tier) == (surface, tier)

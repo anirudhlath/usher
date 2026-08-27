@@ -58,6 +58,7 @@ from usher.ports.search import (
     SearchMode,
     SearchOutcome,
     SearchRequest,
+    SearchSurface,
     SuggestIndex,
     SuggestTier,
 )
@@ -529,6 +530,7 @@ async def _service(
     expander: _Expander | None = None,
     ports: _Ports | None = None,
     analytics: SearchAnalytics | None = None,
+    suggest_analytics: bool = True,
     clock: Callable[[], float] = time.perf_counter,
     now: datetime | None = None,
     centroid: Sequence[float] | None = None,
@@ -602,6 +604,7 @@ async def _service(
         embedder=embedder,
         expander=None if expander is None else expander.service,
         analytics=analytics,
+        suggest_analytics=suggest_analytics,
         now=(lambda: _NOW) if now is None else (lambda: now),
         clock=clock,
     )
@@ -2112,20 +2115,26 @@ def test_the_interval_clock_is_monotone_and_the_wall_clock_is_not_the_same_calla
 
 
 @pytest.mark.parametrize("tier", list(SuggestTier))
-async def test_type_ahead_records_no_row_on_either_tier(tier: SuggestTier) -> None:
-    """A keystroke is not a search, and both tiers agree.
+async def test_type_ahead_records_the_surface_and_the_tier_that_answered(
+    tier: SuggestTier,
+) -> None:
+    """PRD 10's amendment 2 at the service, one row per answered keystroke.
 
-    Storing a tier under `search_queries.mode` -- a `SearchMode`, three
-    reachable values -- would be two vocabularies under one name, and tier 1's
-    p50 of 0.6 ms against full text's 33.3 ms means the suggest rows would
-    out-number and out-weight the searches by an order of magnitude each in
-    every mode-split panel PRD 10 builds.
+    `search_queries.mode` is a `SearchMode` and a tier is a disjoint
+    vocabulary, so the two are in two columns rather than one: `surface` says
+    which box asked, `tier` says which index ran, and `mode` is `FULL_TEXT`
+    because neither tier embeds and neither fuses.
 
-    **Both an answered prefix and a refused one**, because a writer placed
-    above `suggest`'s blank guard and a writer placed below it are two
-    different defects and a case exercising one arm cannot see the other. The
-    control is the same recorder writing on the search path, so "no rows" is
-    not merely what an unwired fixture produces.
+    **Parametrised over the tier and asserting the tier**, which is what
+    separates a writer from a writer that hard-codes `PREFIX`: both arms of a
+    case that only asserted `surface` would pass against one.
+
+    **Both an answered prefix and a blank one**, because a writer placed above
+    `suggest`'s blank guard and a writer placed below it are two different
+    defects and a case exercising one arm cannot see the other. The commit is
+    counted beside the row for the reason `_Recorder` exists: a row written
+    into a session nobody commits is rolled back on the CLI root and nothing
+    says so.
     """
     hits = (SearchHit(title_id=_QUIET, score=1.0),)
     recorder = _Recorder()
@@ -2134,27 +2143,195 @@ async def test_type_ahead_records_no_row_on_either_tier(tier: SuggestTier) -> No
         index, suggestions=_ScriptedSuggest(hits), tier=tier, analytics=recorder.bind()
     )
 
+    assert len(await service.suggest("vac", tier=tier, user_id=_HOUSEHOLD)) == 1, (
+        "the premise: the box answered"
+    )
+    assert await service.suggest("  ", tier=tier, user_id=_HOUSEHOLD) == ()
+
+    (row,) = recorder.rows
+    assert (row.surface, row.tier, row.mode) == (
+        SearchSurface.SUGGEST,
+        tier,
+        SearchMode.FULL_TEXT,
+    )
+    assert (row.query, row.user_id, row.result_count) == ("vac", _HOUSEHOLD, 1)
+    assert recorder.commits == 1, "a row nobody commits is lost on the CLI root"
+
+    await service.search("vacuum", user_id=_HOUSEHOLD)
+    assert [one.surface for one in recorder.rows] == [
+        SearchSurface.SUGGEST,
+        SearchSurface.SEARCH,
+    ], "the control: the same recorder tells the two surfaces apart"
+
+
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_type_ahead_with_no_household_records_nothing_on_either_tier(
+    tier: SuggestTier,
+) -> None:
+    """PRD 10's *"a search with no household"* exclusion, and the caller it
+    became load-bearing for.
+
+    `search_queries.user_id` is `NOT NULL` behind `ON DELETE RESTRICT`, so a
+    keystroke nobody is speaking for has no row rather than a row with a hole
+    in it. Both request boundaries resolve a household; **`usher.eval.surfaces.
+    suggest` resolves none and drives this per probe**, thousands of times
+    under `usher eval suggest --full`, so without this guard the evaluation
+    harness would write its own traffic into the table.
+
+    The control is the identical call carrying one, so "no rows" is not merely
+    what an unwired recorder produces. `tests/integration/
+    test_search_analytics.py` makes the same claim about the real harness
+    against a real database; this is the unit-level statement of the rule it
+    rests on.
+    """
+    hits = (SearchHit(title_id=_QUIET, score=1.0),)
+    recorder = _Recorder()
+    index = _ScriptedIndex(SearchOutcome())
+    service = await _service(
+        index, suggestions=_ScriptedSuggest(hits), tier=tier, analytics=recorder.bind()
+    )
+
     assert len(await service.suggest("vac", tier=tier)) == 1, "the premise: the box answered"
-    assert await service.suggest("  ", tier=tier) == ()
+    assert (recorder.rows, recorder.commits) == ([], 0)
+
+    assert len(await service.suggest("vac", tier=tier, user_id=_HOUSEHOLD)) == 1
+    assert len(recorder.rows) == 1, "the control: the same call with a household writes"
+
+
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_the_suggest_switch_is_whole_and_leaves_the_search_row_alone(
+    tier: SuggestTier,
+) -> None:
+    """`USHER_SEARCH_SUGGEST_ANALYTICS=false`, at the service.
+
+    **Whole or nothing, never sampled**: every row of PRD 10's *"which absence
+    means what"* table reads a count, so a rate would turn each into an
+    estimate and add a sixth absence nobody can name. Asserted on both tiers,
+    because a switch honoured on one is a defect a single-tier case cannot see.
+
+    The control is `search` through the same service: this setting narrows the
+    suggest surface and must not reach the search one, or an operator who
+    declined keystroke analytics would silently stop recording searches.
+    """
+    hits = (SearchHit(title_id=_QUIET, score=1.0),)
+    recorder = _Recorder()
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),)))
+    service = await _service(
+        index,
+        suggestions=_ScriptedSuggest(hits),
+        tier=tier,
+        analytics=recorder.bind(),
+        suggest_analytics=False,
+    )
+
+    assert len(await service.suggest("vac", tier=tier, user_id=_HOUSEHOLD)) == 1, (
+        "the premise: the box still answers with the writer off"
+    )
     assert (recorder.rows, recorder.commits) == ([], 0)
 
     await service.search("vacuum", user_id=_HOUSEHOLD)
-    assert len(recorder.rows) == 1, "the control: this recorder does write on the search path"
+    assert [one.surface for one in recorder.rows] == [SearchSurface.SEARCH], (
+        "the control: the search surface is untouched by the suggest switch"
+    )
 
 
-def test_the_suggest_path_cannot_reach_the_analytics_writer_at_all() -> None:
-    """**Structural, because the behavioural pair above cannot see a third
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_a_refused_row_still_answers_the_whole_keystroke_and_never_logs_the_prefix(
+    tier: SuggestTier,
+) -> None:
+    """PRD 08's degradation rule on the surface a client drives per keystroke.
+
+    **The guard is defence in depth, so the only way to test it is to make the
+    promise breakable** -- an injected repository that raises. `record()`'s one
+    reachable refusal is a `latency_ms` past the `integer` column or a
+    `user_id` naming no household, neither of which the shipped route can
+    produce, and *"it did not raise"* is also what a service that stopped
+    writing entirely produces. So the positive control is in this case: the
+    same fixture with a working repository writes one row and commits once.
+
+    **The prefix reaches no log line**, for `search`'s reason one method over:
+    what somebody typed is household state whose home is
+    `search_queries.query`. The sink is asserted non-empty first, because a
+    "the prefix is absent" assertion over an empty sink passes against a
+    service that logged nothing at all -- and would go on passing with the
+    whole `except` arm deleted.
+    """
+    prefix = "kestrelbound vacu"
+    hits = (SearchHit(title_id=_QUIET, score=1.0),)
+    refusing = _RefusingQueries(RepositoryConflict("latency_ms out of range"))
+    recorder = _Recorder(refusing)
+    index = _ScriptedIndex(SearchOutcome())
+    service = await _service(
+        index, suggestions=_ScriptedSuggest(hits), tier=tier, analytics=recorder.bind()
+    )
+
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="TRACE", serialize=True)
+    try:
+        results = await service.suggest(prefix, tier=tier, user_id=_HOUSEHOLD)
+    finally:
+        logger.remove(sink)
+
+    assert len(results) == 1, "the premise: the box still answered"
+    assert refusing.attempts == 1, "the premise: the write was attempted"
+    assert recorder.commits == 0, "a refused row is not a commit"
+    assert lines, "the write failed silently -- nothing said so"
+    assert "suggest" in lines[0], lines[0]
+    assert prefix not in lines[0], lines[0]
+    assert "kestrelbound" not in lines[0], lines[0]
+
+    working = _Recorder()
+    control = await _service(
+        index, suggestions=_ScriptedSuggest(hits), tier=tier, analytics=working.bind()
+    )
+    await control.suggest(prefix, tier=tier, user_id=_HOUSEHOLD)
+    assert (len(working.rows), working.commits) == (1, 1), "the control: this fixture can write"
+
+
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_a_bug_in_the_repository_is_not_absorbed_on_the_suggest_path_either(
+    tier: SuggestTier,
+) -> None:
+    """`except UsherPortError`, deliberately not `except Exception`, on the
+    second writer.
+
+    The two writers share one guard (`_write_row`), which is why this case and
+    its search-path twin are not a duplicated assertion: they say the sharing
+    is real. A `TypeError` out of this module is a bug in Usher and a bug
+    absorbed into a log line is billed as an outage; a refused row is a fact
+    about the store.
+
+    Fails: the catch widened to `except Exception`, on the module's one
+    remaining `except` in this family.
+    """
+    hits = (SearchHit(title_id=_QUIET, score=1.0),)
+    recorder = _Recorder(_RefusingQueries(TypeError("record() got an unexpected keyword")))
+    index = _ScriptedIndex(SearchOutcome())
+    service = await _service(
+        index, suggestions=_ScriptedSuggest(hits), tier=tier, analytics=recorder.bind()
+    )
+
+    with pytest.raises(TypeError):
+        await service.suggest("vacu", tier=tier, user_id=_HOUSEHOLD)
+
+
+def test_the_suggest_path_reaches_the_writer_and_the_short_arm_returns_first() -> None:
+    """**Structural, because the behavioural cases above cannot see a third
     arm.**
 
-    A `suggest` that recorded on some *other* condition -- a hit count, a tier,
-    a prefix length the cases above do not seed -- passes both arms of the
-    parametrised case and writes a row on the request a client makes most.
-    Nothing in the acceptance can be satisfied by "it did not happen in these
-    two fixtures", so the claim is made about the body: `suggest` names neither
-    the collaborator nor the write.
+    Two claims a fixture cannot make. That `suggest` reaches the writer *at
+    all* -- a `suggest` recording on some other condition (a hit count, a tier
+    the cases above do not seed) passes every parametrised arm and then writes
+    on the request a client makes most. And that the blank guard is **before**
+    the writer, which is the mutation "move the early return after the write":
+    a `suggest` that recorded a blank keystroke passes every case that only
+    counts rows on the answering path.
 
-    Fails: any `self._analytics` reference inside `suggest`, and any `record`
-    call there.
+    The order is read off the statement list rather than off line numbers, so
+    it survives a reformat.
+
+    Fails: the `_record_suggest` call deleted; the `if not prefix.strip()`
+    guard moved below it.
     """
     tree = ast.parse((_SERVICES / "search.py").read_text())
     bodies = [
@@ -2165,13 +2342,39 @@ def test_the_suggest_path_cannot_reach_the_analytics_writer_at_all() -> None:
     # The premise: a scan that found no function passes exactly like a scan
     # that found a correct one.
     assert len(bodies) == 1, f"the scan found {len(bodies)} `suggest` definitions"
-    named = {node.attr for node in ast.walk(bodies[0]) if isinstance(node, ast.Attribute)} | {
-        node.id for node in ast.walk(bodies[0]) if isinstance(node, ast.Name)
+    body = bodies[0]
+    named = {node.attr for node in ast.walk(body) if isinstance(node, ast.Attribute)} | {
+        node.id for node in ast.walk(body) if isinstance(node, ast.Name)
     }
-    assert not named & {"_analytics", "record", "SearchQueryRecord", "commit"}, sorted(named)
+    assert "_record_suggest" in named, sorted(named)
     # And the control, so the scan is known to be reading a real body rather
     # than an empty one: the two hydration reads it *does* make are there.
     assert {"list_by_ids", "owned_title_ids"} <= named
+
+    # The docstring is statement 0 and it *names* `_record_suggest`, so a scan
+    # over the raw body finds the writer twice and in the wrong place. Dropped
+    # by kind rather than by index, so the scan does not depend on there being
+    # a docstring at all.
+    statements = [
+        statement
+        for statement in body.body
+        if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant))
+    ]
+    guard_at = [
+        index
+        for index, statement in enumerate(statements)
+        if isinstance(statement, ast.If) and "strip" in ast.dump(statement.test)
+    ]
+    writer_at = [
+        index
+        for index, statement in enumerate(statements)
+        if "_record_suggest" in ast.dump(statement)
+    ]
+    assert len(guard_at) == 1 and len(writer_at) == 1, (guard_at, writer_at)
+    assert guard_at[0] < writer_at[0], (
+        "the blank guard has to return before the row is written, or a keystroke "
+        "a client never meant to send is recorded"
+    )
 
 
 def test_a_row_is_a_search_and_never_a_page() -> None:

@@ -69,7 +69,7 @@ from usher.ports.repository import (
     StoredTaste,
     TitleEmbeddingUpsert,
 )
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface
 
 # Spelled out rather than derived from `_SUSPENDABLE_INDEXES`, so a name
 # silently dropped from that dict fails these cases instead of being read
@@ -858,6 +858,7 @@ async def _refused_search_query(bed: _Bed, **changes: object) -> None:
         mode=SearchMode.FULL_TEXT,
         result_count=1,
         latency_ms=1,
+        surface=SearchSurface.SEARCH,
     )
     await PostgresSearchQueryRepository(bed.session).record(
         dataclasses.replace(record, **changes)  # type: ignore[arg-type]

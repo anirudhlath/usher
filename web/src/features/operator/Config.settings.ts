@@ -498,6 +498,15 @@ export const CONFIG: readonly SettingRow[] = [
     secret: false,
     measured: true,
   },
+  {
+    key: 'USHER_SEARCH_SUGGEST_ANALYTICS',
+    group: 'search',
+    def: 'false',
+    about:
+      'Whether the type-ahead box writes a search_queries row per answered keystroke, naming the tier that answered. Off, and measured: end to end the prefix tier is p50 2.53 ms without the row and 6.29 ms with it, so the write costs more than the request. Whole or nothing, never a sample rate — every absence in that table has to keep meaning one thing. GET /search records either way.',
+    secret: false,
+    measured: true,
+  },
 
   /* ---------------------------------------------------------------- lanes */
   {

@@ -36,15 +36,17 @@ from fastapi import FastAPI
 
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.search_index import FakePrefixSuggestIndex, FakeSuggestIndex
+from tests.fakes.search_query_repository import FakeSearchQueryRepository
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
-from usher.api.deps import get_search_service
+from usher.api.deps import get_default_user_id, get_search_service
 from usher.config import Settings
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
+from usher.ports.repository import SearchQueryRecord
 from usher.ports.search import (
     SearchDocument,
     SearchFilters,
@@ -52,10 +54,11 @@ from usher.ports.search import (
     SearchIndex,
     SearchOutcome,
     SearchRequest,
+    SearchSurface,
     SuggestIndex,
     SuggestTier,
 )
-from usher.services.search import SearchService
+from usher.services.search import SearchAnalytics, SearchService
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 UNREACHABLE_DSN = "postgresql+asyncpg://usher:usher@127.0.0.1:1/usher"
@@ -126,16 +129,23 @@ class _Kit:
     prefix_tier: _RecordingPrefix
     fuzzy_tier: _RecordingFuzzy
     titles: FakeTitleRepository = field(default_factory=FakeTitleRepository)
+    queries: FakeSearchQueryRepository = field(default_factory=FakeSearchQueryRepository)
 
     def calls(self, tier: SuggestTier) -> list[tuple[str, int]]:
         return self.prefix_tier.calls if tier is SuggestTier.PREFIX else self.fuzzy_tier.calls
 
+    @property
+    def rows(self) -> list[SearchQueryRecord]:
+        return list(self.queries.rows.values())
+
 
 async def _kit(*, result_limit: int = 50) -> _Kit:
-    """One catalog, three readers of it: both tiers and the hydration."""
+    """One catalog, four readers of it: both tiers, the hydration, and
+    `search_queries` since M10's J2."""
     titles = FakeTitleRepository()
     prefix_tier = _RecordingPrefix()
     fuzzy_tier = _RecordingFuzzy()
+    queries = FakeSearchQueryRepository()
     await titles.add(
         Title(
             id=_KESTREL,
@@ -157,8 +167,30 @@ async def _kit(*, result_limit: int = 50) -> _Kit:
         FakeTasteRepository(),
         FakeTitleEmbeddingRepository(),
         result_limit=result_limit,
+        # **Wired, because the route's household is only observable through
+        # it.** Without a `SearchAnalytics` the `user_id` this route now
+        # resolves would reach `SearchService.suggest` and be dropped on the
+        # floor, so a route that had stopped passing one would look identical.
+        # The fake never touches a database, so this stays a unit file.
+        analytics=SearchAnalytics(queries=queries, commit=_nothing),
+        # **Stated, because the shipped default is `False`.** The writer
+        # is off on every deployment that has not asked for it -- the
+        # measurement in `Settings.search_suggest_analytics` says why --
+        # so a fixture relying on the default would assert nothing about
+        # the household reaching the row.
+        suggest_analytics=True,
     )
-    return _Kit(service=service, prefix_tier=prefix_tier, fuzzy_tier=fuzzy_tier, titles=titles)
+    return _Kit(
+        service=service,
+        prefix_tier=prefix_tier,
+        fuzzy_tier=fuzzy_tier,
+        titles=titles,
+        queries=queries,
+    )
+
+
+async def _nothing() -> None:
+    """`SearchAnalytics.commit` over a store with no transaction."""
 
 
 def _settings() -> Settings:
@@ -172,9 +204,25 @@ def _settings() -> Settings:
     )
 
 
+#: The household this file's requests carry. Invented, and it never reaches a
+#: database: `get_default_user_id` is overridden below.
+_HOUSEHOLD = uuid.UUID(int=0xD1)
+
+
 def _app(service: SearchService) -> FastAPI:
     built = create_app(_settings())
     built.dependency_overrides[get_search_service] = lambda: service
+    # **Overridden, because this app points at a database nothing listens on.**
+    # Since M10's J2 the suggest route resolves a household -- not for the
+    # answer, which has no blend, but for the `search_queries` row, whose
+    # `user_id` is `NOT NULL` behind a real foreign key. Left unoverridden
+    # every case in this file would 500 on a connection refused, which would
+    # say nothing about the tier selector this file exists to pin.
+    #
+    # Its *presence* is asserted separately, on `/openapi.json` and on the
+    # service call, because an override is exactly the thing that would hide a
+    # route that had quietly stopped reading one.
+    built.dependency_overrides[get_default_user_id] = lambda: _HOUSEHOLD
     return built
 
 
@@ -452,24 +500,35 @@ async def test_a_limit_of_zero_is_refused(client: httpx.AsyncClient) -> None:
     assert response.status_code == 422
 
 
-async def test_the_suggest_route_holds_no_household_and_no_embedder(
-    client: httpx.AsyncClient,
+async def test_the_household_is_a_dependency_and_never_a_query_parameter(
+    client: httpx.AsyncClient, kit: _Kit
 ) -> None:
-    """**A `DefaultUserIdDep` here would be a `SELECT` per keystroke** to
-    resolve an id nothing downstream reads -- `SearchService.suggest` runs no
-    blend, so there is no watch-state term and no taste term for a household
-    to change. And no embedder: `?mode=semantic`'s 422 has no analogue here
-    because there is no lane to be missing.
+    """Since M10's J2 this route resolves a household -- and it does so the way
+    `GET /search` does, which is the half worth pinning.
 
-    Asserted on `/openapi.json` rather than on behaviour, because the defect
-    is a parameter or a failure response that *exists*: this app points at a
-    database nothing listens on, so a household read would 500 rather than
-    quietly cost a round trip, and a case asserting a 200 would pass against a
-    version that had wired one on a reachable database.
+    **The wire is unchanged and that is a claim, not a side effect.** *"Whose
+    search history is this"* is not a client's to choose, so the id arrives
+    through `DefaultUserIdDep` and `/openapi.json` still declares exactly `q`,
+    `tier` and `limit`. A `?user_id=` would be a household any caller could
+    claim to be, on the one route a browser drives per keystroke.
+
+    **And it reaches the row rather than stopping at the handler**, asserted
+    against the id the override supplies: a route that resolved a household and
+    passed it nowhere would write a row with no household -- which is to say no
+    row at all -- and satisfy every parameter assertion above.
+
+    Still no embedder and still no failure of its own: `?mode=semantic`'s 422
+    has no analogue here because there is no lane to be missing, and the only
+    non-200 remains a `422` from parameter validation.
     """
     operation = (await client.get("/openapi.json")).json()["paths"]["/search/suggest"]["get"]
     assert {one["name"] for one in operation["parameters"]} == {"q", "tier", "limit"}
     assert set(operation["responses"]) == {"200", "422"}
+
+    assert (await client.get("/search/suggest", params={"q": _TYPED})).status_code == 200
+    assert [(row.user_id, row.surface, row.tier) for row in kit.rows] == [
+        (_HOUSEHOLD, SearchSurface.SUGGEST, SuggestTier.PREFIX)
+    ]
 
 
 # --- the service's own seam ------------------------------------------------

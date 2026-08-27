@@ -1983,3 +1983,153 @@ only recall@1 — mood and partial-title queries, where the semantic lane should
 earn most, remain unmeasured. And the stratum-B tie has no measured fix: the
 obvious one (break the `exact_name` tie on popularity rather than on the fused
 score) is a proposal, not a result.
+
+## A `search_queries` row costs a keystroke 148% of itself, so the suggest writer ships off — the bar was written to say the opposite (2026-08-26, M10 J2)
+
+**The bar was written first and it refuted its own registered position.**
+`/var/tmp/m10-J2/BAR.md`, `sha256
+7770ba3c92357d45e2ccefae390e3e67f5c130d468385d07fb84ba11e65afb16`, written
+2026-08-27T01:40Z before the first probe and re-read at run time by the
+harness, which refuses to start if the digest has moved. Registered position:
+*both suggest tiers write a `search_queries` row, unconditionally, gated by one
+setting `USHER_SEARCH_SUGGEST_ANALYTICS` defaulting **`true`***. Refutation
+condition: *tier 1's p50, end to end, with the writer on, must stay under
+5.000 ms*. **It did not. The default ships `false`.**
+
+*What "end to end" means here*: `time.perf_counter()` around one
+`httpx.AsyncClient.get` over `ASGITransport` against a real `create_app()` —
+the dependency graph, the household `SELECT`, the tier's own statement, both
+hydration reads, the DTO, and the analytics INSERT with its WAL flush. No
+socket. **Driver floor, measured through the identical client: `GET /health`
+p50 0.370 ms / p95 0.636 ms** over 2,800 samples, so ~15% of a tier-1 number is
+the driver and the verdict survives subtracting all of it.
+
+### The numbers, three arms interleaved probe by probe
+
+| arm | what it is | tier 1 p50 | tier 1 p95 | tier 2 p50 | tier 2 p95 |
+|---|---|---|---|---|---|
+| **0′** | household overridden, writer off | 2.542 | 3.454 | 51.38 | 367.9 |
+| **A** | household resolved, writer off | **2.446** | 3.334 | **45.04** | 372.7 |
+| **B** | household resolved, **writer on** | **5.780** | 8.031 | **48.57** | 380.8 |
+| **0** | the pre-J2 tree (`c9a6418`), separate process | 2.461 | 3.400 | 56.37 | 391.9 |
+
+n = 5,148 per cell (2,574 probes × 2 scored rounds; round 0 discarded).
+Confirmation run, tier 1 only, same three arms, same probes: **0′ 2.547 / A
+2.534 / B 6.289**. So B is 5.78 and 6.29 in two independent runs and the bar is
+5.00.
+
+**The row is a roughly constant ~3.5 ms and what moves is what it is a fraction
+of.** B − A is **+3.33 ms (+136%)** on tier 1 and **+3.53 ms (+7.8%)** on tier
+2 — which reproduces M9's F2 figure (`record()` + commit p50 3.957 ms, of which
+0.9 ms INSERT and 3.0 ms WAL flush) on a completely different path, three
+milestones later, with `ix_search_queries_at` now on the table. Tier 2's 7.8%
+is *inside* the 11.9% PRD 10 already accepted for full text; tier 1's 136% is
+the whole finding. **One switch governs both tiers** — a per-tier switch would
+put a sixth, unnameable absence into PRD 10's *"which absence means what"*
+table, one axis over from the sample rate that document already refuses — so
+the tier that cannot afford it decides.
+
+🔴 **The household `SELECT` is not measurable at this resolution, and that is
+what retires the route docstring's objection.** `GET /search/suggest` said a
+`DefaultUserIdDep` here *"would be a `SELECT` (and, on a first run, an
+`INSERT`) per keystroke"*. Arm A has that read and arm 0′ does not: A − 0′ is
+**−0.096 ms** in the main run and **−0.013 ms** in the confirmation — negative
+both times, i.e. below the noise. The independent control agrees: the *real*
+pre-J2 tree (arm 0, its own process, no such dependency) measures 2.461 against
+arm A's 2.446. **Three measurements of "the route without the row" spanning two
+processes and two source trees agree within 0.10 ms**, which is also what
+bounds how much the box's contention could be inflating them. Prediction 4 said
+the lookup would be 0.1–1.0 ms; it is smaller than that band and smaller than
+the run-to-run spread. ⚠️ **It is still paid on every request including the two
+that write nothing**, because a FastAPI dependency resolves before the handler
+body and the length bound is in the body.
+
+### 🔴 Neither run was quiet, both were quiet in the same way, and that is why the verdict survives it
+
+`_load_snapshot()`'s census reported **2–3 foreign `pytest` processes** in every
+run — another agent's suite on the shared checkout, which is the named noise
+source this file already carries. CPU busy 0.25 → 0.26 across the confirmation
+run (drift **0.013**, inside the 0.10 limit) and 0.11 → 0.25 across the main one
+(drift **0.139**, outside it). So the box carried a *steady* foreign load rather
+than a growing one, which is the condition under which an interleaved paired
+comparison is at its most defensible and an absolute p50 at its least.
+
+**Read the verdict against that honestly.** The bar is an *absolute*, so
+contamination inflates it and could in principle manufacture a failure. It did
+not, and the arithmetic says why: for B to reach 5.000 ms, arm A would have to
+be **≤ 1.67 ms**, against 2.446 / 2.534 / 2.461 measured three ways — a 32%
+error in a quantity whose three independent measurements agree to 4%. Subtract
+the entire 0.370 ms driver floor and B is still 5.41 and 5.92. **The run is
+reported as not-quiet and the verdict is reported as surviving it**; a third
+attempt was killed outright when the postgres container was recreated
+mid-flight (below), so "wait for a quiet box" was not on offer.
+
+### Two things about the environment that cost a run each, both worth knowing
+
+- **`CREATE DATABASE … TEMPLATE usher` is unavailable while the app container
+  is up.** `TEMPLATE` requires *zero* other sessions on the source and
+  `usher-usher-1` holds six. The clone was taken from `usher_m10a`
+  (1,272,870 titles, revision `m10a`) and upgraded to `m10c` — 22 s — which is
+  what this measurement ran against. **Never `usher` itself**: that database is
+  a revision behind this branch and `alembic upgrade head` against it is the
+  3.5-hour outage `db-and-sql.md` records.
+- **The shared postgres container was recreated twice mid-run**, killing one
+  arm with `CannotConnectNowError: the database system is shutting down` and
+  another with `ConnectionDoesNotExistError`. It came back with the shared
+  catalog **renamed `usher` → `usher_catalog`** by concurrent work in a new
+  `~/code/usher-devdb/` checkout, after which `usher-usher-1` logged
+  `FATAL: database "usher" does not exist` every two seconds while reporting
+  healthy. Not this task's to fix and not this task's doing — recorded because
+  **a long measurement on this host has to be restartable**, and because a
+  clone is what made the interrupted runs merely wasted rather than lost.
+
+### What the run establishes about the writer itself, and it is exact
+
+**One row per answered request, counted rather than sampled.** Arm B wrote
+**15,171** rows over the main run against 3 rounds × (2,483 prefix + 2,574
+fuzzy) = 15,171 — equal, not approximately equal — and **7,449** over the
+confirmation run against 3 × 2,483. Arms 0′, A and 0 wrote **zero** between
+them, on the same table, in the same runs. So "one row per answered request",
+"the switch is honoured" and "the pre-J2 tree writes nothing" are all
+arithmetic here rather than assertions.
+
+### 🔴 `scripts/measure_suggest_tiers.py`'s sampling frame no longer reproduces, and this is ADR-0040 arriving in a second harness
+
+`check_frame()` refuses unless the gate's five pools reproduce exactly. They do
+not, and the cause is the rating-provenance split: the frame predicate is
+`tmdb_vote_count >= 500`, and `m10a` moved IMDb's `numVotes` out of that column,
+so the pool is now the *enriched* tier alone.
+
+| band | `GATE_POOLS` (2026-08-03) | live `usher`, 2026-08-27 | the clone this ran on |
+|---|---|---|---|
+| 2–4 | 432 | 80 | 46 |
+| 5–7 | 2,532 | 440 | 206 |
+| 8–11 | 7,178 | 1,315 | 664 |
+| 12–19 | 20,520 | 3,349 | 1,603 |
+| 20+ | 17,887 | 3,323 | 1,536 |
+
+`build_typo_cases` therefore returns **2,574** cases rather than 2,993, with the
+2–4 band clamped to its pool by the clamp whose own comment calls itself
+*"unreachable on the real catalog"*. **This run used those probes deliberately
+and computes no recall from them** — they are real single-edit mutations of real
+catalog names, which is a valid *latency* workload for a paired comparison and
+is not the gate's population. **The script is not repaired here** and the next
+person to want a recall number from it has to re-anchor the frame on
+`imdb_num_votes`, exactly as `usher eval suggest`'s frame already was. This is
+the third instance of ADR-0040's own finding — *"splitting the column does not
+fix its readers; it exposes them"* — and the first in a measurement harness,
+where the failure mode is a refused run rather than a wrong answer.
+
+### Not measured, named rather than implied
+
+- **A real client's keystroke rate.** Every probe is a whole mutated name, not
+  a prefix growing a character at a time, so nothing here says how many rows a
+  real type-ahead box produces per search. That is the denominator retention
+  needs and this run does not supply it.
+- **Concurrency.** One request at a time on one connection. The WAL flush is
+  the term the row is mostly made of and the term most likely to behave
+  differently under load.
+- **A quiet box.** See above.
+- **The INSERT at volume.** `search_queries` held 80 rows at the start of each
+  run and ~15,000 at the end, on a table that has carried `ix_search_queries_at`
+  only since `m10c`.

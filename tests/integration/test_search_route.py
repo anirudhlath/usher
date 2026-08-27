@@ -90,6 +90,11 @@ def settings(postgres_url: str) -> Settings:
         # assert on.
         push_enabled=False,
         worker_enabled=False,
+        # Opposite the shipped default, deliberately: the suggest writer is
+        # off out of the box (the row is 148% of a tier-1 request, measured),
+        # and the keystroke case below is about the deployment that turned it
+        # on. `tests/integration/test_search_analytics.py` owns the semantics.
+        search_suggest_analytics=True,
     )
 
 
@@ -490,39 +495,59 @@ async def test_one_answered_request_writes_exactly_one_search_queries_row(
     assert all(one.latency_ms >= 0 for one in rows), rows
 
 
-async def test_a_keystroke_writes_no_row_on_either_tier(
+async def test_a_keystroke_writes_a_row_only_when_it_clears_its_tiers_minimum(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession], catalog: _Catalog
 ) -> None:
-    """`GET /search/suggest` records nothing -- answered, refused, or blank --
-    and the control is a `/search` request through the same client.
+    """`GET /search/suggest` records one row per **answered** request since
+    M10's J2, and none for the two arms that never reach the service.
 
-    Storing a `SuggestTier` under `search_queries.mode`, a `SearchMode`, would
-    be two vocabularies under one name; and tier 1 at p50 0.6 ms against full
-    text's 33.3 ms means a keystroke-driven client would out-number the
-    searches by an order of magnitude in every mode-split panel. The argument
-    is in `SearchService.suggest`'s docstring and in PRD 10, and this is what
-    says the shipped route agrees with it.
+    `m10c` took PRD 10's amendment 2 -- `surface` and `tier`, two columns
+    rather than a fourth `SearchMode` member -- so a keystroke and a search no
+    longer collapse into one vocabulary, and every mode-split panel now filters
+    on `surface`. The volume argument that stood beside the vocabulary one is
+    answered by `USHER_SEARCH_SUGGEST_ANALYTICS` and by a measurement, not by
+    an absence.
 
-    Four requests, because the route has three arms -- answered, below
-    `min_query_length`, and blank -- and a writer placed on any one of them is
-    a different defect.
+    Four requests, because the route has three arms and a writer placed on any
+    one of them is a different defect: answered on each tier, below
+    `min_query_length`, and blank. The control is a `/search` request through
+    the same client, which must land under `surface = 'search'` with **no**
+    tier -- so "the suggest rows are right" is not satisfied by a deployment
+    writing `suggest` onto everything.
+
+    Detail semantics live in `tests/integration/test_search_analytics.py`;
+    what this adds is that *this* file's fixture and its neighbouring
+    row-counting case agree about what a keystroke costs.
     """
-    for params in (
-        {"q": TYPED_PREFIX},
-        {"q": TYPED_PREFIX[:3]},
-        {"q": "   "},
-        {"q": TYPED_TYPO, "tier": "fuzzy"},
-    ):
+    answered = ({"q": TYPED_PREFIX}, {"q": TYPED_TYPO, "tier": "fuzzy"})
+    unanswered = ({"q": TYPED_PREFIX[:3]}, {"q": "   "})
+    for params in (*answered, *unanswered):
         assert (await client.get("/search/suggest", params=params)).status_code == 200, params
 
     async with sessions() as reader:
-        assert await _analytics_rows(reader) == 0
+        assert await _analytics_rows(reader) == len(answered), (
+            "one row per answered keystroke, and none for the two arms that return "
+            "before the service"
+        )
+        written = (
+            await reader.execute(text("SELECT surface, tier FROM search_queries ORDER BY id"))
+        ).all()
+    assert [(one.surface, one.tier) for one in written] == [
+        ("suggest", "prefix"),
+        ("suggest", "fuzzy"),
+    ]
 
     assert (await client.get("/search", params={"q": TERM})).status_code == 200
     async with sessions() as reader:
-        assert await _analytics_rows(reader) == 1, (
-            "the control: this deployment does write a row on the search path"
-        )
+        assert await _analytics_rows(reader) == len(answered) + 1
+        latest = (
+            await reader.execute(
+                text("SELECT surface, tier FROM search_queries ORDER BY id DESC LIMIT 1")
+            )
+        ).one()
+    assert (latest.surface, latest.tier) == ("search", None), (
+        "the control: the search path still writes a search row with no tier"
+    )
 
 
 async def _analytics_rows(session: AsyncSession) -> int:
