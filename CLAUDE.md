@@ -178,7 +178,8 @@ so a session pays only for what it touches.
 | file | loads when working on | holds |
 |---|---|---|
 | `testing-discipline.md` | `tests/**` | test-design findings — assertions that cannot fail, premise guards, ordering premises, the shape a concurrency test needs |
-| `mutation-sweeps.md` | `docs/plans/**` | sweep harness mechanics — the three `.pyc` defences, `compile()` rather than `ast.parse`, SIGTERM skipping the `finally` — and every per-task sweep ledger with its survivors |
+| `mutation-sweeps.md` | `docs/plans/**` | sweep harness mechanics — the three `.pyc` defences, `compile()` rather than `ast.parse`, SIGTERM skipping the `finally`, the scoring vocabulary — plus the milestone-level and early-task results those rules came from |
+| `mutation-sweep-ledgers.md` | itself, deliberately — open it directly | every per-task sweep ledger with its plants and survivors, M9 onward |
 | `fixtures-and-fakes.md` | `tests/fixtures/**`, `tests/fakes/**`, `tests/contract/**` | the network guard, the four no-third-party-data controls, shape-recorded/value-synthetic fixtures, every recorded divergence between a fake and its Postgres arm |
 | `db-and-sql.md` | `src/usher/db/**` | `ON CONFLICT` traps, `now()` vs `clock_timestamp()`, triggers that own a column, staging-table locks, generated columns, the migration id convention, `test_migrations.py`'s two halves |
 | `emby-push-and-ingest.md` | `adapters/emby/**`, the pipeline services | M3/M4/M5's live runs against a real Emby 4.9.5.0 — the wrong write-back route, `UserData` divergence, the websocket's real cadence, the match ladder's measured yield |
@@ -207,6 +208,25 @@ assuming a split saved anything.** A finding that genuinely
 applies everywhere goes in "Five rules about evidence" above — that list has
 earned five entries in eight milestones, so the bar is high.
 
+**And the file that split escaped it repeated the failure, which is the part
+worth carrying.** `mutation-sweeps.md` was the destination of that first split
+and then grew to **5,077 lines / 339,061 bytes** behind `docs/plans/**` — a
+trigger that fires for almost every planning task here, so the same shape
+recurred at the same place within one milestone. Split again 2026-08-21:
+**1,185 lines / 78,283 bytes stay on the trigger, 3,917 lines of per-task
+ledger moved to `mutation-sweep-ledgers.md`**, a 77% reduction in what a
+planning session loads to reach the mechanics (~85K → ~20K tokens, estimated at
+4 bytes/token, not measured with `count_tokens`). Both halves were checksummed
+before and after and recombine byte-identical to the original.
+
+**The trap that split exposed, because it nearly inverted the fix:** a rules
+file is *conditional only if it carries `paths:`*. One without the key loads
+**unconditionally**, so moving 3,917 lines into a new file with no frontmatter
+would have promoted them from sometimes-loaded to always-loaded. The ledger
+file's trigger is therefore itself — it loads when you append to it, and is
+opened deliberately otherwise. **Check the frontmatter before believing a
+split reduced anything**; the failure is silent and points the wrong way.
+
 ## Commands
 
 **`uv` for everything.** Never pip/conda, never activate a venv.
@@ -223,11 +243,14 @@ uv run lint-imports              # architecture contracts — 12 kept, 0 broken
 uv run pytest                    # full suite; tests/integration/ needs Docker
 ```
 
-`[tool.ruff] extend-exclude = ["docs"]` keeps ruff off `docs/plans/*.md` and
-`docs/prd/*.md` — ruff 0.16+ formats and lints Python code fences embedded in
-Markdown by default, and those two directories hold prose with fences that
-other groups transcribe verbatim. **Without the exclude, an unscoped `ruff
-format .` silently rewrites that prose.**
+`[tool.ruff] extend-exclude = ["docs", ".claude", "web"]` keeps ruff off
+`docs/plans/*.md`, `docs/prd/*.md` and `.claude/rules/*.md` — ruff 0.16+ formats
+and lints Python code fences embedded in Markdown by default, and those
+directories hold prose with fences that other groups transcribe verbatim.
+**Without the exclude, an unscoped `ruff format .` silently rewrites that
+prose.** Note the exclude is bypassed by an *explicit* path argument —
+`ruff format .claude/rules/` does process them — so scope the command, not just
+the config.
 
 ### Tests
 
