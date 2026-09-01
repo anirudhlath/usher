@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.contract.search_index_contract import SearchIndexContract
 from tests.contract.suggest_index_contract import TypoTolerantSuggestIndexContract
+from tests.integration.conftest import Analyze
 from usher.adapters.search.postgres import (
     _LEVENSHTEIN_MAX_INPUT,
     _MAX_DISTANCE,
@@ -1083,6 +1084,16 @@ def _series_request(query_vector: tuple[float, ...]) -> SearchRequest:
     )
 
 
+@pytest.mark.leaks_statistics(
+    "titles", "title_embeddings", restored_by="restores_the_statistics_this_seed_leaks"
+)
+# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the
+# rollback, and that is deliberate for exactly these three cases -- the
+# cleanup runs once, after the last of them, because the control case's
+# non-vacuity is partly borrowed from the leak (2 failures in 12 when the
+# cleanup ran between them; see `restores_the_statistics_this_seed_leaks`).
+# This marker is what stops `session`'s guard from calling that a defect,
+# and what makes the exception name itself.
 @pytest.mark.integration
 async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
     session: AsyncSession,
@@ -1119,6 +1130,16 @@ async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
     )
 
 
+@pytest.mark.leaks_statistics(
+    "titles", "title_embeddings", restored_by="restores_the_statistics_this_seed_leaks"
+)
+# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the
+# rollback, and that is deliberate for exactly these three cases -- the
+# cleanup runs once, after the last of them, because the control case's
+# non-vacuity is partly borrowed from the leak (2 failures in 12 when the
+# cleanup ran between them; see `restores_the_statistics_this_seed_leaks`).
+# This marker is what stops `session`'s guard from calling that a defect,
+# and what makes the exception name itself.
 @pytest.mark.integration
 async def test_the_default_guc_is_what_makes_that_fail(
     session: AsyncSession,
@@ -1167,10 +1188,21 @@ async def test_the_default_guc_is_what_makes_that_fail(
     )
 
 
+@pytest.mark.leaks_statistics(
+    "titles", "title_embeddings", restored_by="restores_the_statistics_this_seed_leaks"
+)
+# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the
+# rollback, and that is deliberate for exactly these three cases -- the
+# cleanup runs once, after the last of them, because the control case's
+# non-vacuity is partly borrowed from the leak (2 failures in 12 when the
+# cleanup ran between them; see `restores_the_statistics_this_seed_leaks`).
+# This marker is what stops `session`'s guard from calling that a defect,
+# and what makes the exception name itself.
 @pytest.mark.integration
 async def test_the_owned_path_does_not_use_the_ann_index(
     restores_the_statistics_this_seed_leaks: None,
     session: AsyncSession,
+    analyze: Analyze,
 ) -> None:
     """Boundary call 4's exact half, asserted on the plan.
 
@@ -1194,7 +1226,7 @@ async def test_the_owned_path_does_not_use_the_ann_index(
     """
     await _seed_embedded_catalog(session, _EMBEDDED_ROWS)
     await _own_every_title(session)
-    await session.execute(text("ANALYZE media_items"))
+    await analyze("media_items")
     index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     predicates, parameters = _predicates(SearchFilters(owned_only=True))
     probe = {

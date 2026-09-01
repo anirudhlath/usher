@@ -532,6 +532,14 @@ class BulkCatalogRepositoryContract:
         assert await self.tvdb_id_of(repo, "tt99000030") == 777  # "tt99000030" < "tt99000130"
         assert await self.tvdb_id_of(repo, "tt99000130") is None
 
+    # Inert on the fake arm, which has no `pg_class` to describe anything.
+    # On the Postgres arm `bulk_load_window` really does `DROP INDEX` and
+    # `CREATE INDEX`, and **`CREATE INDEX` writes the heap's `reltuples`
+    # in place exactly as `ANALYZE` does** -- so the rebuild leaves `titles`
+    # described as holding the rows this transaction is about to roll back.
+    # Measured: 5 rows / 1 page against a `count(*)` of 0. A grep for
+    # `ANALYZE` could never have found this one (#79).
+    @pytest.mark.leaks_statistics("titles")
     async def test_bulk_load_window_is_reentrant_and_transparent(
         self, repo: BulkCatalogRepository
     ) -> None:
@@ -544,6 +552,14 @@ class BulkCatalogRepositoryContract:
             assert (await repo.upsert_titles([THRONES])).inserted == 1
         assert await repo.count_titles() == 2
 
+    # Inert on the fake arm, which has no `pg_class` to describe anything.
+    # On the Postgres arm `bulk_load_window` really does `DROP INDEX` and
+    # `CREATE INDEX`, and **`CREATE INDEX` writes the heap's `reltuples`
+    # in place exactly as `ANALYZE` does** -- so the rebuild leaves `titles`
+    # described as holding the rows this transaction is about to roll back.
+    # Measured: 5 rows / 1 page against a `count(*)` of 0. A grep for
+    # `ANALYZE` could never have found this one (#79).
+    @pytest.mark.leaks_statistics("titles")
     async def test_bulk_load_window_restores_on_an_exception(
         self, repo: BulkCatalogRepository
     ) -> None:

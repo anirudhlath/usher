@@ -1177,6 +1177,19 @@ hardest to notice**, which is why the count is now written out rather than
 the filename alone: the ledger read as complete while a second `ANALYZE`
 landed in a file it already named.
 
+🔴 **Corrected 2026-08-31 (#79): "six other integration files" is five, and
+`test_api_surface_schema.py` does not belong on the list** — its only
+`ANALYZE` is the word, inside a docstring describing a measurement taken
+elsewhere, and it executes nothing. #43 made exactly this correction about its
+own grep (*"Five, not six … the next person will grep and get seven"*) and this
+paragraph, which is the one warning about miscounting, still had the wrong
+count. **The list was also short in the other direction: `ANALYZE` is not the
+only statement that writes `reltuples` in place.** A rolled-back `CREATE INDEX`
+leaves the same lie — measured, `titles` reading 5 rows / 1 page against a
+`count(*)` of 0 — which is why `bulk_load_window`'s cases leak and why a grep
+for `ANALYZE` could never have found them. Both are now asserted rather than
+enumerated; see the `enable_seqscan` entry at the end of this file.
+
 ## An `id()` is a reusable address, so a test that identifies objects by one is identifying nothing (2026-08-19, issue #7)
 
 `test_rows_refresh.py` classified sessions by `id(session)` inside two
@@ -1217,3 +1230,184 @@ levels, `uuid6.uuid7()` is strictly monotonic within a process (0 non-monotonic
 batches in 200 batches of 8, measured — so the `id` tiebreak is stable and the
 UUIDv7 trap is *not* what these cases had), and forcing the planner off seq
 scans changed the plan without changing one hit or one score.
+
+## `enable_seqscan = off` settles *index or scan*, never *which index* — and both of #79's CI failures are the second question (2026-08-31, issue #79)
+
+Two `check` failures in six days, on two different tests, both plan
+assertions, both against a branch whose entire diff was Markdown. #79 asked
+whether the class was wider than the two. It is not, and knowing that is worth
+as much as the repair.
+
+**The lever every plan assertion here reaches for does half of what it is
+credited with.** `SET LOCAL enable_seqscan = off` prices a sequential scan at
+the disabled penalty, which makes *some* index scan win on a table too small
+for one to be worth it. It says nothing about *which*, because a full walk of
+any index — `pk_titles`, a unique constraint, whatever exists — is also not a
+sequential scan. On a table `pg_class` describes as empty every candidate then
+costs the same to four significant figures, and the assertion is reading the
+planner's tie-break order.
+
+**Both failures reproduced, and they are one family.**
+
+| | asserted | actually planned | cost |
+|---|---|---|---|
+| `test_the_availability_sweeps_update_uses_its_index` | `ix_media_items_sweep` | `uq_media_items_source_external`, `Index Cond` on `source_id` alone | `0.14..8.16` **both ways** |
+| `test_the_tier_one_statement_plans_to_the_prefix_index_and_not_the_near_miss` | `ix_titles_name_lower_prefix` | `pk_titles`, with `lower(name)` demoted to a `Filter` | tie at one row |
+
+The sweep case failed **10 runs of 10** in isolation, and passed with one added
+`ANALYZE`. The prefix case is reproduced exactly by suspending its index on a
+seeded catalog: `Index Scan using pk_titles ... Filter: (lower(name) ~~
+'vane%')`, which is the plan CI printed on 2026-08-25 — `['pk_titles',
+'ix_title_search_names_name_lower_prefix', 'pk_titles']`.
+
+**The repair is the fixture, and the margin is what keeps it repaired.**
+Seed a population, `analyze` it, then assert that the runner-up is *worse* —
+`index_suspended()` in `tests/integration/conftest.py` hides one index from the
+planner inside a `SAVEPOINT` (`indisvalid = false`, which is transactional) so
+the counterfactual plan can be costed. Measured on `pgvector/pgvector:pg17`:
+
+| case | chosen | runner-up | margin |
+|---|---|---|---|
+| availability sweep, 2,000 rows / 50 stale | 31.72 | 129.09 | **4.07x** |
+| tier-1 prefix, 2,000 filler titles + aliases | 88.55 | 340.96 | **3.85x** |
+
+`A_DECISIVE_MARGIN = 2.0` is the bar. Without it, trimming a fixture from two
+thousand rows to fifty for speed silently restores the tie under a green test,
+which is exactly how the sweep case got there.
+
+**The shape of the fixture matters as much as its size.** The sweep seeds 2,000
+rows with **50** stale, not 2,000 stale: a source where every row is stale
+describes a library that vanished overnight, and any plan is right for that.
+The three-column index only beats a scan when the predicate is selective within
+the per-source range, which is the measured nightly shape (1,126,674 rows, 200
+stale).
+
+**The 2026-08-25 failure is also a worked example of an absence assertion going
+vacuous, and its own positive guard is the only reason anyone saw it.** The
+case asserts `_NEAR_MISS_INDEX not in taken`. On the failing run the plan
+reached **neither** index, so that assertion passed — while asserting nothing —
+and only `_TIER_ONE_INDEX in taken` beside it went red. Same shape as #62's
+control, one index family over.
+
+**`Index Cond` is the assertion; the index name is the weaker half.** An index
+scan that walks the whole index and demotes the predicate to a `Filter` reaches
+the index *by name* while doing none of the work the index exists for — that is
+precisely the `pk_titles` plan. Asserting the plan positioned the scan on the
+column is strictly stronger, and it does not have to be re-derived when someone
+adds an index. `test_every_cascade_in_this_migration_has_an_index_the_lookup_
+can_use` was a hand-maintained *set of acceptable index names* until this task
+and the set was wrong: `uq_images_owner_provider_path` serves `episode_id`
+exactly as it serves `title_id`, the set said so for one column and not the
+other, and a `pg_class` perturbation was enough to fail a case about a property
+that still held.
+
+**The negative result, which is most of the audit.** 19 integration files
+execute `EXPLAIN` and about 30 sites name an index or a scan; separating real
+plan assertions from schema checks (`test_migrations.py`'s `pg_indexes` reads,
+`tests/unit/test_db_models.py`'s model metadata, every `constraint ==` on an
+integrity error) leaves **25**. Sixteen of them were run in isolation under
+three deliberately different `pg_class` states — as the migration leaves it,
+forced to zero rows/zero pages, and forced to a million rows — 48 runs:
+
+- **one** fails outright in every condition (the availability sweep);
+- **one** is statistics-dependent and fails **loudly** (the cascade probe);
+- **fourteen** are robust to both perturbations.
+
+So the class #79 was opened to bound is two, not thirty. The rest hold because
+their claim is *categorical* rather than a cost decision — only `gin_trgm_ops`
+can serve `%`, only `text_pattern_ops` can serve `LIKE 'pre%'` under a non-C
+collation, only one index leads on that column — and a categorical claim
+survives any statistics at all. **Ask how many indexes could serve the
+predicate before asking whether a plan assertion needs a fixture:** exactly
+one, and `enable_seqscan = off` is sufficient; more than one, and it is a cost
+decision that needs statistics and a margin.
+
+**And `pg_statistic` rolls back while `pg_class` does not, which is why a
+leaked `ANALYZE` is worse than either a fresh table or an analyzed one.**
+Measured: seed 26,624 titles, `ANALYZE`, roll back — `pg_class` still reads
+26,625 rows / 701 pages, and the column histograms the same `ANALYZE` wrote are
+**gone**. The planner is then sizing the relation from one database and
+estimating selectivity from default constants. A table that was never analyzed
+at all reads `reltuples = -1`, which is Postgres for "measure the file", and is
+a *different* and more honest state than one analyzed as empty.
+
+### The guard, and the fixture-ordering trap it exists to remove
+
+`session`'s teardown now asserts, after its own rollback, that `pg_class`
+describes this database: one query, which returns nothing unless something is
+already wrong, and `count(*)` only for tables whose `reltuples` is above zero.
+Every table here is empty between tests, so a positive `reltuples` on an empty
+table is exactly the leak. **It repairs what it found before failing** — the
+leak is durable, so a report-only guard turns one leaking test into an error in
+that test *and every test after it*; measured on `test_raw_payload_store.py`
+alone, two errors, the second on a case that did nothing wrong.
+
+That answers #43's structural point directly: **the property is per-session and
+per-file repairs enumerate.** Five files leaked through `ANALYZE`
+(`test_ingest_end_to_end.py`, `test_job_queue.py` twice,
+`test_raw_payload_store.py`, `test_sync_run_repository.py` twice,
+`test_title_match_repository.py` twice) plus `media_items` from
+`test_adapters_search_postgres.py`, whose own
+`restores_the_statistics_this_seed_leaks` covers only `titles` and
+`title_embeddings`. **The entry above this one says "six other integration
+files" and lists `test_api_surface_schema.py`; that file's `ANALYZE` is prose
+in a docstring and executes nothing.** #43 already made the correction — *"Five,
+not six … the next person will grep and get seven"* — and the count was still
+wrong here, in the ledger the correction was written for.
+
+**And the guard found a leak source no enumeration could have: `CREATE INDEX`.**
+Four cases fail it that contain no `ANALYZE` at all —
+`bulk_catalog_repository_contract.py`'s two `bulk_load_window` cases,
+`test_admin_bootstrap.py` and `test_bootstrap_end_to_end.py`. `CREATE INDEX`
+scans the heap and writes the *heap's* `reltuples`/`relpages` through the same
+in-place path, so a rolled-back index rebuild leaves the same lie. Reproduced
+standalone: `DROP INDEX` / `CREATE INDEX` inside a transaction that inserts
+five rows and rolls back leaves `titles` at **5 rows / 1 page** with a
+`count(*)` of **0**. This is the concrete payoff of asserting the property
+instead of listing the statements that violate it.
+
+🔴 **Blaming the right test needs a reading at the *start* of the test too, and
+finding that out took a red on a case that touches nothing.** The first run of
+this guard over the whole suite produced six reds; two of them —
+`test_staging.py::test_a_staging_table_is_recreated_per_batch` and a
+`test_watch_state_repository.py` case — do not mention `titles` anywhere, and
+both pass in isolation. The mechanism is the one `fixtures-and-fakes.md`
+already records from the other side: **a route-driven test commits for real**,
+so `titles` genuinely holds rows, something analyzes it truthfully, and then a
+*cleanup fixture declared before `session`* deletes them **after** the guard has
+already run. The lie is created by a teardown, in the gap between two tests,
+and lands on whoever is next. Taking the same reading at the top of the test and
+failing only on what appeared in between turned six reds into **four**, and the
+four are the four that really do it.
+
+**The guard has its own plants, because a guard nothing plants against passes
+exactly like one that works.** `tests/integration/test_statistics_guard.py`
+creates each leak on a connection of its own — the lie only exists *after* a
+rollback, and `session`'s rollback is where the guard being tested already runs
+— and watches the check find it. Planted three ways and watched to fail:
+`_tables_pg_class_is_wrong_about` returning `{}` unconditionally kills **both**
+leak cases and neither of the others; `index_suspended`'s `UPDATE` removed kills
+the suspension case on its "the index really left the plan" half. The control
+beside them — seed, roll back, *do not* leak — is what stops a check that
+reported every table from scoring as a catch, and it is deliberately the one a
+dead guard still passes: the pair pins both directions, neither alone does.
+
+**The `analyze` fixture is the sanctioned path** and registers what it analyzed
+so `session` can `VACUUM (ANALYZE)` it back. The deliberate exception marks
+itself: `@pytest.mark.leaks_statistics("titles", "title_embeddings")` on the
+three `_seed_embedded_catalog` cases, whose cleanup must run once after the
+last of them rather than after each — measured at 2 failures in 12 the other
+way, recorded in the entry above.
+
+🔴 **The trap that made this a fixture rather than a fixture: teardown order is
+positional, and getting it wrong is a hang rather than a red.**
+`restores_the_statistics_this_seed_leaks` works by being declared *before*
+`session` in the signature, so it tears down after the rollback its `VACUUM`
+waits on. Adding an autouse fixture that merely *touched* `session` was enough
+to reorder that — and the result was not an assertion failure. It was
+`VACUUM (ANALYZE) titles, title_embeddings` blocked on a relation lock held by
+a session still `idle in transaction`, forever, with pytest printing dots.
+Found by reading `pg_stat_activity` in the container, not from the output. Both
+the restore and the guard therefore live *inside* `session`'s own teardown,
+below its `rollback()`, where the ordering is structural and no signature edit
+can move it.
