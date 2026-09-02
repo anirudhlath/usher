@@ -6,6 +6,7 @@ paths:
   - "src/usher/services/matching.py"
   - "src/usher/services/reconcile.py"
   - "src/usher/services/watch_sync.py"
+  - "src/usher/services/watch_write.py"
 ---
 
 # Emby, the push lane, and the ingest pipeline

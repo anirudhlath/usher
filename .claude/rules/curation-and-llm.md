@@ -6,6 +6,7 @@ paths:
   - "src/usher/services/curation_prompt.py"
   - "src/usher/services/curation_validate.py"
   - "src/usher/services/query_expansion.py"
+  - "src/usher/services/llm_ledger.py"
 ---
 
 # The LLM client, the candidate pool, the prompt and the validator
