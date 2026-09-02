@@ -1090,3 +1090,30 @@ dispatch.** Written inline it returns from the whole of `run_bootstrap`, so a
 instead of merely doubling an import — a strictly worse failure introduced by
 the fix. Its three siblings each return from their own function; this one now
 does too.
+
+
+## `--phase` is `BootstrapPhase`, and two of its members are aliases
+
+Moved out of `CLAUDE.md` on 2026-09-01. It is twenty lines of detail about one
+command's argument, and this file's trigger — `adapters/bulk/**` and
+`services/bootstrap.py` — is exactly the set of paths from which it matters.
+
+**`--phase` is `BootstrapPhase`, and the *steps* of a full run are in execution
+order:** `imdb`, `credit-names`, `aliases`, `tmdb-ids`, `crosswalk`,
+`movielens`. Two members are **aliases rather than steps** and `--phase all`
+dispatches neither: `all` itself, and **`ratings`**, which re-imports
+`title.ratings.tsv.gz` (8.2 MiB) alone rather than paying `--phase imdb`'s
+214.4 MiB of `title.basics.tsv.gz` and the rewrite of every name and year that
+stales an embedding (ADR-0040). `usher.domain.bootstrap.FULL_SEQUENCE` and
+`PHASE_ALIASES` declare the split, and a unit case asserts they partition the
+enum — so a member added to neither is a red rather than a phase `argparse`
+offers, the route accepts and `run_bootstrap` silently ignores.
+The order is measured rather than stylistic — `credit-names`, `aliases` and
+`movielens` all join to `titles` on `imdb_id` so all three follow `imdb`, and
+`credit-names` comes before anything that *enriches* a title because the fill
+writes only skeletons, so a title already enriched is deferred to TMDb for good
+(**203,969 of 204,335** ≥100-vote titles gain names in this order and none in
+the other; it stales no embedding in either, the embedded population being the
+exact complement of what it writes). One vocabulary rather than two:
+`POST /admin/bootstrap/{phase}` and `argparse`'s `choices=` are the same enum,
+so a phase cannot exist on one boundary and not the other.

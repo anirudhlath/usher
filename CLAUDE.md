@@ -5,75 +5,36 @@
 **Usher** — a self-hosted media catalog backend that abstracts media servers
 (Emby first) behind its own canonical database, with search, similarity, and
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
-PostgreSQL.
+PostgreSQL, with a React 19 console in `web/` served at `/console`.
 
-**Status: M9 complete on `milestone/m9-api-surface`.** Nine milestones are built
-and verified, several of them against live third-party services rather than only
-against fakes. **M9 shipped with a gap in that column and the gap is now
-closed**: its H4/H5 live Emby run happened on 2026-08-12, after the milestone
-gate, because the milestone had concluded no credentials existed here by
-checking one `.env` and stopping. **A negative established by looking in the one
-place the answer was expected is not a negative** — the row below is the one to
-read before trusting the playback and write-back paths end to end:
+**`main` is past M9, and the console is part of the product.** Nine milestones
+are built, most of them verified against live third-party services rather than
+only against fakes — a real Emby 4.9.5.0, the live TMDb v3 API, the real IMDb
+dumps, and a catalog of ~1.27M real titles. Since M9's gate closed, `main` has
+taken the React console in `web/`, the demand-enrichment lane
+(`VisibilityService`), migrations `m10a`/`m10b`, and a wider embedding column.
 
-| | delivers | live-verified against |
-|---|---|---|
-| **M1** | scaffold, config, domain models, port ABCs, persistence, telemetry, health routes, container + compose + CI | — |
-| **M2** | bulk bootstrap — IMDb skeleton, TMDb id export, Wikidata crosswalk, all resumable | the real dumps and live WDQS |
-| **M3** | the Emby `SourceAdapter`, encrypted credentials, admin source routes, a source-agnostic contract suite | Emby 4.9.5.0 |
-| **M4** | the ingest pipeline — match/ingest/reconcile/watch-sync/enrich over nine ports and a Postgres priority queue, the TMDb provider, the CLI | Emby 4.9.5.0 and the live TMDb v3 API |
-| **M5** | the push lane, supervised reconnect with a gap-closing delta, `GET /titles/{id}`, `GET /events` over SSE | Emby's `/embywebsocket` |
-| **M6** | `search_document` + GIN, trigram type-ahead, embeddings, `title_neighbors`, RRF fusion, the search CLI | a real 1,271,138-title catalog |
-| **M7** | the composed home screen — nine row providers, `HomeService`, `TasteService`, `DeriveService`, the tag genome, `GET /home` | a real 1,271,570-title catalog |
-| **M8** | LLM curation end to end — `OpenAICompatibleClient` (litellm declined), `curated_rows` + `llm_calls`, the candidate pool, `CurationService` and its validator, `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate`, `usher curate`, the genome tag vocabulary, query expansion | a local vLLM serving `gemma-4-26b-a4b` over a real 1,271,138-title catalog |
-| **M9** | the whole HTTP surface — PRD 07's Screens, Resources, Actions, Admin and Meta tables behind one RFC 9457 envelope over a closed seven-member `code` vocabulary; keyset cursors; search, the two-tier suggest, browse, similarity, the series hierarchy; the image proxy (`images` + `GET /images/{id}`) and artwork on `RowCard`; `POST /titles|episodes/{id}/play` with the playback ticket and outbound watch write-back; the admin completion (sync, unmatched, bootstrap status + trigger, row-provider toggles, `bootstrap.progress`); `search_queries` whole; `GET /meta/attribution`. **Track 2:** `append_to_response=season/N`, the IMDb akas and credit-names bulk expansion, the priority-tier TMDb crawl | the **live TMDb v3 API** (S3: 130,334 requests over 1.98 h, 130,647 titles enriched; T2/T3 against the real IMDb dumps) **and a real Emby 4.9.5.0** — H4/H5 ran 2026-08-12 in 23 bounded requests with no walk: `/play` → ticket → `302` → a real **206** with `video/x-matroska` bytes, the play body leaking nothing with its positive control fired first, and the watch write-back read back *from Emby* and restored **byte-for-byte**. ⚠️ They ran **after** the milestone closed, because M9 recorded "no Emby credentials on this host" having checked `~/code/usher/.env` and nowhere else |
+**What each milestone delivered, what it was live-verified against, and what it
+deliberately did not build** is in `.claude/rules/milestone-boundary-calls.md`,
+which loads when you work under `docs/plans/` or on the roadmap.
 
-**Post-M9 follow-up work is merged into `main` and changes things the table
-above describes.** The one to know about before touching search: **the embedding
-subsystem has a second runtime and a wider column since 2026-08-13.**
-`USHER_EMBEDDING_MODEL` now carries a runtime prefix that selects between
-`fastembed:` (in-process, behind the extra) and `openai:` (any
-OpenAI-compatible endpoint — this deployment's is a second local vLLM serving
-`BAAI/bge-m3`), and migration **`m09e`** widened
-`title_embeddings.embedding` and `user_taste.centroid` from `halfvec(384)` to
-`halfvec(1024)`, **deleting every embedding, centroid and neighbour row** —
-there is no honest conversion between widths. The consequence for anyone
-reading this: **`model_name`'s "a model swap needs no migration" is true only
-within one width**, and the service-free default is now
-`fastembed:BAAI/bge-large-en-v1.5` at 1.2 GB against bge-small's 0.07.
-[ADR-0038](docs/prd/decisions/0038-the-embedding-width-is-deployment-wide-ddl.md).
+**One post-M9 change invalidates an assumption you may already hold.** The
+embedding subsystem has had a second runtime and a wider column since
+2026-08-13. `USHER_EMBEDDING_MODEL` carries a runtime prefix selecting
+`fastembed:` (in-process, behind the extra) or `openai:` (any OpenAI-compatible
+endpoint), and migration `m09e` widened `title_embeddings.embedding` and
+`user_taste.centroid` from `halfvec(384)` to `halfvec(1024)`, **deleting every
+embedding, centroid and neighbour row** — there is no honest conversion between
+widths, so **"a model swap needs no migration" is true only within one width**
+([ADR-0038](docs/prd/decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)).
 Nothing restores the deleted rows on its own: `usher index --backfill`, then
-`usher work`, then `usher similar --rebuild`.
-
-**`m09f` is the one to read before changing a vector column's width again**,
-and it is the more surprising of the two. 1024 lanes is 2,052 bytes against
-`TOAST_TUPLE_THRESHOLD`'s 2,032, so `m09e` did not make vectors 2.67× dearer to
-scan — it pushed every one of them out of the heap into TOAST, and an exact
-scan went **36.5 → 594.7 ms/seed**. Every `halfvec` column now stores `PLAIN`
-(`title_embeddings`, `user_taste`, and `genome_scores`, which had been TOASTed
-since `ffa`), which brings that back to **95.7** and caps
-`EMBEDDING_DIMENSIONS` at ~4,000 lanes, because `PLAIN` cannot spill.
+`usher work`, then `usher similar --rebuild`. `m09f` then capped
+`EMBEDDING_DIMENSIONS` at ~4,000 lanes by moving every `halfvec` column to
+`PLAIN` storage. Both are written up in `.claude/rules/search-and-embeddings.md`.
 
 Task breakdowns are in `docs/plans/`, one file per milestone.
 [PRD 09](docs/prd/09-roadmap.md) is what's next. **Do not invent commands for
 tooling that does not exist yet** — check the Commands section below first.
-
-**What each milestone deliberately did *not* build** — M9's eight boundary
-calls, M8's eight, M7's nine, M6's nine, M4's four, the typo-tolerance gate that
-failed its own bar and the IMDb entity design that failed its own size bar — is
-in `.claude/rules/milestone-boundary-calls.md`, which loads when you work under
-`docs/plans/` or on the roadmap.
-
-⚠️ **M8's own subject document carries a finding worth knowing before you read
-anything else about curation.** Against `gemma-4-26b-a4b`, **88% of generated
-row headings (52 of 59) were the genre labels the prompt explicitly forbids**,
-and one heading in 59 named a filmmaker — so on that model a curated shelf is
-substantively what `GenreAffinityProvider` already produces from a `SELECT`.
-One model, one evening; what transfers is that **the prompt's grouping
-instruction is not self-enforcing and nothing in this system checks it.**
-Recorded as a known limit in [PRD 06](docs/prd/06-rows-and-recommendations.md),
-not fixed — curated rows are additive, so a dull row is a disappointment rather
-than a defect.
 
 ## Keep the PRD current
 
@@ -118,7 +79,7 @@ load automatically when working in `docs/`.
   Users run importers and hold their own API keys. Attribution strings stay in
   the API surface.
 - **Use `uv`** for all Python work: `uv sync`, `uv run <cmd>`, `uv add <pkg>`.
-  Never pip/conda, never activate a venv.
+  Never pip/conda, never activate a venv — `.claude/settings.json` denies both.
 - **TDD.** Failing test first, then implementation.
 - **A mutation sweep mutates the working tree in place, so nothing else may use
   that tree while it runs.** Serialise anything that mutates the tree — one
@@ -131,6 +92,10 @@ load automatically when working in `docs/`.
   gets a `cp` backup, and the restore is verified by reading the file back, not
   by the suite going green: a suite green before the plant is green again after
   a revert that took twenty unrelated lines with it (M8 Task 10).
+  **`.claude/settings.json` denies these rather than trusting you to remember**
+  — along with `git restore`, which does the same damage and which this bullet
+  did not name until 2026-09-01. An instruction is a request; a deny is a
+  mechanism.
 - **Secrets in `Settings` are `pydantic.SecretStr`**, never plain `str` —
   `database_url`, `secret_key`, `tmdb_api_key`, `llm_api_key`. Unwrap with
   `.get_secret_value()` only at the point of use (e.g. handing a DSN to
@@ -182,50 +147,35 @@ so a session pays only for what it touches.
 | `mutation-sweep-ledgers.md` | itself, deliberately — open it directly | every per-task sweep ledger with its plants and survivors, M9 onward |
 | `fixtures-and-fakes.md` | `tests/fixtures/**`, `tests/fakes/**`, `tests/contract/**` | the network guard, the four no-third-party-data controls, shape-recorded/value-synthetic fixtures, every recorded divergence between a fake and its Postgres arm |
 | `db-and-sql.md` | `src/usher/db/**` | `ON CONFLICT` traps, `now()` vs `clock_timestamp()`, triggers that own a column, staging-table locks, generated columns, the migration id convention, `test_migrations.py`'s two halves |
-| `emby-push-and-ingest.md` | `adapters/emby/**`, the pipeline services | M3/M4/M5's live runs against a real Emby 4.9.5.0 — the wrong write-back route, `UserData` divergence, the websocket's real cadence, the match ladder's measured yield |
+| `emby-push-and-ingest.md` | `adapters/emby/**`, the pipeline services incl. `watch_write.py` | M3/M4/M5's live runs against a real Emby 4.9.5.0 — the wrong write-back route, `UserData` divergence, the websocket's real cadence, the match ladder's measured yield |
 | `tmdb-and-enrichment.md` | `adapters/tmdb/**`, `services/enrich.py` | the 712-request live run, the 4xx taxonomy, `append_to_response=season/N`, movie/TV divergence across three API layers |
-| `search-and-embeddings.md` | `adapters/search/**`, `adapters/embedding/**` | the typo-tolerance gate that failed, GIN vs GiST, RRF's five traps, `fastembed` vs `sentence-transformers`, `halfvec`, `hnsw.iterative_scan`, the two embedding runtimes and the two vLLM flags that each cost a run |
+| `search-and-embeddings.md` | `adapters/search/**`, `adapters/embedding/**`, `services/search.py`, `services/similar.py` | the typo-tolerance gate that failed, GIN vs GiST, RRF's five traps, `fastembed` vs `sentence-transformers`, `halfvec`, `hnsw.iterative_scan`, the two embedding runtimes and the two vLLM flags that each cost a run |
 | `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py`, `similar.py` | the sequential build's two very different p95s, the genome's real coverage and its denominators, and why M9 removed the genome from the similarity blend |
-| `curation-and-llm.md` | `adapters/llm/**`, `services/curation*.py`, `query_expansion.py` | M8's live run — the 88% genre-heading finding, the real per-candidate token cost, the pool ceiling the reference endpoint cannot serve, why the coercion is the primary path, and query expansion measuring worse |
+| `curation-and-llm.md` | `adapters/llm/**`, `services/curation*.py`, `query_expansion.py`, `llm_ledger.py` | M8's live run — the 88% genre-heading finding, the real per-candidate token cost, the pool ceiling the reference endpoint cannot serve, why the coercion is the primary path, and query expansion measuring worse |
 | `bootstrap-and-datasets.md` | `adapters/bulk/**` | IMDb TSV parsing, MovieLens archive selection, Wikidata timing, the cache-key finding |
 | `ports-and-error-taxonomy.md` | `src/usher/ports/**`, `src/usher/adapters/**` | what a failure is *called* — a refusal and a fault sharing one type, when a subclass beats a new member, the frequency question to ask before reusing one, and the two-constants-must-move-together shape |
 | `api-telemetry-and-lanes.md` | `api/**`, `telemetry.py`, `composition.py` | SSE and `ASGITransport`, OTel provider caching, the instrumentor that produced no spans for three milestones, lane supervision and readiness |
 | `config-cli-and-deployment.md` | `config.py`, `cli.py`, `compose.yml`, `Dockerfile` | the settings failure that printed its own credential, `.env`'s two readers, `env_file:` vs `environment:`, image measurement, CI tag pinning |
-| `milestone-boundary-calls.md` | `docs/plans/**` | what each milestone deliberately did not build |
+| `milestone-boundary-calls.md` | `docs/plans/**`, `docs/prd/09-roadmap.md` | what each milestone delivered, what it was live-verified against, and what it deliberately did not build |
 | `prd-maintenance.md` | `docs/**` | how to keep the PRD current |
+| `console.md` | `web/**` | the console's own gate (`npm run verify` + two Playwright jobs), the `design-system/` boundary nothing enforces, and why the Python gate says nothing about `web/` |
+| `rules-file-maintenance.md` | `.claude/rules/**` | how `paths:` matching actually works, the two splits that worked and the one that was measured and refused |
 
 To read one outside its trigger paths, just open the file.
 
 **Adding a finding:** append it to the subsystem file, not here. This index
 grows when a new subsystem appears — `curation-and-llm.md` is the one M8
 added — or when a file outgrows its trigger, which is why `mutation-sweeps.md`
-and `fixtures-and-fakes.md` exist. `testing-discipline.md` had reached 1,728
-lines behind `tests/**`, a trigger that fires for almost every task in a
-TDD repo, so the file that loaded most often was also the largest one: the
-sweep ledgers and the fixture material moved to triggers that fire when they
-are actually wanted. **Measure which paths a rules file really loads on before
-assuming a split saved anything.** A finding that genuinely
-applies everywhere goes in "Five rules about evidence" above — that list has
-earned five entries in eight milestones, so the bar is high.
-
-**And the file that split escaped it repeated the failure, which is the part
-worth carrying.** `mutation-sweeps.md` was the destination of that first split
-and then grew to **5,077 lines / 339,061 bytes** behind `docs/plans/**` — a
-trigger that fires for almost every planning task here, so the same shape
-recurred at the same place within one milestone. Split again 2026-08-21:
-**1,185 lines / 78,283 bytes stay on the trigger, 3,917 lines of per-task
-ledger moved to `mutation-sweep-ledgers.md`**, a 77% reduction in what a
-planning session loads to reach the mechanics (~85K → ~20K tokens, estimated at
-4 bytes/token, not measured with `count_tokens`). Both halves were checksummed
-before and after and recombine byte-identical to the original.
-
-**The trap that split exposed, because it nearly inverted the fix:** a rules
-file is *conditional only if it carries `paths:`*. One without the key loads
-**unconditionally**, so moving 3,917 lines into a new file with no frontmatter
-would have promoted them from sometimes-loaded to always-loaded. The ledger
-file's trigger is therefore itself — it loads when you append to it, and is
-opened deliberately otherwise. **Check the frontmatter before believing a
-split reduced anything**; the failure is silent and points the wrong way.
+and `fixtures-and-fakes.md` exist. **Measure which paths a rules file really
+loads on before assuming a split saved anything**, and read
+`.claude/rules/rules-file-maintenance.md` first: it carries the two splits that
+worked, the one that was measured and refused, and how `paths:` matching
+actually works. The failure mode that matters there is silent and points the
+wrong way — **a rules file is conditional only if it carries `paths:`**, so
+moving bulk into a file without frontmatter promotes it from sometimes-loaded
+to always-loaded. A finding that genuinely applies everywhere goes in "Five
+rules about evidence" above — that list has earned five entries in eight
+milestones, so the bar is high.
 
 ## Commands
 
@@ -233,15 +183,26 @@ split reduced anything**; the failure is silent and points the wrong way.
 
 ### The gate
 
-Every one of these must be green before a commit lands:
+Every one of these must be green before a commit lands. **They cover Python
+only — `web/` has its own gate, below.**
 
 ```bash
+uv sync --extra eval             # NOT optional for the gate — see below
 uv run ruff check .              # lint
 uv run ruff format --check .     # formatting
 uv run mypy src tests            # strict, including tests/
 uv run lint-imports              # architecture contracts — 12 kept, 0 broken
 uv run pytest                    # full suite; tests/integration/ needs Docker
 ```
+
+**`uv sync` alone does not produce a green gate, and the failure names
+neither `ranx` nor the extra.** Five `tests/unit/test_eval_*.py` modules abort
+at *collection* with `usher.eval.errors.EvalDependencyMissing`, so `pytest`
+exits `Interrupted: 5 errors during collection` having run nothing — a whole
+suite reported as an error rather than as failures. CI does not hit this
+because its `check` job syncs `--frozen --extra eval`; a clean worktree does.
+The extra is optional to the *product* and mandatory for the *gate*, which is
+why it is the first line above rather than a footnote in the CLI section.
 
 `[tool.ruff] extend-exclude = ["docs", ".claude", "web"]` keeps ruff off
 `docs/plans/*.md`, `docs/prd/*.md` and `.claude/rules/*.md` — ruff 0.16+ formats
@@ -250,7 +211,23 @@ directories hold prose with fences that other groups transcribe verbatim.
 **Without the exclude, an unscoped `ruff format .` silently rewrites that
 prose.** Note the exclude is bypassed by an *explicit* path argument —
 `ruff format .claude/rules/` does process them — so scope the command, not just
-the config.
+the config, and `.claude/settings.json` denies the explicit-path spellings the
+config cannot reach.
+
+**A commit touching `web/` has a second gate, and the first one cannot see it.**
+`web/` is excluded from ruff (`extend-exclude`) and from mypy
+(`files = ["src", "tests"]`), so all five commands above pass on a console
+change that fails CI. Run, from `web/`:
+
+```bash
+npm run verify       # typecheck && lint && format:check && test && build
+npm run e2e          # Playwright functional + a11y
+npm run e2e:visual   # the 120 screenshot comparisons
+```
+
+Those are three separate CI jobs (`console`, `console-e2e`, `console-visual`)
+and **`npm run verify` includes neither Playwright suite.**
+`.claude/rules/console.md` loads when you work under `web/`.
 
 ### Tests
 
@@ -321,7 +298,7 @@ uv run usher suggest "the quie" --limit 5    # type-ahead, typo-tolerant
 
 uv run usher eval                            # every surface, quick, no bar enforced
 uv run usher eval suggest --full             # full goldens, bars enforced, ledger written
-uv sync --extra eval                         # optional: ranx, ~30 packages, dev only
+uv sync --extra eval                         # ranx, ~30 packages — the gate needs it
 uv run usher similar <title id>
 uv run usher similar --rebuild               # recompute title_neighbors
 
@@ -334,25 +311,11 @@ uv run usher curate                          # one LLM generation; pool, rows, d
 uv sync --extra embedding                    # optional: fastembed, 167 MiB, no torch
 ```
 
-**`--phase` is `BootstrapPhase`, and the *steps* of a full run are in execution
-order:** `imdb`, `credit-names`, `aliases`, `tmdb-ids`, `crosswalk`,
-`movielens`. Two members are **aliases rather than steps** and `--phase all`
-dispatches neither: `all` itself, and **`ratings`**, which re-imports
-`title.ratings.tsv.gz` (8.2 MiB) alone rather than paying `--phase imdb`'s
-214.4 MiB of `title.basics.tsv.gz` and the rewrite of every name and year that
-stales an embedding (ADR-0040). `usher.domain.bootstrap.FULL_SEQUENCE` and
-`PHASE_ALIASES` declare the split, and a unit case asserts they partition the
-enum — so a member added to neither is a red rather than a phase `argparse`
-offers, the route accepts and `run_bootstrap` silently ignores.
-The order is measured rather than stylistic — `credit-names`, `aliases` and
-`movielens` all join to `titles` on `imdb_id` so all three follow `imdb`, and
-`credit-names` comes before anything that *enriches* a title because the fill
-writes only skeletons, so a title already enriched is deferred to TMDb for good
-(**203,969 of 204,335** ≥100-vote titles gain names in this order and none in
-the other; it stales no embedding in either, the embedded population being the
-exact complement of what it writes). One vocabulary rather than two:
-`POST /admin/bootstrap/{phase}` and `argparse`'s `choices=` are the same enum,
-so a phase cannot exist on one boundary and not the other.
+**`--phase` is `BootstrapPhase`, and `all` does not dispatch every member** —
+`ratings` is an alias that re-imports `title.ratings.tsv.gz` alone rather than
+paying `--phase imdb`'s 214.4 MiB and the re-embedding that follows (ADR-0040).
+The execution order is measured rather than stylistic. Both are written up in
+`.claude/rules/bootstrap-and-datasets.md`, which loads when you work on either.
 
 **`usher genres --backfill` is the only command here that rewrites a catalog
 column in place, and it is deliberately not an Alembic migration.** The genre
