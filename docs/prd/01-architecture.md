@@ -96,11 +96,12 @@ These are the invariants that keep Emby out of everything:
    independently of internal models.
 
 Import discipline is enforced in CI (`import-linter` contracts), because
-layering rules that are only documented become suggestions. **Eight contracts
-as of M8, and the eighth is a rule the first seven structurally could not
-reach.** Contracts two and three are sourced at `domain`/`ports`/`services`,
-so the indirect chain that catches a *core* module reaching `usher.composition`
-does not exist for a router — and `usher.api` is itself a composition root, so
+layering rules that are only documented become suggestions. **Twelve contracts
+as of E1**, and the eighth is the one worth reading, because it is a rule the
+first seven structurally could not reach. Contracts two and three are sourced
+at `domain`/`ports`/`services`, so the indirect chain that catches a *core*
+module reaching `usher.composition` does not exist for a router — and
+`usher.api` is itself a composition root, so
 it is allowed to reach `db/` and `adapters/` directly. A router doing
 `from usher.composition import build_curation_service` therefore passed all
 seven, ruff, mypy and both suites; planted and measured. The eighth forbids
@@ -110,6 +111,14 @@ say only that: every router imports `usher.api.deps`, which imports the wiring
 on purpose. A router may *reach* the wiring through a dependency and may not
 *name* it — which is what makes [07](07-client-api.md)'s *"the route holds no
 `LLMClient`"* a property of the build rather than of a review.
+
+The four since: the ninth and tenth landed in M9 — the shared http helpers
+import no concrete adapter, and no aggregate port module imports another — and
+the eleventh and twelfth came with the eval harness, which is a leaf nothing
+depends on, and which confines `ranx` to the IR metrics package so the optional
+extra cannot leak into the core. **The count in this paragraph is asserted by
+`tests/unit/test_docs_currency.py` against `pyproject.toml`**, so it fails a
+build rather than drifting again.
 
 ## Ports are ABCs, not Protocols
 

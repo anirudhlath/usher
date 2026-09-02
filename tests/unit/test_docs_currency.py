@@ -388,3 +388,80 @@ def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> Non
         "a status-table row is being counted as prose, so a section is missing "
         f"from the subtraction above: {rows}"
     )
+
+
+# The import-contract count is written down in three places and derived in
+# none: `pyproject.toml` defines the contracts, `docs/prd/01-architecture.md`
+# states how many exist, and `CLAUDE.md`'s gate block annotates
+# `uv run lint-imports` with what a green run prints. On 2026-09-01 the three
+# said twelve, eight and twelve -- the PRD had been correct at M8, carried an
+# honest "as of M8", and then simply stopped being the living document it
+# claims to be while four more contracts landed.
+#
+# This is the same failure this module already exists for, one directory over:
+# a number nobody owns, in a document whose whole job is to be current. The
+# repair is the same one -- assert it rather than re-read it.
+_ARCHITECTURE = _ROOT / "docs" / "prd" / "01-architecture.md"
+_PYPROJECT = _ROOT / "pyproject.toml"
+_CLAUDE_MD = _ROOT / "CLAUDE.md"
+
+_CONTRACT_HEADER = re.compile(r"^\[\[tool\.importlinter\.contracts\]\]", re.MULTILINE)
+_PRD_CONTRACT_COUNT = re.compile(r"\*\*(\w+) contracts\b", re.IGNORECASE)
+_GATE_CONTRACT_COUNT = re.compile(r"architecture contracts — (\d+) kept, (\d+) broken")
+
+_NUMBER_WORDS = {
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+}
+
+
+def _defined_contract_count() -> int:
+    return len(_CONTRACT_HEADER.findall(_PYPROJECT.read_text(encoding="utf-8")))
+
+
+def test_the_architecture_prd_states_the_number_of_contracts_that_exist() -> None:
+    defined = _defined_contract_count()
+    assert defined >= 8, (
+        "fewer contracts are defined than the PRD's narrative describes, so "
+        f"this test is measuring the wrong table: found {defined}"
+    )
+
+    match = _PRD_CONTRACT_COUNT.search(_ARCHITECTURE.read_text(encoding="utf-8"))
+    assert match is not None, (
+        "docs/prd/01-architecture.md no longer states a bolded contract count, "
+        "so the claim this test was written to pin has been reworded away"
+    )
+
+    word = match.group(1).lower()
+    assert word in _NUMBER_WORDS, (
+        f"docs/prd/01-architecture.md says {word!r} contracts, which is not a "
+        f"number word this test can read; add it to _NUMBER_WORDS"
+    )
+    assert _NUMBER_WORDS[word] == defined, (
+        f"docs/prd/01-architecture.md says {word!r} ({_NUMBER_WORDS[word]}) "
+        f"import contracts, pyproject.toml defines {defined}"
+    )
+
+
+def test_the_gate_block_annotates_lint_imports_with_the_real_contract_count() -> None:
+    defined = _defined_contract_count()
+
+    match = _GATE_CONTRACT_COUNT.search(_CLAUDE_MD.read_text(encoding="utf-8"))
+    assert match is not None, (
+        "CLAUDE.md's gate block no longer annotates `uv run lint-imports` with "
+        "a kept/broken count, so the annotation this test pins is gone"
+    )
+
+    kept, broken = int(match.group(1)), int(match.group(2))
+    assert (kept, broken) == (defined, 0), (
+        f"CLAUDE.md's gate says {kept} kept / {broken} broken, "
+        f"pyproject.toml defines {defined} contracts"
+    )
