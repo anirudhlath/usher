@@ -1,0 +1,57 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git checkout --:*)",
+      "Bash(git checkout .)",
+      "Bash(git restore:*)",
+      "Bash(git stash)",
+      "Bash(git stash push:*)",
+      "Bash(git stash save:*)",
+      "Bash(git stash pop:*)",
+      "Bash(git stash apply:*)",
+      "Bash(git stash drop:*)",
+      "Bash(git stash clear:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git reset --merge:*)",
+      "Bash(git reset --keep:*)",
+      "Bash(git clean -f:*)",
+      "Bash(git clean -df:*)",
+      "Bash(git clean -fd:*)",
+      "Bash(pip install:*)",
+      "Bash(pip3 install:*)",
+      "Bash(python -m pip:*)",
+      "Bash(conda:*)",
+      "Bash(ruff format docs:*)",
+      "Bash(ruff format .claude:*)",
+      "Bash(ruff format ./docs:*)",
+      "Bash(ruff format ./.claude:*)",
+      "Bash(uv run ruff format docs:*)",
+      "Bash(uv run ruff format .claude:*)",
+      "Bash(uv run ruff format ./docs:*)",
+      "Bash(uv run ruff format ./.claude:*)"
+    ],
+    "ask": [
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git branch -D:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(alembic downgrade:*)",
+      "Bash(uv run alembic downgrade:*)"
+    ],
+    "allow": [
+      "Bash(uv run ruff check:*)",
+      "Bash(uv run ruff format --check:*)",
+      "Bash(uv run mypy:*)",
+      "Bash(uv run lint-imports)",
+      "Bash(uv run pytest:*)",
+      "Bash(uv sync:*)",
+      "Bash(git worktree list)",
+      "Bash(git show:*)",
+      "Bash(npm run verify)",
+      "Bash(npm run typecheck)",
+      "Bash(npm run lint)",
+      "Bash(npm test:*)"
+    ]
+  }
+}
