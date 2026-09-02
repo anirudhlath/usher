@@ -28,7 +28,9 @@ else in a successful play-then-redeem cycle logs at `INFO` at all --
 this module"), and `PlaybackService` logs only at `DEBUG` (a copy naming a
 source that is gone) and `WARNING` (a source that failed). A `sink == []`
 assertion over a cycle where nothing above WARNING can ever be produced is
-exactly the false green `.claude/rules/mutation-sweeps.md:561` names, so the
+exactly the false green the rules files name under `sink == []`
+(`grep -rn 'sink == \[\]' .claude/rules/` finds it; it moved between files
+on 2026-09-01, which a line number would not have survived), so the
 positive control this pin uses is the one genuine record the resolution
 logic itself produces: a second, uncredentialed source on the same title
 triggers `PlaybackService._copy_targets`'s existing

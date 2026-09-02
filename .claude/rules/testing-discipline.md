@@ -15,6 +15,73 @@ Two neighbours hold what used to live here: `.claude/rules/mutation-sweeps.md`
 `docs/plans/**`) and `.claude/rules/fixtures-and-fakes.md` (fixtures, fakes,
 contract suites, the network guard and the no-third-party-data controls).
 
+**`fixtures-and-fakes.md` loads *beside* this file, not instead of it.** Five of
+its seven trigger patterns sit under `tests/`, which `tests/**` above already
+covers, so on almost every path that loads it both files are in play and the
+split has to be by subject: **an entry about a double's shape goes there, an
+entry about an assertion's teeth stays here.** Six entries had drifted the wrong
+way and were moved back on 2026-09-02 (the `available`/`enrichment_state`
+unwritten-value pair, `NULLS LAST`'s one-armed visibility, the fake that is
+*stricter* than Postgres, `FakeLLMClient`'s unobservable call count, and why
+`LLMClientContract` is the wrong home for a measured latency).
+
+## Commands
+
+`tests/**` is this repository's most-fired trigger, so the two cycles every
+entry below rests on are written out rather than implied.
+
+```bash
+uv sync --extra eval                 # or five test modules abort at *collection*
+uv run pytest                        # the whole suite; integration needs Docker
+uv run pytest tests/unit             # no Docker, no network
+uv run pytest tests/integration      # testcontainers, pgvector/pgvector:pg17
+uv run pytest tests/unit/test_api_home.py::test_the_route_hands_every_provider_a_context_it_can_actually_read
+uv run pytest tests/unit --collect-only 2>&1 | tail -1   # a size, re-derived
+```
+
+**Do not quote a suite size out of this file.** Measured 2026-09-02: **4,446
+unit + 1,301 integration**, 5,747 together (`tests/contract/` collects nothing
+of its own — it is mixin classes both directories subclass). Every *"survived
+all N cases"* below is anchored to the run that produced it, and the most recent
+of those was scored against 2,900 + 899 — 65% of today's unit suite and 69% of
+today's integration one. The sentence each supports survives; the number does
+not, and a survivor list is only true of the selection it was measured against.
+
+**The plant-and-verify cycle**, which is how nearly every entry here was found:
+
+```bash
+cp src/usher/services/x.py /var/tmp/plant.bak        # /tmp is tmpfs on this host
+#  ...apply the mutation with Edit, so the diff is reviewable...
+grep -n '<the planted text>' src/usher/services/x.py # the plant landed
+uv run ruff check src/usher/services/x.py            # spell it carefully, not carelessly
+uv run pytest tests/unit tests/integration           # score it whole, never one directory
+cp /var/tmp/plant.bak src/usher/services/x.py
+diff /var/tmp/plant.bak src/usher/services/x.py      # restore read back, not assumed
+```
+
+The `grep` is not ceremony: **a plant that did not land looks exactly like a
+check that passed.** Nor is the `ruff check` — a plant that dies on a linter
+never reached the suite, and the careless spelling of a defect is the one a
+linter catches, so a `BROKEN-MUTATION` says nothing about coverage.
+`git checkout`/`restore`/`stash`/`reset` are denied in `.claude/settings.json`
+and must not be used to undo a plant; they take uncommitted work with them, and
+a suite green before the plant is green again after a revert that dropped twenty
+unrelated lines.
+
+**And the guard-verification cycle**, whose loose spelling hid four dead guards
+(recorded below):
+
+```bash
+uv run pytest <the case> 2>&1 | grep -E '^E .*<the guard message>'
+```
+
+The `^E ` anchor is the whole point. pytest prints the failing assertion's
+surrounding *source* as context, so a guard's own text appears in the traceback
+of a case that failed on a different assertion entirely; `message in output`
+scored 10/10 where this spelling scored 8/13.
+
+## Findings
+
 **A UUIDv7 primary key makes an `ORDER BY` key unobservable, and it cost this
 milestone five untested orderings.** `new_id()` is monotonic, and almost every
 fixture mints its ids in the same order it assigns the ranking value — so
@@ -116,15 +183,8 @@ the `ORDER BY` key a UUIDv7 makes unobservable, one clause over.
 
 **And a mutation whose damage a rollback undoes is unobservable against a
 transactional arm, which is a thing to check before writing "before" into a
-docstring.** Same sweep: moving `replace_for_user`'s argument validation from
-*before* the `DELETE` to *after* it survives the whole integration file,
-because the SAVEPOINT rolls the delete back with the raise — while the same
-move fails two cases against the fake, which has no transaction. So "refused
-before anything is written" is a property the *fake* holds and Postgres cannot
-demonstrate. Worth knowing in both directions: it is a legitimate
-equivalent-mutant control for a transactional repository, and it is a reason a
-fake's divergence list needs an entry for where the fake is **stricter**, not
-only for where it is more forgiving.
+docstring.** Same sweep, and the *fake* is the arm that sees it — filed under
+"a fake can also be stricter" in `fixtures-and-fakes.md`.
 
 **A premise guard is an assertion like any other, and one of M8 Task 9's could
 not fail.** Found 2026-08-06 in review. `CLAUDE.md` requires every ordering
@@ -182,23 +242,12 @@ one control (31 and 29 before review added the ten the findings below are
 about). The two survivors that were *not* predicted were both a fixture holding
 something constant:
 
-- **`NULLS LAST` is unobservable without a genuine zero.** The Python spelling
-  of a nullable descending sort collapses a NULL through `-(vote_count or 0)`,
-  and with no title actually voted **0** in the fixture that collapse produces
-  the identical list — so deleting the fake's `vote_count is None` key survived
-  the whole suite. Postgres's half fails loudly (its default is NULLS FIRST, so
-  the unknown goes to the top), which is the shape to watch for: **a
-  divergence where only one arm can see the defect reads as coverage on both.**
-  The repair is one row, `vote_count=0`, seeded so it also disagrees on id
-  order.
-- **A predicate on a column no fixture ever writes falsely is unobservable.**
-  `media_items.available` is written `true` by every `own()` helper in the
-  suite, so deleting `WHERE available` from the ownership join survived
-  everything. It is not a hypothetical column: `mark_unseen_unavailable` sets
-  it false for every item a walk stops seeing, so a retracted copy is the
-  ordinary state of a deleted film. **Ask of every boolean predicate: has any
-  fixture, anywhere, ever set this to the other value?** Note the same gap
-  exists in `TitleRepositoryOwnedContract`, which has no such case either.
+- **Both were a fixture that never wrote the other value**, and both are
+  divergence findings rather than test-design ones: the missing genuine zero
+  behind `NULLS LAST`, and `media_items.available`, which every `own()` helper
+  writes `true`. `fixtures-and-fakes.md` holds them with the repairs. The rule
+  they leave here is one question — **has any fixture, in either arm, ever set
+  this column to the other value?**
 - **And a premise guard that protected nothing, deleted rather than
   strengthened.** `assert similarities[0] < 1.0` ("none of the three is the
   centroid itself") read as a premise and had no defect behind it: a candidate
@@ -314,24 +363,26 @@ Both halves matter and the second is the general one:
   answer depends on a fixture fact, not the guards that happen to exist**; the
   second enumeration is a subset of the first and is the one everybody makes.
 
+**All three are repaired, verified 2026-09-02 by reading the file back** —
+`test_a_centroid_re_ranks_the_pool_it_is_given` reads its premise through
+`_stored_vectors` at `test_services_curation_pool.py:657`, and the two cases
+with no angular premise now carry one at `:577` and `:624`. Written down because
+this file's own rule two entries up — *an amendment that leaves the superseded
+claim standing is a silent contradiction* — applies to a narrated defect exactly
+as it applies to an ADR: **a rules file describing a repaired defect in the
+present tense sends the next reader to look for it.** Grep the finding as well
+as the code; `grep -n _stored_vectors tests/unit/test_services_curation_pool.py`
+is the whole check.
+
 Same round, the third instance in this task of **"has any fixture, anywhere,
 ever set this to the other value?"** — after `media_items.available` and
-`titles.popularity` (`titles.tmdb_popularity` since `m10a`/ADR-0040). Every
-candidate fixture in *both* arms of
-`TitleRepositoryCandidateContract` wrote `enrichment_state = ENRICHED`, and the
-port docstring says the read deliberately has no such predicate because the
-skeleton tier is most of the catalog. Planting `enrichment_state = ENRICHED`
-into each implementation now fails **exactly one case on each arm — the new
-one** (out of 47 unit and 64 integration), which is the measurement saying it
-survived both files whole at 46 and 63. The damage is quiet rather than loud,
-which is why it is worth a case:
-the narrowed read still answers with a full-looking, well-ordered pool of
-whatever TMDb enrichment reached (single-digit thousands against 1.27M), and on
-a fresh install that has bootstrapped but not enriched it answers with nothing
-at all. `test_a_skeleton_is_as_eligible_a_candidate_as_an_enriched_title` seeds
-the other value and kills the plant on both arms, naming only itself.
-**A prose paragraph explaining why a column is not filtered on is not a check;
-it is the reason nobody wrote one.**
+`titles.popularity` (`titles.tmdb_popularity` since `m10a`/ADR-0040), this time
+`enrichment_state = ENRICHED` in *both* arms of
+`TitleRepositoryCandidateContract`. The measurement and the repair are in
+`fixtures-and-fakes.md` with the other two; the sentence that stays here is the
+one about the writing rather than the fixture. **A prose paragraph explaining
+why a column is not filtered on is not a check; it is the reason nobody wrote
+one.**
 
 **And one review finding measured and declined rather than applied.**
 `_cosine` recomputes the centroid's norm once per candidate, which reads as an
@@ -520,7 +571,7 @@ the same blind spot:
 - **The fourteen the follow-up found**, all in the prompt: the example JSON
   object (`_SHAPE`), the *"Answer with JSON … and nothing else"* line that
   introduces it, the instruction block's position (rendering the rules
-  **before** the 200-line candidate list, against `_prompt`'s own stated
+  **before** the 200-line candidate list, against `build_prompt`'s own stated
   ordering), *"Choose only from this list"*, both no-duplicate clauses, the
   candidate line's **year** and **genres** and the `_SEPARATOR` between them,
   the history's 1-based numbering, `_engagement`'s `play_count >= 2` threshold
@@ -542,15 +593,14 @@ by a reviewer should be read as a survey result rather than as an incident.
 **Enumerate a module's outputs before enumerating its mutations, and for each
 ask "does any case read this at all?" — if the answer is "only the ones written
 for it", sweep that artefact exhaustively and expect the yield to be near
-100%.** Second half of the same hole: **a fake that is deliberately forgiving
-makes the *number* of interactions unobservable.** `FakeLLMClient` repeats its
-last scripted response forever (documented, and right for a contract suite), so
-`client.calls[0]` is satisfied by any number of calls ≥ 1 and *no* case
-constrained the count. Every count a spec states — one completion, one ledger
-row, one commit — needs its own `len(...) == 1`, and the ledger's count does
-not imply the wire's: one row for two billed calls is precisely the
-understates-spend defect the `record()` rule exists to prevent, arriving
-through the door that rule does not cover.
+100%.** Second half of the same hole is a property of the double rather than of
+the cases and lives in `fixtures-and-fakes.md`: `FakeLLMClient` repeats its last
+scripted response forever, so `client.calls[0]` is satisfied by any number of
+calls ≥ 1. Every count a spec states — one completion, one ledger row, one
+commit — needs its own `len(...) == 1`, and the ledger's count does not imply
+the wire's: one row for two billed calls is precisely the understates-spend
+defect the `record()` rule exists to prevent, arriving through the door that
+rule does not cover.
 
 **Closed 2026-08-06.** 42 cases (from 35), and the prompt sweep re-run at
 **26 mutations — 20 killed, 5 deliberately unpinned, 1 control surviving as
@@ -574,70 +624,58 @@ pinned, so read the list with its outcomes rather than as it stood**:
   `MAX_REASON_CHARS = 1000` and `validate_curation` drops the whole row as
   `row_unusable` rather than truncating.
 
-**Two left, not five, and the corrections are worked through below.** Named
-rather than pinned, in the two cases that remain, because a verbatim
-assertion on the sentences most likely to be *tuned* is a change-detector, and
-the line drawn is: **every constant and every rendered number in a prompt gets
-a case, and so does every rule a validator will drop a row for** (ADR-0028
-sends an operator reading `duplicate` or `not_in_pool` to the prompt, so there
-has to be a rule there to fix).
+**Two left, not five.** The two that remain are named rather than pinned,
+because a verbatim assertion on the sentences most likely to be *tuned* is a
+change-detector, and the line drawn is: **every constant and every rendered
+number in a prompt gets a case, and so does every rule a validator will drop a
+row for** (ADR-0028 sends an operator reading `duplicate` or `not_in_pool` to
+the prompt, so there has to be a rule there to fix).
 
-**Two of those five were wrong to leave alive by that same line, and the test
-for "is this framing prose?" is not how the sentence reads.** Corrected
-2026-08-07 on the next review round. `"This household has not finished anything
-yet."` is a **branch**, not framing: it is one arm of `if history:`, most
-fixtures in the project seed no watch history so it is the arm that actually
-renders, and deleting it left a prompt that jumps from the role sentence
-straight to 200 candidates with no statement about the household at all —
-indistinguishable, to the model, from a prompt whose history was lost on the
-way. And the `reason` bullet's *"one sentence"* is a **bound**: `MAX_REASON_CHARS
-= 1000` and `validate_curation` does not truncate an over-long reason, it drops
-the whole row as `row_unusable` — while the *heading* width beside it, whose
-worst case is cosmetic, was already pinned. **Ask of a prompt sentence whether
-it is one arm of a conditional and whether a validator will discard anything
-over it, before asking whether it is prose somebody might tune.**
+**The line moved three times, and each move was a plant rather than a
+re-reading — so "is this framing prose?" is not a question about how the
+sentence reads.** Four categories, none of which is about tone:
 
-**A third of the five is now pinned too, and it is the *role sentence* — which
-the list above carried as the archetype of framing prose until this correction,
-and which is now marked ❌ there.** Corrected 2026-08-11 by M9's G3, and the
-list itself was rewritten to say so on 2026-08-12: the annotation had been added
-down here while the sentence up there still named the role sentence among the
-unpinned five, so a test author arriving through this file's `paths:`
-frontmatter — which is what binds them — read the false version and never
-reached the correction. **A correction filed below the claim it corrects is not
-a correction; it is a second claim.** The sentence was not framing: it
-asserted that the candidates below it are *"one household's **own** film and
-television library"*, and the pool the prompt is handed **is not filtered by
-ownership** — a measured fact (`owned DESC` is only a sort key, so a 200-title
-pool is 0.0%–10.0% owned for a household owning 0–20 unwatched titles). So the
-opening line made a claim about the data that the code contradicts, which is a
-third category the "is this framing prose?" test does not have: **a sentence can
-be neither a constant, nor a rendered number, nor a conditional arm, and still
-be a *claim some other component has to honour*.** G3 corrected the line and
-pinned the claim.
+- **a constant or a rendered number** — pinned from the start;
+- **an arm of a conditional.** `"This household has not finished anything
+  yet."` is one arm of `if history:` and the arm most fixtures render; deleting
+  it leaves a prompt that jumps from the role sentence straight to 200
+  candidates with no statement about the household at all;
+- **a bound a validator enforces.** `MAX_REASON_CHARS = 1000`, and
+  `validate_curation` drops the whole row as `row_unusable` rather than
+  truncating — while the *heading* width beside it, whose worst case is
+  cosmetic, was already pinned;
+- **a claim some other component has to honour**, which is the category the
+  first three did not have. The role sentence asserted that the candidates
+  below it are *"one household's **own** film and television library"*, and the
+  pool **is not filtered by ownership**: `owned DESC` is only a sort key, so a
+  200-title pool is 0.0%–10.0% owned for a household owning 0–20 unwatched
+  titles, measured. The opening line made a claim about the data that the code
+  contradicts.
 
-**How it is pinned matters more than that it is, and the first spelling was
-wrong.** `==` against the whole 47-word rendered line reads as thorough and is a
-change-detector: ADR-0028 prices that sentence at +26 prompt tokens, so it is a
-standing candidate for cost tuning, and every future copy-edit that kept the
-claim intact would have failed. It also made the sweep *coarse* — all four
-plants died on the same equality, so the verdict could not tell a restored
-defect from a rewording. Narrowed to two literal substrings (the ownership claim
-absent, an explicit not-all-owned statement present), the same four still die and
-now on two different axes, and the control that proves the narrowing is real is a
+**Where the corrections were filed is its own finding.** The role-sentence
+correction was written down here on 2026-08-11 while the list above still
+carried that sentence among the unpinned five, and stayed that way until
+2026-08-12 — so a test author arriving through this file's `paths:` frontmatter
+read the false version and never reached the correction. **A correction filed
+below the claim it corrects is not a correction; it is a second claim.** The
+list above now carries every outcome inline, which is the form to copy: amend in
+place, then grep the file for the sentence you amended.
+
+**And how a claim is pinned matters more than that it is.** `==` against the
+whole 47-word rendered line reads as thorough and is a change-detector —
+ADR-0028 prices that sentence at +26 prompt tokens, so it is a standing
+candidate for cost tuning, and every future copy-edit that kept the claim intact
+would have failed. It also made the sweep *coarse*: all four plants died on the
+same equality, so the verdict could not tell a restored defect from a rewording.
+Narrowed to two literal substrings (the ownership claim absent, an explicit
+not-all-owned statement present), the same four still die and now on two
+different axes, and the control that proves the narrowing is real is a
 **harmless copy-edit that keeps the claim** — which the `==` spelling would have
-killed. **The general form, and it points the opposite way to the `one_line`
-rule two entries down: when a rendered sentence is a claim some other component
-has to honour, pin the claim and not the prose; when the rendering itself is the
-defence, pin the line.** Ask which of the two the artefact is before choosing.
-This repository has now been bitten by each.
-
-So of the five, **three are pinned and two are still deliberately alive** — the
-non-empty history header, and the *"Group by something a person would
-recognise"* rule, which is the one M8's own live run measured the model ignoring
-88% of the time and which nothing in this system checks. The line the entry
-above draws still holds; what has moved three times is where it falls, and each
-move was a *plant*, never a re-reading of the sentence.
+killed. **This points the opposite way to the `one_line` rule two entries down:
+when a rendered sentence is a claim some other component has to honour, pin the
+claim and not the prose; when the rendering itself is the defence, pin the
+line.** Ask which the artefact is before choosing. This repository has been
+bitten by each.
 
 **An assertion whose subject is fixed by a model validator cannot fail, and
 `assert x.error` next to `assert x.ok is False` is the shape.**
@@ -712,23 +750,33 @@ sweep. `tests/unit/test_api_home.py` builds a real `create_app()` and then
 replaces `get_row_context` with a `Library`'s, deliberately and correctly —
 that is what makes the router, the DTO and `HomeService`'s ordering testable
 with no database. The consequence nobody had stated: **`get_row_context` itself
-had never been executed by the unit suite**, so wiring one of its twelve fields
-to `None` (`curated=None  # type: ignore[arg-type]`) passed all 2,743 cases.
+had never been executed by the unit suite**, so wiring one of its fields to
+`None` (`curated=None  # type: ignore[arg-type]`) passed all 2,743 cases.
 `RowContext` is a frozen dataclass with no runtime validation, so it constructs;
 the failure is an `AttributeError` inside whichever provider reads the field, on
 the first request.
 
-**Corrected 2026-08-07, and both corrections are about scope.** The sweep that
-found this was scoped to `tests/unit`, correctly self-filed as a caveat — and
-the write-up then converted that scoping into two claims about the *gate* and
-about *coverage*, neither of which survives measurement. Re-measured at
-`786c5b4` by planting `None` into each of `get_row_context`'s ten
-repository/user arguments in turn and running each suite whole:
+**Two counts, of two different things, and this entry got both wrong.**
+Re-measured 2026-09-02 with `dataclasses.fields` and `inspect.signature`:
+`RowContext` has **thirteen fields** (`user, now, titles, media_items,
+watch_states, episodes, neighbors, people, credits, collections, affinities,
+curated, images`) and `get_row_context` has **twelve parameters, eleven of them
+repository/user** — `now` and `affinities` are on the context and are not
+`Depends` (the clock is a lambda the function closes over; the affinities are a
+callable closing over the `taste` service), and `taste` is a `Depends` and is
+not on the context. `tests/integration/test_pipeline_deps.py` carries the same
+correction as a comment, having made the same slip once already.
 
-| plant | `tests/unit` (2,759) | `tests/integration` (866) |
+**The plant round below is 2026-08-07's, at `786c5b4`, and its arity is that
+day's.** The signature then had eleven parameters, ten of them repository/user;
+M9's `images` is the twelfth and **has never been through this round**. Each
+plant was run against each suite whole:
+
+| plant | `tests/unit` (2,759 then) | `tests/integration` (866 then) |
 |---|---|---|
 | `titles`, `episodes` | SURVIVED | `titles` KILLED, `episodes` **SURVIVED** |
 | the other eight | KILLED | KILLED |
+| `images` (M9) | never measured | never measured |
 
 - **`mypy --strict` is not the only thing in the gate that catches it.**
   `tests/integration/test_pipeline_spans.py` issues a real `probe.get("/home")`
@@ -742,10 +790,16 @@ repository/user arguments in turn and running each suite whole:
   `test_the_row_context_carries_the_stored_user_and_not_a_fresh_one` reads the
   context back and kills `user=None`.
 - **`GET /home` is not untested end to end.** It has exactly one such case, and
-  the honest statement of the residual gap is one field, not ten:
-  **`episodes=None` survives all 2,759 unit and all 866 integration cases.**
+  the residual gap that round could name is one field: **`episodes=None`
+  survived all 2,759 unit and all 866 integration cases of the day.**
   `NextUpProvider` is the only reader, it reads at hydration time, and no case
   anywhere composes a real context over a household with an unfinished series.
+- **The residual gap that round could *not* name is `images`.** The `None` scan
+  below kills it by construction — it is derived from the dataclass and a field
+  wired to `None` is a field wired to `None` — so the claim worth checking is
+  not the scan's but the *behavioural* half's, and nobody has run it. Re-run the
+  round before quoting "9 of 10" again; the suite it was scored against
+  (2,759 + 866) is now 4,446 + 1,301.
 
 **And the repair's own generalisation was wrong, which is why the case now
 carries two assertions.** *"Paired with
@@ -761,8 +815,12 @@ The second assertion is the `None` scan the first draft dismissed as "a second
 list", and it is not one:
 `[f.name for f in dataclasses.fields(ctx) if getattr(ctx, f.name) is None] == []`
 is derived from the dataclass, so it grows with it and there is nothing to keep
-in step. Nothing on the real context is legitimately `None` — `affinities` is
-`()` and `now` is a callable. It kills all ten. **The general form, restated:
+in step. Nothing on the real context is legitimately `None` — `now` is a
+callable and **so is `affinities`**, since the screen-cache finding deferred it
+(this entry said `()` until 2026-09-02, describing the value it stopped being).
+That is the shape the scan has to keep working against: "a field that is a
+callable" and "a field wired to nothing" are one keystroke apart and only one is
+legal. It kills all ten. **The general form, restated:
 for any composition-root function a test suite routinely overrides, ask what
 executes the real one — and when the answer is "one behavioural case", ask which
 of its arguments that case's fixture actually reaches, because a behavioural
@@ -788,14 +846,25 @@ a route docstring that wrote `settings.llm_enabled` while arguing *why it
 deliberately does not read it* would have kept that field's check green if
 `composition.py`'s one real reader were ever deleted. Caught before it landed
 and the docstring now spells the field without the dot, with a sentence saying
-why. **Two facts, both measured rather than reasoned.** Re-running the scan
-against an `ast.Attribute` walk instead of a substring search over the same
-tree: **zero of 56 fields currently rest on prose**, so nothing is masked
-today. And the substring itself is loose in a second way — `f".{name}"` for
-`port` matches every `usher.ports` in the tree, so that field's check would
-pass with `cli.py`'s `settings.port` deleted. Both are cheap to close (walk
-`ast.Attribute`), and both are recorded rather than fixed here because the
-check is not this task's and neither is currently wrong. **The general form,
+why. **Two facts, both measured rather than reasoned, and both re-measured
+2026-09-02 because a field count is exactly the kind of number that rots.**
+`Settings` now has **73 fields** (it had 56 when this was written); re-running
+the scan against an `ast.Attribute` walk instead of a substring search over the
+same tree still finds **zero of the 73 resting on prose**, so nothing is masked
+today. The substring is still loose in the second way — `f".{name}"` for `port`
+is satisfied by any of the **354 lines in `src/` containing `.port`**, nearly all
+of them `usher.ports`, while the AST walk finds exactly **one** real reader
+(`cli.py:2226`), so that field's check would pass with it deleted. Re-derive
+both rather than trusting this paragraph:
+
+```bash
+uv run python -c "from usher.config import Settings; print(len(Settings.model_fields))"
+uv run pytest tests/unit/test_config.py::test_every_setting_is_read_by_something
+```
+
+Both are cheap to close (walk `ast.Attribute`), and both are recorded rather
+than fixed here because the check is not this task's and neither is currently
+wrong. **The general form,
 which is the reusable half: a guard that scans source *text* has two failure
 modes and this repository had only written down the first — prose that trips
 it, and prose that answers it.**
@@ -840,10 +909,11 @@ holds on every successful generation**, i.e. the number PRD 10's latency panel
 plots every ordinary night. The adapter takes an injected `clock` for exactly
 that and **no test in the repository had ever passed it one**; the only
 assertion anywhere was `assert usage.latency_ms >= 0`, which the `max(0, …)`
-clamp makes unfalsifiable. Measured at `7bc4bab`: the careful spelling passes
+clamp makes unfalsifiable. Measured at `7bc4bab` (a suite of **2,900 unit + 899
+integration**, against 4,446 + 1,301 on 2026-09-02): the careful spelling passes
 `ruff check`, `ruff format --check`, `mypy` over 437 files, `lint-imports`
-(8 kept), 2,900 unit and 899 integration, and reports **0 ms for a 1,500 ms
-completion**. Three things worth carrying:
+(8 kept), the whole suite, and reports **0 ms for a 1,500 ms completion**.
+Three things worth carrying:
 
 - **A two-tick iterator cannot see this defect, which is why the first draft of
   the fixture would have ratified it.** `iter([_T0, _T0 + elapsed])` hands out
@@ -864,28 +934,18 @@ completion**. Three things worth carrying:
   prose instead. **Before pinning an exact number computed through floating
   point, check the arithmetic in the interpreter rather than on paper.**
 - **The contract suite is the wrong home for it, decided rather than
-  overlooked.** `LLMClientContract` runs against `FakeLLMClient`, against
-  `OpenAICompatibleClient` over `httpx.MockTransport`, and against a live
-  endpoint. Latency is the one `LLMUsage` field that is *measured* rather than
-  reported, and only one of the three measures it: the fake returns whatever
-  `usage()` was scripted with, so the assertion would be a test of the script,
-  and the live arm cannot hold a fixture clock at all. Pinning it there would
-  mean requiring an injected clock of every `LLMClient` — an implementation
-  detail written into a port contract — and would go green on 2 of 3 arms for
-  the wrong reason, which reads as coverage of the adapter. **A contract suite
-  can only assert what every implementation is obliged to do; a number one
-  implementation computes belongs beside that implementation.** The reasoning
-  is in the contract's own module docstring so the next reader does not
-  re-derive it, and that case's three `>= 0` bounds are now labelled as a floor
-  on the taxonomy rather than as a test of any number.
+  overlooked** — three arms, only one of which measures latency at all. The
+  reasoning is in `fixtures-and-fakes.md` and in the contract's own module
+  docstring; the half that belongs here is that a case going green on 2 of 3
+  arms *for the wrong reason* reads as coverage of the third.
 
 **A guard whose subject is a *write* is invisible to every case that asserts a
 return value, and both of them return the same thing.** Same sweep.
 `CandidatePoolService.for_user` has `if not pool: return pool` in front of
 `await self.taste.centroid(user_id)`, and `test_an_empty_catalog_is_an_empty_pool`
 could not see it: `[] == []` on both sides. Two spellings pass **all** of ruff,
-`ruff format --check`, `mypy` (437 files), `lint-imports` (8 kept), 2,900 unit
-and 899 integration — the guard deleted outright, and the lint-clean respelling
+`ruff format --check`, `mypy` (437 files), `lint-imports` (8 kept) and the whole
+suite at `7bc4bab` — the guard deleted outright, and the lint-clean respelling
 that *moves* the return to after the centroid read — and they are not
 equivalent to each other or to the shipped code, because `TasteService.
 centroid` **writes a refusal row** for a household below `_MIN_TITLES` (a
@@ -1088,7 +1148,7 @@ recorded is a statement about nothing.
 
 ## A count and an argument are two assertions, and the count is the one everybody writes
 
-Same task. `test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass`
+Same task. `test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass`
 asserted `requeues == 1` over three lane passes. Recovery then changed from
 *"once at startup, requeueing everything"* to *"on a timer, on a lease"* — and
 **the old assertion passes against both**, because the count is identical and
@@ -1099,6 +1159,30 @@ The fake now records the argument as well as counting the call. Same shape as
 *"a rejection is not an assertion"* one file over: when a call's correctness
 lives in **what it was passed** rather than in how often it happened, a
 call-count spy is a spy on the wrong thing.
+
+## A route-driven integration test commits for real, and what it leaves behind fails four cases in three other files
+
+`get_session` is the request's commit boundary, so an integration test that
+drives a walk through a **route** writes durably against the session-scoped
+container — unlike every rolled-back test in the suite. Leaving
+`tests/integration/test_pipeline_spans.py`'s stubbed `titles` and enqueued
+`jobs` behind took down four tests in three other files: a duplicate
+`ix_titles_tmdb_id_kind`, a queue depth of 2 where 0 was expected, a claim that
+found 3 jobs instead of 1, and a global `count_by_state`. **Every one of them
+passed in isolation**, which is the tell — same family as the directory-order
+finding above and the `ANALYZE` one below. `media_items` and `sync_runs` go with
+the source's `ON DELETE CASCADE`; `titles` and `jobs` do not, so a route-driven
+case cleans those two up itself.
+
+**And a guard that scans nothing passes exactly like a guard that passes.** Two
+spellings of the same trap, both measured here: a `sitecustomize.py` that is not
+on `PYTHONPATH` produces the identical green run as one that is and blocks
+nothing, and a repo-scan guard whose glob matches no files produces the identical
+green as one that scanned everything (`fixtures-and-fakes.md` carries both, with
+the two-part proof each needs — a banner from the module itself *and* an
+out-of-band probe; a case that fails when the glob is emptied). Nearest relatives
+are the venv-shebang trap and the `-q`/`-qq` trap in `mutation-sweeps.md`.
+**A check's own installation is an assertion, and it is the one nobody writes.**
 
 ## `ANALYZE` outlives the transaction that ran it, and that is what issues #7 and #26 called a "load-sensitivity class" (2026-08-19, issues #7 + #26)
 
@@ -1161,21 +1245,49 @@ rolled back looks exactly like one that worked, so it asserts the pages shrank
 `VACUUM` with `SELECT 1` and watched to fail: `{'titles': (0, 701),
 'title_embeddings': (0, 8875)}`.
 
-**The class is wider than the file that was repaired.** Six other integration
-files `ANALYZE` a shared table inside the rolled-back `session` and put nothing
-back — `test_title_match_repository.py` (`titles`, twice, at 200,000 rows),
-`test_ingest_end_to_end.py` (`media_items`), `test_job_queue.py` (`jobs`,
-twice), `test_raw_payload_store.py`, `test_sync_run_repository.py`
-(`sync_runs`, **twice** since 2026-08-25 — issue #41's Task 2 added a second
-site for `latest_incomplete_run`'s plan assertion, beside the one already
-here), and the `ANALYZE` behind `test_api_surface_schema.py`'s 200,000
-images. Not repaired here and not measured; recorded so the next person does
-not rediscover the mechanism from a symptom.
+**Do not read the ledger below — re-derive it.** It has been wrong twice, in
+both directions, and one command settles it:
+
+```bash
+grep -rn 'text("ANALYZE' tests/integration/     # every site, one line each
+```
+
+**The repaired file is itself still on the list, which the prose above hid.**
+`restores_the_statistics_this_seed_leaks` names `tables = ("titles",
+"title_embeddings")` (`test_adapters_search_postgres.py:1025`) and nothing else
+— but `test_the_owned_path_does_not_use_the_ann_index` at `:1171`, which *takes
+that fixture*, runs `ANALYZE media_items` at `:1197`. So the one file this entry
+calls repaired leaks a third table's statistics into every case after it, and it
+is the exact failure the closing paragraph says a written-out count prevents.
+Found 2026-09-02 by running the grep above rather than by reading this entry.
+
+**The class is wider than the file that was repaired: five *other* integration
+files, eight sites** (2026-09-02, whole tree):
+
+| file | table | sites |
+|---|---|---|
+| `test_title_match_repository.py` | `titles`, at 200,000 rows | 2 |
+| `test_job_queue.py` | `jobs` | 2 |
+| `test_sync_run_repository.py` | `sync_runs` | 2 |
+| `test_ingest_end_to_end.py` | `media_items` | 1 |
+| `test_raw_payload_store.py` | `raw_payloads` | 1 |
+
+`test_sync_run_repository.py`'s second site arrived 2026-08-25 (issue #41's
+Task 2, `latest_incomplete_run`'s plan assertion) beside the one already there.
+None of the eight is repaired or measured; they are recorded so the next person
+does not rediscover the mechanism from a symptom.
+
+**`test_api_surface_schema.py` was on this list and runs no `ANALYZE` at all** —
+its only hit is the word inside a docstring at `:305`, describing a *separate*
+200,000-image measurement taken outside the suite. Six became five on 2026-09-02.
+A ledger of statements assembled by reading prose acquires the ones that are
+only *discussed*, which is the mirror of the failure the paragraph below names:
 
 **A file already on this list is where a new site is cheapest to add and
-hardest to notice**, which is why the count is now written out rather than
-the filename alone: the ledger read as complete while a second `ANALYZE`
-landed in a file it already named.
+hardest to notice**, which is why the count is written out per file rather than
+the filename alone. Both halves have now bitten: the ledger read as complete
+while a second `ANALYZE` landed in a file it already named, *and* it counted a
+file that never ran one.
 
 ## An `id()` is a reusable address, so a test that identifies objects by one is identifying nothing (2026-08-19, issue #7)
 

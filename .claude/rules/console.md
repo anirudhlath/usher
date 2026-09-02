@@ -1,6 +1,7 @@
 ---
 paths:
   - "web/**"
+  - ".github/workflows/**"
 ---
 
 # The Usher Console (`web/`)

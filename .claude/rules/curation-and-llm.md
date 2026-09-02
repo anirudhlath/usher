@@ -27,6 +27,76 @@ frontier model will do better and a 3B model much worse. **What transfers is
 the *ordering* of options and the *shapes* of failures. The percentages
 transfer to nothing.**
 
+## Running one, and what it costs you to look
+
+```bash
+export USHER_LLM_ENABLED=true
+export USHER_LLM_BASE_URL="http://127.0.0.1:8000/v1"   # any OpenAI-compatible endpoint
+export USHER_LLM_MODEL="<what /v1/models says>"        # printed back as report.usage.model
+uv run usher curate            # one generation for the default household
+```
+
+**`usher curate` takes no arguments at all** — no `--user`, deliberately, because
+PRD 01 leaves authentication as a seam and `usher.db.users` stands in it as a
+singleton `is_default` row. It is the one surface that returns the *answer* —
+pool, rows, drops, tokens, cost — in the same breath as the request. It prints
+to stdout, never through the log sink (`report=False`, and
+`configure_telemetry` had to quiet `httpx`'s own per-request INFO line or the
+report opened with a ~900-character JSON envelope about its own completion):
+
+```text
+generation: <uuid>
+pool: 200 candidates
+kept: <n> rows, <n> cards
+  <slug>        <heading>                  <n> cards
+dropped (all five reasons, zeros included -- an absent line and a
+         reason nobody counts read the same):
+  row_too_short    <n> rows
+  ...                                        # all five, zeros included
+tokens: <in> in, <out> out   cost: $0.00000000   latency: <ms> ms   model: <name>
+```
+
+*(The `dropped` block iterates the map the validator built rather than
+filtering it, and the unit is derived from the member's own `row_` prefix — two
+of the five count rows, three count cards, so summing across the label is
+meaningless. `cost_usd` is a `Decimal` all the way to the screen, eight places
+because that is what `llm_calls.cost_usd`'s `NUMERIC(12,8)` stores, so the
+command and a `SUM()` show the same digits.)*
+
+**Two other surfaces reach the same `CurationService.generate`, and neither has
+ever been run live** — `JobKind.CURATE` claimed by `uv run usher work`, and
+`POST /admin/rows/regenerate`, which enqueues one. The route promises a 202 and
+says nothing about when the work runs; `usher work` needs a client of its own,
+because `build_worker` registers `CURATE` under the same guard `INDEX` sits
+behind.
+
+**Two exits are not stack traces and both are ADR-0026's shape.** With
+`USHER_LLM_ENABLED=false` there is no `CurationService` to build at all —
+`composition.llm_client` answers `(None, no-op)` and the service spells its
+client `LLMClient`, never `LLMClient | None`, so "no client, no curation" is a
+`mypy` fact at the composition root rather than a branch — and the command exits
+with a sentence naming the two settings. An empty pool, a generation that
+validated to zero rows, and a completion the endpoint could not produce all
+raise `PortDataMalformed` and exit 1 with *"(the household's previous rows still
+stand)"*. ⚠️ **That sentence is deliberately not "nothing was written":** only
+the empty pool attempts no call. The other two reach `_settle`, which
+**commits an `llm_calls` row with `ok = false` and the real token counts** —
+so on a zero-row generation the operator has been charged. Check with:
+
+```sql
+SELECT at, purpose, ok, tokens_in, tokens_out, cost_usd
+  FROM llm_calls ORDER BY at DESC LIMIT 5;   -- the column is `at`, not `created_at`
+```
+
+The four settings that bound a run, and the two that fight:
+
+| setting | default | what this file measured |
+|---|---|---|
+| `USHER_CURATION_POOL_SIZE` | 200 | `le=1000`, but the reference endpoint 400s above 600 |
+| `USHER_LLM_MAX_OUTPUT_TOKENS` | 2048 | raising it silently lowers the workable pool |
+| `USHER_LLM_PRICE_{IN,OUT}_PER_MTOK` | `Decimal(0)` | 0 is honest self-hosted, and invisible billing hosted |
+| `USHER_QUERY_EXPANSION_ENABLED` | `false` | measured *worse*; `true` without `USHER_LLM_ENABLED` is refused at startup |
+
 ## The refutations
 
 **`~14.6 prompt tokens a candidate` was wrong, and it was wrong in the way a
@@ -181,14 +251,37 @@ queue, because a reader of PRD 06 is the person who needs it.
 
 Named rather than implied. **`media_items` was 0**, so ownership sorting and
 the other nine row providers were never exercised against real data.
-**`title_embeddings` was 0**, so `CandidatePoolService._reranked`'s centroid
-re-rank **never executed** — the one half of boundary call 5 that is still
-covered by the suite alone. End-to-end retrieval through `PostgresSearchIndex`,
-`JobKind.CURATE` via `usher work`, and `POST /admin/rows/regenerate` were all
-untested (only the `usher curate` path ran). **No hosted provider was touched
-at all**, so ADR-0027's *"two providers' quirks are unmeasured"* is unchanged:
-whether `json_schema` is honoured, whether `strict: true` is accepted, and
+**`title_embeddings` was 0**, so the centroid re-rank **never executed** — the
+one half of boundary call 5 that is still covered by the suite alone.
+
+⚠️ **That re-rank is `_reranked`, a module-level function
+(`services/curation_pool.py:187`), not a `CandidatePoolService` method — this
+file called it `CandidatePoolService._reranked` until 2026-09-02 and it has
+never been one.** `CandidatePoolService.for_user` calls it at `:184` after two
+early returns that are the reason the live run missed it: an empty pool returns
+before any centroid read, and a `centroid()` of `None` — the shipped default and
+every new household — returns the base order whole rather than coalescing to a
+zero vector, which would rank every candidate identically. Being module-level is
+what makes it testable at all here: it is a pure
+`(pool, centroid, vectors) -> list[Title]` with nothing to construct, which is
+how the suite covers a path no live run has reached.
+
+End-to-end retrieval through `PostgresSearchIndex`, `JobKind.CURATE` via
+`usher work`, and `POST /admin/rows/regenerate` were all untested (only the
+`usher curate` path ran). **No hosted provider was touched at all**, so
+ADR-0027's *"two providers' quirks are unmeasured"* is unchanged: whether
+`json_schema` is honoured, whether `strict: true` is accepted, and
 429/`Retry-After` semantics are all still one-endpoint knowledge.
+
+⚠️ **And the re-rank got further from being exercised, not closer.** `m09e`
+(2026-08-13) widened `title_embeddings.embedding` and `user_taste.centroid`
+384 → 1024 and **deleted every embedding and every taste centroid** rather than
+converting them, so any deployment that had crossed `services/taste.py`'s
+module-level `_MIN_TITLES` (5) went back to `centroid() is None` and `for_user`'s
+second early return. Reaching the re-rank now costs `usher index --backfill`,
+then `usher work`, then enough watch history to rebuild a centroid — all before
+a single `usher curate`. `.claude/rules/search-and-embeddings.md` carries the
+width argument (ADR-0038).
 
 ## Query expansion measured *worse*, and that is a separate run
 

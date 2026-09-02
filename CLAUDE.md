@@ -79,7 +79,10 @@ load automatically when working in `docs/`.
   Users run importers and hold their own API keys. Attribution strings stay in
   the API surface.
 - **Use `uv`** for all Python work: `uv sync`, `uv run <cmd>`, `uv add <pkg>`.
-  Never pip/conda, never activate a venv — `.claude/settings.json` denies both.
+  Never pip/conda, never activate a venv — `.claude/settings.json` denies the
+  first and `.claude/hooks/guard-bash.sh` refuses the second. (An activation
+  would not survive anyway: each Bash call gets its own shell, so the next
+  command runs outside it.)
 - **TDD.** Failing test first, then implementation.
 - **A mutation sweep mutates the working tree in place, so nothing else may use
   that tree while it runs.** Serialise anything that mutates the tree — one
@@ -92,12 +95,21 @@ load automatically when working in `docs/`.
   gets a `cp` backup, and the restore is verified by reading the file back, not
   by the suite going green: a suite green before the plant is green again after
   a revert that took twenty unrelated lines with it (M8 Task 10).
-  **`.claude/settings.json` denies these rather than trusting you to remember**
-  — along with `git restore`, which does the same damage and which this bullet
-  did not name until 2026-09-01. An instruction is a request; a deny is a
-  mechanism.
+  **These are refused rather than left to your memory** — along with
+  `git restore`, which does the same damage and which this bullet did not name
+  until 2026-09-01. An instruction is a request; a refusal is a mechanism.
+  **The refusal is a hook, not the `deny` list, and the reason is that a
+  `deny` entry is prefix matching.** It closes the spellings someone thought to
+  enumerate and nothing else: `git -C . checkout .`, `git reset -q --hard` with
+  the flags reordered, and `git checkout-index -a -f` all ran clean against the
+  enumerated list on 2026-09-02. `.claude/hooks/guard-bash.sh` reads the whole
+  command instead, so it matches on what the command *does* — and it asks the
+  filesystem whether `git checkout <thing>` names a path, because that is the
+  only thing that separates a branch switch from a discard
+  (`git checkout -b feature/x` is not one). `git reset --soft` is allowed.
 - **Secrets in `Settings` are `pydantic.SecretStr`**, never plain `str` —
-  `database_url`, `secret_key`, `tmdb_api_key`, `llm_api_key`. Unwrap with
+  `database_url`, `secret_key`, `tmdb_api_key`, `llm_api_key`,
+  `embedding_api_key` (five as of 2026-09-01). Unwrap with
   `.get_secret_value()` only at the point of use (e.g. handing a DSN to
   `create_async_engine`); never store the unwrapped value in a variable that
   outlives that call, and never let it reach a log line or an exception
@@ -135,30 +147,31 @@ was learned separately in two or more subsystems.
 
 ## Verified facts worth not re-deriving
 
-Eight milestones of measurements, live-run findings, and traps — each with its
+Nine milestones of measurements, live-run findings, and traps — each with its
 date, its sample, and what it refuted. **They are filed by subsystem under
 `.claude/rules/` and load automatically when you work in the matching paths**,
 so a session pays only for what it touches.
 
 | file | loads when working on | holds |
 |---|---|---|
-| `testing-discipline.md` | `tests/**` | test-design findings — assertions that cannot fail, premise guards, ordering premises, the shape a concurrency test needs |
+| `testing-discipline.md` | `tests/**`, `**/conftest.py` | test-design findings — assertions that cannot fail, premise guards, ordering premises, the shape a concurrency test needs |
 | `mutation-sweeps.md` | `docs/plans/**` | sweep harness mechanics — the three `.pyc` defences, `compile()` rather than `ast.parse`, SIGTERM skipping the `finally`, the scoring vocabulary — plus the milestone-level and early-task results those rules came from |
 | `mutation-sweep-ledgers.md` | itself, deliberately — open it directly | every per-task sweep ledger with its plants and survivors, M9 onward |
-| `fixtures-and-fakes.md` | `tests/fixtures/**`, `tests/fakes/**`, `tests/contract/**` | the network guard, the four no-third-party-data controls, shape-recorded/value-synthetic fixtures, every recorded divergence between a fake and its Postgres arm |
-| `db-and-sql.md` | `src/usher/db/**` | `ON CONFLICT` traps, `now()` vs `clock_timestamp()`, triggers that own a column, staging-table locks, generated columns, the migration id convention, `test_migrations.py`'s two halves |
-| `emby-push-and-ingest.md` | `adapters/emby/**`, the pipeline services incl. `watch_write.py` | M3/M4/M5's live runs against a real Emby 4.9.5.0 — the wrong write-back route, `UserData` divergence, the websocket's real cadence, the match ladder's measured yield |
-| `tmdb-and-enrichment.md` | `adapters/tmdb/**`, `services/enrich.py` | the 712-request live run, the 4xx taxonomy, `append_to_response=season/N`, movie/TV divergence across three API layers |
-| `search-and-embeddings.md` | `adapters/search/**`, `adapters/embedding/**`, `services/search.py`, `services/similar.py` | the typo-tolerance gate that failed, GIN vs GiST, RRF's five traps, `fastembed` vs `sentence-transformers`, `halfvec`, `hnsw.iterative_scan`, the two embedding runtimes and the two vLLM flags that each cost a run |
-| `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py`, `similar.py` | the sequential build's two very different p95s, the genome's real coverage and its denominators, and why M9 removed the genome from the similarity blend |
-| `curation-and-llm.md` | `adapters/llm/**`, `services/curation*.py`, `query_expansion.py`, `llm_ledger.py` | M8's live run — the 88% genre-heading finding, the real per-candidate token cost, the pool ceiling the reference endpoint cannot serve, why the coercion is the primary path, and query expansion measuring worse |
-| `bootstrap-and-datasets.md` | `adapters/bulk/**` | IMDb TSV parsing, MovieLens archive selection, Wikidata timing, the cache-key finding |
+| `fixtures-and-fakes.md` | `tests/{fixtures,fakes,contract}/**`, both `conftest.py`s, `scripts/capture_{tmdb,emby}_fixture.py` | the network guard, the four no-third-party-data controls, shape-recorded/value-synthetic fixtures, every recorded divergence between a fake and its Postgres arm |
+| `db-and-sql.md` | `src/usher/db/**`, `alembic.ini`, `scripts/measure_browse.py` | `ON CONFLICT` traps, `now()` vs `clock_timestamp()`, triggers that own a column, staging-table locks, generated columns, the migration id convention, `test_migrations.py`'s two halves |
+| `emby-push-and-ingest.md` | `adapters/emby/**`, `services/{push,ingest,matching,reconcile,watch_sync,watch_write}.py`, `scripts/measure_ingest.py` | M3/M4/M5's live runs against a real Emby 4.9.5.0 — the wrong write-back route, `UserData` divergence, the websocket's real cadence, the match ladder's measured yield |
+| `tmdb-and-enrichment.md` | `adapters/tmdb/**`, `services/{enrich,handlers}.py`, `scripts/measure_worker_lane.py`, `scripts/enqueue_tier_enrichment.py` | the 712-request live run, the 4xx taxonomy, `append_to_response=season/N`, movie/TV divergence across three API layers |
+| `search-and-embeddings.md` | `adapters/search/**`, `adapters/embedding/**`, `services/search.py`, `services/similar.py`, `services/index.py`, `services/genres.py`, `domain/genres.py`, `db/repositories/search.py`, `api/routers/search.py`, `scripts/measure_{suggest_tiers,exact_name_rank,fusion_coverage_bias}.py` | the typo-tolerance gate that failed, GIN vs GiST, RRF's five traps, `fastembed` vs `sentence-transformers`, `halfvec`, `hnsw.iterative_scan`, the two embedding runtimes and the two vLLM flags that each cost a run |
+| `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py`, `similar.py`, `scripts/measure_{rows,pair_rates}.py` | the sequential build's two very different p95s, the genome's real coverage and its denominators, and why M9 removed the genome from the similarity blend |
+| `curation-and-llm.md` | `adapters/llm/**`, `services/curation{,_pool,_prompt,_validate}.py` (four literals, not a glob), `query_expansion.py`, `llm_ledger.py` | M8's live run — the 88% genre-heading finding, the real per-candidate token cost, the pool ceiling the reference endpoint cannot serve, why the coercion is the primary path, and query expansion measuring worse |
+| `bootstrap-and-datasets.md` | `adapters/bulk/**`, `services/bootstrap.py`, `domain/people.py`, `domain/bootstrap.py`, `scripts/measure_{bulk_load,imdb_people,people_provenance}.py` | IMDb TSV parsing, MovieLens archive selection, Wikidata timing, the cache-key finding |
 | `ports-and-error-taxonomy.md` | `src/usher/ports/**`, `src/usher/adapters/**` | what a failure is *called* — a refusal and a fault sharing one type, when a subclass beats a new member, the frequency question to ask before reusing one, and the two-constants-must-move-together shape |
-| `api-telemetry-and-lanes.md` | `api/**`, `telemetry.py`, `composition.py` | SSE and `ASGITransport`, OTel provider caching, the instrumentor that produced no spans for three milestones, lane supervision and readiness |
-| `config-cli-and-deployment.md` | `config.py`, `cli.py`, `compose.yml`, `Dockerfile` | the settings failure that printed its own credential, `.env`'s two readers, `env_file:` vs `environment:`, image measurement, CI tag pinning |
+| `api-telemetry-and-lanes.md` | `api/**`, `telemetry.py`, `composition.py`, `services/{jobs,events,playback,playback_ticket,titles,visibility,sources}.py` | SSE and `ASGITransport`, OTel provider caching, the instrumentor that produced no spans for three milestones, lane supervision and readiness |
+| `config-cli-and-deployment.md` | `config.py`, `cli.py`, `__main__.py`, `db/migrations/env.py`, `compose.yml`, `Dockerfile`, `.env.example`, `pyproject.toml`, `.github/workflows/**` | the settings failure that printed its own credential, `.env`'s two readers, `env_file:` vs `environment:`, image measurement, CI tag pinning |
 | `milestone-boundary-calls.md` | `docs/plans/**`, `docs/prd/09-roadmap.md` | what each milestone delivered, what it was live-verified against, and what it deliberately did not build |
-| `prd-maintenance.md` | `docs/**` | how to keep the PRD current |
-| `console.md` | `web/**` | the console's own gate (`npm run verify` + two Playwright jobs), the `design-system/` boundary nothing enforces, and why the Python gate says nothing about `web/` |
+| `prd-maintenance.md` | `docs/**/*.md` | how to keep the PRD current |
+| `evals.md` | `src/usher/eval/**`, `docs/evals/**`, `tests/**/test_eval_*.py` | the eval harness — `bars.toml`'s hash-and-never-move rule, the three bars pending on #39, `--quick` records nothing, why `eval/schema.sql` is not a migration, where a run's write-up goes |
+| `console.md` | `web/**`, `.github/workflows/**` | the console's own gate (`npm run verify` + two Playwright jobs), the `design-system/` boundary nothing enforces, and why the Python gate says nothing about `web/` |
 | `rules-file-maintenance.md` | `.claude/rules/**` | how `paths:` matching actually works, the two splits that worked and the one that was measured and refused |
 
 To read one outside its trigger paths, just open the file.
@@ -174,8 +187,28 @@ actually works. The failure mode that matters there is silent and points the
 wrong way — **a rules file is conditional only if it carries `paths:`**, so
 moving bulk into a file without frontmatter promotes it from sometimes-loaded
 to always-loaded. A finding that genuinely applies everywhere goes in "Five
-rules about evidence" above — that list has earned five entries in eight
+rules about evidence" above — that list has earned five entries in nine
 milestones, so the bar is high.
+
+**`.claude/settings.json` also carries three hooks, and all three are
+mechanisms rather than reminders.** At session start
+`.claude/hooks/session-start.sh` prints one line if this worktree's `.venv`
+lacks the `eval` extra (the gate trap below). Before every `Edit`/`Write`,
+`.claude/hooks/guard-generated.sh` refuses a hand edit to
+`web/src/api/schema.d.ts`, which `npm run gen:types` regenerates. Before every
+`Bash`, `.claude/hooks/guard-bash.sh` refuses the two families above — the
+working-tree discards and `ruff format` on prose.
+
+**A hook is the right shape when the mistake has more spellings than you can
+list**, which is what separates the three from the `deny` entries beside them.
+`deny` is prefix matching: it caught `uv run ruff format docs/` and missed
+`python -m ruff format docs/`, `uvx ruff format docs/`, a flag inserted before
+the path, a quoted path and an absolute one — all six demonstrated on
+2026-09-02, and the first of them proven to rewrite Markdown (`ruff 0.16.0`,
+sha `f68662ada458` → `ea1810b17391`). Add a hook only for a mistake a session
+has actually made, and **prove the new spellings are caught and the legitimate
+neighbours are not** — `git checkout -b feature/x` and CLAUDE.md's own
+`. ./.env` idiom both have to keep working.
 
 ## Commands
 
@@ -277,6 +310,7 @@ docker compose down                          # data/ bind mounts survive
 
 ```bash
 uv run usher --help
+uv run usher serve                           # the HTTP server; also the default with no subcommand
 
 uv run usher bootstrap --phase all           # every phase below, in this order
 uv run usher bootstrap --phase imdb          # one phase at a time; resumable
@@ -290,6 +324,8 @@ uv run usher unmatched --limit 50               # the review queue
 uv run usher unmatched --resolve <media_item_id> --title <title_id>
 uv run usher work --once                        # one pass over the queue
 uv run usher work                               # a worker daemon
+uv run usher push --source "Living Room Emby"   # the push lane for one source
+uv run usher push --probe                       # connect, report what arrived, exit
 
 uv run usher index                           # model, stale count, refused count
 uv run usher index --backfill                # enqueue one index job per stale title
@@ -349,6 +385,10 @@ uv run python scripts/measure_imdb_people.py --phase head  # M9 T3; downloads 1.
 uv run python scripts/measure_browse.py                    # M9 B7
 uv run python scripts/measure_people_provenance.py --phase head   # ADR-0036; ~700 MiB
 uv run python scripts/measure_pair_rates.py
+uv run python scripts/measure_worker_lane.py --jobs 600 --seconds 45   # W1; TMDb stubbed on 127.0.0.1
+uv run python scripts/measure_exact_name_rank.py --sample <json> --label before --out <path>   # #25; read-only
+uv run python scripts/measure_fusion_coverage_bias.py      # #21; read-only
+uv run python scripts/enqueue_tier_enrichment.py --limit 200000   # writes `jobs` rows; `usher work` spends the budget
 
 set -a; . ./.env; set +a                              # never a literal credential
 uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json

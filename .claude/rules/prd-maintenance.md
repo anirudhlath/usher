@@ -5,8 +5,14 @@ paths:
 
 # Maintaining the PRD and specs
 
-Loaded when working with anything under `docs/`. The standing obligation to keep
-the PRD current lives in `CLAUDE.md`; this file is the mechanics.
+Loaded when you open a **Markdown** file under `docs/` — the trigger is
+`docs/**/*.md`, not `docs/**`. The two non-Markdown artefacts in this tree,
+`docs/evals/bars.toml` and `docs/evals/ledger.jsonl`, therefore do **not** load
+this file; they load `.claude/rules/evals.md`, whose `docs/evals/**` covers
+every extension and whose rules (a bar is hashed and never moved; the ledger is
+append-only) are the ones that actually govern them. Nothing here applies to
+either. The standing obligation to keep the PRD current lives in `CLAUDE.md`;
+this file is the mechanics.
 
 ## Documentation map
 
@@ -24,9 +30,15 @@ docs/prd/
 ├── 08-operations.md                 config, secrets, failure, testing
 ├── 09-roadmap.md                    milestones
 ├── 10-telemetry-and-dashboards.md   instrumentation, Grafana
-└── decisions/0001-NNNN              ADRs — the *why* behind contested calls
+└── decisions/
+    ├── 0001-NNNN                    ADRs — the *why* behind contested calls
+    └── README.md                    the register: one row per ADR, and a test
 
 docs/specs/                          point-in-time designs for implementation
+docs/plans/                          one file per milestone or eval phase,
+                                     plus progress.md's four status tables
+docs/evals/                          run write-ups — and bars.toml /
+                                     ledger.jsonl, which are `evals.md`'s
 ```
 
 ## PRD vs spec
@@ -43,13 +55,23 @@ Write a new spec if a new plan is needed.
 | When you… | Do this |
 |---|---|
 | Change a design decision during implementation | Update the relevant `docs/prd/NN-*.md` section |
-| Make a decision someone could reasonably dispute | Add an ADR in `decisions/`, link it from the section |
+| Make a decision someone could reasonably dispute | Add an ADR in `decisions/`, link it from the section, **and add its row to `decisions/README.md`** — `tests/unit/test_decision_register.py` compares the two sets in both directions, so a file with no row and a row naming a renamed file are each a red rather than a document nobody finds |
 | Reverse an earlier decision | **Update the existing ADR's status and add the new evidence** — never silently contradict it |
 | Add or complete a section | Update the status table in `docs/prd/README.md` |
 | Land a task from a plan | Update the status cell in **both** tables. `docs/plans/progress.md` and `docs/prd/README.md`'s implementation-plan table each carry one for every plan, and `test_docs_currency.py` checks only that a plan is *named* by them, never that they agree — so the two drifted to `✅ all six landed` against `📋 planned, nothing landed` for the same branch, in one commit, on 2026-08-25 |
 | Write a plan file for a spec that has no status table yet | Give it **its own level-2 heading and table** in `docs/plans/progress.md` naming that spec, and add a row to `docs/prd/README.md`'s implementation-plan table. **Never a row under an existing heading** — that heading names a different spec, so the row makes it false in order to satisfy a check about documentation being true. A plan that really is a *milestone* of the v1 design is the exception and belongs in the milestone table. `tests/unit/test_docs_currency.py` reads every table as one union and fails if a plan file is named by none of them |
 | Discover a load-bearing fact (rate limit, dataset size, API behaviour) | Record it with its source in the relevant section |
 | Learn something that invalidates a stated fact | Correct it and say so — stale "verified" facts are worse than none |
+
+**A worked example of the *"land a task from a plan"* row is standing in the
+tree right now, and the suite is green over it.** Both E1 rows — `docs/plans/progress.md`'s and
+`docs/prd/README.md`'s — still read *"🔨 in progress — 15 tasks planned; Task 1
+landed"*, written 2026-08-18 and untouched since, although PR #45 merged the
+whole phase branch on 2026-08-20 and `usher eval` has been a shipped command
+ever since (`.claude/rules/evals.md` is the record). The two tables **agree with
+each other**, so even a check that compared them would pass; nothing compares
+either to the tree. When you land a task, the cell is the work — the row being
+present is only what the test can see.
 
 ## Conventions
 

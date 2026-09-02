@@ -3,20 +3,34 @@ paths:
   - "src/usher/services/rows/**"
   - "src/usher/services/home.py"
   - "src/usher/services/taste.py"
-  - "src/usher/services/derive.py"
   - "src/usher/services/similar.py"
+  - "scripts/measure_rows.py"
+  - "scripts/measure_pair_rates.py"
 ---
 
-<!-- `similar.py` was added to the triggers on 2026-08-12 (M9 S7). Half this
-file is about the tag genome, the genome's only consumer was
-`SimilarityService`'s blend, and the trigger list did not name that module —
-so the two sessions most likely to undo the S7 decision (anyone editing the
-blend, and anyone re-adding a signal) were the two this file never loaded for.
-Checked rather than assumed: `grep -rln genome src/usher/services/` finds
-`home.py`, `taste.py`, `curation_pool.py`, `bootstrap.py` and `similar.py` —
-the first two were already triggers, the last was the one that *blends* it and
-was not. `curation_pool.py` and `bootstrap.py` are left off deliberately: they
-read the vocabulary and import the file, and neither can reach a weight. -->
+<!-- Trigger list, and both changes to it are measurements rather than guesses.
+
+`similar.py` was ADDED on 2026-08-12 (M9 S7). Half this file is about the tag
+genome, the genome's only consumer was `SimilarityService`'s blend, and the
+trigger list did not name that module — so the two sessions most likely to undo
+the S7 decision (anyone editing the blend, and anyone re-adding a signal) were
+the two this file never loaded for. Checked rather than assumed:
+`grep -rln genome src/usher/services/` finds `home.py`, `taste.py`,
+`curation_pool.py`, `bootstrap.py` and `similar.py` — the first two were
+already triggers, the last was the one that *blends* it and was not.
+`curation_pool.py` and `bootstrap.py` are left off deliberately: they read the
+vocabulary and import the file, and neither can reach a weight.
+
+`derive.py` was REMOVED on 2026-09-02, on the same test applied the other way.
+It had been a trigger and this file says nothing about it — `grep -n derive`
+found the frontmatter line and one unrelated use of the word "derived", so a
+`services/derive.py` session paid for ~600 lines of home-screen and genome
+material and got no finding. Nothing else triggers on that module now; if
+`DeriveService` earns findings, they belong beside `usher derive`'s other half
+in `bootstrap-and-datasets.md` or in a file of their own, not here. The rule
+both changes come from: **a trigger is justified by findings the file actually
+holds about that module, and the check is a grep.** -->
+
 
 
 # The home screen, row providers and the tag genome
@@ -25,11 +39,26 @@ Verified facts, loaded when working in this subsystem. Measured or observed,
 never assumed — each entry carries its date, its sample and what it refuted.
 The always-on conventions live in `CLAUDE.md`; this file is the evidence.
 
+**Two subjects, and roughly half of this file is the one you are probably not
+here for.** The **similarity blend** material is the three genome entries that
+open the file (cosine distribution, the 1.190 ms refutation, coverage and its
+denominators) plus everything from *The candidate-pair rate* through *the
+binding reason a user-tag term was refused*. It exists for `similar.py` and
+`scripts/measure_pair_rates.py` sessions — it is here rather than in
+`search-and-embeddings.md` because the blend is the genome's only consumer —
+and a session editing `services/rows/`, `home.py` or `taste.py` can skip all of
+it. **Everything else is the home screen**: the sequential build, the row and
+screen caches, `RowContext`, `BaseRow`'s hooks, `TasteService`'s memos, the
+split genre vocabulary its providers still read, and the TTL that enrichment
+invalidates.
+
 **M7's measurements, taken 2026-08-04/05 on this host against
-`pgvector/pgvector:pg17` (pgvector 0.8.6) unless stated otherwise. The
-`titles.popularity` re-measure — the column is `titles.tmdb_popularity` since
-`m10a`/ADR-0040 — has its own entry inside M6's gate section
-below, because it is a correction to that gate's headline.**
+`pgvector/pgvector:pg17` (pgvector 0.8.6) unless stated otherwise.** Nothing
+here re-measures `titles.popularity`; that column is `titles.tmdb_popularity`
+since `m10a`/ADR-0040, M6's gate measured it NULL on all 1,271,138 rows, and
+the correction (**77%** on a partly-enriched catalog) is in
+`db-and-sql.md`'s M9 B7 section — not in this file, which is where a reader
+following an older cross-reference will look.
 **The genome cosine does NOT saturate, measured against a bar written before
 the run — so the vectors ship raw and are not mean-centred.** Over all 16,376
 vectors and all **268,157,000** ordered off-diagonal pairs: **mean 0.6101, sd
@@ -56,43 +85,24 @@ reopens it.
 **The genome's real coverage, with its denominators — measured 2026-08-05
 against a `--phase all` catalog of 1,271,570 titles.** 15,565 genome vectors
 joined: **1.22%** of all titles, **1.73%** of 899,991 movies, **7.61%** of the
-≥100-IMDb-vote priority tier (measured at 204,494 titles, not the ~189k PRD 04
-estimated), **10.68%** of a real household's 5,020 owned titles. **The number
-that decides whether the term does anything is none of those** — it is the
-*candidate-pair* rate, because both sides of a pair need a vector: **1.81%**
-(9,069 of 502,000 pairs), **measured, never squared** (`coverage²` would have
-said 1.14% and a real pool is not an independent draw). That is far below the
-10% floor the weight assumes, so at 0.25 the genome reorders about one
-neighbour list in fifty-five. **The term is kept anyway and the choice deferred
-to M9**: 1.81% is a conservative floor (no TMDb key ran, so documents are
-name-shaped and the pool is name-selected, which weakens exactly the
-correlation being measured), and `blend_fingerprint` makes reverting cheap and
-detectable. The genome is **movies-only and frozen at 2023-07-20**, so coverage
-of anything newer is structurally zero and decays.
-⚠️ **And the population is half of that number — settled 2026-08-11 by M9 Task
-S1, before anything in M9 quoted the rate as a baseline.** The arithmetic is
-the load-bearing half: 502,000 candidate pairs over `_CANDIDATE_POOL` (100) is
-exactly **5,020 seeds**, and `SimilarityService.rebuild`'s seeds are
-`list_embedded`, i.e. rows of `title_embeddings` with a non-NULL vector. Those
-5,020 were **one household's owned titles** — the measurement script's own
-predicate is `UPDATE titles SET enrichment_state = 'enriched' WHERE EXISTS
-(SELECT 1 FROM media_items m WHERE m.title_id = titles.id AND m.available)`,
-printing *"promoted 5020 owned titles to the enriched tier"* — so the run moved
-the **tier label** and not the **document**: `search_document`'s weight classes
-C and D (overview, tagline, keywords) were empty, exactly as the script's own
-docstring says. Corroborating counts, both read-only 2026-08-11: `usher-m9-pg`
-holds 1,272,367 titles / **0** embeddings / 0 neighbours / 0 `media_items`, and
-`usher-postgres-1` holds 1,271,138 / 0 / 0 / 0. Neither is M7's catalog, which
-was **1,271,570** titles in a scratch database (`m7gate`) that no longer
-exists — three distinct catalogs, and the absent `media_items` is the stronger
-tell, because neither survivor even holds the household that defined the
-population. **So 1.81% is a floor over 5,020 owned, name-shaped, pre-TMDb seeds
-and is not a baseline for the population M9 measures** — M9 enriches and embeds
-movies with a TMDb id in the ≥100-vote tier, ~130,806 of them, and every input
-to the pair rate changes: the seed set (26× larger, selected by votes rather
-than by ownership), the document (classes C and D filled), and therefore the
-pool `nearest_for` draws. A later number placed beside this one is a second
-measurement, never a delta.
+≥100-IMDb-vote priority tier (204,494 titles, not the ~189k PRD 04 estimated),
+**10.68%** of a real household's 5,020 owned titles. **The number that decides
+whether the term does anything is none of those** — it is the *candidate-pair*
+rate, because both sides of a pair need a vector, and it is **measured, never
+squared** (a real pool is not an independent draw; see the measured correction
+factors below). The genome is **movies-only and frozen at 2023-07-20**, so
+coverage of anything newer is structurally zero and decays.
+
+⚠️ **M7's 1.81% pair rate is void as a baseline and must never be differenced
+against a later number** — settled 2026-08-11 by M9 Task S1, before anything in
+M9 quoted it. The arithmetic gives it away: 502,000 candidate pairs over
+`_CANDIDATE_POOL` (100) is exactly **5,020 seeds**, and those 5,020 were **one
+household's owned titles**, promoted to the enriched *tier label* by a script
+that never filled the *document* — `search_document`'s weight classes C and D
+were empty. That database no longer exists, and neither surviving catalog even
+holds the household that defined the population. **A later number placed beside
+it is a second measurement, never a delta** — which is exactly what S5's
+2.4746% below is.
 **The sequential row build's cost, so boundary call 8 is a decision rather than
 a preference.** Measured 2026-08-04 via `usher home --repeat 5` against a real
 **1,271,570**-title catalog with a synthetic household (5,200 owned copies, 360
@@ -131,24 +141,25 @@ recorded as a before/after count, because a count is the only assertion a fake
 can carry honestly -- a timing assertion against an in-memory dict measures the
 dict.
 
-- **The engaged window was read once per public method.** `genre_affinity` and
-  `centroid` both open with `TasteService._engaged`, so one
-  `CandidatePoolService.for_user` on a deployment with an embedder issued
-  `list_recent(50)` **twice** per generation for a window that cannot move
-  between them (one job, one transaction). Memoised per `(service, user_id)`:
-  **2 -> 1**.
+- **The engaged window was read once per public method.** `TasteService.
+  genre_affinity` and `.centroid` both open with `_engaged`, and one caller that
+  wants both (the candidate pool, on a deployment with an embedder) therefore
+  issued `list_recent(50)` **twice** per generation for a window that cannot
+  move between them — one job, one transaction. The memo lives on
+  `TasteService`, keyed `(service, user_id)`: **2 -> 1**.
 - **`library_genre_counts()` was read once per answer.** It takes no `user_id`
   -- an `unnest(genres) GROUP BY` over the whole owned library, 1.27M titles,
   identical for every household -- and was paid per generation *and* per
   home-screen build. Memoised per service: **3 -> 1** over two households and
   three asks.
-- **`GET /home` paid the whole genre-affinity read before the screen cache
-  could answer.** `get_row_context` is a FastAPI dependency and FastAPI
-  resolves the graph before the handler runs, so `HomeService.compose_report`'s
-  `get_screen` check came *after* `list_recent(50)` + `list_by_ids(50)` +
-  the library aggregate had already run. `RowContext.affinities` is now
-  `Callable[[], Awaitable[Sequence[GenreAffinity]]]`, awaited by the one
-  provider that reads it: a 30 s cache hit costs **1 -> 0**.
+- **`RowContext.affinities` is a `Callable[[], Awaitable[...]]` and not a
+  value, and that is the whole fix for a cache that could not save anything.**
+  Building the context eagerly ran `list_recent(50)` + `list_by_ids(50)` + the
+  library aggregate *before* `HomeService.compose_report`'s `get_screen` check
+  could answer — the request path resolves its dependency graph before the
+  handler runs, so an eager field is paid on every hit. Awaited by the one
+  provider that reads it, a 30 s cache hit costs **1 -> 0**. **Any field added
+  to `RowContext` that costs a statement owes the same treatment.**
 - **Four curated shelves hydrated independently.** `CuratedProvider.propose`
   mints up to five `LLMRow`s from one `list_for_user`, `_MAX_PER_FAMILY` is 4,
   and each `BaseRow.build` issued its own `list_by_ids` + `owned_title_ids`:
@@ -171,13 +182,12 @@ reads for two households **and** the genre each one got: a count alone is
 satisfied by a memo that re-reads and then hands back the wrong entry anyway,
 and the failure mode of the unkeyed version is one household's watch history
 deciding another's affinity, centroid, candidate pool and paid-for shelves --
-rendered perfectly, raising nothing. Its lifetime is argued rather than assumed
-(`api/deps.py` builds one `TasteService` per request; `composition.
-build_pipeline` builds one per unit of work), and it re-reads on a disagreeing
-`max(watch_states.updated_at)` so the argument is not load-bearing: two
-existing cases hold one service across a merge and require the second read to
-see it, and **both failed against the first draft of the memo**, which is how
-the watermark check got written.
+rendered perfectly, raising nothing. **Its lifetime is deliberately not
+load-bearing**: one `TasteService` is built per request and per unit of work,
+but rather than rest on that the memo re-reads on a disagreeing
+`max(watch_states.updated_at)`. Two existing cases hold one service across a
+merge and require the second read to see it, and **both failed against the
+first draft of the memo**, which is how the watermark check got written.
 **Two stale serves cannot overlap in wall clock, and that is the feature
 rather than a gap in the test.** Found 2026-08-11 building M9's serve-stale
 path against the acceptance criterion "two concurrent requests over one stale
@@ -287,11 +297,10 @@ keyword-only *optional* `model_name`, and `centroid()` deliberately does not
 pass one.** Scoping the window's vector read to the current checkpoint looks
 like an improvement and changes what a centroid *is*: mid-swap the mean would
 be taken over whichever subset the backfill had re-embedded, and `title_count`
-would report that as a fact about the household. `CandidatePoolService` keeps
-the unscoped call for its own documented reason (the width mismatch is why
-`_cosine` answers "no opinion" rather than raising inside a nightly job). Both
-are pinned by cases asserting the recorded argument is `None`, because on a
-single-model fixture the two spellings answer identically.
+would report that as a fact about the household. Pinned by a case asserting the
+recorded argument is `None`, because on a single-model fixture the two
+spellings answer identically — **which is why passing one here is a mistake no
+test outside that case can catch.**
 
 **The candidate-pair rate, re-measured over an enriched population — one walk,
 both signals, 2026-08-12 (M9 S5).** `scripts/measure_pair_rates.py` drove
@@ -314,6 +323,28 @@ genome rate is now known over a population whose documents carry real
 `overview`/`tagline`/`genres`/`keywords`, which is the thing S3's enrichment
 existed to produce, and it is **still four times below the 10% floor the 0.25
 weight assumes**.
+
+🔴 **The one fatal spelling of that script, and it is the one that looks
+right.** Counting the *stored* `title_neighbors` rows rather than the *pool*
+`nearest_for` returns answers **147/1,000 = 14.70%** where the pool answers
+**182/1,560 = 11.67%** on the same 40-title population: plausible, four points
+high, and high **by construction**, because the stored rows are the pool already
+sorted by a blend weighting the very signal being counted at 0.25. The first
+draft of `scripts/measure_pair_rates.py` was written that way on purpose and the
+case was red against it before it was fixed. What licenses comparing a
+read-only walk against a later `rebuild()` at all is that **`nearest_for` was
+asserted deterministic on a full page** — two reads of the same 500 seeds, same
+ids, same order — and the walk's counter is byte-for-byte `rebuild`'s
+`pairs_with_tags / candidate_pairs`, pinned by
+`tests/unit/test_scripts_measure_pair_rates.py` over one shared fake.
+
+Two caveats on the tag inputs, neither of which moves a verdict: the threshold
+counts tag *applications*, not distinct tags (485 of the 27,558 titles at
+`>= 5` hold fewer than five distinct ones), and **a tag plant is not stationary
+across an enrichment run** — `imdb_id` is in `EnrichService._ENRICHABLE`, so
+TMDb's `external_ids.imdb_id` overwrites IMDb's own and 28 enriched titles now
+carry a tconst IMDb does not hold at all. Re-derive a join count; do not
+transcribe one across a milestone.
 
 ## The genome term was removed on that number, and the read was kept (2026-08-12, M9 S7)
 
@@ -347,19 +378,18 @@ carrying:
   0.4075 on everything else was promoted with 99% probability, and genome
   coverage concentrates in popular, older, heavily-embedded films (the 1.75×
   correlation above). ⚠️ **The distribution of the three-signal score over a
-  real pool is NOT measured** — that sentence said *"`title_neighbors` holds 0
-  rows on every catalog on this host"* until H7's rebuild wrote **3,266,175**
-  of them on 2026-08-12, and the table still cannot answer it: those rows were
-  scored **without** the genome term, so they are the distribution of
-  `score_without` and not of the four-signal score the promotion was relative
-  to. How often the term actually reordered a list remains unknown and is not
-  claimed. The identity is exact; the frequency is not.
+  real pool is NOT measured, and no rebuild will ever measure it** — whatever
+  `title_neighbors` holds was scored *without* the genome term, so it is the
+  distribution of `score_without` and not of the four-signal score the
+  promotion was relative to. How often the term actually reordered a list
+  remains unknown and is not claimed. The identity is exact; the frequency is
+  not.
 
 **Removed, not zeroed, and this is the half a reviewer should check first.**
 `_blend` adds `_WEIGHTS[name] * value` to the numerator **and** `_WEIGHTS[name]`
 to the denominator, so `_WEIGHTS["tags"] = 0.0` is *arithmetically the same
 program* as the signal being absent, to full precision, at every value — and it
-still enters `blend_fingerprint()`, declares every stored row stale and buys an
+still enters `blend_fingerprint`, declares every stored row stale and buys an
 85-minute rebuild for a table whose every score is unchanged. **No behavioural
 assertion anywhere can tell the two apart**, which is why the guard is
 structural: `test_every_signal_the_blend_is_handed_has_a_weight_and_no_weight_
@@ -379,35 +409,61 @@ it is why the removal saves the blend arithmetic and **not** the `<=>` or the
 TOAST fetch per candidate pair. PRD 05's cost sentence is corrected rather than
 quoted as a saving.
 
-**The obligation, and it is not discharged by this change.**
-`blend_fingerprint()` moves `78900b2bd89a649774d7fd3efe082621` (M7/M8's four
-signals) → `78f3ecd20e654c0f6aa4bdf646ec099b`, so every stored row is stale
-until `usher similar --rebuild` runs. At 130,647 embedded titles that is a full
-quadratic walk, priced by S4 at ~80 minutes and measured by S5 at **85.4** —
-a scheduled operation, not the tail of a task, and **S7 did not run one**.
-⚠️ **Whatever closes it must record `title_neighbors`' row count beside the
-verdict**: "`blend_fingerprint` reports no stale rows" is satisfied by an empty
-table, and an empty table is what every catalog on this host holds.
+**The obligation the removal created, and how it was closed.** Dropping the key
+moves the digest from `78900b2bd89a649774d7fd3efe082621` (M7/M8's four signals)
+to `78f3ecd20e654c0f6aa4bdf646ec099b`, staling every stored row: at 130,647
+embedded titles that is a full quadratic walk, priced by S4 at ~80 minutes and
+measured by S5 at 85.4. **S7 did not run one; H7 did**, 2026-08-12 against
+`usher-m9-pg` in **88.3 minutes** (3.4% over S5, taken while a whole-suite
+mutation sweep held the same box, so not a clean baseline). `stale_neighbors()`
+**0** against **3,266,175 rows** — 130,647 seeds × 25, one fingerprint value in
+the table — and the control S7 demanded held exactly: the rebuild's own
+`pairs_with_tags / candidate_pairs` is the same **323,297 / 13,064,700 =
+2.4746%** S5's read-only walk reported, with `seeds_with_genome` agreeing at
+**15,525**, so the pool was invariant to the weight change and S5's tags figure
+is not void.
 
-✅ **Discharged 2026-08-12 by H7, and the numbers belong here because this is
-where the obligation is written down.** `uv run usher similar --rebuild`
-against `usher-m9-pg`, 10:09:00 → 11:37:18 — **88.3 minutes**, 3.4% over S5's
-85.4 and taken while a whole-suite mutation sweep held the same box, so it is
-not a clean baseline and is not offered as one. `stale_neighbors()` **0**;
-**3,266,175 rows**, 130,647 distinct seeds × 25, **one** `blend_fingerprint`
-value in the table. The control S7 specified holds exactly: the rebuild's own
-`pairs_with_tags / candidate_pairs` is **323,297 / 13,064,700 = 2.4746%**, the
-same two integers S5's read-only walk reported, and `seeds_with_genome` agrees
-too at **15,525** — so the pool really was invariant to the weight change and
-S5's tags figure is not void. Had those disagreed, the walk and the rebuild
-would have drawn different pools and the number this whole decision rests on
-would have had to be withdrawn first.
+🔴 **Do not quote `78f3ecd2…` as the current fingerprint, and do not quote H7's
+row count as the table's state.** Both were overtaken the next day and in
+opposite ways:
 
-The
-four-signal digest is pinned as a literal in
-`tests/unit/test_services_similar.py` (licensed by a case that recomputes it
-from M7's weights, so it cannot drift into a number nothing stamped) precisely
-because the superseded weights are the thing that left `src/`.
+- **`78f3ecd20e654c0f6aa4bdf646ec099b` is the digest that could not move —
+  the bug, not the fix.** It is what the post-S7 three-signal blend produced
+  while `blend_fingerprint` hashed only its three constants (`_WEIGHTS`,
+  `_NEIGHBORS_PER_TITLE`, `_CANDIDATE_POOL`), and on 2026-08-13 swapping
+  `USHER_EMBEDDING_MODEL` from `fastembed:BAAI/bge-small-en-v1.5` to
+  `openai:BAAI/bge-m3` was demonstrated to leave it at exactly that value — the
+  largest weight, 0.45, is a cosine of two *embeddings*, so every stored row's
+  meaning had changed while `usher.similarity.neighbors.stale` read zero
+  throughout. That is why `embedding_model` is now the **fourth** input, and
+  why quoting this digest as current states the defect as the repair. **The
+  signature is
+  `blend_fingerprint(*, embedding_model: str)` — keyword-only; a bare
+  `blend_fingerprint()` is a `TypeError`** — and there is therefore no single
+  current value to quote: `openai:BAAI/bge-m3` gives
+  `a7013154c014e0ff1b60ef5d8534a115` and `fastembed:BAAI/bge-small-en-v1.5`
+  gives `772433d709b3d77d5815ed26726534e1`. **Recompute it, never transcribe
+  it.** Written up in `search-and-embeddings.md`.
+- **H7's 3,266,175 rows were deleted by `m09e`**, which widened
+  `title_embeddings.embedding` from `halfvec(384)` to `halfvec(1024)` and took
+  every neighbour row with it (3,266,175 → **0**). ⚠️ So **this section's own
+  warning is live again in the opposite direction**: it was written because
+  *"`blend_fingerprint` reports no stale rows" is satisfied by an empty table*,
+  the table was then filled, and it was emptied again. The live catalog was
+  re-embedded and rebuilt on 2026-08-13 to **3,268,000** rows and those were
+  re-stamped `a7013154…` in place rather than recomputed — which was only legal
+  because `title_embeddings` held exactly one `model_name` and `title_neighbors`
+  exactly one fingerprint. **Check both counts before ever doing that**, and
+  record the row count beside any future "0 stale" verdict.
+
+`_M7_FOUR_SIGNAL_FINGERPRINT` is pinned as a literal in
+`tests/unit/test_services_similar.py`, and the case around it **asserts the
+current function does not answer it** rather than reproducing it. It used to
+reproduce it by monkeypatching `_WEIGHTS`; adding a fourth input changed the
+payload's *shape*, so no arguments can produce a three-key digest any more.
+**When a digest gains an input, every test that licenses an older digest by
+calling the current function silently becomes unsatisfiable rather than
+wrong.**
 
 ⚠️ **The freed name `tags` is a trap and it is resolved in ADR-0024 rather than
 in a commit message.** `_WEIGHTS`, `NeighborCandidate.tags` and
@@ -421,151 +477,89 @@ returns, is `genome`; a user-tag term is `user_tags`.**
 the finding.** All three signals beat their independent-draw prediction —
 1.37–1.75× — so pool membership and signal membership are positively
 correlated, most strongly for the genome (whose coverage concentrates in
-popular, older, heavily-embedded films). This is the first time this project
-has had the correction factor rather than the warning.
+popular, older, heavily-embedded films). **Use the measured factor; never
+square a coverage and call it a pair rate.** A stricter threshold cannot help,
+either: pairs at `>= 10` are a strict subset of pairs at `>= 5` over an
+identical denominator, so the rate is monotone by construction and the
+"more tags per title" effect (×1.135 clustering) is swamped by its own
+coverage loss (×0.449, because both sides square).
 
-**A stricter tag threshold scores a *lower* pair rate, not a higher one, and
-the decomposition is exact.** The M9 bar guessed `>= 10` would score higher on
-fewer titles. It cannot: pairs at `>= 10` are a strict subset of pairs at
-`>= 5` over an identical denominator, so the rate is monotone by construction.
-The interesting half is *why the gap is what it is*: coverage falls
-21.094% → 14.137% (×0.670), a pair needs **both** sides so that enters squared
-(×0.449), and the heavily-tagged population really is more clustered
-(1.55/1.37 = ×1.135). 6.0821% × 0.449 × 1.135 = **3.099%**, the measured value.
-"More tags per title" is a real effect and it is swamped by its own coverage
-loss, because both-sides squares everything.
+### 🔴 The binding reason a user-tag term was refused is the Jaccard distribution, not the pair rate
 
-**And the membership rate is not the signal.** Measured the same day against
-`ml-latest/tags.csv` itself (21.3M rows, read outside the tree, no row
-committed) over a **uniform random** 2,000-seed sample — 6.4125% both-sides at
-`>= 5`, agreeing with the exhaustive walk's 6.0821% within 5.4%, which is the
-sample's own control:
+**A pair rate is a statement about *membership*.** Nothing here measures whether
+a tags term makes a neighbour list *better*; that needs relevance judgements
+this project has never had. What decides the question is the shape of the value
+the term would feed `_blend`, measured against `ml-latest/tags.csv` itself
+(21.3M rows, read outside the tree, no row committed) over a uniform random
+2,000-seed sample — 6.4125% both-sides at `>= 5`, agreeing with the exhaustive
+walk's 6.0821% within 5.4%, which is the sample's own control:
 
-| tag-set Jaccard | n | mean | median | p90 | p99 | share sharing **no** tag |
-|---|---|---|---|---|---|---|
-| pool pairs, both `>= 5` | 12,825 | 0.0221 | 0.0055 | 0.0625 | 0.1765 | **47.3%** |
-| random pairs, same population | 20,000 | 0.0038 | 0.0000 | 0.0115 | 0.0625 | 83.3% |
-| pool pairs, **marginal** (tagged, no genome) | 2,595 | 0.0261 | **0.0000** | 0.0833 | 0.2222 | **62.3%** |
-| random pairs, marginal | 20,000 | 0.0034 | 0.0000 | 0.0000 | 0.0769 | 92.7% |
+| tag-set Jaccard | n | mean | median | p90 | share sharing **no** tag |
+|---|---|---|---|---|---|
+| pool pairs, both `>= 5` | 12,825 | 0.0221 | 0.0055 | 0.0625 | **47.3%** |
+| random pairs, same population | 20,000 | 0.0038 | 0.0000 | 0.0115 | 83.3% |
+| pool pairs, **marginal** (tagged, no genome) | 2,595 | 0.0261 | **0.0000** | 0.0833 | **62.3%** |
+| random pairs, marginal | 20,000 | 0.0034 | 0.0000 | 0.0000 | 92.7% |
 
-**Near-chance is refuted — it is 5.8× chance overall and 7.7× on the marginal
-population — and the conclusion that guess drew is confirmed anyway, for a
-sharper reason.** The bar's illustrative "two 4-tag sets sharing one tag gives
-0.14" sits between p90 and p99 of the marginal distribution, not at its centre:
-the **median marginal pool pair shares no tag at all**. That is not a missing
-signal, it is a **present** one — `_jaccard` returns `None` only when a *set* is
-empty, so two titles with five tags each and nothing in common yield a hard
-`0.0`, which `_blend` renormalises as a confident negative and which would
-therefore **demote** 62.3% of the very pairs the term was added to promote,
-relative to pairs carrying no tag data at all. ADR-0014's argument, arriving
-from the set-valued side.
+Near-chance is refuted — it is 5.8× chance overall and 7.7× on the marginal
+population — **and the term is still wrong**, for a sharper reason than a low
+rate. The **median marginal pool pair shares no tag at all**, and `_jaccard`
+returns `None` only when a *set* is empty, so two titles with five tags each
+and nothing in common yield a hard `0.0` that `_blend` renormalises as a
+confident negative. The term would **demote 62.3% of the very pairs it fired
+on**, relative to pairs carrying no tag data at all. **ADR-0014's rule covers
+*absence*; this is presence with no overlap** — the default over an open
+user-tag vocabulary, and evidence over a closed ~19-value genre one.
 
-**A pair rate is a statement about membership and this one says so.** Nothing
-here measures whether a tags term makes a neighbour list *better*; that would
-need relevance judgements this project has never had, and the same caveat M7
-attached to the genome's 0.25 weight applies unchanged.
-
-**The bar's own prediction of 3–5% was refuted upward, and the arithmetic
-behind it fails on both inputs.** It scaled M7's observed single-side-to-pair
-ratio of 0.238 by a tier-wide 14.46%. The population that is actually embedded
-carries 21.094%, not 14.46% — and **the ratio is not a constant even within one
-walk**: 2.4746/11.883 = **0.208** for the genome against 6.0821/21.094 =
-**0.288** for tags, a 38% spread over the identical pool. Carrying M7's 0.238
-onto the right coverage predicts 5.02%; the measurement is 21% above that.
-
-**`ml_tags_tmp.n_tags` is not a distinct-tag count, and the input is very
-slightly generous.** Of the 27,558 embedded titles it puts at `>= 5`, **61.7%
-disagree with a case-folded distinct count** and **485 (1.8%) hold fewer than
-five distinct tags**. At 1.8% it moves no verdict, but a threshold named "≥ 5
-tags" is counting tag *applications*.
-
-⚠️ **The tag plant no longer reproduces the bar's table exactly, and the two
-cells that moved are the two that localise the loss.** Re-measured 2026-08-12,
-the join over titles of **any kind** gives 49,055 / 15,385 / 33,670 / 14,448 /
-6,266 against the bar's 49,05**6** / 15,385 / 33,67**1** / 14,448 / 6,266 —
-three cells exact, two one lower, so exactly one title stopped matching and it
-carries **no genome and one-to-four tags**. Corroborated independently: the
-tier's "any tags" read is 45,090 where the plan recorded 45,091 while genome,
-`>= 5` and `genome-or-5` all agree. The mechanism is available and was
-demonstrated rather than assumed — **`imdb_id` is in
-`EnrichService._ENRICHABLE`**, so TMDb's `external_ids.imdb_id` overwrites
-IMDb's own, and streaming all 12,707,540 rows of `title.basics.tsv.gz` finds
-**28 enriched titles whose current `imdb_id` is not a tconst IMDb holds at
-all**. That 28 is a *lower bound* on rewrites — a rewrite onto another valid
-tconst is invisible to the check — and none of the 28 could be tied to a tagged
-id through `links.csv`, so the individual title is characterised but not named.
-**A tag plant is not stationary across an enrichment run.**
-
-**The definition to join on is "titles of any kind", and the 381 are a
-classification finding rather than a defect.** Filtered to `kind = 'movie'` the
-same queries give 48,674 / 15,385 / 33,289 / 14,222 / 6,135; the difference is
-exactly **381 titles this catalog classifies as `series` whose IMDb ids appear
-in a movies-only dataset**. They cost the walk nothing — the embedded
-population is `kind = 'movie'` and holds **zero** series — so the label on the
-bar's row is wrong while its number is right.
-
-**The genome's 15,565 rows reconcile to the walk's 15,525 seeds with no
-residue**: **33** sit outside the frozen `s3_tier_snapshot` entirely (22 movies
-with no `tmdb_id` but ≥ 100 votes, 8 with neither, 3 with a `tmdb_id` and fewer
-than 100 IMDb votes) and **7** are in the tier but are still `skeleton` — part
-of S4's 159-row gap — and `_POPULATION` excludes skeletons, so no `index` job
-was ever owed for them. 15,525 + 33 + 7 = 15,565.
-
-**`nearest_for` was asserted deterministic rather than assumed, on a full
-page**: two reads of the same 500 seeds returned identical pools, id for id and
-in the same order. That is what licenses comparing this walk against a later
-`SimilarityService.rebuild()`, and the walk's genome counter is byte-for-byte
-that rebuild's `pairs_with_tags / candidate_pairs` — pinned to it by
-`tests/unit/test_scripts_measure_pair_rates.py` over one shared fake.
-
-**The one fatal spelling, measured on the fixture that kills it.** Counting the
-*stored* rows rather than the *pool* answers **147/1,000 = 14.70%** where the
-pool answers **182/1,560 = 11.67%** on the same 40-title population: plausible,
-four points high, and high **by construction**, because the stored rows are the
-pool already sorted by a blend that weights the very signal being counted at
-0.25. The first draft of `scripts/measure_pair_rates.py` was written with that
-spelling on purpose and the case was red against it before it was fixed.
-
-**The verdict those measurements bought, so the numbers above are not read as
-an open question — [ADR-0035](../../docs/prd/decisions/0035-the-tags-similarity-term.md),
-2026-08-12 (M9 S6).** 6.0821% is the `< 10%` arm of the pre-registered bar, so
-**no user-tag term is built in M9 and no line of `src/` moved on this arm** —
+**The verdict —
+[ADR-0035](../../docs/prd/decisions/0035-the-tags-similarity-term.md),
+2026-08-12 (M9 S6):** 6.0821% is the `< 10%` arm of the pre-registered bar, so
+**no user-tag term is built and no line of `src/` moved on this arm** —
 `services/similar.py` and `tests/unit/test_services_similar.py` are absent from
 that diff, which is what the bar required. **The rate is the weaker of the two
-reasons and should not be the first thing a later reader re-checks.** The
-binding reason is the Jaccard distribution one table up: `_jaccard` answers
-`None` only for an *empty* set, so the 62.3% of marginal pool pairs sharing no
-tag would feed `_blend` a hard `0.0` and the term would **demote most of the
-pairs it fired on**. ADR-0014's rule covers *absence*; what this measured is
-**presence with no overlap**, which is evidence over a closed ~19-value genre
-vocabulary and the default over an open user-tag one.
+reasons and should not be the first thing a later reader re-checks.**
 
-**And the rate is buyable, which is why it cannot be the criterion.** Single-side
-coverage at `>= 1 tag` is **34.47%** on this population, projecting **11.9%**
-(independent draws) to **16.3%** (× the measured 1.37 factor) — over the floor on
-both arithmetics. So a later reader who lowers the threshold will clear the bar
-and make the zero worse. **Raising coverage at `>= 5` is the direction that is
-closed**: clearing 10% there needs **27.0%** against 21.094%, i.e. ~7,700 more
-`>= 5`-tagged titles inside the same 130,647-title population, while the archive
-is frozen at 2023-07-20 and **19,222** of this catalog's tagged titles carry one
-to four tags and no genome. Enrichment reaches titles MovieLens never tagged, so
-every further pass moves coverage **down**. The scoped follow-up ADR-0035 names
-is three read-only measurements — the `>= 1` rate over *distinct* tags, the
-empty-overlap share at whatever threshold clears, and whether TF-IDF over the
-tag strings or an embedding of the joined tag text puts the median firing pair
-above zero — and no build.
+⚠️ **And the rate is buyable, which is why it cannot be the criterion.**
+Single-side coverage at `>= 1 tag` is **34.47%**, projecting 11.9% (independent
+draws) to **16.3%** (× the measured 1.37) — over the floor on both arithmetics.
+**A later reader who lowers the threshold will clear the bar and make the zero
+worse.** Raising coverage at `>= 5` is the direction that is closed: clearing
+10% needs **27.0%** against 21.094%, ~7,700 more `>= 5`-tagged titles inside the
+same 130,647-title population, while the archive is frozen at 2023-07-20 and
+**19,222** of this catalog's tagged titles carry one to four tags and no genome.
+Enrichment reaches titles MovieLens never tagged, so every further pass moves
+coverage **down**. The scoped follow-up ADR-0035 names is three read-only
+measurements — the `>= 1` rate over *distinct* tags, the empty-overlap share at
+whatever threshold clears, and whether TF-IDF over the tag strings or an
+embedding of the joined tag text puts the median firing pair above zero — and
+no build.
 
 ## Every row provider here reads the split genre vocabulary, and none of them was fixed
+
+✅ **Superseded in the writer half, 2026-09-01.** The six readers' code is
+unchanged and everything below still describes it — but there is now a writer
+that reaches all of them: `GenreNormalisationService` (`usher genres
+--backfill`, `services/genres.py`) rewrites `titles.genres` through
+`canonicalise_genres` (`domain/genres.py`), so `library_genre_counts()` stops
+offering two shelves for one concept once the backfill has run. The other half
+of that story — 79,913 rows rewritten, 304 embeddings staled — is in
+`search-and-embeddings.md` under *"Weight class D and segment 6 both carried
+two spellings of one concept"*; the SQL that does the rewrite is in
+`db-and-sql.md`.
 
 `titles.genres` unions two importers' vocabularies and zero of 1,272,866 titles
 carry both spellings of any concept (2026-08-19,
 [ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)).
 That ADR fixed `/browse`'s filter and facets at read time and reached **none**
-of `GenreAffinityProvider`, `TasteService`, `CurationPool`,
-`BecauseYouWatched`, `Seasonal` or `SimilarityService` — all six read the raw
-column, and `TitleRepository.list_owned_by_tag` is deliberately still exact
+of `GenreAffinityProvider`, `TasteService`, `BecauseYouWatched`, `Seasonal`,
+`SimilarityService` or `CandidatePoolService` — all six read the raw column,
+and `TitleRepository.list_owned_by_tag` is deliberately still exact
 containment. So `library_genre_counts()` still offers a household two shelves
-for one concept, and a `Sci-Fi` shelf cannot reach an enriched title.
+for one concept, and a `Sci-Fi` shelf cannot reach an enriched title. **Five of
+the six are in this file's trigger paths; `CandidatePoolService`
+(`services/curation_pool.py`) is not**, so a session that fixes the readers has
+to open that module deliberately — it is listed here because the set is the
+finding, not because this file covers it.
 
 **Effect size unmeasured, and the denominator is why**: this household owns 180
 titles, which is too few to say anything, and the honest version of the

@@ -15,6 +15,83 @@ these sweeps produced live in `.claude/rules/testing-discipline.md`.
 and the last section here says why. What remains below is the harness: the trap
 rules, the scoring vocabulary, the three `.pyc` defences, and the
 milestone-level and early-task results those rules were derived from.
+**Every mechanic here — the trap rules, the `compile()` dry run, the
+`BAD-ANCHOR`/`DID-NOT-RUN` vocabulary, the `md5sum` restore — is a convention
+re-implemented per sweep, not a script in the repo** (verified 2026-09-01:
+nothing under `scripts/` or `tests/` is a harness, and the per-sweep scripts
+were written outside the tree and not kept). **So the next section is the
+recipe assembled**; everything after it is the evidence for one line of it.
+
+## The recipe, assembled — run this, then read the rest for why
+
+Added 2026-09-02. Every defence below was paid for by a run that reported a
+wrong number, and each is argued at length further down; this block exists
+because the arguments were scattered over 1,100 lines and nobody could
+assemble them at the top of a sweep.
+
+```bash
+# 0. A committed tree is the only thing that makes `git status` a verification.
+#    SIGTERM skips the `finally`, so a killed sweep leaves the tree mutated.
+git status --porcelain                       # must be empty before AND after
+
+export PYTHONDONTWRITEBYTECODE=1             # THE load-bearing .pyc defence (measured 9/9)
+
+F=src/usher/services/rows/cache.py           # the file this plant touches
+ANCHOR='the exact text being replaced'
+cp "$F" /var/tmp/plant.bak                   # never git checkout/restore/stash/reset
+md5sum "$F" > /var/tmp/plant.md5             # /var/tmp, not /tmp: tmpfs here, so a reboot erases it
+
+# 1. BAD-ANCHOR: the target must appear exactly once, or the edit is a silent no-op.
+test "$(grep -cF "$ANCHOR" "$F")" -eq 1 || echo BAD-ANCHOR
+
+# ... apply the mutation to $F ...
+
+# 2. BROKEN-MUTATION: compile(), NOT ast.parse — ast.parse accepts `continue`
+#    outside a loop, so a mutation spelled with one passed the dry run and its
+#    collection error was scored KILLED against an unrelated file.
+uv run python -c 'import sys,pathlib;p=sys.argv[1];compile(pathlib.Path(p).read_text(),p,"exec")' "$F" \
+  || echo BROKEN-MUTATION
+
+# 3. The other two .pyc defences. BOTH trees: a plant in a test file puts its
+#    .pyc in tests/**/__pycache__, and the recipe swept only src/ until 2026-08-11.
+find src tests -name __pycache__ -type d -exec rm -rf {} +
+
+# 4. Sweeping a copy? Prove the import resolves under the copy. `cp -a` brings
+#    .venv/bin/pytest, whose shebang points at the ORIGINAL interpreter.
+uv run python -c 'import usher;print(usher.__file__)'
+
+# 5. Run it. NO -q: addopts already carries one, and -qq suppresses the
+#    "N passed, M failed" line entirely, so the verdict regex matches nothing
+#    and a real failure is scored DID-NOT-RUN.
+uv run pytest tests/unit/test_services_rows_cache.py     # state the selection in the write-up
+
+# 6. Restore, and verify the restore rather than trusting it.
+cp /var/tmp/plant.bak "$F"
+md5sum -c /var/tmp/plant.md5
+git status --porcelain                       # empty again, or something leaked
+```
+
+**Two things the block cannot express, and a sweep is invalid without either.**
+
+- **Carry an equivalent-mutant control that must SURVIVE**, run under the same
+  harness as the real plants. A sweep reporting every mutation killed cannot
+  distinguish a suite with teeth from a harness that scores every run as a
+  kill. Pick one whose equivalence is a *fact about the code* (two independent
+  statements swapped, a positional call converted to a correctly-bound keyword
+  call), measure it against **each** gate step separately — `ruff check`,
+  `ruff format --check`, `mypy src tests`, `lint-imports`, `pytest` — and write
+  *"survived the suite"*, never *"nothing catches it"*.
+- **The selection must not contain a flaky case.** A sweep scored on "did the
+  run fail" inherits the flake's failure rate as a false kill on every plant,
+  and silently upgrades a survivor to a kill. Narrow the selection or deselect
+  by node id, and say which in the write-up.
+
+**Six verdicts, and the file's whole point is that the last four exist:**
+`KILLED`, `SURVIVED`, `BAD-ANCHOR` (the anchor was not unique, so nothing was
+planted), `BROKEN-MUTATION` (it did not compile, or it collected an error),
+`DID-NOT-RUN` (zero tests collected, or no summary line), `HUNG`.
+
+## Where the recipe came from
 
 **M5's final mutation sweep: 56 mutations, 50 killed, and every one of the
 six survivors was predicted.** Run 2026-08-02 in place, each mutation
@@ -24,8 +101,11 @@ after, the group-G harness's rules enforced throughout — target must appear
 exactly once, `cp` backups never `git checkout --`, a run that did not run is
 `DID-NOT-RUN`, a syntax error is `BROKEN-MUTATION`, a hang is `HUNG`.
 **Zero HUNG, zero DID-NOT-RUN, zero BROKEN**, and every mutation was
-dry-run through `ast.parse` before the sweep started so an `IndentationError`
-could not be scored as a kill.
+dry-run before the sweep started so an `IndentationError` could not be scored
+as a kill. ⚠️ **M5 spelled that dry run `ast.parse`, and M6 refuted it four
+days later** — `ast.parse` is not sufficient and `compile()` is, for the reason
+under "M6's sweep" below and in step 2 of the recipe above. The M5 wording is
+left here because it is what that run actually did; **do not copy it.**
 
 The six survivors, and the one prediction that was wrong in the *other*
 direction:
@@ -69,9 +149,11 @@ an equivalent mutant the code comment predicted.** Run 2026-07-31 in place,
 each mutation against the **whole** 1,713-test suite rather than its own
 task's selection — which is the point of a final sweep, since a per-task
 sweep cannot see collateral in another file. Baseline green before,
-restored green after, `/tmp/mutate.py`'s rules enforced throughout (a run
-that did not run is `DID-NOT-RUN`, never `KILLED`; the target must appear
-exactly once; `cp` backups, never `git checkout --`). **38/39 killed.**
+restored green after, the per-sweep script's rules enforced throughout (a
+run that did not run is `DID-NOT-RUN`, never `KILLED`; the target must appear
+exactly once; `cp` backups, never `git checkout --`) — that script was
+written from this file's recipe outside the tree and was not kept.
+**38/39 killed.**
 
 The survivor is `priority = GREATEST(jobs.priority, excluded.priority)` →
 `priority = excluded.priority` in `_ENQUEUE`, and it survives because the
@@ -94,6 +176,9 @@ dependency. And `usable-ids-filters-nothing` **is** caught (2 cases), by
 `test_a_malformed_imdb_id_does_not_abort_the_batch`'s *second* item, whose
 only id is unusable — the first item survives the mutation intact, so a
 version of that case carrying one item would have ratified it.
+
+## Runs that measured nothing and read as if they had
+
 **Mutation sweeps on this host: the shell is zsh, and it does not
 word-split an unquoted `$VAR`.** A selection passed as `$C="path1 path2"`
 reaches pytest as one bogus path, nothing runs, the exit code is non-zero,
@@ -132,16 +217,7 @@ and three harness findings, one of which defeats the plan's own trap rule.**
   clause" spelled as a *replacement* with an assignment already in that clause
   is a duplicate `SET`, i.e. a SQL error, and scored a false kill against a
   mutation the plan correctly calls equivalent. Deleted properly, it survives.
-**And one real coverage gap the sweep found, now closed.**
-`test_the_port_does_not_ask_callers_to_apply_a_query_prefix` read
-`inspect.getdoc(Embedder)` only. The deleted clause happened to live on the
-*class* docstring, so the guard was written against where it was rather than
-where it could go: restoring "callers are responsible for any query-side
-instruction prefix" on **`Embedder.embed`** — the more natural place, since
-`embed` is the method the instruction is about — survived all 2,433 cases. The
-guard now scans every docstring on the port. Same shape as the `sitecustomize`
-installation proof in `fixtures-and-fakes.md`: a guard scoped to one surface of
-two reads as coverage.
+*(The `Embedder.embed` docstring-guard gap — the guard read the class docstring while the plant was on the method's — moved 2026-09-01 to `search-and-embeddings.md`, after the "BGE query prefix is a measured null" paragraph.)*
 **Two plan predictions about survivors were wrong, in opposite directions.**
 Task 12's `stored.model_name == …` was predicted to survive "because
 `FakeEmbedder` has one model name", with an instruction not to strengthen the
@@ -184,8 +260,9 @@ collecting — it collected an error.
 
 Three defences, and the third is what makes the other two checkable: delete
 every `__pycache__` under `src/` **and `tests/`** before each run (the `tests/`
-half was missing here until 2026-08-11 — see the entry at the end of this file,
-where a plant in a test file was scored against another plant's bytecode), set
+half was missing here until 2026-08-11 — see *"The `.pyc` collision has a
+spelling that is reproducible by construction"* near the end of this file, where
+a plant in a test file was scored against another plant's bytecode), set
 `PYTHONDONTWRITEBYTECODE=1` in the subprocess environment so none is written
 back — that one is the load-bearing defence, measured — and carry an
 **equivalent-mutant control** — one mutation that must
@@ -196,6 +273,8 @@ apart. Under all three, the same 37 mutations gave 36 killed and exactly the
 one intended survivor. **The faster the selection, the worse this gets** — a
 per-task sweep over one file is precisely where runs are short enough to
 collide, and a whole-suite sweep at 40 s a run never would have shown it.
+
+## Controls: "the suite holds it" and "the gate holds it" are different claims
 
 ⚠️ **The `__all__` control is a control on the *suite*, not a change nothing
 catches, and reporting it as the latter is wrong.** Measured 2026-08-07 on M8
@@ -245,6 +324,16 @@ finds guards over `ports/embedding.py`, `ports/metadata.py`,
 `services/home.py`, `services/curation.py`, `services/reconcile.py` and
 `services/rows/`, and a control planted in one of those is a kill waiting to
 be misread as a suite with teeth.
+**Re-run 2026-09-01, the same grep returns 31 files** — including two that
+every ledger entry in this repository predates, and this is the only place they
+are written down: `tests/unit/test_cli.py` at :1822/:1836 `ast.unparse`s the
+whole cli module (with docstrings *stripped*, so a reword still survives) and
+`tests/unit/test_composition.py:771`'s `inspect.getdoc` reads
+`JobWorker.registered_kinds`' docstring in `services/jobs.py`. **Every file
+count quoted anywhere below — eight at M8 Task 18, ten at M9 M1 and A1, eleven
+at M9 A2 — is as of its own date, is not restated, and is not to be trusted:
+re-run the grep.** Below, *"cleared the docstring-scan grep"* means exactly this
+check was run on that entry's date and nothing it found scanned the module.
 **Run the control against the gate, not only against pytest, and put the
 verdict per step in the write-up** — one line per tool is what makes the
 difference between the two claims visible.
@@ -335,6 +424,8 @@ as a clean result. No damage that time (the sweeps were ~4 s and the restores
 md5-verified), which is the point: the failure is silent and the near miss is
 the only warning you get.
 
+## Round totals, and the survivors worth arguing about
+
 **M8 Task 19's sweep: 41 mutations over the genome tag vocabulary — 36 killed,
 3 equivalent-mutant controls surviving as designed, 2 measured survivors
 reported rather than replaced.** 49 plant-runs to get there: **three mutations
@@ -345,7 +436,8 @@ against 3 the suite was designed not to catch. Run in place under the three
 `.pyc` defences and the harness rules recorded above. Baseline established
 green on a clean tree first:
 **2,817 unit / 4 skipped**, **898 integration / 8 skipped**, ruff, `ruff format
---check`, mypy over 435 files, 8 import contracts. (The **three** cases the
+--check`, mypy over 435 files, 8 import contracts (count as of that date; 12
+on 2026-09-01). (The **three** cases the
 round added to close its own findings — two unit, one integration — take the
 final numbers to **2,819 / 899**. It said "two" until 2026-08-07: the count
 was taken from the unit column alone, which is the arithmetic error to expect
@@ -397,6 +489,21 @@ would actually write is a **per-run** tally, and that one fails
 whether the mutant and the original differ on any state the system can be in —
 a counter that accumulates across runs is not the counter the gate was reaching
 for.**
+
+**The other half of that question, hoisted out of M9 A2's ledger on 2026-09-02
+because it is the one a loop always fails: a per-item transformation is
+unobservable against a suite whose every fixture has one item.** Before calling
+a loop covered, ask **what the largest N any case has ever exercised is.** A2's
+plant stripped the `input` key from only the *first* validation error rather
+than all of them and **survived all 3,008 unit cases**, because every rejected
+request anywhere in the repository had produced exactly one error — a per-item
+strip and a first-item strip were the same program. It is not an equivalent
+mutant: a `missing` error's `input` is the whole unparsed body, so a
+three-field-short `POST /admin/sources` carries the plaintext password three
+times and the mutant removes one copy. The closing case had to assert
+`len(errors) >= 2` **as its own premise**. Nearest relative is *"has any
+fixture, anywhere, ever set this to the other value?"* in
+`testing-discipline.md`, arriving at a collection size instead of a boolean.
 
 **And the same task shipped the *opposite* claim in two files, which is the
 half worth carrying.** `cli._movielens`' docstring and that case's own
@@ -464,10 +571,7 @@ The three controls, each against every gate step — all three pass all five:
 The first two are facts about the *code* rather than about what the tools look
 at: keyword arguments are evaluated in written order and both expressions are
 side-effect-free, and two attribute writes from two distinct parameters cannot
-observe each other. The docstring reword was checked first against the
-docstring-scan grep recorded above — **none of the files it finds scans
-`services/query_expansion.py`, `services/search.py`, `composition.py` or
-`cli.py`.**
+observe each other. The docstring reword cleared the docstring-scan grep above.
 
 **The one real survivor and why it was closed rather than reported.** `_ms`'
 `max(0, …)` clamp deleted survived all 2,881 cases. It is *not* an equivalent
@@ -509,7 +613,8 @@ alone would hide the gap the round was for. Run 2026-08-07 in place against the
 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** The three `.pyc` defences and the harness
 rules recorded above were in force throughout. Baseline established green on a
 clean tree first: **2,883 unit / 4 skipped**, **899 integration / 8 skipped**,
-ruff, `ruff format --check`, mypy over 437 files, 8 import contracts. **Every
+ruff, `ruff format --check`, mypy over 437 files, 8 import contracts (count as
+of that date; 12 on 2026-09-01). **Every
 kill was checked against the case written for it** — each of the 15 names the
 case its mutation was aimed at, with the only collateral being the inverted
 validator (5 cases, because a settings model that refuses the *reachable*
@@ -526,9 +631,10 @@ The three controls, each against every gate step — all three pass all five:
 The first two are facts about the *code* rather than about what the tools look
 at: both operands of each are side-effect-free pure reads (an `is None` test
 and an attribute read on a settings model), so short-circuit order cannot be
-observed. The docstring reword was checked first against the docstring-scan
-grep recorded above — **none of the files it finds scans `config.py`,
-`composition.py`, `cli.py` or `services/query_expansion.py`.**
+observed. The docstring reword cleared the docstring-scan grep above. (On
+2026-09-01 `cli.py` *is* scanned, by `test_cli.py`'s `ast.unparse` — so the
+premise no longer holds and the conclusion still does, because that scan
+strips docstrings first.)
 
 **The unintended survivor is a new shape: a two-armed guard whose second arm is
 held by `mypy` and by nothing in the suite.** `build_pipeline`'s
@@ -571,39 +677,13 @@ controls, each against every gate step:
 The first two are facts about the *code*: an `except` tuple is matched by
 `isinstance` over classes that are pairwise disjoint, so its order is
 unobservable, and two pure reads of the same tuple cannot observe each other.
-The docstring reword was checked against the docstring-scan grep recorded
-above; none of the eight files it finds scans `cli.py` or `telemetry.py`.
+The docstring reword cleared the docstring-scan grep above (same caveat as
+Task 21's: `cli.py` is scanned as of 2026-09-01, with docstrings stripped).
 
 Three findings worth carrying:
 
-- **A `sink == []` assertion is a false green wherever the fixture makes the
-  logging impossible.** `usher curate`'s success path prints a report and, on
-  the shipped defaults, printed a ~900-character `httpx` INFO envelope on
-  stdout in front of it — `report=False` silences *Usher's* line and can do
-  nothing about a third-party library's. The obvious case for it cannot see
-  it: the integration fixture substitutes `FakeLLMClient`, which opens no
-  socket, so `sink == []` over that fixture passes against a shipped path
-  that logs. The case with teeth is one layer down, in
-  `tests/unit/test_telemetry.py`, driving the **stdlib** logger directly
-  through `configure_logging` — and it asserts through a **DEBUG** loguru
-  sink, so a "fix" that raised the sink threshold instead would fail it.
-  Second arm too (`WARNING` still arrives), which the `CRITICAL` plant kills
-  on its own. **General form: before writing a negative assertion about
-  output, ask what in the fixture makes the output impossible, and put the
-  case where that thing is real.** Same family as "a run that did not run is
-  not a pass", in the fixture rather than the harness.
-- **`Class.__subclasses__()` is the only honest way to enumerate a taxonomy,
-  and it needs the imports to have happened.** `UsherPortError` has **nine**
-  subclasses; `.claude/rules/config-cli-and-deployment.md` said "the base and
-  four leaves" until it was corrected to nine, and a review said six. Both
-  counted `ports/errors.py` and
-  missed `SourceNotSupported`, `FilterNotSupported` and
-  `AvailabilitySweepRefused`, which live beside the ports whose contract they
-  belong to. The exhaustiveness assertion imports all three explicitly, since
-  a class nothing has imported is a subclass Python does not report — an
-  assertion over `__subclasses__()` alone would have silently agreed with the
-  undercount. **Never hand-write the members of a taxonomy a case is about to
-  make a claim over.**
+- *(The `sink == []` false green — `httpx`'s INFO line arrives inside `configure_logging`'s envelope, so an empty-sink assertion passes for the wrong reason — moved 2026-09-01 to `api-telemetry-and-lanes.md`, after the `configure_logging` reclaim entry.)*
+- *(The `__subclasses__()` rule — nine direct subclasses of `UsherPortError`, never a hand-written taxonomy — moved 2026-09-01 to `ports-and-error-taxonomy.md`, "The taxonomy is read from `__subclasses__()`, never hand-written", which is now its canonical home.)*
 - **A message assertion and a database assertion in the same case can be made
   to contradict each other, and that is what gives a wording fix teeth.**
   `usher curate`'s failure sentence claimed "nothing was written" on a path
@@ -651,7 +731,8 @@ latency spellings, `assert 1 == 0` for both pool-guard spellings. Run
 above in force, the restore additionally verified by `md5sum`. Gate green
 before and
 after: **2,903 unit / 4 skipped**, **899 integration / 8 skipped**, mypy over
-437 files, `lint-imports` 8 kept / 0 broken, PRD link check `OK`.
+437 files, `lint-imports` 8 kept / 0 broken (count as of that date; 12 on
+2026-09-01), PRD link check `OK`.
 
 | control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
 |---|---|---|---|---|---|
@@ -661,435 +742,43 @@ It is a fact about the *code* rather than about what the tools look at: an OTel
 span's attributes are a map, both calls are side-effect-free reads of an
 argument and an attribute, and neither can observe the other.
 
-**M9 Task M1's sweep: 40 plants over `m09a` and its four models — 37 killed, 3
-equivalent-mutant controls surviving as designed, 0 unintended survivors, 0
-BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-10 in place, with
-the plant list written down before the first run, the three `.pyc` defences in
-force, and every restore verified by `md5sum` against the pre-plant digest.
-Selection, stated because a survivor list is only true of the selection it was
-measured against: `test_api_surface_schema.py`, `test_migrations.py`,
-`test_bulk_repository.py`, `test_db_models.py`, `test_db_models_api_surface.py`
-and `test_db_migration_status.py` (~15 s a run), plus
-`test_title_match_repository.py` for the one plant outside the migration.
+## Two rules about the run, hoisted out of M9 B2's ledger (2026-09-02)
 
-The plant list, by group: `downgrade()` losing each `drop_table` in turn and
-the whole body replaced by `pass` (6); each of the eleven CHECKs deleted, plus
-the owner CHECK loosened `= 1` → `>= 1` and the btree bound loosened by one
-character (13); `text_pattern_ops` dropped from each prefix index on both the
-migration and the model side, plus the opclass re-keyed on the expression text
-(4); each of the six foreign keys' `ondelete` flipped (6); each cascade-lookup
-index never created (2); the `_SUSPENDABLE_INDEXES` string losing one token
-(1); four nullability/column-set mutations (4); the match path lowercasing the
-probe instead of the column (1); three controls.
+**A sweep scored on "did the run fail" cannot run against a suite containing a
+flaky case.** Every plant inherits the flake's failure rate as a false kill, and
+a survivor that flaked is silently upgraded to a kill — in both directions the
+log reads clean. Either narrow the selection to files the flake is not in, or
+deselect the case by node id, and **say which in the write-up**. Measured on M9
+B2: the `test_sse_end_to_end` case below failed **7 of 8**
+`pytest tests/integration` runs and 1 of 2 whole-suite runs, and was green every
+time it ran alone, so B2 scoped to three files instead.
 
-**Two results worth carrying.**
+**That flake is real, and its first explanation was wrong** — worth carrying
+because it was first misattributed in a report rather than in this file.
+`tests/integration/test_sse_end_to_end.py::test_opening_a_stub_promotes_it_and_
+the_client_is_told_when_it_lands` failing inside a whole-suite run was read, on
+2026-08-11, as host contention from concurrent sibling worktrees. A second
+implementer's 5/5 reproduction in isolated `git archive` copies, each with its
+own `uv sync`, at three commits including one that is docs-only on the M8 merge,
+and on a default no-extra venv, refutes that: **the failure predates M9 and is
+not load-dependent.** Recorded here rather than in a chat transcript, which is
+what made it findable the first time.
 
-- **Every one of the six `downgrade()` plants is killed by exactly one case,
-  and it is the same case for all six** —
-  `test_a_full_down_and_up_cycle_restores_every_index`. Nothing else in the
-  repository can see a `downgrade()` at all: the integration schema is built by
-  one session-scoped `upgrade head` and never goes down. That is the argument
-  for the "one assertion per table" rule stated as a measurement rather than as
-  a rule — with four tables and one head, four of those six plants are
-  distinguishable only by which assertion in that block fires.
-- **A `pg_constraint` read filtered by a name pattern is a taxonomy that ages,
-  and this landing aged one.** M4's
-  `test_the_new_episode_foreign_keys_carry_the_delete_rule_they_were_given`
-  reads `conname LIKE '%episode_id_episodes'`; `images` is the third table to
-  reference `episodes`, so an M4 case failed on a correct M9 entry. Not a
-  mutation — collateral found by running the suite — and the repair is to scope
-  by `conrelid`. Same shape, in the same landing, as
-  `test_name_year_matching_uses_the_expression_index` asserting an index *name*
-  where a second expression index on `lower(name)` can now serve the same
-  equality: both cases named an artefact where they meant a property. The plan
-  assertion is now on the `Index Cond`, which is strictly stronger, and the
-  swap was measured to cost nothing (200,000 rows: 4 buffers and 0.031 ms
-  either way).
+**A premise guard has to be planted against, and it has to fail on its own `E`
+line.** `message in output` is not the check — pytest prints the failing
+assertion's surrounding source, so a guard's text turns up in the traceback of a
+case that failed somewhere else entirely. **And a guard can be dead the day it
+is written:** `assert seeded == sorted(seeded)` over freshly-minted UUIDv7s
+reads as a premise guard but is really a claim about `new_id()`'s monotonicity,
+which no fixture edit can falsify — the defect it appears to guard (seeding
+popularity descending, so the wanted rows are the ones a truncating scan reaches
+first) leaves it passing while the case's real assertion fails. **Write the
+guard against the same data the expectation is computed from**, not against a
+literal slice — B2's repair was `assert set(wanted).isdisjoint(seeded[:3])`,
+derived from the fixture's own popularity mapping — **then plant the fixture
+change and watch it fire.**
 
-The three controls, each against every gate step — all three pass all five:
-
-| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
-|---|---|---|---|---|---|
-| `images`' `width` and `height` CHECKs swapped | PASS | PASS | PASS | PASS | PASS |
-| `images`' two independent cascade-lookup `create_index` calls swapped | PASS | PASS | PASS | PASS | PASS |
-| one sentence of `ImageRow`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
-
-The first two are facts about the *code* rather than about what the tools look
-at: a `CREATE TABLE`'s constraint list has no ordering semantics (Postgres
-stores them by name and `test_every_check_constraint_in_the_models_exists_in_the_database`
-compares a dict), and two `CREATE INDEX` statements on different columns of the
-same table cannot observe each other. The docstring reword was checked first
-against the docstring-scan grep this file records — the ten files it finds scan
-`ports/`, `services/` and `api/`, and **none of them scans `db/models/`**.
-
-And the repaired assertions were planted against, not just reasoned about: the
-match-path case fails on its own `E` line under the defect it names (the plan
-becomes `Hash Join` over a `Seq Scan`, `Hash Cond: ((t.name = lower(p.name)) …)`),
-with the restore md5-verified.
-
-**M9 Task A1's sweep: 5 plants over the new `usher.ports.repository` package —
-2 targets killed, 3 equivalent-mutant controls of which only 2 pass all five
-gate steps, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in
-place with the plant list and its **expected verdict** written down first, the
-three `.pyc` defences in force, and every restore verified by `md5sum` against a
-pre-plant digest of all 18 files. Baseline green on a clean tree first: **2,986
-unit / 4 skipped**, **927 integration / 8 skipped**, mypy over 465 files,
-`lint-imports` 9 kept / 0 broken over 177 analysed files. A five-plant sweep is
-small because the change is a *move* — the real proof that nothing was lost is
-`inspect.getsource` of all 38 public objects compared byte for byte against
-`git show HEAD:src/usher/ports/repository.py`, not a mutation.
-
-| plant | `ruff check` | `format --check` | `mypy` | `lint-imports` | `pytest tests/unit` |
-|---|---|---|---|---|---|
-| P1 `"TitleRepository"` deleted from `__init__.__all__` | **rc=1 `F401`** | PASS | **rc=1** ×99 | PASS | **1 failed** |
-| P2 `_results.py` inverted into `bulk.py` | PASS | PASS | PASS | PASS | **1 failed** |
-| C1 two independent dataclasses swapped in `bulk.py` | PASS | PASS | PASS | PASS | PASS |
-| C2 two independent import blocks reordered in `__init__.py` | **rc=1 `I001`** | PASS | PASS | PASS | PASS |
-| C3 one sentence of `title.py`'s module docstring reworded | PASS | PASS | PASS | PASS | PASS |
-
-**Both targets falsified the plan's own prediction about which check catches
-them, in opposite directions, and that is the whole yield of the sweep.**
-
-- **P1 was predicted to fail "the mirror case and mypy". The mirror case does
-  not fail** — `test_every_postgres_repository_module_has_a_port_module_of_the_
-  same_name` reads `port.__module__`, which a missing `__all__` entry does not
-  move. What fails is `test_the_package_re_exports_every_public_object_its_
-  modules_declare`, which is in the file for exactly this and would not be there
-  if the prediction had been believed. mypy fails as predicted, at all 99 call
-  sites (`Module "usher.ports.repository" does not explicitly export attribute`),
-  and `ruff` fails too, on the now-unused import — the careless spelling.
-- **P2 was predicted to "raise at load time as a cycle". It does not raise at
-  all**, and the plan's own risk paragraph one page later says so (*"resolves
-  today and drags the bulk port into every consumer tomorrow"*) — two sentences
-  in one document predicting opposite outcomes, of which the sweep settles the
-  pessimistic one. Moving `BulkWriteResult` out of the private `_results.py` into
-  `bulk.py` and re-pointing its five other consumers there passes **ruff, format,
-  mypy and all nine import contracts**; the only thing in the repository that
-  sees it is `test_no_aggregate_module_imports_another_aggregate_module`, and the
-  damage it prevents is architectural rather than a failure — five aggregates
-  importing the bulk-load port for a two-field dataclass. **A structural
-  invariant with no runtime symptom needs a structural test, and "it would be a
-  cycle" is the reasoning that stops one being written.**
-- **C2 is the control the plan names and it is not a gate control**, for the
-  reason the `__all__`-reorder entry above records: `I` is in `[tool.ruff.lint]
-  select`, so an import reorder is `I001`. It remains a valid control *on the
-  suite* (pytest cannot kill it, which is what proves the harness is not scoring
-  every run as a kill) and the write-up has to say "survived the suite", never
-  "nothing catches it". **C1 and C3 are the two that pass all five**, and C1's
-  equivalence is a fact about the code rather than about what the tools look at:
-  `GenomeWriteResult` and `GenomeCoverage` are `@dataclass` bodies that reference
-  neither each other nor anything defined between them, and no module in this
-  package has an import-time side effect. C3 was checked first against the
-  docstring-scan grep this file records — the ten test files it finds scan
-  `ports/embedding.py`, `ports/metadata.py`, `services/` and `api/`, and **none
-  of them scans `ports/repository`**.
-
-**M9 Task A2's sweep: 10 plants over the RFC 9457 envelope — 8 targets of
-which 7 were killed on the first pass and 1 was a real coverage gap since
-closed, plus 2 equivalent-mutant controls surviving as designed. 0 BAD-ANCHOR,
-0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place over
-`src/usher/api/errors.py`, `src/usher/api/dto/problem.py` and
-`src/usher/api/app.py`, against the **whole `tests/unit` selection** (3,008
-cases, ~21 s a run), with the plant list and its expected verdict written down
-first, the three `.pyc` defences in force, and every restore verified by
-`md5sum` against a pre-plant digest. The three-way split is the one that says
-something: "9 killed" would hide the gap the round was for.
-
-**The plan named three sweep targets and the one it listed first is the one
-that survived**, which is the yield. *"The `input` key stripped from only the
-first error rather than all of them"* — spelled
-`if key != _ECHOED_INPUT or index > 0` over `enumerate(errors)` — **survived
-all 3,008 unit cases**, because **every rejected request anywhere in this
-repository produced exactly one validation error**, so a per-item strip and a
-first-item strip were the same program. It is not an equivalent mutant and the
-damage is the exact leak `api/errors.py` exists to stop: a `missing` error's
-`input` is the whole unparsed body, so a `POST /admin/sources` missing three
-fields carries the plaintext password three times and the mutant removes one
-copy. Closed by
-`test_every_error_is_stripped_and_not_only_the_first`, which submits a body
-producing three `missing` errors and asserts `len(errors) >= 2` as its own
-premise; re-planted, the mutation fails **that case alone**. **The general
-form: a per-item transformation is unobservable against a suite whose every
-fixture has one item — before calling a loop covered, ask what the largest N
-any case has ever exercised is.** Nearest relative is *"has any fixture,
-anywhere, ever set this to the other value?"* in `testing-discipline.md`,
-arriving at a collection size instead of a boolean.
-
-The other seven targets and what each cost: `instance` spelled
-`str(request.url)` fails 12; the `HTTPException` handler never registered fails
-10; the problem media type dropped fails 10; `type` derived without the kebab
-substitution fails 3; an unmapped status given `not_found` instead of being
-delegated to FastAPI's handler fails 2; the exemption set built from a literal
-rather than derived from the reasons map fails 1; and
-`status_code=status` in place of `status_code=document.status` fails
-**exactly one case, the structural one** — which is the measurement behind the
-claim that the two spellings are behaviourally identical today and that only an
-`ast` assertion can hold them apart.
-
-| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
-|---|---|---|---|---|---|
-| `ProblemResponse.of`'s `detail=` / `instance=` keyword arguments swapped | PASS | PASS | PASS | PASS | PASS |
-| one sentence of `api/errors.py`'s module docstring reworded | PASS | PASS | PASS | PASS | PASS |
-
-The first is a fact about the *code* rather than about what the tools look at:
-keyword arguments are evaluated in written order and both expressions are
-side-effect-free reads (a parameter, and `request.url.path` on a Starlette
-`Request` that caches its `URL`). The docstring reword was checked first
-against the docstring-scan grep this file records — the eleven test files it
-finds scan `ports/`, `services/` and `api/routers/rows.py`, and **none of them
-scans `api/errors.py` or `api/dto/`**; the one scan A2 itself adds reads
-`inspect.getsource(problem_response)`, a single function, not the module
-docstring.
-
-**M9 Task A5's first reported equivalent-mutant control was mischaracterised,
-and it is recorded here rather than quietly replaced.** The write-up claimed
-*"swapping `counter.add`'s two keyword arguments' written order"* survived all
-five gate steps, invoking the `_ledger_row`/`_settle`/`cli._search` precedent
-above by name. That precedent's reasoning — binding is by name regardless of
-position, so reordering *already-written* keywords is inert — does not
-transfer: every `counter.add` call in `src/usher/services/rows/cache.py` is
-positional (`_cache_hits.add(1, {"cache": "screen"})`), and a grep for
-keyword-style counter calls across `src/usher` finds none, anywhere. There was
-no written keyword order to swap. Reconstructed from the working log, what was
-actually planted was `_cache_hits.add(1, {"cache": "screen"})` rewritten to
-`_cache_hits.add(attributes={"cache": "screen"}, amount=1)` — a positional call
-*converted* to an equivalent keyword call, correctly bound, not a reordering of
-a pair that already existed. It is genuinely inert (same value to the same
-parameter, spelled two ways), which is why it survived every step measured
-against it, but it is not the control the ledger's bar asks for: it is not a
-plausible mutation at all — no AST-level argument reordering produces a
-positional-to-keyword rewrite — so its survival demonstrates nothing about
-whether the suite would catch a real argument-order defect.
-
-**And the real version of that defect is not inert.** A genuine positional
-swap — `_cache_hits.add({"cache": "screen"}, 1)` — is not an equivalent
-mutant: `opentelemetry.sdk.metrics._internal.instrument.Counter.add` calls
-`math.isfinite(amount)` before anything else, and `math.isfinite` on a `dict`
-raises `TypeError: must be real number, not dict` (confirmed directly). Every
-case in `test_telemetry_cache.py`/`test_services_rows_cache.py` installs a real
-`MeterProvider` (`Counter._is_enabled()` is true), so that swap is a clean
-kill, not a survivor — reporting it as a control would have been the exact
-inversion this file's controls exist to prevent: a kill mistaken for a
-survivor, which hides a broken control rather than a broken suite.
-
-The corrected control — a fact about the *code*, matching `complete_json`'s
-`span.set_attribute` pair above — and measured against every gate step
-separately, because "the gate holds it" and "the suite holds it" are different
-claims:
-
-| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
-|---|---|---|---|---|---|
-| `get_row`'s miss branch: `self._rows.pop(key, None)` and `_cache_misses.add(1, {"cache": "row"})` swapped | PASS | PASS | PASS | PASS | PASS (2992 / 4 skipped) |
-
-`self._rows` (a plain dict) and `_cache_misses` (an OTel counter) are disjoint
-pieces of state; nothing between the two statements reads either, and both run
-unconditionally before the branch's `return None`, so their relative order is
-unobservable — the same shape as the OTel span-attribute pair, one signal over.
-Restored via `cp` backup, verified byte-identical against the pre-plant
-`md5sum` before continuing.
-
-**Unrelated, found the same day and worth carrying because it was first
-misattributed in a report rather than in this file:** `tests/integration/
-test_sse_end_to_end.py::test_opening_a_stub_promotes_it_and_the_client_is_told_
-when_it_lands` failing inside a whole-suite run was first read as host
-contention from concurrent sibling worktrees. A second implementer's 5/5
-reproduction in isolated `git archive` copies, each with its own `uv sync`, at
-three commits including one that is docs-only on the M8 merge, and on a
-default no-extra venv, refutes that: the failure predates M9 and is not
-load-dependent. Recorded here rather than in a chat transcript, which is what
-made it findable the first time.
-
-**M9 Task B2's sweep: 12 plants over `adapters/search/prefix.py` — 10 targets
-all killed, 2 equivalent-mutant controls surviving all five gate steps,
-0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place with
-the plant list and its **expected verdict** written down first, the three
-`.pyc` defences in force, `compile()` rather than `ast.parse` as the dry run,
-and every restore verified by `md5sum` against a pre-plant digest. **Ten of ten
-killed is the weakest-looking split in this file and the entry has to say why:
-the plants and the cases were written by the same author in the same session
-against the same 40 lines of SQL, which is the condition under which a sweep
-measures its author's consistency rather than the suite's reach.** What makes
-it evidence anyway is the round *before* the run — see the two gaps below,
-which the plant list found and no run against the suite as it then stood could
-have. And the runs then repaid that by **falsifying half the reasoning behind
-one of the two repairs**, which is the part a ledger exists for.
-
-Selection: `tests/integration/test_adapters_search_prefix.py`,
-`tests/integration/test_adapters_search_postgres.py` and
-`tests/unit/test_suggest_index_contract.py` — 56 passed / 2 skipped, 19–29 s a
-run. **Not the whole suite, and the reason is a mechanic worth carrying: this
-tree has a flaky integration case** (the `test_sse_end_to_end` failure recorded
-immediately above, observed here failing **7 of 8** `pytest tests/integration`
-runs and 1 of 2 whole-suite runs, green every time it ran alone). **A sweep
-scored on "did the run fail" cannot run against a
-suite containing a flaky case** — every plant inherits the flake's failure rate
-as a false kill, and a survivor that flaked is silently upgraded to a kill.
-Either narrow the selection to files the flake is not in, as here, or deselect
-the case by node id and say so.
-
-**The two gaps were found by writing the expected verdict down, before any
-plant ran, and each was confirmed afterwards by reconstructing the case as it
-first stood and watching the mutation survive it.** This is the yield, and the
-half that is not a run result is the half that found them:
-
-- **`_LIKE_SPECIALS`' ordering claim was unpinned, and the repair works for a
-  reason the prediction got wrong.** The escape list doubles the backslash
-  *first*, and the comment says why — reversed, the escapes introduced for `%`
-  and `_` are themselves escaped on the next pass and `%` becomes a wildcard
-  again. Working out which case would kill a reordering found that **none
-  would**: with only `Vane Alpha` and `Harbour Lights` seeded, `suggest("%")`,
-  `suggest("_")` and `suggest("\")` all return `[]` under both spellings.
-  Confirmed rather than assumed — the case as first written was reconstructed
-  and the reordering **survived** it. Two repairs went in together, and
-  measuring them apart afterwards is what corrects the prediction:
-
-  | configuration | verdict | fails on |
-  |---|---|---|
-  | the reorder against the shipped four-arm case | KILLED | a `== []` arm |
-  | reorder, `100% Vane` arm removed, `\Vane` row kept | **KILLED** | a `== []` arm |
-  | reorder, `\Vane` row removed, `100% Vane` arm kept | KILLED | the `100%` arm |
-  | reorder, both repairs removed (the case as first written) | **SURVIVED** | — |
-
-  The predicted killer — a prefix holding a metacharacter *and* a backslash,
-  spelled `100%` — does kill it, on its own. **But so does the `\Vane` fixture
-  row, which was added for the backslash arm and has nothing to do with escape
-  ordering**: under the reversed list `suggest("%")` builds `\\%%`, which is a
-  literal backslash followed by wildcards, so it now *matches* `\Vane` and the
-  `== []` arm bites. **A fixture row added to give one arm something to find
-  changes what every other arm in the same case can see** — here in the
-  helpful direction, silently, which is why the entry says which arm fires
-  rather than which arm was designed to. The usual version of this shape in
-  this file is a fixture that makes an assertion vacuous; this is the same
-  coupling running the other way, and it is equally invisible without a plant.
-- **The two-tier ordering fixture agreed with `ORDER BY id` by accident.** With
-  the high-vote row seeded second, deleting the `vote_count DESC NULLS LAST`
-  key left the answer unchanged, because UUIDv7 makes insertion order and id
-  order one sequence — the *exact* trap `CLAUDE.md` names, arrived at through a
-  second column rather than through the obvious one. Fixed by seeding the
-  low-vote row first, which is a one-line change and the difference between a
-  case that tests three sort keys and a case that tests two. Confirmed the same
-  way: the key deleted *and* the original seeding order restored **survives all
-  56 cases**, so the repair is what kills it and not something else in the
-  file. This one the prediction got exactly right, which is why the entry above
-  it is worth as much space as it takes.
-
-The ten targets and what each cost: the outer `ORDER BY` deleted from the
-`LIMIT` fails 3 (an unordered cap is the 66.2% → 48.5% → 2.6% defect one tier
-over); the column not lower-cased fails 9, including the `EXPLAIN` case; the
-prefix not lower-cased fails 1; the `title_search_names` arm dropped from the
-union fails 2; `UNION` → `UNION ALL` fails 1; no escaping at all fails 1; the
-escape list reordered fails 1; the empty-prefix guard deleted fails 1; and the
-`vote_count` key and popularity's `NULLS LAST` each fail exactly the one
-ordering case built for them.
-
-| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
-|---|---|---|---|---|---|
-| the two `UNION` arms of `_PREFIX` swapped | PASS | PASS | PASS | PASS | PASS |
-| one sentence of `_pattern`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
-
-The first is a fact about the *code* rather than about what the tools look at,
-and it is a **SQL-text** control rather than a Python one, which is a shape this
-file did not previously hold. Its equivalence has three legs, and the third is
-the one that makes it airtight rather than merely plausible: `UNION` is
-commutative and set-valued; both arms are side-effect-free reads of different
-tables; and the arms sit inside a CTE whose result the outer `ORDER BY` and
-`LIMIT` are applied to **after** it materialises, so there is no path by which
-arm order could reach the returned row order even if the set operation leaked
-one. Independently re-derived by review rather than taken from the sweep alone.
-Neither control is spellable as an argument reorder — the A5 entry above is the
-reason that was checked rather than assumed. The docstring reword
-was checked first against the docstring-scan grep this file records: **none of
-the scanning test files reads `adapters/search/`**, and the one scan B2 itself
-adds parses the module for `ast.Import`/`ast.ImportFrom` nodes, not prose.
-
-**Separately, the four premise guards were each planted against and each failed
-on its own `E ` line** — `message in output` is not the check, because pytest
-prints the failing assertion's surrounding source and a guard's text turns up
-in the traceback of a case that failed elsewhere. **One of the four was dead
-when written and the repair is the finding.** `assert seeded == sorted(seeded)`
-over a list of freshly-minted UUIDv7s reads as a premise guard and is a claim
-about `new_id()`'s monotonicity, which no fixture edit can falsify: the obvious
-defect it appears to guard — seeding popularity descending, so the wanted rows
-become the ones a truncating scan reaches first — leaves it passing while the
-case's real assertion fails. Replaced by a guard derived from the fixture's own
-popularity mapping (`assert set(wanted).isdisjoint(seeded[:3])`), which that
-plant does kill. **A premise guard written against a literal slice guards the
-literal; write it against the same data the expectation is computed from, then
-plant the fixture change and watch it fire.**
-
-**And one plan-drift correction, recorded because the next reader of the
-`EXPLAIN` case will otherwise re-derive it:** the M9 plan's B2 acceptance names
-the tier-1 index `ix_titles_name_prefix`, and `m09a` ships
-`ix_titles_name_lower_prefix`. The case asserts the shipped name. The
-near-miss it asserts *against*, `ix_titles_name_lower_year`, differs from the
-real one by a single token in `_SUSPENDABLE_INDEXES`, so a plan-shaped
-half-memory of either name is one search-and-replace away from a green suite
-over the wrong index.
-
-**M9 Task E1's sweep: 4 plants over `RowProviderSettingsRepository` and its two
-implementations — 4 killed, 1 equivalent-mutant control surviving as designed,
-0 unintended survivors, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run
-2026-08-11 in place, with the plant list and its expected verdict written down
-first (this port's own acceptance section names all four), the three `.pyc`
-defences in force throughout (`__pycache__` swept before every run,
-`PYTHONDONTWRITEBYTECODE=1`, an equivalent-mutant control), and every restore
-verified by `md5sum` against a pre-plant digest of both mutated files. First
-run of this sweep produced a result with no durable record — reported in a
-chat message, nothing in this file, nothing in the commit — which is the
-defect this entry repairs, not a second measurement of a different port.
-
-**Selection, stated because a survivor list is only true of the selection it
-was measured against:** `tests/unit/test_row_provider_settings_repository_
-contract.py` (the fake arm), `tests/integration/test_row_provider_settings_
-repository.py` (the Postgres arm, plus its two Postgres-only cases),
-`tests/unit/test_ports.py` (`ALL_PORTS` registration),
-`tests/unit/test_ports_repository_package.py` (A1's mirror invariant — this
-task adds a module to that package), `tests/unit/test_rows_invariants.py` and
-`tests/unit/test_services_home.py` (the registry's slug-prefix distinctness,
-pinned from both sides). Scoped rather than whole-suite because nothing
-outside this task's own six files imports `RowProviderSettingsRepository` yet
-— grepped before scoping, not assumed — so a defect in either implementation
-has no path to collateral anywhere else in the tree; the route that will
-change that is E2, not yet landed. Baseline green on a clean tree first: **220
-passed in 5.19s**, restored to the identical count after every plant and
-after the sweep.
-
-The four plants, each the acceptance section's own words:
-
-| plant | verdict | cases failed |
-|---|---|---|
-| `ON CONFLICT (slug_prefix) DO UPDATE` deleted from `_SET_ENABLED` (Postgres) | KILLED | 3 — `IntegrityError` on `pk_row_provider_settings`, a re-set slug now a duplicate key rather than an update |
-| fake `overrides()` defaults every known slug to `True` rather than omitting the untouched ones | KILLED | 5 — the whole fake-arm contract, since every case reads through `overrides()` |
-| `enabled` sense inverted in `set_enabled`, fake arm | KILLED | 3 |
-| `enabled` sense inverted in `set_enabled`, Postgres arm | KILLED | 3 |
-| `set_enabled` calls `self._session.commit()` (Postgres) | KILLED | 1 — the new second-session case, `assert 1 == 0` |
-
-(Five rows because "the `enabled` sense inverted" was run on both
-implementations independently, each with its own `set_enabled`; the
-acceptance section names the property once and it is checked once per arm.)
-Every kill was checked against the case it names and nothing else — the
-`DO UPDATE` deletion raises before a row count is reachable, which is the
-louder failure the contract's own upsert case is written to produce rather
-than a silent duplicate.
-
-**The control, measured against every gate step rather than against pytest
-alone** — the check the `__all__`-reorder entry above exists to force:
-
-| control | `pytest` (scoped selection) | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
-|---|---|---|---|---|---|
-| `ON CONFLICT ... DO UPDATE`'s two independent `SET` assignments swapped (`updated_at`/`enabled`) | PASS (220) | PASS | PASS | PASS | PASS |
-
-It is a fact about the code rather than about what the tools look at: both
-right-hand sides read only from `excluded`, which is fixed within the
-statement before either assignment runs, and Postgres's `SET` list is
-simultaneous rather than sequential — there is no intermediate state either
-assignment could observe the other through. Already checked independently
-against a real pgvector/pgvector:pg17 container by a reviewer before this
-entry was written; re-measured here per gate step rather than re-argued.
-
-Gate green before and after, on the fully restored tree: `ruff check`,
-`ruff format --check`, `mypy` over 471 files, `lint-imports` 9 kept / 0
-broken, and the whole-suite baseline unchanged at **2,995 unit / 4 skipped**.
+## The `.pyc` collision, reproduced by construction (M9 D1, 2026-08-11)
 
 **The `.pyc` collision has a spelling that is reproducible by construction
 rather than by luck, it hits plants in `tests/` as readily as plants in `src/`,
@@ -1129,8 +818,10 @@ in a different file.
 
 **Three: the recipe's sweep is scoped to `src/`, and a plant in a test file
 puts its `.pyc` in `tests/**/__pycache__`.** The harness that produced the
-table above was this project's own sweep script, which sweeps `__pycache__`
-under `src/` only — the recipe as written. Widen it to `src/` **and** `tests/`.
+table above was a per-sweep script written from this file's recipe **outside
+the tree** — nothing under `scripts/` or `tests/` implements a sweep, and
+`/tmp` (tmpfs) has kept none of them. It swept `__pycache__` under `src/`
+only, the recipe as written. Widen the recipe to `src/` **and** `tests/`.
 
 **What is load-bearing, measured rather than assumed — and this refutes the
 first write-up of this finding, including the version in commit `c1fe176`'s
@@ -1164,22 +855,43 @@ sweep harness — a "quick check" of whether an assertion can fail is a mutation
 sweep with the ceremony removed, and it is exactly where a wrong number reads
 as a clean kill.
 
-## The per-task ledgers moved out (2026-08-21)
+## The per-task ledgers moved out (2026-08-21, finished 2026-09-02)
 
-Every `## <milestone> Task <id>` ledger from M9 onward now lives in
-`.claude/rules/mutation-sweep-ledgers.md` — 3,917 lines of them, which is what
-this file's `docs/plans/**` trigger had been loading on every planning task in
-order to deliver the mechanics above. That trigger fires for almost every task
-in this repo, so the file that loaded most often was again the largest one; the
-same reason `testing-discipline.md` was split at 1,728 lines, measured rather
-than assumed.
+**Every per-task ledger from M9 onward is in
+`.claude/rules/mutation-sweep-ledgers.md`.** This file's `docs/plans/**` trigger
+fires for almost every task in this repo, so the file that loaded most often was
+again the largest one — the same reason `testing-discipline.md` was split at
+1,729 lines, measured rather than assumed. `rules-file-maintenance.md` carries
+the method and the current sizes; re-run `wc -lc .claude/rules/*.md` rather than
+quoting any number from here.
 
-**What stayed here is what a sweep needs before it runs**: the harness
-mechanics, the trap rules, the scoring vocabulary, and the milestone-level and
-early-task results the rules were derived from. **What left is the record of
-what individual shipped tasks found.** Open the ledger file directly when you
-want a specific task's plant list — its own trigger is narrow on purpose.
+**It took two passes, and the first one's own summary was wrong about itself.**
+2026-08-21 moved 3,917 lines — but only the ledgers written as `##` headings,
+and it then claimed *"every `## <milestone> Task <id>` ledger"* had gone. **Six
+had not**: M1, A1, A2, A5, B2 and E1 were bold *paragraphs* rather than
+headings, so the sentence was true only on a reading nobody would take, and 394
+lines / 27 KB — **35% of what was left** — went on being charged to every
+`docs/plans/**` session. Moved 2026-09-02, given `##` headings so the sentence
+is now true of the file rather than of its formatting, with three generalisable
+paragraphs hoisted into the mechanics above first (the one-item-fixture rule,
+the flaky-case-in-selection rule, the premise-guard rule) and A5's counter names
+brought current on the way past. **The rule this leaves: a claim about what a
+split moved has to be checked against the file, not against the intent — grep
+for the *content* pattern, not the heading syntax.**
 
-**Appending a new ledger goes in the ledger file, not here.** A finding that
-generalises past its own task belongs in this file's mechanics, or in
-`testing-discipline.md` if it is really about test design.
+⛔ **Do not propose a third split of what is left, on the mechanics-versus-ledger
+axis.** Classifying this file onto that axis was measured at **16–18 alternating
+runs**, not two — interleaving is evidence the file is one subject — and the
+split was refused on it. `rules-file-maintenance.md` holds the method and the
+one other split it has already killed. A different axis needs its own run count
+measured first, not this one re-argued.
+
+**What stayed here is what a sweep needs before it runs**: the recipe at the
+top, the trap rules, the scoring vocabulary, and the milestone-level results the
+rules were derived from. **What left is the record of what individual shipped
+tasks found.** Open the ledger file directly for a specific task's plant list —
+its own trigger is narrow on purpose.
+
+**Appending a new ledger goes in the ledger file under a `##` heading, not
+here.** A finding that generalises past its own task belongs in this file's
+mechanics, or in `testing-discipline.md` if it is really about test design.

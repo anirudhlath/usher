@@ -4,6 +4,14 @@ paths:
   - "src/usher/adapters/embedding/**"
   - "src/usher/services/search.py"
   - "src/usher/services/similar.py"
+  - "src/usher/services/index.py"
+  - "src/usher/services/genres.py"
+  - "src/usher/domain/genres.py"
+  - "src/usher/db/repositories/search.py"
+  - "src/usher/api/routers/search.py"
+  - "scripts/measure_suggest_tiers.py"
+  - "scripts/measure_exact_name_rank.py"
+  - "scripts/measure_fusion_coverage_bias.py"
 ---
 
 # Search, trigram, RRF and embeddings
@@ -11,6 +19,37 @@ paths:
 Verified facts, loaded when working in this subsystem. Measured or observed,
 never assumed — each entry carries its date, its sample and what it refuted.
 The always-on conventions live in `CLAUDE.md`; this file is the evidence.
+
+**Two triggers added 2026-09-02, because whole sections were about symbols
+behind them**: `db/repositories/search.py` (`_FINGERPRINT_SQL`, `_POPULATION`,
+`nearest_for` — the S4 section) and `api/routers/search.py`
+(`_MIN_PREFIX_CHARS` — the two-tier-suggest boundary section). Both cost a
+co-load — `db/**` also pulls `db-and-sql.md`, `api/**` also pulls
+`api-telemetry-and-lanes.md` — and the trade was taken, because a session
+editing `nearest_for` without this file re-derives the 91.7 ms/seed price and
+the `_EXACT_SCAN_OFF` reason from scratch. **The lexical/vector split was
+measured and refused** (thirteen alternating runs, `rules-file-maintenance.md`);
+do not re-propose that axis.
+
+**Re-derive a number before quoting one from here** — every population below is
+dated and several have gone stale. All run 2026-09-02:
+
+```bash
+uv run pytest tests/unit -k "search or embed or similar or genre"
+uv run pytest tests/integration/test_adapters_search_postgres.py   # needs Docker
+uv run usher index                       # model, stale count, refused count
+uv run usher search "the quiet vacuum"   # prints semantic_coverage
+uv run usher suggest "the quie" --limit 5
+# The three harnesses the measured sections came from. All read-only.
+uv run python scripts/measure_suggest_tiers.py --all       # --tier1/--tier2/--indexes
+uv run python scripts/measure_exact_name_rank.py --sample <json> --label before
+uv run python scripts/measure_fusion_coverage_bias.py      # --stratum-a/-b/-c
+```
+
+**Spelling note for every figure below: `titles.popularity`, `.vote_count` and
+`.community_rating` are `tmdb_popularity`, `tmdb_vote_count` and
+`tmdb_vote_average` since `m10a`/ADR-0040.** Measurements keep the spelling they
+were taken in; they are not re-annotated one by one.
 
 **M6's measurements, all taken 2026-08-02 on this host against
 `pgvector/pgvector:pg17` (PostgreSQL 17.10, pgvector **0.8.6** — not the
@@ -67,8 +106,6 @@ Every configuration measured, same 2,993 cases:
 
 - **`titles.popularity` is NULL on all 1,271,138 rows, so the suggest
   statement's popularity ordering was inert and the tiebreak was `id ASC`.**
-  *(That column is `titles.tmdb_popularity` since `m10a`/ADR-0040; the
-  measurement is left in the spelling it was taken in.)*
   Boundary call 4's premise is that the enriched tier is 2k–10k titles — so on
   the measured deployment "ordered by popularity" ordered by insertion order.
   The shipped code's own comment said "roughly 60% of the catalog is
@@ -82,15 +119,20 @@ Every configuration measured, same 2,993 cases:
   finding and is REFUTED — corrected 2026-08-03 by M6's Task 28.**
   `PostgresBulkCatalogRepository.link_crosswalk`
   (`db/repositories/bulk.py`) writes
-  `popularity = COALESCE(m.popularity, t.popularity)` from `tmdb_ids`, reached
-  by `usher bootstrap --phase crosswalk|all` (`cli._bootstrap`'s `crosswalk`
-  arm → `BootstrapService.link_crosswalk`), and
+  `tmdb_popularity = COALESCE(m.popularity, t.tmdb_popularity)` from
+  `tmdb_ids`, reached by `usher bootstrap --phase crosswalk|all` and by
+  `POST /admin/bootstrap/{phase}` — the `crosswalk` arm is
+  **`composition.run_bootstrap`'s**, not the CLI's, since M9's E5; `cli.py`'s
+  `_bootstrap` is one `run_bootstrap(...)` call and has no arms — and
   `BulkCatalogRepository.link_crosswalk`'s docstring documents that write.
   **Symbols rather than line numbers, since 2026-08-07**: all four citations
-  here were line numbers, all four had drifted, and `cli.py:147` had drifted
-  clean out of `_bootstrap` into the middle of `OPERATOR_ERRORS` — a review
-  that checked it in the meantime found it *"still lands inside `_bootstrap`,
-  so it is not wrong"* and left it, which is the reading a line number invites.
+  here were line numbers, all four had drifted, and `cli.py:147` had drifted out
+  of `_bootstrap` into the middle of `OPERATOR_ERRORS` — a review that checked
+  it found *"still lands inside `_bootstrap`, so it is not wrong"* and left it,
+  the reading a line number invites. ⚠️ **A symbol drifts too, just more
+  slowly**: this paragraph then spent a milestone naming `cli._bootstrap` as the
+  owner of an arm E5 had already moved, four lines under the sentence boasting
+  the conversion. Re-read the symbol, not just its spelling.
   Reproduced against real
   Postgres with the shipped statement run verbatim: a **skeleton** title went
   `popularity IS NULL → popularity = 0`. The gate's catalog was 100% NULL
@@ -111,17 +153,13 @@ Every configuration measured, same 2,993 cases:
   shipped ordering is **kept unchanged**. `vote_count`-as-primary-key (dropping
   popularity) recovers all 1.3 points and does not hurt the all-NULL arm, but
   its enriched-tier behaviour is unmeasurable on a skeleton catalog and is an
-  **M9** change; `NULLIF(popularity, 0)` recovers nothing (3 zeros). The
-  uncorrected comment at `adapters/search/postgres.py` and
-  `SearchService._popularity_term`'s "most of 1,271,138 rows" are both
-  **corrected in the same task**. And the third item is sharper than "unread":
+  **M9** change; `NULLIF(popularity, 0)` recovers nothing (3 zeros). And
   **`ix_titles_popularity` is not merely read by nothing — it is unusable as
   declared** (a `DESC`/NULLS-FIRST btree while every consumer asks `DESC NULLS
-  LAST`, a different pathkey the planner never takes; `list_owned_by_tag`, added
-  in M7 Group H, *does* order by `titles.popularity` — `titles.tmdb_popularity`
-  since `m10a` — but its plan is a Merge
-  Semi Join over `pk_titles` that never touches the index), and it is **dropped
-  in migration `ffc`** with the full measurement in its docstring.
+  LAST`, a pathkey the planner never takes; `list_owned_by_tag`, added in M7
+  Group H, *does* order by that column, but its plan is a Merge Semi Join over
+  `pk_titles` that never touches the index), so it is **dropped in migration
+  `ffc`** with the full measurement in its docstring.
   **`SearchService._blend` is unaffected and was checked rather than assumed**:
   `_popularity_term` returns `None`, never `0.0`, and `_blend` drops an absent
   signal from numerator *and* denominator, so an all-NULL catalog collapses to
@@ -159,7 +197,11 @@ Every configuration measured, same 2,993 cases:
 - **`usher index --create-indexes` does not exist.** Task 8 put the trigram
   and tsvector indexes in migration `fa2b6c1e9d30` and added both to
   `bulk.py`'s `_SUSPENDABLE_INDEXES`, so they are dropped for the bootstrap
-  and rebuilt at the end of it — 10.9 s for all four, inside a 74.8 s import.
+  and rebuilt at the end of it — 10.9 s inside a 74.8 s import. **That is the
+  four entries the dict held in M6; it holds five since `m09a` added
+  `ix_titles_name_lower_prefix`**, which B3 priced on its own at 0.666 s /
+  44.2 MB below. The two were never timed as one rebuild, so read 10.9 s as a
+  four-index figure rather than as today's window.
   Guess 6 was about a command the milestone did not ship.
 - **`_TRIGRAM_THRESHOLD = 0.1` in `adapters/search/postgres.py` was documented
   as "the trigram floor the shipped path runs at" and is not.**
@@ -260,17 +302,16 @@ single probe measured: **`'m'` at 2,744 ms**, 78,203 `titles` rows and
 
 - **REFUTED — the sort is not the cost, and B2's residual-exposure argument
   names the wrong mechanism.** B2 declined an inner per-arm cap partly because
-  *"an ordered one costs the same sort, so it buys nothing"*. In the plan for
-  the worst probe the sort is a **top-N heapsort in 26 kB** costing
-  microseconds. The cost is the `UNION`'s de-duplication — a `HashAggregate`
-  at **17 batches spilling 47 MB to disk per worker** — plus a
-  `title_search_names` bitmap heap scan that **goes lossy** (47,951 exact /
-  66,156 lossy heap blocks, **5,664,971 rows removed by filter** to keep
-  1,069,834), plus a hash join back to `titles` at 16 batches. The index probes
-  themselves are 6 ms and 40 ms. **An ordered inner cap would therefore be far
-  cheaper than B2 priced it**, because it would cap the HashAggregate's input
-  rather than paying a sort that is already free — but that is a design change
-  and this task does not tune, so it is handed on rather than made.
+  *"an ordered one costs the same sort, so it buys nothing"*. In the plan for the
+  worst probe the sort is a **top-N heapsort in 26 kB** costing microseconds. The
+  cost is the `UNION`'s de-duplication — a `HashAggregate` at **17 batches
+  spilling 47 MB to disk per worker** — plus a `title_search_names` bitmap heap
+  scan that **goes lossy** (47,951 exact / 66,156 lossy heap blocks, **5,664,971
+  rows removed by filter** to keep 1,069,834), plus a hash join back to `titles`
+  at 16 batches; the index probes themselves are 6 ms and 40 ms. **An ordered
+  inner cap would therefore be far cheaper than B2 priced it** — it would cap the
+  HashAggregate's input rather than pay a sort that is already free — but that is
+  a design change and this task does not tune.
 - **CONFIRMED — the join back to `titles` costs more than the second arm's
   index probe**, at every size measured.
 - **Parallelism is not the lever, and at the worst case it does nothing.**
@@ -319,17 +360,21 @@ single probe measured: **`'m'` at 2,744 ms**, 78,203 `titles` rows and
   **4.527 s / 155.4 MB** over 10,896,525 rows, which has no prior number
   because the table did not exist when the gate ran.
 
-**Two things about measurement harnesses this run paid for, which are not about
-search.** A quiet-check that compares the one-minute load average before and
-after **condemns every clean run**, because a forty-minute run of continuous
-querying raises its own average — this one went 1.34 → 2.82 on a box that was
-provably idle throughout. And a foreign-process census that matches the whole
-command line counts *the shell that mentions the word*: `pgrep -f pytest`
-reported four processes on a box the coordinator had just measured clear, and
-all four were idle `sleep 5` waiters watching for pytest. Both were caught
-before they discarded a good run, both by predicting the failure rather than
-meeting it. Match argv **tokens**, exclude shells, and sample CPU **drift**
-between two moments when the harness itself is idle.
+**Moved here from `mutation-sweeps.md` on 2026-09-01; found in M9 B2's `EXPLAIN` case.**
+**And one plan-drift correction, recorded because the next reader of the
+`EXPLAIN` case will otherwise re-derive it:** the M9 plan's B2 acceptance names
+the tier-1 index `ix_titles_name_prefix`, and `m09a` ships
+`ix_titles_name_lower_prefix`. The case asserts the shipped name. The
+near-miss it asserts *against*, `ix_titles_name_lower_year`, differs from the
+real one by a single token in `_SUSPENDABLE_INDEXES`, so a plan-shaped
+half-memory of either name is one search-and-replace away from a green suite
+over the wrong index.
+
+**This run paid for the two quiet-check traps `CLAUDE.md` now carries** — the
+load average that condemns every clean run and the `pgrep -f` census that counts
+the shell mentioning the word. `scripts/measure_suggest_tiers.py` has the
+working version; both were caught by predicting the failure rather than meeting
+it.
 
 **And a guard is vacuous below the scale that triggers the thing it guards.**
 The check that `SET LOCAL max_parallel_workers_per_gather = 0` actually removed
@@ -403,6 +448,16 @@ P(>0) = 0.000. Corroborated twice at the library level: sentence-transformers
 the one a future contributor is most likely to reintroduce**, by "fixing"
 `SearchService`'s symmetric loop to apply the documented prefix — which is
 exactly the −0.066 condition, with no error and no log line to see it.
+**Moved here from `mutation-sweeps.md` on 2026-09-01; found in M9 A6's sweep.**
+**And one real coverage gap, now closed.**
+`test_the_port_does_not_ask_callers_to_apply_a_query_prefix` read
+`inspect.getdoc(Embedder)` only — the deleted clause happened to live on the
+*class* docstring, so the guard was written against where it was rather than
+where it could go. Restoring "callers are responsible for any query-side
+instruction prefix" on **`Embedder.embed`** (the more natural place) survived
+all 2,433 cases. The guard now scans every docstring on the port — same shape as
+`fixtures-and-fakes.md`'s `sitecustomize` proof: **a guard scoped to one surface
+of two reads as coverage.**
 **Normalisation is baked into the checkpoint, stops holding after the
 `halfvec` cast, and is not load-bearing under the operator this index uses.**
 Norms are 1.0 to within **5.96e-08** and `normalize_embeddings=False` returns
@@ -433,9 +488,25 @@ not the recall.** At 2% filter selectivity, recall@10 over 25 query vectors:
 **`relaxed_order`/40 → 0.508 and 10.00**. With the GUC off, a request for ten
 results **frequently returns zero** — `EXPLAIN` says why: `rows=1, Rows
 Removed by Filter: 39`, i.e. HNSW visited `ef_search` candidates, the filter
-killed them, the scan ended. **`ef_search` is the wrong lever** and
-`relaxed_order` beats `strict_order` because strict terminates earlier to buy
-an ordering RRF does not need. **Caveat that must travel with the numbers:**
+killed them, the scan ended. `relaxed_order` beats `strict_order` because
+strict terminates earlier to buy an ordering RRF does not need.
+
+🔴 **"`ef_search` is the wrong lever" stood here as a present-tense rule and is
+REFUTED — it was true only of the configuration it was measured in, which this
+project has not shipped since M6.** With the GUC *off* at 2% selectivity, 40 →
+200 still returns 4.24 rows of 10, so raising it bought nothing. Under the
+shipped `relaxed_order`, on 132,409 real 1024-lane `bge-m3` vectors,
+unfiltered, `ef_search` **is** the lever and recall@10 is monotone at every one
+of 12 queries: **0.700 / 0.858 / 0.917 / 0.967 / 0.992** at 40 / 100 / 200 /
+400 / 1000 (issue #32, 2026-08-19 — the full table, with latency and the
+filtered arm, is in the `ef_search` section near the end of this file).
+`Settings.search_hnsw_ef_search` moved 100 → 200 on that measurement.
+`adapters/search/postgres.py`'s own comment carries this retraction at the
+constant; **this file went a fortnight without it while the refutation sat
+1,100 lines further down.** A superseded claim in one paragraph of a long file
+is not annotated by a later section unless the earlier paragraph says so.
+
+**Caveat that must travel with the numbers:**
 the probe used uniform-random 384-dim vectors, the worst case for any ANN
 index, so absolute recall is a pessimistic floor — **0.508 is not a
 production recall figure**; what transfers is the ordering of the options and
@@ -503,27 +574,24 @@ was a numpy figure — and numpy `float16` is **140× slower than `float32`**
 `halfvec`; convert to `float32` before any numpy dot product.
 **Every number in this paragraph was taken at `halfvec(384)`, which stopped
 being the width on 2026-08-13** (`m09e`, 1024). The *conclusions* are
-width-independent — quantisation error is per lane, and `float16`'s missing
-GEMM path is not about length — but the two **storage** figures are not: 1.83
-GiB → 0.92 GiB is a 384-lane count, and 1.820 ms was measured over 384-lane
-vectors. Re-measure before quoting either at 1024. See the `m09e` section at the
-end of this file.
+width-independent — quantisation error is per lane, `float16`'s missing GEMM
+path is not about length — but the two **storage** figures are not (1.83 GiB →
+0.92 GiB and 1.820 ms are both 384-lane). Re-measure before quoting either.
 **The deterministic `FakeEmbedder` is `blake2b → Box-Muller → L2-normalise`,
 and its non-vacuity is measured — at 384, which is no longer its width.** Over
 15,996,000 off-diagonal pairs at `dimension=384`: cosine
 mean −0.00001, **sd 0.05102 against a theoretical 1/√384 = 0.05103** (ratio
 1.000), max +0.2549, **zero pairs above 0.5**. `m09e` moved `_DIMENSION` to
-`EMBEDDING_DIMENSIONS` (1024) and **that run was not repeated**, so read the
-numbers as a property of the construction rather than of today's default: the
-mechanism is dimension-independent and a wider vector can only concentrate the
-off-diagonal distribution further (theoretical sd 1/√1024 = 0.03125), which
-makes the measured claim conservative at the new width rather than unverified
-in the direction that would matter. **Re-run it before quoting a number.** The
-fake tracking the constant is not cosmetic: `composition.embedder` now returns
-`None` on a width mismatch, so a fake left at 384 would make every case
-building a real `embedder()` assert against a deployment with no model — which
-is how the stale literal was found, through two unit cases about
-`HF_HUB_OFFLINE`. **Use `hashlib`, never
+`EMBEDDING_DIMENSIONS` (1024) and **that run was not repeated** — read the
+numbers as a property of the construction: the mechanism is
+dimension-independent and a wider vector only concentrates the off-diagonal
+distribution further (theoretical sd 1/√1024 = 0.03125), so the measured claim
+is conservative at the new width rather than unverified in the direction that
+would matter. **Re-run it before quoting a number.** The fake tracking the
+constant is not cosmetic: `composition.embedder` returns `None` on a width
+mismatch, so a fake left at 384 makes every case building a real `embedder()`
+assert against a deployment with no model — which is how the stale literal was
+found, through two unit cases about `HF_HUB_OFFLINE`. **Use `hashlib`, never
 `hash()`** — `np.random.default_rng(abs(hash(text)))` passes *every* contract
 check and fails only across processes, because `str.__hash__` is
 `PYTHONHASHSEED`-salted, so the cross-process case must be pinned. A
@@ -549,8 +617,10 @@ Removing **both from the lexical lane at once** kills
 as `adapters/search/postgres.py`'s own comment claims.
 
 **The embedder is optional and off by default.** `USHER_EMBEDDING_ENABLED`
-gates it and `worker.register(JobKind.INDEX, …)` is guarded on the embedder
-being present exactly as `ENRICH` is guarded on `provider is not None`, so a
+gates it and `composition.worker_kinds` adds `JobKind.INDEX` — with
+`handlers[JobKind.INDEX]` installed alongside it — only under
+`if embedder is not None:`, exactly as `ENRICH` is guarded on
+`provider is not None`; `worker.registered_kinds` reads the pair back. So a
 worker never claims work it cannot run. Without it, full-text and trigram
 still serve all 1.27M titles — narrowed, not broken — and `--mode semantic`
 refuses outright while `--mode fused` narrows to full-text *and says which*.
@@ -619,14 +689,13 @@ delegating to the same `_predicates`/`_coverage` pair, so the guard and the
 reported number cannot drift. **Before pricing a fix as needing a weaker
 predicate, look for the strong one already being computed a few lines away.**
 
-The remaining cost — *"a read on every fused search"* — is a fact about where
-the read is put rather than about having one. It sits behind `expander is not
-None`, which is false on every shipped deployment, so nothing pays for it
-except the deployments that were about to buy a completion, and those trade one
-count over the enriched tier for one 1.4 s call.
-`test_the_shipped_default_probes_nothing_before_embedding` pins the ordering,
-because hoisting the probe above the expander check is the tidier-looking
-version and is the one that costs everybody.
+The remaining cost — *"a read on every fused search"* — is about where the read
+is put, not about having one. It sits behind `expander is not None`, false on
+every shipped deployment, so only a deployment about to buy a completion pays,
+and it trades one count over the enriched tier for a 1.4 s call.
+`test_the_shipped_default_probes_nothing_before_embedding` pins the ordering:
+hoisting the probe above the expander check is the tidier-looking version and
+the one that costs everybody.
 
 **Its position is *most* of the cost argument, and this said "the whole"
 until #16.** `QueryExpansionService.expand` is called from exactly one
@@ -645,40 +714,34 @@ spend is one search whose semantic lane was going to be able to answer.
 
 Three decisions worth not re-deriving. **Only the vector comes from the
 rewrite**: `SearchRequest.query` stays the typed string, so under RRF the
-lexical lane still matches the viewer's own words and a rewrite that drifted
-cannot take an exact-title search with it. **`SearchService.expander` is
-`QueryExpansionService | None`-shaped optional and
-`QueryExpansionService.client` is not** -- M8's rule everywhere else is that an
-`LLMClient` holder is built or not built (`CurationService`), and that works
-only because a deployment with no LLM runs no curation; a `SearchService` is
-built on every deployment there is, so "built or not built" has no state left
-to express and the choice is between an optional collaborator and a second
-class. It is the shape this project has never needed for `embedder`, one
-parameter over — a precedent by absence: ADR-0022 argues the embedder is
-optional and never considers or refuses a second `SearchService` class, so
-"the same call ADR-0022 already made" (which this file and `services/search.py`
-both said until 2026-08-07) overstated it. **A failure is absorbed**:
-`expand` never raises, and an unreachable endpoint, an unparseable answer or a
-blank/over-long rewrite all leave the search running on the typed query --
-while still writing the `llm_calls` row, because a ledger holding only the
-successes understates spend by exactly the failures.
+lexical lane still matches the viewer's own words and a drifted rewrite cannot
+take an exact-title search with it. **`SearchService.expander` is
+`QueryExpansionService | None` and `QueryExpansionService.client` is not** —
+M8's rule elsewhere is that an `LLMClient` holder is built or not built
+(`CurationService`), which works only because a deployment with no LLM runs no
+curation; a `SearchService` is built on every deployment, so "built or not
+built" has no state left to express. ADR-0022 argues the embedder is optional
+and never considers a second `SearchService` class, so "the same call ADR-0022
+already made" (said here and in `services/search.py` until 2026-08-07) was a
+precedent by *absence* and overstated it. **A failure is absorbed**: `expand`
+never raises — unreachable endpoint, unparseable answer, blank or over-long
+rewrite all leave the search on the typed query — while still writing the
+`llm_calls` row, because a ledger holding only successes understates spend by
+exactly the failures.
 
-**And the reported-not-substituted rule has a shape, and it is one-directional
-— this file claimed a biconditional until 2026-08-07 and the biconditional is
-false.** `SearchAnswer.expanded_query` is the text that was embedded and `None`
-when the query was embedded as typed, so **a populated field means a completion
-was bought, and an absent one means nothing about spend**. `usher search`
-prints it above the results. The counterexample is measured, not hypothetical:
-a completion that answers with the wrong key is bought and billed in full —
-`tokens_in=1000`, `tokens_out=200`, one `llm_calls` row, `ok=False`,
-`error=NO_USABLE_QUERY` — and `expand` returns `None`, so the field is `None`
-and the CLI prints nothing. Same for an upstream failure. The old wording
-(*"populated on exactly the searches that bought a completion"*) invites *"no
-`expanded:` line ⇒ no spend"*, which is exactly backwards for the two failure
-paths the billed-on-every-attempt rule exists to make visible. A field echoing
-the typed query when nothing was expanded would instead put a line on every
-search of every default deployment and mean nothing -- which is the mutation
-the CLI case kills.
+**And the reported-not-substituted rule is one-directional; this file claimed a
+biconditional until 2026-08-07.** `SearchAnswer.expanded_query` is the text that
+was embedded and `None` when the query was embedded as typed, so **a populated
+field means a completion was bought and an absent one means nothing about
+spend**. Measured counterexample: a completion answering with the wrong key is
+billed in full — `tokens_in=1000`, `tokens_out=200`, one `llm_calls` row,
+`ok=False`, `error=NO_USABLE_QUERY` — and `expand` returns `None`, so the CLI
+prints nothing. Same for an upstream failure. The old wording (*"populated on
+exactly the searches that bought a completion"*) invites *"no `expanded:` line ⇒
+no spend"*, exactly backwards for the two failure paths the
+billed-on-every-attempt rule exists to make visible. Echoing the typed query
+instead would put a line on every search of every default deployment and mean
+nothing — the mutation the CLI case kills.
 
 The `usher similar --rebuild` freshness gap itself is stated in `CLAUDE.md`
 (always loaded); the one detail not there: `title_neighbors` carries a
@@ -694,15 +757,14 @@ shipped code did with them. Host as always: Ryzen 7 5800X3D, CPU only,
 `pgvector/pgvector:pg17`.
 
 **The population, and what it is a count of.** `title_embeddings` is
-**130,647 rows, every one carrying a vector, 0 refused** — against S3's frozen
-`s3_tier_snapshot` of **130,806 ids**, of which 130,647 enriched. So the
-embedded population is **100.0% of the enriched population and 99.88% of the
-frozen tier**, and the 159-row gap is not missing embeddings: those titles are
-still `skeleton`, which `_POPULATION` (`t.enrichment_state <> 'skeleton'`)
-excludes, so no `index` job was ever owed for them. **The population predicate
-demonstrated at scale rather than asserted**: 1,141,720 skeletons, every one
-without an embedding row, and `count_stale` **0** — 1.14M rows that would match
-the staleness half and are excluded by the population half.
+**130,647 rows, every one carrying a vector, 0 refused**, against S3's frozen
+`s3_tier_snapshot` of **130,806 ids** of which 130,647 enriched — **100.0% of
+the enriched population, 99.88% of the frozen tier**. The 159-row gap is not
+missing embeddings: those are still `skeleton`, which `_POPULATION`
+(`t.enrichment_state <> 'skeleton'`) excludes, so no `index` job was ever owed.
+**The predicate demonstrated at scale rather than asserted**: 1,141,720
+skeletons, every one without an embedding row, `count_stale` **0** — 1.14M rows
+matching the staleness half and excluded by the population half.
 
 **Two passes, and the second one's size is the measurement.** `EnrichService`
 enqueues `INDEX` and `DERIVE` together — at `BACKFILL` for a sweep, and since
@@ -725,16 +787,16 @@ running other agents' test suites. Pass two, index-only and on a quiet box:
 8,603 jobs in **361 s**, **23.8 rows/s aggregate**.
 
 **The invariant holds and the backfill does not run at it — quote it for the
-model, never for the queue.** Real documents, measured with the shipped
-tokenizer over 1,000 sampled embedded titles: mean **125.4 tokens**, median
-118, p95 197, max 323, none over the checkpoint's 512 window. So the enriched
-`name + credits + overview + tagline + genres + keywords` document sits inside
-the **~100–130 tokens** this file already records, and `cli.py`'s 135-token
-estimate is the fair, slightly pessimistic figure it says it is. The *model*
-on those documents, one text per call — the shape `IndexService._embed` uses —
-runs at **9,683 tokens/s**, inside the **8,000–10,700 tokens/s** invariant. The
-*queue* moved 8,603 × 125.4 = 1,078,816 tokens in 361 s: **2,988 tokens/s
-across two workers, ~1,494 each — about 15% of the model's own rate.**
+model, never for the queue.** Real documents, shipped tokenizer, 1,000 sampled
+embedded titles: mean **125.4 tokens**, median 118, p95 197, max 323, none over
+the checkpoint's 512 window — so the enriched `name + credits + overview +
+tagline + genres + keywords` document sits inside the **~100–130 tokens** this
+file already records, and `cli.py`'s 135-token estimate is the fair, slightly
+pessimistic figure it claims to be. The *model* on those documents, one text per
+call (the shape `IndexService._embed` uses), runs at **9,683 tokens/s**, inside
+the **8,000–10,700 tokens/s** invariant. The *queue* moved 8,603 × 125.4 =
+1,078,816 tokens in 361 s: **2,988 tokens/s across two workers, ~1,494 each —
+about 15% of the model's own rate.**
 
 **So `usher index`'s "estimated worker time" is off by a measured factor, and
 its arithmetic is not what is wrong with it.** It printed **109–145 s** for the
@@ -747,22 +809,22 @@ staged `COPY` through a `CREATE TEMP TABLE ... ON COMMIT DROP`, and a commit —
 
 **A quarter of the drain was the staleness gauge.** `usher work` calls
 `SearchGauges.refresh` after *every* `worker.run_once()` — a pass of at most 20
-jobs — and the refresh is three counts. At this tier `count_stale` is
-**360.9 ms** and `count_refused` **22 ms**. Pass two's 8,603 jobs is ~431
-passes, ~215 per worker, × 0.383 s = **82 s of the 361 s wall clock, 23%**,
-spent counting a backlog nothing reads while a backfill is running. S3 watched
-this grow 16.4 → 29.4 → 327.9 ms as the tier went 7,718 → 18,267 → 88,001; at
-130,647 it is 360.9 ms and has flattened, because the cost is the scan of the
-enriched population and that population has stopped moving. `telemetry.py:546`
-and `composition.py:1317` both still describe this scan's population as "2k-10k
-rows".
+jobs — and the refresh is three counts, `count_stale` **360.9 ms** and
+`count_refused` **22 ms** at this tier. Pass two's 8,603 jobs is ~431 passes,
+~215 per worker, × 0.383 s = **82 s of the 361 s wall clock, 23%**, spent
+counting a backlog nothing reads while a backfill runs. S3 watched this grow
+16.4 → 29.4 → 327.9 ms as the tier went 7,718 → 18,267 → 88,001; it has now
+flattened, because the cost is the scan of a population that stopped moving.
+`register_search_gauges`' docstring (`telemetry.py`) and `SearchGauges`' class
+docstring (`composition.py`) both still call this scan's population "2k-10k
+rows", each beside `ix_titles_enrichment_state`.
 
 **And an idle worker is not idle — the cost is on the database, which is why
-`ps` says otherwise.** Two workers with an empty queue burned **0 seconds of
-process CPU over 60 s** and simultaneously held `usher-m9-pg` at **9–67% CPU**:
-each 5-second poll is another gauge refresh, and the refresh is an O(tier)
-scan. Anyone measuring anything else on the same database must stop the
-workers, not merely observe that they are quiet.
+`ps` says otherwise.** Two workers with an empty queue burned **0 s of process
+CPU over 60 s** while holding `usher-m9-pg` at **9–67% CPU**: each 5-second poll
+is another gauge refresh, and the refresh is an O(tier) scan. **Stop the
+workers before measuring anything else on the same database** — do not settle
+for observing that they look quiet.
 
 ### The pool walk `SimilarityService.rebuild` draws — the first per-seed price in this project's history
 
@@ -778,12 +840,10 @@ table, writing nothing.
 | prefix / suffix / random 50 seeds | 38.75 / 38.58 / 38.04 ms/seed |
 
 **Full walk: 130,647 × 36.5 ms = 4,769 s ≈ 80 minutes.** *Measured*: the
-per-seed cost, over 650 seeds, at the real population, on an idle box.
-*Extrapolated*: that the remaining ~130,000 seeds cost the same as the 650 —
-which is the only step here that is not a measurement, and which the
-prefix/suffix/random row is the check on. Page size is not a lever (the two
-page shapes agree within 2.3%) and the seed-side paging is ~3 s of the 80
-minutes.
+per-seed cost over 650 seeds, real population, idle box. *Extrapolated*: that
+the remaining ~130,000 seeds cost the same — the only step here that is not a
+measurement, and what the prefix/suffix/random row checks. Page size is not a
+lever (the two shapes agree within 2.3%); seed-side paging is ~3 s of the 80.
 
 **The cost is linear per seed in the population, so the walk is quadratic in
 it.** Five points taken as the population grew under two-worker load: 30,562 →
@@ -800,15 +860,16 @@ estimate of pool composition. A prefix does not: `list_embedded` orders by
 `tconst` order, so a prefix is ordered by registration era.
 
 **A figure this project already had, in the place nobody looked.** The M9 plan
-states that "165.7–166.2 ms for 50 seeds and 619.9 ms for 200" appears nowhere
-in this repository. It appears twice — `db/repositories/search.py:263-264` and
-`tests/integration/test_services_similar.py:711-712` — and the plan's real
-point survives intact, because **neither site records the embedded population
-it was taken over**. Both are measuring where the `genome_scores` join belongs
-relative to `_EXACT_SCAN_OFF`, on a "real 15,565-row" genome table; the 50-seed
-baseline is a per-seed cost of ~3.3 ms, which is **11× cheaper than the same
-statement over 130,647 embeddings** for exactly the reason the linear fit
-above gives. A per-seed price without its population is not a price.
+says "165.7–166.2 ms for 50 seeds and 619.9 ms for 200" appears nowhere in this
+repository; it appears twice — `db/repositories/search.py`'s comment table under
+`_NEAREST`, and `test_the_genome_join_does_not_run_inside_the_no_index_bracket`
+(`tests/integration/test_services_similar.py`). The plan's real point survives,
+because **neither site records the embedded population it was taken over**: both
+measure where the `genome_scores` join belongs relative to `_EXACT_SCAN_OFF`, on
+a "real 15,565-row" genome table, and the 50-seed baseline of ~3.3 ms/seed is
+**11× cheaper than the same statement over 130,647 embeddings** for exactly the
+reason the linear fit gives. **A per-seed price without its population is not a
+price.**
 
 ### The mutation ledger for `test_a_title_embedded_before_its_credits_landed_is_stale_again`
 
@@ -856,9 +917,15 @@ a design constant rather than at a fixture.
 Two consequences carried in code. The shipped weight is **0.005**, the midpoint
 of the open interval `(0, 0.01)` — 0 excluded because a zero-weighted term is a
 weight that reads like a signal, 0.01 excluded by the table above, and nothing
-measured distinguishes any point between (`title_embeddings` holds **0 rows**
-on both surviving catalogs, so the term's effect size is unmeasurable today,
-not merely unmeasured). And the bound is now pinned by a case that calls
+measured distinguishes any point between. ⚠️ **The reason given for that last
+clause has expired.** It read *"`title_embeddings` holds 0 rows on both
+surviving catalogs, so the term's effect size is unmeasurable today"* — true
+on 2026-08-11 and false from 2026-08-12, when S4 embedded 130,647 titles; the
+table has carried a population ever since (130,720 after `m09e`, **132,440**
+at the 2026-08-19 genre re-derivation). So the effect size is **measurable and
+still unmeasured**, which is a different claim and a smaller excuse. Anyone
+revisiting `w` now has a corpus to revisit it against.
+And the bound is now pinned by a case that calls
 `_blend` **directly** rather than through a fixture: *"popularity maximally for
 it"* is asymptotic — `p / (p + 10)` never reaches 1.0 — so no seeded catalog
 can reach the corner the bound is about, and an ordering case at any reachable
@@ -866,7 +933,22 @@ configuration is green under every `w` in the table.
 
 **What a 0.005 term can move, so the weight is not mistaken for a measurement
 of the signal.** With all six present the denominator is 1.045, so the term
-spans 0.0048 of score. It cannot overturn `owned` (0.15) or `played` (0.02) at
+spans 0.0048 of score.
+
+🔴 **That span is also the displacement margin, and this file plus three code
+sites gave the margin as 0.009615 until 2026-09-02.** 0.009615 is `0.01 / 1.04`
+— the bound with the taste term **absent**: four other signals over a
+five-signal denominator. At the shipped `w = 0.005` with all six present it is
+`0.005 / 1.045` = **0.004785**, the same number as the span above, because at
+that configuration the exact match's entire protection *is* the taste term's
+own headroom. The wrong figure was **2×** the real one and was quoted beside
+the words *"the other five"*, which name the six-signal case. Corrected in
+`SearchService._dense_ranks`' docstring, `search_index_contract.py` and
+`test_services_search.py`; quote 0.009615 only for a search where taste is
+absent. **A bound is a function of which signals are present — carry the
+denominator with it.**
+
+It cannot overturn `owned` (0.15) or `played` (0.02) at
 any cosine gap. It overturns one relevance step only where
 `0.005·Δcos > 0.70/((1+k)(2+k))`, i.e. **k ≥ 11** at an impossible `Δcos = 1.0`
 and k ≥ 25 at a realistic 0.2. Where it decides is where the other five have
@@ -875,10 +957,10 @@ index scores share a rank and the relevance term then cancels exactly.
 
 🔴 **The ceiling survives issue #25 unchanged, and the section below is what it
 was protecting the wrong row from.** Nothing in the table above moved: the
-bound is still `0.70` against `0.35 + 0.15 + 0.15 + 0.02 + 0.02 + w`, the
-margin is still **0.009615** over all five non-relevance signals, `w` is still
-0.005, and `test_no_combination_of_the_other_five_can_displace_an_exact_match`
-is unedited. What changed is *which* hit occupies dense rank 0 — see the next
+bound is still `0.70` against `0.35 + 0.15 + 0.15 + 0.02 + 0.02 + w`, `w` is
+still 0.005, and
+`test_no_combination_of_the_other_five_can_displace_an_exact_match` is
+unedited. What changed is *which* hit occupies dense rank 0 — see the next
 section — which is the one thing this bound never said anything about. **Read
 those two sections together before touching either**: capping the relevance
 decay, the obvious alternative fix, is exactly the change that would have
@@ -954,49 +1036,47 @@ measurable hole.
 defect's own shape.** Tier-1 suggest computes `lower(name) LIKE 'typed%'` and
 already ranked this query correctly, which is what identified the signal — but
 the three essays are *themselves* prefix matches of `The Matrix`, so a prefix
-key flags all four rows alike and separates none. It also costs something real
-in the other direction (every `Matrix Warrior` above `The Matrix` on the query
+key flags all four rows alike and separates none, and it costs something real in
+the other direction (every `Matrix Warrior` above `The Matrix` on the query
 `Matrix`) with nothing measured behind it. On tier 1 the whole candidate set is
-prefix matches, so the key is a filter and popularity does the ordering; in the
-search lane the set is mixed. Equality is the part of the rule that transfers.
-`title_search_names` is not joined either — 10.9M person rows and an alias
-table, a second scan on the one statement with a latency figure to keep — and
-that is the obvious next measurement rather than an omission.
+prefix matches, so the key is a filter and popularity orders; in the search lane
+the set is mixed. **Equality is the part of the rule that transfers.**
+`title_search_names` is not joined either — 10.9M person rows plus an alias
+table, a second scan on the one statement with a latency figure to keep — which
+is the obvious next measurement rather than an omission.
 
 **Latency: the paired measurement is the honest one, and the arm-against-arm
 number failed the bar.** Scored as written (after p95 ≤ 1.25 × before p95 over
 the two whole-service arms) it is 19.31 → 24.42 ms = **1.265×**, a fail by
 0.28 ms — and the two arms ran twenty minutes apart on a box running fourteen
-containers. Running the **two statements** back to back over the same 800
-names, alternating which goes first: old p50 0.596 / p95 13.42 ms, new p50
-0.627 / p95 14.84 ms = **1.106×**, paired delta p50 **+0.013 ms**, mean +0.099
-ms, and the new statement is *faster* on 357 of 800 queries. `EXPLAIN` confirms
-there is no plan change to explain — Bitmap Index Scan → Bitmap Heap Scan →
-Sort → Limit on both, differing by one sort key. **A p95 taken from two runs
-minutes apart on a shared box measures the box as much as the change**; an
-interleaved pair is what the difference is small enough to need.
+containers. The **two statements** back to back over the same 800 names,
+alternating which goes first: old p50 0.596 / p95 13.42 ms, new p50 0.627 / p95
+14.84 ms = **1.106×**, paired delta p50 **+0.013 ms**, and the new statement is
+*faster* on 357 of 800 queries. `EXPLAIN` says there is no plan change to
+explain — Bitmap Index Scan → Bitmap Heap Scan → Sort → Limit on both, differing
+by one sort key. **A p95 from two runs minutes apart on a shared box measures
+the box as much as the change**; interleave when the difference is this small.
 
 ### Two ways a title cannot be found by its own name, both unfixed and neither a ranking problem
 
-The 11 `not_retrieved` misses are the same 11 before and after, and they split
-into two shapes worth knowing before anyone reads the residual rate as ranking
-quality:
+The 11 `not_retrieved` misses are the same 11 before and after, in two shapes
+worth knowing before anyone reads the residual rate as ranking quality:
 
-- **`websearch_to_tsquery` reads ` - ` as negation.** `Regret - Cherie Laurent`
-  compiles to `'regret' & !'cheri' & 'laurent'` — the title's own name excludes
-  the title. `Die 90er - Jahrzehnt der Chancen` → `'die' & '90er' &
-  !'jahrzehnt' & 'der' & 'chancen'`. A hyphen surrounded by spaces is ordinary
-  punctuation in a film title and a **NOT operator** in the websearch grammar,
-  and 8 of the 11 are this. It is the reason to be careful about `plainto_` vs
-  `websearch_to_` rather than a defect in either.
+- **`websearch_to_tsquery` reads ` - ` as negation**, so a title's own name
+  excludes the title: `Regret - Cherie Laurent` → `'regret' & !'cheri' &
+  'laurent'`; `Die 90er - Jahrzehnt der Chancen` → `'die' & '90er' &
+  !'jahrzehnt' & 'der' & 'chancen'`. A spaced hyphen is ordinary punctuation in
+  a film title and a **NOT operator** in the websearch grammar; **8 of the 11
+  are this** — a reason to be careful about `plainto_` vs `websearch_to_`
+  rather than a defect in either.
 - **A name of nothing but stop words** produces an empty tsquery and a `NOTICE:
-  text-search query contains only stop words`. `In Between` is a real title in
-  this catalog and matches nothing, including itself.
+  text-search query contains only stop words`. `In Between` is a real title
+  here and matches nothing, including itself.
 
 Both are **retrieval** failures — the row is not a candidate, so no ranking
-change reaches them — and both would be answered by the same thing: a name
-arm that does not go through the English text-search parser at all. Not built
-here; the bar declared them out of reach before the run rather than after.
+change reaches them — and both want the same thing: a name arm that does not go
+through the English text-search parser at all. Not built; the bar declared them
+out of reach before the run rather than after.
 
 ## The two-tier suggest reached a request boundary, and the boundary is where the keystroke defect is answered (2026-08-12, M9 B5)
 
@@ -1019,27 +1099,25 @@ the shape. **No statement changed** — no floor, no cap, no index, no `UNION`.
   would set the minimum at seven; not a `Settings` field, because the number is
   a function of catalog size rather than of an operator's preference.
 - **Tier 2 is bounded at one character only**, because nobody has measured the
-  trigram statement *per prefix length* — its 33.6 ms p50 / 211 ms p95 /
-  730 ms max are whole-name figures, exactly as tier 1's 0.6 ms was before B3
-  re-measured it per length. A bound with no measurement under it is the shape
-  `ports-and-error-taxonomy.md` records. Its defence is the client's debounce;
-  **the server debounces nothing**.
+  trigram statement *per prefix length* — its 33.6 ms p50 / 211 ms p95 / 730 ms
+  max are whole-name figures, exactly as tier 1's 0.6 ms was before B3
+  re-measured it per length. Its defence is the client's debounce; **the server
+  debounces nothing**.
 - **`usher suggest --tier` defaults to `fuzzy` where the route defaults to
   `prefix`**, and `SearchService.suggest` takes `tier` as a required keyword
   with **no default at all**, so neither boundary inherits the other's answer.
   A route is driven per keystroke and a command is typed once.
 - **The ordered inner per-arm cap is still not made and is the first thing a
-  follow-up should measure.** G7 is refuted (the sort is a 26 kB top-N
-  heapsort; the cost is the `UNION`'s de-duplication spilling 47 MB and a lossy
-  bitmap heap recheck), so it is far cheaper than B2 priced it — but changing
-  the statement would leave B3's per-length curve describing a query that no
-  longer exists, and B5 ships no SQL.
-- **What is still not measured**, beyond the list this file already carries:
-  tier 2 per prefix length; the four-character minimum against real typed
-  queries, which is `search_queries` and has no rows until after M9; and the
-  curve over a `title_search_names` that carries T7's **alias** rows as well as
-  the 10.9M person rows it was taken over — the shipped table is larger than
-  the measured one, so the curve is optimistic in the direction that matters.
+  follow-up should measure.** G7 is refuted (the sort is a 26 kB top-N heapsort;
+  the cost is the `UNION`'s de-duplication spilling 47 MB and a lossy bitmap heap
+  recheck), so it is far cheaper than B2 priced it — but changing the statement
+  would leave B3's per-length curve describing a query that no longer exists,
+  and B5 ships no SQL.
+- **Still not measured**: tier 2 per prefix length; the four-character minimum
+  against real typed queries (`search_queries`, no rows until after M9); and the
+  curve over a `title_search_names` carrying T7's **alias** rows as well as the
+  10.9M person rows — the shipped table is larger than the measured one, so the
+  curve is optimistic in the direction that matters.
 
 ## What one `search_queries` row costs, and the plan's own estimate of it was an order of magnitude out (2026-08-12, M9 F2)
 
@@ -1058,113 +1136,99 @@ connection, 2,000 iterations each. Driver outside the working tree at
 
 **F2's acceptance said the write sits "on a path whose p50 is two orders of
 magnitude larger" and that is wrong by a factor of ten.** Against this file's
-recorded full-text figures — p50 **33.3 ms**, p95 **208.8 ms** over 2,993 cases
-at 1,271,138 titles — the write is **11.9% of a p50 search** and 2.3% of a p95
-one: **one** order of magnitude, not two, and at the median it is an eighth of
-the search rather than a hundredth. The conclusion the estimate was supporting
-survives (no bar is minted, and none is needed), but a reader pricing a future
-change off *"two orders of magnitude"* would be out by 10×.
+full-text figures — p50 **33.3 ms**, p95 **208.8 ms** over 2,993 cases at
+1,271,138 titles — the write is **11.9% of a p50 search** and 2.3% of a p95 one:
+**one** order of magnitude, an eighth of the median search rather than a
+hundredth. The conclusion survives (no bar is minted, and none is needed), but a
+reader pricing a future change off *"two orders of magnitude"* is out by 10×.
 
-**Three quarters of it is the commit, not the INSERT**, and that is the part
-worth carrying: `search_queries` has no index beyond its primary key, so the
-INSERT itself is 0.9 ms and the rest is one WAL flush. Two consequences.
-`usher search` had no commit at all before F2, so it pays the whole 4 ms. On
-`GET /search` the request *did* already commit through `api/deps.get_session`
-— but on a read-only transaction that commit flushes nothing, so the marginal
-cost on the route is the same ~3.4 ms above the floor rather than the INSERT
-alone. And anything that later records a *keystroke* multiplies this by the
-suggest path's rate, which is the volume half of PRD 10's argument for why
-`GET /search/suggest` writes no row.
+**Three quarters of it is the commit, not the INSERT**: `search_queries` has no
+index beyond its primary key, so the INSERT is 0.9 ms and the rest is one WAL
+flush. `usher search` had no commit at all before F2 and pays the whole 4 ms; on
+`GET /search` the request *did* already commit through `api/deps.get_session`,
+but on a read-only transaction that commit flushes nothing, so the marginal cost
+on the route is the same ~3.4 ms above the floor. Anything that later records a
+*keystroke* multiplies this by the suggest path's rate — the volume half of PRD
+10's argument for why `GET /search/suggest` writes no row.
 
-Caveats, stated because they bound the number rather than decorate it: a fresh
-container with `fsync=on` and an empty table, on an otherwise-idle host, with
-one connection and one prepared statement — so this is the steady-state cost of
-a warm path and not a first-call or a contended one, and the INSERT figure is a
-property of a table with no secondary index that a later index would move.
+Caveats that bound the number: a fresh container with `fsync=on` and an empty
+table, idle host, one connection, one prepared statement. Steady-state cost of a
+warm path, not a first-call or a contended one, and the INSERT figure belongs to
+a table with no secondary index that a later index would move.
 
 ## `bge-m3` over HTTP, the width move, and two vLLM flags that each cost a run (2026-08-13, `m09e`)
 
 The design argument is
 [ADR-0038](../../docs/prd/decisions/0038-the-embedding-width-is-deployment-wide-ddl.md);
-this is the evidence and the deployment facts, including the ones that are about
-somebody else's process and therefore have nowhere else to live.
+this is the evidence and the deployment facts.
 
 **`fastembed` does not ship `BAAI/bge-m3`, and this was enumerated rather than
-assumed.** All five model classes on fastembed 0.8.0 — `TextEmbedding`,
+assumed** — all five model classes on fastembed 0.8.0 (`TextEmbedding`,
 `SparseTextEmbedding`, `LateInteractionTextEmbedding`, `ImageEmbedding`,
-`LateInteractionMultimodalEmbedding` — listed and searched; no `bge-m3` in any.
-That is the whole reason a second `Embedder` exists. It is not a judgement about
-in-process versus remote, and anyone re-opening the question should re-run the
-enumeration against the current fastembed before assuming it still holds.
+`LateInteractionMultimodalEmbedding`) listed and searched, no `bge-m3` in any.
+That is the whole reason a second `Embedder` exists; it is not a judgement about
+in-process versus remote. Re-run the enumeration before assuming it still holds.
 
-**The served model's norm is exactly 1.0.** Checked live against the reference
-endpoint, so `_NORM_TOLERANCE = 1e-4` carries the same four orders of magnitude
-of headroom here as it does for `fastembed` against the 8.99–9.46 a missing
-`Normalize` module produces. `EmbedderContract` covers this *less* well for the
-remote runtime than for the local one: the served model is the one thing about
-`OpenAICompatEmbedder` that can change while the process lives.
+**The served model's norm is exactly 1.0**, checked live, so `_NORM_TOLERANCE =
+1e-4` keeps the same four orders of headroom it has for `fastembed` against the
+8.99–9.46 a missing `Normalize` module produces. `EmbedderContract` covers the
+remote runtime *less* well than the local one: the served model is the one thing
+about `OpenAICompatEmbedder` that can change while the process lives.
 
 ### The serving topology — two vLLM engines on one 4090, and why the big one survives
 
-The host now runs both models at once: `cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit` at
+Both models run at once: `cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit` at
 `--gpu-memory-utilization 0.76` on **:8000** (`USHER_LLM_BASE_URL`) and
-`BAAI/bge-m3` at **0.11** on **:8001** (`USHER_EMBEDDING_BASE_URL`). Measured
-weights **16.01
-GiB** and **2.11 GiB** against **24,564 MiB** total, with **~2,135 MiB** held by
-the desktop session.
+`BAAI/bge-m3` at **0.11** on **:8001** (`USHER_EMBEDDING_BASE_URL`) — measured
+weights **16.01 GiB** and **2.11 GiB** against **24,564 MiB** total, ~2,135 MiB
+of it held by the desktop session.
 
 **The 26B fits beside an embedding model because of its attention shape, not
-because of slack.** It is 30 layers of which only **5 are full-attention** — the
-other 25 are sliding-window at 1024 — so one 16K-token sequence costs **435 MiB
-of KV**, not gigabytes. vLLM's own report at that utilisation: *Available KV
-cache memory* **0.77 GiB**, *GPU KV cache size* **6,688 tokens**, *Maximum
-concurrency for 16,384 tokens per request* **1.19x**. That last figure is the
-one to read before adding a third tenant: the chat engine has room for
-approximately one full-length request at a time and no more.
+because of slack.** 30 layers of which only **5 are full-attention** (the other
+25 sliding-window at 1024), so one 16K-token sequence costs **435 MiB of KV**,
+not gigabytes. vLLM's report at that utilisation: KV cache **0.77 GiB**, **6,688
+tokens**, *maximum concurrency for 16,384 tokens per request* **1.19x**. Read
+that last figure before adding a third tenant — the chat engine has room for
+about one full-length request and no more.
 
-### `--load-format pt` is a trap for this checkpoint, and it fails silently
+### The two vLLM flags that each cost a run
 
+🔴 **`--load-format pt` is a trap for this checkpoint and it fails silently.**
 `BAAI/bge-m3` ships `pytorch_model.bin` and **no safetensors**, which looks
-exactly like a model that needs `--load-format pt`. It is not.
-`LoadFormat.PT` globs `["*.pt"]`, so on this repository it matched only
-`colbert_linear.pt` and `sparse_linear.pt` — two auxiliary heads — and loaded a
-model with **391 uninitialised weights**. The default `auto` globs
-`["*.safetensors", "*.bin"]` and is the correct setting. **Nothing raises**: the
-server starts, answers, and returns vectors off a randomly-initialised backbone,
-which is `ADR-0022` Part 3's failure family (a plausible ranking that is wrong
-everywhere) arriving through a loader flag instead of a missing module. The
-operator's vLLM compose file carries the explanation at the flag —
-`~/anirudhlath/vllm/docker/compose.yml`, **not a file in this repository; do not
-edit it**.
+exactly like a model that needs the flag. It is not: `LoadFormat.PT` globs
+`["*.pt"]`, so it matched only `colbert_linear.pt` and `sparse_linear.pt` — two
+auxiliary heads — and loaded a model with **391 uninitialised weights**. The
+default `auto` globs `["*.safetensors", "*.bin"]` and is correct. **Nothing
+raises**: the server starts, answers, and returns vectors off a
+randomly-initialised backbone — ADR-0022 Part 3's failure family (a plausible
+ranking that is wrong everywhere) arriving through a loader flag. The operator's
+vLLM compose file carries the explanation at the flag,
+`/home/anirudhlath/vllm/docker/compose.yml` — **not a file in this repository;
+do not edit it**. (Written `~/anirudhlath/vllm/...` here for a fortnight, which
+expands to a path that has never existed.)
 
-### `--served-model-name` must be the checkpoint, and the taxonomy was right while the message was useless
-
-With `--served-model-name bge-m3`, **every `index` job parked** on
-`PortDataMalformed: the embedding endpoint rejected the request with HTTP 404`.
-Usher sends `checkpoint_of(model_name)` — `BAAI/bge-m3` — and vLLM answers 404
-for a model it does not serve under that name. So the alias has to be the
-checkpoint, because the request body is derived from the same string the
+**`--served-model-name` must be the checkpoint, and the taxonomy was right while
+the message was useless.** With `--served-model-name bge-m3`, **every `index`
+job parked** on `PortDataMalformed: the embedding endpoint rejected the request
+with HTTP 404`. Usher sends `checkpoint_of(model_name)` — `BAAI/bge-m3` — and
+vLLM answers 404 for a model it does not serve under that name. The alias has to
+be the checkpoint, because the request body derives from the same string the
 fingerprint stores and the two cannot be decoupled without decoupling the
 fingerprint from the model.
 
-**Two things worth separating in that outcome.** The error taxonomy behaved
-*correctly*: a non-429 4xx is permanent, retrying it cannot help, so parking
-rather than retrying is the right call and it is what happened. But
-`_ENDPOINT` is a constant precisely so no message carries a URL or a credential
-(`ports-and-error-taxonomy.md`'s rule, and `OpenAICompatibleClient`'s
-precedent), which means the message named **neither the model nor the URL** and
-the diagnosis came entirely from the server's own logs. That is the accepted
-cost of the redaction rule and not a defect — but it means **a 404 from this
-adapter is a signal to go read the inference server**, and that is worth
-knowing before spending time on the client.
+**Two things worth separating.** The taxonomy behaved *correctly* — a non-429
+4xx is permanent, retrying cannot help, parking is right and is what happened.
+But `_ENDPOINT` is a constant precisely so no message carries a URL or a
+credential (`ports-and-error-taxonomy.md`'s rule, `OpenAICompatibleClient`'s
+precedent), so the message named **neither the model nor the URL** and the
+diagnosis came entirely from the server's logs. That is the accepted cost of the
+redaction rule, not a defect — but **a 404 from this adapter is a signal to go
+read the inference server** before spending time on the client.
 
-### `alembic upgrade head` bypasses the settings scrub
-
-Found here, recorded in `config-cli-and-deployment.md` because it is a config
-finding rather than a search one: with `USHER_DATABASE_URL` absent, alembic
-prints pydantic's raw `ValidationError` — `input_value={…}` and a truncated
-`secret_key` with it. `cli._settings_problem` exists to scrub exactly that and
-alembic's `env.py` never reaches it. **Found, not fixed.**
+**Also found here, fixed nowhere:** `alembic upgrade head` bypasses
+`cli._settings_problem`, so with `USHER_DATABASE_URL` absent it prints
+pydantic's raw `ValidationError` — `input_value={…}` and a truncated
+`secret_key`. Written up in `config-cli-and-deployment.md`, which owns it.
 
 ### The live database, immediately before and after `m09e`
 
@@ -1183,41 +1247,39 @@ doubled.
 
 ### The ranking baseline, and three measurements that are owed rather than unknown
 
-**What the 384-lane default actually delivered, measured over this catalog with
+**What the 384-lane default delivered, over this catalog with
 `fastembed:BAAI/bge-small-en-v1.5`.** A plot-description query lands the correct
 title in the top **0.05–0.3%** and **usually outside the top 20** — *"a man
 relives the same day over and over"* ranked Groundhog Day **64th**, Shawshank
-**208th**, The Matrix **262nd**, WALL-E **338th** — while a query naming a
-title's subject matter directly ranked Jurassic Park **1st** and a Harry Potter
-query **4th**. **The percentages are of the embedded population** — the enriched
-tier, ~130k rows, not the 1.27M catalog — which is what makes them damning
-rather than impressive: read the shape rather than any single rank, **topic
-retrieval works and plot retrieval does not**, and a rank of 64 is a lane that
-is functioning and is nowhere near a five-row box. This is the first
-relevance evidence this project has for the semantic lane; ADR-0022's *"relevance
-is not measured at all"* is annotated accordingly.
+**208th**, The Matrix **262nd**, WALL-E **338th** — while a query naming subject
+matter directly ranked Jurassic Park **1st** and a Harry Potter query **4th**.
+**The percentages are of the embedded population** (the enriched tier, ~130k
+rows, not the 1.27M catalog), which is what makes them damning rather than
+impressive. Read the shape, not any single rank: **topic retrieval works and
+plot retrieval does not**, and a rank of 64 is a functioning lane nowhere near a
+five-row box. First relevance evidence this project has for the semantic lane;
+ADR-0022's *"relevance is not measured at all"* is annotated accordingly.
 
 ### The run finished, 2026-08-13, and the model is not what was wrong
 
 130,720 titles re-embedded through `openai:BAAI/bge-m3`, 0 refused, 08:15:32Z →
-10:01:27Z. The three numbers that were owed above, plus two nobody asked for and
-one that changes an operator's day.
+10:01:27Z.
 
 **Throughput: 105.9 minutes, 20.6 rows/s — and the GPU bought the backfill
-nothing.** S4 measured the *CPU, in-process* fastembed backfill at 23.8 rows/s
-aggregate. Moving the model onto a 4090 and reaching it over HTTP made the
-backfill **slower**, and the reason was visible the whole time: sampled
-mid-run, **GPU utilisation 6% and `usher-postgres-1` at 56% CPU**. S4 had
-already priced the per-title work — a claim, three reads, a staged `COPY`
-through a temp table, and a commit — and said the queue runs at ~15% of the
-model's own rate. It still does; the model just got faster at the part that was
-never the bottleneck. **Do not quote a GPU embedder as a backfill improvement.**
+nothing.** S4 measured the *CPU, in-process* fastembed backfill at 23.8 rows/s.
+Moving the model onto a 4090 and reaching it over HTTP made the backfill
+**slower**, and the reason was visible throughout: sampled mid-run, **GPU
+utilisation 6% and `usher-postgres-1` at 56% CPU**. S4 had already priced the
+per-title work (a claim, three reads, a staged `COPY` through a temp table, a
+commit) at ~15% of the model's own rate. It still is; the model just got faster
+at the part that was never the bottleneck. **Do not quote a GPU embedder as a
+backfill improvement.**
 
-**Where the GPU does pay is the query, which is the workload that has a user
-waiting.** Single-text embed against the running endpoint, 30 calls, measured
-*while the backfill was saturating it*: **p50 5.7 ms, p95 9.9 ms, max 13.2 ms**.
-For scale, `/search` was 13.9 ms end to end in M9's live demo, so a 568M
-multilingual model adds about 40% to a search and not a multiple.
+**Where the GPU pays is the query — the workload with a user waiting.**
+Single-text embed against the running endpoint, 30 calls, *while the backfill
+was saturating it*: **p50 5.7 ms, p95 9.9 ms, max 13.2 ms**. `/search` was
+13.9 ms end to end in M9's live demo, so a 568M multilingual model adds about
+40% to a search, not a multiple.
 
 **Storage at 1024 lanes, against the same table at 384 the day before:**
 
@@ -1245,15 +1307,14 @@ positions in the 130,720-row embedded population.
 | Groundhog Day | 64 | **416** | **−352** |
 
 ⚠️ **Six queries is not a relevance measurement and this table must not be
-quoted as one.** It is a before/after on a fixed case set that was written
-before `bge-m3` was under consideration — so it is at least not selected to
-flatter the new model — and that is the whole of its authority. It is the same
-thinness the query-expansion run above carries, and the same rule applies.
+quoted as one.** Its whole authority is that the case set was fixed before
+`bge-m3` was under consideration, so it is at least not selected to flatter the
+new model — the same thinness the query-expansion run above carries, same rule.
 
 🔴 **The Groundhog Day collapse was chased and it is not a model defect. The
 composed document is.** Its top 10 under the new model is noise (`Bad (2025)`,
 `There is a Monster (2024)`, `The Old Barber (2006)`) in a band of 0.54–0.58
-while the right answer sits at 0.4778. Then, embedding the *segments* rather
+while the right answer sits at 0.4778. Embedding the *segments* rather
 than the document:
 
 | what was embedded | cosine |
@@ -1262,9 +1323,9 @@ than the document:
 | its overview alone | **0.5936** ← would rank **1st** |
 | name + overview | 0.5825 |
 
-The composer's own fingerprint (`546e12c2161166b2f04a707aefbbecfa`) was
-reproduced before any of this was believed, so the 0.4779 is the shipped path
-and not a reconstruction of it.
+The composer's fingerprint (`546e12c2161166b2f04a707aefbbecfa`) was reproduced
+before any of this was believed, so 0.4779 is the shipped path and not a
+reconstruction of it.
 
 **And the segment responsible is `credits`, on every case, without exception.**
 Re-composing each gold title with `credits=()` and changing nothing else:
@@ -1279,16 +1340,15 @@ Re-composing each gold title with `credits=()` and changing nothing else:
 | Jurassic Park | 0.5935 | 0.6161 | +0.023 |
 
 **6 of 6, and that consistency is worth more than the six-query rank table
-above** — a mixed result across cases is a draw, a unanimous one across the
-same cases is a direction. Twelve actor names, third of seven segments and
-sitting *between* the title and the plot summary, are dead weight for a plot
-query and drag the whole vector toward a region full of thin, generic titles.
+above** — a mixed result across cases is a draw, a unanimous one is a direction.
+Twelve actor names, third of seven segments and sitting *between* the title and
+the plot summary, are dead weight for a plot query and drag the whole vector
+toward a region full of thin, generic titles.
 
-**The limit of that table, stated because it is easy to over-read:** only the
-*gold* title was re-composed, so the cosines are compared against a corpus that
-still has credits in every other document. Re-embedding all 130,720 without
-credits would lift the whole distribution, so it predicts a **direction**, not a
-rank. So the population was rebuilt and the ranks measured.
+**Easy to over-read:** only the *gold* title was re-composed, so these cosines
+face a corpus that still has credits in every other document. Re-embedding all
+130,720 without credits would lift the whole distribution, so this predicts a
+**direction**, not a rank — hence the rebuild below.
 
 ### The whole tier re-embedded without credits, and the answer is "do not"
 
@@ -1323,31 +1383,26 @@ retrieval and actively harmful for plot retrieval, and no single document can be
 both.** `compose_document` is not carrying a mistake; it is carrying a
 compromise nobody had priced, and both sides of it are now priced.
 
-🔴 **The escape hatch this file proposed one paragraph earlier is refuted, by
-the measurement it asked for.** The argument was: removing credits is safe
+🔴 **The escape hatch this file proposed one paragraph earlier is refuted by the
+measurement it asked for.** The argument was that dropping credits is safe
 *because* `search_document` carries `credit_names` at weight class B (0.396), so
-the lexical lane answers person queries and RRF fuses the two. It does not.
+the lexical lane answers person queries and RRF fuses the two. It does not:
 `websearch_to_tsquery('english', 'Bill Murray')` over the shipped
 `search_document` matches 122 titles and its top three by `ts_rank_cd` are
 **The Bill Murray Stories**, **Biography: Bill Murray** and **Saving Bill
 Murray** — documentaries *about* him, none of them films he is in. The mechanism
-is the weighting the class B measurement already records: name is **0.991** and
-`credit_names` is **0.396**, so a title with the person's name in its *title*
-outranks every film they acted in. Same shape for Keanu Reeves.
+is the class B weighting itself: name is **0.991** against `credit_names`'
+**0.396**, so a title with the person's name in its *title* outranks every film
+they acted in. Same shape for Keanu Reeves. **So neither lane answers "films
+with Bill Murray" without the credits segment in the embedding**, and the
+plausible division of labour — lexical does people, semantic does plots — is
+false in this schema.
 
-**So neither lane answers "films with Bill Murray" without the credits segment
-in the embedding**, and the plausible-sounding division of labour — lexical does
-people, semantic does plots — is false in this schema. It was written into this
-file as *"an argument, not a measurement"*; it is now a measurement, and the
-argument was wrong.
-
-**What this leaves, and it is a design question rather than a fix:** the two
-retrieval modes want different documents, which is what a second vector per
-title, a query router, or an intra-document weighting exists for. None is built
-and none should be guessed at from six queries. What is settled is that
-`compose_document` stays exactly as it is until one of them is, and that the
-next person to notice plot retrieval is mediocre should read this section before
-deleting the credits line.
+**What this leaves is a design question, not a fix:** the two retrieval modes
+want different documents, which is what a second vector per title, a query
+router or an intra-document weighting exists for. None is built, and none should
+be guessed at from six queries. `compose_document` stays exactly as it is until
+one of them is — **read this section before deleting the credits line.**
 
 🔴 **And one number an operator has to know before running anything:
 `usher similar --rebuild` went from 80 minutes to 21.6 hours.** The shipped
@@ -1394,26 +1449,28 @@ walk.** `usher similar --rebuild` ran 2026-08-13 18:31:26Z → 21:51:07Z:
 **130,720 seeds, 3,268,000 rows, 11,981 s — 3.33 h at 91.7 ms/seed**, against
 561 ms/seed before the revision.
 
-⚠️ **This entry said "4.4× on the job" for the first three hours of that run and
-that number was an artefact of when it was taken.** It came from the first 128
-seconds — 1,000 seeds at 128 ms/seed — and was written up with a conclusion
-attached: *"a component speedup is not a job speedup and this one differs by
-40%."* The completed walk refutes it. Steady state is 91.7 ms/seed, the job
-speedup equals the component speedup to within 2%, and the per-seed work the
-scan was supposedly hiding is ~4 ms rather than ~32. **A rate taken from the
-first two minutes of a three-hour job is a measurement of its start-up**, and
-the reasoning built on top of it was the confident part.
+⚠️ **This entry said "4.4× on the job" for three hours, and that number was an
+artefact of when it was taken** — the first 128 seconds, 1,000 seeds at 128
+ms/seed, written up with a conclusion attached (*"a component speedup is not a
+job speedup and this one differs by 40%"*). The completed walk refutes it: the
+two speedups agree to within 2%, and the per-seed work the scan was supposedly
+hiding is ~4 ms rather than ~32. **A rate from the first two minutes of a
+three-hour job measures its start-up** — and the reasoning built on top of it
+was the confident part.
 
 Two more things fell out of it.
 
-🔴 **`genome_scores.relevance` is `halfvec(1128)` = 2,260 bytes and has been
-TOASTed since `ffa` shipped it** — 1,544 kB of heap against **41 MB** of TOAST.
-Every genome-similarity number this project has ever taken was taken through a
+✅ **`genome_scores.relevance` was `halfvec(1128)` = 2,260 bytes and had been
+TOASTed since `ffa` shipped it** — 1,544 kB of heap against **41 MB** of TOAST,
+so every genome-similarity number taken before 2026-08-13 was taken through a
 TOAST fetch. Nothing is known to be wrong with them; they were simply never
-taken any other way. `db/models/taste.py` records the value's size (*"1,128
-halfvec lanes is 2,256 bytes plus a header"*) without drawing the conclusion,
-which is how a measured fact sits next to its own consequence for two
-milestones.
+taken any other way. **Closed by the same migration**: `m09f`'s
+`_VECTOR_COLUMNS` names all three `halfvec` columns and `genome_scores.relevance`
+is the third, so it went `PLAIN` in the same rewrite — this is not a live
+condition and no re-measurement is owed. `db/models/taste.py` recorded the
+value's size (*"1,128 halfvec lanes is 2,256 bytes plus a header"*) without
+drawing the conclusion, which is how a measured fact sat next to its own
+consequence for two milestones.
 
 **And `PLAIN` introduces a ceiling that `EXTERNAL` did not have**: it forbids
 out-of-line storage outright, so a value that will not fit in an 8 kB page makes
@@ -1440,12 +1497,11 @@ eight carry "Day" in the title**. So this is not the blend and not
 `title_neighbors`; it is the composed document's name segment dominating, on a
 title whose name is two common words.
 
-**State it narrowly, because the first reading of that one row was "the
-neighbours are bad" and two more seeds refuted it.** The similarity lane is
-good in general and degrades for titles whose names are ordinary vocabulary —
-which is a *selection* effect on which titles are affected, not a defect in all
-of them. It is the same finding as the credits ablation from the other
-direction: what dominates one of these documents is not its plot.
+**State it narrowly** — the first reading of that one row was "the neighbours
+are bad" and two more seeds refuted it. The lane is good in general and degrades
+for titles whose names are ordinary vocabulary: a *selection* effect on which
+titles are affected, not a defect in all of them, and the credits ablation from
+the other direction — what dominates one of these documents is not its plot.
 
 ⚠️ **A rate measured over a window is wrong when the writes are batched, and
 this one produced 2.78, 8.33 and 21.85 seeds/s for the same run.**
@@ -1458,15 +1514,14 @@ intervals, not N. Anchor the rate to the run's own start instead — 1,000 seeds
 
 ### The follow-up this change identified — closed 2026-08-13
 
-**`blend_fingerprint()` does not cover the embedding model, so a model swap
-leaves every `title_neighbors` row reading as current.** It hashes `_WEIGHTS`,
+**`blend_fingerprint()` did not cover the embedding model, so a model swap left
+every `title_neighbors` row reading as current.** It hashed `_WEIGHTS`,
 `_NEIGHBORS_PER_TITLE` and `_CANDIDATE_POOL` — what a score *means* in the
-blend's terms — and the model that produced the vectors underneath is not one of
-its inputs. So after a swap every row is in `[0, 1]`, carries a plausible
-`rank`, and was derived from a model the deployment no longer runs, with
-`usher.similarity.neighbors.stale` reading **zero** throughout. This is exactly
-the failure `blend_fingerprint` was added to close, arriving through the one
-input it does not hash.
+blend's terms — and not the model that produced the vectors underneath. After a
+swap every row was in `[0, 1]`, carried a plausible `rank`, came from a model
+the deployment no longer ran, and `usher.similarity.neighbors.stale` read
+**zero** throughout: exactly the failure `blend_fingerprint` was added to close,
+arriving through the one input it did not hash.
 
 ✅ **Closed the same day.** `blend_fingerprint(*, embedding_model: str)` hashes
 the model alongside the three constants; `SimilarityService` takes the *name*
@@ -1478,42 +1533,33 @@ the same reason `model_name` records it, a measured 1.41e-03 max pairwise delta
 between two runtimes of one checkpoint, 6x the halfvec quantisation error.
 
 ⚠️ **The licensing case for M7's `78900b2b…` digest could no longer call the
-function, and that is a shape worth recognising.** It used to monkeypatch
-`_WEIGHTS` and assert the function reproduced the literal; adding a key changed
-the payload's *shape*, so no arguments can produce a three-key digest any more.
-It now reconstructs the historical payload explicitly and asserts the current
-function does **not** answer it — which says in code that the superseded digest
-came from a serialisation this project no longer performs. **When a digest gains
-an input, every test that licenses an older digest by calling the current
-function silently becomes unsatisfiable rather than wrong.**
+function.** It monkeypatched `_WEIGHTS` and asserted the function reproduced the
+literal; adding a key changed the payload's *shape*, so no arguments can produce
+a three-key digest any more. It now reconstructs the historical payload
+explicitly and asserts the current function does **not** answer it. **When a
+digest gains an input, every test that licenses an older digest by calling the
+current function silently becomes unsatisfiable rather than wrong.**
 
 **Applied to the live catalog without a rebuild, because the preconditions were
-provable.** Adding an input moves the digest —
-`78f3ecd20e654c0f6aa4bdf646ec099b` → `a7013154c014e0ff1b60ef5d8534a115` — so
-every stored row is stale on merge, which is the mechanism working. These rows
-did not need recomputing: `title_embeddings` held exactly **one** `model_name`
-(`openai:BAAI/bge-m3`) and `title_neighbors` exactly **one** fingerprint, so all
-3,268,000 provably came from that model at this blend and were re-stamped in
-place. **Only ever do that with both counts checked** — a mixed table has no
-single honest label and owes the 3.3-hour walk.
+provable.** The digest moved `78f3ecd20e654c0f6aa4bdf646ec099b` →
+`a7013154c014e0ff1b60ef5d8534a115`, staling every stored row on merge — the
+mechanism working. They did not need recomputing: `title_embeddings` held
+exactly **one** `model_name` (`openai:BAAI/bge-m3`) and `title_neighbors`
+exactly **one** fingerprint, so all 3,268,000 provably came from that model at
+this blend and were re-stamped in place. **Only ever do that with both counts
+checked** — a mixed table has no single honest label and owes the 3.3-hour walk.
+⚠️ And the verdict carries its control: `count_stale` under the running blend is
+**0** *and* the same call with a bogus fingerprint answers **3,268,000**. Zero
+stale is also what an empty table reports.
 
-⚠️ **And the verdict carries its control, which this file demanded in advance:**
-`count_stale` under the running blend is **0** *and* the same call with a bogus
-fingerprint answers **3,268,000**. Zero stale is also what an empty table
-reports, and an empty table is what every catalog on this host held for most of
-this project's life.
-
-`m09e` empties the table, which fixes **the instance**. **The class fix is to
-feed the embedder's `model_name` into `blend_fingerprint()`** — which changes
-its signature and all three of its consumers (`usher similar <title id>`'s
-per-title report, the `usher.similarity.neighbors.stale` gauge, and
-`usher similar --rebuild`). It is **not done**. It was kept out of a width
-migration deliberately: a signature change to a fingerprint function is a change
-to what every stored row *means*, and burying it inside DDL is how the next
-person fails to find it. Whoever takes it should note that it also makes the
-model swap a *third* cause of neighbour staleness in ADR-0020's terms, beside
-the blend change (closed) and *some other title was embedded since* (still
-undecidable per row).
+Two facts from the fix that outlive it. It touched all three consumers
+(`usher similar <title id>`'s per-title report, the
+`usher.similarity.neighbors.stale` gauge, `usher similar --rebuild`) and was
+kept **out of the width migration deliberately** — a signature change to a
+fingerprint is a change to what every stored row means, and burying it in DDL
+is how the next person fails to find it. And it makes a model swap a **third**
+cause of neighbour staleness in ADR-0020's terms, beside a blend change
+(closed) and *some other title was embedded since* (still undecidable per row).
 
 ## `semantic_coverage`'s denominator is the enriched tier, not the catalog (2026-08-19)
 
@@ -1533,36 +1579,35 @@ while the same catalog was 89.7% invisible to that lane.
 **The number was not changed and the sentence was.** The denominator is
 boundary call 4 with an argument behind it — skeletons are never embedded, so
 counting them reports ~0.008 on a healthy catalog and reads as a broken
-subsystem forever — and swapping a measured denominator for an unmeasured one
-is not a repair. What was wrong was a field describing itself in terms of a
+subsystem forever, and swapping a measured denominator for an unmeasured one is
+not a repair. What was wrong was a field describing itself in terms of a
 population it does not use, on the wire, where a client renders it.
 
-**The general form, and it is the second time this file has recorded it:** a
-ratio is only as honest as its denominator's name, and *"the filtered
-population"* is the kind of name that survives review because every word in it
-is true of something. Say which rows are in the bottom, at every site that
-quotes the number — here that was `SearchOutcome`, `SearchResponse`, PRD 07,
-the README and `usher search`'s own printed line.
+**The general form, recorded here for the second time:** a ratio is only as
+honest as its denominator's *name*, and *"the filtered population"* survives
+review because every word in it is true of something. Say which rows are in the
+bottom, at every site that quotes the number — here `SearchOutcome`,
+`SearchResponse`, PRD 07, the README and `usher search`'s printed line.
 ## `ef_search` priced against a real index: 200 ships, the non-monotonicity did not reproduce, and over-fetch is a *filtered*-path lever only (2026-08-19, issue #32)
 
-**The first recall figure this constant has ever had from a real index.** Every
-`ef_search` number above it was taken on uniform-random 384-lane vectors at 2%
-filter selectivity with `hnsw.iterative_scan` **off** — a configuration this
-project has not shipped since M6.
+**The first recall figure this constant has ever had from a real index, and it
+is what retracts the M6 `hnsw.iterative_scan` paragraph above.** Every
+`ef_search` number before this one was taken on uniform-random 384-lane vectors
+at 2% filter selectivity with the GUC **off** — a configuration this project has
+not shipped since M6.
 
 *Sample and denominators.* 132,409 real `openai:BAAI/bge-m3` vectors
 (`halfvec(1024)`, `PLAIN`, `m=16, ef_construction=64`, pgvector 0.8.6 on
 PostgreSQL 17.10), the live `usher-postgres-1`, **read only** — no reindex, no
 rebuild. **12 typed plot queries, embedded once through the deployment's own
-endpoint and frozen**, so every condition scores the identical vectors. Gold is
-the **exact top 10 per query per arm** under `enable_indexscan = off,
+endpoint and frozen**, so every condition scores identical vectors. Gold is the
+**exact top 10 per query per arm** under `enable_indexscan = off,
 enable_bitmapscan = off` — the two GUCs `nearest_for` forces — so recall@10 has
 a denominator of **10 per query, 120 per condition per arm**. Latency is **288
 observations per condition per arm** (12 queries × 12 scored rounds × 2 runs,
-round 0 discarded as warm-up), with conditions **interleaved** rather than
-blocked so a burst of foreign load cannot tax one of them. Bar, sample and
-decision rule were written down before anything ran, at
-`/var/tmp/i32-measure/PREREGISTRATION.md`, sha256
+round 0 discarded as warm-up), conditions **interleaved** rather than blocked so
+a burst of foreign load cannot tax one. Bar, sample and decision rule written
+down before anything ran: `/var/tmp/i32-measure/PREREGISTRATION.md`, sha256
 `0be3c3504a44c11cb37484c0a0d8f4f0f792bf73025a5dfb26fc1d4bbb59ed6c`.
 
 | `ef_search` | recall@10 unfiltered | p50 | p95 | recall@10 filtered (4.8%) | p50 | p95 |
@@ -1593,17 +1638,16 @@ semantic lane filtered, (3) the *first ten rows emitted* by a LIMIT-60 scan —
 the truncation reading, which is the one `relaxed_order` could plausibly break
 — and (4) the **fused** answer scored against the exact vector top 10, which is
 what a harness driving `usher search` without `--mode semantic` measures. Zero
-non-monotone pairs in any of the four. The measurement is also **exactly
+non-monotone pairs in any of the four, and the measurement is **exactly
 deterministic**: 216 (arm, condition, query) cells × 26 repetitions across two
-independent runs produced byte-identical id lists, gold included, and
-`SHOW hnsw.ef_search` read back inside each scored transaction returned the
-value set. Two candidate harness faults were eliminated by measurement rather
-than by argument — the endpoint returns **bit-identical** vectors across 5
-calls and across batch composition, and no `title_embeddings` row was written
-during the run. What is left as the likely cause is the measured object: the
-CLI and the API return `SearchService._rank`'s **blended** order, not the
-lane's, and the fused mode dilutes the whole ef effect (a query capped at 5 of
-10 there reaches 10 of 10 on the semantic lane).
+independent runs gave byte-identical id lists, gold included, with
+`SHOW hnsw.ef_search` read back inside each scored transaction. Two candidate
+harness faults were eliminated by measurement rather than argument — the
+endpoint returns **bit-identical** vectors across 5 calls and across batch
+composition, and no `title_embeddings` row was written during the run. What is
+left is the measured object: the CLI and the API return `SearchService._rank`'s
+**blended** order, not the lane's, and fused mode dilutes the ef effect (a query
+capped at 5 of 10 there reaches 10 of 10 on the semantic lane).
 
 **`relaxed_order` and `LIMIT` do interact, the boundary is exactly
 `ef_search`, and the consequence is not recall.** The scan emits in exact
@@ -1627,8 +1671,8 @@ why before the recall table does.** The distances HNSW returns are
 0.0 over 60 rows) — pgvector approximates *which* vectors it visits, never the
 distance to one — so "re-score the candidates exactly" is arithmetically a
 no-op, and the re-sort is a second no-op wherever the emission was already
-ordered. Measured at the shipped `ef_search = 100`, fetching `10 × N` and
-cutting back to 10:
+ordered. Measured at `ef_search = 100` (the default this run *replaced*, not
+today's 200), fetching `10 × N` and cutting back to 10:
 
 | N | recall@10 unfiltered | p50 | recall@10 filtered | p50 |
 |---|---|---|---|---|
@@ -1642,11 +1686,10 @@ Unfiltered it is **identical per query at every factor** — the deeper rows the
 iterative scan yields are all farther than the tenth already found. Filtered it
 is worth **+10.9 points**, more than `ef_search` 200 buys there (+2.5), because
 under a predicate the extra rows force real traversal. So the issue's argument
-that over-fetch "makes recall a property of the over-fetch factor rather than
-of graph traversal" is **false on the unfiltered path and true on the filtered
-one**, and it is not built: it loses to `ef_search = 200` on the unfiltered arm
-(0.858 against 0.917) at a similar p50, and it is a second statement shape.
-Whoever takes the filtered path should start here.
+that over-fetch "makes recall a property of the over-fetch factor rather than of
+graph traversal" is **false unfiltered and true filtered** — and it is not
+built, because it loses to `ef_search = 200` unfiltered (0.858 against 0.917) at
+a similar p50 and is a second statement shape. Start here for the filtered path.
 
 ⚠️ **The issue's own single case had already decayed when this ran, and that
 is the argument for the sweep rather than a quibble.** *Harry Potter and the
@@ -1736,17 +1779,14 @@ deduplicates, so they normalise to a shorter array. A SQL predicate naming the
 alias spellings cannot see them, which is why the shipped sweep canonicalises
 every row in Python and filters nothing in SQL.
 
-**The fingerprint really does the staling, verified by mutation rather than
-assumed.** `tests/integration/test_genre_backfill.py::
-test_the_rewrite_stales_the_embedding_through_the_shipped_fingerprint` embeds a
-title at its own document, asserts as a **premise** that it is not stale, runs
-the backfill, and asserts `usher index --backfill` then enqueues it. The
-careless plant — deleting the genres segment from `_FINGERPRINT_SQL` alone —
-fails the *premise*, because SQL then assembles six segments against the
-composer's seven. The careful one — the segment emptied on **both** sides, so
-the two still agree — passes the premise and fails the assertion the case is
-named for. Same pair, same lesson, as
-`test_a_title_embedded_before_its_credits_landed_is_stale_again`.
+**The fingerprint really does the staling, verified by mutation.**
+`tests/integration/test_genre_backfill.py::
+test_the_rewrite_stales_the_embedding_through_the_shipped_fingerprint` runs the
+identical careless/careful plant pair as
+`test_a_title_embedded_before_its_credits_landed_is_stale_again` (S4's ledger
+above), over the genres segment instead of the credits one, with the same
+outcome: the careless plant dies on the premise, the careful one on the named
+assertion.
 
 Still unmeasured, and sampleable with no user traffic: how many `Sci-Fi` titles
 change position in a `/search` for a science-fiction query now that they carry
@@ -1754,19 +1794,22 @@ the other label.
 
 ## RRF's absent-lane `COALESCE` costs the typed title its own top row, and the bar written to refute it CONFIRMED it (2026-08-19, issue #21)
 
+⚠️ **Every number in this section is the pre-#25 state.** Issue #25's
+exact-name key closes most of it; the re-run is the next section, and the two
+must be read together.
+
 **Issue #21 is CONFIRMED and not refuted, by a bar written to be capable of
-refuting it.** The bar is `/var/tmp/usher-i21-bar/BAR.md`,
+refuting it.** Bar `/var/tmp/usher-i21-bar/BAR.md`,
 `sha256 0687983a9ec4d41f275c7b6b273b29d734ab44e5eef51f269654631bf348bc62`,
-written 2026-08-19T01:52:51-05:00 — **before the first query was issued** — and
-its digest was re-read at run time and matched. Harness
+written 2026-08-19T01:52:51-05:00 — **before the first query was issued** —
+digest re-read at run time and matched. Harness
 `scripts/measure_fusion_coverage_bias.py`; frozen results
 `/var/tmp/usher-i21-bar/run-full.json`
 (`sha256 e4323414ca5fd3bc8c1c317af75ca8b4a189a2726e6f733c366d35939414a3e4`).
 Live catalog: **1,272,866 titles, 132,409 `title_embeddings`**, alembic `m09f`,
 `openai:BAAI/bge-m3`, shipped `rrf_k = 60`, `limit = 20`, `lane_limit = 100`.
 `skeleton` and *has no `title_embeddings` row* were **verified to coincide
-exactly** (0 skeletons carry a vector) rather than assumed, so the frame is the
-population the issue names.
+exactly** (0 skeletons carry a vector) rather than assumed.
 
 **The sample.** Exact-name known-item queries, deterministic draw
 (`ORDER BY md5(id::text || '20260819-i21')`). **Stratum A, n = 1,000**, uniform
@@ -1807,14 +1850,12 @@ The predicted failure — *"a viewer types an obscure title exactly, and an
 enriched near-match takes the top row"* — is the observed one.
 
 **Miss split, in the recorded idiom** (below the floor / truncated / dropped /
-out-ranked, against the shipped suggest row's `82.8 / 0.0 / 0.0 / 17.2`). The
-search path's analogues are stage for stage: *below the floor* = no
-`search_document @@ websearch_to_tsquery` match, so the row is in no lane at all
-(a skeleton has no vector, so the lexical predicate is its only candidacy);
-*truncated* = matched, but its uncapped lexical rank exceeds the mode's cap
-(20 for `full_text`, `lane_limit = 100` for `fused`); *dropped* = inside the cap
-and absent from the answer, i.e. **the fusion lost it**; *out-ranked* =
-returned, below rank 1.
+out-ranked, against the shipped suggest row's `82.8 / 0.0 / 0.0 / 17.2`), stage
+for stage: *below the floor* = no `search_document @@ websearch_to_tsquery`
+match, so the row is in no lane at all; *truncated* = matched but its uncapped
+lexical rank exceeds the mode's cap (20 for `full_text`, `lane_limit = 100` for
+`fused`); *dropped* = inside the cap and absent from the answer, i.e. **the
+fusion lost it**; *out-ranked* = returned, below rank 1.
 
 | stratum A, service arm | below the floor | truncated | dropped | out-ranked | misses |
 |---|---|---|---|---|---|
@@ -1855,17 +1896,16 @@ for anything a viewer wants; it is an arbitrary tenth of the catalog carrying a
 rank bonus. That makes the defect *worse* than #21 states it, not milder.
 
 **The trade, both signs, because the effect has both.** *Not pre-registered* —
-stratum C was drawn after the verdict above was computed and frozen, enters no
-bar, and exists because half a trade is not a number. **Stratum C, n = 300,
-drawn from the embedded tier**: `fused` **beats** `full_text` 68.3% against
-59.0% (service arm), +9.3 points, 49 queries gained against 21 lost. The same
-`COALESCE` that costs 17 points when the typed title is a skeleton buys 9 when
-it is enriched — and lane membership carries no information about which case a
-query is. At the catalog's own 89.6/10.4 composition that is
-`0.896 × −17.0 + 0.104 × +9.3` = **−14.3 points net** on known-item lookup.
-This is also why a single spot check proves nothing about the sign: `The Matrix`
-under `fused` correctly promotes the 1999 film over three 2018 video essays,
-and it is the 10.4% case.
+stratum C was drawn after the verdict was computed and frozen, enters no bar,
+and exists because half a trade is not a number. **Stratum C, n = 300, from the
+embedded tier**: `fused` **beats** `full_text` 68.3% against 59.0% (service
+arm), +9.3 points, 49 gained against 21 lost. The same `COALESCE` that costs 17
+points when the typed title is a skeleton buys 9 when it is enriched — and lane
+membership carries no information about which case a query is. At the catalog's
+89.6/10.4 composition that is `0.896 × −17.0 + 0.104 × +9.3` = **−14.3 points
+net**. Which is why a single spot check proves nothing about the sign: `The
+Matrix` under `fused` correctly promotes the 1999 film over three 2018 video
+essays, and it is the 10.4% case.
 
 ⚠️ **The fused ordering is limit-dependent, and a wider request can give a worse
 first row.** `lane_limit = limit * _LANE_MULTIPLIER`, so the semantic candidate
@@ -1878,20 +1918,16 @@ the typed title at **rank 1 at `--limit 3` and rank 2 at `--limit 20`**, behind
 (1) The shipped CLI reproduces the service arm at the same limit — `Choinka
 strachu` and `Jallad No. 1` are displaced through `python -m usher search` at
 `--limit 20` exactly as recorded. (2) **The harness wrote nothing, proven by
-arithmetic rather than asserted**: `search_queries` went 47 → 67 across the
-whole session and 20 is exactly the number of *CLI control* invocations, so the
-3,200 index-and-service searches the harness itself issued (it passes
-`user_id=None`) left zero rows.
+arithmetic**: `search_queries` went 47 → 67 across the session and 20 is exactly
+the number of *CLI control* invocations, so the 3,200 index-and-service searches
+the harness issued (it passes `user_id=None`) left zero rows.
 
-**Not settled by this run, named rather than implied.** Only exact-name
-known-item queries were scored — mood, discovery and partial-title queries are
-untouched, and the semantic lane is likelier to earn its keep there. Only
-recall@1; nDCG and recall@5 are unmeasured. `hnsw.iterative_scan`'s interaction
-with the bias is unmeasured, so the semantic lane's row count remains
-configuration-dependent. And **no fix is measured here**: convex fusion is
-#21's proposal, it replaces a parameter-free rule with one that must be tuned,
-and this run establishes only that the change is warranted — not what its
-weights should be.
+**Not settled by this run** (the re-run below inherits all of it): only
+exact-name known-item queries, only recall@1 — mood, discovery and partial-title
+queries, nDCG and recall@5 are untouched, and `hnsw.iterative_scan`'s
+interaction with the bias is unmeasured. And **no fix is measured here**: convex
+fusion is #21's proposal, it replaces a parameter-free rule with one that must
+be tuned, and this run establishes only that the change is warranted.
 
 ## Issue #25's exact-name key closes most of #21, and the residual is the tie it cannot break (2026-08-19, issues #21 + #25 re-run)
 
@@ -1905,13 +1941,12 @@ edited — the only difference is the code under it. Results
 `ef_search`).
 
 **That the run used merged code is proven, not asserted.** A read-only
-`before_cursor_execute` listener recorded every statement the run sent to
-PostgreSQL: **3,200 of 3,200 fused statements and 3,200 of 3,200 `full_text`
-statements carried `lower(t.name) = lower(btrim(:query))` together with
-`ORDER BY exact_name DESC`** (3,200 = 1,600 queries x 2 arms). `main` contains
-zero occurrences of `_EXACT_NAME` and its `_FUSED` outer sort is
-`ORDER BY score DESC, id`, so the two branches are distinguishable from the SQL
-alone and the run is on the right side of the difference.
+`before_cursor_execute` listener recorded every statement sent to PostgreSQL:
+**3,200 of 3,200 fused and 3,200 of 3,200 `full_text` statements carried
+`lower(t.name) = lower(btrim(:query))` with `ORDER BY exact_name DESC`** (3,200
+= 1,600 queries × 2 arms). `main` has zero occurrences of `_EXACT_NAME` and its
+`_FUSED` outer sort is `ORDER BY score DESC, id`, so the two branches are
+distinguishable from the SQL alone.
 
 | stratum A, n = 1,000 | `full_text` | `fused` | delta |
 |---|---|---|---|
@@ -1956,29 +1991,24 @@ pre-registered) supplying the other side of the trade:
 | service arm, post-#25 | -1.8 | +11.0 | **-0.47 pts**, 95% CI [-1.96, +1.02] |
 | index arm, post-#25 | -0.9 | +7.7 | **-0.01 pts**, 95% CI [-0.63, +0.61] |
 
-**Both nets straddle zero.** Fused went from decisively net-negative on this
-catalog to statistically indistinguishable from `full_text`, while winning
-outright on the 10.4% of the catalog that carries a vector (service arm stratum
-C **75.7% -> 86.7%**, +11.0).
+**Both nets straddle zero.** Fused went from decisively net-negative to
+statistically indistinguishable from `full_text`, while winning outright on the
+10.4% of the catalog that carries a vector (service arm stratum C **75.7% ->
+86.7%**, +11.0). **`ef_search` is not a confound**: the pre-#25 run recorded
+100, the shipped default is now 200 (issue #32), and re-running the whole bar at
+both gives service-arm nets of -0.47 and -0.49.
 
-**`ef_search` is not a confound.** The pre-#25 run recorded 100; the shipped
-default is now 200 (issue #32). Re-running the whole bar at both gives nets of
--0.47 (100) and -0.49 (200) on the service arm — the comparison survives the
-parameter change.
-
-**The bar's own verdict is still CONFIRMED, and the arithmetic says why.**
-B1 now *passes* on the index arm (-0.9 is inside the 1.0-point tolerance) and
-B2 now *passes* on the service arm (`p = 0.995` — by the issue's own accounting,
-which excludes misses to another skeleton, fused wins 24 and loses 10). B3
-fails on both arms, which is the stratum-B tie above. So the verdict is carried
-entirely by the adversarial stratum: **#21 is narrowed to same-name
-collisions, not closed.**
+**The bar's own verdict is still CONFIRMED, and the arithmetic says why.** B1
+now *passes* on the index arm (-0.9 is inside the 1.0-point tolerance) and B2 on
+the service arm (`p = 0.995` — by the issue's own accounting, which excludes
+misses to another skeleton, fused wins 24 and loses 10). B3 fails on both arms,
+which is the stratum-B tie above, so the verdict is carried entirely by the
+adversarial stratum: **#21 is narrowed to same-name collisions, not closed.**
 
 **The harness still wrote nothing.** `search_queries` 67 -> 78 across the
 session, and all 11 rows are `The Matrix`/`space opera` from a *different*
-agent's live-container work on issue #31 — none is a skeleton name from either
-draw. The 6,400 searches this run issued (it passes `user_id=None`) left zero
-rows, and the live catalog was read-only throughout.
+agent's live-container work on issue #31. The 6,400 searches this run issued (it
+passes `user_id=None`) left zero rows; the live catalog was read-only.
 
 **Not settled by this run.** Still only exact-name known-item queries and still
 only recall@1 — mood and partial-title queries, where the semantic lane should

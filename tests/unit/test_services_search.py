@@ -1658,7 +1658,9 @@ async def test_a_title_named_exactly_the_query_is_not_displaced_by_a_longer_docu
     0.3501 -- and *popularity was applied and helped*: without it the film
     scores 0.2729. The defect is not a missing term, it is that no combination
     of the other five can overturn what the lexical lane put at dense rank 0
-    (margin 0.009615), and the lexical lane had the wrong row there.
+    (margin `0.005 / 1.045` = 0.004785 with all six present; 0.009615, carried
+    here until 2026-09-02, is the bound with taste absent), and the lexical
+    lane had the wrong row there.
 
     Arranged at the hardest configuration rather than the observed one: the two
     hits carry **equal** index scores, so the relevance term cancels unless the

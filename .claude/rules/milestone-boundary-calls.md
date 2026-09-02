@@ -28,20 +28,34 @@ a question only a planning session asks.
 | **M6** | `search_document` + GIN, trigram type-ahead, embeddings, `title_neighbors`, RRF fusion, the search CLI | a real 1,271,138-title catalog |
 | **M7** | the composed home screen — nine row providers, `HomeService`, `TasteService`, `DeriveService`, the tag genome, `GET /home` | a real 1,271,570-title catalog |
 | **M8** | LLM curation end to end — `OpenAICompatibleClient` (litellm declined), `curated_rows` + `llm_calls`, the candidate pool, `CurationService` and its validator, `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate`, `usher curate`, the genome tag vocabulary, query expansion | a local vLLM serving `gemma-4-26b-a4b` over a real 1,271,138-title catalog |
-| **M9** | the whole HTTP surface — PRD 07's Screens, Resources, Actions, Admin and Meta tables behind one RFC 9457 envelope over a closed seven-member `code` vocabulary; keyset cursors; search, the two-tier suggest, browse, similarity, the series hierarchy; the image proxy (`images` + `GET /images/{id}`) and artwork on `RowCard`; `POST /titles|episodes/{id}/play` with the playback ticket and outbound watch write-back; the admin completion (sync, unmatched, bootstrap status + trigger, row-provider toggles, `bootstrap.progress`); `search_queries` whole; `GET /meta/attribution`. **Track 2:** `append_to_response=season/N`, the IMDb akas and credit-names bulk expansion, the priority-tier TMDb crawl | the **live TMDb v3 API** (S3: 130,334 requests over 1.98 h, 130,647 titles enriched; T2/T3 against the real IMDb dumps) **and a real Emby 4.9.5.0** — H4/H5 ran 2026-08-12 in 23 bounded requests with no walk: `/play` → ticket → `302` → a real **206** with `video/x-matroska` bytes, the play body leaking nothing with its positive control fired first, and the watch write-back read back *from Emby* and restored **byte-for-byte**. ⚠️ They ran **after** the milestone closed, because M9 recorded "no Emby credentials on this host" having checked `~/code/usher/.env` and nowhere else |
+| **M9** | the whole HTTP surface — PRD 07's Screens, Resources, Actions, Admin and Meta tables behind one RFC 9457 envelope over a closed seven-member `code` vocabulary; keyset cursors; search, the two-tier suggest, browse, similarity, the series hierarchy; the image proxy (`images` + `GET /images/{id}`) and artwork on `RowCard`; `POST /titles\|episodes/{id}/play` with the playback ticket and outbound watch write-back; the admin completion (sync, unmatched, bootstrap status + trigger, row-provider toggles, `bootstrap.progress`); `search_queries` whole; `GET /meta/attribution`. **Track 2:** `append_to_response=season/N`, the IMDb akas and credit-names bulk expansion, the priority-tier TMDb crawl | the **live TMDb v3 API**, the real IMDb dumps, and a real **Emby 4.9.5.0** — ⚠️ the Emby half ran *after* the gate, for a reason spelled out below |
 
-**The M9 row carries an evidence rule, which is why it is quoted rather than
-summarised.** H4/H5 ran *after* the milestone gate because M9 had recorded "no
-Emby credentials on this host" having checked `~/code/usher/.env` and nowhere
-else. **A negative established by looking in the one place the answer was
-expected is not a negative.**
+### M9's live verification, and the evidence rule it carries
+
+Split out of the table above on 2026-09-02 — it had been a ~900-word cell,
+which is unreadable in a table and is the only reason it is prose here.
+
+- **TMDb.** S3 made **130,334 requests over 1.98 h** and enriched **130,647
+  titles**. T2/T3 ran against the real IMDb dumps.
+- **Emby.** H4/H5 ran 2026-08-12 in **23 bounded requests with no walk**:
+  `/play` → ticket → `302` → a real **206** carrying `video/x-matroska` bytes,
+  the play body leaking nothing with its positive control fired first, and the
+  watch write-back read back *from Emby* and restored **byte-for-byte**.
+- ⚠️ **They ran after the milestone closed**, because M9 had recorded "no Emby
+  credentials on this host" having checked `~/code/usher/.env` and nowhere else
+  — the operator's credentials were in a secrets file one directory over.
+  **A negative established by looking in the one place the answer was expected
+  is not a negative.** That is why this is quoted rather than summarised.
 
 ## M9's eight boundary calls
 
 **Eight things M9 deliberately did not build**, each stated with its reason in
 the M9 plan's *Boundary calls* section and in
 [PRD 09](../../docs/prd/09-roadmap.md), and repeated here because that plan is
-8,868 lines. Track 2's separate refusals — the IMDb entity design that failed
+**9,269 lines** (`docs/plans/2026-08-10-m9-api-surface.md`, measured
+2026-09-02; it read 8,868 here until then, which was the count at the plan
+commit and not after the milestone's own follow-ups). Track 2's separate
+refusals — the IMDb entity design that failed
 its own size bar, and the five smaller calls that followed from it — are the
 section below this one.
 
@@ -77,25 +91,17 @@ section below this one.
 8. **The 45 columns that leak a raw driver exception are still not translated.**
    M9 is the milestone that built the problem-code vocabulary such a leak would
    map onto, so it is where "widen the `except`" was cheapest to try — and the
-   measurement is what stops it: **31 of the 45 are written through
-   `copy_records_to_table` on the raw asyncpg connection**, where an
-   out-of-range int raises a bare `OverflowError` with **no SQLSTATE**, so no
-   widening of `except IntegrityError` reaches them and there is nothing to map.
-   Mapping them means wrapping the COPY path, which is a bulk-loader change.
+   measurement that stops it (31 of the 45 go through `copy_records_to_table`,
+   whose `OverflowError` carries no SQLSTATE) is in `db-and-sql.md` beside the
+   staged-`COPY` CHECK entry (moved 2026-09-01).
    Left in PRD 09's carried debt with the candidate fix named.
 
-✅ **The one thing M9 shipped as a gap has since been closed: the live Emby
-verification of playback and watch write-back (H4/H5) ran on 2026-08-12 and
-both halves passed.** It was never a boundary call — this file holds calls that
-were decided, and that was a gap — and it is recorded here only because the
-sentence that stood in its place said the opposite. 🔴 **The reason it had been
-a gap was a false negative:** M9 concluded "no Emby credentials exist on the
-development host" after checking `~/code/usher/.env` and nowhere else, and the
-operator's credentials were in a secrets file one directory over. The evidence
-half, per this file's own convention, is in `emby-push-and-ingest.md`; the short
-version is that the whole chain works, the play body leaks nothing with its
-positive control fired first, the `302` leads to a real `206` with real bytes,
-and the write to the operator's account was restored byte-for-byte.
+✅ **There is no ninth call. M9's one shipped gap — the live Emby verification
+of playback and watch write-back — was closed on 2026-08-12 and is written up
+once, under "M9's live verification" above; it was a gap, not a call, and this
+section holds only calls that were decided.** It is named here because the
+sentence that stood in its place said the opposite. Per this file's convention
+the evidence half is in `emby-push-and-ingest.md`, not here.
 
 ## M9 Track 2 — the IMDb bulk expansion, and the bar that failed
 
@@ -136,8 +142,10 @@ right-hand side to live in. **No person row and no credit row is written from
 IMDb at all**, so the two bulk sources never own one entity and the provenance
 rule that design needed does not exist. `title.akas` lands in `m09a`'s
 `title_search_names`. Neither phase mints a table: **`alembic heads` stays at
-exactly one (`m09c`)**, the `m09b` grant is withdrawn, and T4 (the provenance
-rule) and T6-as-a-credits-writer are withdrawn with it.
+exactly one (`m09c`)** *(as of that date — still exactly one on 2026-09-01, but
+the head is `m10b`, with `m09d`, `m09e`, `m09f`, `m10a` and `m10b` landed
+since)*, the `m09b` grant is withdrawn, and T4 (the provenance rule) and
+T6-as-a-credits-writer are withdrawn with it.
 
 **Five smaller calls, each stated with its reason.**
 
@@ -147,39 +155,92 @@ rule) and T6-as-a-credits-writer are withdrawn with it.
    `Person`'s four `/person/{id}` fields from them is impossible anyway: a
    TMDb credit entry carries no `nconst`, so the only merge key the two
    sources share for a person is a name, which by ADR-0003 is not identity.
-2. **`fill_credit_names` writes only where `enrichment_state = 'skeleton'`,
-   so TMDb wins every title it has reached.** That is a precedence rule, not
-   an optimisation: `CreditRepository.replace_for_titles` owns the column for
-   enriched titles, and a `credit_names = '{}'` guard would overwrite TMDb's
-   own answer for a title it derived no cast for. It is also what makes the
-   fill unable to stale an embedding **by construction** rather than by
-   measurement, since the embedded population is exactly the complement.
-3. **The backfill belongs before the TMDb crawl, and the reason is call 2
-   rather than staleness.** Filling the column costs **+624 MB settled,
-   +1,368 MB transient, GIN ×4.54**, and **203,969 of 204,335 ≥100-vote
-   titles would gain a `credit_names`** — but only while they are still
-   skeletons. Run after a priority-tier crawl and call 2's predicate defers
-   every one of them to TMDb, on that run and on every later one, so the
-   coverage is never obtained and re-running does not repair it. It
-   invalidates **no** embedding in either order; a claim that it stales ~100%
-   of the tier contradicts call 2 directly, and **this entry made exactly
-   that claim four lines below the call that refutes it** until an audit
-   found it on 2026-08-12. Stated in the CLI's own report and in PRD 04, not
-   only here.
-4. **`replace_aliases` is scoped by `imdb_ids` *and* `kind = 'alias'`**, so
-   B1's `person` rows survive an alias re-import; and the caller's scope is
-   necessarily the batch's own titles, which means a title whose akas IMDb has
-   **withdrawn entirely** keeps its stale aliases — a streaming importer has
-   no other scope available, and the alternative is one call naming 1.27M
-   titles.
-5. **No parser-side guard refuses an ungrouped dump.** A title's rows must be
-   contiguous for the batching to be sound, and that is measured (zero
-   lexicographic descents in `title.akas`' `titleId` over 58,906,368 rows and
-   in `title.principals`' `tconst` over 101,151,422). A one-variable guard on
-   the sort order was declined because it checks a strictly *stronger*
-   property than the writer needs — this repository's own committed akas
-   fixture is contiguous and unsorted, so the guard would refuse a file that
-   is fine.
+2. *(Items 2–5 — `fill_credit_names`' skeleton-only precedence, the
+   backfill-before-crawl ordering, `replace_aliases`' `imdb_ids` + `kind`
+   scoping, and the contiguity measurement in place of a sort-order guard —
+   moved 2026-09-01 to the tail of `bootstrap-and-datasets.md`, which already
+   held their measurements.)*
+
+## After M9, on `main` (verified 2026-09-02)
+
+**Eight things landed after M9's gate closed** that the sections above cannot
+see, each with its own record elsewhere. This is the index, so that none of them
+is re-litigated as "not built" from a milestone plan that predates it. Listed by
+merge date. It said "six" and omitted the first and last of these until
+2026-09-02; re-derive it with
+`gh pr list --repo anirudhlath/usher --state merged --json number,title,mergedAt`
+rather than trusting the count.
+
+- **The bounded worker pool** — ADR-0037, PR #4, merged **2026-08-13**, one
+  minute after M9's own PR #3. `JobWorker` takes a scope *factory*, so there is
+  one `UnitOfWork`, one event buffer and one source resolver **per job**, and
+  `KIND_CONCURRENCY` (`composition.py:852`) is a table over every `JobKind`
+  resolved against `USHER_JOB_CONCURRENCY` (`config.py:259`, default
+  **`job_concurrency = 12`**). Recovery becomes a lease with a heartbeat
+  (`JobQueue.touch()`, `ports/jobs.py:166`; `job_lease_seconds` 300.0 at
+  `config.py:267`) instead of one `requeue_running()` at process start. **This is the entry most likely to be missed, because it explicitly
+  corrects two PRD sections a plan may still be quoting:** PRD 01's concurrency
+  table (which specified 8 enrichment and 4 sync workers against a loop that
+  ran exactly one job at a time) and PRD 08's recovery rule. Measured against
+  the live TMDb API: one worker **10.38 rps**, three workers **19.76 rps** and
+  not 31. `api-telemetry-and-lanes.md`'s W1 entry is the record.
+- **`m09e`/`m09f`** — `halfvec(384)` → `halfvec(1024)`, deleting every
+  embedding, centroid and neighbour row (ADR-0038, 2026-08-13), then every
+  `halfvec` column to `PLAIN` storage (`m09f`, same PR #22 merged 2026-08-14,
+  no ADR of its own — its docstring and `search-and-embeddings.md` carry it).
+- **The rating-provenance split** — `m10a` renames `titles`' three unprefixed
+  rating columns and adds `imdb_average_rating`/`imdb_num_votes` beside them
+  (ADR-0040, 2026-08-19; merged with #45). **Two of the three renames are a
+  `tmdb_` prefix and the first is not, so "renamed to `tmdb_*`" is not
+  derivable** — the mapping is `community_rating` → **`tmdb_vote_average`**,
+  `vote_count` → `tmdb_vote_count`, `popularity` → `tmdb_popularity`
+  (`_RENAMES` in `src/usher/db/migrations/versions/m10a_rating_provenance.py:135`, which
+  also renames each column's CHECK and the matching `field_provenance` JSONB
+  keys). No rating value was migrated — they were re-imported by
+  `usher bootstrap --phase ratings` — and the rollback table
+  `titles_rating_backup_20260819` is intact (1,272,870 rows on 2026-09-01);
+  it is not dropped without the operator's say-so.
+- **The console** — `web/`, React 19 + Vite, built into the image and served by
+  Usher's own container at `/console` (shipped 2026-08-19, merged as PR #61 on
+  2026-08-20). `mount_console` is defined at **`api/console.py:108`**, not in
+  `api/app.py`, which only imports it (`:13`) and calls it (`:316`). Its gate is
+  not the Python gate: `console.md` and `web/CONVENTIONS.md` are the record.
+- **E1, the quality-eval harness** — `src/usher/eval/`, the `eval` extra
+  (`ranx`), `usher eval`, and the eleventh and twelfth import contracts (the
+  harness is a leaf; only its IR-metrics package imports `ranx`). PR #45, merged
+  2026-08-21. One surface (`suggest`); E2–E4 are not planned. Three
+  `fuzzy recall_at_5` bars are `pending` on #39. `evals.md` is the record.
+- **The resumable watch lane** — `m10b`, ADR-0042 (PR #68, merged 2026-08-26).
+  Two behaviours came from review rather than from the plan, and are the ones a
+  later reader will most want to undo: `SyncRunRepository.save` is
+  non-destructive (`completed` absorbs), and a resumed walk stamps its merges
+  with the attempt's instant, not the original run's. ⚠️ **The code shipped and
+  [issue #41](https://github.com/anirudhlath/usher/issues/41) is still OPEN**
+  (checked 2026-09-02) — the merge did not close it, and the step that would is
+  the operator's: a watch walk has still never been run to completion, which is
+  the condition the issue was opened about. Do not read "PR #68 merged" as "#41
+  delivered"; check `gh issue view 41 --repo anirudhlath/usher`.
+- **`VisibilityService`, #73** — the plural half of PRD 03's demand lane
+  (`services/visibility.py`, consumed by `api/deps.py`, `routers/browse.py`,
+  `routers/search.py` and `services/home.py`; PR #74, merged 2026-08-27). The
+  module docstring is the record.
+- **Enrichment-driven shelf staleness** — PR #77, merged **2026-08-27**. The
+  row cache had two invalidation triggers and enrichment was not one of them, so
+  a title could be enriched and every shelf holding it kept serving the
+  pre-enrichment card until its TTL expired. Closed across
+  `services/rows/cache.py`, `services/enrich.py`, `api/lanes.py` and
+  `composition.py`, with PRD 06 amended. `rows-and-genome.md`'s *"A row TTL is a
+  bet that the catalog does not change"* entry is the record.
+
+`alembic heads` is `m10b`, still exactly one. **Still not built, re-verified
+against the tree on 2026-09-02:** no auth module and no `current_user`
+(`api/deps.py:245`'s `get_default_user_id` still answers the singleton); no
+scheduler; `query_expansion_enabled` is `False` (`config.py:596`); no GiST
+trigram index; `curation_pool_size` defaults to 200 and is capped at 1000
+(`config.py:565`); no `usher.llm.*` metric (the
+`usher.llm.*` names in `adapters/llm/openai_compatible.py` are span
+attributes, not a metric); `copy_records_to_table` is still on the raw driver
+(`db/staging.py`).
 
 **M8's eight deliberate boundary calls**, each stated with its reason in the
 M8 plan's Scope section and in PRD 09: **`LiteLLMClient` is NOT built** — the
@@ -240,7 +301,12 @@ built**, re-derived from `raw_payloads` with no second network call, minus
 `Person`'s four `/person/{id}` fields; **weight class B is filled** and needs a
 denormalised `titles.credit_names` because a generated column cannot reach
 another table; **`title_search_names` is still not built** and M6's condition is
-restated rather than renewed (M7 lands people, not aliases); **the tag genome
+restated rather than renewed (M7 lands people, not aliases) — ✅ **discharged
+by M9 Task M1 on 2026-08-11**, which is the outcome the call named and not a
+reversal: `m09a` shipped the table (`src/usher/db/models/search.py`), Track 2's
+akas import fills it, and the two-tier suggest reads it
+(`adapters/search/prefix.py`, `api/routers/search.py`), so do not re-litigate
+the absence; **the tag genome
 IS built** as one dense `halfvec(1128)` per title rather than a tall table;
 **rows build sequentially** because `AsyncSession` is not concurrency-safe;
 and **row provider enable/disable does not become a table**, because its only

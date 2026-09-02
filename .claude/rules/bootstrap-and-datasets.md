@@ -2,6 +2,12 @@
 paths:
   - "src/usher/adapters/bulk/**"
   - "src/usher/services/bootstrap.py"
+  - "src/usher/db/repositories/bulk.py"
+  - "src/usher/domain/people.py"
+  - "src/usher/domain/bootstrap.py"
+  - "scripts/measure_bulk_load.py"
+  - "scripts/measure_imdb_people.py"
+  - "scripts/measure_people_provenance.py"
 ---
 
 # IMDb, TMDb id exports, Wikidata and MovieLens
@@ -9,6 +15,52 @@ paths:
 Verified facts, loaded when working in this subsystem. Measured or observed,
 never assumed — each entry carries its date, its sample and what it refuted.
 The always-on conventions live in `CLAUDE.md`; this file is the evidence.
+
+## The commands these findings are about
+
+```bash
+uv run usher bootstrap --phase all      # the six steps, in FULL_SEQUENCE's order
+uv run usher bootstrap --phase imdb     # or credit-names | aliases | tmdb-ids | crosswalk | movielens
+uv run usher bootstrap --phase ratings  # an alias, not a step — title.ratings.tsv.gz (8.2 MiB) alone
+uv run usher bootstrap-status           # titles, genome vectors, vocabulary, per-dataset checkpoints
+```
+
+Every step is **resumable** and a resume finishes at the identical row count —
+verified by `SIGKILL` for `imdb`, `aliases` and `credit-names` below, all three
+against real Postgres and the whole dumps. `POST /admin/bootstrap/{phase}` and
+`argparse`'s `choices=` are the same enum, so a phase cannot exist on one
+boundary and not the other. **`--phase credit-names` must run before the TMDb
+enrichment crawl** and `--help` says so; the measurement is under
+"Filling `titles.credit_names`".
+
+A ratings rebuild deletes the checkpoint first, because `--phase ratings` writes
+`--phase imdb`'s own `import_runs` row and a completed run at an unchanged
+upstream revision resumes at EOF and writes nothing:
+
+```sql
+DELETE FROM import_runs WHERE dataset = 'imdb.title.ratings';  -- verify 0 remain
+```
+
+...then assert on **`rows_written`**, never on the exit status. Full argument
+under `--phase ratings` below.
+
+The measurement scripts are not tests — each downloads real dumps or opens real
+sockets, and each is phased so a figure has a trail:
+
+```bash
+uv run python scripts/measure_bulk_load.py                        # downloads the real dump
+uv run python scripts/measure_imdb_people.py --phase head         # M9 T3; 1.49 GiB
+#   then counts | relations | names | titles | blast | drop
+uv run python scripts/measure_people_provenance.py --phase head   # ADR-0036; ~700 MiB
+#   then extract | keys | load | dedup | overlap | blast | latency | apply | seed | drop
+```
+
+**`--phase` is required on both, and `measure_people_provenance.py` re-hashes
+its pre-registered bar (`/var/tmp/t4r/BAR.md`) at the start of every phase and
+refuses to run if it has moved.** `/var/tmp`, never `/tmp` — tmpfs erases the
+proof that a bar predates its numbers.
+
+## MovieLens — the archive, the join and the genome
 
 **`links.csv`'s `tmdbId` is NOT unique — 162 duplicate rows over 38 ids —
 while `imdbId` is.** So the genome joins `titles` through
@@ -32,36 +84,36 @@ the offending `movieId`**. What is deliberately *not* enforced is `tagId` orderi
 case that proves that shuffles a run and expects the right vector — so
 enforcing the observed order would make the by-index property unprovable. The
 run check is `len(run) == n and |{tagIds}| == n`.
-**`genome-tags.csv` is 1,128 rows and every one of them is usable, measured
-2026-08-07 through the shipped `CachedDatasetFile.member_lines`.** `tagId` is
-exactly `1...1128` and already ascending; every name is non-empty; **no name
-contains a comma**; all 1,128 are distinct; the longest is 65 characters; and
-the member is **CRLF**-terminated (8,359 compressed / 18,103 uncompressed
-bytes). Two of those matter to the parser. The CRLF is invisible because
-`member_lines` decodes through `io.TextIOWrapper` in universal-newline mode,
-so the `\r` is gone before `rstrip("\n")` runs -- **verified by reading, not
-assumed**, since a stray `\r` would land in every stored tag name. And the
-comma-free names are a property of *this snapshot*, not a promise, which is
-why the parse is `partition(",")` rather than the `csv` module: only the first
-comma separates. `partition` rather than `split(",", 1)` because a row with no
-comma at all has to be distinguishable, and `split` hands that back as a
-one-element list whose `[0]` parses as a perfectly good `tagId` -- the shipped
-`_tag_count` read exactly that field and was blind to it, which was harmless
-while the names were being thrown away and is not now that `m08b` stores them.
+**`genome-tags.csv` is 1,128 rows and every one is usable, measured 2026-08-07
+through the shipped `CachedDatasetFile.member_lines`.** `tagId` is exactly
+`1...1128` and ascending; every name is non-empty and distinct; the longest is
+65 characters; **no name contains a comma**; and the member is
+**CRLF**-terminated (8,359 compressed / 18,103 uncompressed bytes). Two of those
+decide the parser:
 
-**Two follow-ups from the review of that measurement, 2026-08-07.** The
-universal-newline property was asserted in *three* source files and covered by
-no test — every fixture in `tests/unit/test_adapters_bulk_movielens.py` is
-built with `"\n".join(...)`, so `newline=""` on that `TextIOWrapper` passed all
-2,882 unit cases while putting a trailing `\r` on all 1,128 stored names.
-`test_a_crlf_bodied_member_stores_no_carriage_return_in_a_tag_name` is the
-CRLF-bodied fixture that closes it, and it is the only case in the suite that
-fails against that plant. And the empty-name refusal is now `not name.strip()`,
-not `not name`: `ck_genome_tags_tag_not_empty` is `tag <> ''`, which accepts
-`'   '`, so before the parser was tightened a whitespace-only lane would have
-been stored by both layers. Unreachable in the measured file (all 1,128 names
-are `strip()`-stable), which is why the CHECK was left alone rather than
-re-spelled `btrim(tag) <> ''` in a migration for a value nothing can produce.
+- **The CRLF is invisible only because `member_lines` decodes through
+  `io.TextIOWrapper` in universal-newline mode** — verified by reading, not
+  assumed, since a stray `\r` would land in every stored tag name. That
+  property was asserted in *three* source files and covered by nothing: every
+  fixture in `tests/unit/test_adapters_bulk_movielens.py` is built with
+  `"\n".join(...)`, so planting `newline=""` passed all 2,882 unit cases while
+  putting a trailing `\r` on all 1,128 stored names.
+  `test_a_crlf_bodied_member_stores_no_carriage_return_in_a_tag_name` is the
+  one case in the suite that fails against that plant.
+- **Comma-free names are a property of the snapshot, not a promise**, which is
+  why the parse is `partition(",")` — only the first comma separates — and
+  `partition` rather than `split(",", 1)` because a row with *no* comma has to
+  be distinguishable, and `split` hands that back as a one-element list whose
+  `[0]` parses as a perfectly good `tagId`. The shipped reader (now
+  `MovieLensDataset.tag_vocabulary` / `_vocabulary`,
+  `adapters/bulk/movielens.py:273,305`) read exactly that field and was blind to
+  it — harmless while names were thrown away, not since `m08b` stores them.
+
+The empty-name refusal is `not name.strip()`, not `not name`, because
+`ck_genome_tags_tag_not_empty` is `tag <> ''` and accepts `'   '`. Unreachable
+in the measured file (all 1,128 names are `strip()`-stable), which is why the
+CHECK was left alone rather than re-spelled `btrim(tag) <> ''` in a migration
+for a value nothing can produce.
 
 **`ml-32m` has no genome and `ml-25m` may not be redistributed, so `ml-latest`
 is forced rather than preferred.** `ml-32m.zip` (05/2024) is the newest full
@@ -80,6 +132,8 @@ conclusion. Range-fetching only the three members the importer reads (~96 MB of
 335 MB) is possible and was **measured and declined**: re-implementing resume,
 `If-Range` and the stale-snapshot interlock against per-member local headers is
 new failure surface for a saving an operator pays once.
+## IMDb — the cache key, the parser, and what the dumps really contain
+
 **The bootstrap that produced the catalog, and a cache finding with it.**
 74.8 s wall clock end to end (`title.basics` 41.6 s → 1,271,138 rows,
 `title.ratings` 22.2 s → 538,937 rows written, suspended-index rebuild
@@ -148,41 +202,35 @@ isOriginalTitle` — 8 columns, and **zero rows split to any other count**.
   are not the same rows.
 
 **And the decisive one, which settles whether an `isOriginalTitle` filter
-belongs in the parser: it costs 7 aliases.** Joining the pinned akas file to a
-1,272,367-title catalog built from this host's cached `title.basics`
-(`"128751cb2f3132bd73bdf08c7f4def5d-27"` — **a different upstream snapshot**,
-which is the same not-one-snapshot hazard recorded below and is why the
-numbers differ from T3's by ~0.07%): 7,541,357 akas rows are in the catalog,
-1,272,135 of them are flagged, and **1,272,111 (99.998%) casefold-equal the
-title's own `name` or `original_name`**. Only **24** disagree, and 17 of those
-repeat a name a non-flagged row already carries — so after deduplicating on
-`(title_id, casefold(name))` the alias total goes 1,663,330 → 1,663,323, a
-loss of **7**. The hazard that would have made the filter unsafe is
-empirically zero: **0 of the 1,272,367 catalog titles have no
-`originalTitle`**, so there is no title whose flagged aka is its only carrier.
+belongs in the parser: it costs 7 aliases.** Joined to a 1,272,367-title catalog
+built from this host's cached `title.basics` (`"128751cb2f3132bd73bdf08c7f4def5d
+-27"` — **a different upstream snapshot**, the same not-one-snapshot hazard
+recorded below, which is why these differ from T3's by ~0.07%): of 7,541,357
+in-catalog akas rows, 1,272,135 are flagged and **1,272,111 (99.998%)
+casefold-equal the title's own `name` or `original_name`**. Only **24** disagree,
+17 of those repeating a name a non-flagged row already carries — so after
+dedup the alias total goes 1,663,330 → 1,663,323, a loss of **7**. The hazard
+that would have made the filter unsafe is empirically zero: **0 catalog titles
+have no `originalTitle`**, so no title's flagged aka is its only carrier.
 **The filter is a cheap prefix of the writer's rule and never a substitute** —
 of the 6,269,222 retained rows that survive it, **4,426,783 (70.6%) still
-casefold-equal the title's own name**, and only a comparison against the
-stored `Title` can see that.
+casefold-equal the title's own name**, and only a comparison against the stored
+`Title` can see that.
 
-**The plan's "heavily-filtered file yields row-less batches" risk is inverted
-by the measurement.** It was written for three files at once; of the one that
-survives, `title.akas` keeps **78.4%** of its lines, which makes it the
-*least* filtered dataset `_ImdbDataset` has ever streamed — `title.basics`
-keeps 1,271,138 of 12,678,891, i.e. **10.0%**, and has shipped that way since
-M2. So `_ImdbDataset` was not changed to emit cursor-advancing empty batches:
-a trailing run of filtered lines costs a re-read on resume and never a lost
-row, because `position` counts lines consumed and every downstream write is an
-upsert.
+**The plan's "heavily-filtered file yields row-less batches" risk is inverted by
+the measurement.** `title.akas` keeps **78.4%** of its lines, making it the
+*least* filtered dataset `_ImdbDataset` has ever streamed — `title.basics` keeps
+**10.0%** and has shipped that way since M2. So `_ImdbDataset` was not changed
+to emit cursor-advancing empty batches: a trailing run of filtered lines costs a
+re-read on resume and never a lost row, because `position` counts lines consumed
+and every downstream write is an upsert.
 
-**The alias writer compares with SQL `lower()` and T3/T5 measured with Python
-`casefold()`, so the measured 1,663,364 is a *lower* bound on what ships —
-measured 2026-08-11 (M9 T7), and the gap is 0.070% of the file.**
-`BulkCatalogRepository.replace_aliases` drops an alias whose name equals the
-title's own `name` or `original_name` **under `lower()`**, and deduplicates on
-`(title_id, lower(name))`. That is not the same function `scripts/
-measure_imdb_people.py:353` used — it folds with Python's `str.casefold()` —
-and the three candidate foldings genuinely disagree on real IMDb names:
+**The alias writer compares with SQL `lower()` while T3/T5 measured with Python
+`casefold()`, and the three candidate foldings genuinely disagree on real IMDb
+names — 2026-08-11 (M9 T7).** `BulkCatalogRepository.replace_aliases` drops an
+alias equal to the title's own `name` or `original_name` **under `lower()`** and
+deduplicates on `(title_id, lower(name))`; `scripts/measure_imdb_people.py:353`
+folds with `str.casefold()`:
 
 | pair | Postgres `lower()` | Python `str.lower()` | Python `str.casefold()` |
 |---|---|---|---|
@@ -195,49 +243,45 @@ Streamed through the shipped `parse_akas_row` over the whole pinned
 `Content-Length`, 58,906,369 lines, **46,202,631 retained rows**):
 **32,223 rows (0.070%) have `str.lower() != str.casefold()`**, in exactly two
 families — German `ß` (`Das große Finale`, 21 rows) and Greek final sigma
-(`Οθέλλος`, 25). `casefold()` folds strictly *more* pairs together, so every
-one of those is a row T3's script could classify as canonical or as a
-duplicate and the shipped writer keeps. **The direction is what matters
-against bar (B): the shipped rule stores at least 1,663,364 and at most
-1,663,364 + 32,223, i.e. under 1.70M against an 8,000,000-row ceiling**, so
-(B) passes with 4.7× headroom either way and no re-measurement is owed. *(The
-bound is over rows whose own name diverges; a second-order path exists where
-only the stored `Title`'s name diverges, and it is bounded by the same
-families because 75.5% of retained rows restate that name and would themselves
-be counted.)*
+(`Οθέλλος`, 25). `casefold()` folds strictly *more* pairs together, so T7 could
+only bound the shipped rule: **at least 1,663,364, at most that plus 32,223**,
+under 1.70M against an 8,000,000-row ceiling. ✅ **T8's end-to-end run settled it
+to 1,663,455 — +132, a gap of 0.008% rather than the 1.9% the bound allowed**
+(below). T7 itself wrote no parser and read no dataset, and said so rather than
+implying a run it had not taken.
 
 **Postgres is authoritative here by construction, which is why the divergence
-is recorded and not repaired.** The whole test for keeping an alias is whether
-it reaches anything `ix_titles_name_lower_prefix` does not already answer, and
-that index is a btree over the *database's* `lower(name)` — so under the rule
-that matters, `Οδος` really is a distinct entry and the row really does add
+is recorded and not repaired.** The test for keeping an alias is whether it
+reaches anything `ix_titles_name_lower_prefix` does not already answer, and that
+index is a btree over the *database's* `lower(name)` — so under the rule that
+matters, `Οδος` really is a distinct entry and the row really does add
 reachability. A `casefold()` comparison would drop it and lose recall for a
 claim about an index it does not describe. **The consequence is a fake/Postgres
-divergence** (Python's `str.lower()` applies the contextual final-sigma rule
-and the database does not) and it is enumerated in
-`tests/fakes/bulk_catalog_repository.py`'s own list, pinned by an
-integration-only case rather than by the shared contract.
+divergence** (Python's `str.lower()` applies the contextual final-sigma rule and
+the database does not), enumerated in `tests/fakes/bulk_catalog_repository.py`'s
+own list and pinned by an integration-only case rather than by the shared
+contract.
 
-**No end-to-end run of `replace_aliases` over the whole file was taken, and
-this says so rather than implying one.** T7 writes no parser and reads no
-dataset; what it adds to T3's measurement is the folding function, which the
-count above bounds. What a full run *would* additionally settle is the
-relation size under the shipped rule (T3 measured 307,822,592 B at `m09a`'s
-exact shape for the `casefold()` population) and the batch-boundary question
-below.
+✅ **`replace_aliases` requires whole titles per call, and `IMDbAkaDataset`
+groups by title — `group_of` returns `row.imdb_id`
+(`adapters/bulk/imdb.py:824`), shipped by T8.** This entry read *"does not
+group by title … T8 has to close that gap"* while T7 was the current state;
+the gap is closed and the fix was priced both ways under "The batch-boundary
+bug T7 handed to T8 was real" below.
 
-⚠️ **`IMDbAkaDataset` does not group by title and `replace_aliases` requires
-whole titles per call — T8 has to close that gap and nothing in T7 does.**
-`_ImdbDataset` batches on a row count, so a title straddling a batch boundary
-is delivered in two calls, and the second call's scoped replace **deletes the
-first call's rows**: the title keeps whichever aliases landed in the later
-batch and silently loses the rest. `IMDbCreditNamesDataset` already solves the
-identical problem, in the identical file, by closing a title's run before it
-closes a batch and carrying a `boundary` line number as the cursor rather than
-`position` — its comment says why in full. A caller of `replace_aliases`
-needs that shape, or a scope-and-rows accumulator of its own. The port
-docstring states the precondition and the write cannot check it: every row is
-in scope in both calls, so the `ValueError` guard does not fire.
+The mechanism is worth keeping because it is invisible from either side of the
+port. `_ImdbDataset` batches on a row count, so a title straddling a batch
+boundary is delivered in two calls, and the second call's scoped replace
+**deletes the first call's rows**: the title keeps whichever aliases landed in
+the later batch and silently loses the rest. Nothing reports it — every row is
+in scope in both calls, so the port's `ValueError` guard cannot fire, and the
+phase's report sums the calls. `IMDbCreditNamesDataset` solves the identical
+problem in the identical file, by closing a title's run before it closes a
+batch and carrying a `boundary` line number as the cursor rather than
+`position`. **Any new caller of a scoped-replace port needs that shape or a
+scope-and-rows accumulator of its own.**
+
+## T3 — sizing `people`/`credits` against IMDb (2026-08-11). ⚠️ Its refusal was reversed; read T4R with it
 
 **`title.principals` + `name.basics` will not fit a `people`/`credits` design
 for this catalog, and the refusal is a size measurement rather than a row
@@ -251,114 +295,108 @@ is the recorded refusal, not a shrunken (A)*.
 
 **Every number below comes out of a named phase of
 `scripts/measure_imdb_people.py`, and the whole chain was re-run end to end
-from the pinned files to make that true.** Row counts and the parser-side
-filters are `--phase counts`; every relation size is `pg_table_size` /
+from the pinned files to make that true.** Row counts and parser-side filters
+are `--phase counts`; every relation size is `pg_table_size` /
 `pg_total_relation_size` after `VACUUM ANALYZE` from `--phase relations`; the
 `titles` growth is `--phase titles`; the `credit_names` shape is
 `--phase names` + `--phase blast`. Nothing is arithmetic on another figure
-except where the text says so.
+except where the text says so — **and the phases exist because the first
+version of this entry could not have been written.** Several byte-exact figures
+were `psql` measurements taken at a prompt outside the script; a reviewer
+walking the phases found no trail for any of them and blocked. **Byte-exact
+precision on an untraceable number, sitting beside traceable ones, is
+indistinguishable from a number somebody computed in their head.** The fix was
+to move the measurement into the script, not to soften the prose.
 
-*This paragraph exists because the first version of this entry could not have
-been written.* Several figures — the trimmed table's size, the `character` and
-`job` byte sums, the whole `titles` growth block and (B)'s breakdown — were
-real `psql` measurements taken at a prompt outside the script, and a reviewer
-walking the script's phases correctly found no trail for any of them and
-blocked. **Byte-exact precision on an untraceable number, sitting beside
-traceable ones, is indistinguishable from a number somebody computed in their
-head**, and the reader has no way to tell which is which. The fix was not to
-soften the prose: `--phase relations` now builds and sizes the trimmed table
-and weighs the two text columns itself, `--phase titles` is new and does the
-whole copy/`UPDATE`/`VACUUM FULL` sequence, and `--phase counts` counts the
-canonical-restating akas rows as it writes them. Re-running reproduced every
-load-bearing figure exactly; what it moved is recorded where it moved.
+**(A) failed on its byte clause and (B) passed.** Two of (A)'s three clauses
+passed comfortably — **12,626,452 retained credits** of a 20M ceiling and
+**3,211,941 people** of a 6M one — and the third failed on both readings of its
+unit: **2,701,697,024 B, i.e. 2.702 GB or 2.516 GiB, against a 2.0 GB bar**.
+Trimming `credits` to the five columns a credit cannot do without saves
+306,282,496 B and still lands 395 MB over, so *no version of (A) fit by
+trimming* and (C) was written first.
 
-**(A) fails. (B) passes.** Two of (A)'s three clauses pass comfortably —
-**12,626,452 retained credits** of a 20M ceiling and **3,211,941 people** of a
-6M one — and the third fails on both readings of its unit: **2,701,697,024 B,
-i.e. 2.702 GB or 2.516 GiB, against a 2.0 GB bar**. It is not a fat column, and
-that is measured rather than argued: `t3_credits_trimmed` is the same
-12,625,259 rows cut to the five columns a credit cannot do without —
-`(id, person_id, title_id, kind, billing_order)`, so no `character`, no `job`,
-no `department`, no `tmdb_credit_id`, no `created_at` — carrying only its
-primary key and the two foreign-key indexes, and it measures **1,833,467,904 B
-against the full table's 2,139,750,400**. With `people` unchanged that is
-**2,395,414,528 B (2.395 GB / 2.231 GiB), still over the bar by 20%**. The
-whole text payload shed to get there is `sum(octet_length(...))` on the server:
-**89,306,409 B of `character` over 6,316,428 rows and 20,325,470 B of `job`
-over 2,070,320 — 109,631,879 B in all**, against a measured saving of
-306,282,496 B for dropping those two columns plus `department`,
-`tmdb_credit_id` and `created_at`. Read against the bar directly: **the full
-design is 702 MB over it and the smallest thing that is still a
-`people`/`credits` design is 395 MB over it.** What is left at that point is
-12.6M tuple headers and three uuids apiece, so *there is no version of (A) that
-fits by trimming*, which is exactly why (C) was written first. Nor does the shipped
-`credits` shape even support the load: its only unique key is on
-`tmdb_credit_id`, which
-is NULL on every IMDb row, and the obvious idempotency index `(title_id,
-person_id, kind)` **cannot be UNIQUE** — 1,341,798 retained credits collide on
-it — while adding a further **682,950,656 B (651.3 MiB)**.
+⚠️ **That refusal was reversed on 2026-08-12: the 2.0 GB bar had nothing behind
+it. Read "T4R" below before quoting any of it.** Re-measured against a real
+ceiling, the whole design is 3.375 GB — 13.5% of it. What (A) still supplies is
+the *shape*: those two counts and the 2.702 GB are the sizing a future load
+starts from, and T4R's own 3,374,514,176 B is the number to quote.
 
-**The consequence of (A) failing, taken here rather than deferred.** The IMDb
-half of M9's Track 2 falls back to the **names-only design**:
-`titles.credit_names` is filled directly from `title.principals` ×
-`name.basics` with **no `people` and no `credits` rows written from IMDb at
-all**, so the two bulk sources never own one entity and the question that
-design existed to answer does not arise. T4's provenance rule, T6's credits
-write and **the `m09b` migration grant are withdrawn** — the names-only design
-mints no table and needs no revision, and `m09c` stays spare and still has to
-be *requested*. T5 keeps only its `title.akas` parser. T7 and T8 re-scope to
-aliases and `credit_names` alone. `people`/`credits` remain exactly what M7
-made them: TMDb-derived, enriched-tier only, never bulk-loaded.
+**The consequence taken at the time, and how much of it stands.** The IMDb half
+of M9's Track 2 fell back to the **names-only design**: `titles.credit_names`
+filled directly from `title.principals` × `name.basics`, with **no `people` and
+no `credits` rows written from IMDb**. ✅ **That half is still what ships** —
+there is no IMDb `BulkDataset` writing either table, and `adapters/tmdb/
+mapping.py` remains the only writer of a `Credit`. ⚠️ **The rest was reversed.**
+T4's provenance rule and the withdrawn `m09b` grant came back as **`m09d`**
+(`credits.source`, `people.imdb_id`, `ix_credits_source_natural_key`) and
+`CREDIT_SOURCE_PRECEDENCE` in `domain/people.py`, so the schema and the
+arbitration vocabulary exist while nothing fills them: **both `m09d` indexes
+are empty at that revision**. T5 keeping only its `title.akas` parser, and T7/T8
+re-scoping to aliases and `credit_names`, are what shipped.
 
-**(B) passes both clauses — 4.8× under on rows, 3.2× under on bytes — and the
-reason is that three akas in four are not aliases at all.** Of the 7,536,366
-retained akas rows, **5,693,570
-(75.5%) casefold-equal the title's own `name` or `original_name`** and carry no
-information a `titles` prefix index does not already hold; 1,842,796 survive
-that, and deduplicating on `(title_id, casefold(name))` leaves **1,663,364** —
-against an 8M ceiling — in **307,822,592 B (0.308 GB / 0.287 GiB)** at
-`m09a`'s exact `title_search_names` shape, both indexes included, against a
-1.0 GB ceiling. **Only 399,046 of 1,271,138 titles (31.4%) gain even one
-alias**, so the alias half is a narrow, cheap win rather than a broad one.
-**1,653,088 of the survivors carry a `region`**, which is what that column is
-for. The matching `language` count is deliberately *not* quoted: the dedupe is
-`DISTINCT ON (title_id, folded) ... ORDER BY title_id, folded, region NULLS
-LAST`, so among rows tying on region the survivor is arbitrary and its
-`language` is whichever row won. Two runs over the identical pinned file gave
-410,634 and 410,596 — a 38-row wobble that is a property of the measurement,
-not of the data. `region` is stable because it is an `ORDER BY` key; a loader
-that needs a stable `language` has to add one. Zero retained akas rows are empty and **zero
-exceed `SEARCH_NAME_MAX_CHARS`** (512), so `m09a`'s btree-bound CHECK rejects
-nothing in this snapshot.
+*(That is why the sentence above about `credits`' unique key is dated. Until
+`m09d` its only unique key was `tmdb_credit_id`, NULL on every IMDb row, and the
+obvious `(title_id, person_id, kind)` **cannot be UNIQUE** — 1,341,798 retained
+credits collide on it. The key that landed instead is `(title_id, source,
+billing_order)`, partial on `source <> 'tmdb'` with `NULLS NOT DISTINCT`;
+`db/models/people.py:271-278` carries the whole argument and T4R measured the
+candidates below.)*
+
+**(B) passes both clauses — 4.8× under on rows, 3.2× under on bytes — because
+three akas in four are not aliases at all.** Of 7,536,366 retained rows,
+**5,693,570 (75.5%) casefold-equal the title's own `name` or `original_name`**
+and carry nothing a `titles` prefix index does not already hold; 1,842,796
+survive, and dedup on `(title_id, casefold(name))` leaves **1,663,364** against
+an 8M ceiling, in **307,822,592 B** at `m09a`'s `title_search_names` shape
+against a 1.0 GB one. **Only 399,046 of 1,271,138 titles (31.4%) gain even one
+alias** — a narrow, cheap win rather than a broad one. Zero retained rows are
+empty and **zero exceed `SEARCH_NAME_MAX_CHARS`** (512), so `m09a`'s
+btree-bound CHECK rejects nothing in this snapshot. *(T8 then ran it for real:
+1,663,455 stored, 313 MB.)*
+
+⚠️ **1,653,088 survivors carry a `region` and the matching `language` count is
+deliberately not quoted.** The dedupe is `DISTINCT ON (title_id, folded) ...
+ORDER BY title_id, folded, region NULLS LAST`, so among rows tying on region the
+survivor is arbitrary and its `language` is whichever row won — two runs over
+the identical pinned file gave 410,634 and 410,596, **a 38-row wobble that is a
+property of the measurement, not of the data**. `region` is stable because it is
+an `ORDER BY` key; a loader that needs a stable `language` has to add one.
 
 **Denominators for everything above**, all against the same 1,271,138-title
 catalog: 12,626,452 of 101,151,422 principals rows retained (12.5%);
-**1,192,241 of 1,271,138 titles (93.8%) have ≥1 principal**; 3,212,911 distinct
-`nconst` referenced, of which 3,211,942 appear in `name.basics` and 3,211,941
-carry a `primaryName` — **one referenced person in the whole file has none**.
-That is also why the 12,626,452 retained principals store only **12,625,259**
-credits — both measured, and the difference of 1,193 is the credits naming one
-of the 970 `nconst` (969 absent + 1 nameless) that resolve to no usable person,
-because a credit whose person cannot be stored is dropped rather than orphaned. 7,536,366 of 58,906,368 akas rows retained (12.8%), over **1,270,074
-of 1,271,138 titles (99.92%)** before the canonical-name filter.
+**1,192,241 titles (93.8%) have ≥1 principal**; 3,212,911 distinct `nconst`
+referenced, of which 3,211,941 carry a `primaryName` — **one referenced person
+in the whole file has none**. That is why 12,626,452 retained principals store
+only **12,625,259** credits: the 1,193-row difference is credits naming one of
+the 970 unusable `nconst` (969 absent + 1 nameless), because a credit whose
+person cannot be stored is dropped rather than orphaned. 7,536,366 of 58,906,368
+akas rows retained (12.8%), over **1,270,074 titles (99.92%)** before the
+canonical-name filter. *(T4R re-took all of these against a newer pin and a
+1,272,367-title catalog; see its own Denominators.)*
 
 **The snapshot was pinned and the pin is the finding's date.**
 `title.principals` `"08ce60665889cb40c7371e1eab44a1f2-93"`, `name.basics`
 `"a3b9681921c92e5917182d1ecc05bd2d-37"`, `title.akas`
 `"19810e3eb2b0f1fa774bf4e4af94d7c6-61"` — written by `--phase head` to
-`/tmp/m9-t3/pin.json`, and every later phase passes the pinned value to
-`ensure_local` and aborts if the byte stream upstream served carries a
-different one. Two truncation checks, both run at a shell rather than in the
-script and named here as such: each file's on-disk length equals the
-`Content-Length` its own `HEAD` reported, and `gzip -t` exits clean on all
-three, which validates the trailing CRC32 and ISIZE of the whole stream.
-**IMDb does not regenerate the seven files together**, which the pin made
-visible: five carried `Last-Modified: Tue, 11 Aug 2026 00:47–00:48 GMT` and
-`name.basics`/`title.akas` carried `Mon, 10 Aug 2026 12:53 GMT`. The
-consequence is measurable rather than theoretical — **969 `nconst` referenced
-by that day's `title.principals` do not exist in that day's `name.basics`** —
-so any importer joining across these files must treat a dangling `nconst` as
-routine and drop the credit, not raise.
+`/tmp/m9-t3/pin.json`; every later phase passes the pinned value to
+`ensure_local` and aborts if upstream serves a different one. Two truncation
+checks, run at a shell rather than in the script: each file's on-disk length
+equals the `Content-Length` its own `HEAD` reported, and `gzip -t` exits clean
+on all three, which validates the trailing CRC32 and ISIZE of the whole stream.
+
+⚠️ **IMDb does not regenerate the seven files together, and every join across
+them has to assume it.** The pin made it visible: five carried `Last-Modified:
+Tue, 11 Aug 2026 00:47–00:48 GMT` and `name.basics`/`title.akas` carried
+`Mon, 10 Aug 2026 12:53 GMT`. The consequence is measurable — **969 `nconst`
+referenced by that day's `title.principals` do not exist in that day's
+`name.basics`** — so **an importer joining across these files must treat a
+dangling `nconst` as routine and drop the credit, not raise**. It is also why
+`IMDbCreditNamesDataset` checkpoints a *composite* revision
+(`name.basics=<etag>;title.principals=<etag>`): a single-file revision would
+call two genuinely different pairs one snapshot and replay a stored cursor
+across them. The count moves with the pin every time it is re-measured — 969,
+then 3,734, then 995 — which is the finding, not noise.
 
 **Filling `titles.credit_names` costs four times more in bytes than the names
 themselves weigh — measured on a real 1,271,138-row copy of `titles` at the
@@ -379,38 +417,37 @@ double the settled one: before any vacuum the same table is **2,240,831,488 B,
 +1,367,654,400 B over baseline** (GIN alone at 207,970,304), because a single
 `UPDATE` of 1.19M rows leaves a dead tuple for every live one. **That peak, not
 the settled 624 MB, is the number to budget against PRD 08's 8–12 GB.**
-*These are `--phase titles`' numbers from the re-run that gave them a trail.
-The first pass measured the same quantities through a `psql` pipe and differed
-in the third significant figure — 872,759,296 vs 873,177,088 at baseline, a
-0.05% page-level wobble — while `+624 MB`, `×4.54` and every row count below
-are identical to both. Nothing built against the first pass needs revisiting.*
+*(`--phase titles`' numbers, from the re-run that gave them a trail. The first
+pass measured the same quantities through a `psql` pipe and differed in the
+third significant figure — a 0.05% page-level wobble at baseline — while
+`+624 MB`, `×4.54` and every row count are identical to both. **No timing figure
+was taken**: every number here is a count or a byte size, neither of which moves
+with host load, which is why this measurement was allowed to run while a dozen
+sibling suites had the box.)*
+
 **The embedding blast radius of that fill is zero in every ordering, and the
 ordering constraint is about coverage instead.** `db/repositories/search.py:180`
 pins the embedded population to `t.enrichment_state <> 'skeleton'`, and
 `fill_credit_names` writes only where that expression is *false* — the two sets
 are complements, so the fill cannot invalidate a vector whenever it is run.
+**That is a precedence rule, not an optimisation**: `CreditRepository.
+replace_for_titles` owns the column for enriched titles, and a
+`credit_names = '{}'` guard would overwrite TMDb's own answer for a title it
+derived no cast for.
+
 What the ordering decides is whether the names arrive at all: of the **204,335
-titles with ≥100 votes** (161,519 of them movies — the tier group S is sized
+titles with ≥100 votes** (161,519 of them movies — what tier group S is sized
 on), **203,969 (99.82%)** would gain a `credit_names`, and 161,486 of the
 161,519 movies (99.98%) — *while they are still skeletons*. After a
 priority-tier crawl those titles are deferred to TMDb permanently, on that run
 and every later one, and re-running the phase does not repair it.
 **Backfill `credit_names` before the TMDb crawl, not after.**
 
-*Corrected 2026-08-12.* This paragraph read "zero today and ~100% tomorrow"
-and said the late ordering "invalidates nearly all of" the tier. That is
-refused by the `AND m.ours` predicate in `fill_credit_names` itself, which
-skips every non-skeleton — the counts and the recommendation stand, the
-mechanism was wrong, and it had propagated to five other statements including
-two an operator reads.
-
-**No timing figure was taken.** Every number above is a count or a byte size,
-and neither moves with host load — which is the whole reason this measurement
-was allowed to run while a dozen sibling suites and testcontainers had the box.
-Parse rates, load durations and `EXPLAIN ANALYZE` times were deliberately not
-recorded, because under that contention they would measure the host. If a
-timing baseline for these three files is ever wanted it needs a quiet box and
-a separate run.
+*Corrected 2026-08-12: this paragraph read "zero today and ~100% tomorrow" and
+said the late ordering "invalidates nearly all of" the tier, which the
+`AND m.ours` predicate refuses outright. The counts and the recommendation
+stand; the mechanism was wrong, and it had propagated to five other statements
+including two an operator reads.*
 
 **`name.basics` and `title.principals` at the parser level, measured over the
 whole pinned files rather than over the catalog-retained slice — 2026-08-11
@@ -471,26 +508,21 @@ real id space is a realistic input here precisely because the licensing guard
 mandates one.
 
 **A TMDb `credits.cast[]`, `credits.crew[]` or `created_by[]` entry carries no
-IMDb `nconst`, so people cannot be merged across TMDb and IMDb without a
-second request each.** Read, not inferred, from four places that agree: the
-recorded payloads (`movie.json`'s `credits.cast[]` is `adult, cast_id,
-character, credit_id, gender, id, known_for_department, name, order,
-original_name, popularity, profile_path`; `credits.crew[]` swaps
-`character`/`order`/`cast_id` for `department`/`job`; `series.json`'s
-`created_by[]` is `credit_id, gender, id, name, original_name, profile_path` —
-no `imdb_id` and no `nm`-shaped value anywhere under any of them);
-`usher.adapters.tmdb.mapping._append`, which reads exactly `id`, `name`,
+IMDb `nconst`, so people cannot be merged across TMDb and IMDb without a second
+request each.** Read, not inferred, from four sources that agree: the recorded
+payloads (no `imdb_id` and no `nm`-shaped value under any of the three arrays);
+`adapters/tmdb/mapping._append`, which reads exactly `id`, `name`,
 `known_for_department`, `credit_id` and `character` and has nowhere to put one;
-`usher/domain/people.py`'s docstring, which records the same three field lists
-against the same payloads and states that `imdb_id`, `birth_year`,
-`death_year` and `biography` **live on `/person/{id}`, one request per person**;
-and `tests/fixtures/tmdb/README.md`'s 2026-08-01 live shape diff over 29 movies
-and 30 series, which found **no key in the live response absent from these
-files** and named the only six live-only keys (`softcore`, `iso_3166_1`,
-`networks`) — `imdb_id` is not among them. `mapping._imdb_id` reads a *title's*
-IMDb id from the top level or `external_ids`; there is no person analogue. The
-only merge key TMDb and IMDb share for a person is the name, which is not
-identity — two directors who share a name are two rows, by ADR-0003.
+`domain/people.py`'s docstring, which records the same field lists and states
+that `imdb_id`, `birth_year`, `death_year` and `biography` **live on
+`/person/{id}`, one request per person**; and `tests/fixtures/tmdb/README.md`'s
+2026-08-01 live shape diff over 29 movies and 30 series, which found no live key
+absent from the fixtures and named the only six live-only ones — `imdb_id` is
+not among them. `mapping._imdb_id` reads a *title's* IMDb id from the top level
+or `external_ids`; there is no person analogue. The only merge key the two
+sources share for a person is the name, which is not identity — two directors
+who share a name are two rows, by ADR-0003. **Both merge directions were later
+priced live and both have a low yield**; see T4R's second pass.
 
 **Wikidata's crosswalk is seconds, not an hour.** The three property joins
 measured 14.5 s / 2.1 s / 1.1 s unchunked. WDQS's timeout surfaces as
@@ -518,64 +550,65 @@ see `usher/db/repositories/import_run.py`'s module docstring for why this
 repository's one caller never has independent pending work on the session
 worth a SAVEPOINT protecting.
 **Fixing that session-poisoning bug surfaced a second one, one layer up, in
-`BootstrapService.import_dataset` itself: the loser's failure handler
-overwrote the winner's checkpoint.** Once `self._runs.get(dataset.name)`
-after a caught `RepositoryConflict` stopped raising and started actually
-returning a row, it returns the *other*, winning process's row — the loser
-never got one of its own (`start()` never returned it one). The except
-handler used to re-fetch by dataset name unconditionally and evolve+save
-`FAILED` onto whatever it found, which is correct when that row is the
-caller's own (a `_drain` failure, after `start()` succeeded) but silently
-corrupts a legitimately `RUNNING` or already-`COMPLETED` import when it
-belongs to someone else (a `start()` conflict) — worse than the crash it
-replaced, because the crash was loud and this would not have been: a
-subsequent resume reads exactly that corrupted record. `RepositoryConflict`
-can only ever reach `import_dataset` from `start()` itself — once any row
-exists for a dataset, every later `start()`/`save()` call updates that same
-row rather than competing for a new one, so `_drain`'s own `save()` calls
-(which always update the id `start()` already returned) cannot trigger it.
-That made the fix a clean split: a `RepositoryConflict` from `start()`
-specifically now goes to `_concede_to_other_owner`, which touches nothing
-(no `save`, no `commit`) and returns the current owner's row exactly as
-stored; every other `UsherPortError` path is unchanged. Verified against
-real Postgres with a forced two-session race
-(`tests/integration/test_bootstrap_concurrency.py`) — reproduced the
-overwrite on the pre-fix code first (the winner's row read back `FAILED`
-with the loser's unrelated conflict message), then confirmed the fix
-leaves it untouched. The unit-level fakes needed a matching fix to even be
-capable of catching this: the original conflict test double raised
-`RepositoryConflict` with no competing row present at all, so asserting
-only "the caller didn't crash" passed both before and after either bug —
-it needs a real winner row seeded first, and an assertion that it comes
-back byte-for-byte unchanged.
+`BootstrapService.import_dataset`: the loser's failure handler overwrote the
+winner's checkpoint.** Once `self._runs.get(dataset.name)` after a caught
+`RepositoryConflict` stopped raising and started returning a row, it returns the
+*other*, winning process's row — the loser never got one of its own. The except
+handler re-fetched by dataset name unconditionally and evolve+saved `FAILED`
+onto whatever it found, which is right when that row is the caller's own (a
+`_drain` failure, after `start()` succeeded) and **silently corrupts a
+legitimately `RUNNING` or `COMPLETED` import when it belongs to someone else**
+(a `start()` conflict) — worse than the crash it replaced, because the crash was
+loud and a later resume reads exactly that corrupted record.
 
-Verified working as of M2's final group (end-to-end integration, the index
-measurement, and documentation) — the bulk-dataset bootstrap pipeline is
-runnable for real, not just under test:
+The fix is a clean split because `RepositoryConflict` can only reach
+`import_dataset` from `start()`: once any row exists for a dataset, every later
+`start()`/`save()` updates that same row rather than competing for a new one, so
+`_drain`'s own saves cannot trigger it. A conflict from `start()` now goes to
+`_concede_to_other_owner`, which touches nothing (no `save`, no `commit`) and
+returns the owner's row as stored; every other `UsherPortError` path is
+unchanged. Verified against real Postgres with a forced two-session race
+(`tests/integration/test_bootstrap_concurrency.py`) — the overwrite reproduced
+on the pre-fix code first, the winner's row reading back `FAILED` with the
+loser's unrelated conflict message.
 
-```bash
-export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:5432/usher"
-export USHER_SECRET_KEY="<32+ char secret>"
-uv run python -m usher bootstrap --phase all       # import IMDb + TMDb ids + crosswalk
-uv run python -m usher bootstrap --phase imdb      # one phase at a time
-uv run python -m usher bootstrap-status            # progress and catalog size
-uv run python scripts/measure_bulk_load.py         # NOT a test -- downloads the real dump
-```
+⚠️ **The unit fakes could not have caught either bug.** The original conflict
+double raised `RepositoryConflict` with **no competing row present at all**, so
+asserting "the caller didn't crash" passed before and after both. It needs a
+real winner row seeded first and an assertion that it comes back byte-for-byte
+unchanged.
 
-Verified directly against a scratch `pgvector/pgvector:pg17`, 2026-07-30,
-downloading the real IMDb/TMDb dumps and querying live Wikidata — nothing
-mocked. `bootstrap --phase imdb` killed mid-run at 700,000/1,271,138 titles
-committed; re-run logged `resuming imdb.title.basics from position 6033908
-(700000 rows already seen)` and finished at the identical 1,271,138 titles
-an uninterrupted run reaches. A full `bootstrap --phase all` then ran end to
-end: 1,271,138 titles (899,828 movies / 371,310 series), 538,937 with a
-community rating, 291,737 linked to a `tmdb_id` (236,712 movies / 55,025
+## Runs against real Postgres and the real dumps
+
+**The pipeline is runnable for real, verified against a scratch
+`pgvector/pgvector:pg17` on 2026-07-30 — real IMDb/TMDb dumps, live Wikidata,
+nothing mocked (M2's final group).** `bootstrap --phase imdb` killed mid-run at
+700,000/1,271,138 titles committed; the re-run logged `resuming
+imdb.title.basics from position 6033908 (700000 rows already seen)` and finished
+at the identical 1,271,138 titles an uninterrupted run reaches. A full
+`--phase all` then ran end to end: 1,271,138 titles (899,828 movies / 371,310
+series), 538,937 rated, 291,737 linked to a `tmdb_id` (236,712 movies / 55,025
 series, zero `(tmdb_id, kind)` duplicates — ADR-0011 holds under real data),
-50,793 linked to a `tvdb_id`. Two known titles spot-checked correct end to
-end: `tt0111161` (The Shawshank Redemption) landed with `tmdb_id=278`,
-`community_rating=9.3`; `tt0944947` (Game of Thrones) landed with
-`tmdb_id=1399`, `tvdb_id=121361`, `community_rating=9.2`. `bootstrap-status`'s
-final report:
+50,793 linked to a `tvdb_id`. Two known titles spot-checked end to end:
+`tt0111161` (The Shawshank Redemption) landed with `tmdb_id=278` and an IMDb
+rating of **9.3**; `tt0944947` (Game of Thrones) with `tmdb_id=1399`,
+`tvdb_id=121361`, **9.2**.
+
+⚠️ **That spot-check named the column `community_rating`, and there is no such
+column now.** `m10a` (ADR-0040, 2026-08-19) split three dual-written columns
+into five that each name their source, and `apply_ratings`
+(`db/repositories/bulk.py:622`) writes **`imdb_average_rating` and
+`imdb_num_votes`** — `community_rating` became `tmdb_vote_average`, which this
+phase does not write at all. Re-run the spot-check against the IMDb pair. The
+old name survives on the wire only, through
+`domain/title.py`'s `WIRE_FIELD_NAMES`, so a HTTP response saying
+`community_rating` and a `SELECT` saying `imdb_average_rating` are consistent
+rather than contradictory. Every "with a community rating" count in this file
+is a count of `imdb_average_rating`.
+
+`bootstrap-status`' final report on that run — **and note the shape has since
+gained two lines**, `genome vectors:` and `genome vocabulary:`, which `m08b` and
+`--phase movielens` added:
 
 ```text
 titles in catalog: 1271138
@@ -587,14 +620,15 @@ imdb.title.basics        completed  position=12678891 seen=1271138 written=12711
 ```
 
 **A live end-to-end run needs a real catalog, and building one costs three
-minutes and no API key.** `bootstrap --phase all` pulls IMDb's
+minutes and no API key.** `--phase all` pulls IMDb's
 `title.basics`/`title.ratings` dumps, TMDb's *public daily id export files*
 (not the API — no key), and Wikidata's public SPARQL endpoint. Re-run
 2026-07-31 against a scratch `pgvector/pgvector:pg17`: **1,271,314 titles,
-291,772 with a `tmdb_id`, 539,006 with a community rating**, in 2 min 59 s
-wall clock end to end. That is the catalog M4's match ladder has to be
-measured against — an empty one sends everything to tier 5 and measures
-nothing.
+291,772 with a `tmdb_id`, 539,006 rated**, in 2 min 59 s wall clock. That is the
+catalog M4's match ladder has to be measured against — an empty one sends
+everything to tier 5 and measures nothing.
+
+### T8 — `credit-names` and `aliases`, whole pinned dumps, 22 min 26 s (2026-08-11)
 
 **The two IMDb expansion phases were run end to end against real Postgres and
 the whole pinned dumps — 2026-08-11 (M9 T8), 22 min 26 s of wall clock for
@@ -678,27 +712,23 @@ is what makes the ordering constraint visible in the report. 10,296,829 of the
 the shape T3 predicted, and the number that would look identical to a broken
 join if it were not printed.
 
-**A killed `--phase aliases` resumes at the identical final row count, which
-is the property M2 verified for `--phase imdb` at 700,000/1,271,138 and the
-one the boundary cursor most needed re-checking.** `SIGKILL` at
-**position 37,415,494 of 58,906,369 (63.5%)**, with 29,601,973 retained rows
-seen and 1,386,064 aliases written — and **1,386,064 rows in the table at that
-instant**, so the crash left no half-written title either. Re-running finished
-at `position=58906369 seen=46202631 written=1663455`, and the table holds
-**1,663,455 aliases over 399,018 titles** — the same two numbers, to the row,
-as the uninterrupted run above. `rows_seen` is *equal* to the uninterrupted
-total rather than larger, which is the boundary cursor showing its work: it
-points at the last line of a completed title, so a resume replays no retained
-row at all, where a mid-title cursor would have replayed some and destroyed
-the rest.
+**Both phases resume at the identical final row count under `SIGKILL`, which is
+what the boundary cursor most needed re-checking.** `aliases` killed at position
+37,415,494/58,906,369 (63.5%) with 1,386,064 written — and **1,386,064 rows in
+the table at that instant**, so the crash left no half-written title; the re-run
+finished `position=58906369 seen=46202631 written=1663455` and the table holds
+**1,663,455 aliases over 399,018 titles**, the uninterrupted run's numbers to
+the row. `credit-names` killed at 48,065,977/101,151,423 (47.5%) with **642,449**
+filled — matching the 642,449 titles then holding a non-empty `credit_names` —
+and the re-run finished at **1,194,047**, again exact.
 
-**`--phase credit-names` resumes identically too, and its resume is the
-expensive one.** `SIGKILL` at **position 48,065,977 of 101,151,423 (47.5%)**,
-5,300,000 titles seen and **642,449** filled — matching the 642,449 titles
-then holding a non-empty `credit_names`. Re-running finished at
-`position=101151423 seen=11490876 written=1194047` with **1,194,047** titles
-filled, the uninterrupted run's number exactly, and `rows_seen` again equal
-rather than inflated. What it costs is the part worth planning around: the
+**`rows_seen` comes back *equal* to the uninterrupted total rather than larger,
+which is the boundary cursor showing its work**: it points at the last line of a
+completed title, so a resume replays no retained row at all, where a mid-title
+cursor would have replayed some and destroyed the rest.
+
+`credit-names`' resume is the expensive one, and that is the part worth planning
+around: the
 `nconst -> primaryName` index is rebuilt from the whole of `name.basics`
 before the first batch of **every** run, resumed or not — a fixed 19.5 s and
 345 MiB — so a resume pays the join's setup again and only the
@@ -708,65 +738,54 @@ correct precisely because the index is never partial.
 
 ## `bulk_load_window()` is entered before the ownership race is known, and a route makes that reachable (2026-08-12, M9 E5)
 
-**Found by asking E3's question of a bootstrap phase — *what has changed
-between the enqueue and the claim, and does the handler still have the right
-to do the work?* — and it is a defect in a shipped M2 path rather than in the
-new route. Recorded, not fixed.**
+**A defect in a shipped M2 path, not in the new route. Recorded, not fixed.**
+Found by asking E3's question of a bootstrap phase: *what has changed between
+the enqueue and the claim, and does the handler still have the right to do the
+work?*
 
-`cli._bootstrap` (now `composition.run_bootstrap`) opens
-`catalog.bulk_load_window()` **around** the two IMDb `import_dataset` calls,
-and `BootstrapService.import_dataset` is where a `RepositoryConflict` from
+`composition.run_bootstrap` (was `cli._bootstrap`) opens
+`catalog.bulk_load_window()` **around** the two IMDb `import_dataset` calls, and
+`import_dataset` is where a `RepositoryConflict` from
 `ImportRunRepository.start()` is discovered. So the window is entered before
-anybody knows who owns the dataset, and the window's own guard —
-`count_titles() == 0` — is a point-in-time read taken at that same moment.
-
-Two processes bootstrapping an **empty** catalog therefore both see zero, both
-`DROP INDEX IF EXISTS ix_titles_sort_name, ix_titles_name_lower_year`, and both
-commit. The loser then concedes inside `import_dataset`
-(`_concede_to_other_owner` touches nothing and **does not raise**), returns,
-exits its `async with`, and runs `CREATE INDEX IF NOT EXISTS` for both — **while
-the winner is still streaming 1.27M rows**. The winner's own rebuild afterwards
-is a no-op, because the indexes are already there.
+anybody knows who owns the dataset, and its guard — `count_titles() == 0` — is a
+point-in-time read taken at that same moment. Two processes bootstrapping an
+**empty** catalog both see zero, both `DROP INDEX IF EXISTS
+ix_titles_sort_name, ix_titles_name_lower_year`, and both commit. The loser
+concedes inside `import_dataset` (`_concede_to_other_owner` touches nothing and
+**does not raise**), exits its `async with`, and runs `CREATE INDEX IF NOT
+EXISTS` for both — **while the winner is still streaming 1.27M rows**.
 
 **The cost is exactly the saving the window exists for, so the suspension
-silently buys nothing:** 40.2 s instead of 35.8 s (11.0% slower) and a rebuilt
-pair of 127 MB instead of 97 MB (~24% larger) — the measured numbers recorded
-further up this file. Second-order, the loser's `CREATE INDEX` takes a `SHARE`
-lock on `titles`, which blocks the winner's batch writes for the length of the
-rebuild.
+silently buys nothing:** 40.2 s instead of 35.8 s and a rebuilt pair of 127 MB
+instead of 97 MB. Second-order, the loser's `CREATE INDEX` takes a `SHARE` lock
+on `titles`, blocking the winner's batch writes for the length of the rebuild.
 
-**The window of exposure is the *download*, not the whole run.** Once the
-winner commits its first batch (50,000 rows at `USHER_BULK_BATCH_SIZE`'s
-default) `count_titles()` is non-zero and a later loser suspends nothing. But
-the winner's first commit is behind a `HEAD`, an `ensure_local` and 224 MB, so
-the window is minutes wide on a cold cache.
+**The window of exposure is the *download*, not the whole run.** Once the winner
+commits its first batch (50,000 rows at `USHER_BULK_BATCH_SIZE`'s default)
+`count_titles()` is non-zero and a later loser suspends nothing — but that first
+commit is behind a `HEAD`, an `ensure_local` and 224 MB, so the window is
+minutes wide on a cold cache.
 
-**What changed in M9 is reachability, not the code.** Before E5 this needed two
-`usher bootstrap` processes started by hand, which is an operator's own
-mistake. `POST /admin/bootstrap/{phase}` makes the ordinary shape *worker
-claims the job while an operator has the CLI running in a terminal* — and note
-what does **not** reach it: `(kind, key)` unique means two presses of one phase
-are one job, and the single `JobWorker` lane serialises the jobs that do exist,
-so no pair of *jobs* can race. It takes a second process.
-
-**Not repaired here, deliberately.** Both candidate fixes — a Postgres advisory
-lock around the window, or entering the window only after `start()` has been
-won — are behaviour changes to a path M2 shipped and M9's E5 was scoped to
-*extract verbatim*; "any behaviour change found necessary is a separate commit
-with its own red". What E5 does add is the assertion that the window's guard
-holds at all on a live catalog
-(`tests/integration/test_admin_bootstrap.py::test_the_load_window_declines_on_a_
-live_catalog_and_keeps_both_indexes`), which is the half that stops an
-unauthenticated route taking browse ordering away from every reader.
+**What changed in M9 is reachability, not the code.** This used to need two
+`usher bootstrap` processes started by hand. `POST /admin/bootstrap/{phase}`
+makes the ordinary shape *worker claims the job while an operator has the CLI
+running in a terminal* — and note what does **not** reach it: `(kind, key)`
+unique means two presses of one phase are one job, and the single `JobWorker`
+lane serialises the jobs that exist, so no pair of *jobs* can race. It takes a
+second process. Both candidate fixes (an advisory lock around the window, or
+entering it only after `start()` is won) are behaviour changes to an M2 path
+that E5 was scoped to extract verbatim. What E5 does add is
+`tests/integration/test_admin_bootstrap.py::test_the_load_window_declines_on_a_
+live_catalog_and_keeps_both_indexes` — the half that stops an unauthenticated
+route taking browse ordering away from every reader.
 
 ## `bootstrap-status`' two aggregates cost a third of a second at catalog scale (2026-08-12, M9 E6)
 
 **Measured, not estimated**, because `GET /admin/bootstrap/status` makes the
 same four reads on every request and the alternative to stating the number was
 a cache nobody had measured either. Against a real **1,272,367-title** catalog
-with a **15,565-vector** genome and a 1,128-row vocabulary (`usher-m9-pg`, the
-T8 catalog), through `psql \timing`, median of five, on a **busy** box — a
-dozen containers and sibling suites had it — so every figure is an upper bound:
+with a 15,565-vector genome (the T8 catalog), `psql \timing`, median of five, on
+a **busy** box — so every figure is an upper bound:
 
 | read | median | range |
 |---|---|---|
@@ -804,7 +823,7 @@ publishes one frame per committed batch, so at the shipped default of 50,000:
 | **`--phase imdb`** | | **61** |
 
 Against `sync.progress`' **measured** 1,127 for one nightly walk of the one
-library this project has measured (`services/reconcile.py:255`), so this is the
+library this project has measured (`services/reconcile.py:276`), so this is the
 lower-rate of the two producers by an order of magnitude and the SSE bus's
 queue bound is not in play. The retained counts are M2's own end-to-end run,
 recorded further up this file.
@@ -818,6 +837,13 @@ where every other registration gets `worker.events`. A `--phase all` run adds
 top.
 
 ## T4R — the IMDb/TMDb provenance design, re-measured against a bar that means something (2026-08-12)
+
+⚠️ **What shipped out of this is `m09d`'s schema and nothing else.**
+`credits.source`, `people.imdb_id` and `ix_credits_source_natural_key` exist;
+**no IMDb row has ever been written to either table**, both new indexes are
+empty, and `CREDIT_SOURCE_PRECEDENCE` arbitrates a second source that does not
+yet exist. Every figure below is a *priced* design, not a deployed one — which
+is what makes it re-usable and what makes quoting it as current wrong.
 
 **T3's refusal is reversed, and two of its three reasons did not survive
 scrutiny.** The entry above stands as a measurement; what follows is what
@@ -862,12 +888,13 @@ whole file and not only the retained slice**: a key unique on one catalog's
 slice and not on the file breaks on somebody else's catalog.
 
 **The dedup bar, demonstrated in both directions rather than asserted.** The
-shipped shape — `tmdb_credit_id` its only unique key, NULL on every IMDb row —
-loaded twice from the identical pinned bytes goes **12,637,249 → 25,274,498**,
-exactly 2×. The design's scoped delete plus `(title_id, source,
-billing_order)` leaves the count and the key-set md5 unchanged. **The failing
-arm is the half that matters**: a dedup key never shown to be load-bearing is
-a key nobody measured.
+pre-`m09d` shape — `tmdb_credit_id` its only unique key, NULL on every IMDb row
+— loaded twice from the identical pinned bytes goes **12,637,249 → 25,274,498**,
+exactly 2×. The scoped delete plus `(title_id, source, billing_order)` — which
+is what `m09d` then shipped as `ix_credits_source_natural_key`, partial on
+`source <> 'tmdb'` with `NULLS NOT DISTINCT` — leaves the count and the key-set
+md5 unchanged. **The failing arm is the half that matters**: a dedup key never
+shown to be load-bearing is a key nobody measured.
 
 🔴 **The blast-radius correction is confirmed at catalog scale, and the
 denominator is the point.** The fill would write a non-empty `credit_names`
@@ -888,42 +915,41 @@ people. Resolving the people that exist is **1.73× cheaper** than resolving
 the people a payload mentions. **A count taken off the cache and a count taken
 off the table are different numbers, and the request budget wants the second.**
 
-**Do not price a TMDb crawl from M9's 18.3 rps.** That rate is an artifact of
-`JobWorker.run_once`'s `for job in claimed: await self._run(job)` with a
-commit per iteration — in-flight HTTP requests per process is exactly 1, and
-the token bucket was never binding on any worker. Price from a policy ceiling:
-887,161 requests is **6.2 h** at TMDb's stated ~40 rps, **8.2 h** at the
-shipped 30 rps default, **9.9 h** at ADR-0005's self-imposed ~25 rps. 9.9 h is
-the number to quote, because 25 rps is Usher's own policy and leaves headroom
-for the enrich lane.
+**Do not price a TMDb crawl from any observed lane rate — price it from the
+policy ceiling.** 887,161 requests is **6.2 h** at TMDb's stated ~40 rps,
+**8.2 h** at the shipped 30 rps default, **9.9 h** at ADR-0005's self-imposed
+~25 rps. **9.9 h is the number to quote**, because 25 rps is Usher's own policy
+and leaves headroom for the enrich lane. ⚠️ **M9's 18.3 rps is not that number
+and its mechanism no longer exists**: it was an artifact of `JobWorker.
+run_once`'s `for job in claimed: await self._run(job)` with a commit per
+iteration — exactly 1 in-flight request per process — and W1 replaced that loop
+with a bounded `asyncio.wait` pool at `Settings.job_concurrency` (default 12,
+`config.py:259`), measuring **1 → 12 in flight**. The conclusion survives the
+fix, and is strengthened by it: W1 found the token bucket binding at every
+setting it tried, and that bucket *is* the policy. See W1 in
+`tmdb-and-enrichment.md`.
 
-**The ≤6-month cache term applies to `raw_payloads` and not to derived
-columns, and where the `nconst` lands therefore decides whether a crawl
-recurs.** `RawPayloadStore`'s own docstring says `fetched_at` *is* the
-compliance clock and `oldest_fetched_at(provider)` *is* the compliance query
-(ADR-0016; PRD 10's dashboard-5 panel plots it). A cached person payload is on
-that clock and expires; `people.imdb_id` is a derived column, in the same
-class as `titles.imdb_id` and every other TMDb-derived field this project has
-stored permanently for nine milestones. **Cache the response and the crawl is
-recurring; store the derived id and it is not.**
+**The ≤6-month cache term applies to `raw_payloads` and not to derived columns,
+so where the `nconst` lands decides whether a crawl recurs.**
+`RawPayloadStore`'s docstring makes `fetched_at` the compliance clock and
+`oldest_fetched_at(provider)` the compliance query (ADR-0016). A cached person
+payload is on that clock and expires; `people.imdb_id` is a derived column, in
+the same class as `titles.imdb_id`. **Cache the response and the crawl is
+recurring; store the derived id and it is not.** `_UPSERT_PEOPLE` cannot blank
+it — its `DO UPDATE SET` names three columns and `imdb_id` is not one, so
+`usher derive` cannot discard a crawl. That is an accident of a column list
+somebody could extend without thinking, which is why it is now pinned by a test.
 
-**And `_UPSERT_PEOPLE` cannot blank it — by virtue of a column list, which is
-why it is now pinned by a test.** The statement names
-`(id, tmdb_id, name, sort_name, known_for_department)` and its `DO UPDATE SET`
-names three columns, none of them `imdb_id`. So `usher derive` cannot discard
-a crawl. That is an accident of a list somebody could extend without thinking.
-
-🔴 **The latency bar passed and the carve-out I pre-registered is what let it,
-which is the finding rather than a caveat.** Nine probes before and after the
-load, on one catalog, 30 reps each, probe values fixed first, on a box the
-quiet-check confirmed idle (drift −0.001, no foreign workload — an earlier
-run was discarded because the same check caught a sibling worktree's
-`pytest`). Eight routes moved within ±5.4%. **`PeopleProvider`'s
-recurring-people join went 11.08 → 76.08 ms p95, +586%**, and my bar excused
-it: I had written *"for any probe whose baseline p95 is < 20 ms, treat a
-regression as unproven"* to stop a 0.6 ms wobble reading as a failure, and it
-swallowed a **65 ms** one. **A noise floor expressed as a percentage of a
-small baseline is not a noise floor; express it as an absolute.**
+🔴 **The latency bar passed, and the carve-out that let it pass is the finding
+rather than a caveat.** Nine probes before and after the load, 30 reps each,
+probe values fixed first, on a box the quiet-check confirmed idle (drift
+−0.001; an earlier run was discarded because the same check caught a sibling
+worktree's `pytest`). Eight routes moved within ±5.4%. **`PeopleProvider`'s
+recurring-people join went 11.08 → 76.08 ms p95, +586%** — and the bar excused
+it, because *"for any probe whose baseline p95 is < 20 ms, treat a regression as
+unproven"*, written to stop a 0.6 ms wobble reading as a failure, swallowed a
+**65 ms** one. **A noise floor expressed as a percentage of a small baseline is
+not a noise floor; express it as an absolute.**
 
 **The regression is recoverable and needs both halves — measured, because
 neither alone does it.** `credits` grows 2,877,486 → 15,514,735 (5.4×), and
@@ -953,45 +979,31 @@ in *both* directions, not a count of duplicated humans: two people sharing a
 name inflate it and one spelled differently across sources is missed. ADR-0003
 is the reason it can only ever be a proxy.
 
-**Denominators.** 1,194,030 of 1,272,367 titles (93.84%) have ≥1 principal;
-3,216,472 distinct `nconst` referenced, 3,215,476 (99.97%) carrying a
-`primaryName`, 1 nameless and 995 absent from that day's `name.basics` — T3
-measured 969 against a different pin, and **the number moves with the pin
-because the dumps are not one snapshot**. 12,637,249 credits stored from
-12,638,471 retained principals; the 1,222-row difference is credits naming one
-of the 996 unusable `nconst`.
+**Denominators**, T3's shape re-taken on the newer pin: 1,194,030 of 1,272,367
+titles (93.84%) have ≥1 principal; 3,216,472 distinct `nconst` referenced,
+3,215,476 (99.97%) with a `primaryName`, 1 nameless and 995 absent; 12,637,249
+credits stored from 12,638,471 retained principals, the 1,222-row difference
+being credits naming one of the 996 unusable `nconst`.
 
 ### T4R, second pass — `/find` works, and the yield is what settles the merge (2026-08-12)
 
-🔴 **The first pass wrote that branch (c) was "removed by a mechanism, not a
-cost" because `/find/{nconst}?external_source=imdb_id` was unverified. It
-works.** The uncertainty was flagged rather than asserted, but the conclusion
-drawn from it was still an overstatement — **an unverified "cannot" doing the
-work of a measured "does not pay"**, which is the same error that withdrew
-this task the first time, one scale down. Caught in review. If a credential
-exists on the box, probe the endpoint; do not reason about it.
+🔴 **The first pass called branch (c) "removed by a mechanism, not a cost"
+because `/find/{nconst}?external_source=imdb_id` was unverified. It works** —
+200, 240 live requests over three bursts, driven from a throwaway script outside
+the tree reading the operator's `.env`. The uncertainty was flagged rather than
+asserted and the conclusion drawn from it was still an overstatement: **an
+unverified "cannot" doing the work of a measured "does not pay"**, the same
+error that withdrew this task the first time, one scale down. **If a credential
+exists on the box, probe the endpoint; do not reason about it.**
 
-Verified live against the real API, 240 requests over three bursts, driven
-from a throwaway script outside the tree reading the operator's `.env` and
-redacting the key from everything printed:
-
-```
-GET /find/{nconst}?external_source=imdb_id  ->  200
-person_results[0] keys: adult, gender, id, known_for, known_for_department,
-                        media_type, name, original_name, popularity, profile_path
-```
-
-**It carries `name`, non-empty** — with `id`, `known_for_department`,
-`popularity` and `profile_path`, i.e. **every field `Person` stores**, so the
-IMDb→TMDb direction needs **no follow-up `/person/{id}` call**. A key list
-circulated in review omitted four of the ten; read the response, not a
-summary of it.
-
-**No rate-limit differential between `/find` and `/person/{id}/external_ids`.**
-Neither exposes any `x-ratelimit-*` or `Retry-After` header (`NONE` on both),
-neither returned a 429 at concurrency 8, and observed throughput was
-27.8–32.4 req/s for both — inside the variation of samples this size.
-ADR-0005's policy ceiling governs both equally.
+`person_results[0]` carries `adult, gender, id, known_for,
+known_for_department, media_type, name, original_name, popularity,
+profile_path` — **`name` non-empty, and every field `Person` stores**, so the
+IMDb→TMDb direction needs **no follow-up `/person/{id}` call**. (A key list
+circulated in review omitted four of the ten; read the response, not a summary
+of it.) **No rate-limit differential** between `/find` and
+`/person/{id}/external_ids`: no `x-ratelimit-*` or `Retry-After` on either, no
+429 at concurrency 8, 27.8–32.4 req/s for both. ADR-0005's ceiling governs both.
 
 🔴 **Both merge directions have a low yield, and that is a better argument
 than any reversibility tie-break.** Uniform samples, live:
@@ -1033,9 +1045,11 @@ vacuum**, so budget the peak. Same confound, same framing, as T3's
 ## `--phase ratings` shares `--phase imdb`'s checkpoint, so a rebuild deletes the row first (2026-08-19, ADR-0040)
 
 `usher bootstrap --phase ratings` re-imports `title.ratings.tsv.gz` (8.2 MiB)
-alone, because `--phase imdb` downloads `title.basics.tsv.gz` (214.4 MiB) first
-and rewrites every name and year — and a changed name stales that title's
-embedding, which a *rating* refresh against a live catalog should not pay for.
+alone, writing **`titles.imdb_average_rating` and `titles.imdb_num_votes`** and
+nothing else (`db/repositories/bulk.py:622`). `--phase imdb` downloads
+`title.basics.tsv.gz` (214.4 MiB) first and rewrites every name and year — and a
+changed name stales that title's embedding, which a *rating* refresh against a
+live catalog should not pay for.
 It is an **alias, not a step**: `FULL_SEQUENCE` and `PHASE_ALIASES` partition
 `BootstrapPhase`, and `--phase all` reaches these rows inside its IMDb arm and
 never dispatches this one. Adding it to both arms imports the file twice.
@@ -1094,26 +1108,46 @@ does too.
 
 ## `--phase` is `BootstrapPhase`, and two of its members are aliases
 
-Moved out of `CLAUDE.md` on 2026-09-01. It is twenty lines of detail about one
-command's argument, and this file's trigger — `adapters/bulk/**` and
-`services/bootstrap.py` — is exactly the set of paths from which it matters.
+Moved out of `CLAUDE.md` on 2026-09-01, because it is detail about one command's
+argument and **every path in this file's `paths:` frontmatter is a path from
+which it matters** — the seven are `adapters/bulk/**`, `services/bootstrap.py`,
+`domain/people.py`, `domain/bootstrap.py`, and the three `measure_*` scripts.
+`domain/bootstrap.py` is the one that declares the split.
 
-**`--phase` is `BootstrapPhase`, and the *steps* of a full run are in execution
-order:** `imdb`, `credit-names`, `aliases`, `tmdb-ids`, `crosswalk`,
-`movielens`. Two members are **aliases rather than steps** and `--phase all`
-dispatches neither: `all` itself, and **`ratings`**, which re-imports
-`title.ratings.tsv.gz` (8.2 MiB) alone rather than paying `--phase imdb`'s
-214.4 MiB of `title.basics.tsv.gz` and the rewrite of every name and year that
-stales an embedding (ADR-0040). `usher.domain.bootstrap.FULL_SEQUENCE` and
-`PHASE_ALIASES` declare the split, and a unit case asserts they partition the
-enum — so a member added to neither is a red rather than a phase `argparse`
+**The *steps* of a full run, in execution order:** `imdb`, `credit-names`,
+`aliases`, `tmdb-ids`, `crosswalk`, `movielens` —
+`domain/bootstrap.py:93-100`. Two members are **aliases rather than steps** and
+`--phase all` dispatches neither: `all` itself, and **`ratings`**, which
+re-imports `title.ratings.tsv.gz` (8.2 MiB) alone rather than paying
+`--phase imdb`'s 214.4 MiB of `title.basics.tsv.gz` and the rewrite of every
+name and year that stales an embedding (ADR-0040). `FULL_SEQUENCE` and
+`PHASE_ALIASES` are declared side by side and a unit case asserts they partition
+the enum — so a member added to neither is a red rather than a phase `argparse`
 offers, the route accepts and `run_bootstrap` silently ignores.
-The order is measured rather than stylistic — `credit-names`, `aliases` and
-`movielens` all join to `titles` on `imdb_id` so all three follow `imdb`, and
-`credit-names` comes before anything that *enriches* a title because the fill
-writes only skeletons, so a title already enriched is deferred to TMDb for good
-(**203,969 of 204,335** ≥100-vote titles gain names in this order and none in
-the other; it stales no embedding in either, the embedded population being the
-exact complement of what it writes). One vocabulary rather than two:
-`POST /admin/bootstrap/{phase}` and `argparse`'s `choices=` are the same enum,
-so a phase cannot exist on one boundary and not the other.
+
+⚠️ **`--phase all` is six steps, and a comment in this file called it three
+until 2026-09-02** — a figure that was true of M2's run, when `credit-names`,
+`aliases` and `movielens` did not exist, and is the reason the two steps that
+dominate the runtime measured above (826.1 s + 520.1 s of a 22 min 26 s run)
+read as unaccounted for.
+
+The order is measured rather than stylistic: `credit-names`, `aliases` and
+`movielens` all join `titles` on `imdb_id`, so all three follow `imdb`; and
+`credit-names` precedes anything that *enriches* a title, because
+`fill_credit_names` writes only skeletons and a title already enriched is
+deferred to TMDb permanently (**203,969 of 204,335** ≥100-vote titles gain names
+in this order and none in the other). It stales no embedding in either order,
+the embedded population being the exact complement of what it writes.
+
+**M9 Track 2's boundary call, moved here from `milestone-boundary-calls.md` on
+2026-09-01.** Its numbered items 2, 3 and 5 were the same measurements this file
+already carries — the skeleton precedence rule, the `credit_names` sizing
+(+624 MB settled / +1,368 MB transient / GIN ×4.54), and the contiguity finding
+— and were collapsed into their own sections on 2026-09-02 rather than kept as a
+second copy. Item 4 was the one mechanism with no home:
+
+**`replace_aliases` is scoped by `imdb_ids` *and* `kind = 'alias'`**, so B1's
+`person` rows survive an alias re-import. The caller's scope is necessarily the
+batch's own titles, which means a title whose akas IMDb has **withdrawn
+entirely** keeps its stale aliases — a streaming importer has no other scope
+available, and the alternative is one call naming 1.27M titles.

@@ -1022,7 +1022,13 @@ async def restores_the_statistics_this_seed_leaks(postgres_url: str) -> AsyncIte
     the point where every remaining case in the file needs the truth and no
     seeding case is relying on the lie.
     """
-    tables = ("titles", "title_embeddings")
+    # `media_items` is here because `test_the_owned_path_does_not_use_the_ann_index`
+    # takes this fixture and then runs `ANALYZE media_items` of its own -- so the
+    # one file this entry calls repaired was leaking a third table's statistics
+    # into every case after it. Found 2026-09-02 by re-running
+    # `grep -rn 'text("ANALYZE' tests/integration/` rather than by reading the
+    # ledger, which is the whole reason that ledger says to re-derive it.
+    tables = ("titles", "title_embeddings", "media_items")
     engine = build_engine(postgres_url)
 
     async def pages() -> dict[str, int]:

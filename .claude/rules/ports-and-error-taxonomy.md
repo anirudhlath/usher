@@ -64,10 +64,18 @@ common path, because a timeout is what an unreachable or overloaded upstream
 produces and a protocol error is not.
 
 **`usher.adapters.http.failure_detail` is the one definition**, and the
-`type(exc).__name__` half of it was already spelled inline at five sites
-(`EmbyPushChannel` twice, `TmdbClient`, `OpenAICompatibleClient`, the
-embedding client, `TmdbImageProvider`) before `EmbySession` and the two bulk
-adapters were found still interpolating `{exc}`. It adds the **timeout budget**,
+`type(exc).__name__` half of it was already spelled inline at **seven sites
+across six classes** — re-counted off the tree on 2026-09-02, because this
+paragraph said "five sites" and then listed six slots: `EmbyPushChannel`
+(once, at the websocket open), `_WebsocketsConnection` (**twice**, on send and
+on close — a separate class in the same module, which is where the miscount
+came from), `TmdbClient`, `OpenAICompatibleClient`, `OpenAICompatEmbedder` and
+`ProviderCdnImageFetcher`. Those were the sites already doing it right before
+`EmbySession` and the two bulk adapters were found still interpolating
+`{exc}`. (An eighth spelling, `push.py`'s `logger.debug` on a failed close, is
+a log line rather than an exception message and is not one of them.) **Count
+call sites from the tree, not from the class you remember being in.** It adds
+the **timeout budget**,
 recovered rather than invented: `build_request` writes
 `extensions["timeout"]` from the client default *or* from a per-request
 `timeout=` kwarg, and httpx sets `.request` on every `RequestError`, so
@@ -233,8 +241,15 @@ refusal is a decision *this* project made.** `PortUnavailable`,
 `PortAuthFailed`, `PortRateLimited` and `PortDataMalformed` all describe the
 other end. Nothing in that vocabulary says "the upstream was fine and we will
 not carry this", so the first author of any such refusal reaches for
-`PortDataMalformed` — which is right, and is why the subclass rather than a
-sixth member is the answer. Expect this shape wherever a port has a closed
+`PortDataMalformed` — which is right, and is why the subclass rather than **a
+seventh member of `ports/errors.py`** is the answer. (This read "a sixth
+member" until 2026-09-02. That module has held **six** since
+`PortDataMalformed` itself landed on 2026-07-30 — twelve days *before* this
+finding — so the count was wrong when it was written, not merely outdated, and
+the enumeration two sections down already said six. The argument is
+unaffected: it is about adding no member at all. But a taxonomy rule that
+miscounts its own taxonomy invites the reader to trust the count.) Expect this
+shape wherever a port has a closed
 allowlist: a media type, a codec, a container format, a locale, a schema
 version.
 
@@ -248,6 +263,53 @@ value of the subclass is that it did **not** fork any caller, and that claim is
 only asserted by `isinstance(caught.value, PortDataMalformed)`. Measured: with
 the import widened so the mutation is the *careful* spelling rather than a
 `NameError`, exactly one assertion in the suite fails, and it is that one.
+
+## The taxonomy is read from `__subclasses__()`, never hand-written
+
+**Moved here from `mutation-sweeps.md` on 2026-09-01; found in M9's curate-CLI sweep. This file is now the canonical home of the rule; `config-cli-and-deployment.md` points here.**
+**`Class.__subclasses__()` is the only honest way to enumerate a taxonomy,
+and it needs the imports to have happened.** `UsherPortError` has **nine**
+subclasses; `.claude/rules/config-cli-and-deployment.md` said "the base and
+four leaves" until it was corrected to nine, and a review said six. Both
+counted `ports/errors.py` and
+missed `SourceNotSupported`, `FilterNotSupported` and
+`AvailabilitySweepRefused`, which live beside the ports whose contract they
+belong to. The exhaustiveness assertion imports all three explicitly, since
+a class nothing has imported is a subclass Python does not report — an
+assertion over `__subclasses__()` alone would have silently agreed with the
+undercount. **Never hand-write the members of a taxonomy a case is about to
+make a claim over.**
+
+The nine, re-read from the tree on 2026-09-01 rather than from the paragraph
+above: six in `ports/errors.py` — `PortUnavailable`, `PortAuthFailed`,
+`PortRateLimited`, `RepositoryConflict`, `RepositoryNotFound`,
+`PortDataMalformed` — plus `AvailabilitySweepRefused` (`ports/ingest.py`),
+`FilterNotSupported` (`ports/search.py`) and `SourceNotSupported`
+(`ports/source.py`); `MediaTypeNotServable` is a child of `PortDataMalformed`,
+not of `UsherPortError`, and so is not among them.
+
+**Re-derive all of it rather than quoting this file — every count above was
+wrong at least once, and two of them were wrong *in this file*.** Verified
+2026-09-02:
+
+```bash
+# The nine. `usher.composition` first, because a class nothing imported is a
+# subclass Python does not report -- which is how "six" survived a review.
+uv run python -c "import usher.composition; from usher.ports.errors import \
+UsherPortError as E; print(len(E.__subclasses__()), \
+sorted(c.__name__ for c in E.__subclasses__()))"
+
+# The six in the taxonomy module alone, which is the count a "new member"
+# argument has to be stated against.
+grep -c 'UsherPortError)' src/usher/ports/errors.py
+
+# The inline `type(exc).__name__` sites `failure_detail` exists to replace:
+# eight lines, seven of them exception messages and one a log line.
+grep -rn 'type(exc)\.__name__' src/usher/adapters/ | grep -v 'adapters/http.py'
+
+# The guard that fails when a tenth member arrives undecided.
+uv run pytest tests/unit/test_cli_errors.py -k port_taxonomy_is_split
+```
 
 ## A refusal justified by "this cannot happen" is one measurement away from firing constantly
 

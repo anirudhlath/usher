@@ -27,47 +27,6 @@ queue form is `retryable=False` — the job parks on its **first** attempt and
 needs a human to release it. Dropping the conjunct buys 30,983 parked rows,
 no data, and a `usher sync-status` an operator can no longer read.
 
-**Two spellings of the predicate, on purpose, and the Python one is the
-authority.** `_PAGE` narrows in SQL so the walk does not drag 1,272,367 rows
-across the wire; `is_tier_movie` is applied again to every row the page
-reader hands back, and it is what decides whether a job is written. The
-asymmetry is the point: a SQL predicate that is accidentally *too wide* — the
-one risk above, and the one that costs 30,983 parked rows — is caught by the
-Python guard and costs nothing, while a SQL predicate that is too narrow
-costs coverage the next run picks up. The two must agree, so keep them in
-view of each other; `tests/unit/test_scripts_enqueue_tier_enrichment.py`
-pins the Python half and nothing pins the SQL half but this sentence.
-
-**The bound is in the iterator.** `--limit` is subtracted from the size of
-the *next page asked for*, so the walk stops reading, not merely stops
-writing. `CLAUDE.md`'s rule ("the bound has to be in the iterator, not in
-`max_pages`") is about a live run against a real server, and it applies to a
-walk over 130,806 rows for the same reason. `max_pages` does not exist here
-anyway — it is an Emby adapter concept (`adapters/emby/adapter.py:251`) and
-exhausting it raises `PortDataMalformed`.
-
-**The cursor advances on the last id of the page, unconditionally**, before
-the predicate is consulted. A cursor advanced on the last *enqueued* id
-cannot get past a page nothing in it clears, which on this catalog is the
-ordinary page rather than the exotic one.
-
-**Re-running is cheap and that is what makes the full run resumable.**
-`enqueue` deduplicates on `(kind, key)` and promotes rather than duplicates,
-so a second pass over the same prefix writes nothing new; and a title already
-enriched inside `USHER_ENRICH_CACHE_MAX_AGE_DAYS` (default 30) re-reads its
-`raw_payloads` row and spends **no TMDb request** when the job runs — measured
-2026-08-11, twenty already-cached titles re-enqueued by id and drained for
-zero outbound requests.
-
-⚠️ **The predicate is not stationary: enriching a title can remove it from the
-tier, so a second run of this script does not select the same rows.**
-`tmdb_vote_count` is in `EnrichService._ENRICHABLE`; the bulk loader writes
-IMDb `numVotes` into that column through `apply_ratings` and enrichment
-overwrites it with TMDb's own `vote_count`, which is a different electorate.
-**That dual write is what ADR-0040 is about**, and `m10a` renamed `vote_count`
-to `tmdb_vote_count`, which made an IMDb writer landing there legible without
-stopping it.
-
 ✅ **ADR-0040's Task 2 stopped that dual write, which briefly emptied this
 predicate, and the repair is the measurement below (2026-08-19).**
 `apply_ratings` now writes `imdb_num_votes`/`imdb_average_rating`, and nothing
@@ -138,39 +97,30 @@ enriched inside `USHER_ENRICH_CACHE_MAX_AGE_DAYS` (default 30) re-reads its
 2026-08-11, twenty already-cached titles re-enqueued by id and drained for
 zero outbound requests.
 
-⚠️ **The predicate is not stationary: enriching a title can remove it from the
-tier, so a second run of this script does not select the same rows.**
-`tmdb_vote_count` is in `EnrichService._ENRICHABLE`; the bulk loader writes
-IMDb `numVotes` into that column through `apply_ratings` and enrichment
-overwrites it with TMDb's own `vote_count`, which is a different electorate.
-**That dual write is what ADR-0040 is about**, and `m10a` renamed `vote_count`
-to `tmdb_vote_count`, which made an IMDb writer landing there legible without
-stopping it.
+**The history of this predicate, which is worth keeping because the tier's
+population is quoted all over `.claude/rules/tmdb-and-enrichment.md`.** It used
+to read `vote_count >= 100`, against a column two writers filled: the bulk
+loader put IMDb `numVotes` there through `apply_ratings` and enrichment
+overwrote it with TMDb's own `vote_count`, a different electorate. That made the
+tier **non-stationary by construction** — `tmdb_vote_count` is in
+`EnrichService._ENRICHABLE`, so enriching a title rewrote the very column the
+tier selected on, and a second run selected different rows. `m10a` renamed the
+column `tmdb_vote_count`, which made an IMDb writer landing there legible
+without stopping it; ADR-0040's Task 2 then stopped it, which briefly left this
+script's predicate matching **zero rows** on a freshly bootstrapped catalog
+(issue #42). Both are repaired above: the predicate is `imdb_num_votes`, which
+has one writer no crawl touches.
 
-🔴 **ADR-0040's Task 2 then stopped it, and in doing so emptied this script's
-predicate on any catalog that has not been enriched yet. Read this before
-running it on a new deployment (2026-08-19).** `apply_ratings` now writes
-`imdb_num_votes`/`imdb_average_rating`, and nothing else fills
-`tmdb_vote_count`: `upsert_titles` omits it from its `DO UPDATE` list and
-`link_crosswalk` writes only `tmdb_popularity`. So after a fresh
-`usher bootstrap --phase all`, `tmdb_vote_count` is **NULL on every row**, the
-tier is `kind = 'movie' AND NULL >= 100 AND ...` — **zero rows** — and the
-enrichment crawl this script exists to start cannot start itself. On a catalog
-bootstrapped before `m10a` the column still holds its pre-existing mixed values
-(540,275 rows on the deployed one, measured 2026-08-19), so the tier still
-selects there; the break is a fresh-install one, which is the direction hardest
-to notice.
-
-**Not repaired in the commit that found it, deliberately.** The tier this script
-has always *meant* is "movies a lot of people on IMDb have voted on", which is
-`imdb_num_votes >= 100` — the same restoration ADR-0040 made for the eval
-sampling frame, one predicate over. But that is a behaviour change to what a
-crawl fetches, it moves the population every downstream tier statistic in
-`.claude/rules/tmdb-and-enrichment.md` is quoted against, and it deserves the
-failing test and the re-measurement the frame re-anchor got rather than a
-docstring edit. It is owed, it is named here and in ADR-0040's Consequences, and
-until it lands **an operator bootstrapping a new catalog must not expect this
-script to enqueue anything.**
+⚠️ **This docstring told the story twice, in contradiction, until 2026-09-02** —
+the ✅ paragraphs above and a 🔴 block down here that still said the repair was
+"not repaired in the commit that found it, deliberately" and warned that
+**"an operator bootstrapping a new catalog must not expect this script to
+enqueue anything."** That warning was false by then: `_PAGE` and `is_tier_movie`
+both read `imdb_num_votes`. A 41-line block of this docstring was also duplicated
+verbatim. Recorded rather than quietly deleted, because the failure is the one
+`.claude/rules/prd-maintenance.md` names — an amendment that leaves the
+superseded claim standing is a second claim, and here the stale one was the
+scarier of the two, so a reader who believed it would not run the script at all.
 
 Measured 2026-08-11 over 537
 enriched tier movies: **80 still carry `>= 100` (14.9%)**. ⚠️ The scale gap this

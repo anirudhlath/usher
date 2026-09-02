@@ -2,6 +2,7 @@
 paths:
   - "src/usher/db/**"
   - "alembic.ini"
+  - "scripts/measure_browse.py"
 ---
 
 # PostgreSQL, SQLAlchemy and migrations
@@ -57,27 +58,17 @@ orders by `down_revision` and never cared). `m08a` (`curated_rows` +
 vocabulary) shipped 2026-08-07; the rule for the next milestone is now
 mechanical rather than a decision: `m09a`, then `m10a`.
 
-**The rule held — both predictions landed — and a rule is not a ledger, so
-here is the chain as it stands on 2026-08-26**: `m08a`, `m08b`, `m09a`,
-`m09c` (`images`' natural key — **`m09b` was never minted** and is still the
-unallocated spare E4's index request would take), `m09d`, `m09e`, `m09f`,
-`m10a`, `m10b`. **Head is `m10b`**, pinned as a literal at
-`tests/unit/test_db_migration_status.py`, which is the thing to read rather
-than this paragraph. Seven of those nine landed after the sentence above was
-written and none of them extended it, which is why the list is separate from
-the rule now: the rule says what to mint next, the list says what exists.
-
-🔴 **The commit that added that list also appended *"then `m11a`"* to the
-rule above, and no such revision exists.** Removed 2026-08-26, and recorded
-here rather than quietly reverted, because of what it was: an invented fact
-in the one entry whose entire subject is a fact going stale, added by the
-commit that was correcting the staleness. It also falsified both sentences it
-sat beside in the same edit — *"both predictions landed"* over three
-predictions, one unlanded, and *"none of them extended it"* over an edit that
-just had. **A forward-looking rule is not a place to write a revision id**:
-`m11a` is what the next milestone should be *called*, and the only honest
-statement of what exists is the list, checkable against the versions
-directory and against `code_head_revision()`.
+**A rule is not a ledger, so the chain is listed separately from it**: `m08a`,
+`m08b`, `m09a`, `m09c` (`images`' natural key — **`m09b` was never minted** and
+is still the unallocated spare E4's index request would take), `m09d`, `m09e`,
+`m09f`, `m10a`, `m10b`. **Head is `m10b`**, pinned as a literal at
+`tests/unit/test_db_migration_status.py::
+test_code_head_revision_matches_the_head_migration_on_disk` — read that and
+`ls src/usher/db/migrations/versions/`, not this paragraph. **A forward-looking
+rule is not a place to write a revision id**: an earlier edit appended *"then
+`m11a`"* to the rule above and no such revision existed. `m11a` is what the
+next milestone should be *called*; what exists is checkable against the
+versions directory and `code_head_revision()`, and nothing else is.
 
 **M9 took the convention and shipped one revision where a draft plan wanted
 seven, and the reason generalises.** `m09a` (`images`, `search_queries`,
@@ -107,16 +98,12 @@ the ordering being *obvious*, which is the tell: if an id is going to be
 compared as text, pad it at the point it is minted, or sort on the integer it
 came from rather than on its rendering.
 
-**Closed in Task 13 rather than 15, by the first rule above rather than the
-second**, because the validator is the only thing that mints a curated slug and
-a fix in `CuratedProvider` would have been a second place that knows the
-scheme. `services.curation_validate` pads to the width of the generation --
-three rows stay `curated-1` … `curated-3` and twelve become `curated-01` …
-`curated-12` -- so a `text` column and a `(-score, slug)` tie-break carry the
-model's ordering at any row count.
-`test_the_model_s_row_order_survives_and_the_slugs_sort_in_it` asserts the
-unpadded spelling really does sort wrong as its own premise, so it cannot pass
-because twelve rows happened to be nine.
+The `curated_rows.slug` half was closed in `services.curation_validate` — the
+only thing that mints a slug — and not in any repository. The fact about *this*
+schema is the one that decides where such a fix can go: `curated_rows.slug` is
+`text` and `HomeService`'s tie-break is `(-score, slug)`, so the column carries
+no ordering the minting side did not pad in, and no read-side repair exists.
+
 **`tests/integration/test_migrations.py`'s down/up cycle needs attention from
 every group that adds a migration, and the `-1` half breaking is the design,
 not the defect.** The `-1`-from-head half asserts on whatever the *current*
@@ -126,18 +113,10 @@ migration itself) for `ffb`, M7 Task 36 for `ffc`, M8 Task 8 for `m08a`,
 M8 Task 19 for `m08b`, M9 Task M1 for `m09a`, then `m09c`, `m09d`, `m09e`,
 `m09f`, `m10a`, and — with issue #41's `sync_runs.position` — `m10b`. The
 sixth was run and watched to fail before it was touched: `AssertionError:
-assert 'pk_genome_tags' not in {...}`.
-
-⚠️ **Read the jump from six to twelve as a gap in this record, not as a burst
-of migrations.** The count stood at six from `m09a` (2026-08-10) until #41
-brought it current on 2026-08-25: `m09c` through `m10a` each re-pointed the
-block and not one of them wrote it down, so five landings' worth of the
-evidence this entry exists to accumulate went unrecorded. Nothing is
-unrecoverable — every one of them *did* extend
-`test_migrations.py`'s revision-pinned block, which is where the
-displacement chain is legible — but a count that is five landings stale is
-the failure mode this entry was written to prevent, arriving in the entry
-itself. Update it in the commit that re-points the block.
+assert 'pk_genome_tags' not in {...}`. **Update this count in the commit that
+re-points the block** — it stood at six from `m09a` (2026-08-10) until #41
+brought it current on 2026-08-25, and the five landings in between are legible
+only from `test_migrations.py`'s revision-pinned block, not from here.
 
 **An inherited `-1` assertion that had teeth cannot survive a new head, and
 the failure is always loud.** Having teeth *means* being true at the state
@@ -180,6 +159,29 @@ redundant.
 Related: `run_alembic` used to infer its direction from the target string, so a
 bare revision id ran `upgrade` — a silent no-op — and it now takes an explicit
 `direction`.
+
+**Moved here from `mutation-sweeps.md` on 2026-09-01; two results of the
+`m09a` landing sweep worth carrying.**
+
+- **Every one of the six `downgrade()` plants is killed by exactly one case,
+  and it is the same case for all six** —
+  `test_a_full_down_and_up_cycle_restores_every_index`. Nothing else in the
+  repository can see a `downgrade()` at all: the integration schema is built by
+  one session-scoped `upgrade head` and never goes down. That is the argument
+  for the "one assertion per table" rule stated as a measurement rather than as
+  a rule — with four tables and one head, four of those six plants are
+  distinguishable only by which assertion in that block fires.
+- **The same landing broke a case that asserted an index *name* where it meant
+  a property.** `test_name_year_matching_uses_the_expression_index` named
+  `ix_titles_name_lower_year`, and `m09a`'s second expression index on
+  `lower(name)` can serve the same equality. The plan assertion is now on the
+  `Index Cond`, which is strictly stronger, and the swap was measured to cost
+  nothing (200,000 rows: 4 buffers and 0.031 ms either way). Its twin — the
+  `conname LIKE` FK case that aged in the same landing — is below, under *A
+  schema case filtered by `conname LIKE`*; **both named an artefact where they
+  meant a property**, which is the shape to check for when a landing breaks a
+  schema case it is not about.
+
 **The search document's generated column collides with the 1:1 row/model rule
 in three places, and the second one fires on writes.** `Title` is
 `extra="forbid"` and `_to_domain` builds it from `TitleRow.__table__.columns`,
@@ -228,13 +230,32 @@ wait **819 ms** for each other's *whole transaction* — not the length of a
 DDL. With **no** leftover they do not wait at all: they race on
 `pg_type_typname_nsp_index` and one comes back as a `RepositoryConflict`, so
 **a healthy batch is reported to its caller as a constraint violation**.
-`CREATE TEMP TABLE … ON COMMIT DROP` fixes both in one line per DDL constant,
-for all ten staging tables. **The `pg_temp`-qualified `DROP` is
-load-bearing**: measured, a `TEMP` create behind an *unqualified* drop still
-stalls **818 ms** on a leftover `public` table. `CREATE TEMP UNLOGGED TABLE`
-is a syntax error (`TEMP` replaces `UNLOGGED`, and temp tables are already
-WAL-free). Nine integration files' `DROP TABLE IF EXISTS stg_*` cleanup is
-deleted rather than left to drop nothing.
+`CREATE TEMP TABLE … ON COMMIT DROP` fixes both in one line per DDL constant —
+**16 of them across 8 repository modules as of 2026-09-01** (`bulk.py` holds
+seven), which is why the guard is a scan and not a list:
+`tests/unit/test_staging_ddl.py` regex-matches every `CREATE … TABLE stg_*` in
+`src/` and requires the modifier and the `ON COMMIT DROP`, so a new DDL that
+forgets either fails without anyone extending an enumeration. **The
+`pg_temp`-qualified `DROP` is load-bearing**: measured, a `TEMP` create behind
+an *unqualified* drop still stalls **818 ms** on a leftover `public` table.
+`CREATE TEMP UNLOGGED TABLE` is a syntax error (`TEMP` replaces `UNLOGGED`, and
+temp tables are already WAL-free).
+
+**That same change deleted a whole class of fixture cleanup, and it must not
+come back.** Before M6, a test that *committed* through `usher.db.staging`
+leaked its staging table — DDL is transactional and the integration suite's
+usual isolation is a rolled-back transaction, so only the committing fixtures
+(the job queue's concurrency harness, which needs two real backends) leaked
+one — and it surfaced as
+`test_migration_matches_the_orm_metadata` reporting schema drift in a **later
+file**, so the queue suite passed alone and took the migration test down in
+combination. **Nine integration files carried a `DROP TABLE IF EXISTS stg_*`
+cleanup for that; every one of those lines is now a comment recording its
+removal**, and the only live `DROP TABLE IF EXISTS public.stg_jobs` left in
+`tests/` is `test_staging_lock.py` deliberately *planting* a leftover to prove
+the `pg_temp` qualification above. **A new fixture needs no cleanup** — wanting
+one means its DDL is missing a modifier, and `tests/unit/test_staging_ddl.py`
+is what says so.
 **`SELECT … FOR UPDATE SKIP LOCKED` is the whole of the queue's exclusion,
 and both wrong spellings *hang* rather than answer.** Verified against
 `pgvector/pgvector:pg17` by deleting each in turn from
@@ -269,8 +290,13 @@ crosses the port boundary raw, which is the one thing ADR-0009 forbids.
 The third is the one where the wide `except` is **not** currently load-bearing
 and the write-up says so: narrowing it to `IntegrityError` survives the whole
 suite, because that table's column type was picked precisely so every reachable
-refusal is a CHECK violation.)
-`PostgresLLMCallRepository` catches `DBAPIError` and filters on the SQLSTATE
+refusal is a CHECK violation. **Six as of 2026-09-01**, and the mechanism moved
+rather than being copied: `image.py`, `search_query.py` and `watch_state.py`
+joined those three, all six through the one `refusals_as_conflict` in
+`db/repositories/_errors.py` — the module whose whole reason is that two copies
+of a measured accessor are two chances to lose one.)
+`refusals_as_conflict` (`db/repositories/_errors.py:133`, its `except
+DBAPIError` at :172) catches `DBAPIError` and filters on the SQLSTATE
 *class* instead: `22` (data exception) and `23` (integrity constraint
 violation) are "this row is not storable as given"; everything else — a
 dropped connection, a statement timeout, an undefined table — propagates,
@@ -374,8 +400,10 @@ is not colon-prefixed when a comment needs to quote a parameter spelling.
 transaction; `clock_timestamp()` is the instant the statement runs.** Both
 appear in this schema and the difference is load-bearing in two places:
 
-- `usher.db.repositories.jobs` uses `clock_timestamp()` in all four of its
-  statements. `requeue_running`'s `updated_at <= clock_timestamp() -
+- `usher.db.repositories.jobs` uses `clock_timestamp()` in all five of its
+  timestamped statements (`_ENQUEUE`, `_CLAIM`, `_FAIL`, `_TOUCH`, `_REQUEUE`;
+  four until `_TOUCH` arrived with W1 — see the lease entry below).
+  `requeue_running`'s `updated_at <= clock_timestamp() -
   interval` cannot match a claim made in the same transaction if both sides
   read the same frozen `now()`, and a job that failed twenty minutes into a
   long transaction must back off from *now* rather than from when that
@@ -410,14 +438,6 @@ with two other things — a row re-written by an `UPDATE` (so heap order and
 `created_at` order disagree at all) and a `LIMIT` smaller than the candidate
 set (so the key decides *which* rows are kept, not just how they are
 returned). Worth knowing before writing a plan-independent ordering test.
-**A test that commits through `usher.db.staging` leaves its staging table
-behind.** `stage_records` creates the table with DDL, Postgres DDL is
-transactional, and the integration suite's usual isolation is a rolled-back
-transaction — so only a test that *commits* (the job queue's concurrency
-harness, which needs two real backends) leaks one. It surfaces as
-`test_migration_matches_the_orm_metadata` reporting schema drift in a *later*
-file, so the queue suite passes alone and takes the migration test down in
-combination. Such a fixture must `DROP TABLE IF EXISTS stg_*` in its cleanup.
 **A staged `COPY` does not fire the destination's CHECK constraints**, on
 this project's path, because `usher.db.staging`'s staging tables are
 declared without constraints. The violation surfaces one statement later, at
@@ -428,6 +448,13 @@ raw asyncpg connection, outside SQLAlchemy's error translation, and would
 raise `asyncpg.exceptions.CheckViolationError` straight past any
 `except IntegrityError`. Do not add constraints to a staging DDL without
 giving its caller a second `except`.
+**Moved here from `milestone-boundary-calls.md` on 2026-09-01; the mechanism
+behind M9's boundary call 8, which stays there.** The
+measurement is what stops it: **31 of the 45 are written through
+`copy_records_to_table` on the raw asyncpg connection**, where an
+out-of-range int raises a bare `OverflowError` with **no SQLSTATE**, so no
+widening of `except IntegrityError` reaches them and there is nothing to map.
+Mapping them means wrapping the COPY path, which is a bulk-loader change.
 **`tmdb_id` is unique per `kind`.** TMDb's movie and series id spaces overlap
 on 26,968 ids (measured against Wikidata, 2026-07-30 — 47.3% of all series
 ids it knows). `ix_titles_tmdb_id_kind`, and `get_by_tmdb_id` takes a
@@ -645,8 +672,10 @@ than per generation), which is the shape `testing-discipline.md` records as
 
 **Rank on a narrow projection, then join the entity back — and project the sort
 keys *through* the subquery rather than re-deriving them outside.**
-`list_unwatched_candidates` put 32 of `titles`' 33 columns through a
-whole-catalog join and top-N sort to return four fields anybody reads. The
+`list_unwatched_candidates` put all but one of `titles`' columns (32 of 33 when
+this was measured; `m10a` has since taken the table to **35**, so re-count
+rather than quoting either figure) through a whole-catalog join and top-N sort
+to return four fields anybody reads. The
 two-stage rewrite is ordinary; the trap is the outer `ORDER BY`. Re-stating
 `owned` outside means re-joining `owned_titles`, i.e. a *second* `DISTINCT` over
 `media_items` — so the keys are carried out of the ranking stage and the outer
@@ -668,9 +697,20 @@ gets plain `defer` — `credit_names_for` reads it deliberately one method down,
 a stray access is a routing mistake, and `raiseload` would convert one small
 query into an `InvalidRequestError` inside the nightly curation job. Verified
 before choosing: `raiseload=True` was set temporarily and the **full** unit and
-integration suites run green, then reverted. **The deferral loops over
-`DERIVED_COLUMNS` rather than naming the two columns**, so a future derived
-column that nobody defers fails the case that exists for it.
+integration suites run green, then reverted.
+
+**The deferral cannot loop, and the *test* does — which is the half that keeps
+the two sets in step.** `_WITHOUT_DERIVED_COLUMNS` (`db/repositories/title.py`)
+names both columns literally because they take **different options**
+(`defer(TitleRow.search_document, raiseload=True)` against a plain
+`defer(TitleRow.credit_names)`), so there is no one expression to iterate
+`DERIVED_COLUMNS` with. What iterates it is
+`tests/integration/test_title_repository.py::
+test_no_entity_read_ships_credit_names_over_the_wire`, so a third derived
+column that nobody defers fails there rather than being silently paid for on
+every entity read. **Adding one means picking its `raiseload` and adding a
+line, not extending a set** — and the two sets must be checked against each
+other by hand.
 
 ## The keyset over a nullable column, 2026-08-11 (M9 B6)
 
@@ -689,17 +729,20 @@ when the first differing pair involves a NULL — and unknown is not true, so th
 `WHERE` rejects the row. The damage is the quietest kind: the client gets full
 pages, in order, ending early.
 
-This is not an edge case on this schema. `titles.year`, `titles.popularity` and
-`titles.vote_count` are all nullable, and `popularity` was measured NULL on
-**all 1,271,138 rows** of a bootstrap-only catalog, so on a fresh install the
-unkeyed group is most of the table. *(`m10a`/ADR-0040 renamed those two to
-`titles.tmdb_popularity` and `titles.tmdb_vote_count`; nullability, and
-therefore everything this section argues, is unchanged.)* ADR-0034 shipped the row-comparison
-spelling as the milestone-wide instruction for three groups writing keyset SQL
-independently; it is corrected there with this table, and the correction
-includes the leading term's direction — `(key IS NOT NULL)` **ascending** puts
-NULLs *first*, which contradicted the ADR's own "NULL sorts last" sentence one
-line above it.
+This is not an edge case on this schema. `titles.year`,
+`titles.tmdb_popularity` and `titles.tmdb_vote_count` are all nullable
+(`m10a`/ADR-0040 renamed the last two from `popularity`/`vote_count`;
+nullability is unchanged), and on the deployed partly-enriched catalog measured
+by B7 below — 1,272,367 titles — the NULL fractions are `sort_name` **0**,
+`year` 147,848, `tmdb_vote_count` 732,587, `tmdb_popularity` **980,523**. So
+**77% is the figure to carry for `tmdb_popularity`**, not the *"NULL on all
+1,271,138 rows"* M6's gate measured on a bootstrap-only catalog: the unkeyed
+group shrinks as enrichment runs and never reaches zero. ADR-0034 shipped the
+row-comparison spelling as the milestone-wide instruction for three groups
+writing keyset SQL independently; it is corrected there with this table, and
+the correction includes the leading term's direction — `(key IS NOT NULL)`
+**ascending** puts NULLs *first*, which contradicted the ADR's own "NULL sorts
+last" sentence one line above it.
 
 The spelling that works, and it is `IS NOT DISTINCT FROM` written out:
 
@@ -753,7 +796,7 @@ and none of the 172 others, which is what "the same order" means when it is
 measured instead of argued.
 
 **The premise guard on that case caught the fixture, not the code, on its first
-run** — `popularity` and `vote_count` had no tie, so their `id` tail was
+run** — the two TMDb sort keys had no tie, so their `id` tail was
 unobservable and the equivalence would have been about four rows instead of
 seven. One row carrying a tie for every key at once fixed it. This is the
 `assert far_id < near_id` rule paying out in the direction nobody plans for.
@@ -764,17 +807,19 @@ the `id` tail dropped fails **5**; deleting the `key.is_(None)` disjunct from
 the predicate fails 7.
 
 **The nullable sorts are not fixed by this and the reason matters.** `year`,
-`popularity` and `vote_count` have no index at all, so all three remain a
-sequential scan (235.55 / 229.50 / 231.21 ms). A `(col DESC NULLS LAST, id)`
-btree on each would serve them — and **under the written-out spelling could not
-have been matched even if it existed**, so this change is what makes such an
-index possible rather than what makes it unnecessary. Recommended and
-deliberately not minted here: `ix_titles_popularity` is this schema's own
-precedent for an index declared on a guess, unusable, and dropped two
-milestones later in `ffc`, and Track 1 is not taking a third revision for an
-optimisation. A GIN index on `genres` is a separate and genuinely open
-question — B7 found none exists, so the lossy-bitmap recheck B3 measured one
-subsystem over would be *created* by adding it, not avoided.
+`tmdb_popularity` and `tmdb_vote_count` have no index at all, so all three
+remain a sequential scan (235.55 / 229.50 / 231.21 ms). A
+`(col DESC NULLS LAST, id)` btree on each would serve them — and **under the
+written-out spelling could not have been matched even if it existed**, so this
+change is what makes such an index possible rather than what makes it
+unnecessary. Recommended and deliberately not minted here:
+`ix_titles_popularity` is this schema's own precedent for an index declared on
+a guess, unusable, and dropped two milestones later in `ffc`, and Track 1 is
+not taking a third revision for an optimisation. **Anyone minting them must use
+the post-`m10a` names** — an index written against `popularity` or
+`vote_count` will not compile. A GIN index on `genres` is a separate and
+genuinely open question — B7 found none exists, so the lossy-bitmap recheck B3
+measured one subsystem over would be *created* by adding it, not avoided.
 
 **Offset paging duplicates under a concurrent insert, measured rather than
 asserted.** PRD 07 has claimed this since M1 and nothing tested it, because
@@ -878,10 +923,9 @@ in the log. `/var/tmp` and not `/tmp`, which is tmpfs on this host.
 **Catalog, recorded with every number because a phase read as a catalog fact is
 how the last one went wrong:** 1,272,367 titles (1,141,720 skeleton / 0 basic /
 130,647 enriched), `alembic m09c`, autoanalyzed. NULL fractions of the four
-sort keys: `sort_name` **0**, `year` 147,848, `vote_count` 732,587,
-`popularity` **980,523** — so *"popularity is NULL on all 1,271,138 rows"* is
-now false on a partly-enriched catalog and 77% is the right figure to carry.
-118,856 titles carry no genre. `media_items` is **empty**, so every `owned`
+sort keys: `sort_name` **0**, `year` 147,848, `tmdb_vote_count` 732,587,
+`tmdb_popularity` **980,523** — the source of the 77% the keyset section above
+carries. 118,856 titles carry no genre. `media_items` is **empty**, so every `owned`
 number here is an `EXISTS` against an empty table and is **not** the filter
 that ships. `work_mem` 4 MB, `shared_buffers` 128 MB,
 `max_parallel_workers_per_gather` 2, jit on. Genre vocabulary 30 members,
@@ -941,43 +985,37 @@ B3 measured one subsystem over.
 
 ### The `ORDER BY`'s spelling, not the missing index, is what makes a `name` page a sequential scan
 
-Measured **after** both bars were scored, as a diagnostic, changing one
-variable: the leading `(key IS NOT NULL) DESC` term replaced by the
-`NULLS LAST` it was written out from, nothing else moved.
+The mechanism, the plan table and the equivalence test are one section up
+(*The keyset over a nullable column*), which is where a `title.py` session
+needs them. **What only B7 has is the per-sort price**, measured after both
+bars were scored as a one-variable diagnostic — the leading
+`(key IS NOT NULL) DESC` term replaced by the `NULLS LAST` it was written out
+from, nothing else moved:
 
 | sort | column NOT NULL | shipped p50 | `NULLS LAST` p50 | plan under `NULLS LAST` |
 |---|---|---|---|---|
 | `name` | **yes** | 299.21 | **0.92** | `Index Scan using ix_titles_sort_name` + Incremental Sort, **29 buffers**, 0.080 ms |
 | `year` | no | 277.13 | 235.55 | Parallel Seq Scan (no index exists) |
-| `popularity` | no | 269.96 | 229.50 | Parallel Seq Scan |
-| `vote_count` | no | 276.48 | 231.21 | Parallel Seq Scan |
+| `tmdb_popularity` | no | 269.96 | 229.50 | Parallel Seq Scan |
+| `tmdb_vote_count` | no | 276.48 | 231.21 | Parallel Seq Scan |
 
-**317× on `name`, for a page proved byte-identical** — the two spellings were
-run side by side and matched on **0 mismatched positions over 25**.
-`titles.sort_name` is declared `NOT NULL` and `ix_titles_sort_name` already
-exists; Postgres 17 does **not** simplify `sort_name IS NOT NULL` to `true`
-even so, and an index is matched by the **sort key expression**, so the
-written-out form is unindexable while the `NULLS LAST` form that produces the
-identical row order is not.
-
-`db/repositories/title.py` writes the term out deliberately — *"the keyset
-predicate has to agree with this term for term and two spellings of one rule is
-how they stop agreeing"* — and that argument is about **correctness**, which it
-gets right. What nobody had measured is that it also costs the index.
-**The general form: `(key IS NOT NULL) DESC, key <dir>` and `key <dir> NULLS
-LAST` are the same *order* and different *sort keys*, and only one of them an
-index can serve. A legibility decision about SQL text can be a plan decision.**
+**317× on `name`, for a page proved byte-identical** — 0 mismatched positions
+over 25. The three nullable sorts move ~17% and stay sequential, so **the
+spelling is worth two orders of magnitude only where an index already exists**;
+elsewhere it buys the *possibility* of one.
 
 **The recommendation, which is bar 2's named output and is not applied here**
 — B6 owns that statement and `ix_titles_popularity` is the precedent for adding
 an index on a guess:
 
 1. Spell the `ORDER BY` as `NULLS LAST`. Free, no DDL, and it alone puts
-   `sort=name` at 0.92 ms — 51× *under* bar 2.
+   `sort=name` at 0.92 ms — 51× *under* bar 2. **Done**: shipped in
+   `db/repositories/title.py`, which is why the "shipped p50" column above is
+   history rather than a description of `main`.
 2. Then, and only then, a btree per nullable sort key
-   (`(year DESC NULLS LAST, id)`, and the same for `popularity` and
-   `vote_count`) can be matched at all. Under the written-out spelling such an
-   index is unusable and would be `ix_titles_popularity` a second time.
+   (`(year DESC NULLS LAST, id)`, and the same for **`tmdb_popularity` and
+   `tmdb_vote_count`** — `m10a`/ADR-0040 renamed both, and an index minted
+   against the old names will not compile) can be matched at all. Not minted.
 3. A genre predicate needs a GIN index on `titles.genres` to stop being a
    1.27M-row scan — and that is what would create B3's lossy recheck, so it is
    a measurement rather than a foregone conclusion.
@@ -1124,27 +1162,14 @@ after it lands the split needs evidence the column no longer carries.
 `MissingGreenlet`, with the crash's last two log records both on the
 `ix_titles_imdb_id` conflict path, 19 ms and 24 ms before death.
 
-### The stack was not missing; it was discarded, and this file's own subsystem is where
-
-**The dead worker's log survived** (`/tmp/m9-exec/S3/w1.log`, pid 2348601,
-last record `2026-08-11 18:26:32.053-05:00` = `23:26:32Z`). Its final two
-lines are:
-
-```
-usher work: MissingGreenlet: greenlet_spawn has not been called; can't call await_only() here. ...
-(the stack is one flag away: `usher --traceback work`)
-```
-
-That is `cli._operator_problem`. **`MissingGreenlet` → `InvalidRequestError`
-→ `SQLAlchemyError`, and `SQLAlchemyError` was a member of
-`cli.OPERATOR_ERRORS`** — so the CLI's error boundary classified a programming
-error as an operator error and replaced the traceback with one line. 🔴 The
-issue's own premise (*"the run used bare `usher work`, so no stack was
-recorded"*) is **refuted**: `--traceback` would have helped, but nothing the
-operator did or failed to do is why there is no stack. Narrowed to
-`DBAPIError`, which is what that member's comment already claimed to admit;
-ADR-0026 carries the argument and PRD 08's own copy of the family list is
-corrected in the same commit.
+**Why there was no stack is a CLI finding, not a db one**, and it is written up
+in `tmdb-and-enrichment.md` (the S3 correction) and ADR-0026: every
+`SQLAlchemyError` — which `MissingGreenlet` is, via `InvalidRequestError` —
+was a member of `cli.OPERATOR_ERRORS`, so the boundary replaced the traceback
+with one line. It is narrowed to `DBAPIError` now, and `JobWorker._run` logs
+the crashing job's kind and key with its traceback before re-raising, so the
+next occurrence self-reports in both deployment shapes. **What is a db fact is
+everything below.**
 
 ### The mechanism the conflict path really does create, reproduced
 
@@ -1153,7 +1178,10 @@ Measured on `pgvector/pgvector:pg17` through the shipped
 
 **A caught `IntegrityError` inside `begin_nested()` leaves the conflicted
 `TitleRow` in the session's identity map, `state.expired is True`, every one
-of its 33 attributes unloaded.** `SessionTransaction._restore_snapshot`
+of its 35 columns unloaded** — 35 is `len(TitleRow.__table__.columns)`, not the
+33 of `Title.model_fields`; the two differ by exactly `DERIVED_COLUMNS`, and an
+expiry is over the *row*, so it is the larger number that counts.
+`SessionTransaction._restore_snapshot`
 expires every dirty state in the identity map when a SAVEPOINT rolls back, and
 `expire_on_commit=False` does nothing about it — this is a *rollback*-driven
 expiry, not a commit-driven one. In an async session an expired attribute is a
@@ -1199,75 +1227,54 @@ that needed IO outside a greenlet is still not named. What *is* now named is
 the family, the artefact it leaves in the identity map, and the fact that the
 next occurrence self-reports.
 
-### What the next occurrence records without anyone remembering a flag
+**No `AsyncSession` in `usher work` is reachable from two coroutines**, which
+is what keeps this an identity-map hazard rather than a concurrency one — but
+**check that against the scope factory, never against a sentence**. Issue #8's
+premise (*"one `AsyncSession`, one job at a time, no tasks"*) was already false
+on all three counts by W1: `JobWorker` runs up to `USHER_JOB_CONCURRENCY` (12)
+at once and spawns a task per job plus a heartbeat. The conclusion survived it
+only because `composition.unit_of_work` opens a fresh session per scope.
 
-- `cli.OPERATOR_ERRORS` no longer swallows it: the process dies with a real
-  traceback on stderr.
-- `JobWorker._run` logs `logger.opt(exception=True).error(...)` naming the
-  job's kind and key **before** re-raising. Property 3 (a bug propagates) is
-  unchanged; what is added is that the log holds the two facts a stack cannot
-  supply once the process is gone. S3 had neither — its last records name a
-  job that failed *cleanly*, and the job that died appears nowhere.
-- This also covers `usher serve`, whose `api/lanes.py::_run_worker` catches
-  `Exception` and logs `str(exc)` with no stack, deliberately (a database
-  outage must slow the lane, not end it). It is left alone: the crash now
-  arrives at that handler already written down with its traceback.
+## Three SQL decisions the split genre vocabulary forced on `titles.genres` (2026-08-19, ADR-0039 / issue #30)
 
-### The refuted shared-session premise, re-checked against today's `main`
-
-**The refutation holds; the premise it rested on does not.** Issue #8 says
-`usher work` *"holds one `AsyncSession` and runs one job at a time, and
-`asyncio.run` creates no tasks"*. Since W1 that is false on all three counts:
-`JobWorker` runs up to `USHER_JOB_CONCURRENCY` (12) jobs at once, `run_once`
-spawns an `asyncio.create_task` per job plus a heartbeat task, and `_pass`
-claims continuously. What still holds is the conclusion — `composition.
-unit_of_work` opens a **fresh session per scope**, and `_claim`, `_heartbeat`
-and each `_run_in_scope` take one each, so no `AsyncSession` is reachable from
-two coroutines. Anyone re-deriving this must check the scope factory, not the
-sentence.
-
-## `/browse`'s genre filter is an overlap over a concept, not containment of a string (2026-08-19)
-
-`titles.genres` holds 37 labels from two importers that share no vocabulary,
-and the two alphabets are **disjoint on every concept they both name**:
-`Sci-Fi` 20,051 titles, `Science Fiction` 6,223, **zero with both**, and the
-same zero for all nine alias pairs on 1,272,866 rows. `TitleRow.genres @>
-ARRAY[:genre]` therefore answered half a concept under either spelling and
-looked entirely right doing it.
+**Why the column needs any of this is a vocabulary finding, not a SQL one**: it
+lives in `search-and-embeddings.md` under *"Weight class D and segment 6 both
+carried two spellings of one concept"*, and in
 [ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md).
+The one fact from it that decides SQL here: two importers' alphabets are
+**disjoint on every concept they both name** — `Sci-Fi` 20,051 titles,
+`Science Fiction` 6,223, **zero with both**, and the same zero for all nine
+alias pairs on 1,272,866 rows.
 
-- **`&&` over `usher.domain.genres.genre_spellings(genre)`.** For an unmapped
-  label the expansion is one element and `a && ARRAY[x]` **is** `a @>
-  ARRAY[x]`, so the open-vocabulary behaviour is unchanged rather than
-  approximately unchanged. Written out for the reason `@>` was: the *generic*
-  `ARRAY` these columns are declared with implements neither operator through
-  SQLAlchemy's helpers, and the failure is at statement-build time in the
-  integration run and **never at all against the fake**.
-- **The facet collapse is a sum, and the exact spelling was measured and
-  declined.** `SELECT canon, count(*) FROM (SELECT DISTINCT t.id,
-  COALESCE(a.canon, g) FROM titles t CROSS JOIN LATERAL unnest(t.genres) g LEFT
-  JOIN alias a ON a.src = g)` is correct with no premise at all and ran at
-  **1,789 ms** against the shipped `GROUP BY unnest(genres)`'s **199 ms** on
-  the live catalog — a 9× regression on a facet block already missing its B7
-  bar (p95 ≤ 200 ms) at 330.81 ms. Summing is exact while no title carries two
-  spellings of one concept, which is *measured* zero rather than assumed, and
-  `EnrichService` cannot create one because a concept with no TMDb name has
-  exactly one spelling.
-- **The fake sums too, per raw label rather than per title.** Deduping in
-  Python and not in SQL is how the two arms of a contract suite come to
-  disagree on the exact population that distinguishes them — and the fake is
-  the arm where the divergence would be invisible.
-- **A collation trap the contract suite walked into.** `sort_name` ordering is
-  **not** the same on the two arms: Python compares `"a "` before `"an"`, and
-  Postgres's default collation ignores the space at the primary level, so
-  `"A Fused…"` / `"A Skeleton…"` / `"An Enriched…"` is one order in the fake
-  and another in Postgres. A browse contract case that asserts on position must
-  seed names distinct in their **first word**.
+**1. The filter is `&&`, not `@>`, over `genre_spellings(genre)`.** For an
+unmapped label the expansion is one element and `a && ARRAY[x]` **is** `a @>
+ARRAY[x]`, so open-vocabulary behaviour is unchanged rather than approximately
+unchanged. Both operators are written out rather than reached through
+SQLAlchemy's helpers, because the *generic* `ARRAY` these columns are declared
+with implements neither — and that failure is at statement-build time in the
+integration run and **never at all against the fake**.
 
-## A batched in-place rewrite of a catalog column: `UPDATE … FROM (VALUES …)`, and the guard is the whole design (2026-08-19, issue #30)
+**2. The facet collapse is a sum, and the exact spelling was measured and
+declined.** `SELECT canon, count(*) FROM (SELECT DISTINCT t.id,
+COALESCE(a.canon, g) FROM titles t CROSS JOIN LATERAL unnest(t.genres) g LEFT
+JOIN alias a ON a.src = g)` is correct with no premise at all and ran at
+**1,789 ms** against the shipped `GROUP BY unnest(genres)`'s **199 ms** on the
+live catalog — a 9× regression on a facet block already missing its B7 bar
+(p95 ≤ 200 ms) at 330.81 ms. Summing is exact only while no title carries two
+spellings of one concept, which is the *measured* zero above rather than an
+assumption, and `EnrichService` cannot create one because a concept with no
+TMDb name has exactly one spelling. **If that zero ever moves, the sum is
+wrong and the 9× is what the repair costs.**
 
-`usher genres --backfill` rewrites `titles.genres` through
-`usher.domain.genres.canonicalise_genres` over 1.27M rows.
+⚠️ **A collation trap any `browse` contract case can walk into**, found here
+and true of every ordering assertion on this schema: `sort_name` does **not**
+order the same on the two arms. Python compares `"a "` before `"an"`; Postgres's
+default collation ignores the space at the primary level, so `"A Fused…"` /
+`"A Skeleton…"` / `"An Enriched…"` is one order in the fake and another in
+Postgres. Seed names distinct in their **first word**.
+
+**3. The backfill is `UPDATE … FROM (VALUES …)` and the guard is the whole
+design.** `usher genres --backfill` rewrites `titles.genres` over 1.27M rows;
 `PostgresTitleRepository.replace_genres` is the write, and three of this file's
 existing entries decide its shape between them:
 
@@ -1296,7 +1303,7 @@ WHERE titles.id = v.id AND titles.genres IS DISTINCT FROM v.genres
   `test_a_batch_writes_only_its_changed_members` in
   `TitleRepositoryGenreSweepContract`, on the Postgres arm and on the fake.
 - **`rowcount` needs the `CursorResult` cast**, which `bulk.py:_rowcount` and
-  `PostgresCollectionRepository.link_title` both already record: `rowcount`
+  `PostgresCollectionRepository.attach_titles` both already record: `rowcount`
   lives on `CursorResult`, not on the `Result[Any]` that `session.execute` is
   annotated to return.
 - **`synchronize_session=False` is required**, not tidy: a multi-row `UPDATE`
