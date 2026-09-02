@@ -16,6 +16,7 @@ from tests.contract.sync_run_repository_contract import (
     SyncRunRepositoryContract,
     run,
 )
+from tests.integration.conftest import Analyze
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import _INCOMPLETE, PostgresSyncRunRepository
 from usher.domain.enums import SourceKind
@@ -82,7 +83,10 @@ async def test_a_caught_conflict_leaves_the_session_usable(
 
 
 async def test_the_cursor_query_uses_the_source_kind_index(
-    session: AsyncSession, repository: PostgresSyncRunRepository, source_id: uuid.UUID
+    session: AsyncSession,
+    repository: PostgresSyncRunRepository,
+    source_id: uuid.UUID,
+    analyze: Analyze,
 ) -> None:
     """`ix_sync_runs_source_kind_started` is
     `(source_id, kind, started_at DESC)`, so "the newest completed run of this
@@ -94,7 +98,7 @@ async def test_the_cursor_query_uses_the_source_kind_index(
         one = run(source_id, started_at=EARLIER.replace(year=2020) + (LATER - EARLIER) * index)
         await repository.add(one)
         await repository.save(one.evolve(status=SyncRunStatus.COMPLETED, finished_at=LATER))
-    await session.execute(text("ANALYZE sync_runs"))
+    await analyze("sync_runs")
     plan = "\n".join(
         (
             await session.execute(
@@ -114,7 +118,10 @@ async def test_the_cursor_query_uses_the_source_kind_index(
 
 
 async def test_the_resume_query_uses_the_source_kind_index(
-    session: AsyncSession, repository: PostgresSyncRunRepository, source_id: uuid.UUID
+    session: AsyncSession,
+    repository: PostgresSyncRunRepository,
+    source_id: uuid.UUID,
+    analyze: Analyze,
 ) -> None:
     """`_INCOMPLETE`'s comment claims the index supplies the ordering and that
     the `id` tiebreak costs only an Incremental Sort over one `started_at`
@@ -141,7 +148,7 @@ async def test_the_resume_query_uses_the_source_kind_index(
                 started_at=EARLIER.replace(year=2020) + (LATER - EARLIER) * index,
             )
         )
-    await session.execute(text("ANALYZE sync_runs"))
+    await analyze("sync_runs")
     plan = "\n".join(
         (
             await session.execute(

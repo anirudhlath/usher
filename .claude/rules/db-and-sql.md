@@ -1318,3 +1318,33 @@ failure shape one column over — and it would also miss the 12 live titles whos
 `genres` merely contains a **duplicate** (`{Drama,Drama}`), which normalise to
 a shorter array with no alias involved. Filtering saves a tenth of a scan and
 costs a predicate nobody can keep in step.
+
+## `CREATE INDEX` writes the heap's `reltuples` in place, so a rolled-back index rebuild lies about the table (2026-08-31, issue #79)
+
+`ANALYZE`'s in-place catalog write is the known one — `.claude/rules/testing-
+discipline.md` has measured it twice. **`CREATE INDEX` takes the same path.**
+It scans the heap to build the index and then updates the *heap's*
+`pg_class.reltuples` and `relpages` with what it counted, not as a new catalog
+row, so a transaction that inserts rows, rebuilds an index and rolls back
+leaves the table described as holding rows that are gone.
+
+Measured on `pgvector/pgvector:pg17`, against the real schema: five rows
+inserted, `DROP INDEX ix_titles_sort_name` / `CREATE INDEX`, `ROLLBACK` —
+`titles` reads **5 rows / 1 page** with a `count(*)` of **0**.
+
+**Where it bites here is `bulk_load_window`**, which drops and rebuilds the two
+suspendable btrees on `titles`. In production that is harmless: the rows are
+real and the statistics are right. Under the integration suite's rolled-back
+`session` it is a lie every later test plans against, and it is invisible to
+the obvious search — four cases leak it and **none of them contains the word
+`ANALYZE`**. `session`'s teardown now asserts that `pg_class` describes this
+database rather than enumerating the statements that break it, which is how
+these were found at all.
+
+**And the counterfactual technique that goes with it**, for anything asserting
+which index a plan takes: `UPDATE pg_index SET indisvalid = false WHERE
+indexrelid = 'ix_…'::regclass` hides one index from the planner, is
+transactional (a `SAVEPOINT` takes it back), and is the state a failed `CREATE
+INDEX CONCURRENTLY` leaves — so the cost of the *next-best* plan is readable
+without touching the schema. `tests/integration/conftest.py::index_suspended`
+wraps it.
