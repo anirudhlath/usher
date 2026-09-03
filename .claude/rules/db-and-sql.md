@@ -165,6 +165,14 @@ Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
 - **A read on `media_items.title_id` alone is a read of the whole show** — an
   episode's row carries its series' `title_id` *and* its own `episode_id`, so
   `AND episode_id IS NULL` is the bound (`list_for_title`, `resolve_external_ids`).
+- 🔴 **`CREATE INDEX` writes the *heap's* `reltuples`/`relpages` in place, so a
+  rolled-back rebuild leaves the table described as holding rows that are gone**
+  — measured on pg17: five rows, `DROP`/`CREATE INDEX`, `ROLLBACK`, and `titles`
+  reads 5 rows / 1 page against a `count(*)` of 0 (#79). Harmless in production
+  where the rows are real; under a rolled-back test session every later plan is
+  made against the lie, and `bulk_load_window` is the site. `ANALYZE` is the
+  known case, **not the only one** — assert `pg_class` describes the database
+  rather than enumerating the statements that break it.
 
 ## The job queue
 

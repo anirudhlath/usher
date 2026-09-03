@@ -168,11 +168,18 @@ uv run pytest <the case> 2>&1 | grep -E '^E .*<the guard message>'
   are gone and flips an exact plan to an approximate HNSW scan for every later
   case — and a case not asserting its lane premises then names the wrong
   culprit. Vacuum once **after the last seeding case**; a per-case cleanup takes
-  neighbours' teeth with it, since some need the dense graph. Re-derive the
-  sites rather than trusting a ledger:
-  ```bash
-  grep -rn 'text("ANALYZE' tests/integration/
-  ```
+  neighbours' teeth with it, since some need the dense graph. ⚠️ **Grepping for
+  `ANALYZE` cannot find them all** — `CREATE INDEX` writes the heap's `reltuples`
+  the same way, so `bulk_load_window`'s rebuild leaks it from four cases that
+  never say the word (#79). `session`'s teardown asserts `pg_class` describes the
+  database instead of enumerating the statements that break it.
+- **`SET LOCAL enable_seqscan = off` settles *index or scan*, never *which
+  index*.** A full walk of any index is also not a sequential scan, so on a table
+  `pg_class` calls empty every candidate costs the same and the assertion is
+  reading the planner's tie-break — both of #79's CI failures were that, on a
+  branch whose whole diff was Markdown. To price the next-best plan, hide one
+  index: `conftest.py::index_suspended` sets `indisvalid = false`, which is
+  transactional and is the state a failed `CREATE INDEX CONCURRENTLY` leaves.
 
 ## Sweeps, equivalence, and writing findings down
 
