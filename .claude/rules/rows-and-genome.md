@@ -162,8 +162,8 @@ other.
   evaluates `STALE_TASTE` and answers *"should I recompute?"*; `latest(user_id)`
   is one primary-key probe with no predicate and no model argument and answers
   *"what is the best stored statement about this household?"*. Neither is the
-  other spelled shorter: - **A request has no embedder**, so it cannot supply
-  `model_name` — routed
+  other spelled shorter:
+  - **A request has no embedder**, so it cannot supply `model_name` — routed
     through `centroid()`, the taste ranking term is structurally `None` on the
     shipped default, a weight that reads like a signal.
   - **`latest` must not inherit the staleness predicate.** The watch state that

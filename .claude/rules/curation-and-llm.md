@@ -111,7 +111,8 @@ removing it, gives up the bounds, and asks a model to quote a number.
   is that the prompt's grouping instruction is not self-enforcing and nothing in
   this system checks it.** Carried in PRD 06 and PRD 09.
 - **`_cards` de-duplicates within a row only** — a title on two shelves of one
-  generation is not counted `duplicate` and is not prevented. The prompt's rule 7
+  generation is not counted `duplicate` and is not prevented. The prompt's *"Do not
+  use the same candidate in more than one row"*
   is the only defence, and a prompt rule is not a guarantee.
 - **The pool has no ownership *filter*.** `list_unwatched_candidates` uses
   ownership as an `ORDER BY` key, deliberately, so PRD 06's *"the pool spans the

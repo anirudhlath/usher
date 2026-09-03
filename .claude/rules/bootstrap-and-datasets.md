@@ -3,6 +3,8 @@ paths:
   - "src/usher/adapters/bulk/**"
   - "src/usher/services/bootstrap.py"
   - "src/usher/db/repositories/bulk.py"
+  - "src/usher/db/repositories/people.py"
+  - "src/usher/db/repositories/import_run.py"
   - "src/usher/domain/people.py"
   - "src/usher/domain/bootstrap.py"
   - "scripts/measure_bulk_load.py"
@@ -13,8 +15,9 @@ paths:
 # IMDb, TMDb id exports, Wikidata and MovieLens
 
 Rules for this subsystem; the detail is in the ADRs and module docstrings named
-here. The three `measure_*` scripts are not tests: each hits the network, and
-each requires `--phase`.
+here. The `measure_*` scripts are not tests: each hits the network, two take a
+required `--phase`, and **`measure_bulk_load.py` takes no arguments and truncates
+the database between passes — scratch database only, never a real catalog.**
 
 ```bash
 uv run usher bootstrap --phase all      # the six steps, in FULL_SEQUENCE's order

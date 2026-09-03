@@ -16,6 +16,16 @@ paths:
 
 Rules for this subsystem; the arguments are in the ADRs and docstrings cited.
 
+```bash
+uv run pytest tests/unit -k "api or lanes or telemetry or events"
+uv run pytest tests/integration/test_api_lanes.py       # needs Docker
+python -m usher &                                       # :8000, or :8100 under compose
+curl -sD- -o/dev/null localhost:8000/api/v1/titles | grep -i traceresponse
+curl -s localhost:8000/health/ready | jq .              # 503 names the failing check
+# The DTO scan discovers by suffix, so re-derive rather than trusting the list:
+grep -rhn '^class .*BaseModel' src/usher/api/dto/ | grep -v 'Response\|Request'
+```
+
 ## SSE and the event bus
 
 - **Never drive SSE through `httpx.ASGITransport`** — it runs the app to
@@ -79,10 +89,14 @@ Rules for this subsystem; the arguments are in the ADRs and docstrings cited.
 - **Readiness reports the lanes and never gates on them.** `LaneReport` is
   separate from `ReadinessChecks` because every field of the latter is part of
   the status code; the case proving it needs a reachable database.
-- **Both lane switches default on, so every app-building fixture passes
-  `push_enabled=False, worker_enabled=False`**, per fixture so it is greppable —
-  otherwise a worker polls the real `jobs` table and a push lane opens a real
-  socket. `dependency_overrides` never reach a lifespan.
+- **There are three lanes, and only two have switches.** Both default on, so
+  every app-building fixture passes `push_enabled=False, worker_enabled=False`,
+  per fixture so it is greppable — otherwise a worker polls the real `jobs` table
+  and a push lane opens a real socket. `dependency_overrides` never reach a
+  lifespan. ⚠️ **`rows.refresh` is gated on being handed a cache and a queue, not
+  on a setting**, and `create_app` always builds the pair — so those two switches
+  do *not* leave the app starting nothing, and it is deliberately outside both
+  `running_sources()` and `ReadinessChecks`.
 - **`start()` creates tasks and awaits nothing**, which keeps `/health` at 200
   with Postgres down. Drive it by hand: `coro.send(None)` must raise
   `StopIteration`.

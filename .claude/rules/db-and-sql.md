@@ -98,8 +98,9 @@ Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
   and `requeue_running`'s age comparison cannot match a claim made in the same
   transaction if both sides read one frozen `now()`.
 - **Seven tables carry an `updated_at` trigger** (`test_migrations.py` pins the
-  exact set); the rest have no `updated_at` column at all, `media_items`
-  deliberately so. They assign `now()`
+  exact set, so adding one "for consistency" fails there). Tables like `jobs` and
+  `title_embeddings` have the *column* and deliberately no trigger — a single
+  writer sets it explicitly; `media_items` has neither. Triggers assign `now()`
   unconditionally, `BEFORE UPDATE`, so a merge's own `updated_at = observed_at`
   lands on the *insert* path only and two updates in one transaction read back
   one stamp. Integration fixtures are one transaction — backdate a raw `INSERT`.

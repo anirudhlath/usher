@@ -28,7 +28,11 @@ cp "$F" /var/tmp/plant.bak                   # never git checkout/restore/stash/
 md5sum "$F" > /var/tmp/plant.md5             # /var/tmp, not /tmp: tmpfs here, a reboot erases it
 
 # 1. BAD-ANCHOR: the target must appear exactly once, or the edit is a silent no-op.
-test "$(grep -cF "$ANCHOR" "$F")" -eq 1 || echo BAD-ANCHOR
+# `grep -c` counts LINES: `x = f() and f()` answers 1 for a two-hit anchor, and a
+# multi-line anchor is treated as alternation. Count occurrences, and halt.
+python3 -c 'import sys,pathlib
+n = pathlib.Path(sys.argv[1]).read_text().count(sys.argv[2])
+sys.exit(0 if n == 1 else print(f"BAD-ANCHOR: {n} occurrences") or 1)' "$F" "$ANCHOR" || return 1
 
 # ... apply the mutation to $F ...
 
@@ -36,7 +40,7 @@ test "$(grep -cF "$ANCHOR" "$F")" -eq 1 || echo BAD-ANCHOR
 #    outside a loop, so a mutation spelled with one passes the dry run and its
 #    collection error is scored KILLED against an unrelated file.
 uv run python -c 'import sys,pathlib;p=sys.argv[1];compile(pathlib.Path(p).read_text(),p,"exec")' "$F" \
-  || echo BROKEN-MUTATION
+  || { echo BROKEN-MUTATION; return 1; }
 
 # 3. The other two .pyc defences. BOTH trees: a plant in a test file puts its
 #    .pyc in tests/**/__pycache__, not src/.

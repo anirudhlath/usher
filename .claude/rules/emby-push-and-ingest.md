@@ -7,6 +7,7 @@ paths:
   - "src/usher/services/reconcile.py"
   - "src/usher/services/watch_sync.py"
   - "src/usher/services/watch_write.py"
+  - "src/usher/api/routers/unmatched.py"
   - "scripts/measure_ingest.py"
 ---
 
@@ -108,8 +109,8 @@ says nothing about a source left out of step by a parked write-back.
   connection** — a buffering proxy connects perfectly every time, so a reset on
   connection means PRD 08's "mark `supports_push = false` after N failures"
   never fires, and catching that needs a fake with an **unbounded** supply of
-  connections. The reset belongs in `PushHealth.record_open`, guarded on
-  `opened_at`.
+  connections. The reset is `failures = 0` in `PushSupervisor._run`, behind `if
+  delivering:` — not in `record_open`, which is the connection event.
 - **`ItemsRemoved` fires on a library from which nothing was removed**, so count
   it and retract nothing on it, or one refresh marks a present file unavailable
   ([ADR-0015](../../docs/prd/decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)).
@@ -143,8 +144,9 @@ read both cursors.
 ## The match ladder
 
 Six tiers: `tmdb_id`; `imdb_id`; `tvdb_id`; exact normalised name with year ±1
-and exactly one survivor (`_confident`); stub-on-sight; unmatched — where a
-`match` job is enqueued at `BACKFILL` for the remote search.
+and exactly one survivor, scoped by kind (`match_by_name_year` locally,
+`_confident` for the remote search); stub-on-sight; unmatched — where a `match`
+job is enqueued at `BACKFILL` for that remote search.
 
 - **An episode must never walk the ladder.** It carries the *episode's* own
   provider ids, not its series'; TVDb numbers episodes and series in overlapping

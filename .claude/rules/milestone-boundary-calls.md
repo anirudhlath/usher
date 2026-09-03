@@ -28,8 +28,9 @@ subsystem rules file, not here.
 
 ## M9's eight boundary calls
 
-1. **No authentication**; `current_user` still returns the singleton default
-   user. Designing authorization against routes landing in the same milestone is
+1. **No authentication**; `get_default_user_id` (`api/deps.py`) returns the
+   singleton default user and there is no `current_user` symbol anywhere in the
+   tree. Designing authorization against routes landing in the same milestone is
    the mistake PRD 07 avoided four times with the error envelope.
 2. **The GIN → GiST swap for tier-2 suggest is deferred, not rejected**
    (ADR-0031). The 2.8-point recall gain was measured against synthetic mutations
@@ -67,8 +68,9 @@ What survives is that `credits` could not dedupe an IMDb load — now closed by
 stands, because `m09c` took its position, not because the design failed.**
 
 **What shipped is the names-only design, not a shrunken bulk people/credits
-load** — that option failed on 2.702 GB against a 2.0 GB ceiling, which is why
-there is no `m09b`.
+load** — that option measured 2.702 GB (2.395 GB for the five-column variant)
+against a ceiling ADR-0036 has since retired, so read `m09d`'s docstring for why
+`m09b` does not exist: the id was never minted and `m09c` took its position.
 `titles.credit_names` is filled from `title.principals` × `name.basics` with the
 join resolved **in the importer**; **no person row and no credit row is written
 from IMDb at all**, so the two bulk sources never own one entity. `title.akas`

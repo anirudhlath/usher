@@ -78,6 +78,15 @@ def names_a_path(args):
 
 
 def destructive(verb, args):
+    # Read-only members of otherwise destructive families. Blocking these was
+    # worse than useless: the refusal claimed they discard uncommitted work,
+    # which is false for every one of them.
+    if verb == "stash" and args[:1] and args[0] in ("list", "show"):
+        return None
+    if verb == "clean" and ("-n" in args or "--dry-run" in args):
+        return None
+    if verb == "restore" and "--staged" in args and "--worktree" not in args:
+        return None
     if verb in ("restore", "stash", "clean", "checkout-index"):
         return "git " + verb
     if verb == "reset" and "--soft" not in args:

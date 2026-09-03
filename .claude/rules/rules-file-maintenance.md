@@ -23,7 +23,7 @@ to correct a false claim is right; leaving the claim false to stay at 200 is not
 
 The instinct when a file gets big is to split it, and this repository tried that
 twice — `testing-discipline.md` in 2026-08-08 (`dbe9206`), `mutation-sweeps.md`
-in 2026-08-21 (`308b58e`, moving 3,917 lines of per-task ledger into a
+decided 2026-08-21 (landed in `308b58e` on the 25th, moving 3,917 lines into a
 `mutation-sweep-ledgers.md` whose trigger was itself). Both worked as
 arithmetic. Neither fixed anything:
 

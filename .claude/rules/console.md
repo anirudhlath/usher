@@ -56,5 +56,9 @@ the product, not about the runner — see the comment above `console-visual` in
 tidy screen breaks first: four absent states with four treatments, no fabricated
 denominators, keyset only (no totals, no page numbers), a playback ticket URL is
 a secret that is never rendered or logged, errors print `code`/`status`/`detail`
-verbatim and never parse `detail`, `202` means queued, and the UI must be fully
-correct if zero SSE frames ever arrive. Read them there before changing a screen.
+verbatim and never parse `detail`, `202` means queued, **anything needing a route
+that does not exist is labelled `REQUIRES BACKEND WORK` on screen** with the
+missing routes printed in mono, and the UI must be fully correct if zero SSE
+frames ever arrive. Read them there before changing a screen — that eighth one is
+the anti-fabrication rule, and building a plausible fake around a missing
+endpoint is the failure it exists to stop.
