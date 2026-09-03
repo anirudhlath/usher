@@ -398,6 +398,49 @@ class RowCache:
             self._rows.pop((user_id, slug), None)
         self._screens.pop(user_id, None)
 
+    def invalidate_titles(self, title_ids: Iterable[uuid.UUID]) -> None:
+        """Drop every cached row and screen naming one of these titles.
+
+        **No `user_id`, and that is the difference from `invalidate` rather
+        than an omission.** A play button is one household's act, so its
+        invalidation is scoped to one household. Enrichment is a *catalog*
+        write: the title it rewrote is equally stale on every screen holding
+        it, and a per-household spelling would leave the second household
+        serving the first's already-repaired staleness for the rest of a
+        six-hour TTL.
+
+        **Both halves are scanned.** A screen is stored whole, so a row can
+        reach one without ever being written to the row half -- dropping only
+        the row half is `invalidate`'s own recorded subtle bug (the next
+        request is a screen cache hit and the invalidation had no visible
+        effect) arriving through the other door.
+
+        **An empty batch drops nothing**, which is the guard that keeps this a
+        statement about titles: a job that enriched nothing hands over an empty
+        sequence, and a `clear()` behind this name would empty a cache no write
+        had staled while satisfying every case that names a title.
+
+        Linear in the cache rather than indexed by title, deliberately. The row
+        half is bounded at `_MAX_ENTRIES` and a screen is one household's eight
+        rows, so the scan is a few thousand set probes; a title -> rows index
+        would be a second structure maintained on every `put_row` for a dict
+        whose entries all die within hours, which is the argument `_evict`
+        already makes for not keeping an access record.
+        """
+        stale = frozenset(title_ids)
+        if not stale:
+            return
+        emptied: set[uuid.UUID] = set()
+        for key, entry in list(self._rows.items()):
+            if any(card.title_id in stale for card in entry.value.cards):
+                del self._rows[key]
+                emptied.add(key[0])
+        for user_id, screen in list(self._screens.items()):
+            if user_id in emptied or any(
+                card.title_id in stale for row in screen.value for card in row.cards
+            ):
+                del self._screens[user_id]
+
     def clear(self) -> None:
         """Empty both halves. `usher home --repeat` calls this between runs,
         because a repeat that measured cache hits would report a number near

@@ -88,6 +88,7 @@ from usher.domain.watch import User
 from usher.ports.rows import Row, RowContext, RowProvider, ScoredRow
 from usher.services.rows import ROW_PROVIDERS
 from usher.services.rows.cache import Freshness, RowCache, ScreenRead
+from usher.services.visibility import VisibilityService
 
 _meter = metrics.get_meter("usher.home")
 _tracer = trace.get_tracer("usher.home")
@@ -258,6 +259,7 @@ class HomeService:
         stale_grace: timedelta = SCREEN_STALE_GRACE,
         max_rows: int = _MAX_ROWS,
         max_per_family: int = _MAX_PER_FAMILY,
+        visibility: VisibilityService | None = None,
     ) -> None:
         self._providers = tuple(providers)
         # `None` is a composer with no cache at all, which is what every
@@ -291,6 +293,12 @@ class HomeService:
         self._stale_grace = stale_grace if refresh is not None else timedelta(0)
         self._max_rows = max_rows
         self._max_per_family = max_per_family
+        # Optional for the reason `cache` and `refresh` are: `usher home`
+        # composes a screen to print it, and a CLI inspecting the composer
+        # should not enqueue on the operator's behalf. Absent, `_compose` skips
+        # the promotion entirely rather than promoting into a queue nothing
+        # claims from.
+        self._visibility = visibility
 
     async def compose(self, ctx: RowContext) -> tuple[BuiltRow, ...]:
         """Propose, select, build sequentially, drop empties, order.
@@ -426,6 +434,28 @@ class HomeService:
         screen = self._order(built)
         if self._cache is not None:
             self._cache.put_screen(ctx.user.id, screen, ttl=_SCREEN_TTL)
+        if self._visibility is not None:
+            # **Once for the whole screen, and after `_order` rather than
+            # inside `_build`** (issue #73). Nine providers over one catalog
+            # put the same film on two shelves routinely, so promoting per
+            # provider is one staged write per shelf carrying duplicates the
+            # database then discards; `seen_cards` dedupes across the screen
+            # and pays one.
+            #
+            # **`screen` and `built` hold the same rows here, and that was
+            # measured rather than assumed.** `_select` applies `max_rows` and
+            # the family cap *before* anything is built, so a losing shelf is
+            # never built and its cards never exist; `_order` only reorders
+            # and displaces. Substituting `built` for `screen` above is
+            # therefore an equivalent mutant today -- recorded because it stops
+            # being one the moment anything drops a row after it is built, and
+            # `screen` is the spelling that stays correct if that happens.
+            #
+            # Deliberately here rather than in `compose`, so a screen served
+            # from the cache does not re-promote: the promotion belongs to the
+            # build that produced those cards, and the job it wrote is already
+            # on the queue at this rung.
+            await self._visibility.seen_cards(card for row in screen for card in row.cards)
         return screen
 
     async def _build(self, ctx: RowContext, candidate: _Candidate) -> BuiltRow:

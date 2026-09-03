@@ -81,6 +81,11 @@ def _offline_settings(cache: Path, **rest: object) -> Settings:
     )
 
 
+# `bulk_load_window` rebuilds the two suspendable btrees, and `CREATE INDEX`
+# writes the heap's `reltuples` in place just as `ANALYZE` does -- so this
+# leaves `titles` described as holding rows the rollback takes away. The
+# guard in `session` puts it back; this names it so it is not a red (#79).
+@pytest.mark.leaks_statistics("titles")
 async def test_a_bootstrap_phase_runs_end_to_end_through_the_shared_dispatch(
     session: AsyncSession, cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.contract.raw_payload_store_contract import PAYLOAD, RawPayloadStoreContract
+from tests.integration.conftest import Analyze
 from usher.db.repositories.sync import PostgresRawPayloadStore
 from usher.ports.errors import RepositoryConflict
 
@@ -78,14 +79,14 @@ async def test_a_second_put_does_not_add_a_row(
 
 
 async def test_the_compliance_query_uses_the_fetched_at_index(
-    session: AsyncSession, store: PostgresRawPayloadStore
+    session: AsyncSession, store: PostgresRawPayloadStore, analyze: Analyze
 ) -> None:
     """`ix_raw_payloads_fetched_at` is ascending because the question asks for
     the minimum (PRD 10, dashboard 5). A `min()` that seq-scans is fine at
     1,000 rows and is not at the catalog's enrichment volume."""
     for index in range(2_000):
         await store.put("tmdb", "movie", str(index), {"v": index})
-    await session.execute(text("ANALYZE raw_payloads"))
+    await analyze("raw_payloads")
     plan = "\n".join(
         (
             await session.execute(

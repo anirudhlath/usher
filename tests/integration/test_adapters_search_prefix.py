@@ -42,7 +42,7 @@ import inspect
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import pytest_asyncio
@@ -50,6 +50,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.contract.suggest_index_contract import SuggestIndexContract
+from tests.integration.conftest import A_DECISIVE_MARGIN, Analyze, index_suspended
 from usher.adapters.search import prefix as prefix_module
 from usher.adapters.search.postgres import _MAX_DISTANCE, _SUGGEST, _TRIGRAM_THRESHOLD
 from usher.adapters.search.prefix import _PREFIX, PostgresPrefixSuggestIndex
@@ -72,6 +73,16 @@ from usher.ports.search import SuggestIndex
 _TIER_ONE_INDEX = "ix_titles_name_lower_prefix"
 _NEAR_MISS_INDEX = "ix_titles_name_lower_year"
 _TIER_TWO_INDEX = "ix_titles_name_trgm"
+
+_ENOUGH_TO_PLAN_AGAINST = 2_000
+"""Filler rows behind the tier-1 plan assertion.
+
+One row is what it had until 2026-08-31, and one row is a table the planner
+sizes off an empty `pg_class` where every candidate index costs the same --
+see `_plan_tree` and issue #79. Two thousand is the same order the other plan
+assertions in this suite seed (`test_title_match_repository.py`,
+`test_job_queue.py`), and it is enough for the measured margin below.
+"""
 
 
 async def _given_title(
@@ -150,23 +161,85 @@ def _index_names(node: dict[str, Any]) -> list[str]:
     return found
 
 
-async def _plan(session: AsyncSession, statement: str, parameters: dict[str, Any]) -> list[str]:
-    """The indexes the planner takes for `statement`, with sequential scans
+def _index_conditions(node: dict[str, Any]) -> list[str]:
+    """Every `Index Cond` in a plan tree, the same walk as `_index_names`.
+
+    **Naming the index is the weaker half of the claim.** An index scan that
+    walks the whole index and puts the predicate in a `Filter` reaches the
+    index by name while doing none of the work the index exists for -- which is
+    what a plan reaching `titles` through `pk_titles` is, and is exactly the
+    shape of the CI failure on 2026-08-25 (issue #79). `Index Cond` is
+    Postgres saying it used the predicate to *position* the scan.
+    """
+    found = [node["Index Cond"]] if "Index Cond" in node else []
+    for child in node.get("Plans", ()):
+        found.extend(_index_conditions(child))
+    return found
+
+
+async def _plan_tree(
+    session: AsyncSession, statement: str, parameters: dict[str, Any]
+) -> dict[str, Any]:
+    """The plan the planner takes for `statement`, with sequential scans
     disabled.
 
-    **The lever is necessary and it is not a thumb on the scale.** At fixture
-    scale a sequential scan really is cheaper and the planner is right to take
-    it, so without `enable_seqscan = off` the plan says nothing about which
-    index *could* serve the query. With it, an index that cannot serve the
-    predicate still does not appear: the pre-`m09a` measurement of exactly
-    this query against `ix_titles_name_lower_year` is `Seq Scan on titles` at
-    cost 1e10 -- not merely not-chosen, **not choosable**. That is what makes
-    "the near miss is absent from the plan" a claim about the operator class
-    rather than about cost estimation.
+    **The lever is necessary and it is not sufficient, and #79 is where the
+    second half was learned.** At fixture scale a sequential scan really is
+    cheaper and the planner is right to take it, so without `enable_seqscan =
+    off` the plan says nothing about which index *could* serve the query. With
+    it, an index that cannot serve the predicate still does not appear: the
+    pre-`m09a` measurement of exactly this query against
+    `ix_titles_name_lower_year` is `Seq Scan on titles` at cost 1e10 -- not
+    merely not-chosen, **not choosable**. That is what makes "the near miss is
+    absent from the plan" a claim about the operator class rather than about
+    cost estimation.
+
+    What it does *not* settle is which of several *usable* indexes wins, and on
+    a table `pg_class` describes as empty they all cost the same: with seq
+    scans priced at the disabled penalty, a full walk of `pk_titles` is a
+    candidate too. That is how this file's tier-1 case failed in CI on
+    2026-08-25 -- `['pk_titles', 'ix_title_search_names_name_lower_prefix',
+    'pk_titles']`, with the near-miss assertion passing **vacuously** beside
+    it, because the plan reached neither the right index nor the wrong one. A
+    caller asserting which index wins therefore has to seed a population and
+    `analyze` it first.
     """
     await session.execute(text("SET LOCAL enable_seqscan = off"))
     plan = await session.execute(text(f"EXPLAIN (FORMAT JSON) {statement}"), parameters)
-    return _index_names(plan.scalar_one()[0]["Plan"])
+    return cast("dict[str, Any]", plan.scalar_one()[0]["Plan"])
+
+
+async def _plan(session: AsyncSession, statement: str, parameters: dict[str, Any]) -> list[str]:
+    """The index names in `_plan_tree`'s plan."""
+    return _index_names(await _plan_tree(session, statement, parameters))
+
+
+async def _given_a_catalog_to_plan_against(session: AsyncSession, rows: int) -> None:
+    """Enough of a catalog that the planner can tell one index from another.
+
+    Bulk `INSERT ... SELECT` rather than `rows` calls to `_given_title`: this
+    is scenery, and the small hand-written helpers above are for the rows a
+    case actually asserts on. **None of these names begins with the prefix the
+    cases probe** -- the point is a population the probe is *selective*
+    against, because an index that returns the whole table is not doing
+    anything a scan would not.
+    """
+    await session.execute(
+        text(
+            "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
+            "SELECT gen_random_uuid(), :kind, 'Filler ' || i, 'Filler ' || i, :state "
+            "FROM generate_series(1, :rows) AS i"
+        ),
+        {"kind": TitleKind.MOVIE.value, "state": EnrichmentState.ENRICHED.value, "rows": rows},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO title_search_names (id, title_id, name, kind) "
+            "SELECT gen_random_uuid(), t.id, 'Filler Alias ' || t.sort_name, :kind "
+            "FROM titles AS t WHERE t.name LIKE 'Filler %'"
+        ),
+        {"kind": SearchNameKind.ALIAS.value},
+    )
 
 
 @pytest.mark.integration
@@ -404,6 +477,7 @@ async def test_an_empty_prefix_reads_nothing(session: AsyncSession) -> None:
 @pytest.mark.integration
 async def test_the_tier_one_statement_plans_to_the_prefix_index_and_not_the_near_miss(
     session: AsyncSession,
+    analyze: Analyze,
 ) -> None:
     """The statement reaching `titles` any way other than through the
     `text_pattern_ops` btree.
@@ -426,13 +500,28 @@ async def test_the_tier_one_statement_plans_to_the_prefix_index_and_not_the_near
     Both arms of the union are asserted, because the second one's index is a
     different index on a different table and a statement that lost it would
     still plan the first correctly.
+
+    **This case failed in CI on 2026-08-25 against a Markdown-only diff, and
+    the repair is the fixture rather than the assertion (issue #79).** The plan
+    it got was `['pk_titles', 'ix_title_search_names_name_lower_prefix',
+    'pk_titles']`: on a `titles` of one row the planner walked the primary key
+    and filtered, which `enable_seqscan = off` does nothing about because a
+    full index walk is not a sequential scan. Two things follow, and both are
+    below. A population, `analyze`d, is what makes the prefix index *cheaper*
+    rather than merely available -- and the near-miss assertion **passed on
+    that failing run while asserting nothing**, because a plan that reaches
+    neither index satisfies it, so the absence is now asserted beside an
+    `Index Cond` that says the right index positioned the scan.
     """
+    await _given_a_catalog_to_plan_against(session, _ENOUGH_TO_PLAN_AGAINST)
     film = await _given_title(session, name="Vane Alpha", popularity=1.0)
     await _given_search_name(
         session, title_id=film, name="Vane Ashgrove", kind=SearchNameKind.PERSON
     )
+    await analyze("titles", "title_search_names")
 
-    taken = await _plan(session, _PREFIX, {"pattern": "vane%", "limit": 10})
+    tree = await _plan_tree(session, _PREFIX, {"pattern": "vane%", "limit": 10})
+    taken = _index_names(tree)
 
     assert _TIER_ONE_INDEX in taken, (
         f"the tier-1 statement did not reach {_TIER_ONE_INDEX}; only the `text_pattern_ops` "
@@ -442,6 +531,20 @@ async def test_the_tier_one_statement_plans_to_the_prefix_index_and_not_the_near
     assert _NEAR_MISS_INDEX not in taken, (
         f"the plan reached {_NEAR_MISS_INDEX}, which is a default-opclass btree on "
         "(lower(name), year) and cannot answer a prefix -- see m09a's docstring"
+    )
+    positioned = [one for one in _index_conditions(tree) if "lower(name)" in one]
+    assert len(positioned) == 2, (
+        "both arms have to reach their index by an `Index Cond` on `lower(name)`, or the "
+        f"absence assertion above is satisfied by a plan that indexes nothing: {tree}"
+    )
+    async with index_suspended(session, _TIER_ONE_INDEX):
+        without = await _plan_tree(session, _PREFIX, {"pattern": "vane%", "limit": 10})
+    assert _TIER_ONE_INDEX not in _index_names(without), (
+        f"the index was not suspended, so the margin below measures nothing: {without}"
+    )
+    assert without["Total Cost"] > tree["Total Cost"] * A_DECISIVE_MARGIN, (
+        f"the tier-1 index wins by too little for the choice to be a property of the "
+        f"schema: {tree['Total Cost']} against {without['Total Cost']}"
     )
 
 

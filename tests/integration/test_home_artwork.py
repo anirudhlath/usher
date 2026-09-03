@@ -21,9 +21,11 @@ would answer.
 `get_session`, which is the request's commit boundary, so a screen composed
 from a route writes durably against the session-scoped container -- unlike
 every rolled-back test in this suite. `images` and `media_items` go with their
-owners' `ON DELETE CASCADE`; `titles` and `sources` are deleted by id. The
-`users` row is a singleton reached by `ON CONFLICT (name) DO NOTHING` and is
-left standing, as `test_rows_route.py` leaves it.
+owners' `ON DELETE CASCADE`; `titles`, `sources` and -- since issue #73 made
+this a read route that promotes what it draws -- the `enrich` `jobs` are
+deleted by id. The `users` row is a singleton reached by
+`ON CONFLICT (name) DO NOTHING` and is left standing, as `test_rows_route.py`
+leaves it.
 """
 
 import uuid
@@ -176,6 +178,19 @@ async def household(
         async with sessions() as session:
             # `images` and `media_items` cascade from the rows below them;
             # `titles` and `sources` do not.
+            #
+            # Neither does `jobs`: `GET /home` promotes every skeleton it draws
+            # (issue #73) and `get_session` commits at the end of a successful
+            # request, so this file's reads write `enrich` rows. **Before the
+            # titles** -- the job's `key` is the title's id as text, so once
+            # the title row is gone there is nothing left to identify them by.
+            await session.execute(
+                text(
+                    "DELETE FROM jobs WHERE kind = 'enrich' AND key IN "
+                    "(SELECT id::text FROM titles WHERE id = ANY(:ids))"
+                ),
+                {"ids": [derived.id, bare.id]},
+            )
             await session.execute(
                 text("DELETE FROM titles WHERE id = ANY(:ids)"), {"ids": [derived.id, bare.id]}
             )

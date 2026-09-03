@@ -33,7 +33,7 @@ headings below and from `git log main`.
 ## Quality-eval phases (from docs/specs/2026-08-18-usher-quality-evals-design.md)
 | Phase | What it delivers | Plan file | Status |
 |---|---|---|---|
-| E1 | Eval skeleton + the suggest surface | docs/plans/2026-08-18-e1-eval-skeleton-and-suggest.md | 🔨 in progress on `spec/quality-evals` — 15 tasks planned; Task 1 landed (`515823a`, `51819bd`): the `usher.eval` package, its extra, and the eleventh import contract |
+| E1 | Eval skeleton + the suggest surface | docs/plans/2026-08-18-e1-eval-skeleton-and-suggest.md | ✅ **merged 2026-08-20 ([PR #45](https://github.com/anirudhlath/usher/pull/45))** — Tasks 1–13 and 15 landed: the `usher.eval` package behind its extra, the eleventh and twelfth import contracts, the `ranx` adapter, the typo-gate generator, the fingerprint's compared/recorded split, hashed pre-registered bars, the two ledger sinks, and a sweep of 19 plants (16 killed, 3 predicted). ⏳ **Task 14 Steps 3–4 — filling the three `fuzzy recall_at_5` bars — are deliberately open**, blocked on [#39](https://github.com/anirudhlath/usher/issues/39): all three sit on the arm the ordering defect hits hardest, so filling them from today's baseline would pin a value the eventual fix *fails*. This row said "Task 1 landed" until 2026-09-02 |
 | E2 | Search + similarity surfaces | — | not planned |
 | E3 | Judge + curation + rows | — | not planned |
 | E4 | CI — `eval-quick` gate, nightly `eval-full` | — | not planned |
@@ -49,7 +49,7 @@ if a file in `docs/plans/` is named by none of them.
 ## Rating provenance (from docs/specs/2026-08-19-rating-provenance-split-design.md)
 | Task | What it delivers | Plan file | Status |
 |---|---|---|---|
-| 1–7 | Every rating column names its source; IMDb's numbers re-imported; E1's frame re-anchored | docs/plans/2026-08-19-rating-provenance-split.md | 🔨 in progress on `spec/quality-evals` — 7 tasks planned; Task 1 landed: `m10a` renames the three dual-written columns to `tmdb_*`, adds the `imdb_*` pair, and renames `field_provenance`'s three JSONB keys — **the one statement in it that touches a row**, and a pure rename (measured: all 132,415 rows carrying provenance carry all three keys, every value `tmdb`). No rating value is moved; those are re-imported from source instead. The follow-up commit also restored `title.updated`'s `fields` payload to wire names, which the rename had silently moved |
+| 1–7 | Every rating column names its source; IMDb's numbers re-imported; E1's frame re-anchored | docs/plans/2026-08-19-rating-provenance-split.md | ✅ **all 7 tasks landed 2026-08-19** (this cell said "in progress — Task 1 landed" until 2026-09-02). Task 1 was `m10a`, which renames the three dual-written columns — `community_rating` to **`tmdb_vote_average`**, which is not a prefix, plus `tmdb_vote_count` and `tmdb_popularity` — adds the `imdb_*` pair, and renames `field_provenance`'s three JSONB keys — **the one statement in it that touches a row**, and a pure rename (measured: all 132,415 rows carrying provenance carry all three keys, every value `tmdb`). No rating value is moved; those are re-imported from source instead. The follow-up commit also restored `title.updated`'s `fields` payload to wire names, which the rename had silently moved |
 
 **This is a third table for the second table's reason, and not for a third
 one.** The rating-provenance split has its own spec

@@ -31,7 +31,7 @@ from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, MatchMethod, SourceKind, TitleKind
-from usher.domain.jobs import Job, JobKind
+from usher.domain.jobs import Job, JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
@@ -121,6 +121,40 @@ async def test_the_enrich_handler_enriches_the_title_its_key_names() -> None:
     stored = await titles.get(title.id)
     assert stored is not None
     assert stored.enrichment_state is EnrichmentState.ENRICHED
+
+
+async def test_the_enrich_handler_hands_the_service_the_rung_its_job_was_claimed_at() -> None:
+    """The wiring that makes the clamp in `EnrichService._apply` reachable at
+    all: the rung lives on the claimed `Job` and this handler is the only
+    thing that can carry it across.
+
+    Asserted on the **follow-up** rather than on a spy, because that is where
+    the rung is observable to the rest of the system -- `DERIVE` is what
+    writes `images`, and a handler that dropped `job.priority` would leave a
+    title a client is looking at with its artwork behind the sweep, which is
+    the shipped defect this closes. `enrich_handler(service)(job)` with no
+    priority on the job would answer `BACKFILL` here, so the assertion
+    distinguishes the wiring from its absence.
+    """
+    titles = FakeTitleRepository()
+    title = Title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Stub", sort_name="Stub")
+    await titles.add(title)
+    queue = FakeJobQueue()
+    service = EnrichService(
+        titles,
+        FakeEpisodeRepository(),
+        FakeRawPayloadStore(),
+        FakeMetadataProvider(),
+        _noop,
+        FakeEventPublisher(),
+        queue=queue,
+    )
+
+    await enrich_handler(service)(
+        Job(kind=JobKind.ENRICH, key=str(title.id), priority=JobPriority.DEMAND)
+    )
+
+    assert queue.jobs_of(JobKind.DERIVE)[0].priority == JobPriority.DEMAND
 
 
 async def test_an_enrich_key_that_is_not_a_uuid_parks_rather_than_killing_the_worker() -> None:

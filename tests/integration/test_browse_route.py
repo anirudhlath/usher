@@ -76,6 +76,18 @@ async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncS
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
+        # `GET /browse` promotes every skeleton it draws (issue #73) and
+        # `get_session` commits at the end of a successful request, so this
+        # file's reads write `enrich` rows. **Before the titles**: the job's
+        # `key` is the title's id as text, so once the title row is gone there
+        # is nothing left to identify this file's jobs by.
+        await session.execute(
+            text(
+                "DELETE FROM jobs WHERE kind = 'enrich' AND key IN "
+                "(SELECT id::text FROM titles WHERE sort_name LIKE :pattern)"
+            ),
+            {"pattern": f"{MARK} %"},
+        )
         await session.execute(
             text("DELETE FROM titles WHERE sort_name LIKE :pattern"), {"pattern": f"{MARK} %"}
         )

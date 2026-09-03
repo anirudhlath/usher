@@ -26,8 +26,10 @@ contract saying nothing may import it, precisely because it *is* a
 composition root. Shared code there would either break that contract or
 force it to be weakened.
 
-**Why this module is in no import-linter contract's source list.** Seven
-contracts exist and none names `usher.composition`, deliberately: it imports
+**Why this module is in no import-linter contract's source list.** Twelve
+contracts exist (this said "seven" until 2026-09-02; re-derive with
+`grep -c '^\[\[tool.importlinter.contracts\]\]' pyproject.toml`) and none
+names `usher.composition`, deliberately: it imports
 `usher.db` and `usher.adapters`, so a core module reaching it breaks
 contracts two and three -- which report indirect chains by default, unlike
 contracts six and seven's `allow_indirect_imports = true`. Verified by
@@ -845,7 +847,12 @@ def build_push_applier(
 
 
 def build_enrich_service(
-    pipeline: Pipeline, settings: Settings, provider: MetadataProvider, *, events: EventPublisher
+    pipeline: Pipeline,
+    settings: Settings,
+    provider: MetadataProvider,
+    *,
+    events: EventPublisher,
+    cache: RowCache | None = None,
 ) -> EnrichService:
     """Enrichment, with its publisher passed in rather than read off the
     pipeline.
@@ -873,6 +880,10 @@ def build_enrich_service(
         # table, and a second queue would enqueue index work into an object
         # nothing ever claims from -- enriched titles, no vectors, no error.
         queue=pipeline.queue,
+        # Process-scoped where the pipeline is session-scoped, on
+        # `build_push_applier`'s terms: `None` is a root that composes no
+        # screens (`usher work`, `usher sync`) and has nothing to invalidate.
+        cache=cache,
         cache_max_age_days=settings.enrich_cache_max_age_days,
     )
 
@@ -937,6 +948,7 @@ def build_worker(
     client: LLMClient | None,
     registry: "SourceRegistry",
     user_id: uuid.UUID,
+    rows: RowCache | None = None,
 ) -> JobWorker:
     """The queue consumer, with a handler per `JobKind` this process can run.
 
@@ -992,6 +1004,10 @@ def build_worker(
                     registry=registry,
                     user_id=user_id,
                     events=events,
+                    # Process-lifetime, so it is carried rather than rebuilt
+                    # per scope -- the same terms as `provider`, `embedder`
+                    # and `client` above.
+                    rows=rows,
                 ),
                 events=events,
             )
@@ -1089,6 +1105,7 @@ def _worker_handlers(
     registry: "SourceRegistry",
     user_id: uuid.UUID,
     events: DeferredEventPublisher,
+    rows: RowCache | None = None,
 ) -> dict[JobKind, Handler]:
     """One scope's handlers, bound to that scope's repositories.
 
@@ -1173,7 +1190,7 @@ def _worker_handlers(
     )
     if provider is not None:
         handlers[JobKind.ENRICH] = enrich_handler(
-            build_enrich_service(pipeline, settings, provider, events=events)
+            build_enrich_service(pipeline, settings, provider, events=events, cache=rows)
         )
         # Guarded on the provider rather than on the embedder, and that is the
         # honest dependency rather than the convenient one: `DeriveService`

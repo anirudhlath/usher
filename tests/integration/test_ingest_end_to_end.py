@@ -44,6 +44,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.emby_server import FakeEmbyServer
 from tests.fakes.event_publisher import FakeEventPublisher
+from tests.integration.conftest import (
+    A_DECISIVE_MARGIN,
+    Analyze,
+    index_suspended,
+    total_cost,
+)
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
@@ -61,7 +67,7 @@ from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
 from usher.ports.credentials import SourceCredentials
-from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
+from usher.ports.ingest import MediaItemUpsert, SweepResult, WatchStateMerge
 from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
@@ -949,10 +955,30 @@ async def test_a_re_seen_job_is_not_rewritten_every_night(
     ).scalar_one() == int(JobPriority.DEMAND)
 
 
+_SWEPT_SOURCE = 2_000
+"""Rows on the source the sweep runs against.
+
+Not a round number chosen for comfort: fifty is what this case seeded until
+2026-08-31, and fifty rows with no statistics is a table the planner sizes off
+an empty `pg_class`, where `ix_media_items_sweep` and
+`uq_media_items_source_external` both cost `0.14..8.16` -- the same to four
+significant figures. The assertion below was reading a tie-break, and it lost
+**10 runs of 10** in isolation. See issue #79.
+"""
+
+_STALE_ON_IT = 50
+"""And the shape matters as much as the size. The measured nightly run is
+1,126,674 rows with 200 stale, so `available AND last_seen_at < :seen_since`
+selects a fraction of a per-source range -- which is the only shape in which a
+three-column index beats a scan. Seeding a source where *every* row is stale
+describes a library that vanished overnight, and any plan is right for that."""
+
+
 async def test_the_availability_sweeps_update_uses_its_index(
     session: AsyncSession,
     media_items: PostgresMediaItemRepository,
     source: Source,
+    analyze: Analyze,
 ) -> None:
     """`ix_media_items_sweep` exists for the sweep's `UPDATE`, and the
     numbers say exactly that.
@@ -970,16 +996,23 @@ async def test_the_availability_sweeps_update_uses_its_index(
       touch every row however it is planned.
 
     So the claim is the narrow one and this case asserts the narrow one.
-    `enable_seqscan = off` is what makes the choice observable at fixture
-    size -- on fifty rows a seq scan really is cheaper, and an assertion
-    that passed only because the table was small would be measuring the
-    fixture.
+
+    **`enable_seqscan = off` is necessary and it is not sufficient, which is
+    what this case had wrong.** It settles *index or scan*; it says nothing
+    about *which index*, because a full walk of any index is also available
+    once a sequential one is priced at the disabled penalty -- and on a table
+    `pg_class` describes as empty every candidate costs the same. That is why
+    the fixture now seeds a population and `analyze`s it, and why the margin
+    is asserted below rather than assumed: the runner-up has to be *worse*,
+    or "the planner chose the index I meant" is a fact about tie-breaking
+    order rather than about the schema.
     """
+    seen_since = CHANGED_AT + timedelta(days=1)
     await media_items.upsert_many(
         [
             MediaItemUpsert(
                 source_id=source.id,
-                external_id=f"stale-{index}",
+                external_id=f"item-{index}",
                 title_id=None,
                 episode_id=None,
                 container="mkv",
@@ -992,19 +1025,22 @@ async def test_the_availability_sweeps_update_uses_its_index(
                 file_size_bytes=None,
                 runtime_seconds=None,
                 added_at=None,
-                last_seen_at=CHANGED_AT,
+                last_seen_at=CHANGED_AT if index < _STALE_ON_IT else seen_since,
             )
-            for index in range(50)
+            for index in range(_SWEPT_SOURCE)
         ]
     )
+    await analyze("media_items")
     captured, stop = _capture(lambda statement: "SET available = false" in statement)
     try:
         result = await media_items.mark_unseen_unavailable(
-            source.id, seen_since=datetime.now(UTC), max_retract_fraction=1.0
+            source.id, seen_since=seen_since, max_retract_fraction=1.0
         )
     finally:
         stop()
-    assert result.retracted == 50
+    assert result == SweepResult(retracted=_STALE_ON_IT, total=_SWEPT_SOURCE), (
+        "the premise: a mostly-fresh source with a stale tail, not a source that vanished"
+    )
     assert captured, "the sweep's UPDATE was not issued"
 
     await session.execute(text("SET LOCAL enable_seqscan = off"))
@@ -1015,12 +1051,25 @@ async def test_the_availability_sweeps_update_uses_its_index(
     for column in ("source_id", "available", "last_seen_at"):
         assert column in condition, plan
 
+    async with index_suspended(session, "ix_media_items_sweep"):
+        runner_up = await _explain(session, statement, parameters)
+    assert "ix_media_items_sweep" not in runner_up, (
+        f"the index was not actually suspended, so the comparison below measures nothing:"
+        f"\n{runner_up}"
+    )
+    assert total_cost(runner_up) > total_cost(plan) * A_DECISIVE_MARGIN, (
+        "the sweep index wins by too little to be a property of the schema -- the fixture "
+        "is back below the scale at which the planner can tell the candidates apart.\n"
+        f"chosen {total_cost(plan)}:\n{plan}\nnext best {total_cost(runner_up)}:\n{runner_up}"
+    )
+
 
 async def test_resolving_a_target_uses_the_unique_index(
     session: AsyncSession,
     media_items: PostgresMediaItemRepository,
     source: Source,
     catalog: uuid.UUID,
+    analyze: Analyze,
 ) -> None:
     """`resolve_targets` runs once per watch-state batch against
     `external_id = ANY(...)`, and it is the only lookup on the hot path
@@ -1063,7 +1112,7 @@ async def test_resolving_a_target_uses_the_unique_index(
             for index in range(2_000)
         ]
     )
-    await session.execute(text("ANALYZE media_items"))
+    await analyze("media_items")
     captured, stop = _capture(
         lambda statement: (
             "external_id = ANY" in statement and "title_id IS NOT NULL OR" in statement

@@ -42,6 +42,7 @@ from tests.contract.job_queue_contract import (
     JobQueueContract,
     StagingLockReader,
 )
+from tests.integration.conftest import Analyze
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.domain.jobs import JobKind, JobPriority, JobStatus
@@ -247,7 +248,7 @@ async def test_two_workers_split_two_jobs_rather_than_queueing_behind_each_other
 
 
 async def test_the_claim_query_uses_the_partial_index(
-    session: AsyncSession, queue: PostgresJobQueue
+    session: AsyncSession, queue: PostgresJobQueue, analyze: Analyze
 ) -> None:
     """`ix_jobs_claim` is `(priority DESC, created_at) WHERE status =
     'pending'`. A claim that sorts instead of scanning it is a sort over the
@@ -278,7 +279,7 @@ async def test_the_claim_query_uses_the_partial_index(
             for index in range(2_000)
         ]
     )
-    await session.execute(text("ANALYZE jobs"))
+    await analyze("jobs")
     plan = "\n".join(
         (
             await session.execute(
@@ -778,7 +779,7 @@ async def test_the_claim_ordering_survives_a_planner_that_ignores_the_index(
 
 
 async def test_a_claim_is_ordered_even_when_its_update_stage_hash_joins(
-    session: AsyncSession, queue: PostgresJobQueue
+    session: AsyncSession, queue: PostgresJobQueue, analyze: Analyze
 ) -> None:
     """`UPDATE ... RETURNING` makes no promise about row order, and at 2,000
     rows the claim's second stage really is a `Hash Join` over a `Seq Scan` of
@@ -797,7 +798,7 @@ async def test_a_claim_is_ordered_even_when_its_update_stage_hash_joins(
     await queue.enqueue(
         [JobRequest(kind=JobKind.ENRICH, key="urgent", priority=JobPriority.DEMAND)]
     )
-    await session.execute(text("ANALYZE jobs"))
+    await analyze("jobs")
     claimed = await queue.claim([JobKind.ENRICH], limit=20)
     assert claimed[0].key == "urgent", [job.key for job in claimed[:3]]
     keys = [(-job.priority, job.created_at) for job in claimed]

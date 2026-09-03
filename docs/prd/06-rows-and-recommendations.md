@@ -1146,13 +1146,48 @@ never blocks on a slow row.
 > a per-row grace with no per-row refresh behind it would serve stale rows that
 > nothing ever replaces.
 >
-> **Invalidation is driven by the push lane and by demand reads, never by the
-> nightly walk** — the same scale argument [07](07-client-api.md) makes for
-> `watchstate.updated`. A walk merges up to 1,126,789 states; one invalidation
-> per merged row is a fan-out per row per night. A walk that finishes at 04:00
-> is on the screen by 04:00:30, through the 30 s screen TTL.
-> `WatchStateSyncService` is handed no cache at all, so adding that call means
-> adding a constructor argument.
+> **Invalidation is driven by the push lane, by demand reads and by
+> enrichment, never by the nightly walk** — the same scale argument
+> [07](07-client-api.md) makes for `watchstate.updated`. A walk merges up to
+> 1,126,789 states; one invalidation per merged row is a fan-out per row per
+> night. A walk that finishes at 04:00 is on the screen by 04:00:30, through
+> the 30 s screen TTL. `WatchStateSyncService` is handed no cache at all, so
+> adding that call means adding a constructor argument.
+>
+> **Enrichment is the third trigger and was added late, because it is the one
+> write whose staleness the TTLs cannot absorb.** `PushApplyService` and
+> `WatchWriteService` invalidate `WATCH_STATE_ROWS` — two slugs whose TTLs are
+> 60 s anyway. Enrichment rewrites a card's `name`, `year`,
+> `enrichment_state` **and** `artwork`, which is every field a `RowCard`
+> carries, and it lands on rows whose TTLs are hours: `because-you-watched`
+> and `people` are 6 h, `seasonal` 12 h. So a title enriched inside that
+> window keeps rendering under its skeleton name with a "No artwork on record"
+> placeholder for the rest of it. Measured on the deployed catalog
+> 2026-08-26: **55 of 145 cards on a live `/home` carried `artwork: null`
+> while a cold compose of the same screen carried 5**, and the per-row null
+> rate tracked TTL exactly — `continue-watching` (60 s) 0%,
+> `recently-added` (5 min) 12%, `genre-affinity` (1 h) 0–5%,
+> `because-you-watched` (6 h) 75–90%.
+>
+> **`title.updated` does not cover it**, which is the trap worth naming: the
+> frame is a statement to a *client*, and the console's handler is colour-only
+> by design (`patterns.md` §7 — a frame adds a highlight class for 1000 ms and
+> does not refetch). A cache the server reads from has to be told separately.
+>
+> **`RowCache.invalidate_titles` takes no `user_id`**, unlike `invalidate`. A
+> play button is one household's act; enrichment is a *catalog* write, equally
+> stale on every screen holding the title.
+>
+> **And this is not the fan-out the paragraph above refuses, because it is
+> keyed on the title rather than on the write.** An invalidation drops only
+> the entries whose cards actually name the enriched title, so during a bulk
+> backfill almost every call drops nothing. The bound is the screen's own
+> size, not the run's: a screen of 145 cards can be invalidated at most 145
+> times by a backfill, once per card, however many titles the backfill
+> touches. Against M9's S3 — 130,647 titles enriched in 1.98 h — that is at
+> most 145 rebuilds where the 30 s screen TTL already forces **237** over the
+> same window. Enrichment therefore adds strictly less churn than the TTL, and
+> a `clear()`-shaped invalidation would not have this property.
 >
 > **Cache keys carry the user**, taken from the request's own `current_user`,
 > so replacing that one dependency remains the whole of adding authentication —

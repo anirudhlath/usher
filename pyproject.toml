@@ -187,6 +187,14 @@ addopts = "-q --strict-markers --strict-config"
 # them, since addopts marker expressions apply even to an explicit path.
 markers = [
     "integration: needs a live PostgreSQL via Docker (testcontainers); see tests/integration/conftest.py",
+    # Args are table names. `session`'s teardown asserts that `pg_class` still
+    # describes the database, because the catalog update is in place and one
+    # test's statistics are every later test's planner (issues #26/#43/#79).
+    # Bare, it means "known side effect, repair it quietly"; with
+    # `restored_by="<fixture>"` it means the leak has to survive until that
+    # fixture runs, which is load-bearing in exactly one file --
+    # see `restores_the_statistics_this_seed_leaks`.
+    "leaks_statistics: this test leaves pg_class describing rows it rolled back",
 ]
 
 [tool.ruff]

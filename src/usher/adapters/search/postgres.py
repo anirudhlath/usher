@@ -207,9 +207,10 @@ _REMOVE = "DELETE FROM title_embeddings WHERE title_id = CAST(:title_id AS uuid)
 #
 # Caveat, because the numbers are meaningless without it: the probe used
 # uniform-random 384-dim vectors, the worst case for any ANN index, so
-# absolute recall is a pessimistic floor. **0.56 is not a production recall
-# figure.** What transfers is the ordering of the options and the row-count
-# failure, which is structural.
+# absolute recall is a pessimistic floor. **0.508 is not a production recall
+# figure** -- this read "0.56" until 2026-09-02, a number that appears nowhere
+# in the table four lines above it. What transfers is the ordering of the
+# options and the row-count failure, which is structural.
 #
 # **This comment used to end "`ef_search` is *not* the lever: 40 -> 200 with
 # the GUC off still returns 4.24 of 10", and that sentence is true only of the

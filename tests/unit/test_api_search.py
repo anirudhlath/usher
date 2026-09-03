@@ -28,6 +28,7 @@ from fastapi import FastAPI, Request
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from tests.fakes.embedding import FakeEmbedder
+from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
@@ -37,10 +38,11 @@ from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
-from usher.api.deps import get_default_user_id, get_search_service
+from usher.api.deps import get_default_user_id, get_search_service, get_visibility_service
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemCode
 from usher.config import Settings
-from usher.domain.enums import TitleKind
+from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.title import Title
 from usher.ports.embedding import Embedder
 from usher.ports.search import (
@@ -54,6 +56,7 @@ from usher.ports.search import (
 )
 from usher.services.query_expansion import QUERY_KEY, QueryExpansionService
 from usher.services.search import SearchAnalytics, SearchService
+from usher.services.visibility import VisibilityService
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 UNREACHABLE_DSN = "postgresql+asyncpg://usher:usher@127.0.0.1:1/usher"
@@ -173,6 +176,7 @@ async def _service(
     result_limit: int = 50,
     watch_states: _RecordingWatchStates | None = None,
     analytics: SearchAnalytics | None = None,
+    prefix_suggestions: SuggestIndex | None = None,
 ) -> SearchService:
     titles = FakeTitleRepository()
     media_items = FakeMediaItemRepository()
@@ -195,7 +199,7 @@ async def _service(
         )
     return SearchService(
         index,
-        _ScriptedSuggest(),
+        prefix_suggestions or _ScriptedSuggest(),
         _ScriptedSuggest(),
         titles,
         media_items,
@@ -235,6 +239,13 @@ def _app(service: SearchService, *, settings: Settings | None = None) -> FastAPI
     built = create_app(settings or _settings())
     built.dependency_overrides[get_search_service] = lambda: service
     built.dependency_overrides[get_default_user_id] = lambda: _VIEWER
+    # Three, since #73: both routes in this file promote the skeletons they
+    # answered with, so the queue and the catalog are on their path and the
+    # real `PostgresJobQueue` points at the database nothing listens on. The
+    # two demand-lane cases below replace this with a pair they can assert on.
+    built.dependency_overrides[get_visibility_service] = lambda: VisibilityService(
+        FakeJobQueue(), FakeTitleRepository()
+    )
     return built
 
 
@@ -751,3 +762,85 @@ async def test_no_source_concept_and_no_credential_reaches_the_body(
         "owned",
         "score",
     }
+
+
+# -- the demand lane (issue #73) -------------------------------------------
+
+
+class _SuggestingIndex(SuggestIndex):
+    """A suggest index that answers, unlike `_ScriptedSuggest` above."""
+
+    async def suggest(self, prefix: str, limit: int = 10) -> list[SearchHit]:
+        return [SearchHit(title_id=_FIRST, score=_STRONG)]
+
+
+async def _catalog_of(**states: EnrichmentState) -> FakeTitleRepository:
+    """`_FIRST` and `_SECOND` at the tiers a case names."""
+    titles = FakeTitleRepository()
+    for key, title_id in (("first", _FIRST), ("second", _SECOND)):
+        await titles.add(
+            Title(
+                id=title_id,
+                kind=TitleKind.MOVIE,
+                name=_CATALOG[title_id],
+                sort_name=_CATALOG[title_id].casefold(),
+                enrichment_state=states[key],
+            )
+        )
+    return titles
+
+
+async def test_a_search_promotes_the_skeletons_it_answered_with(hits: _ScriptedIndex) -> None:
+    """The surface with the strongest intent signal in the API: a viewer typed
+    this query and got these rows back.
+
+    `SearchResult` carries no `enrichment_state` (issue #52), so the route
+    cannot judge its own answer and `seen_ids` resolves the tier. Both tiers
+    are seeded, because a route that promoted every row it returned passes an
+    all-skeleton case unchanged.
+    """
+    queue = FakeJobQueue()
+    catalog = await _catalog_of(first=EnrichmentState.SKELETON, second=EnrichmentState.ENRICHED)
+    app = _app(await _service(hits))
+    app.dependency_overrides[get_visibility_service] = lambda: VisibilityService(queue, catalog)
+
+    async for connected in _client(app):
+        response = await connected.get("/search", params={"q": "anything"})
+
+    assert response.status_code == 200
+    assert len(response.json()["results"]) == 2, "the premise: both rows were answered"
+    assert [job.key for job in queue.jobs_of(JobKind.ENRICH)] == [str(_FIRST)]
+    assert queue.jobs_of(JobKind.ENRICH)[0].priority == JobPriority.VISIBLE
+
+
+async def test_type_ahead_promotes_what_it_offered() -> None:
+    """`GET /search/suggest` fires per keystroke, which makes it the highest
+    volume surface on this lane and the one whose cost is least like the
+    others'.
+
+    It is wired anyway, and the reason is that a suggestion is drawn: a
+    dropdown of names a viewer is choosing between is exactly "titles a client
+    was just shown". The repeat is free at the database (`GREATEST` under
+    `AND jobs.priority < excluded.priority`), so the steady-state cost of
+    holding a key down is one read per keystroke rather than one write, and
+    issue #73 carries the volume question rather than answering it here.
+    """
+    queue = FakeJobQueue()
+    catalog = await _catalog_of(first=EnrichmentState.SKELETON, second=EnrichmentState.ENRICHED)
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=(), semantic_coverage=0.0)),
+        prefix_suggestions=_SuggestingIndex(),
+    )
+    app = _app(service)
+    app.dependency_overrides[get_visibility_service] = lambda: VisibilityService(queue, catalog)
+
+    async for connected in _client(app):
+        # Four characters, because `_MIN_PREFIX_CHARS` is 4 and a shorter
+        # prefix is answered early with no results -- nothing drawn, nothing to
+        # promote, and a premise this case would otherwise fail on.
+        response = await connected.get("/search/suggest", params={"q": "anyt"})
+
+    assert response.status_code == 200
+    assert len(response.json()["results"]) == 1, "the premise: a suggestion was offered"
+    assert [job.key for job in queue.jobs_of(JobKind.ENRICH)] == [str(_FIRST)]
+    assert queue.jobs_of(JobKind.ENRICH)[0].priority == JobPriority.VISIBLE
