@@ -265,9 +265,11 @@ class SearchIndexContract:
         `GET /search?q=The Matrix` returned the 1999 film 5th behind three 2018
         video essays repeating the phrase in their own names, and the blend
         could not rescue it: no combination of popularity, ownership, watch
-        state, recency and taste can overturn dense rank 0 (margin 0.009615,
-        deliberate, and the bound F5's taste weight is derived from). So the
-        lane has to put the right row there.
+        state, recency and taste can overturn dense rank 0 (margin
+        `0.005 / 1.045` = 0.004785 with all six present, deliberate, and the
+        bound F5's taste weight is derived from -- 0.009615, which this
+        docstring carried until 2026-09-02, is the same bound with taste
+        *absent*). So the lane has to put the right row there.
 
         **The premise is asserted from the hits themselves and it is what makes
         this a relevance test**: the essay's own index score is strictly

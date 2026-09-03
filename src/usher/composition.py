@@ -26,8 +26,10 @@ contract saying nothing may import it, precisely because it *is* a
 composition root. Shared code there would either break that contract or
 force it to be weakened.
 
-**Why this module is in no import-linter contract's source list.** Seven
-contracts exist and none names `usher.composition`, deliberately: it imports
+**Why this module is in no import-linter contract's source list.** Twelve
+contracts exist (this said "seven" until 2026-09-02; re-derive with
+`grep -c '^\[\[tool.importlinter.contracts\]\]' pyproject.toml`) and none
+names `usher.composition`, deliberately: it imports
 `usher.db` and `usher.adapters`, so a core module reaching it breaks
 contracts two and three -- which report indirect chains by default, unlike
 contracts six and seven's `allow_indirect_imports = true`. Verified by

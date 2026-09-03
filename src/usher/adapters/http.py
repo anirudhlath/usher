@@ -256,9 +256,10 @@ def port_error_for(
     `TmdbClient`'s outage message the path it 5xx'd on, which is the only thing
     in that message an operator acts on.
 
-    The ladder itself is measured, and `.claude/rules/config-cli-and-deployment
-    .md` holds the table: 429, then 401/403, then any other 4xx except 408,
-    then everything else at or above 400.
+    The ladder itself is measured: 429, then 401/403, then any other 4xx except
+    408, then everything else at or above 400. `.claude/rules/tmdb-and-
+    enrichment.md` reads it back as job outcomes -- which rungs park a job on the
+    first attempt and which spend the retry budget.
     """
     status = response.status_code
     if status == 429:

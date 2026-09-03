@@ -1,7 +1,10 @@
 """Every staging table in `src/` is temporary, and it drops at commit.
 
-A rule rather than a list, because the list is what drifts. Ten staging DDLs
-exist across five repositories today and the eleventh is the one that
+A rule rather than a list, because the list is what drifts -- and it has: this
+sentence said "ten across five repositories" until 2026-09-02, when
+`grep -rho "CREATE TEMP TABLE stg_[a-z_]*" src/ | sort -u` answered **16 across
+eight**. Re-derive it rather than trusting the number here; the scan below does
+not depend on it. The next one is the one that
 reintroduces the hazard: a shared name in `public` taking two `ACCESS
 EXCLUSIVE` locks per batch, held to commit, plus a table left behind by any
 caller that commits -- which surfaces as schema drift in
@@ -10,8 +13,8 @@ that caused it passes alone.
 
 Scanned as text rather than asserted per module, for the reason
 `test_every_setting_is_read_by_something` is a substring scan: the DDL is a
-string constant in five different files and a per-file assertion is a list
-again. It cannot tell a DDL from a docstring quoting one, which is why the
+string constant spread across those eight files and a per-file assertion is a
+list again. It cannot tell a DDL from a docstring quoting one, which is why the
 match requires `CREATE` and a `stg_` name on the same line -- prose about the
 old shape reads `DROP TABLE IF EXISTS stg_jobs` or names the constant, never
 `CREATE ... TABLE stg_x (`.

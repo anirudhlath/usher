@@ -926,7 +926,7 @@ class PostgresTitleRepository(TitleRepository):
         # `rowcount` is what the `WHERE` matched, and `IS DISTINCT FROM` is
         # *in* the `WHERE` -- so this is rows **changed**, never rows touched.
         # The cast is what `bulk.py:_rowcount` and
-        # `PostgresCollectionRepository.link_title` both record: `rowcount`
+        # `PostgresCollectionRepository.attach_titles` both record: `rowcount`
         # lives on `CursorResult`, not on the `Result[Any]` that
         # `session.execute` is annotated to return.
         return cast(CursorResult[Any], result).rowcount

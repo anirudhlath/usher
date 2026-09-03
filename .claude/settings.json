@@ -1,0 +1,95 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git checkout --:*)",
+      "Bash(git checkout .)",
+      "Bash(git restore:*)",
+      "Bash(git stash)",
+      "Bash(git stash:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git reset --merge:*)",
+      "Bash(git reset --keep:*)",
+      "Bash(git clean:*)",
+      "Bash(pip install:*)",
+      "Bash(pip3 install:*)",
+      "Bash(python -m pip:*)",
+      "Bash(python3 -m pip:*)",
+      "Bash(uv pip:*)",
+      "Bash(conda:*)",
+      "Bash(git checkout-index:*)",
+      "Bash(git reset)",
+      "Bash(git reset --mixed:*)",
+      "Bash(ruff format docs:*)",
+      "Bash(ruff format .claude:*)",
+      "Bash(ruff format ./docs:*)",
+      "Bash(ruff format ./.claude:*)",
+      "Bash(uv run ruff format docs:*)",
+      "Bash(uv run ruff format .claude:*)",
+      "Bash(uv run ruff format ./docs:*)",
+      "Bash(uv run ruff format ./.claude:*)"
+    ],
+    "ask": [
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git branch -D:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(alembic downgrade:*)",
+      "Bash(uv run alembic downgrade:*)"
+    ],
+    "allow": [
+      "Bash(uv run ruff check:*)",
+      "Bash(uv run ruff format --check:*)",
+      "Bash(uv run mypy:*)",
+      "Bash(uv run lint-imports)",
+      "Bash(uv run pytest:*)",
+      "Bash(uv run alembic heads)",
+      "Bash(uv run alembic current)",
+      "Bash(uv run usher --help)",
+      "Bash(uv sync:*)",
+      "Bash(git worktree list)",
+      "Bash(git show:*)",
+      "Bash(npm run verify)",
+      "Bash(npm run typecheck)",
+      "Bash(npm run lint)",
+      "Bash(npm run format:check)",
+      "Bash(npm run build)",
+      "Bash(npm run e2e)",
+      "Bash(npm run e2e:visual)",
+      "Bash(npm test:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/session-start.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-generated.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-bash.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
