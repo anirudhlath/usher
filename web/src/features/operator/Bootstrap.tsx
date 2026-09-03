@@ -28,13 +28,15 @@
  *   one silently is how "~7%" came to mean four different things.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   Badge,
   Button,
   ConfirmDialog,
   CursorProgress,
   Icon,
+  LiveIndicator,
   NOT_MEASURED,
   Problem,
   Skeleton,
@@ -44,14 +46,17 @@ import {
   type ProblemDocument,
 } from '@/design-system'
 import { OpsHeader, OpsSection } from '@/app/shells/OperatorShell'
+import { PHASES, labelFor, type PhaseSpec } from './phases'
 import { ROUTES } from '@/app/routes'
 import { useToasts } from '@/patterns'
 import { useProblemTrace } from '@/features/shared/trace'
 import {
   UsherProblem,
   useBootstrapStatus,
+  useEventStream,
   useStartBootstrap,
   type BootstrapPhase,
+  type BootstrapProgress,
   type ImportRun,
 } from '@/api'
 
@@ -84,6 +89,37 @@ function formatDuration(ms: number): string {
   if (h > 0) return `${h} h ${String(m).padStart(2, '0')} m`
   if (m > 0) return `${m} m ${String(s).padStart(2, '0')} s`
   return `${s} s`
+}
+
+/**
+ * How long the fallback keeps asking after a trigger before it gives up.
+ *
+ * Only reachable with the stream down. `POST /admin/bootstrap/{phase}` answers
+ * 202 the moment the job is enqueued and the worker claims it whenever the lane
+ * gets to it, so there is a window in which the operator has asked for
+ * something and nothing is running yet — and a gate that only opens on "is
+ * something running" can never open during it. That is the whole of the bug
+ * this screen shipped with, and the fallback must not reproduce it.
+ */
+const WAITING_FOR_THE_WORKER_MS = 120_000
+
+/**
+ * We asked for something and the worker has not touched anything since.
+ *
+ * **Derived on every read rather than stored**, which is what makes it
+ * self-clearing: the wait ends the moment any run reports a heartbeat later
+ * than the press, whichever route observed it. Held as state it would need a
+ * synchronous `setState` in an effect — cascading renders, and a second copy of
+ * a fact the runs already carry.
+ *
+ * `heartbeat_at` rather than `status`, because a phase that starts and finishes
+ * between two fallback polls is never *seen* running, and a status test would
+ * leave this true for the whole window after it.
+ */
+function stillWaiting(askedAt: number | null, runs: readonly ImportRun[] | undefined): boolean {
+  if (askedAt === null) return false
+  if (Date.now() - askedAt >= WAITING_FOR_THE_WORKER_MS) return false
+  return !(runs ?? []).some((run) => Date.parse(run.heartbeat_at) >= askedAt)
 }
 
 function elapsedOf(run: ImportRun): string | undefined {
@@ -124,70 +160,102 @@ function useThroughput(runs: readonly ImportRun[] | undefined): Map<string, numb
 
 /* ------------------------------------------------------------------ phases */
 
-interface PhaseSpec {
-  phase: Exclude<BootstrapPhase, 'all'>
-  label: string
-  /** What it downloads. A dataset fact, not a measurement of this deployment. */
-  size: string
-  writes: string
-  /** Why this one cannot move up the list. */
-  because: string
+/**
+ * A `bootstrap.progress` frame as the run it describes, merged over whatever
+ * the cache already holds for that dataset.
+ *
+ * `null` for a frame missing either field a checkpoint cannot be identified or
+ * drawn without — which is **not** defensive: §7 makes every field on the wire
+ * nullable because a malformed frame is indistinguishable from one the bus
+ * dropped, and a dropped frame is a case this surface is already correct for.
+ * Every other field falls back to the cached run before it invents anything, so
+ * a partial frame narrows the card rather than blanking it.
+ */
+function runOfFrame(payload: BootstrapProgress, cached: ImportRun | undefined): ImportRun | null {
+  const { dataset, status } = payload
+  if (dataset === null) return null
+  if (status !== 'running' && status !== 'completed' && status !== 'failed') return null
+
+  const now = new Date().toISOString()
+  const position = typeof payload.position === 'string' ? Number(payload.position) : payload.position
+
+  return {
+    dataset,
+    phase: (payload.phase ?? cached?.phase ?? null) as ImportRun['phase'],
+    status,
+    revision: payload.revision ?? cached?.revision ?? 'unknown',
+    position: position !== null && Number.isFinite(position) ? position : (cached?.position ?? 0),
+    rows_seen: payload.rows_seen ?? cached?.rows_seen ?? 0,
+    rows_written: payload.rows_written ?? cached?.rows_written ?? 0,
+    error: payload.error,
+    started_at: payload.started_at ?? cached?.started_at ?? now,
+    heartbeat_at: payload.heartbeat_at ?? now,
+    finished_at: payload.finished_at,
+  }
 }
 
 /**
- * `BootstrapPhase`'s members in execution order — one vocabulary, shared by
- * `POST /admin/bootstrap/{phase}` and the CLI's `--phase`, so a phase cannot
- * exist on one boundary and not the other.
+ * The fetched runs with everything newer that arrived on the stream laid over
+ * them.
+ *
+ * **Frames are held outside the query cache and merged here, on every read.**
+ * They used to be written into it with `setQueryData`, and that lost them two
+ * ways, both reported from a real deployment as *"nothing happens right away,
+ * something flashed and went away"*:
+ *
+ * · A frame arriving before the first response had nothing to merge into and
+ *   was dropped. `GET /admin/bootstrap/status` is uncached and re-reads
+ *   `titles` four times — **2.4 s measured while a bootstrap was running**,
+ *   against 0.33 s idle — so that window is widest exactly when a phase has
+ *   just been triggered, because the thing widening it is the phase.
+ * · A refetch already in flight replaced the whole cache entry when it landed,
+ *   with a snapshot older than the frame. React Query knows nothing of a manual
+ *   patch, and every terminal frame starts such a refetch: `--phase all`
+ *   finished three datasets inside one second on the shipped deployment.
+ *
+ * Merging at read time has neither failure by construction — there is nothing
+ * for a response to overwrite. `heartbeat_at` is the arbiter rather than
+ * arrival order, so a response that really is newer than the frame still wins,
+ * which is what makes the fetch authoritative again once it catches up.
  */
-const PHASES: readonly PhaseSpec[] = [
-  {
-    phase: 'imdb',
-    label: 'IMDb basics',
-    size: '~224 MB from IMDb (regenerated daily)',
-    writes: 'title skeletons — names, years, runtimes',
-    because: 'first: everything below joins to the titles this writes',
-  },
-  {
-    phase: 'credit-names',
-    label: 'Credit names',
-    size: '~730 MB from IMDb',
-    writes: 'person records for every credited name',
-    because:
-      'joins to titles on imdb_id, and it writes only skeletons — a title already enriched is deferred to TMDb for good, so it runs before anything that enriches',
-  },
-  {
-    phase: 'aliases',
-    label: 'Aliases',
-    size: '~380 MB from IMDb',
-    writes: 'alternate titles used by search',
-    because: 'joins to titles on imdb_id',
-  },
-  {
-    phase: 'tmdb-ids',
-    label: 'TMDb id export',
-    size: '~18 MB from TMDb',
-    writes: 'the TMDb id crosswalk',
-    because: 'needs the titles the IMDb phase wrote to attach ids to',
-  },
-  {
-    phase: 'crosswalk',
-    label: 'Wikidata crosswalk',
-    size: 'SPARQL against query.wikidata.org, no dump',
-    writes: 'IMDb ↔ TMDb ↔ Wikidata links',
-    because: 'links the two id spaces the phases above populate',
-  },
-  {
-    phase: 'movielens',
-    label: 'MovieLens genome',
-    size: '~265 MB from GroupLens',
-    writes: 'tag genome vectors used by similarity',
-    because: 'joins to titles on imdb_id',
-  },
-]
+function withFrames(
+  fetched: readonly ImportRun[] | undefined,
+  framed: ReadonlyMap<string, ImportRun>,
+): readonly ImportRun[] | undefined {
+  if (fetched === undefined) return framed.size === 0 ? undefined : [...framed.values()]
 
-/** A dataset's human label, or the wire value when the API names one we do not. */
-function labelFor(dataset: string): string {
-  return PHASES.find((spec) => spec.phase === dataset)?.label ?? dataset
+  const seen = new Set(fetched.map((run) => run.dataset))
+  const merged = fetched.map((run) => {
+    const frame = framed.get(run.dataset)
+    if (frame === undefined) return run
+    return Date.parse(frame.heartbeat_at) >= Date.parse(run.heartbeat_at) ? frame : run
+  })
+  // A dataset the response has never mentioned — a first-ever import — goes at
+  // the front, which is where the route puts most-recent activity anyway.
+  const fresh = [...framed.values()].filter((run) => !seen.has(run.dataset))
+  return fresh.length === 0 ? merged : [...fresh, ...merged]
+}
+
+/**
+ * The run a phase's row speaks for, out of the one or more datasets it owns.
+ *
+ * **A phase is not a dataset**: `imdb` writes `title.basics` then
+ * `title.ratings`, and `tmdb-ids` writes one file per kind, so a row has to
+ * summarise a set. Least-finished wins — a phase with anything running is
+ * running, and one with a failure is failed even if its sibling completed,
+ * because the failure is the thing an operator has to act on and "Resume" is
+ * the button it needs. Among datasets that all completed, the one that finished
+ * last is the one whose timestamps describe the phase.
+ */
+function representativeOf(candidates: readonly ImportRun[]): ImportRun | undefined {
+  const running = candidates.find((run) => run.status === 'running')
+  if (running !== undefined) return running
+  const failed = candidates.find((run) => run.status === 'failed')
+  if (failed !== undefined) return failed
+  return candidates.reduce<ImportRun | undefined>((latest, run) => {
+    if (latest === undefined) return run
+    return Date.parse(run.finished_at ?? '') > Date.parse(latest.finished_at ?? '') ? run : latest
+  }, undefined)
 }
 
 const ALL_FACTS: ConfirmFact[] = [
@@ -296,36 +364,123 @@ function ratio(numerator: number, denominator: number): string {
 export default function Bootstrap() {
   const toasts = useToasts()
   const traceOf = useProblemTrace()
-  const status = useBootstrapStatus({
-    // §8: uncached and ~0.33 s a call, so poll only while something is running.
-    refetchInterval: (query) =>
-      query.state.data?.runs.some((run) => run.status === 'running') ? 10_000 : false,
-  })
+  const queries = useQueryClient()
   const start = useStartBootstrap()
   const [pending, setPending] = useState<PhaseSpec | 'all' | null>(null)
+  /** When a trigger was last accepted. `waiting` below is the reading of it. */
+  const [askedAt, setAskedAt] = useState<number | null>(null)
+
+  /**
+   * What the stream has said, keyed by dataset. **Component state, never the
+   * query cache** — `withFrames` explains what writing it into the cache cost.
+   * Bounded by the number of datasets, which is eight.
+   */
+  const [framed, setFramed] = useState<ReadonlyMap<string, ImportRun>>(new Map())
+
+  const applyFrame = useCallback((payload: BootstrapProgress) => {
+    setFramed((previous) => {
+      const next = runOfFrame(payload, previous.get(payload.dataset ?? ''))
+      if (next === null) return previous
+      const merged = new Map(previous)
+      merged.set(next.dataset, next)
+      return merged
+    })
+  }, [])
+
+  const stream = useEventStream({
+    onEvent: (event) => {
+      if (event.name !== 'bootstrap.progress') return
+      applyFrame(event.payload)
+      // The one refetch that survives, and it is per transition rather than per
+      // batch: `titles`, the genome counts and the vocabulary all move when a
+      // phase finishes, and none of the three is on the frame.
+      if (event.payload.status === 'completed' || event.payload.status === 'failed') {
+        void queries.invalidateQueries({ queryKey: ['bootstrap-status'] })
+      }
+    },
+  })
+
+  /**
+   * `idle` counts as carrying frames and that is not a concession: the server
+   * sends `: keepalive` every 20 s, so a quiet stream is a healthy one and the
+   * indicator says so. Only `off` and `reconnecting` mean nothing can arrive.
+   */
+  const streamIsLive = stream.state === 'connected' || stream.state === 'idle'
+
+  const status = useBootstrapStatus({
+    /**
+     * **Nothing while the stream is live.** §8's 10 s cadence survives only as
+     * the fallback for a deployment the frames cannot reach — `usher work` in
+     * its own container publishes to a `NullEventPublisher` — and §7 requires
+     * this screen to be correct there too.
+     */
+    refetchInterval: (query) => {
+      if (streamIsLive) return false
+      if (query.state.data?.runs.some((run) => run.status === 'running')) return 10_000
+      // Asked for, not yet started. Faster than the running cadence because the
+      // whole point is to catch the transition, and bounded because an operator
+      // who pressed Run an hour ago is not still waiting on this.
+      return stillWaiting(askedAt, query.state.data?.runs) ? 2_000 : false
+    },
+  })
 
   const data = status.data
-  const runs = data?.runs
+  /**
+   * **`useMemo` is load-bearing, not a micro-optimisation.** `withFrames` maps,
+   * so it hands back a new array on every call, and `useThroughput` keys its
+   * effect on `runs` *identity* — an unmemoised merge makes that effect fire
+   * every render, `setRates` re-render, and the two spin forever. It presents
+   * as a hung test and, in a browser, as a page that renders correctly while
+   * burning a core.
+   */
+  const runs = useMemo(() => withFrames(data?.runs, framed), [data?.runs, framed])
   const throughput = useThroughput(runs)
 
   const anyRunning = (runs ?? []).some((run) => run.status === 'running')
-  const live = (runs ?? []).filter((run) => run.status === 'running' || run.status === 'failed')
-  const neverBuilt = data !== undefined && data.runs.length === 0
 
-  const runFor = (phase: string): ImportRun | undefined => (runs ?? []).find((run) => run.dataset === phase)
+  const waiting = stillWaiting(askedAt, runs)
+  const live = (runs ?? []).filter((run) => run.status === 'running' || run.status === 'failed')
+  // Read through the merge, or the first frame of a first-ever import leaves the
+  // screen insisting the catalog has never been built while a run streams past.
+  const neverBuilt = data !== undefined && (runs ?? []).length === 0
+
+  /**
+   * The run a phase's row speaks for. Matched on `phase`, **never on
+   * `dataset`** — see `labelFor` for what that cost — and through
+   * `representativeOf`, because a phase owns one *or more* datasets.
+   */
+  const runFor = (phase: string): ImportRun | undefined =>
+    representativeOf((runs ?? []).filter((run) => run.phase === phase))
 
   /**
    * The only honest duration available: what this deployment actually took,
-   * read off `started_at` and `finished_at` of a run that finished. Anything
-   * else is `NOT_MEASURED` — patterns.md §5 forbids an invented range.
+   * summed across every dataset the phase writes. Anything else is
+   * `NOT_MEASURED` — patterns.md §5 forbids an invented range.
+   *
+   * **Summed, and over all of them.** `imdb` writes `title.basics` then
+   * `title.ratings`; reading the duration off the single run the phase's row
+   * summarises reports one dataset's clock as the phase's, and on the shipped
+   * deployment that read **0 s** — `title.ratings` resumed at head while
+   * `title.basics` took five seconds. A min-start-to-max-finish span is the
+   * other obvious shape and is worse: the two datasets need not have run in
+   * one sitting, so the span reports the gap *between* two imports as the time
+   * an import took.
+   *
+   * Every dataset must have finished, or the number would describe a subset of
+   * the work while claiming to describe the phase.
    */
   const measuredFor = (phase: string): string => {
-    const run = runFor(phase)
-    if (!run || run.finished_at === null) return NOT_MEASURED
-    const started = Date.parse(run.started_at)
-    const finished = Date.parse(run.finished_at)
-    if (Number.isNaN(started) || Number.isNaN(finished)) return NOT_MEASURED
-    return `${formatDuration(finished - started)} on this deployment`
+    const owned = (runs ?? []).filter((run) => run.phase === phase)
+    if (owned.length === 0) return NOT_MEASURED
+    let total = 0
+    for (const run of owned) {
+      if (run.finished_at === null) return NOT_MEASURED
+      const started = Date.parse(run.started_at)
+      const finished = Date.parse(run.finished_at)
+      if (Number.isNaN(started) || Number.isNaN(finished)) return NOT_MEASURED
+      total += finished - started
+    }
+    return `${formatDuration(total)} on this deployment`
   }
 
   const trigger = (target: PhaseSpec | 'all'): void => {
@@ -346,6 +501,11 @@ export default function Bootstrap() {
           ...(coalesces === undefined ? {} : { coalesced: coalesces }),
           destination: { label: 'Watch it under Running now', to: ROUTES.bootstrap },
         })
+        // The queue has it and nothing is running yet. With the stream live the
+        // opening frame is what arrives next and this is never read; with it
+        // down, this is what keeps the fallback asking across the window a
+        // running-only gate cannot open in.
+        setAskedAt(Date.now())
       },
     })
   }
@@ -369,18 +529,27 @@ export default function Bootstrap() {
           <Badge tone="neutral" mono>
             {count(data?.titles ?? 0)} titles
           </Badge>
+          <LiveIndicator state={stream.state} />
           <Badge
-            tone={anyRunning ? 'info' : 'neutral'}
-            icon={<Icon name={anyRunning ? 'radio' : 'circle-dashed'} />}
+            tone={streamIsLive ? 'good' : anyRunning || waiting ? 'info' : 'neutral'}
+            icon={<Icon name={streamIsLive || anyRunning ? 'radio' : 'circle-dashed'} />}
           >
-            {anyRunning ? 'polling every 10 s while something runs' : 'idle — not polling'}
+            {streamIsLive
+              ? 'live — not polling'
+              : anyRunning
+                ? 'polling every 10 s while something runs'
+                : waiting
+                  ? 'polling until the worker picks it up'
+                  : 'idle — not polling'}
           </Badge>
           <span style={{ font: 'var(--text-body-xs)', color: 'var(--text-muted)' }}>
-            Status costs about 0.33 s and is uncached, so it is only polled while a run is live.
+            {streamIsLive
+              ? 'Progress arrives on /events, so nothing is polled. Status costs about 0.33 s and is uncached.'
+              : 'The event stream is down, so status is polled instead — about 0.33 s a call, uncached.'}
           </span>
         </div>
 
-        {status.isPending && (
+        {status.isPending && (runs ?? []).length === 0 && (
           <SkeletonRegion busy label="Loading bootstrap status …">
             <Skeleton shape="table" count={6} />
           </SkeletonRegion>
@@ -434,7 +603,15 @@ export default function Bootstrap() {
           </div>
         )}
 
-        {data && !neverBuilt && (
+        {/*
+          Gated on the *runs*, not on `data`. A frame can arrive before the
+          first `GET /admin/bootstrap/status` answers — measured at **2.4 s
+          while a bootstrap was running**, and the thing making it slow is the
+          phase the operator has just started — so requiring `data` here meant
+          the one section that had something to say waited on the three that
+          did not. "Nothing happens right away" was the report.
+        */}
+        {(runs ?? []).length > 0 && !neverBuilt && (
           <OpsSection
             title="Running now"
             note="Six real numbers and a position. There is no total on the wire, so there is no bar to fill."
@@ -447,7 +624,7 @@ export default function Bootstrap() {
                     <CursorProgress
                       key={run.dataset}
                       dataset={run.dataset}
-                      phase={labelFor(run.dataset)}
+                      phase={labelFor(run)}
                       status={run.status === 'failed' ? 'failed' : 'running'}
                       rowsSeen={run.rows_seen}
                       rowsWritten={run.rows_written}
@@ -464,8 +641,9 @@ export default function Bootstrap() {
               </div>
             ) : (
               <StateBlock kind="empty" title="Nothing is running" meta="no run reports status: running">
-                Every recorded run has finished. Nothing is being polled — status is uncached and costs about
-                0.33 s, so it is only asked for while a run is live.
+                {streamIsLive
+                  ? 'Every recorded run has finished. A run that starts announces itself on /events, so this fills in without a reload and without polling.'
+                  : 'Every recorded run has finished. The event stream is down, so this is polled rather than pushed — status is uncached and costs about 0.33 s a call.'}
               </StateBlock>
             )}
           </OpsSection>

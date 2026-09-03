@@ -89,13 +89,38 @@ export interface SyncProgress {
 /**
  * Operator surfaces. **No percent, no denominator** — `position` is the resume
  * point and is printed verbatim in mono (patterns.md §8).
+ *
+ * **This is the whole run, not a cursor, and that is what makes the screen
+ * drivable.** Every field is `ImportRunResponse`'s, spelled identically, so a
+ * frame patches a status document with no translation. A leaner payload only
+ * says *something moved*, and answering each one with
+ * `GET /admin/bootstrap/status` — ~0.33 s, uncached, four scans of `titles` —
+ * is strictly worse than the poll it replaces.
+ *
+ * **Two phases because they are two facts.** `requested_phase` is what the
+ * operator pressed (`all` for a full run), so it is how a surface tells its own
+ * request's frames from somebody else's. `phase` is the **step that owns the
+ * dataset** — the six-member vocabulary this screen has a row for — and it is
+ * `null` for a dataset the server's map does not hold. They differ on every
+ * `--phase all` run.
+ *
+ * Every field is nullable because the wire is: a frame whose JSON is missing a
+ * key, or carries the wrong type for one, is indistinguishable from a frame the
+ * bus dropped, and §7 requires the surface to be correct for that anyway.
  */
 export interface BootstrapProgress {
   readonly dataset: string | null
   readonly phase: string | null
+  readonly requested_phase: string | null
+  readonly status: string | null
+  readonly revision: string | null
   readonly rows_seen: number | null
   readonly rows_written: number | null
   readonly position: string | number | null
+  readonly error: string | null
+  readonly started_at: string | null
+  readonly heartbeat_at: string | null
+  readonly finished_at: string | null
 }
 
 /** Discard local state, refetch, and say so in the connection indicator. */
@@ -268,9 +293,16 @@ export function parseFrame(name: EventName, event: Event): UsherEvent | null {
         payload: {
           dataset: str(data, 'dataset'),
           phase: str(data, 'phase'),
+          requested_phase: str(data, 'requested_phase'),
+          status: str(data, 'status'),
+          revision: str(data, 'revision'),
           rows_seen: num(data, 'rows_seen'),
           rows_written: num(data, 'rows_written'),
           position: str(data, 'position') ?? num(data, 'position'),
+          error: str(data, 'error'),
+          started_at: str(data, 'started_at'),
+          heartbeat_at: str(data, 'heartbeat_at'),
+          finished_at: str(data, 'finished_at'),
         },
       }
     case 'resync_required':

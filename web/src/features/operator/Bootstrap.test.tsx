@@ -1,13 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { ToastProvider } from '@/patterns'
 import { ToastStack } from '@/features/shared/ToastStack'
-import { renderApp, screen, within } from '@/test/render'
+import { renderApp, screen, waitFor, within } from '@/test/render'
+import { installFakeEventSource } from '@/test/sse'
 import { server } from '@/test/server'
 import { expectNoViolations } from '@/test/axe'
 import {
   bootstrapStatus,
   bootstrapStatusEmpty,
+  importCompleted,
   importRunning,
   problemHandler,
   sourceUnavailable,
@@ -17,6 +19,17 @@ import { TRACE_ID } from '@/test/fixtures/ids'
 import { TEMPO_URL, deadLinks, traceLinks, withTempo } from '@/test/trace'
 import { ROUTES } from '@/app/routes'
 import BootstrapScreen from './Bootstrap'
+
+/**
+ * The toast region, never the whole document. The screen renders a
+ * `LiveIndicator`, whose §7 announcement is its own `role="status"` live
+ * region, so a bare `findByRole('status')` is ambiguous — and that ambiguity is
+ * the component working as specified rather than a collision to design around.
+ * Same helper `Sources.test.tsx` already uses.
+ */
+function toasts(): HTMLElement {
+  return screen.getByRole('region', { name: 'Notifications' })
+}
 
 function render() {
   return renderApp(
@@ -174,7 +187,7 @@ describe('Bootstrap', () => {
 
     await user.click(confirm)
 
-    const toast = await screen.findByRole('status')
+    const toast = await within(toasts()).findByRole('status')
     expect(toast.textContent).toContain('Queued')
     expect(toast.textContent).toContain('Queued the crosswalk phase')
     expect(within(toast).getByText('key bootstrap:crosswalk')).toBeInTheDocument()
@@ -196,6 +209,49 @@ describe('Bootstrap', () => {
 
     // movielens: 2026-08-17T23:04:12Z → 23:19:38Z is 15 m 26 s.
     expect(await screen.findByText(/15 m 26 s on this deployment/)).toBeInTheDocument()
+  })
+
+  it('measures a phase as the work all its datasets did, not just the last one', async () => {
+    /**
+     * `imdb` writes `title.basics` then `title.ratings`, and `tmdb-ids` writes
+     * one file per kind. Reading the duration off the row a phase's *summary*
+     * happens to point at reports one dataset's clock as the phase's: on the
+     * shipped deployment `title.basics` took 5 s and `title.ratings` resumed at
+     * head in under a second, and the screen said **"measured 0 s"**.
+     *
+     * Summed rather than min-start-to-max-finish, because the two datasets need
+     * not have run in the same sitting — a span would report the gap between
+     * two imports as the time an import took.
+     */
+    server.use(
+      http.get('/admin/bootstrap/status', () =>
+        HttpResponse.json({
+          ...bootstrapStatus,
+          runs: [
+            {
+              ...importCompleted,
+              dataset: 'imdb.title.basics',
+              phase: 'imdb',
+              started_at: '2026-08-18T02:00:00Z',
+              finished_at: '2026-08-18T02:00:41Z',
+              heartbeat_at: '2026-08-18T02:00:41Z',
+            },
+            {
+              ...importCompleted,
+              dataset: 'imdb.title.ratings',
+              phase: 'imdb',
+              started_at: '2026-08-18T02:00:41Z',
+              finished_at: '2026-08-18T02:01:03Z',
+              heartbeat_at: '2026-08-18T02:01:03Z',
+            },
+          ],
+        }),
+      ),
+    )
+    render()
+
+    // 41 s + 22 s, not the 22 s of whichever row is summarised.
+    expect(await screen.findByText(/1 m 03 s on this deployment/)).toBeInTheDocument()
   })
 
   it('prints genome coverage as counts and as a ratio whose denominator is named', async () => {
@@ -284,5 +340,311 @@ describe('Bootstrap', () => {
       expect(traceLinks(container)).toHaveLength(0)
       expect(deadLinks(container)).toHaveLength(0)
     })
+  })
+})
+
+/**
+ * The screen is driven by `bootstrap.progress`, and these are the cases that
+ * distinguish that from the poll it replaced. The fake `EventSource` is
+ * installed before `render()` in every one of them, because `openEventStream`
+ * constructs its socket in the mount effect and a fake installed afterwards is
+ * a fake nothing ever uses.
+ */
+describe('Bootstrap — live rather than polled', () => {
+  let sse: ReturnType<typeof installFakeEventSource>
+
+  beforeEach(() => {
+    sse = installFakeEventSource()
+  })
+
+  afterEach(() => {
+    sse.restore()
+  })
+
+  /** A `runs` array in which nothing is running — the state a trigger starts from. */
+  const settled: BootstrapStatusResponse = {
+    ...bootstrapStatus,
+    runs: [{ ...importCompleted }],
+  }
+
+  function frame(over: Partial<Record<string, unknown>> = {}) {
+    return {
+      dataset: 'imdb.title.basics',
+      phase: 'imdb',
+      requested_phase: 'all',
+      status: 'running',
+      revision: '2026-08-26',
+      position: 418_002,
+      rows_seen: 418_002,
+      rows_written: 411_774,
+      error: null,
+      started_at: new Date(Date.now() - 60_000).toISOString(),
+      heartbeat_at: new Date().toISOString(),
+      finished_at: null,
+      ...over,
+    }
+  }
+
+  it('reaches the running state after a trigger with no reload, which is the bug this replaced', async () => {
+    /**
+     * The defect, as a case. `POST /admin/bootstrap/{phase}` answers 202 before
+     * the worker has claimed the job, so the single refetch the mutation
+     * invalidates still reports nothing running — and a `refetchInterval` gated
+     * on "is something running" then evaluates `false` and never fires again.
+     * Measured on a real deployment: one status read after the press and then
+     * **91 seconds of silence** while all eight datasets imported and finished.
+     *
+     * Nothing here advances a timer, and that is the point: the screen must
+     * arrive at the running state on the strength of a frame alone.
+     */
+    server.use(http.get('/admin/bootstrap/status', () => HttpResponse.json(settled)))
+    const { user } = render()
+
+    await screen.findByText('Nothing is running')
+    await user.click(await screen.findByRole('button', { name: 'Run all phases' }))
+    await user.click(screen.getByRole('button', { name: 'Start all phases' }))
+    await within(toasts()).findByRole('status')
+
+    sse.latest().open()
+    sse.latest().emit('bootstrap.progress', frame())
+
+    expect(await screen.findByText('IMDb basics')).toBeInTheDocument()
+    expect(screen.queryByText('Nothing is running')).toBeNull()
+    expect(await screen.findByText('418,002')).toBeInTheDocument()
+  })
+
+  it('patches the card from the frame rather than answering it with a request', async () => {
+    /**
+     * The whole reason the payload is the whole run. A frame that only said
+     * *something moved* would buy a `GET /admin/bootstrap/status` per committed
+     * batch — ~0.33 s, uncached, four scans of `titles`, 61 of them for
+     * `--phase imdb` alone — which is strictly worse than the 10 s poll.
+     *
+     * Counting the requests is the assertion; asserting the number changed is
+     * not, because a refetch would change it too.
+     */
+    let reads = 0
+    server.use(
+      http.get('/admin/bootstrap/status', () => {
+        reads += 1
+        return HttpResponse.json({ ...settled, runs: [{ ...importRunning, rows_seen: 1 }] })
+      }),
+    )
+    render()
+
+    await screen.findByText('1', { selector: '.u-cursor__v' })
+    const afterFirstPaint = reads
+
+    sse.latest().open()
+    sse.latest().emit('bootstrap.progress', frame({ rows_seen: 999_111 }))
+
+    expect(await screen.findByText('999,111')).toBeInTheDocument()
+    expect(reads).toBe(afterFirstPaint)
+  })
+
+  it('refetches once on a terminal frame, because titles and the genome are not on it', async () => {
+    /**
+     * The one refetch that survives, and it is bounded to a transition rather
+     * than to a batch. `bootstrap.progress` carries the run and nothing else —
+     * `titles`, the genome counts and the vocabulary all move when a phase
+     * finishes and none of them is on the wire.
+     */
+    let reads = 0
+    server.use(
+      http.get('/admin/bootstrap/status', () => {
+        reads += 1
+        return HttpResponse.json(settled)
+      }),
+    )
+    render()
+
+    await screen.findByText('Nothing is running')
+    const afterFirstPaint = reads
+
+    sse.latest().open()
+    sse.latest().emit('bootstrap.progress', frame({ rows_seen: 12 }))
+    expect(await screen.findByText('12')).toBeInTheDocument()
+    expect(reads).toBe(afterFirstPaint)
+
+    sse
+      .latest()
+      .emit('bootstrap.progress', frame({ status: 'completed', finished_at: new Date().toISOString() }))
+    await waitFor(() => expect(reads).toBe(afterFirstPaint + 1))
+  })
+
+  it('actually stops polling while live, and actually resumes when the stream drops', async () => {
+    /**
+     * The case with teeth, and the one the copy above cannot be. A screen whose
+     * badge reads "live — not polling" while a 10 s interval keeps firing
+     * passes every assertion about the sentence — the claim and the behaviour
+     * are separate facts and only this one is about the behaviour.
+     *
+     * Both directions in one case deliberately: "no requests happened" is also
+     * what a broken query produces, so the second half is the control that
+     * makes the first half mean something.
+     */
+    vi.useFakeTimers()
+    try {
+      let reads = 0
+      server.use(
+        http.get('/admin/bootstrap/status', () => {
+          reads += 1
+          return HttpResponse.json({ ...settled, runs: [{ ...importRunning }] })
+        }),
+      )
+      render()
+
+      await vi.waitFor(() => expect(reads).toBeGreaterThan(0))
+      sse.latest().open()
+      await vi.waitFor(() => expect(screen.queryByText('live — not polling')).not.toBeNull())
+
+      const whileLive = reads
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(reads).toBe(whileLive)
+
+      sse.latest().fail()
+      await vi.waitFor(() => expect(screen.queryByText(/polling every 10 s/)).not.toBeNull())
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(reads).toBeGreaterThan(whileLive)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a frame that arrived before the first status response', async () => {
+    /**
+     * Reported from a real deployment: *"after I hit run, nothing happens right
+     * away on the UI — something flashed and went away."*
+     *
+     * `GET /admin/bootstrap/status` is uncached and re-reads `titles` four
+     * times. Measured at **2.4 s** on the shipped catalog *while a bootstrap
+     * was running* — against the 0.33 s an idle box gives — so the window
+     * between mount and first data is widest exactly when a phase has just been
+     * triggered, because the thing widening it is the phase. Every frame that
+     * lands in it used to be dropped on the floor, because the patch bailed out
+     * when the cache held nothing to merge into.
+     */
+    let release: (() => void) | null = null
+    server.use(
+      http.get('/admin/bootstrap/status', async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return HttpResponse.json(settled)
+      }),
+    )
+    render()
+
+    await screen.findByText('Loading bootstrap status …')
+    sse.latest().open()
+    sse.latest().emit('bootstrap.progress', frame({ rows_seen: 4_242 }))
+
+    // **Asserted while the request is still open**, which is the whole case.
+    // Asserting after the release cannot fail: frames are held in state, so one
+    // dropped from the pre-response window still lands the moment the response
+    // does — the first draft of this case passed against the defect it was
+    // written for, and a mutation sweep is what said so.
+    expect(await screen.findByText('4,242')).toBeInTheDocument()
+    expect(release).not.toBeNull()
+
+    release!()
+    expect(await screen.findByText('1,272,869 titles')).toBeInTheDocument()
+    expect(screen.getByText('4,242')).toBeInTheDocument()
+  })
+
+  it('does not let a refetch already in flight erase a newer frame', async () => {
+    /**
+     * The other half of the same report, and the one that makes a card *flash*
+     * rather than never appear.
+     *
+     * A terminal frame refetches, because `titles` and the genome are not on
+     * the wire. That refetch takes seconds under bootstrap load, and
+     * `--phase all` finishes several datasets inside one second — measured on
+     * the shipped deployment: `imdb.title.basics` completed at 02:36:08, and
+     * `imdb.title.ratings` both started and completed in that same second while
+     * `imdb.credit_names` opened. So a request issued *before* the newest frame
+     * resolves *after* it, carrying a snapshot that predates it.
+     *
+     * Writing frames into the query cache made that a clobber: React Query
+     * replaces the whole entry when a fetch settles and knows nothing of a
+     * manual patch. The card appeared and vanished, which is what was seen.
+     */
+    let served = 0
+    let release: (() => void) | null = null
+    server.use(
+      http.get('/admin/bootstrap/status', async () => {
+        served += 1
+        // The second read is the terminal frame's refetch. Hold it open so the
+        // next frame provably lands while it is still in flight, rather than
+        // racing a timer and hoping.
+        if (served === 2) {
+          await new Promise<void>((resolve) => {
+            release = resolve
+          })
+        }
+        // A distinguishable `titles` per response, because `served` reaching 2
+        // says the request was *issued* and this case is about what happens
+        // when it *lands*. Waiting on the counter asserts before the thing
+        // under test has happened — which is how the first draft of this case
+        // passed against the defect it was written for.
+        return HttpResponse.json({ ...settled, titles: served })
+      }),
+    )
+    render()
+
+    await screen.findByText('Nothing is running')
+
+    sse.latest().open()
+    // Terminal frame for one dataset: this is what starts the slow refetch.
+    sse
+      .latest()
+      .emit('bootstrap.progress', frame({ status: 'completed', finished_at: new Date().toISOString() }))
+    await waitFor(() => expect(release).not.toBeNull())
+
+    // A different dataset starts while that request is still open.
+    sse
+      .latest()
+      .emit(
+        'bootstrap.progress',
+        frame({ dataset: 'imdb.credit_names', phase: 'credit-names', rows_seen: 777_000 }),
+      )
+    expect(await screen.findByText('777,000')).toBeInTheDocument()
+
+    release!()
+
+    // The premise: the stale snapshot has actually landed and been rendered.
+    // Only then is there anything to assert about what it did to the runs.
+    expect(await screen.findByText('2 titles')).toBeInTheDocument()
+
+    // It must carry `titles` and the genome — that is what it was fetched for —
+    // and leave the newer run alone.
+    expect(screen.getByText('777,000')).toBeInTheDocument()
+    expect(screen.queryByText('Nothing is running')).toBeNull()
+  })
+
+  it('says it is live and not polling, and says the opposite when the stream is down', async () => {
+    /**
+     * patterns.md §7 requires the UI to be fully correct if zero frames ever
+     * arrive, and §8 requires the fallback to be *visible*: with `usher work` in
+     * its own container every frame reaches a `NullEventPublisher` and no client
+     * is ever told. A fallback nobody can see is indistinguishable from a screen
+     * that has quietly stopped updating.
+     */
+    server.use(
+      http.get('/admin/bootstrap/status', () =>
+        HttpResponse.json({ ...settled, runs: [{ ...importRunning }] }),
+      ),
+    )
+    render()
+
+    sse.latest().open()
+    expect(await screen.findByText('live — not polling')).toBeInTheDocument()
+    expect(screen.queryByText(/polling every 10 s/)).toBeNull()
+
+    // A dropped stream is the split deployment and a restarting backend alike,
+    // and the fallback has to be nameable in both.
+    sse.latest().fail()
+    expect(await screen.findByText(/polling every 10 s/)).toBeInTheDocument()
+    expect(screen.queryByText('live — not polling')).toBeNull()
   })
 })

@@ -1,8 +1,10 @@
 """Bookkeeping for the bulk-dataset importers (PRD 04, Phases 0-2)."""
 
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Final
 
 from pydantic import AwareDatetime, Field
@@ -104,6 +106,43 @@ FULL_SEQUENCE: Final[tuple[BootstrapPhase, ...]] = (
 #: than a phase that silently never runs.
 PHASE_ALIASES: Final[frozenset[BootstrapPhase]] = frozenset(
     {BootstrapPhase.ALL, BootstrapPhase.RATINGS}
+)
+
+#: Which phase each `BulkDataset` belongs to, keyed by the dataset's own
+#: `name` -- the string that is stored in `import_runs.dataset` and is the only
+#: identity a checkpoint has.
+#:
+#: **A phase is not a dataset and the two vocabularies are not the same size.**
+#: `imdb` writes two (`title.basics` then `title.ratings`, both inside one
+#: `bulk_load_window`) and `tmdb-ids` writes two (one file per `TitleKind`), so
+#: there are eight datasets against six steps and no way to derive one name from
+#: the other. Anything that has a phase and needs the run -- a console row, an
+#: operator asking "did `aliases` finish" -- has to come through here.
+#:
+#: **Declared rather than derived, for `FULL_SEQUENCE`'s reason and one more.**
+#: `domain/` sits below `adapters/` in the layering (PRD 01), so this module
+#: cannot read `BulkDataset.name` even though that property is the authority;
+#: and the values are not reachable from the dispatch either, because
+#: `run_bootstrap`'s `--phase all` arm constructs every dataset under the single
+#: phase `all`, which owns nothing. `tests/unit/test_domain_bootstrap.py`
+#: constructs every dataset and asserts set equality **in both directions**, so
+#: a dataset added to `adapters/bulk/` without an entry here is a red rather
+#: than a run that reports a phase of `None` on a screen built to show one.
+DATASET_PHASES: Final[Mapping[str, BootstrapPhase]] = MappingProxyType(
+    {
+        "imdb.title.basics": BootstrapPhase.IMDB,
+        # `imdb`, not `ratings`. `RATINGS` is an alias that re-imports this one
+        # dataset alone (ADR-0040); the *step* that writes it during a full run
+        # is `imdb`, and a console row keyed on the alias would never light up
+        # for a `--phase all`.
+        "imdb.title.ratings": BootstrapPhase.IMDB,
+        "imdb.credit_names": BootstrapPhase.CREDIT_NAMES,
+        "imdb.title.akas": BootstrapPhase.ALIASES,
+        "tmdb.ids.movie": BootstrapPhase.TMDB_IDS,
+        "tmdb.ids.series": BootstrapPhase.TMDB_IDS,
+        "wikidata.crosswalk": BootstrapPhase.CROSSWALK,
+        "movielens.genome": BootstrapPhase.MOVIELENS,
+    }
 )
 
 

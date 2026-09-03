@@ -44,6 +44,7 @@ import {
 } from '@/design-system'
 import { BackendWork, OpsHeader, OpsSection, Tri } from '@/app/shells/OperatorShell'
 import { ROUTES } from '@/app/routes'
+import { labelFor } from './phases'
 import { useViewport } from '@/app/useViewport'
 import {
   UsherProblem,
@@ -399,7 +400,10 @@ export default function Overview() {
                   <CursorProgress
                     key={run.dataset}
                     dataset={run.dataset}
-                    phase="bootstrap"
+                    // The phase that owns the dataset, not the literal word
+                    // "bootstrap": this card sits beside a Sources one, and
+                    // "which of the six is this" is the whole of what it adds.
+                    phase={labelFor(run)}
                     status="running"
                     rowsSeen={run.rows_seen}
                     rowsWritten={run.rows_written}

@@ -51,8 +51,12 @@ describe('Overview', () => {
     expect(await screen.findByText('Ready')).toBeInTheDocument()
     expect(screen.getByText(/HTTP 200/)).toBeInTheDocument()
 
-    // The cursor run, and the sentence that says there is no estimate.
-    expect(await screen.findByText('imdb')).toBeInTheDocument()
+    // The cursor run, and the sentence that says there is no estimate. The
+    // dataset is the wire name and the caption beside it is the phase that owns
+    // it — `imdb.title.basics` is written by `imdb`, and the two are different
+    // vocabularies rather than two spellings of one.
+    expect(await screen.findByText('imdb.title.basics')).toBeInTheDocument()
+    expect(screen.getByText(/^IMDb basics · rev /)).toBeInTheDocument()
     expect(
       screen.getByText('No completion estimate — the server reports a cursor, not a percentage.'),
     ).toBeInTheDocument()

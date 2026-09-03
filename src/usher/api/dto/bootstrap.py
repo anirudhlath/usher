@@ -29,7 +29,12 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from usher.domain.bootstrap import ImportRun, ImportRunStatus
+from usher.domain.bootstrap import (
+    DATASET_PHASES,
+    BootstrapPhase,
+    ImportRun,
+    ImportRunStatus,
+)
 from usher.domain.jobs import JobKind
 from usher.ports.repository import GenomeCoverage
 from usher.services.bootstrap import BootstrapReport, VocabularyState, VocabularyVerdict
@@ -64,9 +69,24 @@ class ImportRunResponse(BaseModel):
     whose process died — `import_runs` carries no `BEFORE UPDATE` trigger, so
     this column is written by the importer on every committed batch and by
     nothing else.
+
+    **`phase` is derived here and is not a column**, which is the one field on
+    this model that is not `import_runs` read back. A client's vocabulary is
+    `BootstrapPhase` — it is what `POST /admin/bootstrap/{phase}` takes and
+    what an operator presses — and `dataset` is a checkpoint's identity, of
+    which there are eight against six phases. With only `dataset` on the wire a
+    client has nothing to join the two by, and the obvious guess is wrong in a
+    way that looks right: comparing `run.dataset` to a phase value matches
+    **none** of the eight names, so every phase reads "never run" on a fully
+    imported catalog. Storing it instead would record the phase that was
+    *requested*, which for the run an operator actually starts is `all` — a
+    value that owns no dataset. `None` for a name `DATASET_PHASES` does not
+    hold, never a fallback: a row written by a build with a dataset this one
+    lacks is honestly phase-less, and an invented phase cannot be un-believed.
     """
 
     dataset: str
+    phase: BootstrapPhase | None
     status: ImportRunStatus
     revision: str
     position: int
@@ -81,6 +101,7 @@ class ImportRunResponse(BaseModel):
     def of(cls, run: ImportRun) -> "ImportRunResponse":
         return cls(
             dataset=run.dataset,
+            phase=DATASET_PHASES.get(run.dataset),
             status=run.status,
             revision=run.revision,
             position=run.position,

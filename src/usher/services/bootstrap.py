@@ -19,7 +19,12 @@ from enum import StrEnum
 from loguru import logger
 from opentelemetry import metrics, trace
 
-from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
+from usher.domain.bootstrap import (
+    DATASET_PHASES,
+    BootstrapPhase,
+    ImportRun,
+    ImportRunStatus,
+)
 from usher.ports.bulk import BulkCursor, BulkDataset
 from usher.ports.errors import PortDataMalformed, RepositoryConflict, UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
@@ -322,6 +327,22 @@ class BootstrapService:
                     # that branch performs for case 2.
                     run = await self._concede_to_other_owner(dataset.name, resolved, exc, span)
                 else:
+                    # **The opening commit, and it is not bookkeeping.**
+                    # `start()` flushes and does not commit (the port says so
+                    # in as many words), so until some later `_commit()`
+                    # carries it, the `RUNNING` checkpoint is invisible to
+                    # every other connection -- including the one answering
+                    # `GET /admin/bootstrap/status`. `_drain` commits after
+                    # its first batch, which for `wikidata.crosswalk` is a
+                    # SPARQL round trip away and for a dataset resuming at
+                    # head never arrives at all. So an operator who pressed
+                    # Run was told nothing was running, and was told it
+                    # truthfully: from outside this transaction, nothing was.
+                    # One commit per dataset -- eight for a full run, against
+                    # the thousands `_drain` already pays -- buys a row that
+                    # is readable the moment it exists.
+                    await self._commit()
+                    await self._publish_progress(run)
                     resume_from = (
                         BulkCursor(
                             revision=resolved, position=run.position, rows_seen=run.rows_seen
@@ -364,6 +385,11 @@ class BootstrapService:
                 )
                 await self._runs.save(run)
                 await self._commit()
+                # After the commit, exactly as the batch frames are: a
+                # `FAILED` run is a normal, designed state that a screen
+                # relabels "Resume", and it is the transition a client is
+                # least able to infer from silence.
+                await self._publish_progress(run)
                 _failures.add(1, {"dataset": dataset.name, "kind": type(exc).__name__})
                 span.set_attribute("usher.failed", True)
                 logger.error(
@@ -471,7 +497,8 @@ class BootstrapService:
         return await self._finish(run)
 
     async def _publish_progress(self, run: ImportRun) -> None:
-        """One `bootstrap.progress` per committed batch, scoped to no title.
+        """One `bootstrap.progress` per committed batch **and one per
+        transition**, scoped to no title.
 
         **Per batch rather than per run**, because an admin UI's progress bar
         is the whole point of the event and one at the end is a bar that jumps
@@ -480,6 +507,33 @@ class BootstrapService:
         job's registration hands this service the process bus rather than
         `JobWorker`'s deferred buffer (`composition.build_worker` carries that
         argument in full).
+
+        ⚠️ **Per batch was *only* per batch until this, and that made the
+        event undrivable.** `import_dataset` has three transitions a client
+        cares about -- the run starting, finishing, and failing -- and none of
+        them is a batch, so none of them raised a frame. The consequences were
+        both real and both invisible from inside this module: a screen driven
+        by frames showed a card the moment the first batch committed and then
+        had no way to ever clear it, and a dataset that resumed at head
+        committed no batch at all, so it ran to completion having said
+        nothing. `_finish` and the failure arm now publish, and so does the
+        opening -- see `import_dataset` for why that one also needed a commit
+        it did not have.
+
+        **The payload is the whole run, not a cursor**, which is what lets a
+        client render from the frame instead of answering it with a
+        request. `GET /admin/bootstrap/status` costs ~0.33 s and is uncached,
+        so a frame that only says "something moved" buys a refetch per batch
+        -- strictly worse than the poll it was meant to replace. Every field
+        here is `ImportRunResponse`'s, spelled identically, so a client
+        patching a status document with a frame never has to translate.
+
+        **`phase` is the step that owns `dataset`; `requested_phase` is what
+        was asked for.** They differ on every `--phase all` run, and only the
+        first is the six-member vocabulary a console has a row for. Read from
+        `DATASET_PHASES` rather than from `self._phase`, which is `all` for
+        exactly the run where the distinction matters -- and `None`, never a
+        fallback, for a dataset the map does not hold.
 
         **Scoped to no title**, which is what makes PRD 07's *"Admin UI only"*
         true rather than advisory: a `?titles=` subscriber never sees one, and
@@ -491,15 +545,25 @@ class BootstrapService:
         PRD 07's payload column is corrected rather than satisfied by a
         fraction invented from a byte offset.
         """
+        owner = DATASET_PHASES.get(run.dataset)
         await self._events.publish(
             ClientEvent(
                 kind=ClientEventKind.BOOTSTRAP_PROGRESS,
                 data={
                     "dataset": run.dataset,
-                    "phase": self._phase.value,
+                    "phase": owner.value if owner is not None else None,
+                    "requested_phase": self._phase.value,
+                    "status": run.status.value,
+                    "revision": run.revision,
+                    "position": run.position,
                     "rows_seen": run.rows_seen,
                     "rows_written": run.rows_written,
-                    "position": run.position,
+                    "error": run.error,
+                    "started_at": run.started_at.isoformat(),
+                    "heartbeat_at": run.heartbeat_at.isoformat(),
+                    "finished_at": (
+                        run.finished_at.isoformat() if run.finished_at is not None else None
+                    ),
                 },
             )
         )
@@ -511,6 +575,12 @@ class BootstrapService:
         )
         await self._runs.save(run)
         await self._commit()
+        # The frame that closes the run. Without it the last thing a client
+        # hears about a dataset is a batch, which is indistinguishable from a
+        # run that stalled -- and `heartbeat_at` older than 120 s is what a
+        # screen turns into "Stalled?", so the silence does not merely fail to
+        # inform, it eventually misinforms.
+        await self._publish_progress(run)
         logger.info(
             "{dataset} import complete: {seen} rows seen, {written} written",
             dataset=run.dataset,
