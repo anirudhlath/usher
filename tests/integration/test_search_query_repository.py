@@ -18,6 +18,8 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.contract.search_query_repository_contract import (
+    ReferenceCounts,
+    ReferenceRowCounts,
     SearchQueryLedger,
     SearchQueryRepositoryContract,
     StoredSearchQuery,
@@ -64,6 +66,24 @@ class PostgresSearchQueryLedger(SearchQueryLedger):
         return int(found.scalar_one())
 
 
+class PostgresReferenceCounts(ReferenceCounts):
+    """`count(*)` on the two tables a `search_queries` row points at.
+
+    This is the arm where the leaf-delete claim is load-bearing: both foreign
+    keys are real here, so a prune spelled through `users` or `titles` would
+    move these numbers. Whole-table counts rather than a probe for the two
+    seeded ids, because the claim is that nothing at all went.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def read(self) -> ReferenceRowCounts:
+        users = await self._session.execute(text("SELECT count(*) FROM users"))
+        titles = await self._session.execute(text("SELECT count(*) FROM titles"))
+        return ReferenceRowCounts(users=int(users.scalar_one()), titles=int(titles.scalar_one()))
+
+
 async def _seed_user(session: AsyncSession) -> uuid.UUID:
     user_id = new_id()
     await session.execute(
@@ -93,6 +113,10 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
     @pytest.fixture
     def repository(self, session: AsyncSession) -> PostgresSearchQueryRepository:
         return PostgresSearchQueryRepository(session)
+
+    @pytest.fixture
+    def counts(self, session: AsyncSession) -> PostgresReferenceCounts:
+        return PostgresReferenceCounts(session)
 
     @pytest.fixture
     def ledger(self, session: AsyncSession) -> PostgresSearchQueryLedger:

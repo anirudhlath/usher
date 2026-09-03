@@ -44,10 +44,20 @@ household write attribution onto another's row.
 own positive control, because a repository that stopped writing at all
 passes the negative half.
 
+**`oldest()` and `prune()` are M10's J5 and are contract rather than
+storage.** `SearchQueryRetention.last_done()` is built on `min(at)` --
+ADR-0046's no-state design makes every registration read a completion time
+off the artefact it maintains -- so `max` in place of `min`, an empty table
+inventing an age, and a naive datetime are all failures of the *scheduler*
+one layer up rather than of this table. `prune`'s `<`-not-`<=` boundary and
+its exact return value are contract for the same reason: the boundary is one
+character and the count is the chunk loop's only terminator.
+
 Everything else here is storage -- did the row land, did it land once, did
 it land with every column distinct from every other.
 
-Subclass and provide `repository`, `ledger`, `user_id` (naming a household
+Subclass and provide `repository`, `ledger`, `counts` (the two tables a row
+points *at*, for the leaf-delete case), `user_id` (naming a household
 that actually exists, for an implementation with a foreign key), `add_user`
 (a *second* household, for the scope case) and `add_title` (for
 `record_outcome`'s attribution target, same reason).
@@ -59,7 +69,7 @@ Its `ABC` shape is ADR-0001's argument applied to a test double -- a
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import AwareDatetime
@@ -172,6 +182,35 @@ class SearchQueryLedger(ABC):
     async def count(self) -> int:
         """Every row the table holds -- what makes "recorded once, not
         twice" assertable at all."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceRowCounts:
+    """How many households and titles exist, either side of a prune.
+
+    Two numbers rather than a set of ids, because the claim is that
+    *nothing* went, and a set comparison over two seeded rows is the same
+    claim with more to keep in step.
+    """
+
+    users: int
+    titles: int
+
+
+class ReferenceCounts(ABC):
+    """The two tables a `search_queries` row points **at**, counted out of
+    band.
+
+    Test infrastructure. It exists because *"the delete is a leaf"* is the
+    kind of claim that is true, obvious, and asserted by nothing -- and the
+    row being deleted names both tables, so the absurd implementation is one
+    somebody could write. Same out-of-band shape as `SearchQueryLedger`
+    beside it: neither table is reachable through this port.
+    """
+
+    @abstractmethod
+    async def read(self) -> ReferenceRowCounts:
+        """`count(*)` on `users` and on `titles`, right now."""
 
 
 class SearchQueryRepositoryContract:
@@ -536,3 +575,155 @@ class SearchQueryRepositoryContract:
 
         assert await ledger.get(unknown) is None
         assert await ledger.count() == 0
+
+    # -- oldest() and prune(), M10's J5 -------------------------------------
+
+    async def test_the_oldest_row_is_what_min_at_answers_and_an_empty_table_is_none(
+        self, repository: SearchQueryRepository, user_id: uuid.UUID
+    ) -> None:
+        """`SearchQueryRetention.last_done()` is built on this, so both
+        halves are contract rather than storage.
+
+        The wrong implementations this kills: `max(at)` in place of `min(at)`,
+        which is the identical mistake `SimilarityService.computed_at()`
+        refuses one artefact over (*"the newest row would report a whole-table
+        rebuild as fresh the moment its first page committed"*) -- here it
+        would report a table that has *just been written to* as needing no
+        prune, forever. And an empty table answering *some* timestamp rather
+        than `None`, which is the difference between "nothing to prune" and a
+        fabricated age.
+
+        The three rows are seeded **out of order** (middle, oldest, newest),
+        so an implementation answering "the first row written" rather than the
+        smallest `at` is a failure rather than a coincidence.
+
+        ⚠️ **Aware, and asserted here rather than only on the Postgres arm.**
+        `Scheduler._due_now` subtracts this from an aware `now`; a naive
+        answer is a `TypeError` at the tick, not a wrong number. The Postgres
+        arm is the one where this is a real round trip through a column type
+        and it is the reason the assertion is in the shared suite: a fake that
+        hands back what it was given would pass it for the wrong reason if
+        nothing else asked.
+        """
+        assert await repository.oldest() is None, (
+            "an empty table has no oldest row and must not invent one"
+        )
+
+        middle = datetime(2026, 6, 15, 9, 30, tzinfo=UTC)
+        oldest = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
+        newest = datetime(2026, 8, 20, 18, 0, tzinfo=UTC)
+        assert oldest < middle < newest, "the fixture must order the three rows it is about"
+        for at in (middle, oldest, newest):
+            await repository.record(search_query_record(user_id=user_id, at=at))
+
+        answered = await repository.oldest()
+
+        assert answered == oldest
+        assert answered is not None and answered.tzinfo is not None, (
+            "an aware datetime, or the scheduler's due comparison raises TypeError"
+        )
+
+    async def test_pruning_removes_what_is_before_the_cutoff_and_keeps_the_row_exactly_on_it(
+        self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
+    ) -> None:
+        """The boundary, and the row *exactly* at the cutoff is the arm that
+        makes it one.
+
+        The wrong implementations this kill: `<=` for `<`, which is one
+        character and reads as correct either way -- so the case places a row
+        at exactly `before` and requires it to survive, because a case that
+        only checked "the old row disappeared" passes against both spellings
+        and against one that deletes everything. And a prune that ignores its
+        argument and deletes the table, which the two surviving rows rule out.
+
+        `cutoff` is 90 days before `AT` only so the arithmetic reads like the
+        statement PRD 10 prices; nothing here depends on the number.
+        """
+        cutoff = AT - timedelta(days=90)
+        before = search_query_record(user_id=user_id, at=cutoff - timedelta(microseconds=1))
+        exactly = search_query_record(user_id=user_id, at=cutoff)
+        after = search_query_record(user_id=user_id, at=cutoff + timedelta(days=1))
+        for record in (before, exactly, after):
+            await repository.record(record)
+
+        deleted = await repository.prune(before=cutoff, limit=100)
+
+        assert deleted == 1
+        assert await ledger.get(before.id) is None
+        assert await ledger.get(exactly.id) is not None, (
+            "a row answered at exactly the cutoff is inside the window: the statement is `<`"
+        )
+        assert await ledger.get(after.id) is not None
+        assert await ledger.count() == 2
+
+    async def test_a_prune_deletes_at_most_its_limit_and_repeating_it_drains_the_rest(
+        self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
+    ) -> None:
+        """Chunking, from the caller's side: the count is the loop's only
+        terminator, so it has to be exact.
+
+        The wrong implementations this kills: a `limit` the statement builds
+        and ignores, which makes `SearchQueryRetention.run()` hold one
+        transaction over a year of keystrokes; a return value that is the
+        limit rather than the rows affected, which makes the loop never
+        terminate; and a return value that is the *remaining* count, which
+        makes it terminate one chunk early and leave rows behind.
+
+        Five expired rows against a limit of two: 2, 2, 1, and the fourth call
+        answers 0 with the table already empty. The fourth is not decoration --
+        a `prune` that answered its limit unconditionally would pass the first
+        three.
+        """
+        cutoff = AT
+        for offset in range(5):
+            await repository.record(
+                search_query_record(user_id=user_id, at=cutoff - timedelta(days=offset + 1))
+            )
+        assert await ledger.count() == 5
+
+        answers = [await repository.prune(before=cutoff, limit=2) for _ in range(4)]
+
+        assert answers == [2, 2, 1, 0]
+        assert await ledger.count() == 0
+
+    async def test_pruning_a_household_s_searches_takes_neither_the_household_nor_a_title(
+        self,
+        repository: SearchQueryRepository,
+        ledger: SearchQueryLedger,
+        user_id: uuid.UUID,
+        counts: ReferenceCounts,
+    ) -> None:
+        """`search_queries` is a leaf, asserted rather than reasoned.
+
+        Its two foreign keys point *outward* -- `user_id` is `ON DELETE
+        RESTRICT` and `clicked_title_id` is `ON DELETE SET NULL` -- so nothing
+        references these rows and a delete cannot cascade. The wrong
+        implementation this kills is a prune spelled through the household
+        (`DELETE FROM users ...` with the analytics rows following) or one
+        that clears `titles` to satisfy the reference; both are absurd to read
+        and neither is absurd to write, because the row being deleted *names*
+        both tables.
+
+        The premise is that the deleted row genuinely referenced both: a click
+        is attributed to a real title before the prune, so `clicked_title_id`
+        is non-`NULL` when the row goes.
+        """
+        title_id = await self.add_title()
+        record = search_query_record(user_id=user_id, at=AT - timedelta(days=365))
+        await repository.record(record)
+        await repository.record_outcome(
+            record.id, user_id=user_id, clicked_title_id=title_id, played=True
+        )
+        stored = await ledger.get(record.id)
+        assert stored is not None and stored.clicked_title_id == title_id, (
+            "the premise: the row being pruned really does reference a title"
+        )
+        before = await counts.read()
+        assert before.users >= 1 and before.titles >= 1, (
+            "the premise: there is a household and a title that could have been taken"
+        )
+
+        assert await repository.prune(before=AT, limit=100) == 1
+
+        assert await ledger.count() == 0
+        assert await counts.read() == before

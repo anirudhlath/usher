@@ -12,13 +12,17 @@ commits.
 """
 
 import uuid
+from datetime import datetime
+from typing import Any, cast
 
-from sqlalchemy import DateTime, bindparam, text
+from pydantic import AwareDatetime
+from sqlalchemy import CursorResult, DateTime, bindparam, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.base import enum_column
 from usher.db.repositories._errors import refusals_as_conflict
+from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
 from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
@@ -152,6 +156,46 @@ _RECORD_OUTCOME = text(
 )
 
 
+# **The one read on this port, and it is an aggregate rather than a row.**
+# `SearchQueryRetention.last_done()` is built on it (ADR-0046: a job answers
+# "when were you last done" from the artefact it maintains), and
+# `ix_search_queries_at` -- `m10c`'s, added for the `DELETE` below -- makes it
+# an Index Only Scan of the leftmost leaf. Measured 2026-08-27 on a clone of
+# the live catalog at 14,978 rows: `Heap Fetches: 0`, **3 buffers**, median
+# **0.072 ms** over seven samples, which is the same figure ADR-0046 measured
+# over 107 rows. Constant in the table's size, which is what makes it a
+# steady-state number rather than a small-table one.
+_OLDEST_AT = text("SELECT min(at) FROM search_queries")
+
+# 🔴 **`<`, not `<=`**, and the port says why: a row answered at exactly the
+# cutoff is inside the window, which is the boundary PRD 10's own statement
+# draws (`at < now() - interval '90 days'`). The two spellings are one
+# character and both read as correct.
+#
+# **`:before` is a bound value and never `now()` in the statement**, for two
+# reasons this project has already paid for. `now()` is
+# `transaction_timestamp()` and `clock_timestamp()` is the instant a statement
+# runs (`.claude/rules/db-and-sql.md`), so a cutoff computed inside a chunked
+# loop is either frozen to the wrong transaction or moving under the loop --
+# and a deletion boundary that moves is a different bug from either. The
+# service computes it once per run from the clock this project injects, which
+# is also what makes an 89/90/91-day case deterministic rather than flaky at
+# midnight.
+#
+# **The subquery is what carries the `LIMIT`**: `DELETE ... LIMIT` is not
+# PostgreSQL syntax, and the pattern is a self-`IN` on the primary key. The
+# inner `ORDER BY at` is not cosmetic -- it is what lets the planner walk
+# `ix_search_queries_at` for exactly `:limit` leaf entries instead of
+# collecting every expired row and discarding all but the limit, and it makes
+# the chunks oldest-first, so an interrupted run has removed the rows furthest
+# past the window rather than an arbitrary sample of them.
+_PRUNE = text(
+    "DELETE FROM search_queries WHERE id IN ("
+    "  SELECT id FROM search_queries WHERE at < :before ORDER BY at LIMIT :limit"
+    ")"
+).bindparams(bindparam("before", type_=DateTime(timezone=True)))
+
+
 class PostgresSearchQueryRepository(SearchQueryRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -182,6 +226,45 @@ class PostgresSearchQueryRepository(SearchQueryRepository):
                     "played": played,
                 },
             )
+
+    async def oldest(self) -> AwareDatetime | None:
+        found = await self._session.execute(_OLDEST_AT)
+        # `min()` over an empty table is one row holding `NULL`, not no row --
+        # so `scalar_one()` rather than `scalar_one_or_none()`, and `None`
+        # here means the table is empty rather than that the read found
+        # nothing to look at.
+        answered = found.scalar_one()
+        if answered is None:
+            return None
+        # Aware by the column's own type: `search_queries.at` is `TIMESTAMP
+        # WITH TIME ZONE` (`m09a`), and asyncpg hands a `timestamptz` back
+        # with a `tzinfo`. Asserted rather than trusted -- the port obliges
+        # awareness because `Scheduler._due_now` subtracts this from an aware
+        # `now`, and a naive value raises `TypeError` at the tick instead of
+        # answering wrongly. A future `TIMESTAMP` column, or a driver change,
+        # is a red here rather than a scheduler that stops running every job
+        # registered after this one.
+        if not isinstance(answered, datetime) or answered.tzinfo is None:
+            # `PortDataMalformed` rather than a bare `AssertionError`: this
+            # crosses a port boundary, ADR-0009 forbids a raw exception doing
+            # that, and the family is the right one -- the store answered
+            # something this port cannot use. `Scheduler._due_now` catches it,
+            # counts the job failed and does not run it, which is the outcome
+            # this guard exists for.
+            raise PortDataMalformed(
+                "min(search_queries.at) read back without a timezone; the column is "
+                "TIMESTAMP WITH TIME ZONE and ScheduledJob.last_done requires an aware value"
+            )
+        return answered
+
+    async def prune(self, *, before: datetime, limit: int) -> int:
+        result = await self._session.execute(_PRUNE, {"before": before, "limit": limit})
+        # `rowcount` lives on `CursorResult`, not on the `Result[Any]`
+        # `session.execute` is annotated to return -- `bulk.py:_rowcount` and
+        # `PostgresCollectionRepository.link_title` both already record the
+        # cast. It is the loop's only terminator, so it is the rows actually
+        # removed and never the limit that was asked for.
+        return int(cast("CursorResult[Any]", result).rowcount)
 
 
 def _parameters(record: SearchQueryRecord) -> dict[str, object]:

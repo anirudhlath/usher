@@ -86,7 +86,7 @@ the artefact it maintains.**
 | job | `last_done()` | shipped today? |
 |---|---|---|
 | the neighbour rebuild | `SimilarityService.computed_at()` | ✅ yes — `SELECT min(computed_at) FROM title_neighbors` |
-| `search_queries` retention | 🔴 **not `min(search_queries.at)`** — see below | ❌ no — J5 owns the port method *and* the reading |
+| `search_queries` retention | `min(min(search_queries.at) + window, now)` — **not** `min(at)`, see below | ✅ yes — M10's J5, `SearchQueryRetention` |
 
 The rebuild's is one query, it is exact, and **it survives a restart because the
 state was never in the scheduler.** A scheduler table would be a second copy of
@@ -110,9 +110,37 @@ retention window, and nothing said so: not this record, not PRD 08's table
 **The obligation a `last_done()` therefore carries is that this job's own runs
 move the reading**, and that is stated as a contract rather than left to be
 inferred: `ScheduledJob.last_done`'s docstring (M10's J4) carries it, with the
-measurement above. **J5 owes a real completion time or a different design**, and
-this row is deliberately left naming the debt rather than a statement that is
-false.
+measurement above.
+
+✅ **J5 discharged it, and the repair is one the design survives rather than one
+it needed a table for.** The artefact retention maintains is not a row — it is
+**the table's lower bound**. A successful run at instant *T* establishes *"no
+row is older than T − window"*, so the invariant held at *T* and goes on
+holding until the oldest surviving row itself falls out of the window:
+
+    last_done() = min(min(at) + window, now)
+
+— *"the most recent instant at which this table was known to hold nothing past
+its cutoff"*. **This job's own runs move it and nothing else does**: a prune
+pushes `min(at)` forward to at least `now - window`, which pushes the reading to
+`now`; a search writing a *new* row cannot move `min(at)` at all, because a new
+row is the newest one. That is the whole difference from the reading this
+record originally gave.
+
+The period then reads honestly against it: a job is due once the oldest
+surviving row is `window + period` old — i.e. **once a period's worth of expired
+rows has accumulated**, which is a statement an operator can act on, where under
+`min(at)` the period was inoperative for any value under the window.
+
+⚠️ **And it never answers `None`.** *"Never built, therefore due"* is right for
+an artefact that has to be constructed and wrong for an invariant: an **empty**
+`search_queries` satisfies the retention rule vacuously, so `None` there would
+make an idle deployment run a no-op prune on every tick forever — the same
+defect, arriving from the one state the original reading handled correctly. An
+empty table answers `now`. **The third registration owes the same two arguments
+about its own artefact**, and the shape to watch for is now sharper than this
+record first stated it: not merely a job with no artefact, but a job whose
+artefact carries a timestamp *somebody else* writes.
 
 🔴 **`computed_at()` is `min`, not `max`, and the distinction is what makes
 this design safe rather than merely cheap.** The repository comment says why:
@@ -214,6 +242,11 @@ relies on.
   operator-facing copy.
 - **The `last_done()` reads are not free, and they are priced below rather than
   in J4.** They run once per tick per job, forever, on a table that grows.
+  ⚠️ **The two that exist are three orders of magnitude apart** — 71.1 ms for
+  the rebuild's `min(computed_at)` over a 756 MB table, 0.072 ms for
+  retention's `min(at)` through `ix_search_queries_at` — so the tick floor is
+  sized for the dearer one and a deployment that has only registered the cheap
+  one is nowhere near it.
 - [ADR-0020](0020-derived-state-carries-its-fingerprint.md) is **linked rather
   than contradicted.** `blend_fingerprint` is what makes the rebuild's
   *staleness* a query rather than an inference, and that is the mechanism a
@@ -240,7 +273,7 @@ HEAD), `title_neighbors` **756 MB**.
 |---|---|---|---|
 | `SimilarityService.computed_at()` | `_OLDEST_NEIGHBOR`, shipped verbatim | **71.1 ms** | 69.2–78.6 |
 | `count_stale()`, whole table | `_COUNT_STALE_NEIGHBORS`, shipped verbatim, `title_id` NULL | **72.6 ms** | 71.7–83.4 |
-| retention's `min(search_queries.at)` | ⚠️ not shipped, and not a `last_done()` either — see decision 2 | **0.064 ms** | 0.058–0.168 |
+| retention's `min(search_queries.at)` | ⚠️ shipped since J5, but as an *input* to `last_done()` rather than as one — see decision 2 | **0.064 ms** | 0.058–0.168 |
 
 🔴 **Two of the three reads the M10 plan prices do not exist, and one of the two
 it does have is a different statement than the plan names.** Measured, with the

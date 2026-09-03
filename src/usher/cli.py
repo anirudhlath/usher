@@ -835,26 +835,39 @@ async def _schedule(settings: Settings, *, once: bool) -> None:
     ADR-0046's decision 3: nothing excludes a second runner, so a crontab
     entry beside a server with the lane on is two runners for one artefact.
 
-    Builds no engine and opens no connection **at this stage of the
-    milestone**, because the registry ships empty (`build_scheduler`) and a
-    loop over zero jobs asks nothing. A registration widens
-    `build_scheduler`'s signature and this function grows the session factory
-    it needs in the same commit -- which is the honest shape, rather than a
-    connection pool opened here today against work that does not exist.
+    **Builds an engine and opens no connection**, which is
+    `create_app`'s lifespan property and is deliberate here for the same
+    reason: `build_scheduler` wires a session *factory* into the one
+    registration that exists, and the first connection is opened by the first
+    `last_done()` inside the first tick. A `--once` run against a database
+    that is down therefore fails as a logged job failure and exit 0 rather
+    than as a stack trace from a connection pool, which is what an operator's
+    crontab wants at 3am. The engine is disposed however the command ends --
+    ⚠️ **including the daemon form, which never ends normally**: `finally`
+    runs on the `CancelledError` a SIGINT produces, and not on SIGKILL.
     """
-    scheduler = build_scheduler(settings)
-    register_scheduler_gauges(scheduler.read)
-    registered = len(scheduler.jobs)
-    if once:
-        ran = await scheduler.tick()
-        # Both numbers, because `ran` alone cannot distinguish "nothing was
-        # due" from "nothing is registered" -- and at this commit the second
-        # is the shipped state, so a line that hid it would read as a healthy
-        # night on a deployment where the scheduler can never do anything.
-        print(f"{ran} of {registered} scheduled jobs ran")
-        return
-    print(f"scheduling {registered} jobs every {settings.scheduler_tick_seconds:g}s")
-    await scheduler.run()
+    engine = build_engine(
+        settings.database_url.get_secret_value(),
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
+    try:
+        scheduler = build_scheduler(settings, sessions=build_session_factory(engine))
+        register_scheduler_gauges(scheduler.read)
+        registered = len(scheduler.jobs)
+        if once:
+            ran = await scheduler.tick()
+            # Both numbers, because `ran` alone cannot distinguish "nothing
+            # was due" from "nothing is registered" -- and the second was the
+            # shipped state for one commit, so a line that hid it would have
+            # read as a healthy night on a deployment where the scheduler
+            # could never do anything.
+            print(f"{ran} of {registered} scheduled jobs ran")
+            return
+        print(f"scheduling {registered} jobs every {settings.scheduler_tick_seconds:g}s")
+        await scheduler.run()
+    finally:
+        await engine.dispose()
 
 
 async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:

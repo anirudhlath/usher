@@ -809,22 +809,44 @@ Two jobs are registered, and the contract is a **name**, a **period**, a
 `last_done()` and a `run()` — no crontab expression, no calendar, no timezone,
 no dependency graph:
 
-| job | what it runs | `last_done()` reads | period |
-|---|---|---|---|
-| the neighbour rebuild | `usher similar --rebuild`'s batch | `min(title_neighbors.computed_at)` | ⏳ set by its registration (M10's J6) |
-| `search_queries` retention | the 90-day `DELETE` [10](10-telemetry-and-dashboards.md) prices | 🔴 **owed** — see below | ⏳ set by its registration (M10's J5) |
+| job | what it runs | `last_done()` reads | period | shipped? |
+|---|---|---|---|---|
+| `search_queries` retention | `DELETE FROM search_queries WHERE at < :cutoff`, chunked, a commit per chunk | `min(min(search_queries.at) + window, now)` | 1 day | ✅ M10's J5 |
+| the neighbour rebuild | `usher similar --rebuild`'s batch | `min(title_neighbors.computed_at)` | ⏳ set by its registration | ⏳ M10's J6 |
 
-🔴 **`min(search_queries.at)` was named here as retention's `last_done()` and it
-cannot be one.** It is the age of the **oldest surviving row**, written by the
-search path rather than by this job, so after a prune it sits at the retention
-window's age and stays there — the job reads as due on every tick forever, for
-any period shorter than the window, and the period decides nothing. **A
-`last_done()` has to be a reading this job's own runs move**, which is the
-contract `usher.ports.scheduler.ScheduledJob.last_done` states and the ADR's own
-decision 2 now carries. The period column exists for the same reason: a period
-is a property of the job, this table had no column for it, and the one design
-that would have made the reading above behave — pinning the period *exactly* to
-the retention window — was therefore unstatable here.
+🔴 **`min(search_queries.at)` was named here as retention's `last_done()` and
+cannot be one; the reading in the table is what replaced it.** `min(at)` is the
+age of the **oldest surviving row**, written by the search path rather than by
+this job, so after a prune it sits at the window's age and stays there — the job
+reads as due on every tick forever, for any period shorter than the window, and
+the period decides nothing. **A `last_done()` has to be a reading this job's own
+runs move**, which is what
+`usher.ports.scheduler.ScheduledJob.last_done` states.
+
+**What retention maintains is the table's lower bound, and that is what a
+completion time can be read off.** A successful run at instant *T* establishes
+*"no row is older than T − window"*, so the invariant held at *T* and goes on
+holding until the oldest surviving row itself falls out of the window — hence
+`min(min(at) + window, now)`, *"the most recent instant this table was known to
+hold nothing past its cutoff"*. A prune moves it and a new search cannot,
+because a new row is the newest one. An **empty** table answers `now` rather
+than `None`: nothing to prune is the invariant satisfied, where `None` would
+mean *"never built, therefore due"* and would make an idle deployment prune on
+every tick forever.
+
+**So the period is how much expired data may accumulate, not how long a row is
+kept**, and the two numbers are set in different places on purpose: the *window*
+is `USHER_SEARCH_QUERY_RETENTION_DAYS` because it is a household's own history,
+and the *period* is a property of the job. A day of expiry is about 1,050 rows
+on this deployment (measured 2026-08-27) against a 10,000-row chunk, so the
+steady-state prune is one transaction.
+
+⚠️ **A failed retention run converges and a failed rebuild does not.** The
+scheduler spaces retries and cannot bound *progress* — a batch that restarts
+from page one redoes its work however far apart the attempts are — but a prune
+is not such a batch: every committed chunk removes rows permanently and the
+chunks go oldest first, so an interrupted run leaves progress the next one
+keeps. The rebuild's resume is J6's.
 
 **`USHER_SCHEDULER_ENABLED` defaults to `false`**, and turning it on is an
 operator decision with a number attached. A fresh deployment has no embeddings,

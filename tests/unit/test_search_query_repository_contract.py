@@ -14,6 +14,8 @@ import uuid
 import pytest
 
 from tests.contract.search_query_repository_contract import (
+    ReferenceCounts,
+    ReferenceRowCounts,
     SearchQueryLedger,
     SearchQueryRepositoryContract,
     StoredSearchQuery,
@@ -61,10 +63,35 @@ class FakeSearchQueryLedger(SearchQueryLedger):
         return len(self._repository.rows)
 
 
+class FakeReferenceCounts(ReferenceCounts):
+    """The two tables the fake does not have.
+
+    🔴 **Modelled as constants, and that is a divergence rather than a
+    shortcut.** `search_queries` being a leaf is a property of two foreign
+    keys, and this arm has none -- so *"the prune took no household and no
+    title"* is true here by construction and cannot be false. The numbers are
+    fixed at 1 each so the case's own premise guard (`users >= 1 and
+    titles >= 1`) is satisfied honestly rather than by a zero that would make
+    the guard the thing being tested.
+
+    The claim is load-bearing on the Postgres arm and only there, which is
+    where `tests/integration/test_search_query_repository.py` counts the real
+    rows. Recorded here because a reader who saw this case green on both arms
+    would otherwise credit the fake with an assertion it cannot make.
+    """
+
+    async def read(self) -> ReferenceRowCounts:
+        return ReferenceRowCounts(users=1, titles=1)
+
+
 class TestFakeSearchQueryRepository(SearchQueryRepositoryContract):
     @pytest.fixture
     def repository(self) -> FakeSearchQueryRepository:
         return FakeSearchQueryRepository()
+
+    @pytest.fixture
+    def counts(self) -> FakeReferenceCounts:
+        return FakeReferenceCounts()
 
     @pytest.fixture
     def ledger(self, repository: FakeSearchQueryRepository) -> FakeSearchQueryLedger:

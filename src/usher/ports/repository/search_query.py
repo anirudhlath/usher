@@ -8,6 +8,7 @@ Implemented by
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 
 from pydantic import AwareDatetime
 
@@ -317,4 +318,87 @@ class SearchQueryRepository(ABC):
         shipped callers can reach it** -- the click writer names the title
         whose row it has just read out of `titles`. It is the contract for
         the caller that has not been written yet.
+        """
+
+    @abstractmethod
+    async def oldest(self) -> AwareDatetime | None:
+        """`min(at)` -- when the oldest surviving row was answered, or `None`
+        for an empty table. **M10's J5**, and the only read on this port.
+
+        **This is not a read surface and it is not the exception the port's
+        own docstring declines.** `SearchQueryRepository` has no read method
+        because this table's readers are PRD 10's dashboards and *"an index
+        whose only reader is a later milestone is a cost with no payer"*; one
+        aggregate over one column is not a dashboard and answers nothing about
+        any individual row. What it *is* is the input to
+        `SearchQueryRetention.last_done()` -- the artefact reading ADR-0046's
+        no-state design makes every registration owe -- so the alternative to
+        it is a scheduler table, which is the thing that record exists to
+        refuse. `test_the_cost_ledger_has_no_read_method` is the neighbouring
+        constraint and is untouched: `llm_calls` gains nothing here.
+
+        ⚠️ **Aware, always, and the port says so because nothing else can.**
+        `Scheduler._due_now` subtracts this from `datetime.now(UTC)`, and a
+        naive answer raises `TypeError: can't subtract offset-naive and
+        offset-aware datetimes` rather than answering wrongly.
+        `search_queries.at` is `TIMESTAMP WITH TIME ZONE` (`m09a`, and read
+        off `information_schema` on the live table), so the shipped
+        implementation gets this from the column -- but a `TIMESTAMP` column
+        one table over would not, which is why the obligation is written here
+        and pinned through a real round trip rather than against a hand-built
+        value.
+
+        Cheap by construction rather than by luck: `ix_search_queries_at`
+        (`m10c`) makes it an Index Only Scan of one leaf. Measured 2026-08-27
+        on a clone of the live catalog holding **14,978 rows** -- `Heap
+        Fetches: 0`, 3 buffers, median **0.072 ms** over seven samples, which
+        is the same figure the ADR measured over **107** rows.
+        """
+
+    @abstractmethod
+    async def prune(self, *, before: datetime, limit: int) -> int:
+        """Delete up to `limit` rows answered before `before`. Returns how
+        many were deleted. **M10's J5**, PRD 10's retention statement.
+
+        **`before` is a value the caller computed, never an interval this
+        method interpolates.** The retention *policy* -- how long a query is
+        kept -- is a setting a service reads
+        (`USHER_SEARCH_QUERY_RETENTION_DAYS`), and a port that took
+        `'90 days'` would be a port that took SQL. It also makes the boundary
+        deterministic: a cutoff computed once from an injected clock is the
+        same value for every chunk of one run, where `now()` inside the
+        statement is `transaction_timestamp()` and `clock_timestamp()` moves
+        under the loop (`.claude/rules/db-and-sql.md` carries both traps).
+
+        **`limit` has no default here, on this port or on any
+        implementation.** Three copies of one number is what
+        `list_unwatched_candidates` shipped and what
+        `.claude/rules/testing-discipline.md` records: the two arms of a
+        contract suite drifted about the size of the artefact the suite
+        exists to pin, and the assertion that the copies agree runs after the
+        drift. The caller says how big a chunk is; there is one such caller
+        and it reads a setting.
+
+        **Strictly `<`, never `<=`.** A row answered at exactly `before` is
+        inside the window by one microsecond of definition and is kept, which
+        is the boundary PRD 10's own statement draws
+        (`at < now() - interval '90 days'`). The two spellings are one
+        character and both read as correct, so the contract states which and a
+        case asserts it against a row placed exactly there.
+
+        **The delete is a leaf and cannot cascade.** `search_queries`' two
+        foreign keys point *outward* -- `fk_search_queries_user_id_users` is
+        `ON DELETE RESTRICT` and `fk_search_queries_clicked_title_id_titles`
+        is `ON DELETE SET NULL`, both read off `pg_constraint` on the live
+        table -- and nothing anywhere references a `search_queries` row, so
+        removing one takes no household and no title with it. Asserted rather
+        than reasoned: the contract counts both tables either side.
+
+        A caller that wants the whole population gone calls this until it
+        answers fewer than `limit`, committing between chunks. **That loop
+        terminates for a reason the neighbour rebuild's does not** -- a
+        deleted row cannot re-satisfy the predicate, where
+        `SimilarityService.rebuild`'s *"re-read what looks stale, rebuild,
+        repeat"* does not terminate against a row the predicate cannot clear
+        -- so the loop needs no keyset cursor and does not have one.
         """

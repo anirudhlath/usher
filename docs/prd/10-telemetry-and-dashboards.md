@@ -830,22 +830,55 @@ the tier that cannot afford it decides. The run, its arms and what it did not
 establish are in `.claude/rules/search-and-embeddings.md`. **It is
 whole-or-nothing and never a sample rate**, for the same reason.
 
-⚠️ **Nothing owns this table's size, and that is stated rather than left
-implied.** There is no retention job and no scheduler anywhere in `src/` —
-every periodic thing in this project is an operator's cron line ([M8's boundary
-call 8](09-roadmap.md)) — so `search_queries` grows monotonically at one row per
-answered search, forever. On the shipped surface that is bounded by how often a
-household presses enter, which is why it is tolerable in M9; it is *not* what a
-keystroke-recording amendment above would produce, and pricing the retention is
-part of that amendment rather than a follow-up to it. Pruning is
-`DELETE FROM search_queries WHERE at < now() - interval '90 days'`, an
-operator's SQL. ✅ **`m10c` added `ix_search_queries_at`, so that statement is
-no longer a sequential scan** — measured rather than asserted: under
-`enable_seqscan = off` the same `EXPLAIN` reads `Seq Scan on search_queries`
-at `m10b` and names the index at `m10c`
-(`tests/integration/test_m10_schema.py`). ⚠️ **The index is not a retention
-job**: nothing in `src/` runs that `DELETE`, so the sentence above this one is
-unchanged and the table still grows monotonically.
+✅ **Something owns this table's size since M10, and it is a scheduled job
+rather than an operator's cron line.** This paragraph read *"there is no
+retention job and no scheduler anywhere in `src/` … so `search_queries` grows
+monotonically at one row per answered search, forever"*, and both halves are
+now history: `usher.services.scheduler.SearchQueryRetention` runs
+`DELETE FROM search_queries WHERE at < :cutoff` — the statement this document
+named, with the boundary computed from the injected clock rather than from
+`now()` inside it — and `m10c` added `ix_search_queries_at` to serve it.
+[ADR-0046](decisions/0046-the-scheduler-stores-nothing.md) is the component.
+
+**Three things an operator has to know, because the job is not unconditional.**
+
+- **The window is `USHER_SEARCH_QUERY_RETENTION_DAYS`, default 90** — this
+  document's own number, taken rather than re-derived, and a setting so
+  "keep less" needs no release.
+- ⚠️ **It runs only where the scheduler does**, and `USHER_SCHEDULER_ENABLED`
+  is **off by default**. On a deployment that has not turned the lane on and
+  runs no `usher schedule` from a crontab, the sentence this paragraph used to
+  end on is still true and the table still grows.
+- **The job offers itself once a day**, which is a property of the job rather
+  than a setting: its `last_done()` is *"the last instant this table held
+  nothing past its cutoff"*, so the period is **how much expired data may
+  accumulate**, not how long a row is kept.
+
+**Two numbers, both dated, because a reader who sees only one draws the wrong
+conclusion.** Measured 2026-08-27 on a clone of this deployment's catalog:
+`search_queries` holds **14,978 rows in 2,920 kB**, arriving over 14 d 06 h —
+about **1,050 rows a day**, against **107 rows** on the live catalog whose
+suggest writer is off. So a day's expiry is a fifth of one 10,000-row chunk and
+a *steady-state* prune is a single transaction. **The volume this exists for is
+the suggest writer's**, not the search box's: one row per keystroke past the
+min-length gate rather than one per press of enter, which this document
+estimates *"would out-number **and** out-weight the searches by an order of
+magnitude each"*. A reader who sees only the 107 concludes the retention job is
+premature; a reader who sees only the estimate concludes the table is already
+large.
+
+✅ **`m10c`'s index is what makes the prune's cost independent of the
+population, and both halves are measured.** Under `enable_seqscan = off` the
+same `EXPLAIN` reads `Seq Scan on search_queries` at `m10b` and names the index
+at `m10c` (`tests/integration/test_m10_schema.py`). On the `m10c` clone,
+2026-08-27: the 90-day statement finding **nothing** to delete is
+`Index Scan using ix_search_queries_at`, **2 buffers, 0.009 ms** — which is
+what a daily prune on a healthy deployment costs, and it does not grow with the
+table. A cutoff that *does* match — 7 days, 80 of 14,978 rows — is **2.99 ms**,
+of which the selection is 10 buffers through the index and the rest is the
+delete itself. ⚠️ At this size the planner joins the selected ids back through
+a sequential scan; that is a fact about 14,978 rows and not about the
+statement.
 
 The same "whole" cuts the other way: `requested_mode` is wire-only and is
 deliberately **not** a tenth column. `played` is `NOT NULL` rather than

@@ -9,10 +9,12 @@ nothing but the app and asserts a **job ran** -- not that a lane object exists,
 not that a setting was read. `test_lanes_in_the_server_process.py`'s shape
 exactly, and for its reason.
 
-**The job is a fake, and it has to be.** J4 ships the scheduler with an empty
-registry: the two registrations ADR-0046 prices are separate tasks. A case here
-that drove a real one would be asserting something this commit does not
-contain, so the substitution is made where a composition root makes it -- by
+**The job is a fake, and it stays one now that a real registration exists.**
+What these cases are about is the *lane* -- does the server process tick at
+all, and does the switch decide whether it does -- and a real job would make
+each of them depend on the state of a table as well. The real registration's
+own database work is `tests/integration/test_search_query_retention.py`'s
+subject. So the substitution is made where a composition root makes it -- by
 replacing `usher.api.lanes.build_scheduler`, the way
 `test_the_lifespan_releases_every_process_resource_it_built` replaces
 `metadata_provider`. `dependency_overrides` do not reach the lifespan.
@@ -89,9 +91,18 @@ def _settings(postgres_url: str, *, scheduler: bool) -> Settings:
 
 
 def _with_job(monkeypatch: pytest.MonkeyPatch, job: ScheduledJob) -> None:
-    """The registry J5 and J6 will fill, filled here with a fake instead."""
+    """The real registry, replaced by one holding a single fake.
 
-    def _build(settings: Settings) -> Scheduler:
+    ⚠️ **`sessions` is accepted and dropped**, which is what keeps the
+    substitution honest: `LaneSupervisor.start` passes the session factory
+    `create_app` handed it, so a supervisor that stopped passing one would be
+    a `TypeError` here rather than a silent narrowing. What the fake must not
+    do is *use* it -- these cases are about the lane, and the real
+    registration's database work is
+    `tests/integration/test_search_query_retention.py`'s subject.
+    """
+
+    def _build(settings: Settings, *, sessions: object) -> Scheduler:
         scheduler = Scheduler(tick_seconds=settings.scheduler_tick_seconds)
         scheduler.register(job)
         return scheduler

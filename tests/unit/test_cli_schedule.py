@@ -9,11 +9,17 @@ raise the identical exception on purpose, which is exactly what makes the two
 arms indistinguishable there. `.claude/rules/config-cli-and-deployment.md`
 records it as a standing debt a new command owes.
 
-Nothing here opens a database. At this commit `_schedule` genuinely does not
-need one -- the registry ships empty (`composition.build_scheduler`) and a tick
-over zero jobs asks nothing -- and the `--once` case below is what pins that,
-because a `_schedule` that built an engine would fail against the unreachable
-DSN these settings carry.
+**Nothing here opens a connection, and since J5 that is a property rather than
+an accident.** `_schedule` now builds an engine -- the retention registration
+needs a session factory -- and `build_engine` connects to nothing, so every
+case below runs against an unreachable DSN and returns. A `_schedule` that
+opened a connection eagerly would fail all of them, which is what makes
+`create_app`'s own *"a lane connects to nothing at start"* property assertable
+for this command too.
+
+The registry these cases drive is a **substituted** one, because what they are
+about is `--once`'s arithmetic rather than which jobs a deployment runs; the
+real registry is `tests/unit/test_services_scheduler.py`'s subject.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -85,13 +91,14 @@ def test_one_tick_over_an_empty_registry_says_so_and_exits(
 
     **Both numbers are printed and the second is the load-bearing one.** `ran`
     alone cannot distinguish *"nothing was due"* from *"nothing is
-    registered"*, and at this commit the second is the shipped state -- so a
-    line carrying only the first would read as a healthy night on a deployment
-    where the scheduler can never do anything at all. J5 and J6 are what move
-    the denominator off zero.
+    registered"*, and the second was the shipped state for one commit -- so a
+    line carrying only the first would have read as a healthy night on a
+    deployment where the scheduler could never do anything at all. J5 moved
+    the denominator to 1 and J6 moves it to 2; an empty registry is still
+    reachable, and is what a process with no way to a database gets.
 
     That this returns at all against an unreachable database is the other
-    half: `_schedule` opens no connection while the registry is empty.
+    half: `_schedule` builds an engine and opens no connection.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
@@ -100,6 +107,14 @@ def test_one_tick_over_an_empty_registry_says_so_and_exits(
         raise AssertionError("usher schedule --once started the HTTP server")
 
     monkeypatch.setattr("uvicorn.run", _served)
+    # The empty registry is substituted rather than shipped since J5. What this
+    # case is about is the *line* -- both numbers, and `0 of 0` being sayable
+    # at all -- which is a property of `_schedule` and not of what happens to
+    # be registered today.
+    monkeypatch.setattr(
+        "usher.cli.build_scheduler",
+        lambda settings, *, sessions: Scheduler(tick_seconds=settings.scheduler_tick_seconds),
+    )
 
     main(["schedule", "--once"])
 
@@ -150,7 +165,7 @@ def test_one_tick_does_not_run_a_job_whose_period_has_not_elapsed(
     monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
     job = _Recent()
 
-    def _build(settings: Settings) -> Scheduler:
+    def _build(settings: Settings, *, sessions: object) -> Scheduler:
         scheduler = Scheduler(tick_seconds=settings.scheduler_tick_seconds)
         scheduler.register(job)
         return scheduler

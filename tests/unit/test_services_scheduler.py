@@ -1,18 +1,18 @@
-"""The scheduler loop, over fake jobs and an injected clock.
+"""The scheduler loop over fake jobs, and `SearchQueryRetention` over a fake
+store -- both with an injected clock and no database anywhere.
 
-**Every job in this file is a fake, and that is the point rather than a
-convenience.** J4 ships `Scheduler` with an *empty* registry: the two
-registrations are separate tasks (`search_queries` retention and the neighbour
-rebuild), so a case here that drove a real job would be testing a component
-this commit does not contain. What the cases below pin is the loop -- the due
-comparison, the sequencing, the failure isolation, the empty-registry state and
-the two lifecycle promises -- against jobs that exist only to be observed.
+**Every job the *loop* cases drive is a fake, and that is the point rather
+than a convenience.** What they pin is the loop -- the due comparison, the
+sequencing, the failure isolation and the two lifecycle promises -- against
+jobs that exist only to be observed, so a defect in a registration cannot make
+one of them green or red.
 
-**And the empty registry is asserted rather than merely shipped.** An empty
-registry that nothing checks is indistinguishable from one somebody forgot to
-fill, which is why `test_the_registry_a_composition_root_builds_ships_empty`
-exists and why it names both halves: `build_scheduler` returns a `Scheduler`,
-and that scheduler has no jobs.
+**The retention cases below are the other half and drive the real job**
+(M10's J5) over `FakeSearchQueryRepository` through a recording scope. Its
+`last_done()` is an *arithmetic* claim over what the store answers, so a fake
+store is the right arm for it; the Postgres arm -- the real statement, the
+real boundary and the real commit -- is
+`tests/integration/test_search_query_retention.py`.
 
 **The clock's origin is deliberately not zero.** `.claude/rules/
 testing-discipline.md`: *"a fixture whose origin is the identity element of the
@@ -22,7 +22,9 @@ a `last_done()` of `datetime.min`, and the whole subject here is a subtraction.
 """
 
 import asyncio
-from collections.abc import Iterator
+import uuid
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -31,11 +33,22 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tests.fakes.search_query_repository import FakeSearchQueryRepository
 from usher.composition import build_scheduler
 from usher.config import Settings
+from usher.db.base import build_engine, build_session_factory
+from usher.domain.ids import new_id
+from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
 from usher.ports.scheduler import ScheduledJob
-from usher.services.scheduler import Scheduler
+from usher.ports.search import SearchMode, SearchSurface
+from usher.services.scheduler import (
+    RETENTION_PERIOD,
+    Scheduler,
+    SearchQueryRetention,
+    SearchQueryScope,
+)
 
 # Not the epoch, and not a round number either -- see the module docstring.
 _NOW = datetime(2026, 8, 27, 18, 30, 43, tzinfo=UTC)
@@ -123,6 +136,61 @@ def _scheduler(*jobs: ScheduledJob, clock: _Clock | None = None) -> Scheduler:
     return scheduler
 
 
+def _no_sessions() -> async_sessionmaker[AsyncSession]:
+    """A real session factory over a real engine against a port nothing
+    listens on.
+
+    `build_engine` opens no connection -- that is `create_app`'s own lifespan
+    property -- and `build_scheduler` only closes over this, so no case here
+    touches a socket. A `Mock` would satisfy the type and would let a
+    `build_scheduler` that *used* the factory eagerly pass silently.
+    """
+    return build_session_factory(build_engine("postgresql+asyncpg://u:p@127.0.0.1:1/usher"))
+
+
+class _RecordingScope:
+    """A `SearchQueryScope` over one repository, counting how many times it
+    was opened and how many of those exits were clean.
+
+    **`opened` is the assertion "a commit per chunk" is made through on this
+    arm.** The fake has no transaction, so a commit is not observable as a
+    stored effect -- what *is* observable is that `run()` opens a fresh scope
+    per chunk rather than one for the whole drain, which is the structure the
+    commit hangs off. The Postgres arm asserts the commit itself, on a
+    connection that never saw the writing session.
+    """
+
+    def __init__(self, repository: SearchQueryRepository) -> None:
+        self._repository = repository
+        self.opened = 0
+        self.closed_cleanly = 0
+
+    @asynccontextmanager
+    async def __call__(self) -> AsyncIterator[SearchQueryRepository]:
+        self.opened += 1
+        yield self._repository
+        self.closed_cleanly += 1
+
+
+def _scope_over(repository: SearchQueryRepository) -> SearchQueryScope:
+    return _RecordingScope(repository)
+
+
+def _row(*, at: datetime, user_id: uuid.UUID) -> SearchQueryRecord:
+    """One `search_queries` row, with everything this file does not vary
+    filled in. Invented values, like every fixture here."""
+    return SearchQueryRecord(
+        id=new_id(),
+        at=at,
+        user_id=user_id,
+        query="the quiet vacuum",
+        mode=SearchMode.FULL_TEXT,
+        result_count=1,
+        latency_ms=1,
+        surface=SearchSurface.SEARCH,
+    )
+
+
 @pytest.fixture
 def spans() -> Iterator[InMemorySpanExporter]:
     exporter = InMemorySpanExporter()
@@ -190,67 +258,335 @@ async def test_a_job_that_has_never_run_is_due() -> None:
     assert job.runs == 1
 
 
-# -- the empty registry ----------------------------------------------------
+# -- the registry a composition root builds --------------------------------
 
 
-def test_the_registry_a_composition_root_builds_ships_empty() -> None:
-    """**J4 ships the loop and no registrations**, and an empty registry that
-    nothing asserts is indistinguishable from one somebody forgot to fill.
+def _settings(**overrides: object) -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+        secret_key="0" * 32,
+        **overrides,  # type: ignore[arg-type]
+    )
 
-    Both halves are named: the composition root returns a `Scheduler`, and
-    that scheduler's registry is empty. J5 and J6 each add one entry here and
-    this assertion is what makes each of them a visible decision rather than a
-    line nobody reads.
+
+def test_the_registry_a_composition_root_builds_holds_the_retention_job() -> None:
+    """**J4 shipped the loop with no registrations and J5 adds the first**,
+    and a registry nothing asserts is indistinguishable from one somebody
+    forgot to fill.
+
+    ⚠️ **This case read `scheduler.jobs == ()` for one commit and the
+    assertion was the deliverable then**, which is why it is a rewrite rather
+    than a deletion: the point it makes is unchanged -- what a deployment will
+    actually run is a line somebody has to write here -- and the value it
+    asserts moved because a registration landed. J6 adds the second entry and
+    edits this list again.
+
+    The name is asserted rather than the type. It is a metric label
+    (`usher.scheduler.job.duration` and its two siblings are all labelled
+    `job`) and a span name, so a rename is an emptied panel; a case asserting
+    `isinstance(..., SearchQueryRetention)` would let that through.
+    """
+    scheduler = build_scheduler(_settings(), sessions=_no_sessions())
+
+    assert isinstance(scheduler, Scheduler)
+    assert [job.name for job in scheduler.jobs] == ["search_queries.retention"]
+
+
+def test_a_scheduler_with_no_way_to_reach_a_database_registers_nothing() -> None:
+    """`sessions=None` is an explicit *"this process cannot reach a
+    database"*, and an empty registry is still a legal state.
+
+    The wrong implementation this kills: a `build_scheduler` that registered
+    the retention job anyway and left it to fail on its first `last_done()` --
+    which the loop would absorb, count, back off on and repeat forever, with
+    the only symptom a log line every few minutes. Every `LaneSupervisor` in
+    `tests/unit/test_api_lanes.py` is in this state.
+    """
+    scheduler = build_scheduler(_settings(), sessions=None)
+
+    assert scheduler.jobs == ()
+
+
+def test_the_retention_registration_carries_the_window_and_the_batch_an_operator_set() -> None:
+    """The two settings reach the job, and the period comes from neither.
+
+    The wrong implementations this kills: a registration that hard-codes 90
+    days beside a setting an operator can change, which is the failure a
+    setting exists to prevent; one that passes the *days* where a `timedelta`
+    is wanted, which is a factor of 86,400 and reads as correct at a glance;
+    one that wires the batch into the window or the window into the batch --
+    two adjacent keyword arguments, so the names are all that stop a swap; and
+    one that reads the *period* off the retention window, which is precisely
+    the design ADR-0046 shipped with and `ScheduledJob.last_done` refuses.
+
+    Read off the job's own declared configuration rather than its private
+    attributes: `period`, `window` and `batch` are properties for this reason.
+    Non-default values on both settings, because 90 and 10,000 are what a
+    registration ignoring them would also produce.
     """
     scheduler = build_scheduler(
-        Settings(
-            database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
-            secret_key="0" * 32,
-        )
+        _settings(search_query_retention_days=7, search_query_retention_batch=3),
+        sessions=_no_sessions(),
     )
-    assert isinstance(scheduler, Scheduler)
-    assert scheduler.jobs == (), f"the registry shipped with {[j.name for j in scheduler.jobs]}"
+
+    (job,) = scheduler.jobs
+    assert isinstance(job, SearchQueryRetention)
+    assert job.window == timedelta(days=7)
+    assert job.batch == 3
+    assert job.period == RETENTION_PERIOD
+    assert job.period != job.window, (
+        "the period is the job's own and must not be read off the retention window"
+    )
 
 
-async def test_an_empty_registry_logs_once_over_three_ticks(lines: list[str]) -> None:
-    """A scheduler that spammed a line every tick forever is the shape an
-    operator mutes -- and then never sees the real one.
+# -- the retention registration (M10 J5) -----------------------------------
 
-    Three ticks, one line. Asserting after a single tick cannot tell *"once"*
-    from *"per tick"*, which is the same shape
-    `test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass`
-    needed.
+
+async def test_an_empty_table_is_not_due_rather_than_never_built() -> None:
+    """🔴 **The defect ADR-0046's own reading had, arriving from the one state
+    it handled correctly.**
+
+    `ScheduledJob.last_done` says `None` means *"never built, therefore
+    due"*, which is right for an artefact that has to be constructed and wrong
+    for an **invariant**: an empty `search_queries` holds nothing past its
+    cutoff, so the retention rule is satisfied vacuously. A `last_done()`
+    answering `None` there would make an idle deployment run a no-op prune on
+    every tick, forever -- the same "due on every tick" this job was
+    redesigned to escape.
+
+    Both halves are asserted, because *"the reading is not `None`"* is also
+    what a job answering `datetime.min` would produce: the reading is `now`,
+    and a tick over it runs nothing.
     """
-    scheduler = _scheduler()
+    clock = _Clock()
+    job = SearchQueryRetention(
+        _scope_over(FakeSearchQueryRepository()),
+        window=timedelta(days=90),
+        batch=10,
+        period=RETENTION_PERIOD,
+        now=clock.read,
+    )
 
-    for _ in range(3):
-        assert await scheduler.tick() == 0
+    assert await job.last_done() == clock.now
 
-    empty = [line for line in lines if "no registered jobs" in line]
-    assert len(empty) == 1, f"expected one line about the empty registry, got {empty}"
-
-
-async def test_registering_a_job_ends_the_empty_state(lines: list[str]) -> None:
-    """The control for the case above: *"one line over three ticks"* is also
-    what a scheduler that logged nothing at all produces, and it is also what
-    one that never notices a registration produces."""
-    scheduler = _scheduler()
-    await scheduler.tick()
-    assert [line for line in lines if "no registered jobs" in line]
-
-    job = _Fake("late", last=None)
-    scheduler.register(job)
-    assert await scheduler.tick() == 1
-    assert job.runs == 1
+    assert await _scheduler(job, clock=clock).tick() == 0
 
 
-def test_two_jobs_may_not_share_a_name() -> None:
-    """`name` is a metric label and a span name, so two jobs under one name
-    make `usher.scheduler.job.duration` a histogram over two populations with
-    nothing saying so."""
-    scheduler = _scheduler(_Fake("twin"))
-    with pytest.raises(ValueError, match="twin"):
-        scheduler.register(_Fake("twin"))
+async def test_a_table_whose_oldest_row_is_inside_the_window_is_not_due() -> None:
+    """The state this deployment is in today, and the state a healthy one is
+    in almost always.
+
+    The wrong implementation this kills is the one ADR-0046 tabulated:
+    `last_done()` spelled as `min(at)` itself. A row 14 days old against a
+    90-day window reads as *"last done 14 days ago"* under that spelling, i.e.
+    due against any period under a fortnight -- and after a prune it would sit
+    at the window's age and stay there, due forever. Here the same row reads
+    as *"the invariant holds now"*.
+
+    The control is the second arm: the same job, the same window, one row
+    moved past the cutoff, must be due -- otherwise a `last_done()` that
+    always answered `now` would pass the first half.
+    """
+    clock = _Clock()
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    await repository.record(_row(at=clock.now - timedelta(days=14), user_id=user_id))
+    job = SearchQueryRetention(
+        _scope_over(repository),
+        window=timedelta(days=90),
+        batch=10,
+        period=timedelta(days=1),
+        now=clock.read,
+    )
+
+    assert await job.last_done() == clock.now
+    assert await _scheduler(job, clock=clock).tick() == 0, "nothing is past the cutoff"
+
+    await repository.record(_row(at=clock.now - timedelta(days=95), user_id=user_id))
+
+    assert await job.last_done() == clock.now - timedelta(days=5)
+    assert await _scheduler(job, clock=clock).tick() == 1, (
+        "a row five days past a 90-day window is four days past a one-day period"
+    )
+
+
+async def test_the_period_is_how_much_expired_data_may_accumulate() -> None:
+    """The arithmetic the reading buys, stated as a boundary.
+
+    A job is due once the oldest surviving row is `window + period` old, so a
+    row exactly `window + period` past is due and one a moment short of it is
+    not. That is the whole difference between a period that decides something
+    and ADR-0046's original reading, under which any period shorter than the
+    window decided nothing at all.
+
+    Two arms one microsecond apart, because a fixture a day either side of the
+    boundary cannot tell `>=` from `>` -- and the not-due arm is what stops a
+    job that is simply always due from passing.
+    """
+    clock = _Clock()
+    window = timedelta(days=90)
+    period = timedelta(days=1)
+    user_id = new_id()
+
+    short = FakeSearchQueryRepository()
+    await short.record(
+        _row(at=clock.now - window - period + timedelta(microseconds=1), user_id=user_id)
+    )
+    exact = FakeSearchQueryRepository()
+    await exact.record(_row(at=clock.now - window - period, user_id=user_id))
+
+    def job(repository: FakeSearchQueryRepository) -> SearchQueryRetention:
+        return SearchQueryRetention(
+            _scope_over(repository), window=window, batch=10, period=period, now=clock.read
+        )
+
+    assert await _scheduler(job(short), clock=clock).tick() == 0
+    assert await _scheduler(job(exact), clock=clock).tick() == 1
+
+
+async def test_a_run_moves_the_reading_its_own_period_is_compared_against() -> None:
+    """🔴 **The contract `ScheduledJob.last_done` states, asserted for the
+    first registration that owes it.**
+
+    *"A reading this job's own runs move"* is the whole of why
+    `min(search_queries.at)` was rejected. Here it is measured rather than
+    argued: the job is due, it runs, and the same reading is `now` afterwards
+    -- so the next tick does nothing.
+
+    The premise guard is the first assertion: a job that was never due could
+    not demonstrate anything by not running afterwards.
+
+    The second half is the other direction, and it is what the rejected
+    reading fails: a **new search** cannot move the reading. A row written
+    at `now` is the newest one, so it changes neither `min(at)` nor the
+    invariant, and the job stays not-due -- where under `min(at)`-as-a-
+    completion-time a table that keeps being searched keeps ageing into
+    permanent dueness.
+    """
+    clock = _Clock()
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    await repository.record(_row(at=clock.now - timedelta(days=200), user_id=user_id))
+    await repository.record(_row(at=clock.now - timedelta(days=10), user_id=user_id))
+    job = SearchQueryRetention(
+        _scope_over(repository),
+        window=timedelta(days=90),
+        batch=10,
+        period=timedelta(days=1),
+        now=clock.read,
+    )
+    scheduler = _scheduler(job, clock=clock)
+
+    assert await scheduler.tick() == 1, "the premise: this job was due"
+
+    assert await job.last_done() == clock.now
+    assert await scheduler.tick() == 0, "its own run moved the reading past its own period"
+
+    await repository.record(_row(at=clock.now, user_id=user_id))
+
+    assert await scheduler.tick() == 0, (
+        "a fresh search must not make the retention job due -- that is the defect "
+        "min(search_queries.at) as a last_done() has"
+    )
+
+
+async def test_the_prune_drains_in_chunks_and_opens_a_scope_for_each() -> None:
+    """A commit per chunk, observed on this arm as a scope per chunk.
+
+    The wrong implementations this kills: one `DELETE` for the whole
+    population, which holds a transaction and a lock set over a table
+    `GET /search` writes to on every request; a loop that reuses one scope, so
+    every chunk commits at the end or not at all; and a loop that stops after
+    the first chunk, which leaves the table over-length while reporting
+    success.
+
+    Seven expired rows against a batch of three: chunks of 3, 3, 1 -- and the
+    short third is what terminates it, so **three** scopes and not four. The
+    survivor arm is what stops a `run()` that simply emptied the table from
+    passing.
+    """
+    clock = _Clock()
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    for days in (200, 180, 160, 140, 120, 110, 100):
+        await repository.record(_row(at=clock.now - timedelta(days=days), user_id=user_id))
+    for days in (80, 1):
+        await repository.record(_row(at=clock.now - timedelta(days=days), user_id=user_id))
+    scope = _RecordingScope(repository)
+    job = SearchQueryRetention(
+        scope, window=timedelta(days=90), batch=3, period=RETENTION_PERIOD, now=clock.read
+    )
+
+    await job.run()
+
+    assert scope.opened == 3, "3 + 3 + 1: the short chunk is the terminator"
+    assert scope.closed_cleanly == 3, "every chunk's scope has to exit cleanly to commit"
+    assert sorted((clock.now - record.at).days for record in repository.rows.values()) == [1, 80]
+
+
+async def test_the_cutoff_is_taken_once_and_not_per_chunk() -> None:
+    """A boundary recomputed inside its own loop moves under it.
+
+    The wrong implementation this kills reads the clock per chunk, so a run
+    that takes minutes deletes rows that were inside the window when it
+    started. Driven with a clock that jumps a year between chunks and a batch
+    of one: with the cutoff taken once, the row 10 days old survives;
+    recomputed per chunk it is a year past the second chunk's cutoff and goes.
+
+    This is also what makes the loop terminate against a live table -- a row
+    written *during* the run is newer than a fixed cutoff by construction.
+    """
+    clock = _Clock()
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    for days in (400, 380, 10):
+        await repository.record(_row(at=clock.now - timedelta(days=days), user_id=user_id))
+
+    def jumping_clock() -> datetime:
+        reading = clock.now
+        clock.now += timedelta(days=365)
+        return reading
+
+    job = SearchQueryRetention(
+        _scope_over(repository),
+        window=timedelta(days=90),
+        batch=1,
+        period=RETENTION_PERIOD,
+        now=jumping_clock,
+    )
+
+    await job.run()
+
+    survivors = [record.at for record in repository.rows.values()]
+    assert len(survivors) == 1, "only the two rows past the *original* cutoff may go"
+
+
+async def test_the_prune_says_how_many_rows_it_removed(lines: list[str]) -> None:
+    """*"A filter is invisible without a counter"*, one table over.
+
+    Without it, *"this deployment answered few searches"* and *"retention
+    deleted them"* are the same observation. The wrong implementation this
+    kills is a `run()` that returns quietly, which every other case here
+    passes.
+    """
+    clock = _Clock()
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    for days in (400, 380):
+        await repository.record(_row(at=clock.now - timedelta(days=days), user_id=user_id))
+    job = SearchQueryRetention(
+        _scope_over(repository),
+        window=timedelta(days=90),
+        batch=10,
+        period=RETENTION_PERIOD,
+        now=clock.read,
+    )
+
+    await job.run()
+
+    pruned = [line for line in lines if "pruned" in line]
+    assert len(pruned) == 1, f"expected one line naming the count, got {pruned}"
+    assert "pruned 2 " in pruned[0], pruned[0]
 
 
 # -- sequencing ------------------------------------------------------------
@@ -327,6 +663,89 @@ async def test_a_last_done_that_raises_neither_runs_the_job_nor_stops_the_tick(
     assert unreadable.runs == 0, "a job ran on the strength of a read that raised"
     assert healthy.runs == 1
     assert [line for line in lines if "unreadable" in line]
+
+
+class _NaiveLastDone(ScheduledJob):
+    """A job whose `last_done()` answers a **timezone-naive** datetime.
+
+    Not a hypothetical and not a hostile double: SQLAlchemy hands a naive
+    value back for a `TIMESTAMP WITHOUT TIME ZONE` column,
+    `ScheduledJob.last_done` states *"timezone-aware"* in prose, and nothing
+    in the type system enforces it. This is the shape of the first
+    registration that reads the wrong column type.
+    """
+
+    name = "naive"
+    period = _HOUR
+
+    async def last_done(self) -> datetime | None:
+        return _NOW.replace(tzinfo=None) - timedelta(hours=2)
+
+    async def run(self) -> None:  # pragma: no cover - never reached
+        raise AssertionError("a job whose reading could not be compared must not be run")
+
+
+async def test_a_job_whose_last_done_is_naive_is_a_failure_and_not_a_dead_tick(
+    lines: list[str],
+) -> None:
+    """🔴 **The due comparison was outside the guard for one commit, and this
+    is what that cost.**
+
+    `Scheduler._due_now` wrapped `await job.last_done()` and nothing else, so
+    `now - last` on a naive answer raised `TypeError: can't subtract
+    offset-naive and offset-aware datetimes` and escaped `tick()` entirely.
+    Every job registered *after* the offender was skipped, on every tick,
+    forever; `run()` logged it as *"the scheduler's tick failed"* with **no
+    job name in it** -- the shape `LaneSupervisor._guard` exists to prevent --
+    and under `usher schedule --once` it escaped the command altogether.
+
+    Three assertions, and the sibling is the one that makes this about
+    isolation rather than about a `TypeError`. It is registered **after** the
+    offender deliberately: registration order is run order, so a sibling
+    registered first would still run under the broken code and the case would
+    pass against it.
+
+    Found by J4's own review, relayed mid-task to J5 because J5's is the
+    project's first real `last_done()`.
+    """
+    clock = _Clock()
+    offender = _NaiveLastDone()
+    sibling = _Fake("healthy", period=_HOUR, last=clock.now - timedelta(hours=2))
+    scheduler = _scheduler(offender, sibling, clock=clock)
+
+    ran = await scheduler.tick()
+
+    assert sibling.runs == 1, "a job registered after the offender was skipped by its failure"
+    assert ran == 1, "the tick counted the sibling and not the job that could not be compared"
+    assert [line for line in lines if "naive" in line and "last done" in line], (
+        f"the failure has to name the job: {lines}"
+    )
+
+
+async def test_a_job_whose_last_done_is_naive_backs_off_rather_than_retrying_every_tick(
+    lines: list[str],
+) -> None:
+    """The other half: an unusable reading is a failure of that job, so it is
+    counted and spaced like one.
+
+    The wrong implementation this kills is a `_due_now` that caught the
+    `TypeError`, returned `False` and recorded nothing -- the loop would then
+    ask a permanently broken job on every tick forever, which is the same hot
+    loop `_back_off` exists to stop, arriving through the read instead of
+    through the run.
+    """
+    clock = _Clock()
+    offender = _NaiveLastDone()
+    scheduler = _scheduler(offender, clock=clock)
+
+    await scheduler.tick()
+    before = len([line for line in lines if "last done" in line])
+    await scheduler.tick()
+
+    assert before == 1, "the first tick did not report the failure, so there is nothing to space"
+    assert len([line for line in lines if "last done" in line]) == 1, (
+        "a job whose reading could not be compared was asked again on the very next tick"
+    )
 
 
 async def test_a_failing_job_is_not_offered_again_on_the_very_next_tick() -> None:

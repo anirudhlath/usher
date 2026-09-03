@@ -41,6 +41,9 @@ still land.
 """
 
 import uuid
+from datetime import datetime
+
+from pydantic import AwareDatetime
 
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
@@ -98,3 +101,31 @@ class FakeSearchQueryRepository(SearchQueryRepository):
         # `played` is `True` a later `False` is stale information rather
         # than a correction to write over it.
         self.outcomes[query_id] = (winning_click, already_played or played)
+
+    async def oldest(self) -> AwareDatetime | None:
+        # `min(at)` over the values held, not "the first row written" -- an
+        # implementation that answered insertion order would pass every case
+        # that seeds in order, which is why the contract seeds out of it.
+        if not self.rows:
+            return None
+        return min(record.at for record in self.rows.values())
+
+    async def prune(self, *, before: datetime, limit: int) -> int:
+        # 🔴 **`<`, and the fake spells it out rather than inheriting it.**
+        # The boundary is one character and both spellings read as correct, so
+        # a fake using `<=` would make the contract's exactly-on-the-cutoff arm
+        # pass on one arm and fail on the other -- a divergence about the one
+        # thing this method is for.
+        #
+        # **Oldest first**, matching the statement's `ORDER BY at`: the chunk
+        # boundary is observable through the return value, so a fake choosing
+        # an arbitrary `limit` rows would make the contract's `[2, 2, 1, 0]`
+        # case pass against a Postgres arm that removed a different set.
+        expired = sorted(
+            (record for record in self.rows.values() if record.at < before),
+            key=lambda record: record.at,
+        )[:limit]
+        for record in expired:
+            del self.rows[record.id]
+            self.outcomes.pop(record.id, None)
+        return len(expired)

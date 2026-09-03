@@ -94,6 +94,7 @@ from usher.composition import (
     Pipeline,
     QueueGauges,
     SearchGauges,
+    SessionFactory,
     SourceRegistry,
     UnitOfWork,
     build_push_applier,
@@ -147,6 +148,7 @@ class LaneSupervisor:
         client: LLMClient | None = None,
         rows: RowCache | None = None,
         refreshes: RefreshQueue | None = None,
+        sessions: SessionFactory | None = None,
         idle_seconds: float = IDLE_SLEEP_SECONDS,
     ) -> None:
         self._settings = settings
@@ -164,6 +166,19 @@ class LaneSupervisor:
         # than half of one.
         self._refreshes = refreshes
         self._user_id = user_id
+        # The scheduler's registrations need a database and do **not** need a
+        # `Pipeline`: `SearchQueryRetention` reads one aggregate and issues one
+        # `DELETE`, so `unit_of_work` above -- twenty-odd repositories, two
+        # suggest indexes, an embedder, a source-gate registry -- is the wrong
+        # scope entirely. `SessionFactory` is an opaque callable
+        # (`composition`'s alias), which is what keeps this module free of
+        # SQLAlchemy the way `UnitOfWork` already does.
+        #
+        # ⚠️ **`None` is a supervisor that cannot reach a database**, which is
+        # every one in `tests/unit/test_api_lanes.py`: `build_scheduler` then
+        # registers nothing and the loop ticks over an empty registry, which is
+        # still a legal state. `create_app` always passes one.
+        self._sessions = sessions
         self._provider = provider
         # Carried, never built here. All three of these are per-*process*
         # resources handed in by the composition root that made them, and
@@ -238,7 +253,7 @@ class LaneSupervisor:
             # is two `create_observable_gauge` calls, and `Scheduler.start`
             # creates a task and returns. The first `last_done()` happens
             # inside that task.
-            self._scheduler = build_scheduler(self._settings)
+            self._scheduler = build_scheduler(self._settings, sessions=self._sessions)
             # Registered here rather than unconditionally in `create_app`,
             # which is where `register_push_gauges` goes: with no scheduler
             # there is no snapshot to read, and `_observe_job_due` answering

@@ -622,6 +622,24 @@ export const CONFIG: readonly SettingRow[] = [
     measured: false,
   },
   {
+    key: 'USHER_SEARCH_QUERY_RETENTION_DAYS',
+    group: 'lanes',
+    def: '90',
+    about:
+      'How long a search_queries row is kept. The scheduler prunes anything older; 90 days is PRD 10\'s own window. The prune only runs where the scheduler does, and the job offers itself once a day.',
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_SEARCH_QUERY_RETENTION_BATCH',
+    group: 'lanes',
+    def: '10000',
+    about:
+      'How many rows one retention transaction may delete. The prune loops and commits per chunk, because a single DELETE over a year of keystrokes locks a table every answered search writes to. This deployment writes about 1,050 rows a day, so the steady-state prune is one chunk.',
+    secret: false,
+    measured: false,
+  },
+  {
     key: 'USHER_SCHEDULER_TICK_SECONDS',
     group: 'lanes',
     def: '300.0',

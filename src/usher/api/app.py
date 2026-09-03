@@ -181,6 +181,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             client=client,
             rows=row_cache,
             refreshes=row_refreshes,
+            # The scheduler's registrations reach a database through this and
+            # not through `unit_of_work` above -- a retention prune has no use
+            # for a `Pipeline`. `LaneSupervisor` holds it opaquely
+            # (`SessionFactory`), so this module is still the only one here
+            # that knows what an engine is.
+            sessions=session_factory,
         )
         app.state.lanes = lanes
         # PRD 10's `usher.source.push.connected` / `.reconnects`. Registered

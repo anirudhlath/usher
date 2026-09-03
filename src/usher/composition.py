@@ -52,7 +52,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from loguru import logger
@@ -129,6 +129,7 @@ from usher.ports.repository import (
     PersonRepository,
     RawPayloadStore,
     RowProviderSettingsRepository,
+    SearchQueryRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -173,7 +174,12 @@ from usher.services.query_expansion import QueryExpansionService
 from usher.services.reconcile import ReconcileService
 from usher.services.rows import row_providers
 from usher.services.rows.cache import RowCache
-from usher.services.scheduler import Scheduler
+from usher.services.scheduler import (
+    RETENTION_PERIOD,
+    Scheduler,
+    SearchQueryRetention,
+    SearchQueryScope,
+)
 from usher.services.search import SearchAnalytics, SearchService
 from usher.services.similar import SimilarityService, blend_fingerprint
 from usher.services.taste import TasteService
@@ -207,6 +213,15 @@ async def nothing() -> None:
 # *wiring* rather than on SQLAlchemy, and so a lane test can supply a
 # pipeline over fakes with no database in it at all.
 UnitOfWork = Callable[[], AbstractAsyncContextManager["Pipeline"]]
+
+# The engine-bound session factory, named so a long-lived consumer can hold
+# one without naming SQLAlchemy. `UnitOfWork` above is the right shape for
+# anything that wants a `Pipeline`; this is for the one consumer that wants a
+# *scope factory* instead -- `build_scheduler`, whose registration reads one
+# aggregate and issues one `DELETE` and has no use for twenty repositories.
+# An alias rather than a second protocol, because it is exactly what
+# `build_session_factory` already returns.
+SessionFactory = async_sessionmaker[AsyncSession]
 
 
 @dataclass(frozen=True, slots=True)
@@ -990,30 +1005,78 @@ def build_worker(
     )
 
 
-def build_scheduler(settings: Settings) -> Scheduler:
-    """The scheduled-work loop, **with an empty registry** (ADR-0046, M10 J4).
+def search_query_scope(sessions: async_sessionmaker[AsyncSession]) -> SearchQueryScope:
+    """One session, one `SearchQueryRepository`, **committed on a clean
+    exit**.
 
-    🔴 **Shipping empty is the deliverable, not a stub.** The two registrations
-    ADR-0046 prices are separate tasks -- `search_queries` retention and the
-    neighbour rebuild -- and each is a decision about *when* a multi-hour batch
-    may start unasked. Baking one in here would make that decision invisible;
-    `tests/unit/test_services_scheduler.py::
-    test_the_registry_a_composition_root_builds_ships_empty` is what makes it a
-    line somebody has to delete rather than one nobody reads.
+    `unit_of_work`'s shape one port wide, and for its reasons: returned as a
+    callable so `usher.services` and `usher.api.lanes` reach a database
+    without either of them importing SQLAlchemy, and opened per use so a
+    long-lived lane never holds a session -- hours, idle in transaction, on a
+    snapshot from whenever the scheduler started.
 
-    ⚠️ **A scheduler with no registrations is dead code, and dead code is
-    reverted rather than merged.** This project's own rule in the inverse:
-    *"a kind whose handler is a stub is a queue that grows forever"*
-    (`domain/jobs.py`). If the first registration does not land in this phase,
-    this component and its lane come out.
+    🔴 **The commit is here and it is the whole of "a commit per chunk".**
+    Every repository in this package flushes and never commits, and
+    `SearchQueryRetention.run` opens one of these per chunk -- so a scope that
+    forgot to commit would be a prune that deleted a year of keystrokes inside
+    one transaction and then, on a process that died before the loop ended,
+    deleted none of them. Nothing about the failure would be visible: the run
+    logs its count either way.
 
-    Takes settings and nothing else, deliberately: the loop holds no session,
-    no repository and no client, and every job carries whatever it needs to
-    reach a database. A registration that needs a `UnitOfWork` widens this
-    signature in the commit that adds it, which is the same shape
-    `build_worker` above has.
+    Deliberately **not** `unit_of_work`: that builds a whole `Pipeline` --
+    twenty-odd repositories, two suggest indexes, an embedder -- for a job
+    that reads one aggregate and issues one `DELETE`, and it would put a
+    source-gate registry and a metadata provider behind a retention prune.
     """
-    return Scheduler(tick_seconds=settings.scheduler_tick_seconds)
+
+    @asynccontextmanager
+    async def open() -> AsyncIterator[SearchQueryRepository]:
+        async with sessions() as session:
+            yield PostgresSearchQueryRepository(session)
+            # After the body, so a raise inside the chunk leaves the chunk
+            # uncommitted rather than half-committed. `async with sessions()`
+            # closes the session either way and rolls back what was not
+            # committed.
+            await session.commit()
+
+    return open
+
+
+def build_scheduler(
+    settings: Settings, *, sessions: async_sessionmaker[AsyncSession] | None
+) -> Scheduler:
+    """The scheduled-work loop and its registry (ADR-0046, M10 J4 and J5).
+
+    **One registration: `search_queries` retention.** The neighbour rebuild is
+    J6 and is not here yet, so this function is still the one place a reader
+    can see what a deployment will actually run.
+
+    ⚠️ **`sessions=None` is an explicit "this process cannot reach a
+    database", not a default**, which is why it has no default value: a
+    scheduler built that way registers nothing and ticks over an empty
+    registry, and that has to be a line somebody wrote rather than a keyword
+    they omitted. `tests/unit/test_services_scheduler.py::
+    test_a_scheduler_with_no_way_to_reach_a_database_registers_nothing` is
+    what pins it, and it is the state a lane supervisor in a test is in.
+
+    **The registration states its own period at the call site**, from
+    `RETENTION_PERIOD` -- a period is a property of the job rather than a
+    setting (`ScheduledJob.period`), and this is the one place a reader can
+    compare it against the window an operator *can* set. The window and the
+    chunk size are `Settings`', because those are policy: how long a household
+    keeps its own search history, and how much of it one transaction may hold.
+    """
+    scheduler = Scheduler(tick_seconds=settings.scheduler_tick_seconds)
+    if sessions is not None:
+        scheduler.register(
+            SearchQueryRetention(
+                search_query_scope(sessions),
+                window=timedelta(days=settings.search_query_retention_days),
+                batch=settings.search_query_retention_batch,
+                period=RETENTION_PERIOD,
+            )
+        )
+    return scheduler
 
 
 def _worker_handlers(
@@ -2541,6 +2604,7 @@ __all__ = [
     "Pipeline",
     "QueueGauges",
     "SearchGauges",
+    "SessionFactory",
     "SourceGateRegistry",
     "SourceRegistry",
     "adapter_factory",
@@ -2559,6 +2623,7 @@ __all__ = [
     "nothing",
     "open_adapter",
     "run_bootstrap",
+    "search_query_scope",
     "selected_sources",
     "source_gates",
     "unit_of_work",

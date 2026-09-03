@@ -22,6 +22,7 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
+from pydantic import AwareDatetime
 
 from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.image_repository import FakeImageRepository
@@ -288,6 +289,15 @@ class _RefusingSearchQueries(SearchQueryRepository):
         clicked_title_id: uuid.UUID | None,
         played: bool,
     ) -> None:
+        raise self._error
+
+    # The retention pair (M10's J5) raises too, on the same terms -- nothing
+    # at a route reaches either, and a stub that answered them would be
+    # claiming this double models something it is not asked about.
+    async def oldest(self) -> AwareDatetime | None:
+        raise self._error
+
+    async def prune(self, *, before: datetime, limit: int) -> int:
         raise self._error
 
 

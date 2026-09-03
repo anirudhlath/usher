@@ -451,13 +451,14 @@ freshness gap in the project: a title's neighbours go stale when some *other*
 title gets an embedding, which no per-row predicate can decide. It is an
 operator's command or a cron entry after `usher index --backfill`.
 
-⚠️ **`usher schedule` is the component that will close that gap and it does
-not close it yet.** M10's J4 ships the loop, the port and the lane
-([ADR-0046](docs/prd/decisions/0046-the-scheduler-stores-nothing.md)) **with an
-empty registry** — the two registrations, `search_queries` retention and the
-neighbour rebuild, are separate tasks. So today both forms of the command are
-honest and both do nothing: `usher schedule --once` prints `0 of 0 scheduled
-jobs ran`. Three things to know before turning it on:
+⚠️ **`usher schedule` is the component that will close that gap and it closes
+half of it so far.** M10's J4 ships the loop, the port and the lane
+([ADR-0046](docs/prd/decisions/0046-the-scheduler-stores-nothing.md)); **J5
+registers the first job**, `search_queries` retention, so
+`usher schedule --once` now prints `0 of 1 scheduled jobs ran` on an ordinary
+night. **The neighbour rebuild is J6 and is still outstanding**, so nothing yet
+runs `usher similar --rebuild` for you. Three things to know before turning it
+on:
 
 - **`USHER_SCHEDULER_ENABLED` defaults to `false`**, so the server process runs
   no scheduler lane unless you say so. `usher schedule` ignores the switch —
@@ -480,7 +481,21 @@ jobs ran`. Three things to know before turning it on:
   retries (doubling, capped at the job's period) so a broken job is not
   retried every tick forever — but a batch with no resume restarts from the
   beginning each attempt, so spacing bounds the cost and not the progress.
-  Resumption belongs to the registration.
+  Resumption belongs to the registration. ✅ **Retention converges anyway**:
+  every committed chunk removes rows permanently and the chunks go oldest
+  first, so an interrupted prune leaves progress the next one keeps. The
+  rebuild is the one that does not.
+- 🔴 **A registration's `last_done()` has to be a reading its own runs move,
+  and "some timestamp on the artefact" is not that.** ADR-0046 originally gave
+  retention's as `min(search_queries.at)` — the age of the oldest surviving
+  row, written by the *search path* — which sits at the retention window's age
+  forever after a prune and makes the job due on every tick for any period
+  shorter than the window. What shipped is
+  `min(min(search_queries.at) + window, now)`, *"the last instant this table
+  held nothing past its cutoff"*, and the period is therefore **how much
+  expired data may accumulate** (a day) rather than how long a row is kept
+  (`USHER_SEARCH_QUERY_RETENTION_DAYS`, 90). The contract is on
+  `ScheduledJob.last_done`; J6 owes the same argument about `title_neighbors`.
 
 ### Scripts that are not tests
 

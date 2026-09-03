@@ -900,12 +900,21 @@ class Settings(BaseSettings):
     # | `computed_at()` (ADR-0046's evidence table) | 71.1 ms | 69.2-78.6 |
     # | `computed_at()`, re-measured here on a busier host | 73.2 ms | 68.4-81.5 |
     #
-    # So **~71-73 ms per tick** for the one job that will exist: 0.12% of a
-    # minute at this floor, and 7% of a second at `1.0`. ⚠️ ADR-0046 quotes
+    # | retention's `oldest()`, the one registration that exists | 0.072 ms | 0.064-0.099 |
+    #
+    # So **~71-73 ms per tick** once both jobs are registered: 0.12% of a
+    # minute at this floor, and 7% of a second at `1.0`. ⚠️ ADR-0046 quoted
     # **~144 ms** by adding `count_stale()` to the tick; that read is J6's own
     # staleness guard *inside* `run()`, which the loop does not perform, so it
-    # is a cost of the job rather than of the period. The floor survives either
-    # figure. `ge=60.0` rather than `gt=0` because a value that would spend a
+    # is a cost of the job rather than of the period. Corrected in the record;
+    # the floor survives either figure. ⚠️ **And the job that ships today is
+    # the *cheap* one** -- `SearchQueryRetention.last_done()` is `min(at)`
+    # through `ix_search_queries_at`, an Index Only Scan of one leaf measured
+    # at 0.072 ms over 14,978 rows on 2026-08-27, so a tick on a deployment
+    # without the rebuild registered costs three orders of magnitude less than
+    # this floor is justified against. The floor is sized for the dearer read
+    # rather than the shipped one, deliberately: J6 adds it without revisiting
+    # this number. `ge=60.0` rather than `gt=0` because a value that would spend a
     # meaningful share of the deployment's database budget re-asking a question
     # whose answer changes every few hours is a configuration nothing wants and
     # this file can refuse.
@@ -915,6 +924,43 @@ class Settings(BaseSettings):
     # while keeping a `--once` run's arithmetic easy to read. Read by
     # `composition.build_scheduler`.
     scheduler_tick_seconds: float = Field(default=300.0, ge=60.0)
+
+    # `search_queries` retention (PRD 10's *"nothing owns this table's size"*,
+    # M10's J5), the scheduler's first registration.
+    #
+    # **90 days is taken rather than re-derived**: it is the only number PRD 10
+    # offers, it is the window that document's own `DELETE` is written against,
+    # and there is no usage history here to derive a better one from. It ships
+    # as a setting rather than a constant so an operator can shorten it without
+    # a release -- a household's search history is the most personal thing this
+    # schema stores, and "keep less of it" must not need a rebuild.
+    #
+    # ⚠️ **The retention window and a dashboard's window are two numbers that
+    # have to agree, and nothing here can enforce it.** A PRD 10 dashboard 1
+    # panel asking for 180 days over a 90-day table shows a truncated series
+    # and no error. Named here and owned by the dashboard group.
+    #
+    # `ge=1` rather than `ge=0`: zero is not a shorter retention, it is a
+    # cutoff at `now`, which deletes the row every answered search has just
+    # written. That is a switch for "record nothing", and the switch for
+    # recording nothing is `USHER_SEARCH_SUGGEST_ANALYTICS` and an analytics-
+    # free `SearchService`, both of which write no row rather than writing one
+    # and racing a prune for it.
+    search_query_retention_days: int = Field(default=90, ge=1)
+    # How many rows one transaction may delete. The prune loops, opening a
+    # session and committing per chunk, because a single `DELETE` over a
+    # year of keystrokes holds one transaction and one lock set for its whole
+    # duration on a table `GET /search` writes to on every request.
+    #
+    # 10,000 against a measured arrival rate of ~1,050 rows a day (a clone of
+    # the live catalog, 14,978 rows in 14 d 06 h on 2026-08-27) means the
+    # steady-state prune is **one chunk**, and the number only becomes
+    # load-bearing on a first run after a long outage or after J2's keystroke
+    # writer is switched on -- which is the case it exists for. `ge=1` because
+    # a chunk of zero deletes nothing and, since the loop terminates on a chunk
+    # shorter than the limit, terminates immediately: a retention job that
+    # silently never prunes.
+    search_query_retention_batch: int = Field(default=10_000, ge=1)
 
     # The client event channel (PRD 07's SSE surface). Same reasoning as
     # every block above: PRD 08's TOML config layer does not exist yet.
