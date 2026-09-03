@@ -122,7 +122,8 @@ trigger, just open it.
 session must not get wrong — not how it was discovered, what the sample was, or
 what it refuted. A finding is one to three lines. If you are reaching for a
 date, a row count or a "measured rather than assumed", you are writing history,
-and git already has it. **No rules file may exceed 200 lines**; read
+and git already has it. **Rules files target 200 lines and may never pass 400**,
+and most are at the target already, so adding means displacing — read
 `.claude/rules/rules-file-maintenance.md` before splitting one, because a file
 without `paths:` loads *unconditionally* and a split into one is a promotion.
 A finding that genuinely applies everywhere goes in "Five rules about evidence"
@@ -131,12 +132,15 @@ above — five entries in nine milestones, so the bar is high.
 **`.claude/settings.json` carries three hooks, and all three are mechanisms.**
 `session-start.sh` warns if this worktree's `.venv` lacks the `eval` extra;
 `guard-generated.sh` refuses a hand edit to `web/src/api/schema.d.ts`;
-`guard-bash.sh` refuses working-tree discards and `ruff format` on prose.
-**A hook is the right shape when the mistake has more spellings than you can
-list** — `deny` is prefix matching, so it caught `uv run ruff format docs/` and
-missed `python -m ruff format docs/`. Add one only for a mistake a session has
-made, and prove both directions: the new spellings blocked, the legitimate
-neighbours (`git checkout -b feature/x`, `. ./.env`) still working.
+`guard-bash.sh` refuses working-tree discards, `ruff format` on prose, and venv
+activation. **A hook is the right shape when the mistake has more spellings than
+you can list** — `deny` is prefix matching, so it caught `uv run ruff format
+docs/` and missed `python -m ruff format docs/`. Add one only for a mistake a
+session has made, and prove both directions: the new spellings blocked, the
+legitimate neighbours (`git checkout -b feature/x`, `. ./.env`) still working.
+**Vary statement position, not just flags** — `guard-bash.sh` shipped matching
+newline-collapsed text anchored on `^` and `[;&|]`, so it caught
+`cd src && git clean -fd` and let `cd src`↵`git clean -fd` through.
 
 ## Commands
 
@@ -163,9 +167,9 @@ formats Python fences inside Markdown by default. **The exclude is bypassed by
 an explicit path argument**, so scope the command, not just the config;
 `guard-bash.sh` is what enforces it.
 
-**A commit touching `web/` has a second gate the first cannot see** — `web/` is
-excluded from both ruff and mypy, so all six commands pass on a console change
-that fails CI. From `web/`:
+**A commit touching `web/` has a second gate the first cannot see** — ruff
+`extend-exclude`s it and mypy's `files = ["src", "tests"]` never names it, so all
+six commands pass on a console change that fails CI. From `web/`:
 
 ```bash
 npm run verify       # typecheck && lint && format:check && test && build
@@ -173,7 +177,9 @@ npm run e2e          # Playwright functional + a11y
 npm run e2e:visual   # the 120 screenshot comparisons
 ```
 
-Three separate CI jobs, and **`verify` includes neither Playwright suite.**
+Three separate CI jobs (`console`, `console-e2e`, `console-visual`), and
+**`verify` includes neither Playwright suite** — nor CI's sixth step, a grep of
+`dist/assets/` proving no MSW fixture reached the production bundle.
 
 ### Tests, database, service
 
@@ -181,6 +187,7 @@ Three separate CI jobs, and **`verify` includes neither Playwright suite.**
 uv run pytest tests/unit             # no Docker, no network
 uv run pytest tests/integration      # Docker: testcontainers, pgvector/pgvector:pg17
 uv run pytest -m "not integration"   # marker equivalent of tests/unit
+uv run pytest -m integration         # and of tests/integration; kept in sync deliberately
 
 export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:5432/usher"
 export USHER_SECRET_KEY="<32+ char secret>"
@@ -190,7 +197,12 @@ uv run alembic revision --autogenerate -m "..."
 python -m usher                              # the server, reading Settings.host/port
 curl http://localhost:8000/health            # liveness 200 | /health/ready 200 or 503
 docker compose up -d --build                 # postgres + usher, both healthchecked
+curl http://localhost:8100/health/ready      # compose publishes 8100, NOT 8000
 ```
+
+Compose maps `${USHER_COMPOSE_HOST_PORT:-8100}:8000` because another container
+on this host already holds 8000 — curl it after a compose up and you reach a
+different service, not a dead port.
 
 `tests/integration/` gets its schema from the real Alembic migration once per
 session — not `create_all`, which cannot see CHECK bodies or triggers — and each

@@ -23,9 +23,10 @@ and is more current than this file. **Spelling: `titles.popularity`,
 
 ## Trigram and suggest
 
-- **`Settings.search_trigram_threshold` stays 0.3**; lowering it converts
-  threshold-excluded misses into out-ranked ones at 14× the latency, buying no
-  recall. `_TRIGRAM_THRESHOLD = 0.1` in `adapters/search/postgres.py` is the
+- **`Settings.search_trigram_threshold` stays 0.3** — 0.1 does buy recall (82.5%
+  → 85.1% @5) and is refused on **latency**, 14× p50 on the one path with a
+  keystroke budget. Do not restate that as "no recall": it forecloses a real
+  trade. `_TRIGRAM_THRESHOLD = 0.1` in `adapters/search/postgres.py` is the
   integration driver's value; only the `Settings` value ships.
 - **Keep the candidate cap at 200** — wider measures *worse*, and both the cap
   and the `levenshtein` re-rank are inert (0.0% of misses, every configuration
@@ -35,9 +36,11 @@ and is more current than this file. **Spelling: `titles.popularity`,
   `%` at 4.3× the p50 and identical recall — and **no plan-shape test
   distinguishes them**, so a green suite is not evidence here. Keep
   `fastupdate = off`: a pending list costs 7.7× read amplification.
-- **The suggest tiebreak is `vote_count DESC NULLS LAST` under popularity**,
-  which stays the hard key. Popularity is NULL across the skeleton tier, so
-  without the tiebreak "ordered by popularity" orders by insertion.
+- **The suggest tiebreak is `tmdb_vote_count DESC NULLS LAST` under
+  `tmdb_popularity`**, which stays the hard key. ⚠️ ADR-0040 moved the bootstrap
+  writer to `imdb_num_votes`, so on a bootstrap-only catalog **both** are NULL on
+  every row and the `ORDER BY` degenerates to `dist ASC, id ASC` — insertion
+  order, tiebreak and all.
 
 ## The two-tier suggest boundary (ADR-0031)
 

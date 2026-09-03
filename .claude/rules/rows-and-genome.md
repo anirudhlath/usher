@@ -25,10 +25,13 @@ other.
 
 - **The genome is not a term in the blend.** `_WEIGHTS` has no `"tags"` key and
   `_neighbors_for` does not pass `tags=`
-  ([ADR-0035](../../docs/prd/decisions/0035-the-tags-similarity-term.md), and
-  ADR-0024 carries the amendment). Everything that *reads* it stays:
-  `genome_scores`, `genome_tags`, `GenomeRepository`, `NeighborCandidate.tags`,
-  `NeighborSeed.has_genome` and `NeighborRebuild`'s coverage counters.
+  ([ADR-0024](../../docs/prd/decisions/0024-the-genome-is-one-dense-vector-per-title.md)
+  carries that amendment; ADR-0035 settles only the *user-tag* term). Everything
+  that *reads* it stays, and **`NeighborCandidate.tags` must answer `None`,
+  never `0.0`** — its only reader counts `tags is not None`, so a zero reports a
+  barely-covered catalog as fully covered: `genome_scores`, `genome_tags`,
+  `GenomeRepository`, `NeighborCandidate.tags`, `NeighborSeed.has_genome` and
+  `NeighborRebuild`'s coverage counters.
 - **Removed, not zeroed.** `_WEIGHTS["tags"] = 0.0` is arithmetically the same
   program at every value, and it still enters `blend_fingerprint`, declares
   every stored row stale and buys a ~90-minute rebuild for a table whose scores
@@ -154,12 +157,13 @@ other.
 
 ## `TasteService` and `user_taste`
 
-- **`user_taste` has two readers with deliberately different predicates.**
-  `get(user_id, *, model_name)` evaluates `STALE_TASTE` and answers *"should I
-  recompute?"*; `latest(user_id)` is one primary-key probe with no predicate and
-  no model argument and answers *"what is the best stored statement about this
-  household?"*. Neither is the other spelled shorter:
-  - **A request has no embedder**, so it cannot supply `model_name` — routed
+- **`user_taste` has two readers with deliberately different predicates**, both
+  on `TasteRepository` rather than the service. `get(user_id, *, model_name)`
+  evaluates `STALE_TASTE` and answers *"should I recompute?"*; `latest(user_id)`
+  is one primary-key probe with no predicate and no model argument and answers
+  *"what is the best stored statement about this household?"*. Neither is the
+  other spelled shorter: - **A request has no embedder**, so it cannot supply
+  `model_name` — routed
     through `centroid()`, the taste ranking term is structurally `None` on the
     shipped default, a weight that reads like a signal.
   - **`latest` must not inherit the staleness predicate.** The watch state that
@@ -194,6 +198,6 @@ other.
   fixed `/browse`'s filter and facets at read time and reached none of them;
   `GenreNormalisationService` (`usher genres --backfill`) is the writer that
   does, by rewriting the column through `canonicalise_genres`.
-- **`CandidatePoolService` (`services/curation_pool.py`) is outside this file's
-  triggers**, so a session fixing the readers has to open that module
-  deliberately. It is named here because the *set* is the finding.
+  `list_owned_by_tag` is deliberately **not** widened by ADR-0039 and stays
+  exact containment — it is the call the two genre-shaped providers make, so it
+  is the method a session acting on this bullet is most likely to break.

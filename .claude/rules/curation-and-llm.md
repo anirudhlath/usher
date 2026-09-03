@@ -72,9 +72,12 @@ and `JobWorker` parks rather than spending four more completions on the wall.
 
 **A per-item prompt decoration is priced per candidate and paid at the pool
 ceiling — check it against the ceiling, not against the default pool.** The
-candidate line already costs ~20.4 tokens each (it renders the genre list), and a
-proposed ownership marker at ~2.9 more would have pushed a working pool-600
-configuration past `max_model_len` into HTTP 400. Declined on that.
+candidate line already costs ~20.4 tokens each (it renders the genre list). A
+proposed ownership marker was declined against a **pre-registered bar of 2.0
+tokens/candidate** that the cheapest legible wording missed by 45% — not against
+a 400. Terse (~2.9) fits pool 600 with ~56 tokens to spare under `max_model_len`;
+only the verbose (~4.9) wording goes over. Check a decoration against the pool
+*ceiling* and against the bar it was registered on, never against the default.
 
 ## The coercion is the primary path, not a fallback
 

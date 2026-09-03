@@ -35,8 +35,9 @@ Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
 - **Revision ids are `m<NN><letter>`, zero-padded to two digits** — unpadded,
   `sorted(["m8a", "m9a", "m10a"])` puts `m10a` first. Read the chain and head
   from `ls src/usher/db/migrations/versions/` and
-  `tests/unit/test_db_migration_status.py`; **never write a revision id into a
-  rule or a plan**, which only ever names one that does not exist.
+  `tests/unit/test_db_migration_status.py`. **Never write a revision id
+  *forward-looking***: an edit once appended "then `m11a`" for a revision nobody
+  had minted. Naming one that exists is fine and two migrations rely on it.
 - **Allocate one revision per *merge*, never per author** — every integration
   test runs `alembic upgrade head`, so a pre-allocated chain serialises authors.
 - **`test_migrations.py`'s `-1`-from-head assertion must be re-pointed by every
@@ -96,8 +97,9 @@ Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
   statements: a lease renewed deep inside a long transaction must stamp *now*,
   and `requeue_running`'s age comparison cannot match a claim made in the same
   transaction if both sides read one frozen `now()`.
-- **Triggers own `updated_at` on `watch_states`, `titles`, `sources` and
-  `episodes`; `media_items` deliberately has none.** They assign `now()`
+- **Seven tables carry an `updated_at` trigger** (`test_migrations.py` pins the
+  exact set); the rest have no `updated_at` column at all, `media_items`
+  deliberately so. They assign `now()`
   unconditionally, `BEFORE UPDATE`, so a merge's own `updated_at = observed_at`
   lands on the *insert* path only and two updates in one transaction read back
   one stamp. Integration fixtures are one transaction — backdate a raw `INSERT`.

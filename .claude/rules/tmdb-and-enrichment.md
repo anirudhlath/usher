@@ -30,8 +30,10 @@ selects nothing (issue #42).
 
 ## Commands
 
-Neither script runs in CI; each writes to a real database or opens real sockets,
-says so in its docstring, and needs `USHER_DATABASE_URL`/`USHER_SECRET_KEY` set.
+None of these run in CI; each writes to a real database or opens real sockets and
+says so in its docstring. `enqueue_tier_enrichment.py` and `usher` read
+`USHER_DATABASE_URL`/`USHER_SECRET_KEY`; `measure_worker_lane.py` takes
+`--database-url` and mints its own throwaway secret.
 
 ```bash
 # The tier writes `jobs` rows only; `usher work` spends the TMDb budget. There
@@ -45,7 +47,6 @@ uv run python scripts/measure_worker_lane.py --jobs 600 --seconds 45   # a stub
 # committed, `--id`/`--query` defaultless so no real third-party id lands here.
 # Weaker evidence than it looks — `--kind search` records `/search/movie` only,
 # `--kind series` omits the blind window, and no fixture records `raw_payloads`.
-set -a; . ./.env; set +a     # never a literal key
 uv run python scripts/capture_tmdb_fixture.py --kind movie --id <id> > /tmp/shape.json
 
 uv run pytest tests/unit -k "tmdb or enrich"
@@ -78,9 +79,9 @@ a v4 JWT and `_is_v4_token` picks header vs query form; `tmdb_requests_per_secon
   fails `fk_episodes_season_id_seasons` on the **second** enrichment — and **no
   port fake sees this**, a dict having no foreign keys.
 - **Never compare `EnrichmentState` members directly** — `ENRICHED > STUB` is
-  `False`, so a guard spelled that way never promotes anything, and the case that
-  catches it is **promoting a stub**. A failure handler that resets the tier is
-  likewise invisible to a test seeded at that tier.
+  `False`, so a guard spelled that way never promotes anything, and the case
+  that catches it is **promoting a skeleton**. A failure handler that resets the
+  tier is likewise invisible to a test seeded at that tier.
 - **No credential and no URL may reach a log, a span or an exception message.**
   `HTTPXClientInstrumentor` records the full URL as a span attribute and v3 has
   no header form for its key, so `TmdbClient` sends `Authorization: Bearer` for a
@@ -88,11 +89,14 @@ a v4 JWT and `_is_v4_token` picks header vs query form; `tmdb_requests_per_secon
 
 ## The failure taxonomy
 
-- **A 4xx that is not 429 is `PortDataMalformed`** — `retryable=False`, so the
-  job parks on its first attempt instead of spending five retries to reach the
-  identical answer. **404 is the case that fires in production**, the catalog
-  holding bulk-export ids that age. **408 is excluded and stays retryable** for
-  the proxy case above, and **5xx is `PortUnavailable`**.
+- **The ladder is 429, then 401/403, then any other 4xx but 408** (`adapters/
+  http.py`). 401/403 is `PortAuthFailed`, which PRD 03 makes the trigger for
+  silent re-authentication rather than a terminal failure — it does *not* park.
+  Everything below it is `PortDataMalformed` with `retryable=False`, so the job
+  parks on its first attempt instead of spending five to reach the identical
+  answer. **404 is the case that fires in production**, the catalog holding
+  bulk-export ids that age. **408 stays retryable** for the proxy case above,
+  and **5xx is `PortUnavailable`**.
 - **A kind-less TMDb reference is `PortDataMalformed`, never a guess**
   ([ADR-0011](../../docs/prd/decisions/0011-tmdb-id-is-namespaced-by-kind.md)):
   tens of thousands of ids are live in *both* id spaces and name unrelated works,
@@ -102,9 +106,9 @@ a v4 JWT and `_is_v4_token` picks header vs query form; `tmdb_requests_per_secon
 - **An `ix_titles_imdb_id` conflict is a write failure, not an upstream one** —
   enrichment writes TMDb's `external_ids.imdb_id` over the bulk export's and
   another row already holds it. Not being `PortDataMalformed`, it burns all five
-  attempts (re-fetching each time, since the failing write rolls the
-  `raw_payloads` insert back) and parks the title `skeleton` with its
-  `enrichment_error`.
+  attempts and parks the title `skeleton` with its `enrichment_error` — but
+  `RawPayloadStore.put`'s SAVEPOINT is released before the title write fails, so
+  the payload survives and the retries are cache reads, not TMDb requests.
 
 **TMDb's year filter is exact where the match ladder's is ±1**, so `_confident`'s
 ±1 never fires against TMDb results. `_search_one` retries **yearless** when a
@@ -196,5 +200,4 @@ never been fed by TMDb; `_is_v4_token`'s positive branch has never met a real v4
 token; no season TMDb lists has been refused by its own route, so the reconcile's
 arbitrary-season branch is unexercised; nothing has run beyond three workers or a
 non-`US` `tmdb_region`; and whether `MissingGreenlet` in a long `usher work` run
-is *caused* by the `ix_titles_imdb_id` conflict path or merely follows one is open
-(`.claude/rules/db-and-sql.md` has the candidate mechanism).
+is *caused* by the `ix_titles_imdb_id` conflict path is open.

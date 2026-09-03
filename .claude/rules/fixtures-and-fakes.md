@@ -139,12 +139,11 @@ case drives a fake fetcher or `httpx.MockTransport`.
   than upheld, and a well-meant `set()` in the fake's loop would diverge only on
   a fixture nobody has written.
 - **Ask of every boolean or enum predicate: has any fixture, in either arm, ever
-  written the other value?** `media_items.available` is `true` in every `own()`
-  helper, so deleting `WHERE available` from the ownership join survived
-  everything — while `mark_unseen_unavailable` makes a retracted copy the
-  ordinary state of a deleted film. Every candidate fixture in both arms wrote
-  `enrichment_state = ENRICHED`, so a narrowed read answering with nothing on a
-  bootstrapped-but-unenriched install survived too.
+  written the other value?** Both instances that taught this rule are now closed,
+  and closing them is what the answer looks like: `own()` took an `available`
+  flag once a retracted distractor was seeded, and one candidate case now seeds
+  `SKELETON` where every other writes `ENRICHED`. Before that, deleting `WHERE
+  available` from the ownership join survived everything.
 - **Import `testcontainers.community.postgres`, not `testcontainers.postgres`**
   — the latter is a shim raising a `DeprecationWarning` at import, and a suite
   with one permanently expected warning is one where the next real warning is

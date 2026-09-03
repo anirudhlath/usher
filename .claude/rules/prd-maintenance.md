@@ -63,15 +63,13 @@ Write a new spec if a new plan is needed.
 | Discover a load-bearing fact (rate limit, dataset size, API behaviour) | Record it with its source in the relevant section |
 | Learn something that invalidates a stated fact | Correct it and say so — stale "verified" facts are worse than none |
 
-**A worked example of the *"land a task from a plan"* row is standing in the
-tree right now, and the suite is green over it.** Both E1 rows — `docs/plans/progress.md`'s and
-`docs/prd/README.md`'s — still read *"🔨 in progress — 15 tasks planned; Task 1
-landed"*, written 2026-08-18 and untouched since, although PR #45 merged the
-whole phase branch on 2026-08-20 and `usher eval` has been a shipped command
-ever since (`.claude/rules/evals.md` is the record). The two tables **agree with
-each other**, so even a check that compared them would pass; nothing compares
-either to the tree. When you land a task, the cell is the work — the row being
-present is only what the test can see.
+**The status tables can be green, mutually consistent and wrong together.** Both
+E1 rows — `docs/plans/progress.md`'s and `docs/prd/README.md`'s — read *"🔨 in
+progress — 15 tasks planned; Task 1 landed"* for a fortnight after PR #45 merged
+the whole phase branch, and they **agreed with each other** throughout, so a
+check comparing them would have passed. Nothing compares either to the tree.
+When you land a task, the cell is the work — the row being present is only what
+the test can see. (Both were corrected 2026-09-02.)
 
 ## Conventions
 

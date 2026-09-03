@@ -7,9 +7,10 @@ paths:
 # Testing discipline
 
 How to make a test able to fail. `CLAUDE.md`'s five evidence rules are assumed;
-sweep mechanics are in `mutation-sweeps.md`. `fixtures-and-fakes.md` loads
-beside this file on nearly every path, so keep the split by subject: **a
-double's shape goes there, an assertion's teeth stay here.**
+sweep mechanics are in `mutation-sweeps.md`. `fixtures-and-fakes.md` triggers on
+fixtures/fakes/contract/conftest only, while this fires on all of `tests/**` — so
+most sessions get this file alone. **A double's shape goes there, an assertion's
+teeth stay here**, but state a rule here if a plain `tests/unit/` session needs it.
 
 ## Commands
 
@@ -71,8 +72,12 @@ uv run pytest <the case> 2>&1 | grep -E '^E .*<the guard message>'
   for a sort under UUIDv7 keys, a transposition for a reordering (seed a
   3-cycle), a two-tick iterator for "was the send inside the window".
 - **Ask of every boolean, enum or nullable column: has any fixture, in either
-  arm, ever written the other value?** A prose paragraph explaining why a column
-  is *not* filtered on is not a check; it is the reason nobody wrote one.
+  arm, ever written the other value?** (`fixtures-and-fakes.md` has the two
+  instances.) A prose paragraph explaining why a column is *not* filtered on is
+  not a check; it is the reason nobody wrote one.
+- **`coro.send(None)` to reach a parked branch needs its precondition actually
+  set up** — the queue must already be *full*, or the branch is unreachable and
+  the technique reports a false pass.
 - **A redundant-looking predicate is a coverage question, not a style
   question.** Ask what makes it redundant, then whether any fixture has ever
   made that thing false. Two predicates equally selective in every fixture are
@@ -188,13 +193,8 @@ uv run pytest <the case> 2>&1 | grep -E '^E .*<the guard message>'
   observable exactly where the suite breaks that invariant on purpose** —
   usually a `model_construct` case written for something else. Check there
   before calling it equivalent, and check every shape in the parametrisation.
-- **A performance finding with no measurement behind it is a design change with
-  no argument behind it**, and a *declined* optimisation rests on a measurement,
-  so a change to that measurement's inputs re-opens it while nothing links the
-  two. When a constant a benchmark was taken at moves, grep for benchmarks taken
-  at it. Record the number in the docstring that invites the question.
 - **An amendment that leaves the superseded claim standing is a silent
   contradiction, and a rules file describing a repaired defect in the present
   tense sends the next reader looking for it.** Amend in place, then grep the
-  document *and* the code for the claim amended: a correction filed below the
-  claim it corrects is a second claim, not a correction.
+  document *and* the code: a correction filed below the claim it corrects is a
+  second claim, not a correction.

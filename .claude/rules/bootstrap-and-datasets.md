@@ -79,9 +79,9 @@ the stale-snapshot interlock is new failure surface for a one-off saving.
 ## Parsing the IMDb TSVs
 
 - **They have no quoting mechanism and their title fields contain literal `"`.**
-  `csv.reader`'s default `QUOTE_MINIMAL` silently rewrites those names, on all
-  four files. Parse with `line.split("\t")`. **Zero rows in any of the four split
-  to a wrong column count**, so a wrong count is a real signal, never noise.
+  `csv.reader`'s default `QUOTE_MINIMAL` silently rewrites those names. Parse
+  with `line.split("\t")`. **Zero rows split to a wrong column count** on the
+  three measured, so a wrong count is a real signal, never noise.
 - **`types` and `attributes` are multi-valued inside one `title.akas` column,
   separator `\x02`** — a reader assuming a tab calls those rows malformed.
 - **`name.basics` is sorted lexicographically by the `nconst` *string*, not
@@ -188,13 +188,13 @@ the stale-snapshot interlock is new failure surface for a one-off saving.
 - **A TMDb `cast[]`/`crew[]`/`created_by[]` entry carries no IMDb `nconst`** —
   `imdb_id`, birth/death year and biography live on `/person/{id}`, one request
   per person (`/find/{nconst}?external_source=imdb_id` works, no follow-up call).
-  **Both merge directions have a low yield, so two rows per human is irreducible
-  for most people**; the only shared key is the name, not identity (ADR-0003).
+  **Both merge directions have a low yield (ADR-0036), so a merge costs a second
+  request per person.** That is *expensive*, not *impossible* — do not restate it
+  as an absolute; that is how this claim went wrong once already.
 - **Price a TMDb crawl from the policy ceiling — ADR-0005's ~25 rps, never an
   observed lane rate** — over the people the catalog *holds*, not those its
   payloads mention (`mapping._CAST_LIMIT` caps stored cast at 50 a title).
 - **The ≤6-month cache term applies to `raw_payloads`, not to derived columns**
   (ADR-0016), so **cache the response and a crawl recurs; store the derived id and
-  it does not.** `_UPSERT_PEOPLE`'s `DO UPDATE SET` does not name `imdb_id`, so
-  `usher derive` cannot discard a crawl — an accident of a column list, pinned by
-  a test.
+  it does not.** `_UPSERT_PEOPLE`'s `DO UPDATE SET` omits `imdb_id`, so `usher
+  derive` cannot discard a crawl — an accident of a column list, pinned by a test.

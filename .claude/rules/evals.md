@@ -8,10 +8,8 @@ paths:
 # The quality-eval harness (E1)
 
 `usher eval` measures a surface against pre-registered bars — the half of
-quality a green test suite cannot judge. Landed with PR #45, merged 2026-08-20
-23:21 local — **2026-08-21 UTC, which is the whole of why
-`milestone-boundary-calls.md` dates it a day later than this file**. `suggest`
-is the only surface (`cli.py`'s `choices=["suggest"]`).
+quality a green test suite cannot judge. Landed with PR #45. `suggest` is the
+only surface (`cli.py`'s `choices=["suggest"]`).
 
 ```bash
 uv sync --extra eval                   # ranx; optional to the product, mandatory for the gate

@@ -66,7 +66,9 @@ What survives is that `credits` could not dedupe an IMDb load — now closed by
 `m09d`'s natural key. **T4's provenance rule is built; the `m09b` withdrawal
 stands, because `m09c` took its position, not because the design failed.**
 
-**What shipped is the names-only design and it is not a shrunken (A).**
+**What shipped is the names-only design, not a shrunken bulk people/credits
+load** — that option failed on 2.702 GB against a 2.0 GB ceiling, which is why
+there is no `m09b`.
 `titles.credit_names` is filled from `title.principals` × `name.basics` with the
 join resolved **in the importer**; **no person row and no credit row is written
 from IMDb at all**, so the two bulk sources never own one entity. `title.akas`

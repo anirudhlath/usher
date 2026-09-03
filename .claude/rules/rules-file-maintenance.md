@@ -11,7 +11,15 @@ is for.
 
 ## The cap, and why splitting is usually the wrong answer
 
-**No rules file may exceed 200 lines.** At 400 it is broken, not merely large.
+**200 lines is the target and 400 is the hard ceiling.** Past 400 a file is
+broken, not merely large.
+
+**Most of these files sit within a line or two of 200, so assume you are full.**
+Adding a finding therefore means naming what it displaces, in the same edit:
+the rule it supersedes, a measurement narrative, or a paragraph restating its
+neighbour. If nothing in the file is worth less than what you are adding, the
+finding belongs somewhere else — or it is not a rule yet. Going a few lines over
+to correct a false claim is right; leaving the claim false to stay at 200 is not.
 
 The instinct when a file gets big is to split it, and this repository tried that
 twice — `testing-discipline.md` in 2026-08-08 (`dbe9206`), `mutation-sweeps.md`

@@ -151,9 +151,12 @@ Rules for this subsystem; the arguments are in the ADRs and docstrings cited.
   *request*, and this suite runs with no expected warnings.
 - **A leak check may not forbid "emby"** — an operator names a source "Living
   Room Emby". Assert against a distinctive `external_id` and that key.
-- **Every model in `api/dto/` ends in `Response`, nested ones included** —
-  `test_api_dto.py` discovers by that suffix and asserts no credential-shaped
-  field, so a differently named model is invisible to the scan.
+- **`test_api_dto.py`'s credential scan discovers by the `Response` suffix, and
+  five models in `api/dto/` do not carry it** — `ReadinessChecks`, `LaneReport`,
+  `Page`, `RowProviderUpdate`, and `AttributionEntry`, which is a route's own
+  `response_model`. Name a new response model `*Response` or it is invisible to
+  the scan. `*Request` models are excluded on purpose: they legitimately carry
+  credentials (`SourceCreateRequest.password`).
 - **`request.url_for` substitutes path parameters raw**, so `api/deps.py`'s
   `quote(ticket, safe="=")` is the only encoding step; `RedirectResponse`
   re-quotes `Location` with `%` safe and `wrap_deep_link` encodes once.
@@ -195,6 +198,5 @@ Rules for this subsystem; the arguments are in the ADRs and docstrings cited.
   context.** An all-zero header is well-formed and names nothing; a sampled-out
   span is the half an all-zero check misses, since a valid id with no exported
   trace opens an empty Tempo page.
-- **The header name is contested.** Published W3C trace-context Level 2 defines
-  no response header, and on `main` the binding moved to `Server-Timing` (metric
-  `trace`, same grammar). Shipped as `traceresponse`, what OTel emits.
+- **The header name is contested** — `telemetry.py`'s own comment has the
+  argument and the standards history.
