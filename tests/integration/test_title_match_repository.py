@@ -21,6 +21,7 @@ from tests.contract.title_match_repository_contract import (
     TitleCatalog,
     TitleMatchRepositoryContract,
 )
+from tests.integration.conftest import Analyze
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
@@ -171,7 +172,9 @@ async def test_a_batch_costs_a_bounded_number_of_statements(
 
 
 async def test_name_year_matching_uses_the_expression_index(
-    session: AsyncSession, catalog: TitleCatalog
+    session: AsyncSession,
+    catalog: TitleCatalog,
+    analyze: Analyze,
 ) -> None:
     """A query that lowercases the *probe* instead of the column cannot use an
     expression index on `lower(name)` at all, and the fake -- which matches on
@@ -207,7 +210,7 @@ async def test_name_year_matching_uses_the_expression_index(
             kind=TitleKind.MOVIE, name=f"Movie {index}", year=2000 + index % 20
         )
     await session.flush()
-    await session.execute(text("ANALYZE titles"))
+    await analyze("titles")
     plan = "\n".join(
         (
             await session.execute(
@@ -223,7 +226,9 @@ async def test_name_year_matching_uses_the_expression_index(
 
 
 async def test_provider_id_matching_uses_the_namespaced_index(
-    session: AsyncSession, catalog: TitleCatalog
+    session: AsyncSession,
+    catalog: TitleCatalog,
+    analyze: Analyze,
 ) -> None:
     """`ix_titles_tmdb_id_kind` is unique and partial (`WHERE tmdb_id IS NOT
     NULL`), and `t.tmdb_id = p.value` is what lets Postgres prove the
@@ -234,7 +239,7 @@ async def test_provider_id_matching_uses_the_namespaced_index(
             kind=TitleKind.MOVIE, name=f"Movie {index}", tmdb_id=index, year=2000
         )
     await session.flush()
-    await session.execute(text("ANALYZE titles"))
+    await analyze("titles")
     plan = "\n".join(
         (
             await session.execute(

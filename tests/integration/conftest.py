@@ -32,17 +32,31 @@ holds mutable state across tests -- each test's isolation comes entirely
 from its own connection and transaction, never from resetting something
 shared -- which is what would matter for running this suite under
 pytest-xdist, should that ever get adopted.
+
+**The one thing the rollback does not undo is `pg_class`.** `ANALYZE` and
+`CREATE INDEX` both write `reltuples`/`relpages` with an in-place catalog
+update, so a test that seeds, analyzes and rolls back leaves every later test
+in the process planning against rows that are gone -- issues #26, #43 and #79.
+`session`'s teardown therefore asserts, after its own rollback, that `pg_class`
+still describes this database, and repairs what it finds. Take the `analyze`
+fixture rather than executing `ANALYZE` directly; `index_suspended` and
+`A_DECISIVE_MARGIN` are the other half, for a test whose subject is which index
+a plan takes.
 """
 
 import os
+import re
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Protocol
 
 import pytest
 import pytest_asyncio
 from alembic.command import downgrade, upgrade
 from alembic.config import Config
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from usher.config import get_settings
 from usher.db import models  # noqa: F401  — registers all tables
@@ -174,13 +188,265 @@ def postgres_url() -> Iterator[str]:
         yield url
 
 
+_A_TABLE_NAME = re.compile(r"\A[a-z_][a-z0-9_]*\Z")
+
+
+def _identifier(name: str) -> str:
+    """A table name that may be interpolated into SQL.
+
+    Every caller below names a literal table, so this can never fail in
+    practice; it is here so that the `# noqa: S608` on the interpolations is
+    backed by a check rather than by a promise.
+    """
+    if not _A_TABLE_NAME.match(name):
+        raise ValueError(f"not a table name: {name!r}")
+    return name
+
+
+async def _restore_the_statistics(conn: AsyncConnection, tables: frozenset[str]) -> None:
+    """Put `pg_class` back after a test `ANALYZE`d something.
+
+    `VACUUM` cannot run inside a transaction block, hence the AUTOCOMMIT hop,
+    and it has to run **after** the caller's rollback or the seeded tuples are
+    not yet dead and the vacuum is a no-op that looks exactly like a vacuum
+    that worked. This runs inside `session`'s own teardown, below its
+    `rollback()`, which is what makes that ordering structural rather than a
+    convention a future fixture can quietly break -- see the guard's docstring.
+    """
+    names = ", ".join(_identifier(name) for name in sorted(tables))
+    await conn.execute(text(f"VACUUM (ANALYZE) {names}"))
+
+
+async def _tables_pg_class_is_wrong_about(
+    conn: AsyncConnection, forgiven: frozenset[str]
+) -> dict[str, tuple[int, int]]:
+    """Each public table whose `reltuples` disagrees with its `count(*)`,
+    against what it really holds.
+
+    Cheap on purpose: one query, and it returns nothing at all unless
+    something already looks wrong, so the `count(*)`s below are paid for only
+    when there is something to attribute. Tables never analyzed read
+    `reltuples = -1`, which is Postgres for "measure the file", and are not a
+    lie about anything.
+    """
+    described = await conn.execute(
+        text(
+            "SELECT relname FROM pg_class "
+            "WHERE relnamespace = 'public'::regnamespace AND relkind = 'r' AND reltuples > 0"
+        )
+    )
+    wrong: dict[str, tuple[int, int]] = {}
+    for table in sorted({str(row[0]) for row in described} - forgiven):
+        estimate = await conn.execute(
+            text("SELECT reltuples::bigint FROM pg_class WHERE relname = :name"), {"name": table}
+        )
+        live = await conn.execute(
+            text(f"SELECT count(*) FROM {_identifier(table)}")  # noqa: S608 -- checked identifier
+        )
+        described_as, really_there = int(estimate.scalar_one()), int(live.scalar_one())
+        if described_as != really_there:
+            wrong[table] = (described_as, really_there)
+    return wrong
+
+
+async def _assert_pg_class_still_describes_this_database(
+    conn: AsyncConnection,
+    *,
+    node_id: str,
+    forgiven: frozenset[str],
+    expected: frozenset[str],
+    inherited: frozenset[str],
+) -> None:
+    """The property every test in this directory is entitled to assume:
+    `pg_class` describes the database it is about to plan against.
+
+    **`ANALYZE` writes `reltuples` and `relpages` with an in-place catalog
+    update, so `session`'s rollback does not take them back.** A test that
+    seeds two thousand rows, `ANALYZE`s, and rolls back leaves every *later*
+    test in the process planning against a row count that no longer exists --
+    issue #26's mechanism, inventoried per-file in #43, and the reason #79
+    exists. Per-file repairs enumerate; this asserts the property, so a leak
+    nobody has enumerated fails **in the test that caused it** rather than in
+    whichever unlucky test plans next.
+
+    **It repairs what it found before failing, which is not politeness.** The
+    leak is durable, so a guard that only reports turns one leaking test into
+    an error in that test *and in every test after it* -- measured, running
+    `test_raw_payload_store.py` alone: two errors, the second on a case that
+    did nothing wrong. Cleaning up leaves exactly one red, on the test that
+    caused it.
+
+    **And it fails only on what this test *introduced*, which is the other
+    half of naming the culprit.** `inherited` is the same reading taken at the
+    top of the test, so a lie already in place when it started is repaired and
+    not blamed on it. Without that, a table analyzed while rows were genuinely
+    committed -- which route-driven tests do, since `get_session` is the
+    request's commit boundary -- and emptied later reds whichever test happens
+    to run next.
+    """
+    lying = await _tables_pg_class_is_wrong_about(conn, forgiven)
+    if lying:
+        await _restore_the_statistics(conn, frozenset(lying))
+    introduced = {
+        table: pair
+        for table, pair in lying.items()
+        if table not in inherited and table not in expected
+    }
+    assert not introduced, (
+        f"{node_id} left `pg_class` describing rows this database does not have "
+        f"(reltuples, count(*)): {introduced}. The catalog update is **in place**, so this "
+        "is now every later test's planner too -- and `ANALYZE` is not the only thing that "
+        "writes it: a rolled-back `CREATE INDEX` leaves the same lie, measured. Take the "
+        "`analyze` fixture instead of executing `ANALYZE` directly, or -- if the leak is a "
+        "side effect of what the test exercises -- mark it "
+        "`@pytest.mark.leaks_statistics(...)` naming the tables."
+    )
+
+
+@pytest.fixture
+def _analyzed_tables() -> set[str]:
+    """The tables this test told the planner about, shared by reference
+    between `analyze` and `session` so the restore needs no global."""
+    return set()
+
+
+class Analyze(Protocol):
+    """The `analyze` fixture, as a test signature can name it."""
+
+    async def __call__(self, *tables: str) -> None: ...
+
+
+@pytest.fixture
+def analyze(session: AsyncSession, _analyzed_tables: set[str]) -> Analyze:
+    """`ANALYZE`, for a test whose subject is a *plan*, with the cleanup the
+    rollback does not do.
+
+    **A test that asserts a plan establishes its own statistics.** Without
+    them the planner sizes the relation off an empty `pg_class`, every
+    candidate index costs the same to four significant figures, and which one
+    the assertion names is decided by nothing the test controls -- that is
+    both of #79's CI failures, and `test_the_availability_sweeps_update_uses_
+    its_index` failed **10 runs of 10** in isolation for exactly this reason
+    before it seeded a population and called this.
+
+    Use this rather than executing `ANALYZE` yourself: it registers the table
+    for the `VACUUM (ANALYZE)` that `session` runs after its rollback, which
+    is what keeps the statistics from becoming every later test's problem.
+    The guard in `session`'s teardown is what makes that non-optional.
+    """
+
+    async def run(*tables: str) -> None:
+        for table in tables:
+            await session.execute(text(f"ANALYZE {_identifier(table)}"))
+        _analyzed_tables.update(tables)
+
+    return run
+
+
+A_DECISIVE_MARGIN = 2.0
+"""How much cheaper the asserted plan has to be than the best one without its
+index, before "the planner chose it" is a claim about the schema.
+
+Two, because the measured margins are far above it and the number that matters
+is the one that separates *decided* from *tied*, not a percentile. On
+`pgvector/pgvector:pg17`, 2026-08-31: the availability sweep at 2,000 rows with
+50 stale costs **31.72** through `ix_media_items_sweep` and **129.09** through
+`uq_media_items_source_external` with the sweep index suspended -- **4.07x**.
+The same case at its old fixture size of fifty rows and no `ANALYZE` costs
+`0.14..8.16` **both** ways -- measured by suspending each candidate in turn, so
+that is a reading rather than an inference from the winner's cost -- which is
+the tie this constant exists to fail on. That reading also reproduces the CI
+failure byte for byte: `Index Scan using uq_media_items_source_external ...
+(cost=0.14..8.16 rows=1 width=7)`, `Index Cond` on `source_id` alone.
+"""
+
+_A_ROOT_COST = re.compile(r"\(cost=[0-9.]+\.\.([0-9.]+) ")
+
+
+def total_cost(plan: str) -> float:
+    """`EXPLAIN`'s estimate for the whole plan, off its root node.
+
+    The root is the first line, and its `cost=start..total` is the number to
+    compare: `start` is what it takes to return the *first* row, which two
+    plans can tie on while differing by orders of magnitude overall.
+    """
+    match = _A_ROOT_COST.search(plan)
+    assert match, f"no root cost in this plan, so `EXPLAIN` did not run with costs:\n{plan}"
+    return float(match.group(1))
+
+
+@asynccontextmanager
+async def index_suspended(session: AsyncSession, index: str) -> AsyncIterator[None]:
+    """Hide one index from the planner, so a plan assertion can measure what
+    the *alternative* costs.
+
+    **"The planner chose the index I meant" is not a property of the schema
+    unless the runner-up is materially worse**, and at fixture scale it
+    routinely is not: #79's two CI failures are both plans where the chosen
+    and the asserted index cost the same to four significant figures, so the
+    assertion was reporting a tie-break. Asserting the *margin* is what stops
+    a future fixture -- trimmed from two thousand rows to fifty because the
+    suite got slow -- from silently restoring the tie under a green test.
+
+    `indisvalid = false` is how Postgres itself marks an index the planner
+    must ignore (it is the state a failed `CREATE INDEX CONCURRENTLY` leaves),
+    and a plain `UPDATE` on the catalog is transactional: the `SAVEPOINT` here
+    takes it back, and the enclosing `session` fixture's rollback would take
+    it back again. Verified directly on `pgvector/pgvector:pg17` -- the row
+    reads `indisvalid = t` again after the block, on this connection and on a
+    fresh one. Nothing writes to the table inside the block, so the index
+    being nominally invalid for its duration costs nothing.
+    """
+    savepoint = await session.begin_nested()
+    try:
+        await session.execute(
+            text(
+                "UPDATE pg_index SET indisvalid = false WHERE indexrelid = CAST(:name AS regclass)"
+            ),
+            {"name": index},
+        )
+        yield
+    finally:
+        await savepoint.rollback()
+
+
 @pytest_asyncio.fixture
-async def session(postgres_url: str) -> AsyncIterator[AsyncSession]:
+async def session(
+    postgres_url: str, request: pytest.FixtureRequest, _analyzed_tables: set[str]
+) -> AsyncIterator[AsyncSession]:
+    # `leaks_statistics(*tables)` says the leak is a known side effect of what
+    # the test exercises, so the guard repairs it and stays quiet.
+    # `leaks_statistics(*tables, restored_by=...)` says something else owns the
+    # repair and the leak has to survive until it runs -- which is a real case
+    # exactly once here, and naming the owner is the point of the keyword.
+    expected, forgiven = set[str](), set[str]()
+    for marker in request.node.iter_markers("leaks_statistics"):
+        (forgiven if marker.kwargs.get("restored_by") else expected).update(marker.args)
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
     async with engine.connect() as conn:
         await conn.begin()
+        inherited = frozenset(await _tables_pg_class_is_wrong_about(conn, frozenset(forgiven)))
         async with factory(bind=conn) as s:
             yield s
         await conn.rollback()
+        # Switching isolation level needs the connection to be between
+        # transactions, which the rollback above has just made true. Both the
+        # restore and the guard run here rather than in a fixture of their own
+        # because a fixture's teardown ordering is *positional* -- the
+        # convention "declare it before `session`" is one signature edit away
+        # from putting a `VACUUM` in front of the rollback it waits on, which
+        # is not an assertion failure but a hang on a relation lock. Measured:
+        # an autouse fixture that merely touched `session` was enough to
+        # reorder it that way.
+        autocommit = await conn.execution_options(isolation_level="AUTOCOMMIT")
+        if _analyzed_tables:
+            await _restore_the_statistics(autocommit, frozenset(_analyzed_tables))
+        await _assert_pg_class_still_describes_this_database(
+            autocommit,
+            node_id=request.node.nodeid,
+            forgiven=frozenset(forgiven),
+            expected=frozenset(expected),
+            inherited=inherited,
+        )
     await engine.dispose()

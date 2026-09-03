@@ -373,10 +373,13 @@ _DAYS_IN_YEAR = 365.25
 # So the usable interval is the **open** `(0, 0.01)`: 0 excluded because a
 # zero-weighted term is the "weight that reads like a signal" this table
 # refuses, 0.01 excluded by the arithmetic above. Nothing measured
-# distinguishes any point inside it -- `title_embeddings` holds **0 rows** on
-# both surviving catalogs, so the term's real effect size is not merely
-# unmeasured but unmeasurable today -- and 0.005 is the midpoint, which is the
+# distinguishes any point inside it, and 0.005 is the midpoint, which is the
 # only choice in that interval that does not import a preference nobody has.
+# ⚠️ This comment justified that with *"`title_embeddings` holds 0 rows on both
+# surviving catalogs, so the effect size is unmeasurable today"* -- true on
+# 2026-08-11 and false from 2026-08-12, when S4 embedded 130,647 titles
+# (132,440 as of 2026-08-19). The effect size is **measurable and still
+# unmeasured**, which is a different claim and a smaller excuse.
 # It leaves 0.005 of headroom, so a seventh term is still expressible.
 #
 # **What 0.005 can actually move, stated rather than implied.** With all six
@@ -1116,7 +1119,11 @@ def _dense_ranks(hits: Sequence[SearchHit]) -> list[int]:
     cancels between them exactly, and popularity then decides between a film
     and a video essay named after it. Leading the key makes rank 0 a group of
     one, which is the state `_WEIGHTS`' arithmetic bound is stated over: no
-    combination of the other five can displace it, margin 0.009615.
+    combination of the other five can displace it, margin `0.005 / 1.045` =
+    0.004785 with all six signals present. **Carry the denominator with the
+    margin** -- this docstring read 0.009615 until 2026-09-02, which is
+    `0.01 / 1.04`, the bound with the *taste* term absent, and so twice the
+    real headroom on any search that has one.
 
     Two exact matches with different index scores still take ranks 0 and 1 --
     that is two titles with one name, which is a real state of this catalog and

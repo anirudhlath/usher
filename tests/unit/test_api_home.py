@@ -256,8 +256,9 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
     over real Postgres with no overrides at all.
 
     **Two assertions, because the behavioural one alone does not generalise.**
-    Measured 2026-08-07, planting `None` into each of `get_row_context`'s ten
-    repository/user arguments in turn and running the whole unit suite against
+    Measured 2026-08-07 at `786c5b4`, planting `None` into each of
+    `get_row_context`'s ten repository/user arguments *of that day* in turn and
+    running the whole unit suite against
     the behavioural assertion by itself: **8 killed, 2 survived** --
     `titles=None` and `episodes=None` both passed all 2,759 cases. The
     behavioural half only asks every provider to `propose()` against an
@@ -278,8 +279,11 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
     is not `None`, so a plant there still dies here; what this scan cannot see
     is a callable that answers `[]` forever, which is why
     `test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_it`
-    asserts a *genre* off the real one. It kills all ten, including the two the
-    behavioural half cannot see.
+    asserts a *genre* off the real one. It killed all ten of that day's plants,
+    including the two the behavioural half cannot see -- and because it is
+    derived rather than listed, it covers the **eleventh** (M9's `images`) by
+    construction, which is the one argument that round never measured
+    behaviourally.
 
     The behavioural half is kept anyway, and it is the half with the *reason*
     in it: a scan proves the field is populated, and `propose()` proves it is

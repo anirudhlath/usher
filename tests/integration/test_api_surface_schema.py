@@ -312,18 +312,36 @@ async def test_every_cascade_in_this_migration_has_an_index_the_lookup_can_use(
 
     The same narrow index is chosen for the real parent `DELETE` and for
     `list_for_title`. So `ix_images_title_id` is not made redundant by `m09c`,
-    it is simply indistinguishable from the wider index at zero rows -- and the
-    property this case claims is *"a usable index exists at all"*, which both
-    satisfy. Naming one of them would be asserting a tie-break.
+    it is simply indistinguishable from the wider index at zero rows.
+
+    **This asserted a *set of index names* until 2026-08-31, and the set was
+    wrong in a way only a plan flip could show.** `uq_images_owner_provider_path`
+    leads on a coalesced owner, so it serves `episode_id` exactly as it serves
+    `title_id`; the set said so for one column and not for the other, and a
+    perturbation of `pg_class` was enough to make the planner take it for
+    `episode_id` and fail a case about a property that still held --
+    `Index Scan using uq_images_owner_provider_path ... Index Cond: (episode_id
+    = ...)`, measured under both an all-empty and an all-large `pg_class` (#79).
+    A hand-maintained list of acceptable winners has to be re-derived every
+    time an index is added, and nothing reminds anyone.
+
+    So the assertion is the property instead: **the plan reaches this table
+    through an `Index Cond` on this column.** That is what "the referential
+    check has an index it can use" means, it holds however many indexes could
+    serve it, and it is *stronger* than naming one -- an index scan that walks
+    the whole index and puts the column in a `Filter` passes a name check and
+    fails this one. That distinction is not hypothetical: it is exactly the
+    shape of the other #79 failure, where a prefix lookup was served by a full
+    `pk_titles` walk.
     """
     probes = [
-        ("images", "title_id", {"ix_images_title_id", "uq_images_owner_provider_path"}),
-        ("images", "episode_id", {"ix_images_episode_id"}),
-        ("images", "person_id", {"ix_images_person_id"}),
-        ("title_search_names", "title_id", {"ix_title_search_names_title_id"}),
+        ("images", "title_id"),
+        ("images", "episode_id"),
+        ("images", "person_id"),
+        ("title_search_names", "title_id"),
     ]
     await session.execute(text("SET LOCAL enable_seqscan = off"))
-    for table, column, acceptable in probes:
+    for table, column in probes:
         result = await session.execute(
             text(
                 f"EXPLAIN SELECT 1 FROM {table} "  # noqa: S608 -- both are literals above
@@ -331,11 +349,8 @@ async def test_every_cascade_in_this_migration_has_an_index_the_lookup_can_use(
             )
         )
         plan = "\n".join(row[0] for row in result)
-        # A *set*, and three of the four hold exactly one name -- so this is
-        # not a blanket "some index was used", which `Seq Scan` would also have
-        # to be excluded from by hand. Only the column with two genuine
-        # candidates has two.
-        assert any(name in plan for name in acceptable), f"{table}.{column}: {plan}"
+        assert f"Seq Scan on {table}" not in plan, f"{table}.{column}: {plan}"
+        assert f"Index Cond: ({column} = " in plan, f"{table}.{column}: {plan}"
 
 
 # --- the CHECK bodies, exercised rather than described -----------------------

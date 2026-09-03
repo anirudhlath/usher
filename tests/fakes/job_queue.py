@@ -3,12 +3,18 @@
 **Where this is more forgiving than Postgres, on purpose.** Eight places, and
 the first is not a nuance -- it is the whole point of the port:
 
-(**Seven, corrected 2026-08-07.** This header said six from `69e0ae3`, which
-shipped six bullets; `ac447e5` added the seventh -- the no-op re-enqueue count
--- and left the number behind. Three other files already call that one "the
-fake's seventh" by name: `src/usher/ports/search.py`,
-`tests/integration/test_index_backfill.py`, and
-`.claude/rules/testing-discipline.md`. This file was the outlier.)
+(**The count is load-bearing because four other files cite an ordinal into this
+list by name, so a bullet inserted above one renumbers their prose silently.**
+The no-op re-enqueue count is the *seventh* and is called that in
+`src/usher/ports/search.py`, `tests/integration/test_index_backfill.py`,
+`tests/integration/test_rows_route.py` and
+`.claude/rules/fixtures-and-fakes.md`. Two corrections, both to this
+parenthetical: the header said six from `69e0ae3` while `ac447e5` had already
+shipped the seventh bullet, fixed 2026-08-07; and the citation list named
+`testing-discipline.md`, which stopped holding that material at the 2026-08-08
+rules split, and omitted `test_rows_route.py` -- fixed 2026-09-02. **Append,
+never insert, and re-run `grep -rn "fake's seventh" src tests .claude` before
+changing an ordinal.**)
 
 - **Nothing here can express `SELECT ... FOR UPDATE SKIP LOCKED`.** This is
   one dict behind one event loop; there is no second session, no row lock,
