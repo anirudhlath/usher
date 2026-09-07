@@ -887,32 +887,48 @@ class Settings(BaseSettings):
     # the other two.
     scheduler_enabled: bool = False
     # How long the loop sleeps between ticks. **The floor is measured rather
-    # than stylistic.** A tick issues **one `last_done()` per registered job
-    # and nothing else** -- that is the whole of `ScheduledJob`'s contract, so
-    # it is the whole of what the loop performs -- and for the one
-    # registration to come that read is `SimilarityService.computed_at()`,
-    # `min(computed_at)` over `title_neighbors`. Measured read-only against
-    # this deployment's live 756 MB table on 2026-08-27, the shipped statement
-    # run verbatim, seven samples with the first discarded:
+    # than stylistic.** A tick issues **one `last_done()` per registered job**
+    # -- that is the whole of `ScheduledJob`'s contract, so it is the whole of
+    # what the loop *decides* on -- and for the one registration to come that
+    # read is `SimilarityService.computed_at()`, `min(computed_at)` over
+    # `title_neighbors`. Measured read-only against this deployment's live
+    # 756 MB table on 2026-08-27, the shipped statement run verbatim, seven
+    # samples with the first discarded:
     #
     # | read | median | range |
     # |---|---|---|
     # | `computed_at()` (ADR-0046's evidence table) | 71.1 ms | 69.2-78.6 |
     # | `computed_at()`, re-measured here on a busier host | 73.2 ms | 68.4-81.5 |
     #
-    # | retention's `oldest()`, the one registration that exists | 0.072 ms | 0.064-0.099 |
+    # | retention's `oldest()`, the one registration that exists | 0.041 ms | 0.037-0.048 |
     #
     # So **~71-73 ms per tick** once both jobs are registered: 0.12% of a
     # minute at this floor, and 7% of a second at `1.0`. ⚠️ ADR-0046 quoted
     # **~144 ms** by adding `count_stale()` to the tick; that read is J6's own
     # staleness guard *inside* `run()`, which the loop does not perform, so it
     # is a cost of the job rather than of the period. Corrected in the record;
-    # the floor survives either figure. ⚠️ **And the job that ships today is
-    # the *cheap* one** -- `SearchQueryRetention.last_done()` is `min(at)`
-    # through `ix_search_queries_at`, an Index Only Scan of one leaf measured
-    # at 0.072 ms over 14,978 rows on 2026-08-27, so a tick on a deployment
-    # without the rebuild registered costs three orders of magnitude less than
-    # this floor is justified against. The floor is sized for the dearer read
+    # the floor survives either figure.
+    #
+    # ⚠️ **"And nothing else" was this comment's claim until 2026-09-07 and it
+    # is not true of a shipped registration.** `SearchQueryRetention.last_done`
+    # reads through `composition.search_query_scope`, which **commits on a
+    # clean exit** -- so the read-only `SELECT min(at)` is followed by a
+    # `COMMIT` and preceded by a pool checkout, i.e. two round trips per job
+    # per tick and not one. It does not move the arithmetic (the second is a
+    # `COMMIT` on a transaction that wrote nothing), and it is stated because
+    # the floor is justified on a per-tick cost and a reader checking that cost
+    # will count round trips. `services/scheduler.py`'s `_due_now` carries the
+    # same correction.
+    #
+    # ⚠️ **And the job that ships today is the *cheap* one** --
+    # `SearchQueryRetention.last_done()` is `min(at)` through
+    # `ix_search_queries_at`, an Index Only Scan of one leaf re-measured
+    # 2026-09-07 on `usher_j2` at a median of **0.041 ms** over 14,978 rows
+    # (`Heap Fetches: 1`, 4 buffers -- `SearchQueryRepository.oldest` carries
+    # the full reading and this table's row was the stale copy of it, 0.072 ms
+    # and 3 buffers, until 2026-09-07), so a tick without the rebuild registered
+    # costs three orders of magnitude less than this floor is justified
+    # against. The floor is sized for the dearer read
     # rather than the shipped one, deliberately: J6 adds it without revisiting
     # this number. `ge=60.0` rather than `gt=0` because a value that would spend a
     # meaningful share of the deployment's database budget re-asking a question
@@ -945,22 +961,46 @@ class Settings(BaseSettings):
     # written. That is a switch for "record nothing", and the switch for
     # recording nothing is `USHER_SEARCH_SUGGEST_ANALYTICS` and an analytics-
     # free `SearchService`, both of which write no row rather than writing one
-    # and racing a prune for it.
-    search_query_retention_days: int = Field(default=90, ge=0)
+    # and racing a prune for it. ⚠️ **The floor is a claim and it is pinned**
+    # -- `tests/unit/test_config.py::
+    # test_the_retention_window_and_the_chunk_cannot_be_switched_off`, because
+    # relaxing either of these two to `ge=0` left the whole suite green when it
+    # was measured on 2026-09-07.
+    search_query_retention_days: int = Field(default=90, ge=1)
     # How many rows one transaction may delete. The prune loops, opening a
     # session and committing per chunk, because a single `DELETE` over a
     # year of keystrokes holds one transaction and one lock set for its whole
     # duration on a table `GET /search` writes to on every request.
     #
-    # 10,000 against a measured arrival rate of ~1,050 rows a day (a clone of
-    # the live catalog, 14,978 rows in 14 d 06 h on 2026-08-27) means the
-    # steady-state prune is **one chunk**, and the number only becomes
+    # 10,000 against a measured arrival rate of **single digits a day** means
+    # the steady-state prune is **one chunk**, and the number only becomes
     # load-bearing on a first run after a long outage or after J2's keystroke
-    # writer is switched on -- which is the case it exists for. `ge=1` because
-    # a chunk of zero deletes nothing and, since the loop terminates on a chunk
-    # shorter than the limit, terminates immediately: a retention job that
-    # silently never prunes.
-    search_query_retention_batch: int = Field(default=10_000, ge=0)
+    # writer is switched on -- which is the case it exists for.
+    #
+    # ⚠️ **The rate this comment quoted until 2026-09-07 -- "~1,050 rows a
+    # day, 14,978 rows in 14 d 06 h" -- was a burst divided by a span it did
+    # not arrive over.** Re-measured 2026-09-07 on `usher_j2`, the same clone:
+    # **14,898 of those 14,978 rows (99.5%) carry `surface = 'suggest'` and
+    # were all written on one day**, 2026-08-27, by J2's own backfill. The
+    # organic remainder is **80 rows**; the span is **14 d 04 h 11 m**, not
+    # 14 d 06 h; so the arrival rate is **5.6 rows a day**, and the two
+    # live-shaped databases agree -- `usher_catalog` 109 rows over 19 d 02 h
+    # (5.7/day) and `usher_wt_devdb` 107 rows over 13 d 23 h (7.7/day). The
+    # conclusion is unchanged and stronger: at single digits a day a
+    # steady-state prune is emphatically one chunk. **The burst is what a
+    # *first* run after the suggest writer is switched on looks like**, which
+    # is the case 10,000 is sized for.
+    #
+    # 🔴 `ge=1` because a chunk of zero is a loop that **never ends**, not
+    # one that ends early. `SearchQueryRetention.run` breaks on
+    # `deleted < batch`; at `batch = 0` a chunk deletes nothing, so `0 < 0` is
+    # false and the drain re-opens a scope and re-issues the same
+    # `DELETE ... LIMIT 0` forever. Measured 2026-09-07 against a three-row
+    # fake: **253,501 `prune` calls in 2.0 s, all three rows still present**.
+    # Against a real database each pass is a round trip so the loop is at
+    # least cancellable -- but it is a scheduled job hammering the table
+    # `GET /search` writes to, not the silent no-op this comment claimed.
+    search_query_retention_batch: int = Field(default=10_000, ge=1)
 
     # The client event channel (PRD 07's SSE surface). Same reasoning as
     # every block above: PRD 08's TOML config layer does not exist yet.

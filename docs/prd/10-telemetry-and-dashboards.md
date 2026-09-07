@@ -868,17 +868,31 @@ is what the search box alone produces in the days after a milestone, and it is
 not the shape the job exists for.
 
 **Two numbers, both dated, because a reader who sees only one draws the wrong
-conclusion.** Measured 2026-08-27 on a clone of this deployment's catalog:
-`search_queries` holds **14,978 rows in 2,920 kB**, arriving over 14 d 06 h —
-about **1,050 rows a day**, against **107 rows** on the live catalog whose
-suggest writer is off. So a day's expiry is a fifth of one 10,000-row chunk and
-a *steady-state* prune is a single transaction. **The volume this exists for is
-the suggest writer's**, not the search box's: one row per keystroke past the
+conclusion.** Measured on a clone of this deployment's catalog (`usher_j2`):
+`search_queries` holds **14,978 rows in 2,920 kB**, against **107 rows** on the
+live catalog whose suggest writer is off. **The volume this exists for is the
+suggest writer's**, not the search box's: one row per keystroke past the
 min-length gate rather than one per press of enter, which this document
 estimates *"would out-number **and** out-weight the searches by an order of
 magnitude each"*. A reader who sees only the 107 concludes the retention job is
 premature; a reader who sees only the estimate concludes the table is already
 large.
+
+🔴 **The daily rate this paragraph gave — "arriving over 14 d 06 h — about 1,050
+rows a day" — was wrong, and it was the sole arithmetic under
+`RETENTION_PERIOD = 1 day` and `batch = 10,000`.** Re-measured 2026-09-07 on the
+same clone: **14,898 of the 14,978 rows (99.5%) carry `surface = 'suggest'` and
+were all written on a single day**, 2026-08-27, when J2's keystroke writer was
+exercised. Nothing arrived at 1,050/day. The organic remainder is **80 rows**,
+the true span is **14 d 04 h 11 m** rather than 14 d 06 h, and the resulting
+arrival rate is **5.6 rows a day** — with the two live-shaped databases agreeing
+at 5.7/day (`usher_catalog`, 109 rows over 19 d 02 h) and 7.7/day
+(`usher_wt_devdb`, 107 rows over 13 d 23 h). **The conclusion survives and gets
+stronger**: at single digits a day, a day's expiry is a rounding error against a
+10,000-row chunk and a steady-state prune is emphatically one transaction. What
+the burst *is* good evidence for is the case the chunk size exists for — the
+first prune after the suggest writer is switched on, which is 14,898 rows in a
+day and two chunks.
 
 ✅ **`m10c`'s index is what makes the prune's cost independent of the
 population, and both halves are measured.** Under `enable_seqscan = off` the

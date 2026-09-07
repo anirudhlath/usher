@@ -25,12 +25,12 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import DateTime, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.composition import search_query_scope
 from usher.db.base import build_engine, build_session_factory
-from usher.db.repositories.search_query import PostgresSearchQueryRepository
+from usher.db.repositories.search_query import _PRUNE, PostgresSearchQueryRepository
 from usher.domain.ids import new_id
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
 from usher.ports.search import SearchMode, SearchSurface
@@ -336,18 +336,59 @@ async def test_the_chunked_delete_walks_the_index_oldest_first(
     two oldest. A `DELETE ... WHERE id IN (SELECT id ... LIMIT n)` with no
     `ORDER BY` is a legal statement that passes every count assertion.
 
+    🔴 **The seeding order is the whole of this case's teeth, and it was age
+    order until 2026-09-07.** The fixture wrote `(400, 300, 200, 150, 100,
+    10)` in that sequence, so the heap order of the expired rows *was* their
+    age order and an unordered `LIMIT 2` returned the same two rows the
+    ordered one does. Measured 2026-09-07: dropping `ORDER BY at` from `_PRUNE`
+    left this case green. Seeded as below, age order agrees with neither of the
+    two orders an unordered statement can reach for free -- `ctid`, which is
+    what a sequential scan hands back, and `id`, which a UUIDv7 key makes
+    monotonic in insertion order -- and **both disagreements are asserted as
+    premises before the prune** rather than left in prose. Same reasoning as
+    the sibling `oldest()` contract case, which seeds out of order for exactly
+    this reason.
+
     **`ix_search_queries_at` is what serves it.** `EXPLAIN` under
     `enable_seqscan = off` is the shipped idiom for separating *not chosen*
     from *not choosable* (`.claude/rules/db-and-sql.md`) -- at this fixture's
     size the planner would pick a sequential scan whatever index existed, so
-    an unforced plan assertion here would be vacuous.
+    an unforced plan assertion here would be vacuous. ⚠️ **It explains
+    `_PRUNE` itself**, imported from the repository rather than transcribed:
+    the arm used to carry its own inline `SELECT`, which is a plan assertion
+    about a string in this file and says nothing about the statement that
+    ships. `EXPLAIN` without `ANALYZE` plans and does not execute, so the four
+    surviving rows are still there afterwards.
     """
+    # Deliberately not age order. The two oldest expired rows are written
+    # third and fourth, so the first two a heap walk reaches are the two
+    # *youngest* expired ones -- and `new_id()` is UUIDv7, so allocating the
+    # records in this same order puts `id` order on the seeding order too.
     ages = {
         days: _record(at=NOW - timedelta(days=days), user_id=user_id)
-        for days in (400, 300, 200, 150, 100, 10)
+        for days in (150, 100, 400, 300, 200, 10)
     }
     for record in ages.values():
         await repository.record(record)
+
+    expired = {"before": NOW - WINDOW}
+    # Two premises, asserted rather than described, because each is a free
+    # ride an unordered statement could take: the physical order a sequential
+    # scan hands back (`ctid`) and the key order a UUIDv7 makes monotonic
+    # (`id`) must both disagree with age order. If either agreed, the pair
+    # they name would be the pair `ORDER BY at` names and the row assertion
+    # below would pass with the inner ordering gone.
+    free_rides = (
+        "SELECT id FROM search_queries WHERE at < CAST(:before AS timestamptz) "
+        "ORDER BY ctid LIMIT 2",
+        "SELECT id FROM search_queries WHERE at < CAST(:before AS timestamptz) ORDER BY id LIMIT 2",
+    )
+    for statement in free_rides:
+        taken = await session.execute(text(statement), expired)
+        assert {row[0] for row in taken} == {ages[150].id, ages[100].id}, (
+            f"{statement} now names the same rows `ORDER BY at` does -- the fixture has been "
+            "reseeded into age order and dropping the inner ORDER BY stops being visible here"
+        )
 
     assert await repository.prune(before=NOW - WINDOW, limit=2) == 2
 
@@ -356,11 +397,10 @@ async def test_the_chunked_delete_walks_the_index_oldest_first(
 
     await session.execute(text("SET LOCAL enable_seqscan = off"))
     plan = await session.execute(
-        text(
-            "EXPLAIN SELECT id FROM search_queries WHERE at < CAST(:before AS timestamptz) "
-            "ORDER BY at LIMIT 2"
+        text("EXPLAIN " + _PRUNE.text).bindparams(
+            bindparam("before", type_=DateTime(timezone=True))
         ),
-        {"before": NOW - WINDOW},
+        {**expired, "limit": 2},
     )
     assert "ix_search_queries_at" in "\n".join(row[0] for row in plan)
 

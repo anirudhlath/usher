@@ -23,9 +23,13 @@ measured cost somewhere in this repository:
 
 **The tick has a measured floor and it is `Field(ge=60.0)` on the setting.**
 `config.py` carries the table; the short form is that a tick issues **one
-`last_done()` per registered job and nothing else** -- 71.1 ms for the
-neighbour rebuild's reading and 0.072 ms for `SearchQueryRetention`'s -- so
-60 s is 0.12% duty and 1 s would be 7%.
+`last_done()` per registered job and decides on nothing else** -- 71.1 ms for
+the neighbour rebuild's reading and 0.041 ms for `SearchQueryRetention`'s
+(re-measured 2026-09-07 on `usher_j2`) -- so 60 s is 0.12% duty and 1 s would
+be 7%. ⚠️ *"And nothing else"* was this paragraph's claim until 2026-09-07 and
+overstates it by one round trip per job: `SearchQueryRetention.last_done` reads
+through a `SearchQueryScope`, which commits on a clean exit, so the read is a
+pool checkout, a `SELECT` and a `COMMIT`. See `_due_now`.
 
 **And it holds one piece of state, deliberately: a per-job retry backoff.**
 ADR-0046's *"the scheduler stores nothing"* is about a durable last-run
@@ -311,11 +315,22 @@ class Scheduler:
     async def _due_now(self, job: ScheduledJob) -> bool:
         """Ask the artefact, and fold the answer into the gauge's snapshot.
 
-        **One `last_done()` per job per tick, and nothing else**, which is the
-        whole of what a tick costs before any job runs -- 71.1 ms measured for
-        the neighbour rebuild's reading and 0.072 ms for retention's
+        **One `last_done()` per job per tick and no second question**, which is
+        the whole of what a tick costs before any job runs -- 71.1 ms measured
+        for the neighbour rebuild's reading and 0.041 ms for retention's
         (`config.py` carries the table). Both halves of the answer come from
         that single read, so the gauge cannot disagree with the decision.
+
+        ⚠️ **One *call* is not one round trip, and this docstring said
+        "nothing else" until 2026-09-07.** What a registration does inside its
+        `last_done()` is its own business, and the one that ships spends two:
+        `SearchQueryRetention` reads through a `SearchQueryScope`, and
+        `composition.search_query_scope` **commits on a clean exit**, so a
+        read-only `SELECT min(at)` is a pool checkout, the `SELECT`, and a
+        `COMMIT` over a transaction that wrote nothing. It is cheap and it is
+        not free, and the scheduler cannot see it -- the commit is what makes
+        the *prune's* chunking durable (`run()`), so it is a property of the
+        scope rather than something a read could opt out of.
 
         🔴 **The subtraction is inside the guard, and it was outside it for
         one commit.** `await job.last_done()` was the only thing wrapped, so a
@@ -474,18 +489,36 @@ class Scheduler:
 #: retention window: with `last_done()` spelled as below, a job is due once
 #: the oldest surviving row is `window + period` old, so this number is *how
 #: much expired data may accumulate*, not how long a row is kept. A day of it
-#: is one chunk and change -- measured 2026-08-27 on a clone of the live
-#: catalog, `search_queries` grew 14,978 rows in 14 d 06 h, so a day is
-#: ~1,050 rows against a 10,000-row chunk -- and it means a prune lands within
+#: is a small fraction of one chunk -- measured 2026-09-07 on `usher_j2`, a
+#: clone of the live catalog, organic `search_queries` arrivals run at **5.6
+#: rows a day** against a 10,000-row chunk -- and it means a prune lands within
 #: a day of a row expiring rather than within a tick of it. Shorter buys
 #: nothing an operator can see; longer would let the table run measurably over
 #: its stated window.
+#:
+#: ⚠️ **This docstring read *"14,978 rows in 14 d 06 h, so a day is ~1,050
+#: rows"* until 2026-09-07, and that is a burst divided by a span it did not
+#: arrive over.** Re-measured on the same clone: 14,898 of the 14,978 rows
+#: (99.5%) carry `surface = 'suggest'` and landed on a single day, 2026-08-27,
+#: from J2's own backfill; the organic remainder is 80 rows; and the span is
+#: 14 d 04 h 11 m, not 14 d 06 h. The conclusion survives and gets stronger --
+#: at single digits a day the steady-state prune is emphatically one chunk --
+#: but the burst is what a *first* run after the suggest writer is switched on
+#: looks like, not a daily rate. `config.py` carries the three databases the
+#: figure was re-derived over.
+#:
+#: **A day is also a published number.** `.env.example`,
+#: `web/src/features/operator/Config.settings.ts`, PRD 08 and PRD 10 all state
+#: it in prose an operator reads, so it is pinned to its literal in
+#: `tests/unit/test_services_scheduler.py::
+#: test_the_retention_registration_carries_the_window_and_the_batch_an_operator_set`
+#: rather than only compared against itself.
 #:
 #: A **property of the job and not a setting**, which is the shape
 #: `ScheduledJob.period` and `cli._schedule` both already state: an operator
 #: tunes the *window* (`USHER_SEARCH_QUERY_RETENTION_DAYS`), which is the
 #: number PRD 10 prices and the one a household would ask about.
-RETENTION_PERIOD = timedelta(days=30)
+RETENTION_PERIOD = timedelta(days=1)
 
 #: `SearchQueryRetention.name`. **Stable, because it is a metric label**
 #: (`usher.scheduler.job.duration`, `.failures` and `.due` are all labelled
@@ -659,6 +692,28 @@ class SearchQueryRetention(ScheduledJob):
         stale, rebuild, repeat"* does not terminate against a row the
         predicate cannot clear. That is the difference that lets this loop be
         three lines rather than a cursor.
+
+        🔴 **And *"a deleted row cannot re-satisfy the predicate"* is a claim
+        about a committed delete, so the terminator has a precondition this
+        module cannot enforce: `SearchQueryScope` must commit each chunk.**
+        Each iteration opens a new scope and therefore a new session; an
+        *uncommitted* delete is invisible to the next one, which re-selects the
+        same rows, deletes them again, and answers the same full-length chunk
+        forever. It is the shipped wiring --
+        `composition.search_query_scope` commits on a clean exit -- but it is a
+        property of the callable a composition root passes, not of this loop.
+        Measured 2026-09-07: deleting that one `await session.commit()` turns
+        this drain into a non-terminating loop, caught by
+        `tests/integration/test_search_query_retention.py`'s `DRAIN_DEADLINE`
+        as a `TimeoutError` rather than by any assertion here. A scope that
+        did not commit would also be a prune that deleted nothing durably, so
+        the two failures are one defect and the case that owns it is
+        `test_the_prune_commits_each_chunk_where_a_composition_root_wired_it`.
+
+        ⚠️ **`batch` must be at least 1 or the same loop never ends**, for the
+        adjacent reason: at `batch = 0` a chunk deletes nothing and `0 < 0` is
+        false. `Settings.search_query_retention_batch` is `ge=1` and carries
+        the measurement.
 
         The count is logged rather than counted on an instrument: this runs
         once a day, and *"a filter is invisible without a counter"* is

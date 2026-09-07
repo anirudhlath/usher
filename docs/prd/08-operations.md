@@ -837,9 +837,21 @@ every tick forever.
 **So the period is how much expired data may accumulate, not how long a row is
 kept**, and the two numbers are set in different places on purpose: the *window*
 is `USHER_SEARCH_QUERY_RETENTION_DAYS` because it is a household's own history,
-and the *period* is a property of the job. A day of expiry is about 1,050 rows
-on this deployment (measured 2026-08-27) against a 10,000-row chunk, so the
-steady-state prune is one transaction.
+and the *period* is a property of the job. A day of expiry is **single digits of
+rows** against a 10,000-row chunk, so the steady-state prune is one transaction.
+
+⚠️ **This paragraph said "about 1,050 rows on this deployment" until 2026-09-07,
+and that number was a burst divided by a span it did not arrive over.** The
+14,978-row clone it came from holds **14,898 `surface = 'suggest'` rows written
+on one day** — 2026-08-27, when J2's keystroke writer was exercised — leaving
+**80** organic rows across the fortnight either side; re-measured 2026-09-07 the
+organic rate is **5.6 rows a day**, with the live catalog at 5.7/day (109 rows
+over 19 d 02 h) and `usher_wt_devdb` at 7.7/day (107 rows over 13 d 23 h). The
+conclusion is unchanged and stronger. **The burst is not noise, though — it is
+what the chunk size exists for**: a first prune after the suggest writer is
+switched on, or after an outage, is the case where 10,000 is load-bearing, and
+[PRD 10](10-telemetry-and-dashboards.md) carries both numbers together for
+exactly that reason.
 
 ⚠️ **A failed retention run converges and a failed rebuild does not.** The
 scheduler spaces retries and cannot bound *progress* — a batch that restarts

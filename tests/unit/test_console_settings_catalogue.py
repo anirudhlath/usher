@@ -25,6 +25,9 @@ import re
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
 
 from usher.config import Settings
 
@@ -41,6 +44,21 @@ _CATALOGUE = (
 #: the start of a row. Anchored to the object literal so a key *mentioned* in an
 #: `about` sentence is not counted as a catalogued row.
 _ROW_KEY = re.compile(r"^\s*key: '([A-Z][A-Z0-9_]*)',$", re.MULTILINE)
+
+#: A row's key paired with the default it prints, lazily so the `def:` matched
+#: is the one inside that row's own object literal. The `def: string` on the
+#: interface declaration is never reached: this only ever scans *forward* from
+#: a `key:`, and the declaration precedes every row.
+_ROW_DEFAULT = re.compile(
+    r"^\s*key: '([A-Z][A-Z0-9_]*)',\n(?:.*\n)*?\s*def: '([^']*)',", re.MULTILINE
+)
+
+#: What the catalogue prints for the three defaults that have no literal.
+#: Spelled out here so the mapping is a decision rather than a coincidence a
+#: normalising helper would hide.
+_NO_DEFAULT = "required"
+_NONE = "unset"
+_BLANK = "empty"
 
 
 def _environment_names() -> set[str]:
@@ -129,3 +147,74 @@ def test_every_secret_is_marked_as_one(catalogued: set[str]) -> None:
             f"{key} is a SecretStr in Settings and the console does not mark it `secret: true` -- "
             "it would render its value"
         )
+
+
+def _printed_default(field: FieldInfo) -> str:
+    """What the catalogue's `def:` must read for one `Settings` field.
+
+    Three spellings carry no literal and the console prints a word instead:
+    a field with no default at all is `required`, a `None` default is `unset`,
+    and an empty string -- including an empty `SecretStr` -- is `empty`. A
+    secret's default is unwrapped rather than `str()`ed, because
+    `SecretStr.__str__` is `**********` for anything non-empty and would let a
+    wrong default read as correct.
+    """
+    default = field.default
+    if default is PydanticUndefined:
+        return _NO_DEFAULT
+    if default is None:
+        return _NONE
+    if isinstance(default, SecretStr):
+        default = default.get_secret_value()
+    if isinstance(default, bool):
+        # Before the `str()` below: `str(True)` is `'True'`, and the catalogue
+        # prints the TypeScript spelling an operator would type into `.env`.
+        return "true" if default else "false"
+    return _BLANK if default == "" else str(default)
+
+
+def test_every_catalogued_default_is_the_default_usher_actually_ships(
+    catalogued: set[str],
+) -> None:
+    """🔴 **`def:` was an unverified copy of the Python default until
+    2026-09-07**, and it is the field on this screen an operator acts on.
+
+    The three cases above pin the *set* of keys and the `secret:` flag; the
+    number beside each key was checked by nobody. So `USHER_SEARCH_QUERY_
+    RETENTION_DAYS` could read `def: '90'` while `Settings` shipped 30, and an
+    operator reading a page headed "every setting" would be reading a page
+    that is wrong in the one column they came for -- the same one-directional,
+    silent drift this module's docstring records for the key set, one column
+    over. J5 added two more rows to the unchecked shape, which is what made it
+    worth closing.
+
+    **The comparison is exact, not fuzzy.** Everything with a literal default
+    is compared as the string an operator would type; the three spellings that
+    have no literal (`required`, `unset`, `empty`) are mapped by name in
+    `_printed_default`, so a field whose default *changes* to `None` fails
+    here rather than being normalised into agreement.
+
+    The pairing regex's own premise is asserted first: it has to find a `def:`
+    for every key the sibling cases found, or a row that lost its default
+    would silently drop out of the comparison instead of failing it.
+    """
+    paired = dict(_ROW_DEFAULT.findall(_CATALOGUE.read_text()))
+    assert set(paired) == catalogued, (
+        "the key/default pairing regex no longer matches one row per key -- rows without a "
+        f"paired `def:`: {sorted(catalogued - set(paired))}"
+    )
+
+    prefix = str(Settings.model_config.get("env_prefix", ""))
+    expected = {
+        (field.alias if field.alias else f"{prefix}{name}".upper()): _printed_default(field)
+        for name, field in Settings.model_fields.items()
+    }
+    wrong = {
+        key: (printed, expected[key])
+        for key, printed in sorted(paired.items())
+        if key in expected and printed != expected[key]
+    }
+    assert not wrong, (
+        "the console's Configuration screen prints a default Usher does not ship "
+        f"(key: printed vs actual): {wrong}"
+    )
