@@ -847,6 +847,53 @@ receives traffic, so "it connected" is not a health signal.
 Exit codes: `0` success, `1` a malformed id or an unhandled error, `2` any
 argument error (including `--resolve` without `--title`).
 
+## Building a client
+
+Three obligations a client takes on, and neither of the first two is obvious
+from an API that answers.
+
+### Playback hands you a token you must treat as a secret
+
+`POST /titles/{id}/play` returns an **opaque, short-lived ticket URL**
+(`/stream/{ticket}`) rather than a source URL. The ticket is stateless — a
+Fernet token over an HKDF-SHA256 subkey of `USHER_SECRET_KEY` — with a
+**300-second** TTL
+([ADR-0029](docs/prd/decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)).
+
+**Redeeming it is a `302`, and the `Location` it sends you to carries the
+source's session token.** A client reads `Location` by definition, so that
+token reaches you. What the ticket changed is the **artifact, not the grant**
+([ADR-0012](docs/prd/decisions/0012-playback-urls-carry-a-source-token.md)) —
+and that distinction matters, because three documents in this repository have
+claimed the opposite at one time or another and all three were wrong.
+
+So: that URL is the whole capability grant for whatever the configured source
+account can do. It is not minted per request, nothing about the response
+ending ends it, and there is no revocation before expiry — the coarse
+revocation that exists is rotating `USHER_SECRET_KEY`, which invalidates every
+outstanding ticket at once. **Never log it, never render it, never put it in a
+URL bar you screenshot.**
+
+⚠️ **The `deep_link` target is asymmetric and it is the case you will actually
+hit.** A deep link hands the ticket to a third-party player, which follows the
+redirect and then holds the real URL exactly as before — for that target the
+reduction is close to nil.
+
+### You must render the attribution, and the logo
+
+`GET /meta/attribution` returns four strings. Render all of them.
+
+**TMDb also requires their logo**, which is an image this project does not ship
+and cannot ship for you — a string cannot carry it. That obligation is yours,
+not Usher's, and it is a licensing condition rather than a courtesy. See
+[`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md) for the
+full table and the four hard rules, and [Attribution](#attribution) below for
+what the strings are and why the endpoint does not filter them.
+
+### Pin the minor version
+
+See [Versioning](#versioning). `0.x` means the wire contract may still move.
+
 ## Attribution
 
 This project ships importers, never data. Each deployment downloads its own
