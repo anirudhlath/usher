@@ -55,6 +55,7 @@ from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.source import SourceItem, SourceItemKind
+from usher.services.rows import ROW_PROVIDERS
 
 _SERVER_SPAN = "GET /_probe/sync"
 
@@ -227,10 +228,19 @@ def _by_name(spans: tuple[ReadableSpan, ...]) -> dict[str, ReadableSpan]:
 
 def _ancestry(spans: tuple[ReadableSpan, ...], start: str) -> list[str]:
     """Walk parent links from `start` up to the root, by name."""
+    return _ancestry_of(spans, _by_name(spans)[start])
+
+
+def _ancestry_of(spans: tuple[ReadableSpan, ...], start: ReadableSpan) -> list[str]:
+    """The same walk from a span rather than from its name.
+
+    `propose` needs it: the composer emits one per registered provider, so
+    `_by_name` keeps whichever finished last and a name-keyed walk would assert
+    about one of ten.
+    """
     by_id = {span.context.span_id: span for span in spans if span.context is not None}
-    named = _by_name(spans)
-    chain = [start]
-    current = named[start]
+    chain = [start.name]
+    current = start
     while current.parent is not None:
         parent = by_id.get(current.parent.span_id)
         if parent is None:
@@ -395,3 +405,33 @@ async def test_a_row_build_nests_under_the_composition_and_that_under_the_reques
     assert response.json()["rows"], "nothing was built, so there is no row.build span to walk"
     spans = span_exporter.get_finished_spans()
     assert _ancestry(spans, "row.build") == ["row.build", "home.compose", "GET /home"]
+
+
+async def test_every_propose_nests_under_the_composition_and_that_under_the_request(
+    probe: AsyncClient, span_exporter: InMemorySpanExporter, a_recent_arrival: uuid.UUID
+) -> None:
+    """M10's `propose`, closed end to end -- and the arm the unit case cannot
+    reach, because there is no request to be a parent of in a unit test.
+
+    **Every one of them, not the last one.** The composer emits a `propose` per
+    *registered* provider, so a name-keyed walk would assert about whichever
+    finished last and stay green with nine of ten spans reparented -- which is
+    what `_ancestry_of` exists for.
+
+    The count is derived from `ROW_PROVIDERS` rather than written as a literal:
+    `row_provider_settings` ships empty, and a provider added to the registry
+    must show up here without an edit.
+    """
+    response = await probe.get("/home")
+
+    assert response.status_code == 200
+    spans = span_exporter.get_finished_spans()
+    proposals = [span for span in spans if span.name == "propose"]
+    assert len(proposals) == len(ROW_PROVIDERS), (
+        f"{len(proposals)} propose spans over a registry of {len(ROW_PROVIDERS)}"
+    )
+    assert {(span.attributes or {}).get("usher.row.provider") for span in proposals} == {
+        provider.slug_prefix for provider in ROW_PROVIDERS
+    }
+    for span in proposals:
+        assert _ancestry_of(spans, span) == ["propose", "home.compose", "GET /home"]

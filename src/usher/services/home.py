@@ -398,11 +398,43 @@ class HomeService:
         composition under a different span and without the cache read -- one
         body rather than two, because a second copy is a second place for the
         cap, the adjacency rule and the TTL to drift.
+
+        **The `propose` span is emitted here, so it inherits two roots.**
+        `compose_report` calls this inside `home.compose`; `rebuild` calls it
+        inside no span of its own, so the refresh lane's `propose` spans hang
+        off `rows.refresh` exactly as its `row.build` spans do. That asymmetry
+        is the one PRD 10 already records for `row.build`, one phase earlier,
+        and it is deliberate rather than an omission -- see `rebuild`.
         """
         candidates: list[_Candidate] = []
         for provider in self._providers:
             at = time.perf_counter()
-            proposals = await provider.propose(ctx)
+            # **One span per registered provider, inside the bracket that
+            # already times this loop.** `entry.propose_seconds` measures the
+            # same interval and feeds `usher home`'s breakdown; the span is
+            # what puts that interval in a *trace*, where until M10 a provider
+            # slow to propose and cheap to build was visible only in the
+            # parent's duration -- `next-up` alone is 302.9 ms of a 710.3 ms
+            # p50 at the scale ceiling (ADR-0025). No histogram goes with it:
+            # a third copy of one measurement is the
+            # `usher.http.server.duration`-beside-`http.server.duration`
+            # mistake PRD 10 refuses.
+            #
+            # `start_as_current_span`, never `start_span`, for `_build`'s
+            # reason: the nesting is what makes a trace answer "what did this
+            # request do" rather than "what happened around then".
+            with _tracer.start_as_current_span("propose") as span:
+                proposals = await provider.propose(ctx)
+                # Both lines read state this scope already holds and neither
+                # writes anything, so their order carries no meaning -- which
+                # is what makes swapping them the equivalent-mutant control
+                # for this span. `usher.row.provider` is the `slug_prefix`,
+                # the same spelling `_build` uses, so one group-by spans both
+                # phases; the class `__name__` is a *different* vocabulary
+                # living one module over in `BASE_SCORES` and is the near-miss
+                # worth naming.
+                span.set_attribute("usher.row.provider", provider.slug_prefix)
+                span.set_attribute("usher.row.proposed", len(proposals))
             entry = tally[provider.slug_prefix]
             entry.propose_seconds += time.perf_counter() - at
             entry.proposed += len(proposals)

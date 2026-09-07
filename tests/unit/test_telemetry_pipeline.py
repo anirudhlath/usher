@@ -12,10 +12,16 @@ The span cases are here rather than in `tests/integration/` because they
 need no database. What they cannot say is whether a pipeline span nests
 under a *request*; that is `tests/integration/test_pipeline_spans.py`, and
 it needs a real app.
+
+**The composer's `propose` span is the one subject here that M4 did not
+build.** It lives with the rest of PRD 10's span tree rather than with the
+composer's own cases because the claim is the document's -- one span per
+*registered* provider, two attributes, and a parent that differs by lane --
+and because both of its roots are reachable with no database at all.
 """
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 
 import httpx
@@ -25,7 +31,7 @@ from opentelemetry.metrics import CallbackOptions
 from opentelemetry.metrics._internal.instrument import _ProxyInstrument
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Link, SpanContext, TraceFlags
@@ -38,16 +44,21 @@ from tests.fakes.job_scope import worker_over
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
+from tests.fakes.row_provider import FakeRow, FakeRowProvider
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
 from tests.fakes.title_repository import FakeTitleRepository
+from tests.unit.rows import Library
 from usher.adapters.tmdb import TmdbClient
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import Job, JobKind, JobPriority
+from usher.domain.rows import RowCard
 from usher.domain.title import Title
 from usher.ports.errors import PortUnavailable
+from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.enrich import EnrichService
+from usher.services.home import HomeService
 from usher.services.ingest import IngestService
 from usher.services.jobs import _links_for
 from usher.services.matching import MatchService
@@ -376,6 +387,169 @@ def test_an_invalid_traceparent_produces_no_link_at_all() -> None:
     tracer = trace.get_tracer("test")
     with tracer.start_as_current_span("probe", links=[invalid]) as span:
         assert getattr(span, "links", ()) == ()
+
+
+# The composer's two lanes, and the registry both of them walk. One provider
+# proposes a row and the other proposes nothing, because "one span per
+# *registered* provider" and "one span per provider that returned something"
+# are the same assertion against a registry where every provider fires.
+_PROPOSING = "recently-added"
+_SILENT = "next-up"
+# A span the proposing provider opens inside `propose`, so that "the composer
+# made this span current" is observable and not only "the composer gave this
+# span a parent". See `_TracingRowProvider`.
+_INSIDE = "provider.work"
+
+
+def _card() -> RowCard:
+    return RowCard(
+        title_id=new_id(),
+        kind=TitleKind.MOVIE,
+        name="An Invented Title",
+        enrichment_state=EnrichmentState.SKELETON,
+    )
+
+
+class _TracingRowProvider(FakeRowProvider):
+    """A `FakeRowProvider` that opens a span of its own inside `propose`.
+
+    **This is the arm `start_span` fails, and the parent-of-`propose` arm is
+    not it.** Measured rather than assumed, on 2026-09-07 with this class not
+    yet written: planting `start_as_current_span` -> `start_span` and scoring
+    it over `tests/unit` plus all three span-observing integration files
+    killed nothing (4,811 passed, 4 skipped). `Tracer.start_span` with no
+    explicit `context` still parents to the *current* span, so a `propose`
+    minted that way is still `home.compose`'s child and every assertion about
+    its own parent stays green.
+
+    What it does break is the half `_build`'s docstring gives as its *reason*
+    rather than as its mechanism: `start_span` never makes the span current,
+    so the work done while proposing -- for a real provider, every SQLAlchemy
+    statement span it issues -- reparents up to the composition. That is the
+    difference between a trace that answers "what did this request do" and one
+    that answers "what happened around then", and only a span emitted *inside*
+    `propose` can see it. (`_build`'s "rather than a second root" is the same
+    over-claim one phase later, and `row.build` has no arm for it either --
+    left alone here because D2 owns `_compose` and nothing else.)
+    """
+
+    async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
+        with trace.get_tracer("test").start_as_current_span(_INSIDE):
+            return await super().propose(ctx)
+
+
+def _registry() -> list[RowProvider]:
+    return [
+        _TracingRowProvider(
+            proposals=(ScoredRow(row=FakeRow(_PROPOSING, cards=(_card(),)), score=0.9),),
+            slug_prefix=_PROPOSING,
+        ),
+        FakeRowProvider(proposals=(), slug_prefix=_SILENT),
+    ]
+
+
+def _attributes(span: ReadableSpan) -> dict[str, object]:
+    return dict(span.attributes or {})
+
+
+def _named(spans: Sequence[ReadableSpan], name: str) -> list[ReadableSpan]:
+    return [span for span in spans if span.name == name]
+
+
+async def test_every_provider_that_proposes_opens_a_propose_span_under_the_composition(
+    span_exporter: InMemorySpanExporter,
+) -> None:
+    """PRD 10's `propose`, and the four properties that make it worth having.
+
+    Proposal ran inside `home.compose` and was untraced individually until
+    M10, so a provider slow to *propose* and cheap to *build* was visible
+    only in the parent's duration -- and at the scale ceiling that is 302.9
+    ms of a 710.3 ms p50 for `next-up` alone (ADR-0025, re-measured there
+    against 1,277,878 owned items; the 23.9 ms figure belongs to a
+    5,200-copy household and means nothing here).
+
+    **One span per *registered* provider**, not one per provider that
+    returned something: `ProviderReport` keeps a line for the silent ones
+    for the same reason, since an absent provider and a silent one are the
+    two states the breakdown exists to tell apart. **`usher.row.provider` is
+    the `slug_prefix`**, the same attribute `row.build` carries, so one
+    group-by spans both phases. And **parentage, not existence** -- a
+    composer emitting `propose` as a second root has valid ids, exports
+    traces, and carries the name the document asks for.
+
+    The fourth is **currentness**, which parentage does not imply and which
+    only a span opened *inside* `propose` can see: see `_TracingRowProvider`
+    for the plant that proved the difference.
+    """
+    providers = _registry()
+
+    await HomeService(providers=providers).compose(Library().context())
+
+    exported = span_exporter.get_finished_spans()
+    # The positive control. An exporter that collected nothing satisfies
+    # every per-span assertion below vacuously.
+    assert exported, "the exporter collected no spans"
+    compositions = _named(exported, "home.compose")
+    assert len(compositions) == 1, [span.name for span in exported]
+    assert compositions[0].context is not None
+    proposals = _named(exported, "propose")
+    assert len(proposals) == len(providers), (
+        f"{len(proposals)} propose spans over a registry of {len(providers)}"
+    )
+    by_provider = {_attributes(span)["usher.row.provider"]: span for span in proposals}
+    assert set(by_provider) == {_PROPOSING, _SILENT}
+    assert _attributes(by_provider[_PROPOSING])["usher.row.proposed"] == 1
+    assert _attributes(by_provider[_SILENT])["usher.row.proposed"] == 0
+    for span in proposals:
+        assert span.parent is not None, "a propose span is a second root"
+        assert span.parent.span_id == compositions[0].context.span_id
+    # And **current**, not merely parented: the span the provider opened while
+    # proposing hangs off its own `propose`. `start_span` satisfies every
+    # assertion above and fails here, which is why the arm exists.
+    proposing = by_provider[_PROPOSING]
+    assert proposing.context is not None
+    inside = _named(exported, _INSIDE)
+    assert len(inside) == 1, [span.name for span in exported]
+    assert inside[0].parent is not None, "the provider's own span is a second root"
+    assert inside[0].parent.span_id == proposing.context.span_id
+
+
+async def test_a_refresh_opens_propose_spans_with_no_home_compose_parent(
+    span_exporter: InMemorySpanExporter,
+) -> None:
+    """The mirror PRD 10 already draws for `row.build`, one phase earlier.
+
+    `rebuild` is `_compose` without the cache read and **without a
+    `home.compose` of its own**, so the serve-stale lane's spans hang off
+    `rows.refresh` instead -- deliberately, since minting a second
+    `home.compose` would double the count every dashboard reads as
+    "requests that composed". This fails if somebody "fixes" the refresh by
+    minting one.
+
+    The rebuild runs inside a span here for the reason
+    `test_the_refresh_is_a_root_span_linked_to_the_request_that_served_stale`
+    gives: without an ambient parent to be wrongly attached to, "no
+    `home.compose` ancestor" is what an unparented span produces anyway and
+    the assertion could not fail.
+    """
+    providers = _registry()
+
+    with trace.get_tracer("test").start_as_current_span("rows.refresh") as refresh:
+        await HomeService(providers=providers).rebuild(Library().context())
+        refresh_id = refresh.get_span_context().span_id
+
+    exported = span_exporter.get_finished_spans()
+    assert exported, "the exporter collected no spans"
+    assert not _named(exported, "home.compose"), (
+        "a refresh minted a home.compose -- PRD 10 counts those as compositions a request paid for"
+    )
+    proposals = _named(exported, "propose")
+    assert len(proposals) == len(providers), (
+        f"{len(proposals)} propose spans over a registry of {len(providers)}"
+    )
+    for span in proposals:
+        assert span.parent is not None, "a propose span is a second root"
+        assert span.parent.span_id == refresh_id
 
 
 def _instrument_names(reader: InMemoryMetricReader) -> set[str]:

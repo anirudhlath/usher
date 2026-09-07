@@ -50,11 +50,15 @@ index.title                       ← M6, a child of job.index
 └── index.embed
 
 home.compose                      ← M7, one per GET /home or usher home
+├── propose                          M10, one per *registered* provider
 └── row.build                        one per row actually built
 
 rows.refresh                      ← M9, the serve-stale lane's root span,
-└── row.build                        Linked (never parented) to the request
-                                     that served the stale screen
+├── propose                          Linked (never parented) to the request
+└── row.build                        that served the stale screen. Both names
+                                     appear under home.compose as well: one
+                                     body emits them, and `rebuild` opens no
+                                     home.compose of its own
 
 job.curate                        ← M8, a worker's root span like the three
 └── curation.generate                above it; one per generation
@@ -110,11 +114,27 @@ reader would assume:
   the name cardinality at two where `because-you-watched-<seed>` would have
   made it catalog-sized. **Dashboard 4 can have its breakdown**, from either
   side: the histogram's `provider` label or this attribute.
-- **There is no `propose` span.** Proposal runs inside `home.compose` and is
-  untraced individually, so a provider that is slow to *propose* and cheap to
-  *build* shows up only in the parent's duration. Recorded as a gap rather
-  than drawn, because an unwritten span in a documented tree is the trace-side
-  version of the permanently empty panel this file's preamble argues against.
+- **`propose` is one span per *registered* provider, and it carries two
+  attributes** — `usher.row.provider` (the `slug_prefix`, the same spelling
+  `row.build` uses, so one group-by spans both phases) and
+  `usher.row.proposed`, the length of what `propose` returned. A provider that
+  proposed nothing therefore has a span reading `usher.row.proposed=0` rather
+  than no span at all, which is the distinction `ProviderReport` keeps between
+  an absent provider and a silent one. **It is inherited by both roots**:
+  `HomeService._compose` emits it, and `rebuild` runs that same body with no
+  `home.compose` of its own, so the refresh lane's `propose` spans hang off
+  `rows.refresh` — the asymmetry the bullet below records for `row.build`, one
+  phase earlier. **A cached screen produces none**: a screen hit returns before
+  `_compose` runs, so this population is *compositions that happened*, the one
+  `usher.home.compose.duration` measures and not `row.build`'s. **No metric goes
+  with it** — the per-provider propose cost is this span's duration and
+  `ProviderReport.propose_seconds` already, and a third copy as a histogram is
+  the `usher.http.server.duration`-beside-`http.server.duration` mistake this
+  document refuses below. Sized by
+  [ADR-0025](decisions/0025-rows-build-sequentially.md): at the scale ceiling
+  `next-up` costs 302.9 ms to propose against a 710.3 ms p50 compose, and at the
+  5,200-copy household the whole compose is 23.9 ms — two households a factor of
+  thirty apart on one composer, which only a per-provider breakdown separates.
 - **A cached row produces no `row.build` span**, for the same reason it records
   no histogram point: the cache returns before the span opens. So the number of
   `row.build` children of a `home.compose` is the number of *misses on that
