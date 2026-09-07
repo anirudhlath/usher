@@ -83,6 +83,23 @@ matches `ix_llm_calls_at` below, which is the same shape for the same
 `WHERE at >= :since` query family, and on a table measured at 72 kB the index
 size saving BRIN exists for is worth nothing.
 
+**What justifies it is the steady state, not the present, and the arithmetic
+is the argument.** A daily prune at a 90-day window matches about **1/90th** of
+the table -- **1.1%** -- which is the selectivity ratio at which a btree beats a
+sequential scan, and precisely the ratio a *first* run after a long outage does
+not have. Without the index every daily prune reads 100% of the relation to
+delete 1.1% of it; with it, it reads the 1.1%. **On this deployment today the
+index buys nothing measurable and that is stated rather than dressed up**:
+`search_queries` held **9 rows in 32 kB** when this milestone was planned
+(2026-08-13), and the 90-day `DELETE` was a Seq Scan of **1 shared buffer, 0
+rows removed, 0.043 ms**. The volume the index exists for is the suggest
+writer's, which arrives at one row per keystroke rather than one per press of
+enter. ⚠️ **The 1.1% argument is about the *selection*, not the whole
+statement** -- measured on the 14,978-row clone, the planner still joins the
+selected ids back through a sequential scan at that size (PRD 10 records it),
+so the ratio governs which access path finds the rows and not the cost of
+removing them.
+
 **The two `llm_calls` indexes ship here with no reader, deliberately, and
 `m08a`'s objection is answered with a number rather than overruled.** They are
 copied from `m08a_curation.py`'s own docstring rather than re-derived, partial

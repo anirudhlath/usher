@@ -854,6 +854,19 @@ named, with the boundary computed from the injected clock rather than from
   nothing past its cutoff"*, so the period is **how much expired data may
   accumulate**, not how long a row is kept.
 
+**Why the index is justified by the steady state rather than by today.** A
+daily prune at a 90-day window matches about **1/90th** of the table — **1.1%**
+— which is the selectivity ratio at which a btree beats a sequential scan, and
+the ratio a *first* run after a long outage does not have. Without the index
+every daily prune reads 100% of the relation to delete 1.1% of it; with it, it
+reads the 1.1%. **When M10 was planned the index bought nothing measurable and
+that is recorded rather than dressed up**: on 2026-08-13 `search_queries` held
+**9 rows in 32 kB**, every one written by F2 since M9 closed, and the 90-day
+`DELETE` was a **Seq Scan, 1 shared buffer, 0 rows removed, 0.043 ms**. Those
+nine are why the paragraph below carries two later numbers instead — nine rows
+is what the search box alone produces in the days after a milestone, and it is
+not the shape the job exists for.
+
 **Two numbers, both dated, because a reader who sees only one draws the wrong
 conclusion.** Measured 2026-08-27 on a clone of this deployment's catalog:
 `search_queries` holds **14,978 rows in 2,920 kB**, arriving over 14 d 06 h —
