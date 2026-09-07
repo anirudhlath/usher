@@ -117,6 +117,66 @@ _search_results = _meter.create_histogram(
     "usher.search.results", unit="1", description="Results returned per search, by mode"
 )
 
+# **The two-tier suggest boundary is a bucket problem before it is a naming
+# problem**, and this is the only histogram in the project that says so.
+# `configure_metrics` installs no `View`, so every other seconds-unit
+# instrument here takes the SDK's default explicit boundaries -- `(0.0, 5.0,
+# 10.0, 25.0, ...)`, in seconds -- and every observation under five seconds
+# falls in the first of them. Measured rather than reasoned, 2026-09-07: 2,000
+# points (seed 20260907) drawn on ADR-0002's shipped tier-2 shape and exported
+# over real OTLP into this host's collector and Prometheus came back as
+# `histogram_quantile(0.5, ...)` = **2.5000 s** and `(0.95, ...)` = **4.75 s**
+# against the sample's own **35.20 ms** and **225.07 ms** -- 71x and 21x wrong
+# -- against **38.12 ms** and **240.70 ms** on the ladder below. PRD 10 carries
+# the run. A keystroke path is where the default stops being a loss of
+# resolution and becomes a loss of the measurement.
+#
+# **An instrument advisory rather than a `View`, and the choice is a scope
+# rather than a preference.** The repo-wide fix PRD 10 asks for is every
+# seconds-unit histogram at once and is owned there; an advisory travels with
+# the instrument, so it holds under whichever `MeterProvider` a caller
+# installed -- including the `InMemoryMetricReader` every unit case installs,
+# which is what makes it assertable at all.
+#
+# **The ladder spans both tiers by construction**, because one histogram over
+# two populations is what the `tier` label exists to refuse: ADR-0002's
+# shipped-configuration row measures tier 2's whole-name p50/p95/max at
+# 33.6/211/730 ms, and ADR-0031's p95-by-prefix-length table measures tier 1's
+# shipped union from 2,707 ms at one character to 2.3 ms at seven. `0.05` is a
+# boundary exactly rather than incidentally -- ADR-0002's as-you-type budget
+# is 50 ms, so the fraction of keystrokes inside it is a bucket ratio and
+# never an interpolation between two bounds.
+_SUGGEST_BUCKETS = (0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0)
+
+# PRD 10's names for the type-ahead path, byte for byte and on the same terms
+# as the pair above. The near misses this pair invites are
+# `usher.suggest.latency` (by analogy with `usher.enrichment.latency`, which is
+# a real row of that table), `usher.search.suggest.duration` -- which would put
+# the type-ahead box inside every `usher.search.*` panel, the exact objection
+# PRD 10 raises against reusing `SearchMode` for a tier (ADR-0031 argues the
+# split and never mentions `SearchMode`) -- and `usher.suggest.result`
+# singular.
+#
+# **`tier` is a label rather than two instrument names**, for the reason
+# `usher.row.build.duration` carries `provider`: a group-by is one query and
+# two names are two panels that cannot be summed. Its vocabulary is
+# `SuggestTier`'s own two lower-case members, `prefix` and `fuzzy`, and it is
+# written into PRD 10 beside `mode`'s because a label whose vocabulary is
+# undocumented is a label two call sites spell differently.
+_suggest_duration = _meter.create_histogram(
+    "usher.suggest.duration",
+    unit="s",
+    description="Wall time per answered keystroke, by suggest tier",
+    explicit_bucket_boundaries_advisory=_SUGGEST_BUCKETS,
+)
+# **Results and not hits**, which is a distinction this path has and `search`
+# does not: `suggest` drops a hit whose title `list_by_ids` did not return, so
+# the two numbers differ exactly when the index and the catalog disagree. The
+# hydrated count is the one a client painted, so it is the one plotted.
+_suggest_results = _meter.create_histogram(
+    "usher.suggest.results", unit="1", description="Results returned per keystroke, by tier"
+)
+
 # The two separators, named because they are load-bearing rather than
 # cosmetic. `_SECTION` is `_FINGERPRINT_SQL`'s `CHR(10)` and `_ITEM` is
 # `usher_array_text`'s `array_to_string($1, ' ')`. A change to either is a
@@ -1096,16 +1156,38 @@ class SearchService:
         the reason `_record_suggest` gives, so the tier that cannot afford it
         decides. `.claude/rules/search-and-embeddings.md` carries the run.
 
+        ✅ **It also emits `usher.suggest.duration` and
+        `usher.suggest.results` since M10's D1, both labelled `tier`, and the
+        histograms are unconditional where the row is not.** They answer a
+        different question from the table, and only the table needed the
+        schema change `m10c` made: a histogram answers *"is the box fast"* and
+        `search_queries` answers *"what did people type"*. So they sit outside
+        `USHER_SEARCH_SUGGEST_ANALYTICS` -- an operator who turned the row off
+        to buy back the 148% would otherwise also have turned off the only
+        series that could show whether the box was meeting its budget -- and
+        they record on a deployment with no `analytics` collaborator at all,
+        which is every unit case and `usher suggest`.
+
+        **The measured interval is the whole method rather than the tier
+        call**, because hydration is what a client waits for and it is the same
+        two reads for both tiers by construction, so a window around the index
+        probe alone would measure only the half that does not differ between
+        the two things the label distinguishes.
+
         **The write is outside the measured window and after the hydration**,
         for `search`'s reason: an INSERT inside it would be counted as suggest
         latency by the very row recording it. It is also the last thing this
-        method does, because the commit ends the caller's transaction.
+        method does, because the commit ends the caller's transaction. The two
+        `record` calls are on the near side of it and share its one clock read,
+        so the row and the histogram are the same interval.
 
         **A short `prefix` is refused before the measurement and therefore
-        before the row.** The route's own length bound returns even earlier
-        (`_MIN_CHARS_FOR_TIER`), so neither a blank keystroke nor one below its
-        tier's minimum is an answered query, and PRD 10's *"a blank or
-        whitespace-only query"* exclusion covers both.
+        before the row and before either histogram point.** The route's own
+        length bound returns even earlier (`_MIN_CHARS_FOR_TIER`), so neither a
+        blank keystroke nor one below its tier's minimum is an answered query,
+        and PRD 10's *"a blank or whitespace-only query"* exclusion covers
+        both. Counted, a blank one would make the p50 a measure of how fast
+        somebody types.
         """
         if not prefix.strip():
             return ()
@@ -1121,6 +1203,22 @@ class SearchService:
             for hit in hits
             if hit.title_id in by_id
         )
+        elapsed = self._clock() - started
+        # **The measured interval is the whole method and not the tier call**,
+        # because hydration is what a client waits for and it is the same two
+        # reads for both tiers by construction -- so a window around
+        # `self._tiers[tier].suggest` alone would report the half of the cost
+        # that does not differ between the two things the label distinguishes.
+        # It is the same clock read `search_queries.latency_ms` gets, for the
+        # reason `test_the_row_and_the_histogram_are_the_same_interval` gives
+        # one method over: two intervals taken a few statements apart differ by
+        # whatever ran between them, which is exactly the quantity an operator
+        # reading the panel is looking for.
+        #
+        # **Recorded before the analytics write and after the hydration**, so
+        # the row's own INSERT is outside the number the row is about.
+        _suggest_duration.record(elapsed, {"tier": tier.value})
+        _suggest_results.record(len(results), {"tier": tier.value})
         await self._record_suggest(
             prefix,
             # Passed through, never re-derived. The row has to name the index
@@ -1129,7 +1227,7 @@ class SearchService:
             tier=tier,
             user_id=user_id,
             results=len(results),
-            elapsed=self._clock() - started,
+            elapsed=elapsed,
         )
         return results
 

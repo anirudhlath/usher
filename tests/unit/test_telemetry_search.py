@@ -23,6 +23,7 @@ import inspect
 import re
 import sys
 import uuid
+from bisect import bisect_left
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -30,7 +31,10 @@ import pytest
 from opentelemetry import metrics, trace
 from opentelemetry.metrics._internal.instrument import _ProxyInstrument
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics._internal.aggregation import (
+    _DEFAULT_EXPLICIT_BUCKET_HISTOGRAM_AGGREGATION_BOUNDARIES as _SDK_DEFAULT_BOUNDARIES,
+)
+from opentelemetry.sdk.metrics.export import HistogramDataPoint, InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -55,7 +59,14 @@ from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.title import Title
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import ScoredNeighbor, SearchQueryRecord
-from usher.ports.search import SearchDocument, SearchMode, SearchOutcome, SearchRequest
+from usher.ports.search import (
+    SearchDocument,
+    SearchHit,
+    SearchMode,
+    SearchOutcome,
+    SearchRequest,
+    SuggestTier,
+)
 from usher.services.handlers import index_handler
 from usher.services.index import IndexService
 from usher.services.search import SearchAnalytics, SearchService
@@ -80,7 +91,7 @@ _PRD_10 = Path(__file__).resolve().parents[2] / "docs" / "prd" / "10-telemetry-a
 # ⚠️ **This table has a second reader**, and the two are deliberately not
 # merged: `tests/unit/test_telemetry_metric_names.py:_ROW` parses the same rows
 # for the *name* alone, to census the catalogue against what `src/usher/` hands
-# to a `Meter` factory (39 declared vs 40 rows). This one is the only reader of
+# to a `Meter` factory (41 declared vs 42 rows). This one is the only reader of
 # the *type* column. Merging them would collapse two different questions into
 # one — measured, in M10 O4's sweep: deleting one catalogue row kills a case in
 # *both* files, and that independence is what made the blast radius
@@ -421,6 +432,225 @@ def test_the_result_series_is_a_histogram_and_not_a_counter(
         assert kinds[name] == "Histogram", f"{name} is documented as a histogram"
 
 
+# -- the two histograms PRD 10 owes M10's type-ahead path ------------------
+
+
+def _suggest_service(
+    titles: FakeTitleRepository,
+    prefix_tier: FakePrefixSuggestIndex,
+    fuzzy_tier: FakeSuggestIndex,
+) -> SearchService:
+    """`_service`'s shape with the two suggest doubles handed in rather than
+    constructed, because a case about *which tier answered* has to seed
+    them."""
+    return SearchService(
+        FakeSearchIndex(),
+        prefix_tier,
+        fuzzy_tier,
+        titles,
+        FakeMediaItemRepository(),
+        FakeWatchStateRepository(),
+        FakeTasteRepository(),
+        FakeTitleEmbeddingRepository(),
+        result_limit=50,
+    )
+
+
+async def test_a_suggest_records_its_duration_and_its_result_count_under_the_tier_that_answered(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """`usher.suggest.duration` and `usher.suggest.results`, both labelled
+    `tier`, driven once per tier through the real `SearchService`.
+
+    **One unlabelled histogram over this route would be a mixture of two
+    populations**, and the ratio between them is decided by a client's
+    debounce behaviour rather than by anything the server can see. ADR-0031
+    measures tier 2's whole-name p50 at 33.6 ms and tier 1's shipped union p95
+    at 2,707 ms at one character against 112 ms at four -- so an unlabelled
+    p50 answers a question about a keyboard. The label is a label rather than
+    two instrument names for the reason `usher.row.build.duration` carries
+    `provider`: a group-by is one query and two names are two panels that
+    cannot be summed.
+
+    **The results point is the hydrated count, not the hit count**, and the
+    two are seeded apart here because nothing else in this file makes them
+    differ: `suggest` drops a hit whose title `list_by_ids` did not return
+    (`if hit.title_id in by_id`), so a series recording `len(hits)` would
+    report a type-ahead box that answered when the box was empty. Both tiers
+    match both seeded names; only one of the two is in the catalog.
+
+    The near misses this pair invites are `usher.suggest.latency` (by analogy
+    with `usher.enrichment.latency` in the same table),
+    `usher.search.suggest.duration` -- which would put the type-ahead box
+    inside every `usher.search.*` panel -- and `usher.suggest.result`
+    singular. None raises and none fails an assertion that a histogram was
+    recorded.
+    """
+    titles = FakeTitleRepository()
+    hydrated = _title("Quiet Vacuum")
+    await titles.add(hydrated)
+    missing = _title("Quiet Ocean")
+
+    prefix_tier, fuzzy_tier = FakePrefixSuggestIndex(), FakeSuggestIndex()
+    for tier in (prefix_tier, fuzzy_tier):
+        tier.given(name=hydrated.name, title_id=hydrated.id, popularity=2.0)
+        tier.given(name=missing.name, title_id=missing.id, popularity=1.0)
+
+    service = _suggest_service(titles, prefix_tier, fuzzy_tier)
+    for tier_value in (SuggestTier.PREFIX, SuggestTier.FUZZY):
+        assert len(await service.suggest("quiet", tier=tier_value)) == 1, (
+            "the premise: both tiers match both names and only one is hydrated"
+        )
+
+    recorded = _recorded(meter_reader)
+    assert [attrs["tier"] for attrs, _ in recorded["usher.suggest.duration"]] == [
+        "prefix",
+        "fuzzy",
+    ]
+    assert [(attrs["tier"], value) for attrs, value in recorded["usher.suggest.results"]] == [
+        ("prefix", 1.0),
+        ("fuzzy", 1.0),
+    ]
+
+
+async def test_a_blank_prefix_records_no_suggest_point(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """`SearchService.suggest` returns empty for a whitespace prefix before it
+    reaches a tier, and a type-ahead box sends one between every keystroke --
+    the mirror of `test_a_blank_query_is_not_counted_as_a_search`, on the
+    surface where it matters more, because the box is driven per keystroke
+    rather than per submit.
+
+    Counted, those zero-duration zero-result calls would dominate both series
+    and make a suggest-latency panel a measure of how fast somebody types.
+
+    **The port not being called is asserted too**, and it is the half a
+    weaker case would drop: a record moved inside the guard would leave the
+    histogram empty while the tier still ran, which is the same panel and a
+    different bug.
+    """
+
+    class _Counting(FakePrefixSuggestIndex):
+        calls = 0
+
+        async def suggest(self, prefix: str, limit: int = 10) -> list[SearchHit]:
+            type(self).calls += 1
+            return await super().suggest(prefix, limit)
+
+    tier = _Counting()
+    service = _suggest_service(FakeTitleRepository(), tier, FakeSuggestIndex())
+
+    assert await service.suggest("   ", tier=SuggestTier.PREFIX) == ()
+    recorded = _recorded(meter_reader)
+    assert "usher.suggest.duration" not in recorded
+    assert "usher.suggest.results" not in recorded
+    assert _Counting.calls == 0, "a blank prefix must not reach the index either"
+
+
+def test_the_suggest_series_are_histograms_and_not_counters(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """PRD 10 documents two histograms, and a row emitted under its documented
+    *name* but the wrong *type* is the same class of failure as a near-miss
+    name -- `test_the_result_series_is_a_histogram_and_not_a_counter`'s
+    precedent, one surface over.
+
+    "How long did a keystroke take" and "how many rows came back" are both
+    distributions whose interesting values are the tails: the keystrokes that
+    missed the 50 ms budget, and the boxes that came back empty. A counter
+    answers "how many results have ever been suggested", which nobody plots.
+
+    Read off the exported data rather than off the call, and the documented
+    type is read out of PRD 10 rather than retyped, so this fails in both
+    directions -- a `create_counter` in `src/`, and a table row edited to say
+    `counter`.
+    """
+    from usher.services import search as search_module
+
+    search_module._suggest_duration.record(0.0336, {"tier": "fuzzy"})
+    search_module._suggest_results.record(5, {"tier": "fuzzy"})
+
+    documented = {
+        name: kind
+        for name, kind, _ in _ROW.findall(_PRD_10.read_text())
+        if name.startswith("usher.suggest.")
+    }
+    assert documented == {
+        "usher.suggest.duration": "histogram",
+        "usher.suggest.results": "histogram",
+    }, documented
+
+    kinds = _kinds(meter_reader)
+    for name in documented:
+        assert kinds[name] == "Histogram", f"{name} is documented as a histogram"
+
+
+def test_the_duration_buckets_resolve_a_keystroke_rather_than_a_five_second_page(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """🔴 **The one assertion without which this whole pair is decorative.**
+
+    `configure_metrics` installs no `View`, so every histogram in this project
+    takes the SDK's default explicit boundaries -- `(0.0, 5.0, 10.0, 25.0, …)`,
+    in **seconds** -- and every observation under five seconds lands in one
+    bucket. PRD 10 records that defect against the seconds-unit histograms it
+    already documents. A type-ahead path is the case where it stops being a
+    loss of resolution and becomes a loss of the measurement: measured
+    2026-09-07 through this host's OTLP collector into its Prometheus, 2,000
+    points (seed 20260907) on ADR-0002's shipped tier-2 row answered
+    `histogram_quantile(0.5, …) = 2.5000 s` and `histogram_quantile(0.95, …) =
+    4.75 s` on the default boundaries -- against the sample's own 35.20 ms and
+    225.07 ms, so 71x and 21x wrong -- and 38.12 ms / 240.70 ms on the
+    boundaries below. PRD 10 carries the run and its method.
+
+    So `usher.suggest.duration` carries an
+    `explicit_bucket_boundaries_advisory`, which the SDK's default aggregation
+    reads off the instrument (verified through the `_ProxyInstrument` path
+    this module's import order actually takes). **Deliberately on the
+    instrument and not a `View` in `configure_metrics`**: the repo-wide fix
+    PRD 10 asks for is every seconds-unit histogram at once and is not this
+    task, and an advisory travels with the instrument rather than with
+    whichever provider a caller installed -- including the one this fixture
+    installs, which is why this case can see it at all.
+
+    The premise is the 50 ms as-you-type budget being an exact boundary: the
+    fraction of keystrokes inside the budget is then a bucket ratio rather
+    than an interpolation, so the panel answers the question ADR-0002 gated
+    on without inventing a number between two bounds.
+    """
+    from usher.services import search as search_module
+
+    search_module._suggest_duration.record(0.0336, {"tier": "fuzzy"})
+
+    (point,) = [
+        point
+        for resource in (meter_reader.get_metrics_data() or _NO_DATA).resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "usher.suggest.duration"
+        for point in metric.data.data_points
+        # Narrowed rather than cast: an `ExponentialHistogramDataPoint` carries
+        # no `explicit_bounds` at all, and this case would then be asserting
+        # about a point shape it was not written for.
+        if isinstance(point, HistogramDataPoint)
+    ]
+    bounds = tuple(point.explicit_bounds)
+    assert bounds != _SDK_DEFAULT_BOUNDARIES, (
+        "the suggest histogram is on the SDK default boundaries, which cannot "
+        "distinguish a 2 ms keystroke from a 4 s one"
+    )
+    assert 0.05 in bounds, "the as-you-type budget is a boundary, not an interpolation"
+    assert max(bounds) >= 2.707, (
+        "tier 1's measured one-character p95 is 2,707 ms and must not land in the overflow bucket"
+    )
+    # The resolution claim itself: the two tiers' own p50s fall in different
+    # buckets, which is the whole reason the label is worth carrying.
+    assert bisect_left(bounds, 0.00253) != bisect_left(bounds, 0.0336), (
+        "tier 1's 2.53 ms p50 and tier 2's 33.6 ms p50 share a bucket"
+    )
+
+
 # -- the catalogue ---------------------------------------------------------
 
 
@@ -470,18 +700,32 @@ def test_the_modules_owning_those_instruments_are_imported() -> None:
     assert {"usher.services.search", "usher.services.index"} <= set(sys.modules)
 
 
-def test_prd_10_marks_the_m6_rows_as_shipped() -> None:
+def test_prd_10_marks_every_milestones_rows_as_shipped() -> None:
     """The other direction of the same maintenance rule. PRD 10's `Emitted`
     column is "maintained rather than aspirational", so a metric that now
     exists and is still marked `M6` rather than `✅ M6` tells the next reader
-    it is owed by a future milestone."""
-    milestones = {
-        name: milestone
-        for name, _, milestone in _ROW.findall(_PRD_10.read_text())
-        if milestone.endswith("M6")
-    }
-    assert milestones, "no M6 metric rows parsed"
-    assert all(value.startswith("✅") for value in milestones.values()), milestones
+    it is owed by a future milestone.
+
+    **Every row rather than M6's, and generalising is cheaper than a third
+    copy** -- this was M6's alone until M10's D1 added the two suggest rows,
+    and the alternative was a second body differing only in a substring. What
+    licenses dropping the filter is a fact about the table rather than a hope
+    about it: `test_telemetry_metric_names.py` asserts
+    `declared == set(catalogue) - {"http.server.duration"}` as an *equality*,
+    so the catalogue cannot hold a row for an instrument nothing declares, so
+    every row of it is shipped by construction. The header sentence above the
+    table still offers "owned by a later milestone", and that option has been
+    closed by the neighbouring case since M10 Phase 0 -- a future milestone's
+    row has to arrive with its instrument or not at all, and this case is now
+    the second thing that says so.
+    """
+    milestones = {name: milestone for name, _, milestone in _ROW.findall(_PRD_10.read_text())}
+    assert len(milestones) >= 40, f"the catalogue table parse found {len(milestones)} rows"
+    assert {"usher.search.duration", "usher.suggest.duration"} <= set(milestones), (
+        "the parse missed a known row, so an all-rows assertion would be vacuous"
+    )
+    unshipped = {name: value for name, value in milestones.items() if not value.startswith("✅")}
+    assert not unshipped, unshipped
 
 
 # -- the two embedding gauges ----------------------------------------------
