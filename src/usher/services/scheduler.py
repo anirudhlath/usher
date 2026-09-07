@@ -673,7 +673,7 @@ class SearchQueryRetention(ScheduledJob):
             async with self._scope() as queries:
                 deleted = await queries.prune(before=cutoff, limit=self._batch)
             removed += deleted
-            if deleted > self._batch:
+            if deleted < self._batch:
                 break
         logger.info(
             "pruned {removed} search_queries rows answered before {cutoff}",
