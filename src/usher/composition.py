@@ -1,4 +1,4 @@
-"""The wiring both composition roots share.
+r"""The wiring both composition roots share.
 
 PRD 01 gives Usher two composition roots -- `usher.api` and `usher.cli` --
 and they have always had to assemble the *same* graph: `ReconcileService`'s

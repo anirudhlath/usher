@@ -1,4 +1,4 @@
-"""D5's other two leak pins: a telemetry attribute and the loguru sink.
+r"""D5's other two leak pins: a telemetry attribute and the loguru sink.
 
 **Why these two live here and not beside `test_api_playback_leaks.py`.** Both
 of ADR-0012's remaining named surfaces need a *real* outbound call to be a
