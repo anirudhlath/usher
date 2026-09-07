@@ -18,6 +18,7 @@ per chunk"* is precisely the claim a rolled-back transaction cannot make -- and
 a prune that never committed would leave every case above green.
 """
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -116,6 +117,30 @@ def _job(
     )
 
 
+#: A ceiling on any `SearchQueryRetention.run()` this file drives.
+#:
+#: 🔴 **A non-terminating drain is this job's one shipped bug, and without a
+#: deadline the suite cannot turn it into a red.** `wip: ... not reviewed, not
+#: gated` carried `if deleted > self._batch: break`, which `prune` can never
+#: satisfy, so `run()` spun at a full core. Every case here passed a *hang* up
+#: to pytest, which has no timeout plugin in this project, so CI would have
+#: reported a job timeout hours later rather than a failing assertion -- and
+#: the M10 J5 sweep scored the same mutation `HUNG` rather than `KILLED` for
+#: exactly this reason.
+#:
+#: Generous on purpose: the whole selection's green baseline is under eight
+#: seconds, so five is "the loop is not advancing", never "the box is busy".
+#: `.claude/rules/testing-discipline.md` states the shape -- give any wait a
+#: deadline that *gives up*, because a claim whose failure mode is a deadlock
+#: can otherwise only ever report a timeout.
+DRAIN_DEADLINE = 5.0
+
+
+async def _drain(job: SearchQueryRetention) -> None:
+    """`job.run()`, bounded. See `DRAIN_DEADLINE`."""
+    await asyncio.wait_for(job.run(), DRAIN_DEADLINE)
+
+
 async def _count(session: AsyncSession) -> int:
     found = await session.execute(text("SELECT count(*) FROM search_queries"))
     return int(found.scalar_one())
@@ -148,7 +173,7 @@ async def test_the_retention_job_deletes_only_rows_past_the_cutoff(
         await repository.record(record)
     assert await _count(session) == 4
 
-    await _job(repository).run()
+    await _drain(_job(repository))
 
     survived = await session.execute(text("SELECT id FROM search_queries"))
     assert {row[0] for row in survived} == {ages[90].id, ages[89].id, ages[0].id}
@@ -250,7 +275,7 @@ async def test_a_live_shaped_population_wholly_inside_the_window_is_not_due_and_
     # satisfying the rule, so the age the scheduler subtracts is zero.
     assert await job.last_done() == NOW
 
-    await job.run()
+    await _drain(job)
     assert await _count(session) == rows
 
 
@@ -291,7 +316,7 @@ async def test_the_prune_takes_no_household_and_no_title_with_it(
     users_before = (await session.execute(text("SELECT count(*) FROM users"))).scalar_one()
     titles_before = (await session.execute(text("SELECT count(*) FROM titles"))).scalar_one()
 
-    await _job(repository).run()
+    await _drain(_job(repository))
 
     assert await _count(session) == 0
     assert (await session.execute(text("SELECT count(*) FROM users"))).scalar_one() == users_before
@@ -390,7 +415,7 @@ async def test_the_prune_commits_each_chunk_where_a_composition_root_wired_it(
         job = SearchQueryRetention(
             watching, window=WINDOW, batch=2, period=RETENTION_PERIOD, now=_clock
         )
-        await job.run()
+        await _drain(job)
 
         assert seen_midway == [5, 3, 1, 1], (
             "seven rows, six expired, a batch of two: each chunk's deletion has to be "
