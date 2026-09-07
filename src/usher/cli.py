@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Final
 
 import httpx
+from loguru import logger
 from pydantic import SecretStr, ValidationError
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -772,13 +773,76 @@ async def _work(settings: Settings, *, once: bool) -> None:
                 )
             return done
 
-        ran = await _measure()
+        async def _pass() -> int:
+            """One pass, and in the daemon form a bug in it costs the pass
+            rather than the process.
+
+            **The arm `api/lanes.py`'s worker lane has had since M6, arriving
+            at the other root of the same worker** (M10 F10). `JobWorker._pass`
+            re-raises the first task failure after every task has settled, so
+            without this one job's `AttributeError` ends `usher work` while the
+            identical job under `USHER_WORKER_ENABLED=true` costs the lane one
+            pass -- two survival semantics for one defect, in a deployment an
+            operator picks between with a setting, and nothing said so.
+
+            🔴 **`logger.exception`, never `logger.warning`, and that is the
+            whole reason this arm is safe to have.** Issue #8 is a crash that
+            left two lines and no frames; an arm that swallowed a bug and
+            logged a *message* would turn a dead worker -- which is at least
+            visible -- into a healthy-looking one that silently retries a
+            deterministic fault. The stack is what makes the next occurrence
+            evidence, and it is the deliverable here even though the cause is
+            still unknown. `telemetry.configure_logging` sets `diagnose=False`,
+            so the frames carry no locals and PRD 08's
+            credentials-are-never-logged rule survives (`services/jobs.py`
+            makes the same call for the same reason).
+
+            ⚠️ **`--once` is deliberately outside the arm.** A cron entry and
+            `docker compose exec usher python -m usher work --once` read the
+            *exit code*, and a guard around this form would answer a crashed
+            pass with `0` -- so the thing that exists to notice would be the
+            last to. The daemon has no exit code to report with and its
+            survival is the property; `--once` has no survival to protect and
+            its exit code is. Pinned by
+            `tests/unit/test_cli_work.py::
+            test_one_pass_keeps_its_exit_code_rather_than_logging_and_returning`.
+
+            **`Exception`, never `BaseException`:** `CancelledError` is how a
+            SIGINT reaches this loop, and catching it would build a daemon that
+            cannot be stopped out of the arm that stops it dying. Pinned by an
+            **AST** case (`test_both_worker_roots_record_a_crashed_pass_with_
+            its_frames`) rather than by a behavioural one, and that is
+            `testing-discipline.md`'s rule about a failure mode that is a
+            deadlock: a case that cancels this loop and waits can only report a
+            timeout, and it does not even manage that -- the planted
+            `BaseException` hangs the test runner's own teardown on the
+            unstoppable task, so it produces no red line at all.
+
+            Returning `0` is not a consolation value -- it is what makes the
+            caller sleep `_IDLE_SLEEP_SECONDS` instead of hot-looping a
+            failing pass, which is the same thing the lane's `ran = 0` does.
+            The cost, named rather than discovered: a database outage now logs
+            a stack per pass instead of a sentence per pass. The *rate* is
+            unchanged, only the size, and the arm cannot tell an outage from a
+            bug without re-litigating `OPERATOR_ERRORS` one layer down.
+            """
+            if once:
+                return await _measure()
+            try:
+                return await _measure()
+            except Exception as exc:
+                logger.exception(
+                    "the worker pass failed; the daemon continues: {error}", error=str(exc)
+                )
+                return 0
+
+        ran = await _pass()
         print(f"{ran} jobs, {recovered} recovered claims")
         while not once:
             if ran == 0:
                 await asyncio.sleep(_IDLE_SLEEP_SECONDS)
             taken = recovered
-            ran = await _measure()
+            ran = await _pass()
             if recovered != taken:
                 # **On a change, never per pass.** Without this a daemon prints
                 # exactly one line, at startup, when the total is almost always

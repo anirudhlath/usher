@@ -947,7 +947,26 @@ class LaneSupervisor:
                 # the lane down, never end it. A worker lane that returned
                 # would leave the queue draining only on the next restart,
                 # with nothing in `/health/ready` saying so.
-                logger.warning("the worker lane's pass failed: {error}", error=str(exc))
+                #
+                # 🔴 **`logger.exception`, and it was `logger.warning` until
+                # M10's F10.** Issue #8 is a `MissingGreenlet` that killed a
+                # `usher work` daemon and left no frames, and the CLI boundary
+                # was only *one* of the two reasons: the same fault raised
+                # inside this lane was answered with `str(exc)` -- a message,
+                # so no frames -- and this root does not even die, so there was
+                # no crash for an operator to notice either. Neither root
+                # recorded a traceback for a bug in this project's own code,
+                # which is why ~92,000 jobs produced a rate and no evidence.
+                # The stack is what makes the next occurrence evidence.
+                #
+                # The cost, named rather than discovered: a database outage
+                # logs a stack per pass instead of a sentence per pass. The
+                # *rate* is unchanged -- `ran` is still 0, so the sleep below
+                # still applies -- and this arm cannot tell an outage from a
+                # bug without re-deciding `cli.OPERATOR_ERRORS` one layer down.
+                # `configure_logging` sets `diagnose=False`, so the frames
+                # carry no locals.
+                logger.exception("the worker lane's pass failed: {error}", error=str(exc))
             if ran == 0:
                 await asyncio.sleep(self._idle_seconds)
 
