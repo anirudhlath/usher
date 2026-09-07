@@ -1352,6 +1352,23 @@ suspicion.
   began after the request's ended"*, observed through a session log rather than
   forced. Not to deselect it in CI: a case deselected in CI is a feature nobody
   checks.
+  **Re-measured 2026-09-07 by M10's F6, and it did not reproduce: 0 failures in
+  10 whole-`tests/integration` runs under sustained concurrent `tests/unit`
+  load and 0 in 5 under burst load**, HEAD `cb5ac06`, load average 6.9–28.8,
+  fifteen full `--tb=long` logs kept at `/var/tmp/m10-f7/` against a protocol
+  pre-registered and `sha256`'d before the first run. Selection named:
+  **whole `tests/integration`**, and these two numbers are not unioned with the
+  2-in-7 above, which is itself a union of two different denominators.
+  **The prescription in this entry is stale and that matters more than the
+  rate.** *"Observed through a session log"* was already implemented when it
+  was written: `_SessionLog` keeps a strong reference to every session it
+  records (`held`), which closes the `id()`-reuse hazard the ordering premise
+  used to have. It landed in `271b0d4` on 2026-08-19. Re-measured on this host
+  2026-09-07: **2,000 created-and-freed `Session` objects occupy 7 distinct
+  `id()` values; 2,000 held by a strong reference occupy 2,000.** So the hazard
+  is real and is already closed, and the open residual is that **nothing
+  asserts the pinning happened** — a `held` deleted as a leak would look
+  exactly like a `held` that works.
 - ⚠️ **A second intermittent integration group is *reported* and did not
   reproduce, and this list is where the report belongs rather than a rate.**
   Raised 2026-08-19 reviewing M10's S4:
@@ -1374,6 +1391,47 @@ suspicion.
   three would be a false kill. `.claude/rules/mutation-sweeps.md` carries the
   full measurement and the reason the affected sweep control's verdict stands
   either way. Chasing the mechanism is nobody's task yet, deliberately.
+  **Third measurement, 2026-09-07 (M10 F6), HEAD `cb5ac06`: zero failures of
+  all three cases in 15 whole-`tests/integration` runs** — 10 under sustained
+  concurrent `tests/unit` load, 5 under burst. That is a third environment and
+  a third answer (4-in-3 solo, 0-in-10 solo, 0-in-15 whole-directory under
+  load); they still do not average into a rate.
+- 🔴 **`test_search_query_retention.py::test_the_prune_commits_each_chunk_where_a_composition_root_wired_it`
+  leaks `pg_class` statistics intermittently — 7 of 15, and it is not a
+  footnote to #7.** Found 2026-09-07 by M10's F6 while chasing #7, and recorded
+  under its own name and its own denominator because a second intermittent case
+  found while chasing the first is a finding, not an aside. **7 failures in 15
+  whole-`tests/integration` runs** (3 of 10 under sustained concurrent
+  `tests/unit` load, 4 of 5 under burst), HEAD `cb5ac06`, logs at
+  `/var/tmp/m10-f7/`. It is an **ERROR at teardown**, not a failure, so a
+  harness scoring on `FAILED` lines does not see it at all. `conftest.py`'s
+  statistics guard fires:
+  ``left `pg_class` describing rows this database does not have (reltuples, count(*)): {'users': (1, 0)}``,
+  then `assert not {'users': (1, 0)}`. The case carries no
+  `@pytest.mark.leaks_statistics`. This is the #26/#43/#79 family — the guard
+  repairs what it found before failing, so the run continues, but the leak is
+  about `users` and *every later test's planner* is what that family is about.
+  CI is exactly as blind to it as to the entries above: `.github/workflows/ci.yml`
+  runs the whole suite with no deselection. Nothing is deselected here either.
+- ⚠️ **`test_episode_repository.py::test_next_up_reads_the_episode_key_index_and_does_not_scan_episodes`
+  failed once in 15 runs on a planner tie-break.** Same F6 run set, 2026-09-07,
+  HEAD `cb5ac06`; the full `--tb=long` traceback is in
+  `/var/tmp/m10-f7/run-A09.log`. **The losing assertion is the third one — the
+  one the docstring calls "the one with teeth"** —
+  `assert re.search(r"Index Cond:.*ROW\(season_number, episode_number\)", plan)`,
+  and the plan it printed put the row comparison in
+  `Join Filter: ((e_1.title_id = e.title_id) AND (ROW(e.season_number, e.episode_number) > ROW(e_1.season_number, e_1.episode_number)))`
+  with `Index Cond: (season_number > 0)` instead. The first two assertions
+  passed: the index *is* named and there is no `Seq Scan`. That is precisely
+  the tie-break `.claude/rules/testing-discipline.md` says
+  `SET LOCAL enable_seqscan = off` cannot settle — it decides *index or scan*,
+  never *which index* or where the comparison lands.
+  **An open question, recorded as one:** run A09 is the only one of the fifteen
+  carrying both this failure and the `users` statistics leak above, and that
+  family's whole mechanism is one test's statistics becoming another test's
+  planner. It is a co-occurrence in 1 of 15 and the leak also occurred in six
+  runs where this case passed. A lead, not a mechanism — the third time this
+  project has had to write that sentence about a flake.
 - ✅ **`test_sse_end_to_end.py::test_opening_a_stub_promotes_it…` was flaky and
   is closed — do not inherit the deselection.** `.claude/rules/mutation-sweeps.md`
   names it **four** times: one attribution note and **two deselections**, then
