@@ -225,6 +225,19 @@ async def _drain(job: SearchQueryRetention) -> None:
     await asyncio.wait_for(job.run(), DRAIN_DEADLINE)
 
 
+async def _tick(scheduler: Scheduler) -> int:
+    """`scheduler.tick()`, bounded. See `DRAIN_DEADLINE`.
+
+    🔴 **`Scheduler.tick()` awaits `job.run()` with no deadline of its own**,
+    so bounding the direct `run()` call sites was not enough: a job that never
+    returns wedges the tick, and the suite reported a hang rather than a
+    failure. That is a property of the shipped component and not of these
+    tests -- issue #83 -- and this helper only makes the suite able to *say*
+    so.
+    """
+    return await asyncio.wait_for(scheduler.tick(), DRAIN_DEADLINE)
+
+
 async def test_a_job_whose_period_has_not_elapsed_is_not_run() -> None:
     """**The failing test this task was written against**, and its positive
     control is the first arm.
@@ -238,7 +251,7 @@ async def test_a_job_whose_period_has_not_elapsed_is_not_run() -> None:
     waiting = _Fake("waiting", period=_HOUR, last=clock.now - timedelta(minutes=30))
     scheduler = _scheduler(due, waiting, clock=clock)
 
-    ran = await scheduler.tick()
+    ran = await _tick(scheduler)
 
     assert due.runs == 1, "the job whose period had elapsed was not run"
     assert waiting.runs == 0, "a job whose period has not elapsed was run anyway"
@@ -254,7 +267,7 @@ async def test_a_job_at_exactly_its_period_is_due() -> None:
     """
     clock = _Clock()
     job = _Fake("exact", period=_HOUR, last=clock.now - _HOUR)
-    assert await _scheduler(job, clock=clock).tick() == 1
+    assert await _tick(_scheduler(job, clock=clock)) == 1
     assert job.runs == 1
 
 
@@ -267,7 +280,7 @@ async def test_a_job_that_has_never_run_is_due() -> None:
     is the first one a registration will meet.
     """
     job = _Fake("never", last=None)
-    assert await _scheduler(job).tick() == 1
+    assert await _tick(_scheduler(job)) == 1
     assert job.runs == 1
 
 
@@ -382,7 +395,7 @@ async def test_an_empty_table_is_not_due_rather_than_never_built() -> None:
 
     assert await job.last_done() == clock.now
 
-    assert await _scheduler(job, clock=clock).tick() == 0
+    assert await _tick(_scheduler(job, clock=clock)) == 0
 
 
 async def test_a_table_whose_oldest_row_is_inside_the_window_is_not_due() -> None:
@@ -413,12 +426,12 @@ async def test_a_table_whose_oldest_row_is_inside_the_window_is_not_due() -> Non
     )
 
     assert await job.last_done() == clock.now
-    assert await _scheduler(job, clock=clock).tick() == 0, "nothing is past the cutoff"
+    assert await _tick(_scheduler(job, clock=clock)) == 0, "nothing is past the cutoff"
 
     await repository.record(_row(at=clock.now - timedelta(days=95), user_id=user_id))
 
     assert await job.last_done() == clock.now - timedelta(days=5)
-    assert await _scheduler(job, clock=clock).tick() == 1, (
+    assert await _tick(_scheduler(job, clock=clock)) == 1, (
         "a row five days past a 90-day window is four days past a one-day period"
     )
 
@@ -453,8 +466,8 @@ async def test_the_period_is_how_much_expired_data_may_accumulate() -> None:
             _scope_over(repository), window=window, batch=10, period=period, now=clock.read
         )
 
-    assert await _scheduler(job(short), clock=clock).tick() == 0
-    assert await _scheduler(job(exact), clock=clock).tick() == 1
+    assert await _tick(_scheduler(job(short), clock=clock)) == 0
+    assert await _tick(_scheduler(job(exact), clock=clock)) == 1
 
 
 async def test_a_run_moves_the_reading_its_own_period_is_compared_against() -> None:
@@ -490,14 +503,14 @@ async def test_a_run_moves_the_reading_its_own_period_is_compared_against() -> N
     )
     scheduler = _scheduler(job, clock=clock)
 
-    assert await scheduler.tick() == 1, "the premise: this job was due"
+    assert await _tick(scheduler) == 1, "the premise: this job was due"
 
     assert await job.last_done() == clock.now
-    assert await scheduler.tick() == 0, "its own run moved the reading past its own period"
+    assert await _tick(scheduler) == 0, "its own run moved the reading past its own period"
 
     await repository.record(_row(at=clock.now, user_id=user_id))
 
-    assert await scheduler.tick() == 0, (
+    assert await _tick(scheduler) == 0, (
         "a fresh search must not make the retention job due -- that is the defect "
         "min(search_queries.at) as a last_done() has"
     )
@@ -625,7 +638,7 @@ async def test_two_due_jobs_run_one_at_a_time() -> None:
     first = _Fake("first", last=clock.now - timedelta(hours=2))
     second = _Fake("second", last=clock.now - timedelta(hours=2))
 
-    assert await _scheduler(first, second, clock=clock).tick() == 2
+    assert await _tick(_scheduler(first, second, clock=clock)) == 2
 
     assert len(first.windows) == 1 and len(second.windows) == 1, (
         "two windows are a statement about two runs; one is a statement about nothing"
@@ -651,7 +664,7 @@ async def test_a_failing_job_does_not_stop_its_siblings(lines: list[str]) -> Non
     poison = _Fake("poison", last=None, fails=True)
     healthy = _Fake("healthy", last=None)
 
-    ran = await _scheduler(poison, healthy, clock=clock).tick()
+    ran = await _tick(_scheduler(poison, healthy, clock=clock))
 
     assert poison.runs == 1
     assert healthy.runs == 1, "a failing job took its sibling down with it"
@@ -671,7 +684,7 @@ async def test_a_last_done_that_raises_neither_runs_the_job_nor_stops_the_tick(
     unreadable = _Fake("unreadable", last=None, last_done_fails=True)
     healthy = _Fake("healthy", last=None)
 
-    assert await _scheduler(unreadable, healthy, clock=clock).tick() == 1
+    assert await _tick(_scheduler(unreadable, healthy, clock=clock)) == 1
 
     assert unreadable.runs == 0, "a job ran on the strength of a read that raised"
     assert healthy.runs == 1
@@ -726,7 +739,7 @@ async def test_a_job_whose_last_done_is_naive_is_a_failure_and_not_a_dead_tick(
     sibling = _Fake("healthy", period=_HOUR, last=clock.now - timedelta(hours=2))
     scheduler = _scheduler(offender, sibling, clock=clock)
 
-    ran = await scheduler.tick()
+    ran = await _tick(scheduler)
 
     assert sibling.runs == 1, "a job registered after the offender was skipped by its failure"
     assert ran == 1, "the tick counted the sibling and not the job that could not be compared"
@@ -751,9 +764,9 @@ async def test_a_job_whose_last_done_is_naive_backs_off_rather_than_retrying_eve
     offender = _NaiveLastDone()
     scheduler = _scheduler(offender, clock=clock)
 
-    await scheduler.tick()
+    await _tick(scheduler)
     before = len([line for line in lines if "last done" in line])
-    await scheduler.tick()
+    await _tick(scheduler)
 
     assert before == 1, "the first tick did not report the failure, so there is nothing to space"
     assert len([line for line in lines if "last done" in line]) == 1, (
@@ -778,9 +791,9 @@ async def test_a_failing_job_is_not_offered_again_on_the_very_next_tick() -> Non
     job = _Fake("poison", period=_HOUR, last=None, fails=True)
     scheduler = _scheduler(job, clock=clock)
 
-    await scheduler.tick()
+    await _tick(scheduler)
     assert job.runs == 1, "the first tick did not run the job, so there is no failure to space"
-    await scheduler.tick()
+    await _tick(scheduler)
 
     assert job.runs == 1, "a job that raised was retried on the very next tick"
 
@@ -804,21 +817,21 @@ async def test_the_backoff_expires_and_never_exceeds_the_period() -> None:
     scheduler = Scheduler(tick_seconds=_HOUR.total_seconds(), now=clock.read)
     scheduler.register(job)
 
-    await scheduler.tick()
+    await _tick(scheduler)
     assert job.runs == 1
 
     clock.now += timedelta(minutes=59)
-    await scheduler.tick()
+    await _tick(scheduler)
     assert job.runs == 1, "the backoff expired early"
 
     clock.now += timedelta(minutes=2)
-    await scheduler.tick()
+    await _tick(scheduler)
     assert job.runs == 2, "the backoff never expired"
 
     # And the cap holds on the *second* failure, where an uncapped doubling
     # would ask for two periods.
     clock.now += timedelta(minutes=61)
-    await scheduler.tick()
+    await _tick(scheduler)
     assert job.runs == 3, "the backoff doubled past the job's own period"
 
 
@@ -833,20 +846,20 @@ async def test_a_run_that_succeeds_clears_the_backoff() -> None:
     job = _Fake("flaky", period=_HOUR, last=None, fails=True)
     scheduler = _scheduler(job, clock=clock)
 
-    await scheduler.tick()
+    await _tick(scheduler)
     assert job.runs == 1
     job._fails = False
     clock.now += timedelta(minutes=2)
-    await scheduler.tick()
+    await _tick(scheduler)
     assert job.runs == 2, "the premise: the backoff had expired and the job ran clean"
 
     # A clean run resets the counter, so the *next* failure is spaced by one
     # tick again rather than by two.
     job._fails = True
-    await scheduler.tick()
+    await _tick(scheduler)
     assert job.runs == 3
     clock.now += timedelta(seconds=61)
-    await scheduler.tick()
+    await _tick(scheduler)
     assert job.runs == 4, "a clean run did not reset the doubling"
 
 
@@ -862,9 +875,9 @@ async def test_a_backed_off_job_is_not_asked_when_it_was_last_done() -> None:
     job = _Fake("poison", period=_HOUR, last=None, fails=True)
     scheduler = _scheduler(job, clock=clock)
 
-    await scheduler.tick()
+    await _tick(scheduler)
     asked = job.asked
-    await scheduler.tick()
+    await _tick(scheduler)
 
     assert job.asked == asked, "a backed-off job was still asked when it was last done"
 
@@ -1020,7 +1033,7 @@ async def test_the_due_gauge_reads_a_snapshot_the_tick_refreshes() -> None:
     scheduler = _scheduler(overdue, waiting, clock=clock)
 
     assert scheduler.read() == {}, "a gauge reported before anything had read an artefact"
-    await scheduler.tick()
+    await _tick(scheduler)
 
     due = scheduler.read()
     assert due["overdue"] == pytest.approx(timedelta(hours=2).total_seconds())
@@ -1039,7 +1052,7 @@ async def test_a_job_that_has_never_run_reports_no_due_point_at_all() -> None:
     job = _Fake("never", last=None)
     scheduler = _scheduler(job)
 
-    await scheduler.tick()
+    await _tick(scheduler)
 
     assert "never" not in scheduler.read(), f"a never-run job reported {scheduler.read()}"
 
@@ -1051,11 +1064,11 @@ async def test_a_job_whose_last_done_raises_reports_no_due_point() -> None:
     clock = _Clock()
     job = _Fake("flaky", period=_HOUR, last=clock.now - timedelta(hours=3))
     scheduler = _scheduler(job, clock=clock)
-    await scheduler.tick()
+    await _tick(scheduler)
     assert "flaky" in scheduler.read()
 
     job._last_done_fails = True
-    await scheduler.tick()
+    await _tick(scheduler)
 
     assert "flaky" not in scheduler.read()
 
@@ -1080,7 +1093,7 @@ async def test_the_job_span_is_a_root_even_when_the_tick_runs_inside_a_span(
     scheduler = _scheduler(job)
 
     with trace.get_tracer("test").start_as_current_span("enclosing") as enclosing:
-        await scheduler.tick()
+        await _tick(scheduler)
         enclosing_context = enclosing.get_span_context()
 
     finished = {span.name: span for span in spans.get_finished_spans()}
