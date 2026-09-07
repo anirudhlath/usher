@@ -198,6 +198,62 @@ async def test_an_empty_table_reads_as_satisfied_now_rather_than_never_built(
     assert await _job(repository).last_done() == NOW
 
 
+async def test_a_live_shaped_population_wholly_inside_the_window_is_not_due_and_deletes_nothing(
+    session: AsyncSession, repository: PostgresSearchQueryRepository, user_id: uuid.UUID
+) -> None:
+    """The state this deployment is actually in, asserted rather than
+    described.
+
+    J5's own text says the not-due reading must be pinned "against the
+    live-shaped nine-row population". **Nine was true on 2026-08-13 and is
+    not the shape any more** -- measured 2026-09-07 on `usher_catalog`, the
+    live table holds **109 rows** whose oldest is **25 days** old, so every
+    row is inside the 90-day window and the job has nothing to do. What
+    transfers from the spec is the *shape* (a populated table, entirely
+    inside the window), never the cardinality, so the size is named once here
+    and the assertions are computed from what was stored.
+
+    **The rows are inserted newest-first on purpose.** Ids are UUIDv7 and
+    therefore monotonic in insertion order, so seeding oldest-first would put
+    `min(at)` on the lowest id and let `ORDER BY id LIMIT 1` pass as
+    `min(at)` by accident -- `CLAUDE.md`'s "a UUIDv7 key makes `ORDER BY id`
+    and `ORDER BY <the real key>` agree by accident". Seeded this way the
+    oldest row carries the *highest* id.
+    """
+    rows = 109
+    oldest_age = timedelta(days=25)
+    # Ascending age, so the first row written is the newest and the last is
+    # the oldest -- which is what puts `min(at)` on the highest id.
+    ages = [oldest_age * index / (rows - 1) for index in range(rows)]
+    for age in ages:
+        await repository.record(_record(at=NOW - age, user_id=user_id))
+    await session.flush()
+
+    # Premises, read back through the port rather than taken from the
+    # literals above: the population is the size claimed, and its oldest row
+    # is inside the window -- without which "not due" is vacuous.
+    assert await _count(session) == rows
+    oldest = await repository.oldest()
+    assert oldest is not None
+    assert NOW - oldest == oldest_age
+    assert NOW - oldest < WINDOW
+    # The seeding order itself is a premise, so it is asserted rather than
+    # left in the docstring: the oldest row must carry the *highest* id, or
+    # `ORDER BY id LIMIT 1` and `min(at)` agree and this fixture has no teeth
+    # against a reader that confuses them.
+    by_age = await session.execute(text("SELECT id FROM search_queries ORDER BY at LIMIT 1"))
+    by_id = await session.execute(text("SELECT id FROM search_queries ORDER BY id LIMIT 1"))
+    assert by_age.scalar_one() != by_id.scalar_one()
+
+    job = _job(repository)
+    # Not due: `min(min(at) + window, now)` caps at `now` for a table already
+    # satisfying the rule, so the age the scheduler subtracts is zero.
+    assert await job.last_done() == NOW
+
+    await job.run()
+    assert await _count(session) == rows
+
+
 async def test_the_prune_takes_no_household_and_no_title_with_it(
     session: AsyncSession, repository: PostgresSearchQueryRepository, user_id: uuid.UUID
 ) -> None:

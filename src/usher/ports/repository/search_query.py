@@ -349,10 +349,20 @@ class SearchQueryRepository(ABC):
         value.
 
         Cheap by construction rather than by luck: `ix_search_queries_at`
-        (`m10c`) makes it an Index Only Scan of one leaf. Measured 2026-08-27
-        on a clone of the live catalog holding **14,978 rows** -- `Heap
-        Fetches: 0`, 3 buffers, median **0.072 ms** over seven samples, which
-        is the same figure the ADR measured over **107** rows.
+        (`m10c`) makes it an Index Only Scan of one leaf. Re-measured
+        2026-09-07 on `usher_j2`, the clone of the live catalog holding
+        **14,978 rows** -- `Heap Fetches: 1`, **4 buffers** (`shared hit=4`
+        warm), median **0.041 ms** over seven samples (0.037-0.048).
+
+        ⚠️ **The fetch count is 1, not the 0 this docstring claimed**, and
+        all three counters moved. The obvious explanation -- a page the
+        visibility map does not mark all-visible -- was checked and is
+        **false**: `pg_class` reports `relpages = relallvisible = 240`,
+        `n_dead_tup = 0`, and 240 is also the table's actual size, so the map
+        covers every page. Why the scan still takes one heap fetch was not
+        determined and is not worth a walk of Postgres internals here; what
+        the caller needs is the cost, and the cost is lower than the number
+        it replaces. Recorded as measured rather than explained.
         """
 
     @abstractmethod
@@ -371,13 +381,17 @@ class SearchQueryRepository(ABC):
         under the loop (`.claude/rules/db-and-sql.md` carries both traps).
 
         **`limit` has no default here, on this port or on any
-        implementation.** Three copies of one number is what
-        `list_unwatched_candidates` shipped and what
-        `.claude/rules/testing-discipline.md` records: the two arms of a
-        contract suite drifted about the size of the artefact the suite
-        exists to pin, and the assertion that the copies agree runs after the
-        drift. The caller says how big a chunk is; there is one such caller
-        and it reads a setting.
+        implementation.** A default in three signatures is three numbers:
+        `list_unwatched_candidates` shipped `limit: int = 200` on the port,
+        on `PostgresTitleRepository` and on `FakeTitleRepository`, and
+        setting the fake's to 5 left the whole unit suite green while setting
+        the Postgres one's to 5 left the whole integration suite green --
+        because no contract case called without a limit while seeding more
+        than five candidates. The two arms of a contract suite could disagree
+        about the size of the artefact the suite exists to pin, and an
+        assertion that three literals are equal is a check that runs after
+        the drift. The caller says how big a chunk is; there is one such
+        caller and it reads a setting.
 
         **Strictly `<`, never `<=`.** A row answered at exactly `before` is
         inside the window by one microsecond of definition and is kept, which
