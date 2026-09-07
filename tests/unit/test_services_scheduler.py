@@ -212,6 +212,19 @@ def lines() -> Iterator[list[str]]:
 # -- the due comparison ----------------------------------------------------
 
 
+#: A ceiling on any `SearchQueryRetention.run()` this file drives -- the unit
+#: half of `tests/integration/test_search_query_retention.py::DRAIN_DEADLINE`,
+#: and it only works because `FakeSearchQueryRepository.prune` awaits.
+#: A drain whose terminator is broken has to reach pytest as a failure rather
+#: than as a hang; J5 shipped exactly that bug.
+DRAIN_DEADLINE = 5.0
+
+
+async def _drain(job: SearchQueryRetention) -> None:
+    """`job.run()`, bounded. See `DRAIN_DEADLINE`."""
+    await asyncio.wait_for(job.run(), DRAIN_DEADLINE)
+
+
 async def test_a_job_whose_period_has_not_elapsed_is_not_run() -> None:
     """**The failing test this task was written against**, and its positive
     control is the first arm.
@@ -517,7 +530,7 @@ async def test_the_prune_drains_in_chunks_and_opens_a_scope_for_each() -> None:
         scope, window=timedelta(days=90), batch=3, period=RETENTION_PERIOD, now=clock.read
     )
 
-    await job.run()
+    await _drain(job)
 
     assert scope.opened == 3, "3 + 3 + 1: the short chunk is the terminator"
     assert scope.closed_cleanly == 3, "every chunk's scope has to exit cleanly to commit"
@@ -555,7 +568,7 @@ async def test_the_cutoff_is_taken_once_and_not_per_chunk() -> None:
         now=jumping_clock,
     )
 
-    await job.run()
+    await _drain(job)
 
     survivors = [record.at for record in repository.rows.values()]
     assert len(survivors) == 1, "only the two rows past the *original* cutoff may go"
@@ -582,7 +595,7 @@ async def test_the_prune_says_how_many_rows_it_removed(lines: list[str]) -> None
         now=clock.read,
     )
 
-    await job.run()
+    await _drain(job)
 
     pruned = [line for line in lines if "pruned" in line]
     assert len(pruned) == 1, f"expected one line naming the count, got {pruned}"

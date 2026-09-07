@@ -40,6 +40,7 @@ this twice on one row, a click and then a play, and the second call must
 still land.
 """
 
+import asyncio
 import uuid
 from datetime import datetime
 
@@ -111,6 +112,15 @@ class FakeSearchQueryRepository(SearchQueryRepository):
         return min(record.at for record in self.rows.values())
 
     async def prune(self, *, before: datetime, limit: int) -> int:
+        # **This yields, and that is load-bearing rather than cosmetic.** The
+        # Postgres arm awaits a real round trip on every chunk, so a caller
+        # looping over `prune` always has a cancellation point; a fake that
+        # completes synchronously has none, and a `run()` whose terminator is
+        # broken then spins the event loop with no way for
+        # `asyncio.wait_for` to interrupt it. That is not hypothetical -- J5
+        # shipped exactly that terminator bug, and the sweep could only score
+        # it `HUNG` because no deadline could fire.
+        await asyncio.sleep(0)
         # 🔴 **`<`, and the fake spells it out rather than inheriting it.**
         # The boundary is one character and both spellings read as correct, so
         # a fake using `<=` would make the contract's exactly-on-the-cutoff arm
