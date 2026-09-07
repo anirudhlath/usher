@@ -86,3 +86,26 @@ def test_the_changelog_names_the_version_that_ships() -> None:
     assert released, "the changelog has no released version, only [Unreleased]"
 
     assert released[0] == importlib.metadata.version("usher")
+
+
+def test_the_security_policy_supports_the_version_that_ships() -> None:
+    """`SECURITY.md`'s supported line names the running minor series.
+
+    **This is the assertion that stops the table becoming a lie.** A security
+    policy is correct on the day it is written and wrong on the next release,
+    and nothing re-reads it -- a claim whose whole purpose is that it agrees
+    with something else needs an assertion on the agreement.
+
+    The control is `assert rows`: a table parse that matched nothing and a
+    table that is right are otherwise the same green.
+    """
+    policy = (pathlib.Path(__file__).parents[2] / "SECURITY.md").read_text()
+    rows = re.findall(r"^\|\s*([0-9][^|\s]*)\s*\|\s*(\S+)\s*\|", policy, re.MULTILINE)
+
+    assert rows, "no version rows parsed out of SECURITY.md, so the check below is vacuous"
+
+    supported = [version for version, mark in rows if mark == "✅"]
+    assert len(supported) == 1, f"exactly one supported series, got {supported}"
+
+    major, minor, *_ = importlib.metadata.version("usher").split(".")
+    assert supported[0] == f"{major}.{minor}.x"
