@@ -22,6 +22,7 @@ from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
+import usher
 from usher.api.app import create_app
 from usher.api.deps import (
     get_lane_supervisor,
@@ -69,7 +70,7 @@ async def test_health_stays_ok_even_when_database_unreachable(
     asserting it in isolation."""
     response = await client_against_unreachable_database.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {"status": "ok", "version": usher.__version__}
 
 
 async def test_create_app_builds_the_client_event_bus() -> None:
@@ -352,3 +353,29 @@ def _flatten(dependant: Dependant) -> set[object]:
     for sub in dependant.dependencies:
         found |= _flatten(sub)
     return found
+
+
+async def test_liveness_names_the_running_version(
+    client_against_unreachable_database: AsyncClient,
+) -> None:
+    """The one fact an operator needs during an incident: which image is
+    actually running.
+
+    **Shares the unreachable-database fixture with the case above, and adds
+    the two things that case is not about.** That one is the liveness/readiness
+    split's proof and would keep its meaning if the version key were spelled
+    anything at all; this one is about the key itself. The equality is
+    deliberate rather than `"version" in body` -- an absence assertion cannot
+    tell a served version from a served empty string. And the control is the
+    first assertion: an uninstalled tree would otherwise let both cases pass
+    against a `/health` reporting the `0.0.0+unknown` fallback, which is not
+    the fact this endpoint exists to carry.
+    """
+    assert usher.__version__ != "0.0.0+unknown", (
+        "the package is not installed, so this case cannot tell a real version from the fallback"
+    )
+
+    response = await client_against_unreachable_database.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "version": usher.__version__}

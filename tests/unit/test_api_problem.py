@@ -35,6 +35,7 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from starlette.routing import BaseRoute
 
+import usher
 import usher.api.errors
 from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.credit_repository import FakeCreditRepository
@@ -467,7 +468,7 @@ async def test_health_and_readiness_keep_their_own_shapes(client: httpx.AsyncCli
     a unit test."""
     liveness = await client.get("/health")
     assert liveness.status_code == 200
-    assert liveness.json() == {"status": "ok"}
+    assert liveness.json() == {"status": "ok", "version": usher.__version__}
     assert liveness.headers["content-type"] == "application/json"
 
     readiness = await client.get("/health/ready")

@@ -23,6 +23,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import usher
 from usher.api.app import create_app
 from usher.api.lanes import IDLE_SLEEP_SECONDS
 from usher.api.routers.health import _check_migrations
@@ -77,7 +78,7 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 async def test_health_is_liveness_only(client: AsyncClient) -> None:
     response = await client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {"status": "ok", "version": usher.__version__}
 
 
 async def test_ready_reports_database_connectivity(client: AsyncClient) -> None:

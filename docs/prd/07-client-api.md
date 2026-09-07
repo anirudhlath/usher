@@ -999,7 +999,7 @@ be added if a client turns out to need flexible field selection.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /health` · `GET /health/ready` | Liveness and readiness |
+| `GET /health` · `GET /health/ready` | Liveness and readiness. `/health` carries `version`, the running package version — additive, per this document's own DTO-versioning rule, and deliberately not on `/health/ready`, whose every field gates the status code |
 | `GET /meta/attribution` | The four required attribution strings — IMDb, TMDb, MovieLens, Wikidata ([04](04-catalog-bootstrap.md)) |
 | `GET /openapi.json` | Schema |
 

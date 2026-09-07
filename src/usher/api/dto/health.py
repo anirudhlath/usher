@@ -13,7 +13,28 @@ from pydantic import BaseModel
 
 
 class LivenessResponse(BaseModel):
+    """Liveness, and the one fact an operator needs during an incident.
+
+    **`version` is here and not on `ReadinessChecks`**, for the reason that
+    model's own docstring gives: `ready` is
+    `all(self.model_dump().values())`, so every field added there becomes part
+    of the status code, and a version string is not a check.
+
+    ⚠️ **Publishing it on an unauthenticated probe is a real objection and it
+    is answered rather than skipped.** A version string is a free answer to
+    "which CVEs apply". Three things settle it, and none of them is "nobody
+    will look": this repository is public and MIT, so the tag, the changelog
+    and the lockfile are already readable by the same person;
+    `/openapi.json` is served unauthenticated and describes the whole surface,
+    which is a strictly larger disclosure; and what it buys is the one cheap
+    way to tell which image is actually running, which is exactly what an
+    incident needs. **An operator who disagrees can drop `/health` at the
+    reverse proxy** -- one location block, and it costs them nothing, because
+    the compose healthcheck targets `/health/ready`.
+    """
+
     status: str
+    version: str
 
 
 class ReadinessChecks(BaseModel):

@@ -118,7 +118,7 @@ openssl rand -hex 32          # paste this into USHER_SECRET_KEY= in .env
 mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images data/bulk
 docker compose up -d --build
 
-curl -sf http://localhost:8100/health        # {"status":"ok"}
+curl -sf http://localhost:8100/health        # {"status":"ok","version":"0.1.0"}
 curl -sf http://localhost:8100/health/ready  # adds database + migration state,
                                              # and reports the background lanes
 ```

@@ -11,6 +11,7 @@ from loguru import logger
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from usher import __version__
 from usher.api.deps import LaneSupervisorDep, SessionDep
 from usher.api.dto.health import (
     LaneReport,
@@ -41,7 +42,7 @@ _DEGRADED: Final[dict[int | str, dict[str, Any]]] = {
 @router.get("/health", response_model=LivenessResponse)
 async def health() -> LivenessResponse:
     """Liveness. Checks nothing external by design."""
-    return LivenessResponse(status="ok")
+    return LivenessResponse(status="ok", version=__version__)
 
 
 async def _check_database(session: AsyncSession) -> bool:
