@@ -73,6 +73,20 @@ class _ConsoleFiles(StaticFiles):
         try:
             response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
+            if exc.status_code == 405:
+                # 🔴 **`StaticFiles` raises a bare 405, and this app renders
+                # every `HTTPException` as RFC 9457** -- so the `Allow` header
+                # the router supplies on its own 405s was simply absent here,
+                # and `test_every_route_answers_a_problem_document_for_a_
+                # method_it_does_not_have` fails on `/console/config.json`.
+                #
+                # ⚠️ **It only fails where `web/dist` exists**, because this
+                # mount is skipped without a bundle -- so a checkout that has
+                # never run `npm run build` is green and the container image,
+                # which always builds one, is not.
+                raise StarletteHTTPException(
+                    status_code=405, detail=exc.detail, headers={"Allow": "GET, HEAD"}
+                ) from exc
             if exc.status_code != 404 or not _looks_like_a_navigation(path, scope):
                 raise
             response = await super().get_response(_INDEX, scope)

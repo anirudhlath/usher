@@ -389,9 +389,18 @@ def test_every_endpoint_prd_07_promises_is_in_the_schema(
         f"the app published {len(served)} paths -- it did not build, and every comparison "
         "below would be vacuous"
     )
-    assert served == {_normalise(route.path) for route in api_routes(app)}, (
-        "the schema and the route walk disagree about what this app serves"
-    )
+    # `include_in_schema=False` is filtered here and nowhere else in this
+    # file. The walk is deliberately unfiltered -- `test_api_problem.py` needs
+    # every route the app serves, schema member or not -- but *this* assertion
+    # compares against the published document, and a route that opted out of
+    # the document is absent from it by construction. Without the filter the
+    # case can only pass while no such route exists, which is to say only on a
+    # checkout where `web/dist` has never been built: `mount_console` returns
+    # early with no bundle, and its `/` and `/console/config.json` are the two
+    # routes in the tree that opt out.
+    walked = {_normalise(route.path) for route in api_routes(app) if route.include_in_schema}
+    assert walked, "the walk found no schema-bearing route, so the comparison below is vacuous"
+    assert served == walked, "the schema and the route walk disagree about what this app serves"
 
     promised = tabled - {("GET", _SCHEMA_PATH)}
     answering = _served_pairs(document)
