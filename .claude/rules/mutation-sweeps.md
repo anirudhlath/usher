@@ -159,6 +159,23 @@ every control against **each** gate step separately — `ruff check`, `ruff form
   `I` is a lint rule and the formatter leaves import order alone. Re-spell the
   plant without the lint error before writing anything down.
 
+## A `HUNG` is a verdict about the harness, not about the suite
+
+**Bound every run, and treat a hang as unmeasured rather than as a kill.** A
+mutation that makes a loop non-terminating produces no summary line, so a
+harness scoring on "did the run fail" waits forever and one scoring on exit
+code records whatever the timeout did. Set the ceiling from the *measured green
+baseline* (8x it), never a fixed number: a fixed one either stalls the sweep or
+invents a hang for a slow selection.
+
+**Converting `HUNG` into `KILLED` takes a deadline at every driver, and the
+call site is rarely the only one.** J5 bounded `job.run()` and still hung,
+because 35 cases reach the same code through `Scheduler.tick()`, which awaits
+the job with no deadline of its own. Grep for every path into the mutated
+function before concluding the deadline is in place — **and if production has
+no bound either, that is a finding about the component, not about the tests**
+(#83).
+
 ## Reading a survivor before writing it up as a gap
 
 - **Ask whether the mutant and the original differ on any state the system can
