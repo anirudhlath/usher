@@ -364,6 +364,30 @@ class TitleEmbeddingRepository(ABC):
         coverage, and it stays true across a model swap.
         """
 
+    @abstractmethod
+    async def stored_model_names(self) -> list[str]:
+        """Every distinct `model_name` carried by a row that **has a vector**,
+        sorted.
+
+        The read behind M10 J6's model guard, and the population is the one
+        `list_embedded` walks rather than the whole table: a refused title is
+        stored with a NULL embedding, is never a seed, and its recorded model
+        names no vector anything can be drawn from. Scoping this to the whole
+        table would refuse a rebuild over a set of vectors that is perfectly
+        uniform because some *unreadable* row disagreed.
+
+        **Distinct names rather than a count or a boolean**, because the
+        guard's whole output is a log line naming what it found: *"configured
+        for X, the table holds Y"* is actionable and *"the table is mixed"* is
+        not. On the catalog this project measures the answer is one string --
+        `openai:BAAI/bge-m3` over 133,364 vectors, measured 2026-09-07 -- and a
+        deployment mid-swap is exactly when it is two.
+
+        Empty for a table with no vectors at all, which is *"nothing to
+        disagree with"* rather than a disagreement: the state a fresh
+        deployment is in, and it must not refuse there.
+        """
+
 
 class TitleNeighborRepository(ABC):
     """`title_neighbors` — the precomputed similarity artefact (PRD 05).
@@ -465,4 +489,75 @@ class TitleNeighborRepository(ABC):
         the running fingerprint and still be wrong, because some third title
         was embedded into its neighbourhood since — that is undecidable per row
         and is why `computed_at()` still exists beside this.
+        """
+
+    @abstractmethod
+    async def resume_cursor(self, *, blend_fingerprint: str) -> uuid.UUID | None:
+        """Where an interrupted rebuild should pick its keyset walk back up —
+        the `after` a resumed `list_embedded` starts from, or `None` for
+        *"start at the beginning"*.
+
+        Defined against the artefact and nothing else, which is what lets
+        `SimilarityService.rebuild(resume=True)` resume **without storing a
+        cursor anywhere** (ADR-0046: the scheduler stores nothing, and
+        resumption belongs to the registration). The value is the greatest
+        embedded `title_id` strictly *below* the lowest embedded `title_id`
+        that carries no `title_neighbors` row stamped `blend_fingerprint`.
+
+        🔴 **A starting offset, computed once — not a loop predicate.** The
+        distinction is one word and `rebuild`'s own docstring argues the other
+        side of it: *"a loop spelled 're-read what looks stale, rebuild,
+        repeat' does not terminate against a row the predicate cannot clear"*.
+        True, and this is not that loop. The walk still advances on `id` and
+        still ends when `list_embedded` returns empty, so a seed the rebuild
+        cannot clear is re-attempted **once per run** rather than looped on
+        forever. What such a seed costs is that the cursor stops moving past
+        it, so resume stops *helping* — never that a seed goes unvisited.
+
+        **Predecessor rather than the uncovered seed itself, because `after`
+        is exclusive.** Answering the first uncovered seed would make the walk
+        skip exactly the seed it was resumed for, every run, forever — the
+        non-convergence this method exists to remove, arriving through an
+        off-by-one.
+
+        **`None` has one meaning and it is the safe one.** Both an
+        all-current table (no uncovered seed at all) and a table whose *first*
+        seed is uncovered answer `None`, and both want the same thing: a walk
+        from the start. An all-current table has no interrupted walk to
+        resume, and neighbour lists still move when some other title is
+        embedded — the undecidable half of staleness `computed_at()` exists
+        for — so a full pass is the honest answer rather than a no-op.
+
+        **The spelling is `ORDER BY title_id LIMIT 1`, and that is not a
+        style choice**: PostgreSQL has no `min`/`max` aggregate for `uuid`.
+        `SELECT min(title_id) FROM title_neighbors` is
+        `ERROR: function min(uuid) does not exist` on PostgreSQL 17.10
+        (checked 2026-09-07), so it fails at the database rather than at
+        mypy — which is why the obvious first attempt is recorded here.
+
+        **Worst case ~0.8 s, and it is a full walk of the embedded
+        population.** Measured 2026-09-07 by calling this method through
+        `PostgresTitleNeighborRepository`: median **778.5 ms** over 60 samples
+        after a discarded warm-up, range 626.8-951.3. The subject is the
+        *exhaustive* case — every embedded seed carrying a current row, so the
+        anti join runs to the end and the `LIMIT 1` never fires — which the
+        live catalog is not in, so it was arranged on a clone
+        (`CREATE DATABASE … TEMPLATE usher_seed_full`, then a covering row for
+        each of the 877 seeds that had none): **133,319 embedded seeds**
+        against **3,311,927** neighbour rows.
+
+        ⚠️ **The wall-clock figure is an upper bound rather than a quiet-host
+        one** — this host carried a load average near 30 from concurrent work
+        throughout. What does not move with load is the *shape*, and it is the
+        part worth knowing: a **nested-loop anti join** driven by an index scan
+        on `pk_title_embeddings`, one `pk_title_neighbors` probe per embedded
+        seed, 666,047 buffers touched. It is **not** a parallel sequential
+        scan. The outer half then adds ~0.02 ms, because an index condition
+        against a NULL cursor matches nothing.
+
+        A table with an interrupted prefix — the case this is *for* —
+        short-circuits far earlier: **12.0 ms**, median of 60 (range
+        10.1-15.5), on the live `usher_catalog` the same day, whose first
+        uncovered seed is the 3,558th of 133,364. It is read **once per run**,
+        never per page and never per tick, against a walk of 3.58 h.
         """

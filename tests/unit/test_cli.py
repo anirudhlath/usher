@@ -419,12 +419,18 @@ def test_similar_is_a_read_form_and_a_write_form_of_one_subcommand() -> None:
     `--backfill`. Two subcommands is how those two would have drifted, and
     argparse has no vocabulary for "exactly one of these".
 
-    Both refusals matter and neither is symmetric with the other. **No
-    arguments** is a read of nothing -- and it is the spelling an operator
-    reaches for when they mean `--rebuild`, so falling through to a rebuild
-    would recompute a 250,000-row table by accident. **Both together** is a
-    read and a write in one command, where the read would answer from rows the
-    write had just replaced.
+    ⚠️ **This case asserted that no arguments was a refusal, and M10's J6
+    makes it the third form.** The old reasoning was that bare `usher similar`
+    is *"a read of nothing"* and is the spelling an operator reaches for when
+    they mean `--rebuild`, so falling through would recompute the table by
+    accident. The first half was true and is no longer -- issue #17 asks for
+    exactly *"a `usher similar` line that says how old the table is relative to
+    the embedding population"*, and this is where it goes. **The second half
+    still holds and is what the `is False` below pins**: the argumentless form
+    must reach a *report*, never the rebuild.
+
+    **Both together** is still refused -- a read and a write in one command,
+    where the read would answer from rows the write had just replaced.
     """
     read = parse_args(["similar", "0198c6b1-0000-7000-8000-000000000001"])
     assert read.title_id == "0198c6b1-0000-7000-8000-000000000001"
@@ -435,10 +441,36 @@ def test_similar_is_a_read_form_and_a_write_form_of_one_subcommand() -> None:
     assert write.title_id is None
     assert write.rebuild is True
 
-    with pytest.raises(SystemExit):
-        parse_args(["similar"])
+    report = parse_args(["similar"])
+    assert report.title_id is None
+    assert report.rebuild is False
+
     with pytest.raises(SystemExit):
         parse_args(["similar", "0198c6b1-0000-7000-8000-000000000001", "--rebuild"])
+
+
+def test_the_rebuild_only_flags_are_refused_where_they_cannot_mean_anything() -> None:
+    """`--resume` and `--max-seeds` are arguments to the walk, and there is no
+    walk in either read form.
+
+    Accepted-and-ignored is the failure this refuses: an operator who typed
+    `usher similar --max-seeds 100` and got the whole-table report would
+    believe they had capped a run that never started. `--max-seeds 0` is
+    refused for the neighbouring reason -- zero is not a smaller run, it is a
+    run that writes nothing and then reports a rebuild.
+    """
+    walk = parse_args(["similar", "--rebuild", "--resume", "--max-seeds", "100"])
+    assert (walk.rebuild, walk.resume, walk.max_seeds) == (True, True, 100)
+
+    plain = parse_args(["similar", "--rebuild"])
+    assert (plain.resume, plain.max_seeds) == (False, None)
+
+    with pytest.raises(SystemExit):
+        parse_args(["similar", "--resume"])
+    with pytest.raises(SystemExit):
+        parse_args(["similar", "0198c6b1-0000-7000-8000-000000000001", "--max-seeds", "5"])
+    with pytest.raises(SystemExit):
+        parse_args(["similar", "--rebuild", "--max-seeds", "0"])
 
 
 def test_work_runs_forever_unless_asked_for_one_pass() -> None:

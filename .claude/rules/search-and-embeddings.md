@@ -153,12 +153,26 @@ and is more current than this file. **Spelling: `titles.popularity`,
 ## `nearest_for` and `usher similar --rebuild`
 
 - **`nearest_for` forces `_EXACT_SCAN_OFF`**, so it is an exact scan per seed
-  and HNSW is not involved: **91.7 ms/seed** at 1024 lanes on `PLAIN`, a ~3.3 h
-  walk. Price it by driving the repository method — a hand-written
-  `ORDER BY embedding <=> …` is served from the index and prices a query nobody
-  runs. **A per-seed price without its population is not a price** (cost is
-  linear per seed, the walk quadratic); bound a walk by seed count, never by a
-  `list_embedded` prefix — UUIDv7 ids follow IMDb import order.
+  and HNSW is not involved: **97.3 ms/seed** at 1024 lanes on `PLAIN`, a
+  **3.58 h** walk on this catalog. Price it by driving the repository method —
+  a hand-written `ORDER BY embedding <=> …` is served from the index and prices
+  a query nobody runs. **A per-seed price without its population is not a
+  price** (cost is linear per seed, the walk quadratic); bound a walk by seed
+  count, never by a `list_embedded` prefix — UUIDv7 ids follow IMDb import
+  order.
+- **`rebuild(resume=True)` reads its start cursor off the artefact once**,
+  before the first page — a starting offset, never a loop predicate. `after` is
+  exclusive, so the cursor is the **predecessor** of the lowest embedded seed
+  with no current-blend row; answering that seed skips the one the resume
+  exists to reach. `max_seeds` bounds the **run**, not the page. **PostgreSQL
+  has no `min`/`max` for `uuid`** (`ERROR: function min(uuid) does not exist`,
+  at the database rather than at mypy) — spell it `ORDER BY title_id LIMIT 1`.
+- **The scheduled rebuild refuses a mixed `title_embeddings`**, and the guard
+  is on the registration rather than in `rebuild`: `nearest_for` does not
+  filter by `model_name`, so a deployment configured for one model draws pools
+  from another's vectors and stamps them with the configured one's fingerprint.
+  Scope the stored-model read to rows that **have** a vector — a refused title
+  carries a NULL embedding and a model name, and is never a seed.
 - **`blend_fingerprint(*, embedding_model)` hashes the model**, making a model
   swap a third cause of neighbour staleness in ADR-0020's terms;
   `SimilarityService` takes the *name*, never an `Embedder`, because a request

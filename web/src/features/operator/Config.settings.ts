@@ -640,6 +640,15 @@ export const CONFIG: readonly SettingRow[] = [
     measured: false,
   },
   {
+    key: 'USHER_SIMILAR_REBUILD_PERIOD_HOURS',
+    group: 'lanes',
+    def: '24.0',
+    about:
+      'How long after a completed neighbour rebuild the scheduler may start the next one. Read the arithmetic before lowering it: the job reads min(title_neighbors.computed_at), which at the instant a walk ends is already the walk\u2019s own duration old, so a period P behaves as P minus the walk. This catalog\u2019s last completed walk ran 12,884 s over 132,442 seeds \u2014 3.58 hours, 2026-08-19 \u2014 so anything at or under that runs back to back forever. The job also refuses to run when USHER_EMBEDDING_MODEL disagrees with the model the stored vectors were written by.',
+    secret: false,
+    measured: true,
+  },
+  {
     key: 'USHER_SCHEDULER_TICK_SECONDS',
     group: 'lanes',
     def: '300.0',

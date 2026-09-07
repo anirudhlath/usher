@@ -212,9 +212,16 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
         # this is exactly the list that catches what that task did: it grew
         # `count_stale` on a port six milestones old, and nothing else in the
         # suite would have noticed the surface move.
+        # `resume_cursor` is M10's J6 and lands on the same terms `count_stale`
+        # did: a port six milestones old grew a method, and this list is the
+        # only thing in the suite that notices a surface move. It reads across
+        # `title_embeddings` as well as this table -- the lowest embedded seed
+        # with no row under the running blend, minus one -- which is why it is
+        # here rather than on `TitleEmbeddingRepository`: the question is what
+        # the *artefact* says has been done.
         (
             TitleNeighborRepository,
-            {"replace", "list_for", "computed_at", "count_stale"},
+            {"replace", "list_for", "computed_at", "count_stale", "resume_cursor"},
         ),
         # M8 Task 9, and it is on this list for the reason `count_stale` is:
         # the surface is where the decisions live. **`replace_for_user` takes

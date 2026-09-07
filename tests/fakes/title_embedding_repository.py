@@ -357,6 +357,21 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
     async def count_without_embedding(self) -> int:
         return sum(1 for row in self.rows.values() if row.embedding is None)
 
+    async def stored_model_names(self) -> list[str]:
+        return sorted({row.model_name for row in self.rows.values() if row.embedding is not None})
+
+    def embedded_ids(self) -> list[uuid.UUID]:
+        """The seed population, in id order. **Not a port method.**
+
+        `FakeTitleNeighborRepository.resume_cursor` needs it, because the real
+        statement is a join across both tables and this pair of fakes is the
+        two halves of it -- the same "two fakes model one table" arrangement
+        `catalog` above already carries. Exposed rather than read through
+        `list_embedded` so a cursor read does not spend one of `_MAX_PAGES` or
+        show up in a case counting the walk's own page reads.
+        """
+        return [title.id for title in self._embedded()]
+
 
 def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     """Plain dot product over two unit vectors.

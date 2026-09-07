@@ -925,6 +925,37 @@ class Settings(BaseSettings):
     # `composition.build_scheduler`.
     scheduler_tick_seconds: float = Field(default=300.0, ge=60.0)
 
+    # The neighbour rebuild's period (M10's J6), the scheduler's second
+    # registration. **Hours rather than a `timedelta`**, because `Settings` is
+    # environment-shaped and `USHER_SIMILAR_REBUILD_PERIOD_HOURS=24` is a thing
+    # an operator can type.
+    #
+    # ⚠️ **A setting, where `SearchQueryRetention`'s period is a constant, and
+    # the asymmetry is deliberate.** `ScheduledJob.period` says a period is a
+    # property of the job, and for retention it is: the window is the policy
+    # and the period is just how much expired data may accumulate. Here the
+    # number an operator has to clear is the **walk's own duration**, which is
+    # a function of their catalog size and nothing in this file can know it.
+    # Measured on this project's catalog from `title_neighbors.computed_at`
+    # itself: the last completed walk took **12,884 s = 3.58 h over 132,442
+    # seeds** (97.3 ms/seed), 2026-08-19 18:30:43Z to 22:05:27Z. A deployment
+    # ten times the size cannot use 24 h and this file must not pretend to
+    # decide for it.
+    #
+    # 🔴 **Any period at or under the walk makes the job due the instant it
+    # finishes**, because `last_done()` is `min(computed_at)` -- the oldest
+    # page, which at the moment a walk ends is already the walk's duration old.
+    # `.env.example` carries that arithmetic against the measured figure so an
+    # operator setting 2.0 can see it is impossible. `ge=1.0` rather than a
+    # floor at the walk, because the walk is not knowable here; the guard an
+    # operator gets is the documented arithmetic, not a validator.
+    #
+    # 24 h by default: comfortably past a 3.58-hour walk on this catalog, and a
+    # neighbour table a day old is well inside PRD 06's *"TTL: hours"*, which
+    # is a claim about how long a consumer may cache what it read rather than
+    # about this table's age.
+    similar_rebuild_period_hours: float = Field(default=24.0, ge=1.0)
+
     # `search_queries` retention (PRD 10's *"nothing owns this table's size"*,
     # M10's J5), the scheduler's first registration.
     #

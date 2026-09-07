@@ -1204,7 +1204,11 @@ has never existed**, and it is worth correcting loudly rather than quietly,
 because it is the one row in this table an operator could act on wrongly.
 Nothing rebuilds `title_neighbors` on any event: `usher similar --rebuild` is
 an operator's command or a cron entry, and M6 recorded this as *"the
-milestone's one honest freshness gap"*.
+milestone's one honest freshness gap"*. ✅ **M10's J6 adds a `similar.rebuild`
+registration to the scheduler and still not a trigger** — a *period* since the
+last completed walk, off by default behind `USHER_SCHEDULER_ENABLED`, which is
+a clock rather than an event and covers the second half below no better than a
+cron entry does ([ADR-0046](decisions/0046-the-scheduler-stores-nothing.md)).
 
 **M7 narrows it to one half and makes the other half countable.** Staleness has
 two causes, and they are not the same kind of problem:

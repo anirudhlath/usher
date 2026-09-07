@@ -105,7 +105,7 @@ def _service(
 ) -> tuple[SimilarityService, FakeTitleEmbeddingRepository, FakeTitleNeighborRepository]:
     catalog = FakeTitleRepository()
     embeddings = FakeTitleEmbeddingRepository(catalog=catalog)
-    neighbors = FakeTitleNeighborRepository(clock=clock)
+    neighbors = FakeTitleNeighborRepository(clock=clock, embeddings=embeddings)
 
     async def commit() -> None:
         return None

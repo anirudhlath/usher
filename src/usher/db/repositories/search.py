@@ -303,6 +303,18 @@ _EXACT_SCAN_ON = ("SET LOCAL enable_indexscan = on", "SET LOCAL enable_bitmapsca
 
 _COUNT_WITHOUT_EMBEDDING = "SELECT count(*) FROM title_embeddings WHERE embedding IS NULL"
 
+# The model guard's read (M10 J6). Scoped to rows that **have a vector**,
+# which is `_LIST_EMBEDDED`'s own population: a refused title is stored with a
+# NULL embedding, is never a seed, and its recorded model names no vector a
+# rebuild can draw a pool from. `DISTINCT` over the whole table would refuse a
+# rebuild whose readable vectors are uniform because an unreadable row
+# disagreed.
+_STORED_MODEL_NAMES = """
+SELECT DISTINCT model_name FROM title_embeddings
+WHERE embedding IS NOT NULL
+ORDER BY model_name
+"""
+
 # Scoped to `seed_ids`, never to the rows being written. A seed whose
 # neighbours all disappeared contributes no rows at all, so a delete derived
 # from `neighbors` deletes nothing for it and leaves its stale neighbours in
@@ -355,6 +367,55 @@ LIMIT :limit
 # `NULL` for an empty table is the "never computed" signal, and it is a
 # different fact from "this title has no neighbours".
 _OLDEST_NEIGHBOR = "SELECT min(computed_at) FROM title_neighbors"
+
+# The resume cursor (M10 J6): where an interrupted walk picks its keyset back
+# up. Read **once per run**, never per page.
+#
+# ⚠️ `ORDER BY title_id LIMIT 1` twice, and neither is a stylistic choice.
+# PostgreSQL has no `min`/`max` aggregate for `uuid` -- `SELECT min(title_id)
+# FROM title_neighbors` is `ERROR: function min(uuid) does not exist` on
+# PostgreSQL 17.10 (checked 2026-09-07). It fails at the database rather than
+# at mypy, which is why the obvious first attempt is recorded here.
+#
+# The CTE is the lowest embedded seed carrying no row stamped with the running
+# blend; the outer half is its **predecessor**, because `_LIST_EMBEDDED`'s
+# `after` is exclusive and answering the uncovered seed itself would make the
+# walk skip exactly the seed it was resumed for, on every run, forever.
+#
+# No row either way means "start at the beginning", and both spellings of that
+# are correct: an all-current table has no interrupted walk to resume, and a
+# table whose *first* seed is uncovered has nothing before it. When the CTE is
+# empty the outer index condition compares against NULL and matches nothing,
+# ~0.02 ms -- so the whole statement's worst case is the CTE's.
+#
+# Worst case ~0.8 s: median 778.5 ms over 60 samples after a discarded warm-up
+# (range 626.8-951.3), 2026-09-07, driven through the repository method against
+# a clone arranged so every embedded seed carries a current row -- 133,319
+# seeds against 3,311,927 neighbour rows -- because the live catalog is not in
+# that state. The host was busy, so treat the wall clock as an upper bound; the
+# plan is what does not move, and it is a **nested-loop anti join** over an
+# index scan of `pk_title_embeddings` with one `pk_title_neighbors` probe per
+# seed, 666,047 buffers. With an interrupted prefix -- the case this is for --
+# it short-circuits: 12.0 ms, median of 60 (range 10.1-15.5), on the live
+# catalog, whose first uncovered seed is the 3,558th of 133,364.
+_RESUME_CURSOR = """
+WITH first_uncovered AS (
+    SELECT e.title_id FROM title_embeddings e
+    WHERE e.embedding IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM title_neighbors n
+          WHERE n.title_id = e.title_id
+            AND n.blend_fingerprint = :blend_fingerprint
+      )
+    ORDER BY e.title_id
+    LIMIT 1
+)
+SELECT e.title_id FROM title_embeddings e
+WHERE e.embedding IS NOT NULL
+  AND e.title_id < (SELECT title_id FROM first_uncovered)
+ORDER BY e.title_id DESC
+LIMIT 1
+"""
 
 # Every interpolated fragment here is a module constant built from module
 # constants; `model_name` is the only caller-supplied value and it crosses as
@@ -677,6 +738,11 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
             result = await self._session.execute(text(_COUNT_WITHOUT_EMBEDDING))
         return int(result.scalar_one())
 
+    async def stored_model_names(self) -> list[str]:
+        with self._session.no_autoflush:
+            result = await self._session.execute(text(_STORED_MODEL_NAMES))
+        return [str(name) for name in result.scalars().all()]
+
 
 class PostgresTitleNeighborRepository(TitleNeighborRepository):
     """`title_neighbors`, written wholesale by the similarity batch.
@@ -776,6 +842,14 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
                 {"blend_fingerprint": blend_fingerprint, "title_id": title_id},
             )
         return int(result.scalar_one())
+
+    async def resume_cursor(self, *, blend_fingerprint: str) -> uuid.UUID | None:
+        with self._session.no_autoflush:
+            result = await self._session.execute(
+                text(_RESUME_CURSOR), {"blend_fingerprint": blend_fingerprint}
+            )
+        cursor = result.scalar_one_or_none()
+        return None if cursor is None else uuid.UUID(str(cursor))
 
 
 def _as_vector_literal(embedding: tuple[float, ...] | None) -> str | None:

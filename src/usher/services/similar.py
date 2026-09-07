@@ -57,8 +57,12 @@ it.** Two things make a neighbour row stale and they are not the same:
 2. **Some other title was embedded** and now belongs in this row. That is
    genuinely undecidable per row -- it is a fact about the whole other table --
    and M7 leaves it exactly where M6 left it: `computed_at()` is a
-   whole-artefact age, `None` means never computed, and **nothing schedules
-   `usher similar --rebuild`.** It is an operator's command or a cron entry.
+   whole-artefact age and `None` means never computed. ⚠️ **M10's J6 makes the
+   rebuild *schedulable* and still not automatic**: `NeighborRebuildJob` at the
+   foot of this module registers it with `usher.services.scheduler.Scheduler`,
+   which `USHER_SCHEDULER_ENABLED` leaves off by default -- so a deployment
+   that has not opted in is exactly where M6 left it, an operator's command or
+   a cron entry.
 
 Saying which half is closed is the difference between an improvement and a
 claim. [ADR-0020](../../../docs/prd/decisions/0020-derived-state-carries-its-fingerprint.md).
@@ -68,8 +72,11 @@ import hashlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
+from loguru import logger
 from opentelemetry import trace
 from pydantic import AwareDatetime
 
@@ -82,6 +89,7 @@ from usher.ports.repository import (
     TitleNeighborRepository,
     TitleRepository,
 )
+from usher.ports.scheduler import ScheduledJob
 
 _tracer = trace.get_tracer("usher.similar")
 
@@ -333,6 +341,19 @@ class SimilarityService:
         # came from is a caller that cannot honestly stamp or count them.
         self._embedding_model = embedding_model
 
+    @property
+    def embedding_model(self) -> str:
+        """What this service was configured with, for the one caller that has
+        to *report* it rather than hash it.
+
+        `NeighborRebuildJob`'s refusal names both sides -- the configured model
+        and what the table holds -- because "the table is mixed" is not a
+        message anybody can act on. Exposed rather than reached for through
+        `_embedding_model` so the log line is a property of the service's
+        declared configuration, the way `SearchQueryRetention.window` is.
+        """
+        return self._embedding_model
+
     async def neighbors_of(
         self, title_id: uuid.UUID, *, limit: int = 10
     ) -> tuple[SimilarTitle, ...]:
@@ -365,7 +386,27 @@ class SimilarityService:
         """The artefact's age. `None` means it has never been built."""
         return await self._neighbors.computed_at()
 
-    async def rebuild(self, *, page_size: int = 500) -> NeighborRebuild:
+    async def foreign_embedding_models(self) -> tuple[str, ...]:
+        """Stored vector model names that are **not** this service's configured
+        one, sorted. Empty means the table agrees with the deployment.
+
+        The read behind M10 J6's model guard. `blend_fingerprint` hashes the
+        *configured* model and this asks what the vectors actually are, so the
+        two together answer *"is the fingerprint I am about to stamp a true
+        label for the rows I am about to compute?"*
+
+        **The guard built on this lives on the scheduled registration and not
+        in `rebuild`**, deliberately: `usher similar --rebuild` is an operator
+        typing a command about a table they can see, and a mid-swap force is a
+        thing an operator may legitimately want. A timer starting a
+        multi-hour walk unasked is not. See `NeighborRebuildJob.run`.
+        """
+        stored = await self._embeddings.stored_model_names()
+        return tuple(name for name in stored if name != self._embedding_model)
+
+    async def rebuild(
+        self, *, page_size: int = 500, resume: bool = False, max_seeds: int | None = None
+    ) -> NeighborRebuild:
         """Recompute `title_neighbors` for the whole embedded population.
 
         **A batch, and deliberately not a `JobKind`** -- the unit of work is
@@ -383,9 +424,47 @@ class SimilarityService:
         a predicate: a loop spelled "re-read what looks stale, rebuild, repeat"
         does not terminate against a row the predicate cannot clear, which is
         the non-convergence the watch-history repair shipped once.
+
+        🔴 **`resume=True` is where the walk *starts*, and that is a different
+        thing from the predicate the paragraph above refuses.** Idempotence
+        above is a property of the **result**; it was never one of the
+        **work**. The keyset began at `after = None` on every run, so an
+        interruption at 3.2 hours of a 3.58-hour walk redid 3.2 hours, and a
+        process restarted more often than the walk takes never reached the end
+        of the catalog. With `resume=True` the start cursor is read **once**,
+        from the artefact (`TitleNeighborRepository.resume_cursor`), and the
+        loop then walks forward exactly as it does without it.
+
+        **The objection the next reader will reach for, answered.** *"Is that
+        not the non-terminating shape?"* No: a loop predicate is re-evaluated
+        every iteration, so a row it cannot clear is revisited forever. This is
+        one read before the first page. The loop still advances on `id` and
+        still ends when `list_embedded` returns empty, so a seed the rebuild
+        cannot clear is re-attempted **once per run** and costs only that the
+        cursor stops moving past it -- resume stops helping, and nothing goes
+        unvisited.
+
+        **What `resume=True` buys is convergence after an interruption, not
+        completeness**, and the difference is worth stating because the cursor
+        looks like it should give both. The uncovered seeds form a contiguous
+        *prefix* only after an interrupted walk; a title embedded since the
+        last complete walk lands wherever its catalog id already sits (UUIDv7
+        follows IMDb import order, not embedding order), so on a table that
+        finished, the first uncovered seed is usually early and the resumed run
+        is a near-full walk anyway. Where it is late, the seeds before it keep
+        lists computed against an older embedded population -- which is
+        ADR-0020's undecidable half of staleness, not something this cursor
+        ever promised to close.
+
+        **`max_seeds` bounds the run and not the page.** A capped run leaves
+        the first N seeds stamped current and the rest stale, which
+        `stale_neighbors()` reports and which `resume=True` picks up -- so the
+        cap and the resume are one mechanism observed from two ends, and it is
+        what makes a walk measured in hours verifiable inside a test. Applied
+        per page instead it would be a page-size argument with a misleading
+        name and no bound at all.
         """
         with _tracer.start_as_current_span("similar.rebuild") as span:
-            after: uuid.UUID | None = None
             seeds = 0
             rows = 0
             seeds_with_genome = 0
@@ -393,12 +472,30 @@ class SimilarityService:
             pairs_with_tags = 0
             # Resolved once per rebuild, not per page: the constants cannot
             # move mid-run, and a per-page call would let a table be stamped
-            # with two fingerprints if they somehow could.
+            # with two fingerprints if they somehow could. ⚠️ **A resumed run
+            # re-resolves nothing** -- the cursor below is derived from *this*
+            # value, so a second call mid-walk could stamp one table under two
+            # fingerprints and make the next run's cursor non-deterministic.
             fingerprint = blend_fingerprint(embedding_model=self._embedding_model)
+            # Read once, before the first page, and only when asked for. See
+            # the docstring: a starting offset, never a loop predicate.
+            after: uuid.UUID | None = (
+                await self._neighbors.resume_cursor(blend_fingerprint=fingerprint)
+                if resume
+                else None
+            )
+            remaining = max_seeds
             while True:
-                page = await self._embeddings.list_embedded(after=after, limit=page_size)
+                # `min`, so the cap is a bound on the **run**. Applied to the
+                # page instead it would bound nothing.
+                limit = page_size if remaining is None else min(page_size, remaining)
+                if limit <= 0:
+                    break
+                page = await self._embeddings.list_embedded(after=after, limit=limit)
                 if not page:
                     break
+                if remaining is not None:
+                    remaining -= len(page)
                 candidates = await self._embeddings.nearest_for(
                     [seed.title_id for seed in page], limit=_CANDIDATE_POOL
                 )
@@ -572,4 +669,158 @@ def _blend(**signals: float | None) -> float:
     return total / applied if applied else 0.0
 
 
-__all__ = ["NeighborRebuild", "SimilarityService", "blend_fingerprint"]
+#: `NeighborRebuildJob.name`. **Stable, because it is a metric label**
+#: (`usher.scheduler.job.duration`, `.failures` and `.due` are all labelled
+#: `job`) and a span name (`scheduler.similar.rebuild`), and a renamed label is
+#: an emptied panel and a histogram split across two populations.
+SIMILAR_REBUILD_JOB_NAME = "similar.rebuild"
+
+#: One `SimilarityService`, in a scope that owns a session for the whole call.
+#:
+#: `SearchQueryScope`'s shape and for its reason: a callable rather than a
+#: session factory, so `usher.services` reaches a database without importing
+#: SQLAlchemy and a unit case drives the whole registration over fakes.
+#:
+#: ⚠️ **The scope does *not* commit on exit, unlike retention's.** `rebuild`
+#: is handed the session's own `commit` and calls it per page -- that is where
+#: "an interrupted walk keeps the pages it finished" comes from -- so a commit
+#: here would be a second one after the last page had already landed, and
+#: `last_done()`'s scope is a read.
+SimilarityScope = Callable[[], AbstractAsyncContextManager[SimilarityService]]
+
+
+class NeighborRebuildJob(ScheduledJob):
+    """`usher similar --rebuild` on a period (M10's J6, ADR-0046).
+
+    The registration ADR-0046 was written for: PRD 08's *"nothing runs `usher
+    similar --rebuild` for you"*, and issue #17's *"automating the rebuild is a
+    larger call"*. It is **schedulable, not automatic** -- `USHER_SCHEDULER_
+    ENABLED` is off by default and this job is what turning it on costs.
+
+    **`last_done()` is `computed_at()` and needs no argument for it**, which
+    is the whole of what ADR-0046 asks of a registration: the artefact carries
+    its own completion time, so nothing is stored and two processes cannot
+    disagree about when the last walk finished. It is `min(computed_at)`
+    rather than `max` for the reason `TitleNeighborRepository.computed_at`
+    gives -- `max` would report a whole-table rebuild as fresh the moment its
+    first page committed, and a scheduler could not tell a finished walk from
+    a started one.
+
+    ⚠️ **The price of `min`, restated because it decides the period.** At the
+    instant a walk finishes, `min` already answers the walk's own duration
+    earlier -- measured on this deployment's last completed walk, 12,884 s
+    (**3.58 h**) over 132,442 seeds spanning 2026-08-19 18:30:43Z to 22:05:27Z
+    -- so a declared period *P* behaves as *P* minus the walk, and at any *P*
+    at or under 3.58 h this job is due the moment it completes and runs back to
+    back forever. `USHER_SIMILAR_REBUILD_PERIOD_HOURS` defaults to 24 and
+    `.env.example` carries the arithmetic, because the walk is a function of
+    catalog size and only the operator knows theirs.
+
+    🔴 **`run()` refuses a table whose vectors were written by a model this
+    deployment is not configured with**, and that refusal is the reason this
+    class exists rather than a bare call to `rebuild`. `blend_fingerprint`
+    hashes the *configured* model, `nearest_for` does not filter by
+    `model_name`, and `Settings.embedding_model` defaults to
+    `fastembed:BAAI/bge-large-en-v1.5`. So a scheduler process started without
+    `USHER_EMBEDDING_MODEL` set, against the catalog this project measures --
+    3,311,050 rows stamped `a7013154c014e0ff1b60ef5d8534a115`, which is
+    `blend_fingerprint(embedding_model="openai:BAAI/bge-m3")`, and 133,364
+    vectors all `openai:BAAI/bge-m3` (measured 2026-09-07) -- would compute
+    `afd00fffaf6946c0d8dcf87faf966614`, find every row stale, and start a
+    3.58-hour rebuild that draws pools from `bge-m3` vectors and stamps them
+    `bge-large`. `blend_fingerprint`'s own docstring names *"a rebuild that
+    refuses to run against a mixed table"* as the honest fix and says it is not
+    built; the scheduler is the customer that makes it worth building, and this
+    is it in its narrow form -- one configured model against the set of stored
+    ones, refusing on disagreement.
+
+    **The guard is here and deliberately not in `rebuild`.** `usher similar
+    --rebuild` is an operator typing a command about a table they can see, and
+    forcing a mid-swap rebuild is a thing an operator may legitimately want. A
+    timer starting a multi-hour walk unasked is not.
+    """
+
+    name = SIMILAR_REBUILD_JOB_NAME
+
+    def __init__(self, scope: SimilarityScope, *, period: timedelta) -> None:
+        self._scope = scope
+        self._period = period
+
+    @property
+    def period(self) -> timedelta:
+        return self._period
+
+    async def last_done(self) -> datetime | None:
+        """`min(title_neighbors.computed_at)`, or `None` if nothing has ever
+        been built.
+
+        `None` is *"never built, therefore due"*, which is right here and is
+        the opposite of `SearchQueryRetention`'s answer: this artefact has to
+        be **constructed**, where retention maintains an invariant an empty
+        table satisfies vacuously. A fresh deployment genuinely owes a walk --
+        it just has no embeddings to walk yet, which is the other half of why
+        `USHER_SCHEDULER_ENABLED` is off by default.
+
+        One scope per call, opened per tick and closed before the tick moves
+        on: a lane holding a session for hours would sit idle in transaction on
+        a snapshot from whenever the scheduler started.
+        """
+        async with self._scope() as similar:
+            return await similar.computed_at()
+
+    async def run(self) -> None:
+        """Refuse a mixed table, else walk it with `resume=True`.
+
+        **The refusal returns rather than raising, and that is a decision.** A
+        raise would be counted on `usher.scheduler.job.failures` and would set
+        `Scheduler._back_off` doubling -- both of which describe a job that
+        tried and broke. This one did not try: the deployment is misconfigured
+        and no amount of retrying at any interval fixes it. So it logs both
+        strings at `ERROR` and returns, and `last_done()` is untouched, so
+        nothing is recorded as done.
+
+        ⚠️ **The cost, stated rather than hidden: it logs once per tick for as
+        long as the mismatch lasts** -- at the 300 s default that is a line
+        every five minutes. Not deduplicated, unlike the scheduler's own
+        "nothing is registered" line, and the difference is that an empty
+        registry is a *legal* state while a rebuild blocked by a
+        misconfiguration is one an operator has to act on. A line an operator
+        mutes is a real risk here and it is the lesser one.
+
+        **`resume=True`, which is what makes a registration converge.** A run
+        cancelled by `Scheduler.stop()` or a process restart leaves a prefix of
+        the catalog stamped current, and the next run starts after it rather
+        than at page one -- so a deployment restarted more often than 3.58 h
+        still reaches the end of its catalog. Cancellation-safe for the reason
+        `ScheduledJob.run` requires: each page deletes and re-inserts its own
+        seeds' rows in one transaction, so the cancelled page rolls back and a
+        later run redoes exactly it.
+        """
+        async with self._scope() as similar:
+            foreign = await similar.foreign_embedding_models()
+            if foreign:
+                logger.error(
+                    "refusing the neighbour rebuild: configured for {configured}, "
+                    "but title_embeddings holds {stored} -- "
+                    "set USHER_EMBEDDING_MODEL to the model the vectors were written by, "
+                    "or re-run `usher index --backfill` under the configured one",
+                    configured=similar.embedding_model,
+                    stored=", ".join(foreign),
+                )
+                return
+            report = await similar.rebuild(resume=True)
+        logger.info(
+            "rebuilt {seeds} seeds and wrote {rows} neighbour rows",
+            seeds=report.seeds,
+            rows=report.rows,
+        )
+
+
+__all__ = [
+    "SIMILAR_REBUILD_JOB_NAME",
+    "NeighborRebuild",
+    "NeighborRebuildJob",
+    "SimilarityScope",
+    "SimilarityService",
+    "blend_fingerprint",
+]

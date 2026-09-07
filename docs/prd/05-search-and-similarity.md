@@ -931,6 +931,24 @@ thing would be worse than an honest gap. Nothing in M6 re-runs the rebuild —
 "TTL: hours" is a statement about how long a consumer may cache what it read,
 not a promise about this table's age.
 
+✅ **M10's J6 makes that rebuild *schedulable*, and deliberately not
+automatic** ([ADR-0046](decisions/0046-the-scheduler-stores-nothing.md)). The
+`similar.rebuild` registration runs the same batch on
+`USHER_SIMILAR_REBUILD_PERIOD_HOURS` (24 h), and `USHER_SCHEDULER_ENABLED` is
+`false` by default — so a deployment that has not opted in is exactly where M6
+left it. Three things came with it and each closes a different half of the gap
+above. `rebuild(resume=True)` reads a **start cursor** off the artefact once
+per run, so an interrupted walk of 3.58 h is not redone from page one and a
+process restarted more often than the walk takes still reaches the end of the
+catalog; the scheduled job **refuses** a `title_embeddings` written by a model
+this deployment is not configured with, because the blend fingerprint labels
+the configured model and the candidate read does not filter by it; and
+`usher similar` with no arguments prints the whole table's age and its stale
+count, which is issue #17's own *"staleness is at least observable"*. **The
+undecidable half is untouched**: a title's neighbours still go stale when some
+*other* title is embedded, no per-row predicate can see it, and a period is
+what eventually covers it rather than a guarantee that it is covered.
+
 **There is no fifth term over MovieLens *user tags*, and that is a measured
 refusal rather than an omission —
 [ADR-0035](decisions/0035-the-tags-similarity-term.md).** `ml-latest/tags.csv`
