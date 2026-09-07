@@ -20,8 +20,9 @@ import { CONFIG, SETTING_COUNT } from './Config.settings'
 /**
  * **This file's timeout, and only this file's.**
  *
- * Configuration is the largest single surface in the product — 73 setting rows,
- * rendered twice over (a table and, at 390 px, 73 stacked cards), each with a
+ * Configuration is the largest single surface in the product — 80 setting rows
+ * as of 2026-09-07, and it only grows — rendered twice over (a table and, at
+ * 390 px, one stacked card each), each with a
  * description, and two of the cases sweep the whole thing with axe. Measured
  * under `vitest --coverage`, which is what CI runs and which roughly doubles
  * everything: 11.0 s for the table case and 6.2 s for the cards case, against a
@@ -241,8 +242,18 @@ describe('Config', () => {
     const { user } = renderConfig()
     await screen.findByRole('heading', { level: 1, name: 'Configuration' })
 
+    // Derived from CONFIG rather than written as a literal: this assertion
+    // was `5` and went red when J2 added USHER_SEARCH_SUGGEST_ANALYTICS to
+    // the group, which is a true statement about the catalogue failing a
+    // test about the *filter*. The premises below are what keep it from
+    // being vacuous -- a filter returning everything, or nothing, would
+    // satisfy a bare derived count.
+    const inSearch = CONFIG.filter((row) => row.group === 'search').length
+    expect(inSearch).toBeGreaterThan(1)
+    expect(inSearch).toBeLessThan(SETTING_COUNT)
+
     await user.selectOptions(screen.getByRole('combobox', { name: 'Subsystem' }), 'search')
-    await waitFor(() => expect(screen.getByText(`5 of ${SETTING_COUNT} shown`)).toBeVisible())
+    await waitFor(() => expect(screen.getByText(`${inSearch} of ${SETTING_COUNT} shown`)).toBeVisible())
     expect(rowFor('USHER_SEARCH_RRF_K')).toBeVisible()
     expect(screen.queryByText('USHER_SSE_QUEUE_SIZE')).toBeNull()
   })

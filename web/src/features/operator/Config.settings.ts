@@ -626,7 +626,7 @@ export const CONFIG: readonly SettingRow[] = [
     group: 'lanes',
     def: '90',
     about:
-      'How long a search_queries row is kept. The scheduler prunes anything older; 90 days is PRD 10\'s own window. The prune only runs where the scheduler does, and the job offers itself once a day.',
+      "How long a search_queries row is kept. The scheduler prunes anything older; 90 days is PRD 10's own window. The prune only runs where the scheduler does, and the job offers itself once a day.",
     secret: false,
     measured: false,
   },
