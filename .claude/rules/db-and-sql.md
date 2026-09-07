@@ -128,6 +128,10 @@ Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
   next statement raises `PendingRollbackError`. It also leaves the conflicted
   row *expired* in the identity map, where a synchronous read of any attribute
   raises `MissingGreenlet`.
+- **Under an `AsyncSession` a `defer()`red column has no "degrades to one small
+  extra query" mode** — the lazy load is IO, and IO outside `greenlet_spawn` is
+  `MissingGreenlet`. So `defer(col)` and `defer(col, raiseload=True)` differ
+  only in *which* error; take the one that names the attribute.
 
 ## Ordering, keysets and paging
 

@@ -227,6 +227,11 @@ class _CountingQueue(FakeJobQueue):
         self.claims = 0
         self.requeues = 0
         self.requeue_ages: list[float] = []
+        # What a pass raises, for the one case about what a crashed pass
+        # records. `None` by default so every other case is untouched: this is
+        # the shortest path from `_run_worker`'s `try` to an exception, since
+        # `JobWorker._pass` claims before it runs anything.
+        self.failure: BaseException | None = None
         # What each pass *asked for*, which is the observable half of
         # `run_once` claiming `list(self._handlers)`: a lane with no model
         # must not ask for `index` work at all.
@@ -235,6 +240,8 @@ class _CountingQueue(FakeJobQueue):
     async def claim(self, kinds: Sequence[JobKind], *, limit: int = 1) -> list[Job]:
         self.claims += 1
         self.claimed_kinds.append(tuple(kinds))
+        if self.failure is not None:
+            raise self.failure
         return await super().claim(kinds, limit=limit)
 
     async def requeue_running(self, *, older_than_seconds: float = 0.0) -> int:
@@ -1536,6 +1543,57 @@ async def test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass(
     assert fakes.queue.requeue_ages == [pytest.approx(DEFAULT_LEASE_SECONDS)], (
         "the lane recovered at an age that would take a live worker's claims: "
         f"{fakes.queue.requeue_ages}"
+    )
+
+
+async def test_a_crashed_worker_pass_is_recorded_with_its_frames_and_the_lane_lives(
+    fakes: _Fakes,
+) -> None:
+    """Issue #8's second root, and the half that is not the CLI boundary.
+
+    That crash was diagnosed as *"the run used bare `usher work`, so no stack
+    was recorded"* and repaired at `cli.OPERATOR_ERRORS` on 2026-08-19. This
+    root loses the stack for a different reason and it survived that repair:
+    the arm below answered a crashed pass with `str(exc)` -- a **message**, so
+    no frames -- and this lane does not die either, so there is not even a
+    dead process to notice. Neither root recorded a traceback for a bug in
+    this project's own code, which is why ~92,000 jobs produced a rate and no
+    evidence.
+
+    **The type name is the discriminator, not the message.** `str(exc)` is
+    `"a bug inside a pass"` and carries no class name at all, so a case
+    asserting on the message passes equally well against the `logger.warning`
+    this replaced. The serialised record names the type and carries the frames
+    only when the exception is attached.
+
+    The survival assertion is the positive control: an arm that re-raised
+    would also stop discarding frames, and would take the lane with it.
+    """
+    fakes.queue.failure = ZeroDivisionError("a bug inside a pass")
+    supervisor = _supervisor(fakes, worker_idle_seconds=0.001, push_enabled=False)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="TRACE", serialize=True)
+    try:
+        await supervisor.start()
+        # One pass, which is reachable however the arm behaves -- so the
+        # survival assertion below is what reports rather than `_drain`'s own
+        # timeout, which says only that something did not happen.
+        await _drain(lambda: fakes.queue.claims >= 1, bound=2.0)
+        await _settle()
+        assert supervisor.worker_running() is True, "one crashed pass ended the lane"
+        await _drain(lambda: fakes.queue.claims >= 2, bound=2.0)
+    finally:
+        logger.remove(sink)
+        await supervisor.stop()
+
+    failures = [line for line in lines if "the worker lane's pass failed" in line]
+    assert failures, f"a crashed pass was not recorded at all: {lines}"
+    assert "ZeroDivisionError" in failures[0], (
+        "the pass was logged as a message, so the record names neither the failure's "
+        f"type nor a single frame: {failures[0]}"
+    )
+    assert "Traceback (most recent call last)" in failures[0], (
+        f"no frames: this is the state that left issue #8 unanswerable: {failures[0]}"
     )
 
 

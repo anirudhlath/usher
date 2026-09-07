@@ -1643,9 +1643,13 @@ suspicion.
   strand its claims until the process restarts.* `api/lanes.py` called
   `worker.startup()` **once per lane lifetime** and set `requeued = True` —
   correct on its own terms, and the comment says why (*"a second call would
-  steal this lane's own claims"*) — while `:573-578` catches `except Exception`,
-  logs a warning and continues, which is also correct on its own terms
-  (*"a database outage must slow the lane down, never end it"*). Composed, they
+  steal this lane's own claims"*) — while `LaneSupervisor._run_worker`'s own
+  arm catches `except Exception`, logs and continues, which is also correct on
+  its own terms (*"a database outage must slow the lane down, never end it"*).
+  *(This clause cited `api/lanes.py:573-578` and said the arm "logs a warning";
+  both are corrected 2026-09-07. F2 moved the code, and M10's F10 made that
+  line a `logger.exception` — see the F10 entry below for why a message there
+  was half of what left issue #8 unanswerable.)* Composed, they
   are a leak: a `MissingGreenlet` raised inside `run_once()` leaves that pass's
   claims in `running`, the lane loops round and claims fresh work, **no
   `startup()` ever runs again in that process**, and nothing appears in
@@ -1771,6 +1775,74 @@ suspicion.
   **200** really is `application/json`, and `test_api_watch.py`'s case reads
   better for saying so, since the 404 and the 200 on one operation are now two
   different media types.
+- **Issue #8's `MissingGreenlet` is still unexplained, and M10's F10 is what
+  narrowed the list rather than what closed it.** The instrumentation half
+  shipped and the diagnosis half did not, which is the split the task was
+  written to allow. Recorded here because issue #8 is **closed** — its stated
+  cause (*"the run used bare `usher work`, so no stack was recorded"*) was
+  refuted and repaired on 2026-08-19, and #72 continues a different question —
+  so the crash itself has no ticket and would otherwise be owned by nobody.
+
+  ✅ **What shipped, and it is the deliverable even though the cause is not
+  found.** Both worker roots now record a crashed pass **with its frames**.
+  `cli.OPERATOR_ERRORS` naming `SQLAlchemyError` was one of two reasons the
+  original crash left two lines ([ADR-0026](decisions/0026-the-cli-boundary-names-families.md)'s
+  2026-08-19 amendment; `issubclass(MissingGreenlet, cli.OPERATOR_ERRORS)` is
+  now `False`, pinned by
+  `test_the_operator_database_family_is_what_the_driver_wraps`). The second
+  survived that repair: `LaneSupervisor._run_worker` answered a crashed pass
+  with `str(exc)` — a message, so no frames — and that root does not die
+  either, so there was not even a dead process to notice. F10 makes it a
+  `logger.exception` and gives `usher work`'s daemon the per-pass `except` the
+  lane already had, so **one worker now has one survival semantics**; `--once`
+  is deliberately outside the arm, because a cron reads the exit code
+  ([08](08-operations.md)'s worker row).
+
+  🔴 **The reproduction is a null result, and a null result is a result.**
+  Measured 2026-09-07 from a throwaway harness outside the tree, driving the
+  **shipped** `cli._work` daemon at `USHER_JOB_CONCURRENCY = 12` against a real
+  Postgres 17 database migrated from scratch, with only the metadata provider
+  substituted (TMDb at ~40 rps cannot deliver this many jobs, and every
+  suspected mechanism is downstream of the provider):
+
+  | | S3, 2026-08-11 | this run |
+  |---|---|---|
+  | wall clock | 1.98 h | **45.0 min** (2,701 s) |
+  | job executions | ~92,000 | **190,432** |
+  | `ix_titles_imdb_id` conflicts | ~30 | **48,000** |
+  | successful enrichments (each staging an asyncpg `COPY`) | ~130,000 over 3 workers | **48,000** |
+  | `MissingGreenlet` | 1, fatal | **0** |
+
+  Zero log records carried an exception at all, over 192,002 of them — and
+  **the detector has a positive control**, because a null result over 190,000
+  executions says nothing unless a `MissingGreenlet` that *did* happen would
+  have been seen: the same harness with every fifth fetch raising one from
+  inside a handler recorded **25** in 40 seconds.
+
+  **What each candidate is now worth.** (1) *A savepoint rollback expires the
+  mapped row and a later synchronous attribute read refreshes it* — the
+  premise is no longer an inference: `tests/integration/test_title_repository.py::
+  test_a_caught_conflict_leaves_an_expired_row_and_every_read_refreshes_it`
+  asserts `inspect(row).expired is True` after a caught `IntegrityError` and
+  that an f-string over that row raises `MissingGreenlet`. The *hazard* is
+  real and every shipped read refreshes inside its own `await`; 48,000 trips
+  through the within-job window (`EnrichService`'s caught `RepositoryConflict`
+  → `_record_failure`'s second `update()`) produced no crash, so **the
+  conflict path alone does not cause it at this HEAD**. (2) *`credit_names`
+  ships deferred without `raiseload`* — **settled and closed**. The comment
+  defending the plain `defer()` argued *"prefer the failure that degrades"*,
+  and on an `AsyncSession` there is no degradation to prefer: measured, the
+  lazy column load is `MissingGreenlet`. `raiseload=True` now makes a
+  mis-routed read name the attribute instead, and the *"verified rather than
+  assumed"* claim about a 2026-08 suite run is a standing guard. (3) *The raw
+  asyncpg `COPY` inside a SQLAlchemy savepoint* — 48,000 successful
+  enrichments each staged one through `db/staging.py`; nothing corrupted.
+
+  ⚠️ **What the run does not cover, stated so the narrowing is not read as a
+  closure**: real TMDb traffic and its latency, 1.98 h rather than 45 min,
+  three separate worker *processes* rather than one, and a 1.27M-row catalog
+  rather than a 100,000-row one. The next occurrence is now evidence rather
+  than a rate, which is what this entry buys.
 
 ## Post-v1 candidates
 

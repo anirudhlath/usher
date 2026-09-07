@@ -200,4 +200,6 @@ never been fed by TMDb; `_is_v4_token`'s positive branch has never met a real v4
 token; no season TMDb lists has been refused by its own route, so the reconcile's
 arbitrary-season branch is unexercised; nothing has run beyond three workers or a
 non-`US` `tmdb_region`; and whether `MissingGreenlet` in a long `usher work` run
-is *caused* by the `ix_titles_imdb_id` conflict path is open.
+is *caused* by the `ix_titles_imdb_id` conflict path is open — **the conflict
+path alone does not do it**, and the number is in PRD 09's carried debt. The
+crash is still unexplained; both roots now record its frames.

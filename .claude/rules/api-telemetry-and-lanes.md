@@ -194,6 +194,9 @@ grep -rhn '^class .*BaseModel' src/usher/api/dto/ | grep -v 'Response\|Request'
   with siblings unawaited. Under `wait` every task settles first.
 - **Two workers cost budget, not correctness**: `USHER_JOB_CONCURRENCY` and
   `USHER_TMDB_REQUESTS_PER_SECOND` are per process against a per-client limit.
+- **A crashed pass is `logger.exception`, never a `str(exc)` message.** The lane
+  survives it, so the frames are the only record there is — and `usher work`'s
+  daemon now has the same arm, deliberately: one worker, one survival semantics.
 
 ## `traceresponse`
 

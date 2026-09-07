@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import ColumnElement, Select, Table, event, insert, select, text
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.exc import MissingGreenlet
+from sqlalchemy.exc import InvalidRequestError, MissingGreenlet
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from tests.contract.title_repository_contract import (
@@ -25,6 +25,7 @@ from usher.db.models.title import DERIVED_COLUMNS, TitleRow
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.title import (
     _RESOLVE_NATURAL_KEYS,
+    _WITHOUT_DERIVED_COLUMNS,
     PostgresTitleRepository,
     _browse_order,
 )
@@ -485,6 +486,82 @@ async def test_no_entity_read_ships_credit_names_over_the_wire(
                 f"an entity read still selects the derived column {column} and "
                 f"drops it in `_to_domain`: {read}"
             )
+
+
+async def test_an_unloaded_derived_column_refuses_by_name_rather_than_by_greenlet(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    """Issue #8's second candidate, settled by measurement (M10's F10).
+
+    `_WITHOUT_DERIVED_COLUMNS` deferred `credit_names` **without**
+    `raiseload`, and the comment above it argued the choice: `raiseload` would
+    convert a mis-routed read into an `InvalidRequestError`, while *"plain
+    deferral costs one small extra query for ten short strings -- prefer the
+    failure that degrades"*.
+
+    🔴 **On an `AsyncSession` there is no degradation to prefer.** A deferred
+    column reached from an ordinary async frame is a lazy load, a lazy load is
+    IO, and IO outside `greenlet_spawn` is `MissingGreenlet` -- the exact
+    error one of three `usher work` daemons died on 78 minutes into M9's S3.
+    So the choice was never "raise or degrade"; it was **which** error, and
+    plain deferral picked the one that names neither the attribute nor the
+    fix. Measured here rather than reasoned about, which is what makes this a
+    guard instead of a claim about a suite run in 2026-08.
+
+    Both halves, because the repair has a way of passing while being about
+    nothing: the sanctioned reader still works (`credit_names_for` selects the
+    column explicitly, so an entity load's options do not touch it), and the
+    premise -- that the attribute really is unloaded -- is asserted before the
+    refusal it explains.
+
+    **The shipped `options()` rather than a shipped method**, because
+    `Session.identity_map` is weak: `list_by_ids` hands back domain models and
+    nothing then references the `TitleRow`, so a case reaching for the mapped
+    row through a repository call is reaching for one CPython may already have
+    collected. `_WITHOUT_DERIVED_COLUMNS` is the artefact under test and it is
+    what every entity read passes;
+    `test_no_entity_read_ships_credit_names_over_the_wire` is what pins that
+    all three of them still do.
+    """
+    title = Title(
+        kind=TitleKind.MOVIE,
+        name="Dune",
+        sort_name="Dune",
+        tmdb_id=90000401,
+        imdb_id="tt99000401",
+    )
+    await repo.add(title)
+    await session.execute(
+        text("UPDATE titles SET credit_names = ARRAY['Timothee Chalamet'] WHERE id = :id"),
+        {"id": title.id},
+    )
+    session.expunge_all()
+
+    loaded = await session.execute(
+        select(TitleRow).options(*_WITHOUT_DERIVED_COLUMNS).where(TitleRow.id == title.id)
+    )
+    row = loaded.scalar_one()
+    assert "credit_names" in cast(Any, sa_inspect(row)).unloaded, (
+        "the premise: `credit_names` is deferred, so this case says nothing about "
+        "the refusal unless the attribute is actually unloaded"
+    )
+
+    # Not `MissingGreenlet`. `raiseload=True` decides the read is a bug before
+    # SQLAlchemy tries to run it, so the message names `TitleRow.credit_names`
+    # instead of naming a greenlet the reader has never heard of.
+    with pytest.raises(InvalidRequestError) as refusal:
+        assert f"{row.credit_names}"
+    assert not isinstance(refusal.value, MissingGreenlet), (
+        "a plain `defer()` here answers a mis-routed read with the same undiagnosable "
+        f"error issue #8 is about: {refusal.value}"
+    )
+    assert "credit_names" in str(refusal.value), (
+        f"the refusal does not name the attribute that was read: {refusal.value}"
+    )
+
+    # The control: the sanctioned reader is a column read and is untouched by
+    # what an entity load's options say.
+    assert await repo.credit_names_for([title.id]) == {title.id: ("Timothee Chalamet",)}
 
 
 async def test_the_candidate_pool_ranks_on_a_narrow_projection(

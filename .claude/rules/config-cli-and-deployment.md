@@ -89,6 +89,10 @@ Derive counts (`alembic heads`, `docker compose config`), never quote them.
 - **`db.users.ensure_default_user` is deliberately not a repository port** — no
   service needs it, and an ABC plus a fake plus a contract suite for one
   `SELECT` is a port with nothing on the other side.
+- **`usher work`'s daemon form guards each pass with `logger.exception` and
+  keeps going; `--once` does not and must not.** The daemon has no exit code to
+  report with and matches the worker lane; `--once` is a cron's invocation and
+  its exit code is the answer.
 - **`kill -9 "$(cat pidfile)"` on a backgrounded `uv run <cmd> &` does not stop
   the work.** `uv run` forks the real interpreter, so `$!` is the wrapper and
   the child keeps committing; kill `pgrep -P "$wrapper_pid"` or the process

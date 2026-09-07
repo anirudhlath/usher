@@ -194,26 +194,40 @@ _ARRAY_FIELDS = ("genres", "keywords", "spoken_languages", "origin_countries")
 # test_no_entity_read_ships_credit_names_over_the_wire` iterates
 # `DERIVED_COLUMNS` rather than naming these two, so that is what fails.
 #
-# **`raiseload` on one and not the other, and the asymmetry is the decision
-# rather than an oversight.** `search_document` is a `TSVECTOR`: `Title` is
-# `extra="forbid"` and could not carry it if it wanted to, every consumer of it
-# is SQL-side, and there is therefore no access that is not a bug -- so raising
-# costs nothing and closes an N+1 that would answer correctly and be invisible.
-# `credit_names` is a `text[]` with a live, sanctioned reader one method down
-# (`credit_names_for`) and a real meaning to a caller, so a future
-# `row.credit_names` off a loaded entity is a mistake about *routing* rather
-# than a nonsense access -- and `raiseload` would convert it into an
-# `InvalidRequestError` inside the nightly curation job, where plain deferral
-# costs one small extra query for ten short strings. Prefer the failure that
-# degrades. Verified rather than assumed before choosing either: no reader in
-# `src/` reaches `credit_names` through a loaded `TitleRow` -- `credit_names_for`
-# selects the column explicitly (a column read, which an entity load's options
-# do not touch), `people.py` writes it in raw SQL and `search.py` reads it in
-# raw SQL -- and the whole suite was additionally run with `raiseload=True`
-# here to prove no untested path does either.
+# **`raiseload` on both, and the second one is a correction.**
+# `search_document` is a `TSVECTOR`: `Title` is `extra="forbid"` and could not
+# carry it if it wanted to, every consumer of it is SQL-side, and there is
+# therefore no access that is not a bug -- so raising costs nothing and closes
+# an N+1 that would answer correctly and be invisible.
+#
+# 🔴 **`credit_names` shipped as a plain `defer()` from M6 to M10's F10, and
+# the argument for it was false about this engine.** It read: `credit_names` is
+# a `text[]` with a live, sanctioned reader one method down
+# (`credit_names_for`), so a future `row.credit_names` off a loaded entity is a
+# mistake about *routing* rather than a nonsense access -- and `raiseload`
+# would convert it into an `InvalidRequestError` inside the nightly curation
+# job, where plain deferral costs one small extra query for ten short strings.
+# *"Prefer the failure that degrades."* **There is no degradation to prefer.**
+# A deferred column reached from an ordinary async frame is a lazy load, a lazy
+# load is IO, and IO outside `greenlet_spawn` is `MissingGreenlet` -- so the
+# choice was never *raise or degrade*, it was **which error**, and the plain
+# `defer()` picked the one that names neither the attribute nor the fix. It is
+# also the error one of three `usher work` daemons died on in M9's S3 (issue
+# #8), which is what makes an armed-and-unreached hazard of this shape worth
+# spending an option on. Measured, not argued:
+# `tests/integration/test_title_repository.py::
+# test_an_unloaded_derived_column_refuses_by_name_rather_than_by_greenlet`
+# fails on `MissingGreenlet` with the plain `defer()` restored.
+#
+# Still true and now enforced rather than promised: no reader in `src/` reaches
+# `credit_names` through a loaded `TitleRow` -- `credit_names_for` selects the
+# column explicitly (a column read, which an entity load's options do not
+# touch), `people.py` writes it in raw SQL and `search.py` reads it in raw SQL.
+# That was a claim about a suite run in 2026-08; the option is what makes it a
+# standing guard.
 _WITHOUT_DERIVED_COLUMNS = (
     defer(TitleRow.search_document, raiseload=True),
-    defer(TitleRow.credit_names),
+    defer(TitleRow.credit_names, raiseload=True),
 )
 
 
