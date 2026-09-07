@@ -662,6 +662,62 @@ endpoints with *real* responses, so "transcribed from documentation" was
 transcribing a real payload. All of it was replaced on 2026-08-01 and the
 rule is now mechanically enforced -- see rule 6 below.
 
+**The pre-fix commits are still on the public remote, and leaving them there is
+a decision rather than an oversight.** Every number here was re-measured
+2026-09-07 against `origin/main` at `4711442`; they move with the branch, so the
+command that produced each is named. The rows entered twice — `7dde52a`
+(2026-07-30 10:13:52 −0500) wrote them into
+`docs/plans/2026-07-30-m2-bootstrap.md` and `1162346` (12:47:26) committed them
+as fixtures — and **three files carry an IMDb dataset row**, not one:
+`tests/fixtures/bulk/title.basics.slice.tsv`, whose four real titles include
+`tt0000001`, `tt0111161` and `tt0944947` with their years, runtimes and genres;
+`tests/fixtures/bulk/title.ratings.slice.tsv`, whose two real ratings carry
+real vote counts, the most licence-restricted part of that dataset; and the M2
+plan itself, which prescribes both files verbatim and is the worst of the three
+because it is data *and the instruction that recreates it*
+(`tests/unit/test_no_third_party_data.py`, whose fourth check exists for
+exactly that shape). Six real IMDb rows in all. Eight further files carried the
+TMDb-shaped records the paragraph above describes — the four
+`tests/fixtures/tmdb/` payloads, the two id-export slices, their unit test, and
+`usher.adapters.bulk.tmdb_ids`' own module docstring, which shipped inside the
+wheel. **113 of the 818 commits on `origin/main` carry at least one of those
+eleven files**: 96 for each bulk fixture, 113 for the plan, and 113 for the
+union of all eleven, because the plan landed first and left last. (Method:
+`git rev-list --objects origin/main` to enumerate every blob-and-path reachable
+from the branch, the guard's own `_IMDB_DATASET_ROW` and `_TMDB_EXPORT_RECORD`
+regexes to pick the offending blobs out of `git cat-file --batch`, then
+`git cat-file --batch-check` over `<commit>:<path>` for all 818 commits.) The
+window closes with **two** commits rather than one — `1196a9d` (2026-08-01
+13:41:56 −0500) replaced the fixtures and added the guard, and `969dcbf`
+(13:59:12, seventeen minutes later) removed the plan's copy, which is why that
+fourth check scans the whole repository instead of only what ships. Both are
+ancestors of `origin/main`, and so is `1162346`, which every one of the 17
+remote-tracking refs under `refs/remotes/origin` contains. **The repository was
+created public on 2026-08-02T23:43:14Z under MIT** (`gh repo view --json
+createdAt,visibility,licenseInfo`), a day after the second fix, so the working
+tree has never been public in a broken state — but the history went public with
+it.
+
+**It was documented rather than rewritten, and the paragraph carries the
+argument rather than the conclusion.** Six real rows are *de minimis* against
+IMDb's non-commercial clause. Against them sits the cross-referenced
+engineering record itself: **165 distinct commit hashes cited across 24
+Markdown files** under `docs/` and `.claude/` — plans, ADRs, eval write-ups,
+and `docs/plans/progress.md` alone accounting for 112 — of which 157 still
+resolve on `origin/main`. (Counted as 7-to-12-character hex tokens that are not
+all digits and that `git cat-file` resolves to a commit object, so a short sha
+written entirely in digits is missed and the real figure is higher; the eight
+that no longer resolve are references that have already rotted, which is the
+same failure a rewrite would cause deliberately and at scale.) A
+`git filter-repo` rewrites every hash in the history and breaks every one of
+those citations, which is a large certain loss set against a small theoretical
+risk. **And it would not buy what it costs**: GitHub retains unreachable
+objects and serves them by SHA until a support request purges them, and every
+clone or fork already made keeps its own copy regardless. **The decision is
+reversible and the inverse is not** — a rewrite is available on any later day,
+and a rewrite already performed cannot be taken back — and that asymmetry,
+rather than the size of the risk, is what settles it.
+
 | Source | Personal self-hosted use | Redistribute | Attribution |
 |---|---|---|---|
 | IMDb datasets | ✅ explicitly permitted | ❌ | Required exact string |
