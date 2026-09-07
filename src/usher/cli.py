@@ -28,6 +28,7 @@ from pydantic import SecretStr, ValidationError
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from usher import __version__
 from usher.api.lanes import LaneSupervisor
 from usher.composition import (
     NO_CREDENTIALS,
@@ -2587,6 +2588,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--traceback",
         action="store_true",
         help="show the full stack instead of a one-line message",
+    )
+    # **`action="version"`, and the placement is load-bearing.** `main` parses
+    # before it opens the error boundary, so argparse raises `SystemExit(0)`
+    # here -- before `get_settings()` runs and before anything reaches a
+    # database. That is what lets `docker run --rm <image> python -m usher
+    # --version` answer on a host with no Postgres, and it is the property a
+    # subcommand could not have: a subcommand is dispatched from inside the
+    # `try`, after the settings are read.
+    #
+    # The number is interpolated from `usher.__version__` rather than written
+    # here. It is `importlib.metadata.version("usher")`, which hatchling copies
+    # from `[project].version` into the distribution's `METADATA` at install
+    # time -- so a fourth place to edit is exactly what this avoids.
+    # `tests/unit/test_release_metadata.py` guards the agreement, and records
+    # that a red there means a `pyproject.toml` bumped without a `uv sync`.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"usher {__version__}",
+        help="print the version and exit, without reading any settings",
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="run the HTTP server (the default with no arguments)")

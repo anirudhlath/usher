@@ -24,6 +24,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import usher
 import usher.cli
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.genome_repository import FakeGenomeRepository
@@ -2149,3 +2150,37 @@ def test_the_phase_choices_are_the_vocabulary_and_not_a_second_copy_of_it() -> N
     assert set(PHASES) == {phase.value for phase in BootstrapPhase}
     assert set(build_parser().parse_args(["bootstrap"]).__dict__) >= {"phase"}
     assert build_parser().parse_args(["bootstrap"]).phase == BootstrapPhase.ALL.value
+
+
+def test_version_prints_the_package_version_and_reads_no_settings(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`usher --version` answers before any settings are read.
+
+    **That is the whole point of `action="version"` rather than a
+    subcommand.** `main` parses first and only then opens the `try` that calls
+    `get_settings()`, so an `action="version"` flag raises `SystemExit(0)` out
+    of `parse_args` before a database URL is needed -- which is what lets
+    `docker run --rm <image> python -m usher --version` answer on a host with
+    no Postgres. `get_settings` is monkeypatched to raise rather than the
+    environment being emptied, so the case pins the ordering rather than a
+    deployment's configuration.
+
+    The second arm is the control: an uninstalled tree makes both sides of the
+    stdout comparison equal to the fallback, and the assertion vacuous.
+    """
+    assert usher.__version__
+    assert usher.__version__ != "0.0.0+unknown", (
+        "the package is not installed, so the stdout comparison below is vacuous"
+    )
+
+    def _no(*args: object, **kwargs: object) -> Settings:
+        raise AssertionError("--version read the settings")
+
+    monkeypatch.setattr(usher.cli, "get_settings", _no)
+
+    with pytest.raises(SystemExit) as excinfo:
+        usher.cli.main(["--version"])
+
+    assert excinfo.value.code == 0
+    assert capsys.readouterr().out == f"usher {usher.__version__}\n"
