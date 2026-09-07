@@ -1118,6 +1118,56 @@ completeness** with the missing entries listed, which doubles as a want-list ·
 most-represented directors and actors · library growth per week · unmatched
 review queue depth.
 
+✅ **All eleven panels here are backed by real data as of M10, and the audit
+that says so is a count against the live catalogue rather than a reading of the
+schema** — 1,276,268 titles and 23,943 `media_items` in `usher_catalog` on
+2026-09-07. Titles by enrichment state is `titles.enrichment_state`
+(`db/models/title.py:180`): skeleton 1,142,767, enriched 133,447, stub 54.
+Owned-vs-catalog is `media_items.available` and `title_id`
+(`db/models/source.py:99`, `:72`) — 23,943 available rows, 18,443 of them
+matched, over 11,516 distinct titles. Genre, decade, language and runtime are
+`titles.genres` (`:98`, non-empty on 1,157,046), `titles.year` (`:68`,
+1,128,000), `titles.original_language`/`spoken_languages` (`:104`, `:105`;
+133,447 and 129,629) and `titles.runtime_minutes` (`:74`, 715,395). **The
+quality ladder is the one a reader expects to be missing and it is not**:
+`media_items` carries `container`, `video_codec`, `audio_codec`, `width`,
+`height`, `hdr_format`, `audio_channels` and `file_size_bytes`
+(`source.py:85-92`), all filled by `adapters/emby/mapping.py:416-425` from
+Emby's `MediaStreams` — 20,922 rows carry a container, 3,171 are 3,840 pixels
+wide or better, and `hdr_format` is set on 1,704 (HDR10 974, DV 706, HLG 24),
+so the Dolby Vision translation is 706 live rows rather than a fixture.
+Franchise completeness is `titles.collection_id` (`title.py:145`, 13,381 rows)
+joined to `collections` (5,298). Most-represented directors and actors are
+`credits` — 2,910,957 rows, cast 2,530,801 and crew 380,156, of which
+`job = 'Director'` is 143,888 — joined to `people` (896,079). Library growth is
+`media_items.added_at` (`source.py:95`), spanning 2019-02-12 to 2026-09-02. And
+unmatched depth is `ix_media_items_unmatched` and `list_unmatched`, 5,500 rows
+today, with the `OFFSET` caveat recorded under Dashboard 3 below.
+
+**Three caveats, every one a denominator rather than an absence.** (1)
+`titles.collection_id` and every `credits` row arrive from TMDb enrichment, so
+franchise completeness and the credits panel are bounded by the enriched
+tier — **133,447 of 1,276,268 titles, 10.5%** on 2026-09-07, which is the
+catalog-wide figure and the one that bounds *"which entries am I missing"*. A
+franchise whose other entries were never enriched reads as complete. **Over the
+owned library the same tier is 9,784 of 11,516, 85.0%**, and the two numbers
+have to travel together: the second is what actually bounds any panel drawn
+over the shelf, and quoting only the first understates every one of them by
+eight-fold. `titles.original_language` is the tell — it is non-null on exactly
+133,447 rows, the enriched count to the row, so the language panel sits on the
+same tier as the credits panel rather than on the catalog. (2)
+`media_items.added_at` is nullable (`source.py:95`), so a growth curve silently
+omits any item whose source reported no `DateCreated`. **0 of 23,943 rows are
+null today**, which makes this structural rather than live — but the panel
+still owes an explicit `added_at IS NOT NULL`, because the next source to
+report nothing will empty part of the curve without raising anything. (3)
+⚠️ **`HdrFormat` has no SDR member** (`domain/enums.py:149-151`: HDR10, DV,
+HLG), so `hdr_format IS NULL` means *"SDR **or** never probed"* and never
+*"SDR"*. 22,239 of the 23,943 rows are null, and 3,021 of those carry no
+`container` either — 3,007 of them series-level rows with no file behind them.
+The ladder's HDR share is therefore a fraction of `video_codec IS NOT NULL`
+(20,857) and never of the table.
+
 ### 2 — Taste & Watching
 
 Watch time by day and user · **abandonment cliff** — a histogram of where you
@@ -1126,6 +1176,87 @@ completion rate · time-of-day heatmap · **taste drift** as genre affinity in a
 stacked area over months · **longest unwatched** (in the library, never played,
 sorted by age) · rewatches · **row effectiveness**: plays attributed per
 `RowProvider`.
+
+⚠️ **Five of these eight panels are backed by real data as of M10, three have
+no backing series at all, and the three are schema changes rather than build
+tasks — opened as [#84](https://github.com/anirudhlath/usher/issues/84) and
+[#85](https://github.com/anirudhlath/usher/issues/85).** The root cause of two
+of the three is one fact worth stating once: **this schema has 28 mapped tables
+and none of them is a play-event log** — 28 `__tablename__` declarations under
+`db/models/`, which is live `usher_catalog`'s 30 `public` base tables on
+2026-09-07 less `alembic_version` and the `titles_rating_backup_20260819` left
+behind by `m10a`, neither of which is one either. `watch_states`
+(`db/models/watch.py:40-108`) is one row per `(user, title)` or
+`(user, episode)` — unique-constrained as such at `:111-112` — carrying
+`position_seconds` (`:80`), `runtime_seconds` (`:83`), `played` (`:84`),
+`play_count` (`:87`) and a single `last_played_at` (`:90`). It is a *current
+state*, not a history, and the live catalogue prices that exactly: measured
+2026-09-07 over 16,782 rows for one user, `SUM(play_count)` is **347 plays**
+against **139 rows carrying a date**, so **208 of 347 plays — 59.9% — have no
+date at all**, overwritten by a later play on the row they shared.
+
+- **"Watch time by day and user" has no backing series** (#84). Minutes
+  attributable to a day need a row per play; the only date any row carries is
+  the last one, and `play_count` carries none at all.
+- **"Taste drift as genre affinity in a stacked area over months" has no
+  backing series** (#84), for the same reason — and ⚠️ **the failure mode is not
+  the one this was expected to have.** The prediction was a panel
+  *systematically emptying toward the past*, as rewatches move items forward out
+  of their own month. The mechanism is real and measured — 80 of the 139 dated
+  rows, **57.6%**, carry `play_count > 1`, so each has had at least one earlier
+  date erased — but the shape is not visible in this household: the 139 dates
+  spread across 17 months at between 1 and 15 a month with no trend. What the
+  panel actually is here is **139 points over 17 months**, which is not a
+  stacked area under any denominator.
+- **"Row effectiveness: plays attributed per `RowProvider`" has no backing
+  series** (#85), **and this document already says so in its own words in the
+  paragraph above `## Dashboards`**: *"This column is joined to a **search**,
+  not to a row: `search_queries` has no row slug, no `generation_id` and no
+  provider, and a play launched from a home shelf carries no `search_id` at
+  all"*. That admission sits in a paragraph about `played`; it is repeated here
+  because this is where the panel is specified. `m10c`'s two new columns are
+  `surface` and `tier`, neither of them a row handle. Live, `search_queries`
+  holds 109 rows with `played` true on **none** of them, so the panel is missing
+  its numerator as well as its join key — measured 2026-09-07 against the dev
+  `usher_catalog`, which predates `m10c` and carries the nine columns rather
+  than the eleven, so those 109 rows have no `surface` and no `tier` either.
+- **"Time-of-day heatmap" is backed and mis-titled.** `last_played_at` gives one
+  hour per item — the hour of its *last* play — so the honest panel is **"when
+  each item was last played"** and never *"when this household watches"*.
+  Backed, retitled, on the 139 dated rows.
+- **"Abandonment cliff" is backed, and its denominator is the fallback rather
+  than the column the panel names.** It is `position_seconds / runtime_seconds`
+  over `played = false` — 55 live rows with `position_seconds > 0` — and
+  `watch_states.runtime_seconds` is nullable by
+  [ADR-0014](decisions/0014-absence-is-not-zero.md) because a walk's listing
+  cannot determine it. ⚠️ On this catalogue it is null on **all 16,782 rows**, so
+  the panel is entirely fallback today rather than merely exposed to one:
+  `media_items.runtime_seconds` (`source.py:93`, set on 23,665 of 23,943) then
+  `titles.runtime_minutes` × 60. Both cover all 55, and the panel must state
+  which it used or a null denominator silently drops the row.
+- **"Longest unwatched" is backed, and the join this document specified for it
+  is the wrong one.** *"`media_items.added_at` with no `watch_states` row"*
+  returns **110** of the 18,443 owned matched items, because the walk writes a
+  row for nearly everything it sees: 16,585 of the 16,782 rows carry
+  `played = false`, `play_count = 0` **and** `position_seconds = 0`. The
+  predicate that answers the panel's own English — *never played* — is "no row
+  **or** a row with `play_count = 0 AND NOT played`", and it returns **18,279**,
+  166 times the other. Backed, with its join corrected here.
+- Completion rate (`watch_states.played`, true on 142 of 16,782) and rewatches
+  (`play_count > 1`, 80 rows) are backed outright.
+
+**The three unbacked panels do not become build tasks, and saying so is this
+audit's actual output.** A play-event log is a schema change with a writer, a
+retention policy and a size argument — `POST /titles|episodes/{id}/play` is the
+only surface that could write one, and `watch_states`' two unique constraints
+(`watch.py:111-112`) are exactly why the table it would extend cannot carry it.
+Row attribution needs a handle `GET /home` does not hand out, which the
+paragraph above already calls *"a PRD amendment rather than a follow-up"*. Both
+are M11 issues, and Dashboard 2 therefore ships **five panels and a stated
+absence** rather than three permanently empty ones. **None of the three is
+marked ⏳** — that means *owed by a named milestone*, and none of these is owed
+by M10. Shipping an empty panel is precisely the failure this document's
+preamble exists to prevent, one layer up from the metric it was written about.
 
 ### 3 — Pipeline
 

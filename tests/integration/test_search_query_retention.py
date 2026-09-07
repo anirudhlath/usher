@@ -365,6 +365,16 @@ async def test_the_chunked_delete_walks_the_index_oldest_first(
     assert "ix_search_queries_at" in "\n".join(row[0] for row in plan)
 
 
+# The only case in this directory that leaves rows *committed* on a second
+# engine, which is the whole point of it -- and long enough for autovacuum's
+# autoanalyze to read them. It does, in a whole-suite run: measured 2026-09-07,
+# three `uv run pytest` runs out of three left `pg_class` claiming
+# search_queries=5 (the count at the first chunk boundary) and users=1 against
+# a table the `finally` had already emptied, while two `pytest tests/integration`
+# runs did not. Nothing here executes ANALYZE, so this is the guard's
+# side-effect arm rather than its `analyze`-fixture one; the statistics are
+# restored either way, the marker only stops the blame.
+@pytest.mark.leaks_statistics("search_queries", "users")
 async def test_the_prune_commits_each_chunk_where_a_composition_root_wired_it(
     postgres_url: str, session: AsyncSession
 ) -> None:
