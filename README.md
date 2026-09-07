@@ -110,6 +110,32 @@ see below.
   `RuntimeError: Cannot send a request, as the client has been closed` — a
   message that names neither the network nor the cache.
 
+### ⚠️ Nothing here requires authentication
+
+**No route in this API checks a credential, and twelve of them are `/admin`.**
+There is no auth module, no token check and no `current_user` anywhere in the
+tree. Anyone who can reach the port can list your sources, resolve unmatched
+items, and start work.
+
+Two of those twelve are expensive rather than merely readable.
+`POST /admin/bootstrap/{phase}` and `POST /admin/sources/{id}/sync` put the two
+longest units of work in the system onto the single sequential worker lane —
+enrichment, indexing, derivation and curation are unavailable for the duration,
+which is hours in the sync case. `POST /admin/rows/regenerate` enqueues a
+curation job, which is where this project spends money on an LLM.
+
+**This is a posture, not an oversight.** Usher is a self-hosted backend whose
+threat model is a home network, and authorization designed against routes
+landing in the same milestone is a guess at a client that does not exist yet.
+It is a recorded boundary call, and
+[#18](https://github.com/anirudhlath/usher/issues/18) is where an auth mode for
+`POST /admin/sources` is tracked.
+
+**So: do not publish this port to the internet.** Bind it to your LAN, or put
+it behind whatever already fronts your other services — a reverse proxy with
+authentication, a VPN, or an SSH tunnel. That decision belongs before the
+`docker compose up` below, which is why this paragraph is above it.
+
 ## Running it
 
 ```bash

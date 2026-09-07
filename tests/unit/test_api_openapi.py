@@ -790,3 +790,47 @@ def test_every_member_of_the_vocabulary_has_a_route_that_can_emit_it(app: FastAP
         f"vocabulary members no route and no handler can emit: {sorted(unemitted)}. ADR-0030's "
         "Consequences oblige this milestone to delete them."
     )
+
+
+def test_no_route_declares_a_security_scheme_and_the_readme_states_the_count(
+    document: Mapping[str, Any],
+) -> None:
+    """Two halves, and only one of them was a discovery.
+
+    **The security half is a guard, verified true before it was written** --
+    there is no auth module in this tree, so it passes at HEAD and says
+    nothing new. It is here because it is the case that goes red the day #18
+    ships, which is exactly when the README sentence has to change.
+
+    **The README half pins the number, not the prose.** A green here does not
+    mean the README explains the posture well; it means the count it states is
+    the count this app serves. That is H6's finding -- a static contract
+    configured by an enumeration needs a test that the enumeration is complete
+    -- arriving at a README sentence instead of a `pyproject.toml` list.
+
+    The control is the `>= 10` floor: an operation walk that globbed nothing
+    would agree with any number the README happened to state.
+    """
+    assert "securitySchemes" not in document.get("components", {})
+    for path, item in document["paths"].items():
+        for method, operation in item.items():
+            assert "security" not in operation, f"{method.upper()} {path}"
+
+    # `_served_pairs`' idiom: every key under a path item is a method here.
+    admin = {
+        (path, method)
+        for path, item in document["paths"].items()
+        for method in item
+        if path.startswith("/admin")
+    }
+    assert len(admin) >= 10, f"the operation walk found {len(admin)} admin operations"
+
+    readme = (pathlib.Path(__file__).parents[2] / "README.md").read_text()
+    posture = readme.split("### ⚠️ Nothing here requires authentication", 1)
+    assert len(posture) == 2, "the README has no posture section for this count to agree with"
+
+    stated = "twelve of them are `/admin`"
+    assert len(admin) == 12, (
+        f"{len(admin)} admin operations, and README says twelve -- move the sentence"
+    )
+    assert stated in posture[1]
