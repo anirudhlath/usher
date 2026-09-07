@@ -165,16 +165,24 @@ that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-Emitted today (✅) or owned by a later milestone (named). A documented metric
-nothing emits is a permanently empty panel that nothing distinguishes from a
-healthy zero, so this column is maintained rather than aspirational. **40
-rows: 39 instruments Usher declares, plus one `FastAPIInstrumentor` supplies.**
+**Every row is emitted today (✅), and since M10's D1 that is asserted rather
+than described.** `test_prd_10_marks_every_milestones_rows_as_shipped` reads
+the `Emitted` column of *every* row instead of M6's alone, so a row owed by a
+later milestone can no longer be written here — it arrives with its instrument
+or not at all, which is what `test_telemetry_metric_names.py`'s
+`declared == catalogue - {"http.server.duration"}` **equality** already says
+about the names. A documented metric nothing emits is a permanently empty panel
+that nothing distinguishes from a healthy zero, so this column is maintained
+rather than aspirational. **42 rows: 41 instruments Usher declares, plus one
+`FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
 |---|---|---|---|
 | `http.server.duration` | histogram | `http.target`, `http.status_code` | ✅ M9 |
 | `usher.search.duration` | histogram | mode | ✅ M6 |
 | `usher.search.results` | histogram | mode | ✅ M6 |
+| `usher.suggest.duration` | histogram | tier | ✅ M10 |
+| `usher.suggest.results` | histogram | tier | ✅ M10 |
 | `usher.home.compose.duration` | histogram | — | ✅ M7 |
 | `usher.row.build.duration` | histogram | provider | ✅ M7 |
 | `usher.curation.rows` | counter | — | ✅ M8 |
@@ -263,6 +271,36 @@ bucket boundaries in `configure_metrics`; it is **not** yet done, and nothing
 in this document's dashboard section should be built before it is. Method and
 the full table: `.claude/rules/emby-push-and-ingest.md`.
 
+⚠️ **`usher.suggest.duration` is the one exception, and it is an exception
+rather than the fix.** M10's D1 could not add a keystroke-latency series under
+these boundaries and have it mean anything — every value the series exists to
+separate falls in the first bucket — so that instrument carries an
+`explicit_bucket_boundaries_advisory` of its own,
+`(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0)`,
+declared beside the `create_histogram` in `services/search.py`. **Measured
+2026-09-07, and the method is the point**: 2,000 points (seed `20260907`)
+drawn from a lognormal fitted to ADR-0002's shipped tier-2 row — median
+33.6 ms, p95 211 ms, clipped at its 730 ms max — recorded onto *two*
+instruments differing only in the advisory and exported over real OTLP/gRPC
+into this host's collector and Prometheus. Against the sample's own **35.20 ms
+p50 and 225.07 ms p95**, `histogram_quantile` over the default boundaries
+answered **2.5000 s** and **4.75 s** — 71× and 21× wrong, and every one of the
+2,000 points in the single `le="5"` bucket — against **38.12 ms** and
+**240.70 ms** on the ladder. The 50 ms boundary is the half that needs no
+interpolation at all: `…_bucket{le="0.05"} / …_count` returned **0.6205**,
+which is the sample's exact fraction inside the budget. **Read it as a scope
+rather than a precedent.** An advisory rides the instrument, so it holds
+under whichever `MeterProvider` a caller installed — which is what makes it
+assertable from a unit case, and is why it was reachable inside one task at
+all — but it fixes exactly one row of this table. Walking every
+`create_histogram` in `src/usher/` on 2026-09-07 finds **15** declaring
+`unit="s"`; **14 are still on the SDK defaults**, 13 of them harmfully
+(`usher.scheduler.job.duration` is the hours-scale exception noted above).
+`0.05` is a boundary rather than a round number — it is
+[ADR-0002](decisions/0002-postgres-first-search.md)'s as-you-type budget —
+which is what makes *"what fraction of keystrokes made the budget"* the bucket
+ratio measured above rather than an interpolation between two bounds.
+
 **`http.server.duration` is a correction, not an addition, and carries no
 `usher.` prefix on purpose.** M9 re-measured through a real `create_app()` and
 real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor` (wired
@@ -305,25 +343,50 @@ dashboard query has to know:
   [ADR-0002](decisions/0002-postgres-first-search.md)'s prohibition arriving
   in the panel an operator would use to check for it. The *requested* mode is
   carried in the answer (`SearchOutcome.requested_mode`), not in a label.
-- **There is no `suggest` value**, and there is no series for the type-ahead
-  path at all. `suggest` is a separate port with its own latency budget
-  ([ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)), and M6
-  emits nothing for it — a gap named here rather than left to be discovered
-  from an empty panel, and one **the gate's measured latency makes worth
-  closing rather than merely worth noting**. ⚠️ **The figures that used to stand
-  here belong to a tier the route does not default to.**
-  [ADR-0031](decisions/0031-the-two-tier-suggest.md)`:304` states that
-  p50 33.6 / p95 211 / max 730 ms are **tier 2 whole-name** figures; the shipped
-  route defaults to **tier 1**, whose union p95 is **2,707 ms at one character**
-  and 112 ms at the four-character minimum (`:193`). A series for this path must
-  therefore carry a `tier` label rather than being one histogram, measured
-  against the 50 ms
-  as-you-type budget [ADR-0002](decisions/0002-postgres-first-search.md) was
-  gated on. A path that misses its budget by 4× at p95 and has no series is a
-  regression nobody would see.
+- **There is still no `suggest` value, and since M10's D1 there is no longer a
+  gap behind that.** `suggest` is a separate port with its own latency budget
+  ([ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)) and M6
+  emitted nothing for it; the type-ahead path now has **its own pair of rows
+  above**, `usher.suggest.duration` and `usher.suggest.results`, rather than a
+  fourth member of this vocabulary. Reusing `SearchMode` was the near miss:
+  a mode and a tier are disjoint vocabularies, and a `suggest` value here would
+  put the type-ahead box inside every `mode`-split panel in dashboards 1 and 4
+  — the same two-vocabularies-under-one-name hazard `search_queries` answered
+  with a `surface` column rather than a fourth mode.
+- ⚠️ **`tier` exists as a label because one histogram over this route would be
+  a mixture of two populations, and the figures that used to stand here are
+  what shows it.** p50 33.6 / p95 211 / max 730 ms is the
+  *"GIN `%` @0.3, cap 200, + vote-count tiebreak — as it ships now"* row of
+  [ADR-0002](decisions/0002-postgres-first-search.md)'s retrieval table, over
+  2,993 **whole names**, and
+  [ADR-0031](decisions/0031-the-two-tier-suggest.md) says whose they are in
+  its *Uncertainty* section, under *Tier 2 per prefix length* — *"Its 33.6 ms
+  p50 / 211 ms p95 / 730 ms max are whole-name figures"*. They are **tier
+  2's**. The shipped route defaults to **tier 1**, whose figures on that same
+  denominator are p50 **0.6 ms** / p95 **1.0 ms** (the btree
+  `text_pattern_ops` prefix row of the same table) — **56× and 211× apart**,
+  so an unlabelled series over this route is a mixture whose position between
+  the two is set by client debounce behaviour the server never sees. And tier
+  1 has no single number anyway: its cost is a function of prefix length
+  spanning three orders of magnitude, and ADR-0031's p95-by-prefix-length
+  table measures the shipped union at **2,707 ms at one character, 809 at two,
+  303 at three, 112 at four and 2.3 ms at seven**. Four is the shipped minimum
+  precisely because 112 ms is the shortest length at which tier 1 is cheaper
+  than the tier it exists to be cheaper than. **`tier`'s vocabulary is
+  `SuggestTier`'s own two lower-case members, `prefix` and `fuzzy`** — written
+  down for the reason `mode`'s is, and it is the tier that *answered*, passed
+  through from the argument that selected the index rather than re-derived.
+  Both series are measured against the 50 ms as-you-type budget
+  [ADR-0002](decisions/0002-postgres-first-search.md) was gated on, which is a
+  literal boundary of `usher.suggest.duration`'s buckets.
 
 A blank query is deliberately not a data point: a search box sends one between
-every keystroke.
+every keystroke. **The same exclusion governs `usher.suggest.*` and matters
+more there**, because the type-ahead box is driven per keystroke rather than
+per submit: `SearchService.suggest` returns on a whitespace-only prefix before
+it reaches a tier, so no point is recorded and no index is read. Counted, those
+zero-duration zero-result calls would make a suggest-latency panel a measure of
+how fast somebody types.
 
 **`provider`'s vocabulary is the ten `slug_prefix` constants**, and it is
 written down here for the reason the paragraph above gives — `continue-watching`,
