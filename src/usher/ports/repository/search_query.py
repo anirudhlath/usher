@@ -356,6 +356,17 @@ class SearchQueryRepository(ABC):
         and pinned through a real round trip rather than against a hand-built
         value.
 
+        **Raises `PortDataMalformed` if the store answers a naive value**, and
+        that is part of the contract rather than an implementation's private
+        choice. The `TypeError` above is what the *absence* of this guard costs
+        -- it fires one layer up, inside the scheduler's subtraction, where
+        `Scheduler._due_now` reports it against the wrong component. An
+        implementation therefore checks awareness at the boundary and raises
+        the taxonomy's own family (ADR-0009: a raw exception may not cross a
+        port), which `_due_now` catches, counts as a failure of the job, and
+        declines to run on. Every read here may also raise a transport
+        `UsherPortError` the way any other database read may.
+
         Cheap by construction rather than by luck: `ix_search_queries_at`
         (`m10c`) makes it an Index Only Scan of one leaf. Re-measured
         2026-09-07 on `usher_j2`, the clone of the live catalog holding
@@ -422,5 +433,17 @@ class SearchQueryRepository(ABC):
         deleted row cannot re-satisfy the predicate, where
         `SimilarityService.rebuild`'s *"re-read what looks stale, rebuild,
         repeat"* does not terminate against a row the predicate cannot clear
-        -- so the loop needs no keyset cursor and does not have one.
+        -- so the loop needs no keyset cursor and does not have one. 🔴 **The
+        commit between chunks is a precondition of that argument and not an
+        optimisation**: a deleted row that was never committed is still there
+        for the next chunk's session, so the loop re-selects it forever.
+        `SearchQueryRetention.run` carries the measurement.
+
+        **Raises**: `RepositoryConflict` cannot arise here -- a delete violates
+        nothing on a leaf table -- but the statement is a database write and
+        may raise a transport `UsherPortError` like any other. `limit` at or
+        below zero is not refused here and is refused where it is configured
+        (`Settings.search_query_retention_batch` is `ge=1`), because a chunk of
+        zero deletes nothing, answers `0`, and never satisfies a caller's
+        `deleted < limit` terminator.
         """

@@ -635,9 +635,9 @@ export const CONFIG: readonly SettingRow[] = [
     group: 'lanes',
     def: '10000',
     about:
-      'How many rows one retention transaction may delete. The prune loops and commits per chunk, because a single DELETE over a year of keystrokes locks a table every answered search writes to. This deployment writes about 1,050 rows a day, so the steady-state prune is one chunk.',
+      'How many rows one retention transaction may delete. The prune loops and commits per chunk, because a single DELETE over a year of keystrokes locks a table every answered search writes to. Measured 2026-09-07, this deployment writes single digits of rows a day, so the steady-state prune is one chunk; the size is for the first run after the suggest writer is switched on, which wrote 14,898 rows in a day. Below 1 the drain never terminates.',
     secret: false,
-    measured: false,
+    measured: true,
   },
   {
     key: 'USHER_SIMILAR_REBUILD_PERIOD_HOURS',
@@ -653,7 +653,7 @@ export const CONFIG: readonly SettingRow[] = [
     group: 'lanes',
     def: '300.0',
     about:
-      'How long the loop sleeps between ticks. One query per registered job per tick and nothing else: measured 2026-08-27 against the live 756 MB title_neighbors at 71-73 ms, so about 0.12% duty at 300 s and 7% at 1 s, which is why the floor of 60 is enforced rather than suggested.',
+      'How long the loop sleeps between ticks. The loop asks each registered job when it was last done and nothing more: measured 2026-08-27 against the live 756 MB title_neighbors at 71-73 ms, so about 0.12% duty at 300 s and 7% at 1 s, which is why the floor of 60 is enforced rather than suggested. That one question is two round trips on the retention job, whose read commits its scope.',
     secret: false,
     measured: true,
   },

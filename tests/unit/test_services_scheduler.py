@@ -358,6 +358,18 @@ def test_the_retention_registration_carries_the_window_and_the_batch_an_operator
     attributes: `period`, `window` and `batch` are properties for this reason.
     Non-default values on both settings, because 90 and 10,000 are what a
     registration ignoring them would also produce.
+
+    🔴 **The period is pinned to the literal and not to the constant**, the
+    way the job's *name* already is one case above. `job.period ==
+    RETENTION_PERIOD` compares the registration against the same symbol the
+    composition root passes it, so it is a statement about the wiring and
+    about nothing else -- measured 2026-09-07, moving `RETENTION_PERIOD` from
+    `timedelta(days=1)` to `timedelta(days=30)` left this whole file green.
+    **A day is a published number**: `.env.example`,
+    `web/src/features/operator/Config.settings.ts`, PRD 08 and PRD 10 all
+    state it in prose an operator reads, and a constant that moves under them
+    is the same silent drift a renamed metric label is. Both assertions are
+    kept -- the literal for the value, the symbol for the wiring.
     """
     scheduler = build_scheduler(
         _settings(search_query_retention_days=7, search_query_retention_batch=3),
@@ -367,6 +379,10 @@ def test_the_retention_registration_carries_the_window_and_the_batch_an_operator
     job = next(one for one in scheduler.jobs if isinstance(one, SearchQueryRetention))
     assert job.window == timedelta(days=7)
     assert job.batch == 3
+    assert timedelta(days=1) == RETENTION_PERIOD, (
+        "the retention job offers itself once a day, and .env.example, Config.settings.ts, "
+        "PRD 08 and PRD 10 all say so in prose no test reads"
+    )
     assert job.period == RETENTION_PERIOD
     assert job.period != job.window, (
         "the period is the job's own and must not be read off the retention window"

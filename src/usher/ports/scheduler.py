@@ -98,16 +98,31 @@ class ScheduledJob(ABC):
         own runs move; a reading that ages on its own, driven by anything other
         than this job completing, makes the period inoperative -- the job is
         permanently due, retried every tick forever, and `period` decides
-        nothing. ADR-0046's decision-2 table gets this wrong for its second
-        registration: it tabulates `min(search_queries.at)` as retention's
-        `last_done()` and calls it *"exact"*, but that is the age of the
-        **oldest surviving row**, written by the search path. After a prune it
-        sits at the retention window's age and stays there, because rows keep
-        ageing into the window. Measured 2026-08-27 on this deployment: 14 days
-        old over 14,978 rows, which reads *due* against any period shorter than
-        the window. **J5 owes a real completion time or a different design; the
-        contract is stated here so that is a visible decision rather than a
-        registration that quietly never rests.**
+        nothing. ADR-0046's decision-2 table gets this wrong in its **second
+        row**, the `search_queries` retention one -- which is also the only
+        registration that has shipped, the neighbour rebuild being J6. It
+        tabulates `min(search_queries.at)` as retention's `last_done()` and
+        calls it *"exact"*, but that is the age of the **oldest surviving
+        row**, written by the search path. After a prune it sits at the
+        retention window's age and stays there, because rows keep ageing into
+        the window. Measured 2026-08-27 on `usher_j2`, a clone of this
+        deployment's catalog: `min(at)` was 14 days old over 14,978 rows, which
+        reads *due* against any period shorter than the window.
+
+        ✅ **J5 discharged this, and the shipped reading is
+        `min(min(at) + window, now)`** --
+        `usher.services.scheduler.SearchQueryRetention.last_done`, which
+        carries the argument. The artefact a prune maintains is the table's
+        *lower bound*, not a row: a run at instant *T* establishes "no row is
+        older than *T* - window", so the invariant held at *T* and goes on
+        holding until the oldest surviving row itself falls out of the window.
+        This job's own runs move it and a new search cannot, because a new row
+        is the newest one; and an **empty** table answers `now` rather than
+        `None`, since nothing to prune is the invariant satisfied. The
+        obligation stays stated here because it is what the *next*
+        registration owes, and this docstring said **"J5 owes a real completion
+        time or a different design"** until 2026-09-07, at a HEAD where J5 had
+        shipped one.
 
         🔴 **An artefact built incrementally must answer for its *oldest*
         part, and that choice costs a period.** `SimilarityService.computed_at()`

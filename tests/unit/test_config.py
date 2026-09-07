@@ -599,6 +599,49 @@ def test_the_backoff_and_the_failure_ceiling_cannot_be_switched_off(
     assert Settings().push_gap_min_interval_seconds == 0.0
 
 
+def test_the_retention_window_and_the_chunk_cannot_be_switched_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both `ge=1` floors on the retention pair, and **the two zeros fail
+    differently**, which is why the comments beside them are not
+    interchangeable.
+
+    `USHER_SEARCH_QUERY_RETENTION_DAYS=0` is a cutoff at `now`: the prune
+    deletes the row the answered search has just written, so a household
+    keeps no history at all. The switch for that is
+    `USHER_SEARCH_SUGGEST_ANALYTICS` and an analytics-free `SearchService`,
+    which write no row rather than writing one and racing a prune for it.
+
+    🔴 `USHER_SEARCH_QUERY_RETENTION_BATCH=0` is the sharper one and it is the
+    **opposite** of what `config.py` claimed until 2026-09-07. That comment
+    read *"a chunk of zero deletes nothing and, since the loop terminates on
+    a chunk shorter than the limit, terminates immediately"*. It does not
+    terminate at all: `SearchQueryRetention.run` breaks on `deleted < batch`,
+    and `0 < 0` is false, so the drain re-opens a scope and re-issues
+    `DELETE ... LIMIT 0` forever. Measured 2026-09-07 against a three-row
+    fake -- 253,501 `prune` calls in 2.0 s with all three rows still present.
+
+    Both floors were **relaxed to `ge=0` and the whole suite stayed green**
+    when this was written, which is what this case is for. The default is
+    re-read afterwards so a floor that had been turned into a *clamp* -- a
+    `Field` that silently coerced rather than refused -- would not read as a
+    pass here.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    for name in ("USHER_SEARCH_QUERY_RETENTION_DAYS", "USHER_SEARCH_QUERY_RETENTION_BATCH"):
+        monkeypatch.setenv(name, "0")
+        with pytest.raises(ValidationError):
+            Settings()
+        monkeypatch.delenv(name)
+    # One above the floor is accepted, so the refusal above is a floor rather
+    # than a rejection of small numbers in general.
+    monkeypatch.setenv("USHER_SEARCH_QUERY_RETENTION_DAYS", "1")
+    monkeypatch.setenv("USHER_SEARCH_QUERY_RETENTION_BATCH", "1")
+    accepted = Settings()
+    assert (accepted.search_query_retention_days, accepted.search_query_retention_batch) == (1, 1)
+
+
 def test_every_setting_is_read_by_something(monkeypatch: pytest.MonkeyPatch) -> None:
     """`config.py`'s own comment: "none is a field that validates and then
     influences nothing". Asserted rather than trusted.

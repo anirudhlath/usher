@@ -101,9 +101,11 @@ surviving row**, and the *search path* writes it — not this job. After a prune
 it sits at the retention window's age and stays there, because rows keep ageing
 into the window from the other end. So under `now - last_done() >= period` the
 job is **due on every tick, forever**, for any period shorter than the window,
-and `period` decides nothing. Measured 2026-08-27 on the `m10c` clone: `min(at)`
-is **14 d 05 h old over 14,978 rows** — due against any period an operator would
-plausibly declare. It behaves only if `period` is pinned *exactly* to the
+and `period` decides nothing. Measured on the `m10c` clone and re-derived
+2026-09-07: `min(at)` is **14 d 04 h old over 14,978 rows** — due against any
+period an operator would plausibly declare. (This record said 14 d 05 h and
+`config.py` said 14 d 06 h; `max(at) - min(at)` on that clone is 14 d 04 h 11 m,
+and the three now agree.) It behaves only if `period` is pinned *exactly* to the
 retention window, and nothing said so: not this record, not PRD 08's table
 (which has no period column), not PRD 09.
 
@@ -255,10 +257,10 @@ relies on.
 - **The `last_done()` reads are not free, and they are priced below rather than
   in J4.** They run once per tick per job, forever, on a table that grows.
   ⚠️ **The two that exist are three orders of magnitude apart** — 71.1 ms for
-  the rebuild's `min(computed_at)` over a 756 MB table, 0.072 ms for
-  retention's `min(at)` through `ix_search_queries_at` — so the tick floor is
-  sized for the dearer one and a deployment that has only registered the cheap
-  one is nowhere near it.
+  the rebuild's `min(computed_at)` over a 756 MB table, 0.041 ms for
+  retention's `min(at)` through `ix_search_queries_at` (re-measured 2026-09-07;
+  see the evidence section) — so the tick floor is sized for the dearer one and
+  a deployment that has only registered the cheap one is nowhere near it.
 - [ADR-0020](0020-derived-state-carries-its-fingerprint.md) is **linked rather
   than contradicted.** `blend_fingerprint` is what makes the rebuild's
   *staleness* a query rather than an inference, and that is the mechanism a
@@ -313,10 +315,20 @@ search that would have found them:
   already shipped. Re-measured 2026-08-27 on the `m10c` clone — 14,978 rows,
   **140× the 107** the figure above was taken over —
   `EXPLAIN (ANALYZE, BUFFERS)` reads **`Index Only Scan using
-  ix_search_queries_at`, `Heap Fetches: 0`, 3 buffers**, and seven `\timing`
-  samples after a discarded warm-up give a median of **0.072 ms** (0.064–0.099).
-  **It is a steady-state figure after all**: the read is one descent to the
-  leftmost leaf, and 140× the rows at the same price is the demonstration.
+  ix_search_queries_at`**. **It is a steady-state figure after all**: the read
+  is one descent to the leftmost leaf, and 140× the rows at the same price is
+  the demonstration.
+
+  ⚠️ **The counters that reading gave — `Heap Fetches: 0`, 3 buffers, median
+  0.072 ms (0.064–0.099) — do not reproduce, and this is the third copy of them
+  to be corrected.** Re-measured 2026-09-07 on `usher_j2`, the same clone at the
+  same 14,978 rows: **`Heap Fetches: 1`, 4 buffers, median 0.041 ms**. The
+  obvious explanation — a page the visibility map does not mark all-visible —
+  was checked and is false (`relpages = relallvisible = 240`, `n_dead_tup = 0`),
+  so the counters are recorded as measured rather than explained;
+  `SearchQueryRepository.oldest`'s docstring carries the full reading. The
+  conclusion is unaffected in the direction that matters: the read got
+  *cheaper*, and it is still three orders of magnitude under the rebuild's.
 
 **The control that makes `count_stale`'s zero a real zero.** *"Zero stale is
 also what an empty table reports"* is this project's own recorded trap, so the

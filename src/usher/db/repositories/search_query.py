@@ -160,11 +160,18 @@ _RECORD_OUTCOME = text(
 # `SearchQueryRetention.last_done()` is built on it (ADR-0046: a job answers
 # "when were you last done" from the artefact it maintains), and
 # `ix_search_queries_at` -- `m10c`'s, added for the `DELETE` below -- makes it
-# an Index Only Scan of the leftmost leaf. Measured 2026-08-27 on a clone of
-# the live catalog at 14,978 rows: `Heap Fetches: 0`, **3 buffers**, median
-# **0.072 ms** over seven samples, which is the same figure ADR-0046 measured
-# over 107 rows. Constant in the table's size, which is what makes it a
+# an Index Only Scan of the leftmost leaf. Re-measured 2026-09-07 on `usher_j2`
+# at 14,978 rows: `Heap Fetches: 1`, **4 buffers**, median **0.041 ms** over
+# seven samples. Constant in the table's size, which is what makes it a
 # steady-state number rather than a small-table one.
+#
+# ⚠️ **This comment carried `Heap Fetches: 0`, 3 buffers and 0.072 ms until
+# 2026-09-07**, which is the figure `400eea3` had already corrected on
+# `SearchQueryRepository.oldest` -- the same measurement, written down twice,
+# and only one copy was updated. The port's docstring is the one that carries
+# the reasoning (including why the fetch count is 1 and why the obvious
+# explanation is false); this is a pointer to it rather than a second home for
+# it.
 _OLDEST_AT = text("SELECT min(at) FROM search_queries")
 
 # 🔴 **`<`, not `<=`**, and the port says why: a row answered at exactly the
