@@ -1,0 +1,37 @@
+name: Feature request
+description: Something Usher does not do yet
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Usher is `0.x` and single-maintainer. A request is read; it is not a
+        commitment. `docs/prd/09-roadmap.md` is what is actually planned.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem, not the solution
+      description: >
+        What are you trying to do, and what stops you? A request phrased as an
+        implementation hides the constraint that would decide the design.
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you are doing instead today
+      description: >
+        This is the field that separates a nice-to-have from a blocker, and it
+        is the one nobody volunteers.
+    validations:
+      required: true
+  - type: textarea
+    id: prior
+    attributes:
+      label: Anything in the docs that already covers it
+      description: >
+        `docs/prd/decisions/` records contested calls with their evidence. If
+        one of them already refused this, say so — reopening a settled call
+        with new evidence is welcome, and re-deriving it is not.
+    validations:
+      required: false

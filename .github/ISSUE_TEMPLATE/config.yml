@@ -1,0 +1,10 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/anirudhlath/usher/security/advisories/new
+    about: >
+      Private vulnerability reporting. Do not open a public issue — it is
+      disclosed the moment you press submit.
+  - name: How to contribute
+    url: https://github.com/anirudhlath/usher/blob/main/CONTRIBUTING.md
+    about: The gate, the conventions, and what a review will ask.
