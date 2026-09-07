@@ -5,6 +5,7 @@ That is the whole reason these are YAML forms.
 """
 
 import pathlib
+from typing import Any
 
 import yaml
 
@@ -16,7 +17,7 @@ _DIR = pathlib.Path(__file__).parents[2] / ".github" / "ISSUE_TEMPLATE"
 _CHOOSER = "config.yml"
 
 
-def _forms() -> dict[str, dict[str, object]]:
+def _forms() -> dict[str, dict[str, Any]]:
     return {
         path.name: yaml.safe_load(path.read_text())
         for path in sorted(_DIR.glob("*.yml"))
