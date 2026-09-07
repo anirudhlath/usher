@@ -216,7 +216,13 @@ does not exist. Written down so this is a deferral rather than a deletion —
 
 Neither is worth adding before the statement that reads it, and both should
 arrive with a measurement against a real ledger rather than against this
-paragraph. **Not indexed even then: `purpose` and `model`** — a deployment
+paragraph. ⚠️ **Both halves of that deferral are discharged and this paragraph
+is the M8 reading.** `m10c` created the two indexes verbatim, and M10's D3 gave
+the port `list_since` -- `WHERE at >= :since ORDER BY at`, which is
+`ix_llm_calls_at`'s own query -- so *"append-only with no read method at all"*
+describes this revision rather than the port, and the measurement asked for
+here is the one in `tests/integration/test_llm_call_repository.py`'s
+`_SEEDED_LEDGER_ROWS`. **Not indexed even then: `purpose` and `model`** — a deployment
 holds one or two values of each, so a btree over either is a structure with
 two entries, which is `title_embeddings.model_name`'s refusal one module over.
 

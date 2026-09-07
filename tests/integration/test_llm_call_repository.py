@@ -22,6 +22,8 @@ without a field on the model raises here rather than being silently dropped.
 """
 
 import uuid
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -34,13 +36,55 @@ from tests.contract.llm_call_repository_contract import (
     LLMCallRepositoryContract,
     llm_call,
 )
+from tests.integration.conftest import A_DECISIVE_MARGIN, Analyze, index_suspended, total_cost
 from usher.db.models.curation import LLMCallRow
-from usher.db.repositories.llm_call import PostgresLLMCallRepository
+from usher.db.repositories.llm_call import _LIST_SINCE_SQL, PostgresLLMCallRepository
 from usher.domain.curation import LLMCall
 from usher.domain.ids import new_id
 from usher.ports.errors import RepositoryConflict, UsherPortError
 
 _READ_ONE = "SELECT * FROM llm_calls WHERE id = CAST(:id AS uuid)"
+
+#: How many ledger rows the plan assertion seeds, and **the number is the
+#: assertion's premise rather than a convenience.**
+#:
+#: Measured 2026-09-07 on PostgreSQL 17.10 (`pgvector/pgvector:pg17`) at head
+#: `m10c`, seeding one row an hour and asking for the same 24-hour window the
+#: case uses, so **24 rows are selected whatever the table holds** and the only
+#: thing varying down the table is the relation's size. Each row is `EXPLAIN`
+#: of `_LIST_SINCE_SQL` with the index available against the same `EXPLAIN`
+#: with it suspended, so the ratio compares this index with the *best
+#: alternative* rather than with an assumption:
+#:
+#: | seeded rows | plan chosen | chosen | next best | ratio |
+#: |---|---|---|---|---|
+#: | 100   | `Seq Scan`   | 4.11 | 4.11   | **1.00** |
+#: | 300   | `Index Scan` | 8.63 | 10.11  | **1.17** |
+#: | 1,000 | `Index Scan` | 8.76 | 32.61  | 3.72 |
+#: | 2,000 | `Index Scan` | 8.76 | 63.61  | 7.26 |
+#: | 4,000 | `Index Scan` | 8.76 | 126.61 | 14.45 |
+#:
+#: 🔴 **The two bold rows are why this constant is 4,000 and not 300**,
+#: and the danger at a small size is subtler than "the planner picks the wrong
+#: plan". At 100 rows it picks `Seq Scan` and is *right* to -- the relation is
+#: a handful of pages, so an index scan pays for heap fetches without saving a
+#: read. But at 300 rows it already picks the index, so a case asserting only
+#: the plan's *name* would be **green there** -- on a margin of 1.17, which is
+#: a tie-break rather than a property of the schema. That is the shape of
+#: issue #79's two CI failures, and it is what `A_DECISIVE_MARGIN` (2.0)
+#: exists to fail on. 4,000 clears it seven times over.
+#:
+#: ⚠️ **The table above was measured against a *committed* relation**, and this
+#: case's seed lives in a transaction that is rolled back -- one more page, so
+#: the numbers here are near the table's rather than equal to them. Planted at
+#: 300 the same day, this case reads 8.63 against 11.11, **1.29x**: a different
+#: number and the identical verdict, which is why the assertion is on the
+#: margin and not on either figure.
+_SEEDED_LEDGER_ROWS = 4000
+
+#: One row an hour, back from the window, so the window's selectivity is a
+#: property of the fixture rather than of a clock.
+_LEDGER_ORIGIN = datetime(2026, 8, 5, 0, 0, tzinfo=UTC)
 
 
 class PostgresLLMCallLedger(LLMCallLedger):
@@ -313,3 +357,125 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
             {"id": call.id},
         )
         assert rendered.scalar_one() == "0.00000002"
+
+    async def test_the_windowed_read_is_served_by_the_time_index(
+        self,
+        repository: PostgresLLMCallRepository,
+        session: AsyncSession,
+        analyze: Analyze,
+    ) -> None:
+        """**`ix_llm_calls_at` earns its keep**, measured on the statement the
+        repository actually issues rather than on a transcription of it --
+        `_LIST_SINCE_SQL` is imported, not retyped.
+
+        `m08a` wrote this index out by name beside this exact predicate
+        (*"dashboard 5's 'LLM spend per day and month' and the cost-anomaly
+        alert, both `WHERE at >= :since`"*) and refused to ship it, because
+        *"an index nothing reads is `ix_titles_popularity` again"*. `m10c`
+        shipped it anyway, one revision ahead of any reader and saying so.
+        This case is the other end of that: the reader exists, and the planner
+        agrees the index is what serves it.
+
+        🔴 **The seeded size is the assertion's premise**, and
+        `_SEEDED_LEDGER_ROWS` carries the measured table that picked it. The
+        short version: at 100 rows the planner chooses a `Seq Scan` and is
+        *right* to; at 300 it chooses this index on a margin of **1.17**,
+        which is a tie-break wearing a measurement's clothes; at 4,000 the
+        margin is **14.45**. A case asserting only the plan's name would be
+        green at 300 and would be reporting tie-breaking order -- the shape of
+        issue #79's two CI failures. So this seeds one row an hour and asks for
+        a **24-hour** window: 24 rows of 4,000, **0.6%**, inside the ~1%
+        selectivity where a btree beats a scan, and the same arithmetic
+        `m10c`'s docstring uses for `ix_search_queries_at`.
+
+        **The margin is asserted rather than the winner's name alone.**
+        `index_suspended` hides `ix_llm_calls_at` and re-plans, so what is
+        compared is this index against the *best alternative* rather than
+        against an assumption -- `A_DECISIVE_MARGIN`'s docstring records the
+        two CI failures that taught this suite the difference.
+
+        **The runner-up is a `Sort` over a `Seq Scan`, which is worth
+        seeing**: with the index suspended Postgres has to sort for the
+        `ORDER BY at` it otherwise gets free from the index's own order. One
+        index serves both halves of this statement, which is why deleting the
+        `ORDER BY` would not even buy a cheaper plan.
+
+        **And the read is executed through the port afterwards.** A plan
+        measured against a statement nobody runs is a plan for a statement that
+        may not answer correctly; `test_the_newest_generation_costs_one_pass_
+        over_the_table` one module over takes the same care for the same
+        reason. The 24 rows are asserted, so a window that planned beautifully
+        and returned the wrong slice fails here rather than passing.
+        """
+        window_end = _LEDGER_ORIGIN
+        window_start = _LEDGER_ORIGIN - timedelta(hours=24)
+        await session.execute(
+            text(
+                "INSERT INTO llm_calls (id, at, model, purpose, tokens_in, tokens_out,"
+                " cost_usd, latency_ms, ok, error, generation_id) "
+                "SELECT gen_random_uuid(),"
+                "       CAST(:origin AS timestamptz) - make_interval(hours => hour),"
+                "       'fake:test-model', 'curation', 1200, 340, 0.0087, 4310,"
+                "       true, NULL, gen_random_uuid() "
+                "FROM generate_series(0, :rows - 1) AS hour"
+            ),
+            {"origin": _LEDGER_ORIGIN, "rows": _SEEDED_LEDGER_ROWS},
+        )
+        # Without statistics the planner sizes `llm_calls` off an empty
+        # `pg_class`, every candidate costs the same to four significant
+        # figures, and which one it names is decided by nothing this test
+        # controls. `analyze`'s own docstring records a case that failed 10
+        # runs of 10 for exactly that.
+        await analyze("llm_calls")
+        seeded = await session.execute(text("SELECT count(*) FROM llm_calls"))
+        assert seeded.scalar_one() == _SEEDED_LEDGER_ROWS, (
+            "the premise: the plan below is asserted at a size where the index can win"
+        )
+
+        parameters = {"since": window_start, "until": window_end}
+        plan = await _explain(session, parameters)
+        assert "Index Scan using ix_llm_calls_at" in plan, plan
+        # **And the plan's *property* beside its artefact's name**, which is the
+        # order `db-and-sql.md` puts them in: a name survives a later migration
+        # adding a second index over `at`, and it also survives both bounds
+        # arriving as a post-scan `Filter` on a scan the index only positioned
+        # by its lower half. What the index is for is *bounding* the read, so
+        # what is asserted is that both comparisons became the `Index Cond` and
+        # that nothing was left over to filter.
+        assert "Index Cond: ((at >= " in plan and "Filter:" not in plan, (
+            f"the window did not become this index's condition, so the scan is bounded by "
+            f"less than the caller asked for:\n{plan}"
+        )
+
+        async with index_suspended(session, "ix_llm_calls_at"):
+            runner_up = await _explain(session, parameters)
+        assert "ix_llm_calls_at" not in runner_up, (
+            f"the index was not actually suspended, so the comparison below measures "
+            f"nothing:\n{runner_up}"
+        )
+        assert total_cost(runner_up) > total_cost(plan) * A_DECISIVE_MARGIN, (
+            f"the time index wins by too little for this to be a property of the schema "
+            f"rather than of tie-breaking order -- the fixture is back below the scale at "
+            f"which the planner can tell the candidates apart, at "
+            f"{_SEEDED_LEDGER_ROWS} rows.\n"
+            f"chosen {total_cost(plan)}:\n{plan}\nnext best {total_cost(runner_up)}:\n{runner_up}"
+        )
+
+        found = await repository.list_since(window_start, until=window_end)
+        assert len(found) == 24, (
+            "the window that planned well returned the wrong slice, so the plan above was "
+            "measured against a statement that does not answer the question"
+        )
+        assert [call.at for call in found] == sorted(call.at for call in found)
+
+
+async def _explain(session: AsyncSession, parameters: Mapping[str, object]) -> str:
+    """`EXPLAIN` in **text** format, because `total_cost` reads the root
+    node's `(cost=start..total ` off the first line.
+
+    `EXPLAIN` without `ANALYZE`: what is asserted is the plan the planner
+    *chose*, and executing it would add runtime to a comparison whose whole
+    point is the estimate the two candidates were ranked on.
+    """
+    result = await session.execute(text("EXPLAIN " + _LIST_SINCE_SQL), parameters)
+    return "\n".join(str(row[0]) for row in result)

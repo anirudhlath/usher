@@ -252,12 +252,15 @@ def test_llm_calls_ships_the_two_indexes_m08a_wrote_down_and_no_others() -> None
     per generation per household per night — a write cost bounded by the
     curation cadence.
 
-    ⚠️ **They still have no reader in `src/`**: `LLMCallRepository` is
-    append-only with no read method, which
-    `test_the_cost_ledger_has_no_read_method` still asserts. That is not the
-    `ix_titles_popularity` failure repeating, because the constraint is a
-    different one -- M10 gets one migration, and a reader task authoring its
-    own DDL would be a second head.
+    **And they have a reader as of M10**: `LLMCallRepository.list_since` is
+    `WHERE at >= :since ORDER BY at`, which is `ix_llm_calls_at`'s own query,
+    so the refusal is discharged rather than only priced.
+    `test_the_cost_ledger_has_no_read_method` -- which asserted the absence and
+    named its own deletion as the exit condition -- retired in the commit that
+    added the read; `tests/unit/test_ports.py`'s parametrised entry now pins
+    `{"record", "list_since"}`. The index shipped one revision ahead of the
+    reader because M10 gets one migration and a reader task authoring its own
+    DDL would be a second head.
 
     A whole-set comparison, not "the two named ones are present": what this
     guards is a *third* index added on the strength of a sentence, and such an
