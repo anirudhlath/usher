@@ -1364,23 +1364,94 @@ under a request shows only that request's.
 LLM spend per day and month by model and purpose · tokens in/out · **cost per
 curated row** and **cost per play attributed to an LLM row** — the honest answer
 to whether the LLM earns its keep · embedding compute time · TMDb quota
-headroom · **the oldest cached TMDb payload against the 6-month cache ceiling**, a
-licensing-compliance panel given [ADR-0005](decisions/0005-bulk-bootstrap.md).
-⚠️ **This panel used to name `titles.enriched_at`, which is the wrong column
-and in the wrong direction:** that records when *Usher* enriched a title, not
-when the *payload* was cached, and the two diverge exactly when a title is
-enriched from an already-cached payload — the case the ceiling exists for. The
-series is `raw_payloads.fetched_at` (`ix_raw_payloads_fetched_at`,
-`db/models/sync.py:104-115`); `provider_cache_meta`, which an earlier draft of
-M10's spec reached for, does not exist and
-[ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)`:26`
-refused it by name ·
+headroom · **the oldest `raw_payloads.fetched_at` against the 6-month TMDb cache
+ceiling**, a licensing-compliance panel given
+[ADR-0005](decisions/0005-bulk-bootstrap.md) and specified in full below ·
 data freshness (age of last IMDb import and TMDb changes sync) · Postgres size
 by table with a disk-exhaustion projection.
+
+⚠️ **The cache-age panel used to name `titles.enriched_at`, which is the wrong
+column and wrong in the direction that matters:** `titles.enriched_at` records
+when *Usher* enriched a title, `raw_payloads.fetched_at` records when the
+*provider's response* was cached, and the two diverge exactly when a title is
+enriched from an already-cached payload — the case the ceiling exists for. A
+title enriched that way advances `enriched_at` and leaves `fetched_at` where it
+was, so a panel on `enriched_at` reports a freshness the cache does not have.
+The series is `raw_payloads.fetched_at`, served by `ix_raw_payloads_fetched_at`
+(`RawPayloadRow` in `db/models/sync.py`, whose index comment names this panel).
+`provider_cache_meta`, which PRD 02 once listed and an earlier draft of M10's
+spec reached for, **does not exist** —
+[ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md) refused
+it by name and no migration has ever created one.
+
+**The panel is three numbers and a threshold line, not one number.**
+`min(fetched_at)` alone is satisfied by a cache holding a single ancient row and
+answers nothing about how much of the cache is out of term, which is what a
+breach is measured in. It reads: **the oldest entry**, **the count of entries
+past the ceiling**, and **that count as a share of `count(*)`** — against a
+**threshold line** at `now() - interval '6 months'`. The single-number version
+is a **rejected design**, recorded here rather than in a plan because a plan is
+not what someone trimming a dashboard for time reads.
+
+⚠️ **Three targets rather than one statement, and that is a measurement.**
+`count(*)` over the whole cache has to read every row, so folding the three
+together costs the other two the index: measured 2026-09-07 at 133,501 payloads,
+separately they plan at 0.48, 4.46 and 4,813, and combined they collapse to one
+`Parallel Seq Scan` with `ix_raw_payloads_fetched_at` unused. Two of the three
+are index-served; the denominator cannot be, and no index on `fetched_at` alone
+would change that.
+
+```sql
+-- 1. the oldest entry, and the threshold line it is read against
+SELECT min(fetched_at) AS oldest_fetched_at,
+       now() - interval '6 months' AS ceiling
+FROM raw_payloads
+WHERE provider = 'tmdb';
+
+-- 2. how many entries are past the ceiling. `<`, never `<=`: TMDb's term is
+--    "no more than 6 months", so a payload cached exactly six months ago is
+--    still in term and counting it reports a breach that has not happened.
+SELECT count(*) AS past_ceiling
+FROM raw_payloads
+WHERE provider = 'tmdb'
+  AND fetched_at < now() - interval '6 months';
+
+-- 3. the denominator, and the count as a share of it. NULLIF guards the empty
+--    cache, where the honest answer is NULL and not a division by zero.
+SELECT count(*) AS cached,
+       count(*) FILTER (WHERE fetched_at < now() - interval '6 months')::numeric
+         / NULLIF(count(*), 0) AS past_ceiling_share
+FROM raw_payloads
+WHERE provider = 'tmdb';
+```
+
+⚠️ **Spell the ceiling `interval '6 months'` and never `interval '180 days'`.**
+Measured over the 1,461 days from 2026-01-01 to 2029-12-31, `now() - interval
+'180 days'` lands **1 to 4 days later** than `now() - interval '6 months'` and
+is never equal to it, so the respelling matches strictly *more* rows and
+over-reports the breach. It is wrong because it is not the term TMDb states —
+`'6 months'` is what the licence says — not because it flatters the number.
+`tests/integration/test_raw_payload_cache_age.py` executes the block above
+verbatim rather than a copy of it, so this specification and what D10's
+dashboard ships cannot drift.
 
 Data freshness is backed by real data as of M2: `import_runs.heartbeat_at`
 (updated every committed batch) and `finished_at` (set on completion or
 failure) are its source, one row per bulk dataset.
+
+✅ **The cache-age panel is backed by real data as of M4, and the first reading
+of the live cache says the obligation is being met.** `raw_payloads`, its
+`fetched_at` column and `ix_raw_payloads_fetched_at` all ship in
+`e5b8f2c40d17_ingest_pipeline`, so the series has had a writer since M4 —
+older than the panel that reads it. Measured on the live catalog **2026-09-07**:
+**133,501 cached payloads at 1,048 MB** (14 MB heap, 1,021 MB TOAST, 12 MB
+index), all of them `tmdb`; oldest `fetched_at` **2026-08-11 21:40:59+00**,
+which is **26.9 days** old; and **zero** entries past the ceiling under either
+spelling of it. That count is the denominator the share is taken over, and this
+is the first time anyone has looked. ⚠️ Quote the date with the number: M10's
+plan carries **129,131 / 995 MB** and `db/backup_manifest.py` carries **130,749
+rows / 995 MB** for the same table, both earlier readings of a cache that is
+still filling, and without their dates the three read as a contradiction.
 
 ✅ **Half of the LLM half is backed by real data as of M8, and the split is
 worth stating because these two panels sit in one sentence above.** *Spend by
