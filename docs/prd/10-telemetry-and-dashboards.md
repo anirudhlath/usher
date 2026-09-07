@@ -229,7 +229,12 @@ reason: renaming one empties a panel and splits a histogram across two series.
   of a read that did not answer is the worse of the two failures. **It is the
   only series that sees a job being retried**, because a failure spaces the
   next attempt (doubling, capped at the job's own period) and a job inside that
-  spacing is skipped before its artefact is read.
+  spacing is skipped before its artefact is read. ⚠️ **A `similar.rebuild` that
+  *refuses* is not among them.** J6's model guard returns rather than raising —
+  a deployment configured for the wrong embedding model has not failed at
+  anything it can retry — so the refusal shows up as a `duration` near zero and
+  a `due` that never falls, and nowhere else. The `ERROR` log line naming both
+  model names is the only place it is spelled out.
 - ⚠️ `usher.scheduler.job.due` is **fed from a synchronous snapshot, so it is
   stale but never wrong** — the same caveat `usher.jobs.queued` carries, and
   for the identical reason: an OTel observable callback runs on the metric

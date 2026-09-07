@@ -37,6 +37,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -81,6 +82,7 @@ from usher.services.curation_validate import (
     TITLE_KEY,
     DropReason,
 )
+from usher.services.similar import blend_fingerprint
 
 # The blend these arranged rows claim to have been computed under. A literal,
 # never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
@@ -1176,6 +1178,99 @@ async def test_similar_says_whether_the_neighbours_were_ever_computed(
     printed = capsys.readouterr().out
     assert "no neighbours for this title" in printed, printed
     assert "have ever been computed" not in printed, printed
+
+
+async def test_similar_with_no_arguments_reports_the_whole_tables_age_and_stale_count(
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #17's stated *"Done when"*, which is a **whole-table** line.
+
+    The issue asks for *"a count, a timestamp, or a `usher similar` line that
+    says how old the table is relative to the embedding population"*. The
+    per-title form above already printed two of those three facts about **one
+    title**, and there was no whole-table spelling of any of them -- so an
+    operator asking *"does this table need rebuilding"* had to pick a title id
+    at random and infer. Bare `usher similar` was a `parser.error` until M10's
+    J6.
+
+    **Three states, and the middle one is why the age line exists at all.** An
+    empty table and a fully current one both report **zero** stale rows, so a
+    command that printed only the count would say the same thing about a
+    deployment that has never run a rebuild and one that finished an hour ago.
+    ⚠️ That is this project's own recorded trap -- *"zero stale is also what an
+    empty table reports"* -- and here it is the command's shape rather than a
+    verdict's control.
+
+    **The age is asserted as a number, not as a substring.** The row below is
+    stamped five hours before now, so a line reading `5.0h` distinguishes the
+    shipped arithmetic from every plausible unit slip: seconds would print
+    18000, days 0.2, and either reads like a plausible operator line.
+    """
+    seed, other = _searchable("The Quiet Vacuum"), _searchable("Vane 4417")
+    await _seed_searchable(cli_settings, [seed, other])
+
+    await _similar(cli_settings, title_id=None, limit=5, rebuild=False)
+    empty = capsys.readouterr().out
+    assert "no neighbours have ever been computed" in empty, empty
+    # The premise, and it is the trap this case is built around: an empty table
+    # answers zero stale, so the sentence above has to be the one that fires.
+    assert "disagrees with the running blend" not in empty, empty
+
+    current = blend_fingerprint(embedding_model=cli_settings.embedding_model)
+    stamped = datetime.now(UTC) - timedelta(hours=5)
+    async with _session_for(cli_settings) as session:
+        pipeline = build_pipeline(session, settings=cli_settings)
+        await pipeline.neighbors.replace(
+            [seed.id],
+            [ScoredNeighbor(title_id=seed.id, neighbor_title_id=other.id, score=0.5, rank=0)],
+            blend_fingerprint=current,
+        )
+        await session.execute(text("UPDATE title_neighbors SET computed_at = :at"), {"at": stamped})
+        await session.commit()
+
+    await _similar(cli_settings, title_id=None, limit=5, rebuild=False)
+    fresh = capsys.readouterr().out
+    assert stamped.isoformat() in fresh, fresh
+    assert "5.0h old" in fresh, fresh
+    assert "no neighbour row disagrees with the running blend" in fresh, fresh
+
+    # One row under a blend that is not the running one. The age line stays --
+    # neither read subsumes the other -- and the count is the one that moves.
+    async with _session_for(cli_settings) as session:
+        pipeline = build_pipeline(session, settings=cli_settings)
+        await pipeline.neighbors.replace(
+            [other.id],
+            [ScoredNeighbor(title_id=other.id, neighbor_title_id=seed.id, score=0.5, rank=0)],
+            blend_fingerprint=_FP,
+        )
+        await session.commit()
+
+    await _similar(cli_settings, title_id=None, limit=5, rebuild=False)
+    stale = capsys.readouterr().out
+    assert "1 neighbour rows were computed under a different blend" in stale, stale
+    assert "no neighbour row disagrees" not in stale, stale
+    assert stamped.isoformat() in stale, stale
+
+
+async def test_the_whole_table_report_prints_and_never_logs(
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`cli._print_home_report`'s rule again, for the form M10 adds.
+
+    `test_every_search_command_prints_and_never_logs` above drives the
+    per-title form and cannot reach this one: the argumentless spelling was a
+    `parser.error` when that case was written, so the branch it now takes is
+    new surface. With `USHER_LOG_JSON=true` -- the default -- a report routed
+    through loguru is a JSON envelope wrapped around a sentence.
+    """
+    sink: list[str] = []
+    handler = logger.add(sink.append, level="DEBUG")
+    try:
+        await _similar(cli_settings, title_id=None, limit=5, rebuild=False)
+    finally:
+        logger.remove(handler)
+    assert capsys.readouterr().out, "the whole-table report printed nothing at all"
+    assert sink == [], f"the whole-table report logged instead of printing: {sink}"
 
 
 async def test_home_composes_a_screen_against_an_empty_database(

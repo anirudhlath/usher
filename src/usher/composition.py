@@ -183,7 +183,12 @@ from usher.services.scheduler import (
     SearchQueryScope,
 )
 from usher.services.search import SearchAnalytics, SearchService
-from usher.services.similar import SimilarityService, blend_fingerprint
+from usher.services.similar import (
+    NeighborRebuildJob,
+    SimilarityScope,
+    SimilarityService,
+    blend_fingerprint,
+)
 from usher.services.taste import TasteService
 from usher.services.watch_sync import WatchStateSyncService
 from usher.telemetry import QueueSnapshot, SearchSnapshot
@@ -1058,14 +1063,64 @@ def search_query_scope(sessions: async_sessionmaker[AsyncSession]) -> SearchQuer
     return open
 
 
+def similarity_scope(
+    sessions: async_sessionmaker[AsyncSession], settings: Settings
+) -> SimilarityScope:
+    """One session, one `SimilarityService`, **committing nothing on exit**.
+
+    `search_query_scope`'s shape one service wide, and for its reasons:
+    returned as a callable so `usher.services` reaches a database without
+    importing SQLAlchemy, and opened per use so a lane that ticks for weeks
+    never holds a session idle in transaction on a snapshot from whenever the
+    scheduler started.
+
+    🔴 **No commit here, and that is the difference from the retention
+    scope.** `SimilarityService` is handed the session's own `commit` and calls
+    it **per page** -- that is where *"an interrupted walk keeps the pages it
+    finished"* comes from, and it is what `NeighborRebuildJob`'s resume cursor
+    then reads back. A commit at scope exit would land after the last page had
+    already committed, and `last_done()`'s scope issues one `SELECT`.
+
+    Deliberately **not** `unit_of_work`: that builds a whole `Pipeline` --
+    twenty-odd repositories, two suggest indexes, an embedder -- and would put
+    a source-gate registry and a metadata provider behind a batch that reads
+    stored vectors. Three repositories is the whole of what this needs, and
+    `embedding_model` is a *name* rather than an `Embedder` precisely so a
+    scheduler process loads no model (`SimilarityService.__init__`).
+    """
+
+    @asynccontextmanager
+    async def open() -> AsyncIterator[SimilarityService]:
+        async with sessions() as session:
+            yield SimilarityService(
+                PostgresTitleEmbeddingRepository(session),
+                PostgresTitleNeighborRepository(session),
+                PostgresTitleRepository(session),
+                session.commit,
+                embedding_model=settings.embedding_model,
+            )
+
+    return open
+
+
 def build_scheduler(
     settings: Settings, *, sessions: async_sessionmaker[AsyncSession] | None
 ) -> Scheduler:
-    """The scheduled-work loop and its registry (ADR-0046, M10 J4 and J5).
+    """The scheduled-work loop and its registry (ADR-0046, M10 J4, J5 and J6).
 
-    **One registration: `search_queries` retention.** The neighbour rebuild is
-    J6 and is not here yet, so this function is still the one place a reader
-    can see what a deployment will actually run.
+    **Two registrations: `search_queries` retention and the neighbour
+    rebuild.** This function is the one place a reader can see what a
+    deployment will actually run, and ADR-0046's own consequence list says the
+    *third* registration is the test of that record -- both of these read a
+    completion time off an artefact they maintain, and a job whose work is a
+    side effect could not.
+
+    **Retention first, and the order is the order a tick runs them in.**
+    `Scheduler.tick` walks the registry in registration order and runs due jobs
+    sequentially, so a tick that finds both due spends 0.072 ms plus one chunk
+    on the prune before it starts a walk measured in hours. The reverse order
+    would leave the cheap job waiting behind the dear one for the length of the
+    rebuild.
 
     ⚠️ **`sessions=None` is an explicit "this process cannot reach a
     database", not a default**, which is why it has no default value: a
@@ -1090,6 +1145,16 @@ def build_scheduler(
                 window=timedelta(days=settings.search_query_retention_days),
                 batch=settings.search_query_retention_batch,
                 period=RETENTION_PERIOD,
+            )
+        )
+        scheduler.register(
+            NeighborRebuildJob(
+                similarity_scope(sessions, settings),
+                # Hours off the setting rather than a constant, because the
+                # number this period has to clear is the walk's own duration
+                # and that is a function of catalog size. `config.py` carries
+                # the arithmetic and the measurement.
+                period=timedelta(hours=settings.similar_rebuild_period_hours),
             )
         )
     return scheduler

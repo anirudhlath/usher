@@ -37,26 +37,31 @@ is due again on the very next tick and retries at the tick rate forever. See
 restarts from page one does not converge however far apart the attempts are,
 and resumption belongs to the registration.
 
-**The registry shipped empty for one commit and holds one job now.**
-`SearchQueryRetention` below is M10's J5, registered by
-`composition.build_scheduler`; the neighbour rebuild is J6 and is still
-outstanding. An empty registry remains a **legal** state rather than an
-unfinished one -- a composition root with no way to reach a database builds
-one -- and a tick over zero jobs logs **once**, not once per tick, because a
-line every five minutes forever is the shape an operator mutes and then never
-sees the real one.
+**The registry shipped empty for one commit and holds two jobs now.**
+`SearchQueryRetention` below is M10's J5 and
+`usher.services.similar.NeighborRebuildJob` is J6; `composition.
+build_scheduler` registers both, retention first, so a tick that finds both
+due spends a chunk on the prune before starting a walk measured in hours. An
+empty registry remains a **legal** state rather than an unfinished one -- a
+composition root with no way to reach a database builds one -- and a tick over
+zero jobs logs **once**, not once per tick, because a line every five minutes
+forever is the shape an operator mutes and then never sees the real one.
 
-**The one registration lives here rather than in a module of its own**, which
-is what J5's own file list asked for and is the right call for a second
-reason: `ScheduledJob` is four methods, the job is thirty lines, and the
-argument it exists to carry -- what a `last_done()` may be read off -- is the
-argument this module's loop is built on. A third registration is where that
-stops being true.
+**One registration lives here and one does not, and the split is the rule
+rather than the exception.** `SearchQueryRetention` is here because it has no
+service of its own: it is thirty lines over one repository, and the argument it
+exists to carry -- what a `last_done()` may be read off -- is the argument this
+module's loop is built on. J6's belongs beside `SimilarityService`, because the
+batch, the blend fingerprint and the resume cursor its `run()` needs are all
+that module's, and importing them here would put `usher.services.similar` into
+a module whose whole claim is that it reaches nothing but `usher.ports`. **The
+rule is that a registration lives with the artefact it maintains**, and
+retention is the case where that is this file.
 
 **This module imports `usher.ports` and stdlib and nothing else from this
-project**, which is what keeps it inside contracts 1-3 without a contract of
-its own: `usher.services` reaching `usher.db` or `usher.adapters` breaks two
-contracts that report indirect chains by default. That is also why
+project, J6's registration included**, which is what keeps it inside contracts
+1-3 without a contract of its own: `usher.services` reaching `usher.db` or
+`usher.adapters` breaks two contracts that report indirect chains by default. That is also why
 `SearchQueryScope` is a callable returning a context manager rather than a
 session factory -- `composition.UnitOfWork`'s shape, for
 `composition.UnitOfWork`'s reason. The two instruments below are

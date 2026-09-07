@@ -20,10 +20,12 @@ scans this file.
 
 import math
 import uuid
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
+from datetime import timedelta
 
 import pytest
+from loguru import logger
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,8 +39,8 @@ from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.title import Title
-from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
-from usher.services.similar import SimilarityService
+from usher.ports.repository import NeighborSeed, ScoredNeighbor, TitleEmbeddingUpsert
+from usher.services.similar import NeighborRebuildJob, SimilarityService
 
 # The blend these arranged rows claim to have been computed under. A literal,
 # never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
@@ -726,3 +728,345 @@ async def test_the_genome_join_does_not_run_inside_the_no_index_bracket(
     all. Fails the moment someone follows the plan's text.
     """
     assert "genome_scores" not in _NEAREST
+
+
+# -- the resume cursor and the model guard (M10 J6) -------------------------
+
+# ⚠️ **The guard's case runs before the cursor's, and the order is load
+# bearing.** A deployment mid-model-swap has a mixed `title_embeddings`, so the
+# refusal fires and the cursor is never read -- correct, and also why a green
+# cursor case placed first could be green because nothing ran at all.
+
+
+@pytest.fixture
+def lines() -> Iterator[list[str]]:
+    captured: list[str] = []
+    sink = logger.add(captured.append, level="DEBUG", format="{level.name}|{message}")
+    yield captured
+    logger.remove(sink)
+
+
+def _rebuild_job(service: SimilarityService) -> NeighborRebuildJob:
+    @asynccontextmanager
+    async def scope() -> AsyncIterator[SimilarityService]:
+        yield service
+
+    return NeighborRebuildJob(scope, period=timedelta(hours=24))
+
+
+@pytest.mark.integration
+async def test_the_scheduled_rebuild_refuses_a_table_written_by_another_model(
+    session: AsyncSession, lines: list[str]
+) -> None:
+    """🔴 **The registration refuses a mixed table, and refusing means writing
+    nothing.**
+
+    `blend_fingerprint` hashes the **configured** model and `nearest_for` does
+    not filter by `model_name`, so a scheduler started with the wrong
+    `USHER_EMBEDDING_MODEL` finds every row stale, walks for hours, draws its
+    pools from one embedding space and stamps them with the other's
+    fingerprint. On the catalog this project measures that is the *default*
+    configuration: `Settings.embedding_model` is
+    `fastembed:BAAI/bge-large-en-v1.5` and every stored vector is
+    `openai:BAAI/bge-m3` (133,364 rows, measured 2026-09-07).
+
+    **Asserted on the table, not on the log.** "It logged" is satisfied by a
+    job that logged and then ran anyway, which is the whole failure -- so the
+    row count is the assertion and the log line is checked for *both* names
+    beside it, because a message naming only one is not actionable.
+
+    **`last_done()` is unchanged**, so nothing is recorded as done and the
+    refusal is not mistaken for a completion. It refuses without raising:
+    a raise would be counted on `usher.scheduler.job.failures` and would set
+    the retry backoff doubling, and neither describes a deployment that is
+    simply configured for the wrong model.
+
+    The positive control is the second half: the identical arrangement with the
+    configured model *matching* writes rows. Without it a guard that refused
+    unconditionally -- or a fixture with no seeds at all -- would pass.
+    """
+    ids = []
+    for index in range(3):
+        _, vector = planted_pair(0.3 * (index + 1))
+        ids.append(await _seed(session, vector=vector, genres=("drama",)))
+    await session.flush()
+
+    async def commit() -> None:
+        await session.flush()
+
+    other_model = "fake:some-other-checkpoint"
+    assert other_model != _MODEL
+    mismatched = SimilarityService(
+        PostgresTitleEmbeddingRepository(session),
+        PostgresTitleNeighborRepository(session),
+        PostgresTitleRepository(session),
+        commit,
+        embedding_model=other_model,
+    )
+    before = await mismatched.computed_at()
+
+    await _rebuild_job(mismatched).run()
+
+    written = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
+    assert written == 0, "the guard logged and then rebuilt anyway"
+    assert await mismatched.computed_at() == before
+    refusals = [line for line in lines if line.startswith("ERROR|")]
+    assert len(refusals) == 1
+    assert other_model in refusals[0]
+    assert _MODEL in refusals[0]
+
+    # The control: same rows, same job, a service that agrees with the table.
+    await _rebuild_job(_service(session)).run()
+
+    agreed = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
+    assert agreed == len(ids) * (len(ids) - 1), (
+        "the matching arm wrote nothing, so the refusal above proves nothing"
+    )
+
+
+class _RecordingEmbeddings(PostgresTitleEmbeddingRepository):
+    """The real repository, recording every `list_embedded` cursor it is given.
+
+    A subclass rather than a delegating double: the case is about *which*
+    `after` the walk starts from, and every other statement it issues has to
+    be the shipped one against the shipped table. A stand-in implementing the
+    whole port would let a resume that read a different population pass.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session)
+        self.calls: list[uuid.UUID | None] = []
+
+    async def list_embedded(
+        self, *, after: uuid.UUID | None = None, limit: int = 500
+    ) -> list[NeighborSeed]:
+        self.calls.append(after)
+        return await super().list_embedded(after=after, limit=limit)
+
+
+@pytest.mark.integration
+async def test_a_resumed_rebuild_starts_at_the_first_seed_without_a_current_fingerprint(
+    session: AsyncSession,
+) -> None:
+    """`rebuild(resume=True)` computes its start cursor once, from the artefact.
+
+    **The failure this closes is a walk that restarts rather than resumes.**
+    `rebuild`'s keyset begins at `after = None` on every run, so an
+    interruption at 3.2 hours of a 3.58-hour walk redoes 3.2 hours -- and a
+    process restarted more often than the walk takes never reaches the end of
+    the catalog. The fix stores nothing: the cursor is derived from the rows
+    that are already there.
+
+    **A starting offset, computed once -- not a loop predicate.** The loop
+    still advances on `id` and still ends when `list_embedded` returns empty,
+    so a seed the rebuild cannot clear is re-attempted once per run rather
+    than looped on forever. That is the distinction `rebuild`'s docstring
+    argues the other side of.
+
+    **Two positive controls, and both are load-bearing.** A `max_seeds` that
+    wrote nothing would satisfy "the resume started later" trivially, so the
+    first run's two seeds are asserted in the table rather than in the report
+    alone; and a wrapper that recorded no call at all would make the cursor
+    assertion vacuous, so `calls` is asserted non-empty before it is indexed.
+    """
+    ids = []
+    for index in range(6):
+        _, vector = planted_pair(0.2 * (index + 1))
+        ids.append(await _seed(session, vector=vector, genres=("drama",)))
+    await session.flush()
+    # The premise: `new_id()` is UUIDv7, so insertion order and id order agree
+    # and "the second seed" is a statement about both. A case that assumed it
+    # would still read green against a walk that visited them in another order.
+    assert ids == sorted(ids)
+
+    capped = await _service(session).rebuild(max_seeds=2)
+
+    assert capped.seeds == 2
+    stamped = (
+        (await session.execute(text("SELECT DISTINCT title_id FROM title_neighbors")))
+        .scalars()
+        .all()
+    )
+    assert sorted(stamped) == ids[:2], (
+        "the capped run wrote no rows, so a resume starting anywhere would pass"
+    )
+
+    embeddings = _RecordingEmbeddings(session)
+
+    async def commit() -> None:
+        await session.flush()
+
+    resumed = SimilarityService(
+        embeddings,
+        PostgresTitleNeighborRepository(session),
+        PostgresTitleRepository(session),
+        commit,
+        embedding_model=_MODEL,
+    )
+    await resumed.rebuild(resume=True)
+
+    assert embeddings.calls, "the rebuild issued no page read"
+    assert embeddings.calls[0] == ids[1]
+
+
+async def _written_rows(session: AsyncSession) -> list[tuple[uuid.UUID, uuid.UUID, float, int]]:
+    """Every neighbour row, without `computed_at`. A clock moves between two
+    runs and is the one column a byte-for-byte comparison cannot include."""
+    result = await session.execute(
+        text(
+            "SELECT title_id, neighbor_id, score, rank FROM title_neighbors "
+            "ORDER BY title_id, neighbor_id"
+        )
+    )
+    return [(row[0], row[1], row[2], row[3]) for row in result.all()]
+
+
+@pytest.mark.integration
+async def test_a_rebuild_with_no_argument_walks_exactly_as_a_resumed_one_over_a_stale_table(
+    session: AsyncSession,
+) -> None:
+    """`rebuild()` is unchanged, and `resume=True` over a fully-stale table is
+    the same walk rather than a different one.
+
+    **The regression this closes is the one a new keyword argument invites**:
+    a default that is not today's behaviour. Both forms run here over a table
+    where nothing carries the running fingerprint, and both the *page cursors*
+    and the *written rows* are compared -- the cursors because that is where
+    `resume=True` can differ at all, and the rows because a walk that read the
+    same pages and blended them differently would pass a cursor-only check.
+
+    ⚠️ **A fully-stale table is also the second spelling of the cursor's
+    `None`.** The first embedded seed carries no current row, so there is
+    nothing before it to resume from, and the honest answer is a walk from the
+    start -- the same answer an all-current table gives, for a different
+    reason. A cursor that answered the *uncovered seed itself* rather than its
+    predecessor would skip the first seed here, and the row comparison is what
+    sees it.
+
+    `computed_at` is excluded from the comparison and nothing else is: it is a
+    clock reading, and the two runs are seconds apart by construction.
+    """
+    ids = []
+    for index in range(4):
+        _, vector = planted_pair(0.2 * (index + 1))
+        ids.append(await _seed(session, vector=vector, genres=("drama",)))
+    await session.flush()
+
+    async def commit() -> None:
+        await session.flush()
+
+    def _service_over(embeddings: PostgresTitleEmbeddingRepository) -> SimilarityService:
+        return SimilarityService(
+            embeddings,
+            PostgresTitleNeighborRepository(session),
+            PostgresTitleRepository(session),
+            commit,
+            embedding_model=_MODEL,
+        )
+
+    plain_reads = _RecordingEmbeddings(session)
+    plain = await _service_over(plain_reads).rebuild()
+    plain_rows = await _written_rows(session)
+
+    # The positive control, and it is the whole case's premise: a walk that
+    # wrote nothing would make every comparison below vacuously true.
+    assert plain.seeds == len(ids)
+    assert plain_rows, "the unresumed walk wrote no rows at all"
+    assert plain_reads.calls, "the unresumed walk issued no page read"
+
+    # Back to fully stale, so the second run meets the same table the first did.
+    await session.execute(text("DELETE FROM title_neighbors"))
+    await session.flush()
+
+    resumed_reads = _RecordingEmbeddings(session)
+    resumed = await _service_over(resumed_reads).rebuild(resume=True)
+
+    assert resumed_reads.calls == plain_reads.calls
+    assert resumed_reads.calls[0] is None, "a fully-stale table has nothing to resume after"
+    assert await _written_rows(session) == plain_rows
+    assert resumed == plain
+
+
+@pytest.mark.integration
+async def test_a_refusal_written_under_another_model_does_not_block_the_rebuild(
+    session: AsyncSession, lines: list[str]
+) -> None:
+    """The guard's population is the rows that **have a vector**, which is the
+    population `list_embedded` walks.
+
+    A title whose document was degenerate is stored as a `title_embeddings` row
+    with a NULL embedding and whatever model name the deployment carried when
+    it was refused. It is never a seed and it names no vector a pool can be
+    drawn from, so a guard scoped to the whole table would refuse a rebuild
+    over a perfectly uniform set of readable vectors because an *unreadable*
+    row disagreed -- and would do it on any deployment that has ever changed
+    model, which is every deployment the guard exists for.
+
+    The refusal is arranged under a model this service is not configured with,
+    so `stored_model_names` scoped to the whole table answers two names and
+    scoped to the readable rows answers one.
+    """
+    ids = []
+    for index in range(3):
+        _, vector = planted_pair(0.3 * (index + 1))
+        ids.append(await _seed(session, vector=vector, genres=("drama",)))
+    refused = await _seed(session, vector=None)
+    await session.execute(
+        text("UPDATE title_embeddings SET model_name = :name WHERE title_id = :id"),
+        {"name": "fake:some-other-checkpoint", "id": refused},
+    )
+    await session.flush()
+
+    service = _service(session)
+    assert await service.foreign_embedding_models() == ()
+
+    await _rebuild_job(service).run()
+
+    written = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
+    assert written == len(ids) * (len(ids) - 1), "the refused row's model name refused the walk"
+    assert [line for line in lines if line.startswith("ERROR|")] == []
+
+
+@pytest.mark.integration
+async def test_an_unresumed_rebuild_still_starts_at_page_one_over_a_half_stamped_table(
+    session: AsyncSession,
+) -> None:
+    """The default is the *old* behaviour, on the one table where the two
+    differ.
+
+    ⚠️ **A fully-stale table cannot see this.** There the cursor is `None`
+    anyway, so a `resume` that had quietly become the default would walk
+    identically and the byte-for-byte case above would stay green. The state
+    that separates them is the half-stamped one `max_seeds` produces: a
+    resumed run starts after the capped prefix, and an unresumed one must
+    still start at the beginning.
+
+    That is a claim about who decides. `usher similar --rebuild` is an
+    operator asking for a full walk and `--resume` is them asking for less;
+    the registration is what always resumes, because a timer has nobody to
+    ask.
+    """
+    ids = []
+    for index in range(4):
+        _, vector = planted_pair(0.2 * (index + 1))
+        ids.append(await _seed(session, vector=vector, genres=("drama",)))
+    await session.flush()
+    assert ids == sorted(ids)
+
+    capped = await _service(session).rebuild(max_seeds=2)
+    assert capped.seeds == 2, "nothing was stamped, so 'unresumed' has nothing to differ from"
+
+    async def commit() -> None:
+        await session.flush()
+
+    reads = _RecordingEmbeddings(session)
+    await SimilarityService(
+        reads,
+        PostgresTitleNeighborRepository(session),
+        PostgresTitleRepository(session),
+        commit,
+        embedding_model=_MODEL,
+    ).rebuild()
+
+    assert reads.calls, "the rebuild issued no page read"
+    assert reads.calls[0] is None

@@ -220,9 +220,9 @@ relies on.
   be described as making the artefact complete.
 - 🔴 **A *failed* run is indistinguishable from one that never ran, and that is
   the sharpest price this design pays.** `SimilarityService.rebuild` deletes and
-  re-inserts per page and has **no resume**
+  re-inserts per page and had **no resume**
   (`after: uuid.UUID | None = None` at the top of the walk), so a run that dies
-  at 60% leaves `min(computed_at)` exactly where it was: still due next tick,
+  at 60% left `min(computed_at)` exactly where it was: still due next tick,
   restarted from page one, forever, with nothing anywhere recording that it
   failed. *"A failing job does not stop the loop"* is satisfied by a loop that
   also never makes progress. J4's `Scheduler._back_off` bounds the retry
@@ -230,6 +230,18 @@ relies on.
   docstring says that bounds the cost and not the convergence. **Resumption
   belongs to the registration**, which is why `ScheduledJob.run` obliges an
   implementation to be safely re-runnable rather than assuming it.
+  ✅ **J6 paid that price and stored nothing to do it.** `rebuild(resume=True)`
+  reads its start cursor **off the artefact**, once per run, before the first
+  page: the embedded seed just below the lowest one carrying no `title_neighbors`
+  row stamped with the running blend. So the second half of the bullet stands
+  and the first half is closed for this registration — a failed run is still
+  indistinguishable from one that never ran, and the *work* it did survives
+  anyway. ⚠️ **It buys convergence after an interruption, not completeness.**
+  The uncovered seeds form a contiguous prefix only after an interrupted walk;
+  a title embedded since the last complete one lands wherever its UUIDv7 id
+  already sits, so on a table that finished, the cursor is usually early and
+  the resumed run is a near-full walk. That is the undecidable half of
+  staleness, which no cursor was ever going to close.
 - **A period is a minimum interval since last completion, not a wall-clock
   schedule.** *"Every night at 3am"* is not expressible and is not offered. An
   operator who wants that runs `usher schedule --once` from their own cron,

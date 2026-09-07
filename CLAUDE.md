@@ -224,17 +224,23 @@ uv run usher push --source "..." | --probe
 uv run usher index [--backfill]                 # search-index freshness
 uv run usher search "..." | suggest "..." --limit 5
 uv run usher eval [suggest --full]              # --full enforces bars, writes the ledger
-uv run usher similar <id> | --rebuild
+uv run usher similar [<id>] [--rebuild [--resume] [--max-seeds N]]
 uv run usher derive | genres [--backfill] | home | curate
 uv sync --extra embedding                       # optional: fastembed, 167 MiB, no torch
 ```
 
 - **`--phase all` does not dispatch every member**, and `ratings` is an alias
   rather than a step (ADR-0040).
-- **Nothing runs `usher similar --rebuild` for you** — the one freshness gap in
-  the project. A title's neighbours go stale when some *other* title gets an
-  embedding, which no per-row predicate can decide. Operator command or cron,
-  after `usher index --backfill`.
+- **`usher similar --rebuild` is *schedulable*, not automatic.** M10's J6
+  registers it as `similar.rebuild` on `USHER_SIMILAR_REBUILD_PERIOD_HOURS`
+  (24 h), behind `USHER_SCHEDULER_ENABLED=false` — so nothing runs it for you
+  unless you opt in, and operator command or cron after `usher index
+  --backfill` is still the shipped path. The registered job **refuses** when
+  `USHER_EMBEDDING_MODEL` disagrees with what `title_embeddings.model_name`
+  holds, and always resumes. **The undecidable half of staleness survives all
+  of it**: a title's neighbours go stale when some *other* title gets an
+  embedding, which no per-row predicate can decide. Bare `usher similar`
+  prints the table's age and stale count.
 
 ### Scripts that are not tests, and live runs
 

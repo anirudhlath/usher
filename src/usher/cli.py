@@ -1419,10 +1419,71 @@ async def _eval(
     raise SystemExit(exit_code_for(report.verdict))
 
 
+async def _similar_status(pipeline: Pipeline) -> None:
+    """The whole-table half of issue #17's *"staleness is at least
+    observable"*: how old `title_neighbors` is, and how much of it was computed
+    under a different blend.
+
+    **Two facts, and they answer different questions** -- the port says so and
+    this command is where an operator meets it. `computed_at()` is
+    `min(computed_at)`, the **oldest** stored row, so it is an upper bound on
+    the artefact's freshness and covers the half of staleness no per-row
+    predicate can decide: a title's neighbours go stale when some *other* title
+    is embedded. `stale_neighbors()` is exact and covers the other half, rows
+    whose blend fingerprint is not the running one. **Neither subsumes the
+    other, and a zero from the second is not a fresh table.**
+
+    ⚠️ **Zero stale is also what an empty table reports**, which is why the age
+    line comes first and says *never* rather than printing nothing: on a
+    deployment where `m09e` emptied the table, "0 stale" and "3.3M rows, all
+    current" are the same two characters.
+
+    **What this deliberately does not print: how many embedded titles have no
+    neighbour row at all.** That is a real number -- 922 of 133,364 on the
+    catalog this project measures, 2026-09-07 -- and it is invisible to both
+    reads here, because a missing row has no fingerprint to disagree and no
+    timestamp to be old. It needs a count neither port offers, and inventing
+    one here would put a third definition of "stale" in front of an operator.
+    ADR-0046 records the same gap: a scheduler that is on does not make the
+    artefact complete.
+    """
+    computed_at = await pipeline.similar.computed_at()
+    if computed_at is None:
+        print("no neighbours have ever been computed -- run `usher similar --rebuild`")
+    else:
+        age = datetime.now(UTC) - computed_at
+        # Hours, because the walk is measured in hours and a period is too. A
+        # day-resolution line cannot distinguish "finished an hour ago" from
+        # "finished this morning", which is the comparison an operator makes.
+        print(
+            f"neighbour table's oldest row: {computed_at.isoformat()} "
+            f"({age.total_seconds() / 3600:.1f}h old)"
+        )
+    stale = await pipeline.similar.stale_neighbors()
+    if stale:
+        print(f"{stale} neighbour rows were computed under a different blend -- rebuild to clear")
+    elif computed_at is not None:
+        print("no neighbour row disagrees with the running blend")
+
+
 async def _similar(
-    settings: Settings, *, title_id: uuid.UUID | None, limit: int, rebuild: bool
+    settings: Settings,
+    *,
+    title_id: uuid.UUID | None,
+    limit: int,
+    rebuild: bool,
+    resume: bool = False,
+    max_seeds: int | None = None,
 ) -> None:
-    """Read one title's precomputed neighbours, or recompute the whole table.
+    """Report the table's age, read one title's neighbours, or recompute it.
+
+    **Three forms, and the argumentless one is M10's.** `usher similar` with
+    nothing after it answers issue #17's *"staleness is at least observable --
+    a count, a timestamp, or a `usher similar` line that says how old the table
+    is relative to the embedding population"*. The per-title form below already
+    printed two of those three facts and there was no whole-table spelling of
+    any of them, so an operator asking *"does this table need rebuilding"* had
+    to pick a title id at random and infer.
 
     **No model is loaded in either form**, and that is a property of the
     design rather than an optimisation: the rebuild reads stored vectors and
@@ -1442,12 +1503,22 @@ async def _similar(
     re-runs this.** It is an operator's command or a cron entry, run after
     `usher index --backfill`. PRD 06's "TTL: hours" is a statement about how
     long M7 may cache what it read, not a promise that this table is hours
-    fresh.
+    fresh. ⚠️ **M10's J6 makes it *schedulable* and still not automatic** --
+    `similar.rebuild` runs this same batch on a period, behind
+    `USHER_SCHEDULER_ENABLED`, which is `false` by default. A deployment that
+    has not opted in is exactly where M6 left it, which is why the paragraph
+    above stands rather than being struck out.
+
+    **`--resume` and `--max-seeds` are arguments to the walk and are refused
+    without `--rebuild`**, accepted-and-ignored being the failure that matters:
+    an operator who typed `--max-seeds 100` and got a report would believe
+    they had capped a run that never started. The scheduled registration
+    always resumes; an operator chooses.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if rebuild:
-            report = await pipeline.similar.rebuild()
+            report = await pipeline.similar.rebuild(resume=resume, max_seeds=max_seeds)
             print(f"rebuilt {report.seeds} seeds, wrote {report.rows} neighbour rows")
             # **The genome's coverage, with its denominators, printed by the
             # path that reads the vectors.** PRD 05 promised "~7%" since
@@ -1492,8 +1563,12 @@ async def _similar(
                 )
             return
 
-        if title_id is None:  # pragma: no cover - `parse_args` refuses this
-            raise SystemExit("give a title id, or --rebuild, but not both")
+        if title_id is None:
+            # The whole-table form. After the rebuild branch above, `None`
+            # here can only mean "no arguments at all", which `parse_args`
+            # now allows and used to refuse.
+            await _similar_status(pipeline)
+            return
         rows = await pipeline.similar.neighbors_of(title_id, limit=limit)
         for row in rows:
             year = f" ({row.year})" if row.year else ""
@@ -2766,7 +2841,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="cases per surface in quick mode; ignored with --full",
     )
 
-    similar = sub.add_parser("similar", help="titles like this one, or rebuild the table")
+    similar = sub.add_parser(
+        "similar", help="how old the neighbour table is, one title's neighbours, or a rebuild"
+    )
     # Optional because `--rebuild` is the write form of the same command. Two
     # subcommands for one artefact is how `usher index` and its backfill would
     # have drifted; the cross-argument rule in `parse_args` is what argparse
@@ -2777,6 +2854,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--rebuild",
         action="store_true",
         help="recompute title_neighbors for the whole embedded population",
+    )
+    similar.add_argument(
+        "--resume",
+        action="store_true",
+        help="with --rebuild: start after the last seed already stamped with the running blend",
+    )
+    similar.add_argument(
+        "--max-seeds",
+        type=int,
+        default=None,
+        help="with --rebuild: stop after this many seeds; the rest stay stale for --resume",
     )
 
     home = sub.add_parser("home", help="compose the home screen, and time it")
@@ -3049,11 +3137,27 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             parser.error("--limit must be at least 1")
         if args.repeat < 1:
             parser.error("--repeat must be at least 1")
-    if args.command == "similar" and bool(args.title_id) == bool(args.rebuild):
-        # Both spellings refused: no arguments is a read of nothing, and both
-        # together is a read and a write in one command. `parser.error` again
-        # -- exit 2 with usage rather than exit 1 with a traceback.
-        parser.error("give a title id, or --rebuild, but not both")
+    if args.command == "similar":
+        # ⚠️ **No arguments is now the whole-table report and no longer an
+        # error.** It was refused as "a read of nothing" until M10's J6, which
+        # is what issue #17's *"a `usher similar` line that says how old the
+        # table is relative to the embedding population"* asks for -- the
+        # per-title form already printed two of the three facts and had no
+        # whole-table spelling. A title id **with** `--rebuild` is still
+        # refused: that is a read and a write in one command.
+        if args.title_id and args.rebuild:
+            # `parser.error` again -- exit 2 with usage rather than exit 1 with
+            # a traceback.
+            parser.error("give a title id, or --rebuild, but not both")
+        # The two rebuild-only flags, refused rather than ignored where they
+        # cannot mean anything. A `--max-seeds` silently dropped on a read is
+        # an operator who believes they capped a walk that never started.
+        if not args.rebuild and (args.resume or args.max_seeds is not None):
+            parser.error("--resume and --max-seeds need --rebuild")
+        if args.max_seeds is not None and args.max_seeds < 1:
+            # Zero is not a smaller run, it is a run that reads a page and
+            # writes nothing while reporting a successful rebuild.
+            parser.error("--max-seeds must be at least 1")
     return args
 
 
@@ -3257,6 +3361,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
                 title_id=None if args.title_id is None else _as_uuid(args.title_id, "title id"),
                 limit=args.limit,
                 rebuild=args.rebuild,
+                resume=args.resume,
+                max_seeds=args.max_seeds,
             )
         )
     elif args.command == "home":

@@ -49,6 +49,7 @@ from usher.services.scheduler import (
     SearchQueryRetention,
     SearchQueryScope,
 )
+from usher.services.similar import NeighborRebuildJob
 
 # Not the epoch, and not a round number either -- see the module docstring.
 _NOW = datetime(2026, 8, 27, 18, 30, 43, tzinfo=UTC)
@@ -295,19 +296,24 @@ def _settings(**overrides: object) -> Settings:
     )
 
 
-def test_the_registry_a_composition_root_builds_holds_the_retention_job() -> None:
-    """**J4 shipped the loop with no registrations and J5 adds the first**,
-    and a registry nothing asserts is indistinguishable from one somebody
-    forgot to fill.
+def test_the_registry_a_composition_root_builds_holds_both_jobs_in_order() -> None:
+    """**J4 shipped the loop with no registrations, J5 added the first and J6
+    the second**, and a registry nothing asserts is indistinguishable from one
+    somebody forgot to fill.
 
-    ⚠️ **This case read `scheduler.jobs == ()` for one commit and the
-    assertion was the deliverable then**, which is why it is a rewrite rather
-    than a deletion: the point it makes is unchanged -- what a deployment will
-    actually run is a line somebody has to write here -- and the value it
-    asserts moved because a registration landed. J6 adds the second entry and
-    edits this list again.
+    ⚠️ **This case read `scheduler.jobs == ()` for one commit and then one
+    name**, which is why each turn is a rewrite rather than a deletion: the
+    point it makes is unchanged -- what a deployment will actually run is a
+    line somebody has to write in `build_scheduler` -- and the value it asserts
+    moves when a registration lands.
 
-    The name is asserted rather than the type. It is a metric label
+    **The order is asserted, not just the membership.** `Scheduler.tick` walks
+    the registry in registration order and runs due jobs sequentially, so on a
+    tick that finds both due the order decides whether a 0.072 ms prune waits
+    behind a walk measured in hours or the other way round. A set comparison
+    would be satisfied by either.
+
+    Names rather than types. Each is a metric label
     (`usher.scheduler.job.duration` and its two siblings are all labelled
     `job`) and a span name, so a rename is an emptied panel; a case asserting
     `isinstance(..., SearchQueryRetention)` would let that through.
@@ -315,7 +321,10 @@ def test_the_registry_a_composition_root_builds_holds_the_retention_job() -> Non
     scheduler = build_scheduler(_settings(), sessions=_no_sessions())
 
     assert isinstance(scheduler, Scheduler)
-    assert [job.name for job in scheduler.jobs] == ["search_queries.retention"]
+    assert [job.name for job in scheduler.jobs] == [
+        "search_queries.retention",
+        "similar.rebuild",
+    ]
 
 
 def test_a_scheduler_with_no_way_to_reach_a_database_registers_nothing() -> None:
@@ -355,14 +364,42 @@ def test_the_retention_registration_carries_the_window_and_the_batch_an_operator
         sessions=_no_sessions(),
     )
 
-    (job,) = scheduler.jobs
-    assert isinstance(job, SearchQueryRetention)
+    job = next(one for one in scheduler.jobs if isinstance(one, SearchQueryRetention))
     assert job.window == timedelta(days=7)
     assert job.batch == 3
     assert job.period == RETENTION_PERIOD
     assert job.period != job.window, (
         "the period is the job's own and must not be read off the retention window"
     )
+
+
+def test_the_rebuild_registration_carries_the_period_an_operator_set() -> None:
+    """The one setting reaches the job, as a `timedelta` of **hours**.
+
+    The wrong implementations this kills: a registration hard-coding 24 h
+    beside a setting an operator can change; one passing the *hours* where a
+    `timedelta` is wanted, which is a factor of 3,600 and reads as correct at a
+    glance; and one wiring `timedelta(days=...)` from the retention setting
+    next to it, which is the adjacent-keyword swap that made
+    `SearchQueryRetention`'s own case necessary.
+
+    **A non-default value, and one that is not a whole number of days**, so a
+    registration ignoring the setting and a registration reading it through the
+    wrong unit both fail rather than one of them.
+
+    ⚠️ **A period here is a setting where retention's is a constant**, and this
+    is the case that pins the asymmetry: what this number has to clear is the
+    walk's own duration, which is a function of catalog size -- 3.58 h over
+    132,442 seeds on this project's own artefact, 2026-08-19 -- and nothing in
+    `src/` can know a deployment's.
+    """
+    scheduler = build_scheduler(
+        _settings(similar_rebuild_period_hours=5.5), sessions=_no_sessions()
+    )
+
+    job = next(one for one in scheduler.jobs if isinstance(one, NeighborRebuildJob))
+    assert job.period == timedelta(hours=5.5)
+    assert job.name == "similar.rebuild"
 
 
 # -- the retention registration (M10 J5) -----------------------------------

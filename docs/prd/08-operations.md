@@ -801,9 +801,10 @@ unreachable.
 
 ### Scheduled work — two named jobs, no table, and off by default
 
-⏳ **Designed by [ADR-0046](decisions/0046-the-scheduler-stores-nothing.md),
-built by M10's J4.** Read the ADR before changing any of it; the contested part
-is that the component holds no state at all.
+✅ **Designed by [ADR-0046](decisions/0046-the-scheduler-stores-nothing.md),
+built by M10's J4, and both registrations have landed — J5's retention and
+J6's rebuild.** Read the ADR before changing any of it; the contested part is
+that the component holds no state at all.
 
 Two jobs are registered, and the contract is a **name**, a **period**, a
 `last_done()` and a `run()` — no crontab expression, no calendar, no timezone,
@@ -812,7 +813,7 @@ no dependency graph:
 | job | what it runs | `last_done()` reads | period | shipped? |
 |---|---|---|---|---|
 | `search_queries` retention | `DELETE FROM search_queries WHERE at < :cutoff`, chunked, a commit per chunk | `min(min(search_queries.at) + window, now)` | 1 day | ✅ M10's J5 |
-| the neighbour rebuild | `usher similar --rebuild`'s batch | `min(title_neighbors.computed_at)` | ⏳ set by its registration | ⏳ M10's J6 |
+| the neighbour rebuild | `usher similar --rebuild`'s batch, `resume=True` | `min(title_neighbors.computed_at)` | `USHER_SIMILAR_REBUILD_PERIOD_HOURS`, 24 h | ✅ M10's J6 |
 
 🔴 **`min(search_queries.at)` was named here as retention's `last_done()` and
 cannot be one; the reading in the table is what replaced it.** `min(at)` is the
@@ -841,12 +842,33 @@ and the *period* is a property of the job. A day of expiry is about 1,050 rows
 on this deployment (measured 2026-08-27) against a 10,000-row chunk, so the
 steady-state prune is one transaction.
 
-⚠️ **A failed retention run converges and a failed rebuild does not.** The
+⚠️ **A failed retention run converges and a failed rebuild did not.** The
 scheduler spaces retries and cannot bound *progress* — a batch that restarts
 from page one redoes its work however far apart the attempts are — but a prune
 is not such a batch: every committed chunk removes rows permanently and the
 chunks go oldest first, so an interrupted run leaves progress the next one
-keeps. The rebuild's resume is J6's.
+keeps. ✅ **The rebuild converges now, and it stores nothing to do it.** J6's
+`SimilarityService.rebuild(resume=True)` reads a **start cursor** off the
+artefact once, before the first page — the embedded seed just below the lowest
+one carrying no row stamped with the running blend — and then walks forward
+exactly as it did. That is a starting offset computed once and **not** a loop
+predicate: the walk still advances on `id` and still ends when the seed page
+comes back empty, so a seed the rebuild cannot clear is re-attempted once per
+run rather than looped on forever. The registration always resumes; an operator
+choosing for themselves types `usher similar --rebuild --resume`.
+
+🔴 **The registered job refuses to run against a table whose vectors were
+written by a model this deployment is not configured with**, logs both names at
+`ERROR` and reports nothing as done. `blend_fingerprint` hashes the
+**configured** model and the candidate read does not filter by `model_name`, so
+a scheduler started without `USHER_EMBEDDING_MODEL` would find every row stale
+and spend hours drawing pools from one embedding space and stamping them with
+another's fingerprint. On this deployment that is the *default* configuration:
+`USHER_EMBEDDING_MODEL` defaults to `fastembed:BAAI/bge-large-en-v1.5` and all
+**133,364** stored vectors are `openai:BAAI/bge-m3` (measured 2026-09-07). The
+guard is on the **registration** and deliberately not inside `rebuild`: an
+operator typing a command about a table they can see may legitimately want to
+force a mid-swap walk; a timer starting a 3.58-hour one unasked may not.
 
 **`USHER_SCHEDULER_ENABLED` defaults to `false`**, and turning it on is an
 operator decision with a number attached. A fresh deployment has no embeddings,
@@ -869,8 +891,14 @@ holding them.
 answers *when*, not *whether*: measured 2026-08-27, 877 of 133,319 embedded
 titles carry no `title_neighbors` row at all, because they were embedded after
 the last walk started, and `stale_neighbors()` reads **0** throughout — a
-missing row has no fingerprint to disagree. The period is what eventually
-covers a growing population; nothing here is a completeness guarantee.
+missing row has no fingerprint to disagree. Re-measured 2026-09-07 it is **922
+of 133,364**, which is the same gap one population later. The period is what
+eventually covers a growing population; nothing here is a completeness
+guarantee, and **`usher similar` with no arguments is where an operator sees
+the two facts that exist** — the oldest row's timestamp with its age in hours,
+and the count of rows carrying some other blend. Neither subsumes the other and
+neither is that third number, which is why the command prints both and invents
+no third definition of "stale".
 
 ### Backup — the asymmetry is the point
 
