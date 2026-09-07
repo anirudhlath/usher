@@ -7,6 +7,7 @@ it exists so that a later edit to one of them cannot pass unnoticed.
 
 import importlib.metadata
 import pathlib
+import re
 import tomllib
 
 import usher
@@ -63,3 +64,25 @@ def test_the_declared_version_is_pre_one_point_zero() -> None:
         "roadmap's 'v1' is a scope name and not a compatibility promise -- "
         "read it and amend it rather than deleting this assertion."
     )
+
+
+def test_the_changelog_names_the_version_that_ships() -> None:
+    """The newest **released** heading is the version this build reports.
+
+    `[Unreleased]` is skipped, and that is the one design decision here: the
+    check is *"the newest released version is the one that ships"*, not *"the
+    newest heading is"* -- otherwise the file could never carry work in
+    progress.
+
+    The control is `assert headings`. A regex that matched nothing and a
+    changelog whose top entry is right are otherwise the same green.
+    """
+    changelog = (pathlib.Path(__file__).parents[2] / "CHANGELOG.md").read_text()
+    headings = re.findall(r"^## \[([^\]]+)\]", changelog, re.MULTILINE)
+
+    assert headings, "no `## [version]` heading was found, so the comparison below is vacuous"
+
+    released = [h for h in headings if h != "Unreleased"]
+    assert released, "the changelog has no released version, only [Unreleased]"
+
+    assert released[0] == importlib.metadata.version("usher")
