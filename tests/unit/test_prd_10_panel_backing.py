@@ -184,3 +184,166 @@ def test_a_bold_opening_that_makes_no_backing_claim_is_not_one() -> None:
 
     assert _BOLD_OPENING.match(bold_but_silent.strip()) is not None
     assert not _carries_a_backing_statement(bold_but_silent)
+
+
+# --- The second check: a ⏳ marker that names a milestone which has shipped ---
+
+_PROGRESS = _ROOT / "docs" / "plans" / "progress.md"
+
+# The same anchor `test_docs_currency.py` uses, for the same reason: the
+# document holds four status tables plus a `| M7 gets | From |` table 1,400
+# lines further down, and an unanchored scan for `| M<n> |` reads all of them.
+_MILESTONE_TABLE = "## Milestones (from"
+
+# **`⏳ M<n>` is the marker; a bare `⏳` is not.** PRD 10 uses one in prose —
+# *"**None of the three is marked ⏳** — that means *owed by a named
+# milestone*"* — to name the vocabulary rather than to claim a debt, and a
+# regex that matched the character alone would read that sentence as a marker
+# owed by no milestone and have nothing to compare.
+_OWED_MARKER = re.compile(r"⏳\s*(?P<milestone>M\d+)")
+
+# Cells are split on **unescaped** pipes only. M10's status cell is one 6 kB
+# paragraph carrying a Loki query — `{service_name="usher"} \|= "2fa839a2…"` —
+# and `str.split("|")` turns that single row into seven cells, which silently
+# moves the status into the wrong position rather than failing.
+_UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
+
+
+def _milestone_status(progress: str) -> dict[str, str]:
+    """`{"M9": "✅ complete on …", …}` from progress.md's milestone table."""
+    start = progress.find(_MILESTONE_TABLE)
+    assert start != -1, f"docs/plans/progress.md has no '{_MILESTONE_TABLE}…' heading"
+    rest = progress[start + len(_MILESTONE_TABLE) :]
+    following = re.search(r"^## ", rest, re.MULTILINE)
+    body = rest[: following.start()] if following else rest
+
+    out: dict[str, str] = {}
+    for line in body.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in _UNESCAPED_PIPE.split(line)]
+        # `| name | milestone | plan | status |` splits to six, the first and
+        # last empty. Fewer means a header rule or a narrower table.
+        if len(cells) < 6:
+            continue
+        name, status = cells[1], cells[4]
+        if re.fullmatch(r"M\d+", name):
+            out[name] = status
+    return out
+
+
+def _owed_markers(text: str) -> list[tuple[int, str]]:
+    """`(line number, milestone)` for every `⏳ M<n>` in the document."""
+    return [
+        (number, match["milestone"])
+        for number, line in enumerate(text.splitlines(), start=1)
+        for match in _OWED_MARKER.finditer(line)
+    ]
+
+
+def test_no_dashboard_panel_is_marked_owed_by_a_milestone_that_has_shipped() -> None:
+    """⏳ means *owed by a named milestone*, so a ⏳ against a milestone that has
+    shipped is a panel whose blocker is gone and whose document does not know
+    it — the failure this file's neighbour checks for in the other direction.
+
+    **Both parses can return nothing, and both are controlled.** An empty
+    shipped set makes every marker read as legitimately owed, and an
+    `_OWED_MARKER` that stopped matching makes a document full of stale markers
+    read as clean. The status parse is controlled here on the real table, in
+    both polarities — M9 shipped, M10 has not — and the marker parse is
+    controlled on a synthetic document in the case below, because after this
+    task the real file has no `⏳ M<n>` left to find. **That is why the
+    positive control this task's own text specified — `assert milestones_seen`
+    against the real document — is not written here: it would go red at exactly
+    the moment the task succeeded.**
+
+    The scan is over the whole document rather than over the dashboard sections
+    alone. `⏳ M<n>` means the same thing wherever PRD 10 writes it, and a scan
+    scoped to `## Dashboards` would inherit `_dashboards()`'s dependency on a
+    heading for no gain in what it can catch.
+    """
+    status = _milestone_status(_PROGRESS.read_text(encoding="utf-8"))
+
+    assert len(status) >= 10, (
+        f"the milestone-table parse found {len(status)} rows ({sorted(status)}), so it is "
+        "reading the wrong table or the wrong cell — with an empty shipped set every ⏳ "
+        "marker below reads as legitimately owed"
+    )
+    assert status.get("M9", "").startswith("✅"), (
+        f"M9 does not read as shipped in progress.md's milestone table: {status.get('M9')!r}"
+    )
+    assert not status.get("M10", "").startswith("✅"), (
+        "M10 reads as shipped, so the status cell is being matched by something other than "
+        f"its own marker: {status.get('M10')!r}"
+    )
+
+    shipped = {name for name, cell in status.items() if cell.startswith("✅")}
+
+    stale = [
+        f"{_PRD.name}:{number} — ⏳ {milestone}, but {milestone} is {status[milestone][:40]!r}"
+        for number, milestone in _owed_markers(_PRD.read_text(encoding="utf-8"))
+        if milestone in shipped
+    ]
+
+    assert stale == [], (
+        "a dashboard panel is marked ⏳ against a milestone that has already shipped, so "
+        "the document still calls a backed panel blocked: " + "; ".join(stale)
+    )
+
+
+def test_the_owed_marker_scan_separates_a_shipped_debt_from_a_live_one() -> None:
+    """The marker parse's own control, on a synthetic document — the real one
+    carries no `⏳ M<n>` once this task lands, so the case above cannot prove
+    its scan still matches anything.
+
+    Three lines, three distinct claims: a marker naming a shipped milestone is
+    a finding, a marker naming an unshipped one is not, and the bare `⏳` PRD 10
+    uses in prose to name the vocabulary is neither.
+    """
+    planted = (
+        "Cost per play attributed to an LLM row stays ⏳ M9: it needs a client.\n"
+        "A play-event log is a schema change and stays ⏳ M11.\n"
+        "**None of the three is marked ⏳** — that means *owed by a named milestone*.\n"
+    )
+
+    found = _owed_markers(planted)
+
+    assert found == [(1, "M9"), (2, "M11")], (
+        f"the ⏳ scan did not read the planted markers as written: {found}"
+    )
+    assert [number for number, milestone in found if milestone == "M9"] == [1], (
+        "the shipped filter did not select the stale marker alone"
+    )
+
+
+def test_the_milestone_status_parse_survives_an_escaped_pipe_in_the_status_cell() -> None:
+    """M10's real row carries one `\\|`, inside a Loki query. It is the only
+    escaped pipe in the table, and splitting on every pipe truncates that one
+    cell rather than shifting it.
+
+    **So the assertion is on the whole cell and not on its marker**, which is
+    the correction this case needed: `\\|` sits *after* the `🚧`, so a prefix
+    check reads the truncated cell as correct and the naive split survives it.
+    Measured 2026-09-07 — with `_UNESCAPED_PIPE` replaced by `r"\\|"` the
+    prefix form passed all eight cases in this module. The defect is
+    unobservable in today's *conclusions* for exactly that reason; it stops
+    being unobservable the first time a status cell puts an escaped pipe before
+    its marker, and that row would then read as unshipped and forgive every ⏳
+    against it.
+    """
+    table = (
+        "## Milestones (from docs/specs/x.md)\n"
+        "| # | Milestone | Plan file | Status |\n"
+        "|---|---|---|---|\n"
+        "| M9 | API surface | docs/plans/m9.md | ✅ complete |\n"
+        '| M10 | Hardening | docs/plans/m10.md | 🚧 in progress, `{a="b"} \\|= "c"` |\n'
+        "\n## Next\n"
+    )
+
+    status = _milestone_status(table)
+
+    assert set(status) == {"M9", "M10"}, f"the table parse read {sorted(status)}"
+    assert status["M9"] == "✅ complete"
+    assert status["M10"] == '🚧 in progress, `{a="b"} \\|= "c"`', (
+        f"the escaped pipe truncated M10's status cell, which read as {status['M10']!r}"
+    )

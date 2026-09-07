@@ -1389,13 +1389,58 @@ model and purpose*, *tokens in/out* and **cost per curated row** are
 exist and were verified live on 2026-08-07: `cost_usd` is `0.00000000` against
 a local model — the honest value — and `0.01658700` with prices 3/15 per Mtok
 configured, exactly `Decimal((4359×3 + 234×15) / 1e6)`, with the column
-`numeric` and `SUM()` agreeing to 8 decimal places. **Cost per play attributed
-to an LLM row is still unbacked** and stays ⏳ M9: it needs `search_queries`'
-`played`, which needs a client. So the panel that answers *"did this cost
-anything"* is live and the one that answers *"was it worth it"* is not — which
-is the same asymmetry [06](06-rows-and-recommendations.md) records at the
-product level, where 88% of one live run's headings were the genre labels the
-prompt forbids and nothing in this stack could have told an operator so.
+`numeric` and `SUM()` agreeing to 8 decimal places. ✅ **`search_queries.played`
+is M9's and not a debt**, so the ⏳ marker this paragraph carried against M9
+until 2026-09-07 named a column that had already shipped:
+`SearchQueryRepository.record_outcome` (`db/repositories/search_query.py`)
+writes it, reached through `api/analytics.py`'s `record_search_outcome` from
+`POST /titles/{id}/play` and `POST /episodes/{id}/play`
+(`api/routers/playback.py`, which passes `played=True` and no
+`clicked_title_id`). **What that marker was guarding was never only `played`.**
+
+⚠️ **Two panels sit inside *"cost per play attributed to an LLM row"* and only
+one of them is reachable — the correlation is backed and the attribution is
+not.** The backed one is **cost per curated row that was later played**:
+`llm_calls ⋈ curated_rows USING (generation_id)`, the join above, joined once
+more against `watch_states` on
+`watch_states.title_id = ANY(curated_rows.card_title_ids)` for the same
+`user_id`, where `card_title_ids` is the ordered `uuid[]` on the row
+(`db/models/curation.py`). It is *not* joined through `search_queries`, which
+cannot see a home-shelf play at all. **It must be titled as an upper bound, in
+the panel**, because a household that played a title which happened to appear
+on a curated shelf did not necessarily play it *from* that shelf:
+`watch_states` records no origin for the launch — its `origin` is
+`WatchStateOrigin`, which discriminates *source-pushed vs user-originated*, not
+*which shelf*. The true attribution is
+[#85](https://github.com/anirudhlath/usher/issues/85) — the issue Dashboard 2's
+*"row effectiveness"* panel is already opened under, for the same missing row
+handle — and this panel cites it rather than pretending to close it.
+
+⚠️ **Three corrections to that panel's shape, measured 2026-09-07 against the
+dev `usher_catalog`.** ① It is **two joins wide, not one**: `llm_calls` carries
+no title id and `watch_states` carries no `generation_id`, so both hops through
+`curated_rows` are load-bearing. ② The title arm is **blind to 31.8% of this
+household's watch state** — `card_title_ids` holds *title* ids, and 5,329 of
+16,782 `watch_states` rows are keyed on `episode_id` instead, so a curated row
+about a series reads as unplayed unless the query adds a **third** join through
+`episodes.title_id` (non-null on 60,866 rows). On today's plays the gap is
+narrow, 136 of the 142 `played` rows being title-keyed against 6 episode-keyed,
+but that is one household's mix rather than a property of the join. ③ **Both
+sides of the existing join are empty on this deployment**: `llm_calls` is 0
+rows in 16 kB and `curated_rows` 0 rows in 24 kB, and `alembic_version` reads
+`m10b` — one migration behind the tree, so neither `ix_llm_calls_at` nor
+`ix_llm_calls_generation_id` exists here yet. The 2026-08-07 reconciliation
+above measured a table that has since been emptied; ✅ on these panels means
+*the query resolves and its arithmetic was checked*, never *this panel has data
+today*.
+
+So the panel that answers *"did this cost anything"* is live, the one that
+answers *"was it followed by a play"* is specified here for D10 to build, and
+only the one that answers *"did the shelf cause the play"* is unbacked — a
+narrower gap than this paragraph claimed until 2026-09-07, and still the same
+asymmetry [06](06-rows-and-recommendations.md) records at the product level,
+where 88% of one live run's headings were the genre labels the prompt forbids
+and nothing in this stack could have told an operator so.
 
 ### 6 — Quality evals
 
