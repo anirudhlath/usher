@@ -983,9 +983,15 @@ roadmap says who owes them, because a finding filed only next to the code it
 concerns is one nobody schedules. Every entry names its evidence; none is a
 suspicion.
 
-- **51 columns leak a raw driver exception across the port boundary** — found by
-  M8, measured live against Postgres 17.10 / asyncpg 0.31.0 with every mechanism
-  driven through the real repository method. ✅ **Scoped by M10's F8 on
+- **32 columns leak a raw driver exception across the port boundary, and 31 of
+  the 32 are the COPY path M9's boundary call 8 keeps out of M10** — found by M8
+  as *"45"*, re-measured by F8 as **51**, and **32 since F9 landed**; measured
+  live against Postgres 17.10 / asyncpg 0.31.0 with every mechanism driven
+  through the real repository method. ⚠️ **This heading read "51" until
+  2026-09-07**, which is F8's own pre-F9 figure left standing across the fix F8
+  scoped — `--summary` at `m10c` prints `exposed-copy 31, exposed-sqlalchemy 1`,
+  and the body below has said so since F9 at *"the `exposed-sqlalchemy` bucket
+  went 20 → 1"*. ✅ **Scoped by M10's F8 on
   2026-08-20 —
   [ADR-0044](decisions/0044-a-bounded-column-is-a-declared-type-that-refuses.md)
   states the bounding rule, publishes the per-column ledger these figures never
@@ -998,13 +1004,50 @@ suspicion.
   `45` and `31` do not, and `17` never could have, because no ledger of it was
   ever published to compare a membership against.
 
-  | claimed at `m08b`, quoted since | verdict, measured 2026-08-20 at `m09f` |
+  ⚠️ **Re-measured 2026-09-07 at `cb5ac06`, migration head `m10c`, and
+  cross-checked against a running database for the first time. The five verdicts
+  stand; three of the *figures* under them moved, and the moves have two causes
+  rather than one — four columns added across `m10a`, `m10b` and `m10c`, and
+  `m10a`'s rating rename redirecting a COPY writer off a column.**
+  `uv run python scripts/audit_bounded_columns.py --summary` prints **83**
+  bounded columns (`VARCHAR 28, INTEGER 50, NUMERIC 1, BIGINT 1, HALFVEC 3`),
+  **7** CHECK-only value bounds, and under the adopted `path` reading
+  `safe 18, translated 33, exposed-copy 31, exposed-sqlalchemy 1`. The chain
+  from F8's own head is `m09f` **79** → `m10a` **80** (`titles.imdb_num_votes`)
+  → `m10b` **81** (`sync_runs.position`) → `m10c` **83**
+  (`search_queries.surface`/`tier`), each printed by `--at`. `--at m08b` still
+  prints `VARCHAR 22, INTEGER 44, NUMERIC 1` = **67**, so the one figure this
+  table reproduces reproduces a second time, three migrations later.
+  🔴 **`--check` exits 0 and `tests/unit/test_bounded_column_ledger.py` is
+  green throughout: the generator was carried through `m10a`, `m10b` and `m10c`,
+  and this prose was not.** A drift guard that compares the script against its
+  own published constants cannot see the document drifting away from both — the
+  last unclosed corner of ADR-0044's *"a ledger that agrees with itself is not a
+  ledger that is right"*.
+
+  ⚠️ **Both of the ledger's sources are the tree, so the running database was
+  asked for the first time on 2026-09-07** — read-only, `usher_catalog` on
+  `usher-postgres-1`, PostgreSQL 17.10, through `pg_attribute`/`format_type()`.
+  It stands at **`m10b`**, one migration behind the tree, and at that head its
+  bounded columns are `--at m10b`'s column for column: **81**, `VARCHAR 26,
+  INTEGER 50, NUMERIC 1, BIGINT 1, HALFVEC 3`, including the three widths the
+  migration replay says it cannot check independently. 🔴 **Rule B applied to
+  the *database* gives 83 instead — the same number as the tree's `m10c` total,
+  and not the same 83** — because the live schema carries
+  `titles_rating_backup_20260819`, ADR-0040's operator-held rollback table,
+  which is in no `Base.metadata` and so in no ledger, and whose
+  `tmdb_vote_count`/`imdb_num_votes` Rule B admits on its face. **Only the
+  census is a database fact**: `safe`/`translated`/`exposed` are properties of
+  writers and `except` clauses, which no `SELECT` can be asked. ADR-0044 now
+  states the population the rule always assumed and never named.
+
+  | claimed at `m08b`, quoted since | verdict, measured 2026-08-20 at `m09f`; re-measured 2026-09-07 at `m10c` |
   |---|---|
-  | **67 bounded columns** | ✅ **Right when written, and the one genuine reproduction here.** `--at m08b` prints 22 `varchar(N)` + 44 `integer` + 1 `numeric(12,8)` = **67**. At `m09f` that same rule gives **75** (M9 added `images.kind/width/height`, `search_queries.mode/result_count/latency_ms`, `title_search_names.kind`, `credits.source`); ADR-0044's rule adds the one `bigint` and the three `halfvec(N)` for **79**, and there are 6 further CHECK-only value bounds it deliberately excludes |
-  | **5 already translated** | ✅ **Right, and exact.** `curated_rows.position` and the four `llm_calls` columns, at `m08b`, under every reading. Now **10**, since M9 gave `images` and `search_queries` the same treatment |
+  | **67 bounded columns** | ✅ **Right when written, and the one genuine reproduction here.** `--at m08b` prints 22 `varchar(N)` + 44 `integer` + 1 `numeric(12,8)` = **67**. At `m09f` that same rule gives **75** (M9 added `images.kind/width/height`, `search_queries.mode/result_count/latency_ms`, `title_search_names.kind`, `credits.source`); ADR-0044's rule adds the one `bigint` and the three `halfvec(N)` for **79**, and there are 6 further CHECK-only value bounds it deliberately excludes. ⚠️ **At `m10c` the two rules give 79 and 83 and the CHECK-only figure is 7** — `m10a` renamed `titles.community_rating` → `tmdb_vote_average` and `titles.popularity` → `tmdb_popularity`, both carrying their CHECK across, and added `imdb_average_rating`, a `Float` with `BETWEEN 0 AND 10` and so a member of the excluded set rather than of the 83 |
+  | **5 already translated** | ✅ **Right, and exact.** `curated_rows.position` and the four `llm_calls` columns, at `m08b`, under every reading. Now **10**, since M9 gave `images` and `search_queries` the same treatment — and **33** at `m10c`, since F9 translated twenty writing sites and `m10b`/`m10c` added three columns whose writers already translated |
   | **17 provably safe** | 🔴 **Not reproducible under any reading, and never scoreable.** ADR-0044 publishes three readings of what closes a value set; at `m08b` they give **18 / 16 / 12** and seventeen is none of them. Two columns the plan counted as safe are not: `titles.imdb_id`'s `pattern` is on `domain.Title` while the bulk writer takes `ports.bulk.ImdbTitle` (a bare `str`), and **`jobs.priority`'s `Field(ge=0, le=100)` is on `domain.Job` while `enqueue` takes `JobRequest`, whose `priority` is a bare `int`** (`ports/jobs.py:45`). A domain bound the write path never runs is not a bound |
-  | **45 exposed** | 🔴 **Not reproducible.** It is `67 − 17 − 5` and 17 is not reachable; the same subtraction with the adopted reading's 16 gives 46, and Rule B's own exposed figure at `m08b` is **50**, at `m09f` **51** — 31 at the COPY, 20 at a SQLAlchemy statement |
-  | **31 through the COPY path** | 🔴 **Not reproducible as stated, and the number recurring is a trap rather than a confirmation.** The adopted reading does put 31 in the COPY bucket — `37` narrow-staged bounded destination columns minus `6` provably safe among them — but the other two readings give **30** and **34**, and `37 − 7 = 30` is the plan's own stated alternative. A figure that appears under one reading of three is not a reproduction, and the membership is not the old 31 in any case: **28 raise `OverflowError` and 3 do not.** `media_items.container`/`video_codec`/`audio_codec` are refused **server-side during the COPY** as `StringDataRightTruncationError`, SQLSTATE **`22001`** — a real SQLSTATE on an exception that is still not a `DBAPIError`. **There are two failure shapes, and a fix that widens `bigint` and forgets `text` reaches 28 of 31** |
+  | **45 exposed** | 🔴 **Not reproducible.** It is `67 − 17 − 5` and 17 is not reachable; the same subtraction with the adopted reading's 16 gives 46, and Rule B's own exposed figure at `m08b` is **50**, at `m09f` **51** — 31 at the COPY, 20 at a SQLAlchemy statement. ⚠️ **Both are pre-F9 and both moved by 2026-09-07**: scored with today's writers, `--at m08b` gives **31** exposed and `m10c` gives **32**, of which 31 are at the COPY and 1 at a SQLAlchemy statement. `--at` classifies a past revision's *columns* with *today's* source, so F9's twenty translations moved M8's head as well as this one |
+  | **31 through the COPY path** | 🔴 **Not reproducible as stated, and the number recurring is a trap rather than a confirmation.** The adopted reading does put 31 in the COPY bucket — `37` narrow-staged bounded destination columns minus `6` provably safe among them — but the other two readings give **30** and **34**, and `37 − 7 = 30` is the plan's own stated alternative. A figure that appears under one reading of three is not a reproduction, and the membership is not the old 31 in any case: **28 raise `OverflowError` and 3 do not.** `media_items.container`/`video_codec`/`audio_codec` are refused **server-side during the COPY** as `StringDataRightTruncationError`, SQLSTATE **`22001`** — a real SQLSTATE on an exception that is still not a `DBAPIError`. **There are two failure shapes, and a fix that widens `bigint` and forgets `text` reaches 28 of 31**. ⚠️ **Re-measured 2026-09-07 the refutation is stronger rather than weaker: at `m08b` the three readings now give 30 / 29 / 33, and 31 is in none of them.** `m10a` redirected `bulk.py:apply_ratings` off `titles.vote_count` onto `titles.imdb_num_votes`, so M8's `vote_count` — `tmdb_vote_count` since that rename — lost its only COPY writer and scores `translated` today; `--at m09f` drops to 30 for the same reason. The COPY bucket is 31 again from `m10a` (`37 − 6`) and is a third membership |
 
   **M9's boundary call 8 survives all of it, and ADR-0044 does not re-open it**:
   the COPY-bucket writes go through `stage_records`' `copy_records_to_table` on the raw
@@ -1074,45 +1117,71 @@ suspicion.
   `except` and killed the worker instead of parking the job. The bound is on the
   model rather than on the column because there is no width to widen: see below.
   `community_rating` is safe only by accident of its `le=10`, which is now a case
-  (`test_community_rating_refuses_a_non_finite_value_by_its_ceiling`) so that
-  relaxing the ceiling cannot quietly re-open it.
-  ⚠️ **`titles.year` and `titles.vote_count` are the same `Field(ge=0)`-against-
-  `integer` shape and are deliberately *not* closed**, with
-  `test_year_and_vote_count_still_accept_a_value_their_column_cannot_hold`
-  recording the exclusion rather than leaving it unstated. Both are in the
-  `exposed-copy` bucket, and a ceiling on `Title` would be invisible to the only
-  writers that overflow them — `bulk.py:upsert_titles` and
-  `bulk.py:apply_ratings` take `ports.bulk` frozen dataclasses and never
-  construct a `Title` at all (ADR-0044, question 5).
+  so that relaxing the ceiling cannot quietly re-open it.
+  ⚠️ **Every column this paragraph names was renamed by `m10a` and both of its
+  test citations went with them, re-measured 2026-09-07.** `Title.popularity` is
+  `Title.tmdb_popularity`; `community_rating` is `tmdb_vote_average`, joined by
+  `imdb_average_rating` carrying the same `ge=0, le=10`, so the accident is
+  load-bearing twice and the case is parametrised over both —
+  `test_a_rating_refuses_a_non_finite_value_by_its_ceiling`, not the singular
+  `test_community_rating_…` name this bullet carried.
+  ⚠️ **`titles.year`, `titles.tmdb_vote_count` and `titles.imdb_num_votes` are
+  the same `Field(ge=0)`-against-`integer` shape and are deliberately *not*
+  closed**, with `test_year_and_vote_counts_still_accept_a_value_their_column_cannot_hold`
+  recording the exclusion rather than leaving it unstated. A ceiling on `Title`
+  would be invisible to the only writers that overflow them —
+  `bulk.py:upsert_titles` and `bulk.py:apply_ratings` take `ports.bulk` frozen
+  dataclasses and never construct a `Title` at all (ADR-0044, question 5).
+  🔴 **"All are in the `exposed-copy` bucket" is false at `m10c`, and that
+  sentence is in the case's own docstring too**: `m10a` redirected
+  `apply_ratings` onto `imdb_num_votes`, so `titles.tmdb_vote_count` has no COPY
+  writer left and the ledger scores it `translated`. `year` and `imdb_num_votes`
+  are the two still in `exposed-copy`. The exclusion is untouched — a `Title`
+  ceiling is invisible to `ImdbTitle`/`ImdbRating` either way — but the reason
+  given for it now covers two of the three columns rather than three.
   ⚠️ **This bullet named "Postgres 17's unbounded `NUMERIC`" as the column until
-  2026-08-20, and that column is not `NUMERIC`** — `titles.popularity` is
-  `sa.Float()` (`a8a0e10ff464:102`, mirrored in `db/models/title.py`), which
-  PostgreSQL resolves to `double precision`. The round-trip observation stands;
-  the mechanism named for it did not. That is also why ADR-0044's rule excludes
-  it: a `float8` refuses nothing a Python `float` can hold, so this is an
-  *unbounded* column accepting a nonsense value — the opposite defect from the 50
-  above, wanting a domain bound rather than a translation. The same correction is
-  owed to issue #10's body, which carries the `NUMERIC` spelling.
-  catches it, evidenced by `id_crosswalk.imdb_id` (staging `text`) surfacing as
-  a wrapped `DBAPIError` while `media_items.container` (staging `varchar(32)`)
-  does not. Separately: `Title.popularity: float | None = Field(ge=0)`
-  (`Title.tmdb_popularity` since `m10a`) accepts
-  **infinity** — `float('inf') >= 0` is `True`, Postgres 17's unbounded `NUMERIC`
-  stores it, verified round-trip, reachable via `json.loads('1e400')` from a TMDb
-  payload. `community_rating` — now `tmdb_vote_average`, and joined by
-  `imdb_average_rating` — is safe only by accident of its `le=10`, which is
-  true of the new pair too.
-  **Still needs a scoped decision before an owner, and M9 looked at it and said
-  no with the reason attached** — it is M9's boundary call 8. M9 is the
-  milestone that built the problem vocabulary a leak like this would have to map
-  onto, so it is the milestone where "widen the `except`" was cheapest to try:
-  the measurement above is what stops it, because **31 of the 45 never reach a
-  SQLAlchemy `except` at all**. Mapping them means wrapping the COPY path
-  itself, which is a change to the bulk loader rather than to the error
-  taxonomy, and [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
-  closed the vocabulary at seven members on the evidence of routes that exist.
-  The candidate is unchanged: declare staging columns wide (`bigint`, `text`) so
-  the refusal moves to the `INSERT … SELECT`.
+  2026-08-20, and that column is not `NUMERIC`** — `titles.tmdb_popularity`
+  (`titles.popularity` until `m10a`) is `sa.Float()` (`a8a0e10ff464:102`,
+  mirrored in `db/models/title.py`), which PostgreSQL resolves to
+  `double precision`. The round-trip observation stands; the mechanism named for
+  it did not. That is also why ADR-0044's rule excludes it: a `float8` refuses
+  nothing a Python `float` can hold, so this is an *unbounded* column accepting a
+  nonsense value — the opposite defect from the 32 above, wanting a domain bound
+  rather than a translation. The same correction is owed to issue #10's body,
+  which carries the `NUMERIC` spelling.
+  🔴 **Twenty lines of this bullet's pre-F8 text were resurrected by a merge
+  and are deleted here, 2026-09-07.** `705f3ab` (F8, 2026-08-20) deleted the
+  paragraph running from *"catches it, evidenced by `id_crosswalk.imdb_id`"* to
+  *"The candidate is unchanged: declare staging columns wide"*; the 59-commit
+  merge `c30cae2` (2026-08-21) kept both sides of the conflict that deletion
+  produced. So until today this bullet **retired the candidate fix in one
+  paragraph and reaffirmed it as "unchanged" ninety-eight lines later** —
+  `:1010` against `:1108` at `cb5ac06`, measured 2026-09-07, and not the
+  "ninety-four" this paragraph claimed on the day it was written — re-asserted
+  the `NUMERIC` spelling it corrects directly above, re-asserted *"31 of the
+  45"* after refuting both figures, and said the debt *"still needs a scoped
+  decision before an owner"* of a decision ADR-0044 had already made and F9 had
+  already implemented. It also opened mid-sentence,
+  on the word *"catches"*, which is what a reader had to notice to find any of
+  the rest. 🔴 **git asked, and the answer was "both".** Replaying the merge
+  on 2026-09-07 — `git merge-tree --write-tree af918e8 7d4e765` — returns this
+  file **conflicted**, the `af918e8` side opening on F8's replacement and the
+  `7d4e765` side closing on the twenty lines it replaced. Nothing reverted
+  silently: the choice was presented and taken both ways, which is the one
+  resolution that leaves no diff behind to review. ⚠️ **And the copy that was
+  kept was the better-annotated one.** `71a9268` (ADR-0040, 2026-08-19) applied
+  the rating renames to it the day *before* F8 deleted it, so at `cb5ac06` the
+  dead paragraph carried `tmdb_popularity`, `tmdb_vote_average` and
+  `imdb_average_rating` while the live one still said `Title.popularity` and
+  `community_rating`. A stale copy that reads as the maintained one is how this
+  survived three weeks of edits to the same bullet. 🔴 **The same commit that
+  restored it got the machine record right**: `c30cae2` updated both of the
+  ledger's published censuses for `m10a`, taught the migration replay `_RENAMES`,
+  and wrote four paragraphs on `tmdb_vote_count` moving to `translated` — one
+  resolution pass, generator correct, prose taken both ways. Nothing is lost
+  with the deletion: the candidate fix is quoted and retired at *"What ADR-0044
+  does retire"*, boundary call 8 is restated at *"M9's boundary call 8 survives
+  all of it"*, and the rename facts are folded into the paragraph above.
 - **`PortRateLimited.retry_after` reaches no consumer** — an M4 gap found by M8.
   **Six sites across four adapter modules** construct it — `adapters/bulk/
   wikidata.py`, `adapters/bulk/download.py`, `adapters/emby/session.py` (three)

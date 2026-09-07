@@ -13,6 +13,12 @@ its reason survives every re-measurement below and is restated with two failure
 shapes rather than one. Narrows the follow-up (F9) to a set this record names.
 Amended once before acceptance, and the amendment is in the record rather than
 in the history — see *"internally consistent and externally wrong"* below.
+**Re-measured at `m10c` on 2026-09-07**, when F8 was asked for a second time,
+and **cross-checked against a running database for the first time**: the five
+verdicts stand, three of the figures under them moved, and the moves have two
+causes rather than one — four columns added across `m10a`, `m10b` and `m10c`,
+and `m10a`'s rating rename redirecting a COPY writer off a column. See the last
+two sections before the Evidence.
 
 ## Context
 
@@ -133,13 +139,23 @@ That is `_errors.py:53–57`'s own sentence — *"any column narrower than the
 field feeding it"* — made mechanical, and it decides the three questions the
 old numbers left open.
 
+🔴 **And it has a second half, added 2026-09-07 because a live check found it
+missing.** The rule says what a bounded *column* is and said nothing about the
+*population* it is applied to, which every count in this record has silently
+assumed. **The population is `Base.metadata`** — the columns some writer in this
+package can reach. Run against a database instead, Rule B also admits
+`titles_rating_backup_20260819`, an operator's rollback table with no model, no
+writer and no port, and the total comes out at a number that looks like this
+record's headline and shares no membership with it. See *"The live catalog"*
+below.
+
 | family | in? | why |
 |---|---|---|
 | `varchar(N)`, including every `Enum` (all render `VARCHAR(N)`; `native_enum=False`) | **in** | a Python `str` has no length |
 | `smallint` / `integer` / **`bigint`** | **in** | a Python `int` has no width. `bigint` is in **because the rule does not care how wide the column is, only that the field is wider** — and it is what makes 67/31 arithmetically possible for the first time |
 | `numeric(p, s)` | **in** | `Decimal` and `float` both exceed `p` digits |
 | `halfvec(N)` | **in** | a `list[float]` has no fixed length. Contested, and admitted rather than carved out — see below |
-| `double precision` — `sa.Float()`, which is what `titles.popularity` and `community_rating` are, and **not** the `NUMERIC` PRD 09 named until today | **out** | IEEE-754 binary64 **is** a Python `float`, so it refuses nothing. This is why `titles.popularity` stores infinity: an unbounded column accepting a nonsense value, the opposite defect, and not this record's subject |
+| `double precision` — `sa.Float()`, which is what `titles.popularity` and `community_rating` are (`tmdb_popularity`, `tmdb_vote_average` and `imdb_average_rating` since `m10a`), and **not** the `NUMERIC` PRD 09 named until today | **out** | IEEE-754 binary64 **is** a Python `float`, so it refuses nothing. This is why `titles.popularity` stores infinity: an unbounded column accepting a nonsense value, the opposite defect, and not this record's subject |
 | `text`, `uuid`, `boolean`, `timestamptz`, `date`, `jsonb`, `bytea`, `tsvector`, `text[]` | **out** | nothing a caller can hand in is refused by the type |
 | a CHECK constraint | **out** | it is not the declared type, and it fires server-side as SQLSTATE **23514** — an `IntegrityError`, which every `except` in this package already catches. It is the mechanism that *works*, so counting it as exposure inverts the finding |
 
@@ -991,6 +1007,157 @@ construct a `Title` — so a ceiling on the domain model would be invisible to t
 only path that overflows them, which is this record's own question (5), third
 reason.
 
+### 🔴 Re-measured at `m10c` on 2026-09-07: the generator was carried through three migrations and this record was not
+
+**F8 was asked for a second time on 2026-09-07, and the answer is that it
+exists.** This record, `scripts/audit_bounded_columns.py` and PRD 09's
+carried-debt bullet are its three artefacts and all three are in the tree, so
+the honest output of running it again is not a second ADR — the register guards
+duplicate *numbers*, nothing guards two records deciding the same question, and
+`docs/prd/decisions/README.md`'s test is *"was it contested"*, which this was
+once. What re-running F8 produces instead is a **measurement of how the first
+one aged**, and the shape of the ageing is worth as much as the numbers.
+`--check` exits 0, `tests/unit/test_bounded_column_ledger.py` passes its 26
+cases, and `PUBLISHED`/`PUBLISHED_AT_M08B` were carried forward by `m10a` and
+`m10c`. **Every figure that went stale went stale in prose.**
+
+🔴 **And the two halves parted company inside a single commit.** `c30cae2`
+(2026-08-21) is the 59-commit merge that took `m10a`; it updated both published
+censuses, added the `_RENAMES` handling to the migration replay and wrote four
+paragraphs on why `tmdb_vote_count` moves to `translated` while `exposed-copy`
+holds station — and in the same resolution it **restored twenty lines of PRD
+09's pre-F8 text that F8 had deleted**, text asserting the candidate fix this
+record retires and the `31 of the 45` it refutes. One pass, one author, the
+generator right and the document wrong.
+
+🔴 **git asked, and the answer was "both".** Replayed read-only on 2026-09-07
+with `git merge-tree --write-tree af918e8 7d4e765`, the merge's own two parents:
+`docs/prd/09-roadmap.md` comes back **conflicted**, and the conflict is exactly
+this hunk: the `af918e8` side opens on F8's replacement text and the `7d4e765`
+side closes on the twenty lines it replaced. So nothing reverted silently
+behind anybody's back; the choice was **presented and answered "both"**, which
+is the resolution a delete-versus-rewrite conflict most invites and the only one
+that leaves no diff to review afterwards. `c30cae2`'s own message counts *"124
+files wide and 13 conflicts deep"* — the 13 reproduce, path for path — and names
+**three** resolutions as *"judgement rather than text"*. PRD 09 is not one of
+the three, which is how a hand resolution and an unreviewed one look identical
+in the log.
+
+That is the clean statement of the gap: a drift guard comparing the script
+against its own published constants cannot see the document drifting away from
+both, which is the last unclosed corner of this record's own *"a ledger that
+agrees with itself is not a ledger that is right"*. PRD 09's bullet carries the
+deletion and the forensics.
+
+Measured at `cb5ac06`, migration head `m10c`, 25 revisions replayed against 83
+metadata columns with zero in either and not the other, 53 write sites.
+
+| this record says | at `m10c`, 2026-09-07 | what moved it |
+|---|---|---|
+| **Rule B total 79**, of which 75 under the claim's own three families | **83**, of which **79** — `VARCHAR 28, INTEGER 50, NUMERIC 1, BIGINT 1, HALFVEC 3` | `--at` prints the chain: `m09f` 79 → `m10a` **80** (`titles.imdb_num_votes`) → `m10b` **81** (`sync_runs.position`) → `m10c` **83** (`search_queries.surface`/`tier`). The last two are the two amendments above; `m10a`'s was never recorded here |
+| **CHECK-only value bounds: 6** | **7** | `m10a`. The renames carried their CHECKs across and `imdb_average_rating` arrived with `BETWEEN 0 AND 10` — a `Float`, so Rule B excludes it and this count takes it |
+| the six excluded are … `titles.community_rating`, `titles.popularity` … | neither name resolves at `m10c` | `m10a`. The seven are `curated_rows.card_title_ids`, `title_neighbors.score`, `title_search_names.name`, `titles.imdb_average_rating`, `titles.tmdb_popularity`, `titles.tmdb_vote_average`, `tmdb_ids.popularity` |
+| *"`path` does put 31 in the COPY bucket **at both heads**"* | **false at `m08b`, and at `m09f`, since `m10a`**: 30 / 29 / 33 under `path` / `closure` / `pydantic`, so **31 is in no reading at either of the heads this record measured** | `m10a` redirected `bulk.py:apply_ratings` off `titles.vote_count` onto `titles.imdb_num_votes`, so M8's `vote_count` lost its only COPY writer. `PUBLISHED_AT_M08B`'s comment records exactly this; this document's three-reading table does not |
+| *"`titles.year` and `titles.vote_count` … Both are in the `exposed-copy` bucket"* | `titles.vote_count` is `tmdb_vote_count` since `m10a` and scores **`translated`** | the same redirect. `titles.year` and `titles.imdb_num_votes` are the two in `exposed-copy`. `tests/unit/test_domain_title.py::test_year_and_vote_counts_still_accept_a_value_their_column_cannot_hold` carries the same wrong sentence in its docstring, and its assertions are unaffected |
+
+**The `31` refutation gets stronger, and it is the only verdict this
+re-measurement touches.** The published argument was *"a figure that appears
+under one reading of three is not a reproduction"*; scored with today's source
+it appears under **none** at `m08b`, and the 31 at `m10a`–`m10c` is a third
+membership again. Conversely `--at m08b` still prints
+`VARCHAR 22, INTEGER 44, NUMERIC 1` = **67** — the second independent
+reproduction of the one figure that ever reproduced, three migrations and three
+weeks later. ✅ 67, ✅ 5, ❌ 17, ❌ 45, ❌ 31 all stand.
+
+⚠️ **`5` is no longer re-derivable, by construction rather than by drift, and
+this is the `--at` caveat paying out a second time.** `--at m08b` scores M8's
+*columns* with *today's* writers, F9 translated twenty of them, and the
+`translated` bucket at that head therefore reads **24**. The reproduction stands
+as measured at `8ca21af`; what stays checkable at any later head is the column
+set, which is what `67` is scored on and why `67` keeps reproducing while `5`
+cannot.
+
+**Not changed, and deliberately.** The dated censuses above are left standing
+rather than overwritten, by this record's own rule that what is comparable
+across heads is the column set and never the buckets. `PUBLISHED`,
+`PUBLISHED_AT_M08B` and the scope handed to F9 are untouched — F9 is done and
+the `exposed-sqlalchemy` bucket is 1 — and **M9's boundary call 8 is not
+re-opened**: the 31 at the COPY are still 28 `OverflowError` + 3 `22001`, still
+raised on the raw asyncpg connection outside SQLAlchemy's translation, and still
+a bulk-loader design task rather than an error-taxonomy one.
+
+🔴 **Four line-number citations in this record no longer resolve, and all four
+are into `bulk.py`, which went 1039 lines at `8ca21af` to 1158 at `cb5ac06`.**
+The two pre-F9 `refusals_as_conflict` sites cited as `:483` and `:778` are now
+`:545` (`replace_genome_tags`) and `:879` (`replace_aliases`); `:483` is today a
+`WHERE NOT EXISTS` and `:778` a comment. `:446`, cited as `replace_genome_tags`
+itself, is now that method's early return — the `def` is at `:508`. `:668`,
+cited as `stg_credit_names.ordinal`'s `enumerate`, is now a column list. The
+module's six `async with refusals_as_conflict` blocks are at `:427`, `:432`,
+`:469`, `:545`, `:788` and `:879`, and only four of those are in a writer:
+`_rowcount` (`:391`) and `_write_result` (`:431`) translate on behalf of the
+rest, which is the design *"the instrument was the defect"* above restored and
+is why counting call sites understates the translated writers. `_errors.py:53–57`
+and `_errors.py:66–75` both still resolve exactly, which is the contrast — they
+are cited into a file nobody has grown. The lesson is issue #82's, one directory
+over: a line number into a moving file is a citation with a shelf life, and
+quoting the sentence outlives it.
+
+### 🔴 The live catalog, asked for the first time on 2026-09-07 — a migration behind, and carrying a table no model has
+
+**Both of this record's independent sources are the tree.** `Base.metadata` and
+the AST replay of `db/migrations/versions/` agree column for column, and the
+ledger names its own exception rather than glossing it: three of the 83 widths
+are written in the migration as an imported name that the replay resolves
+against the *live package*, so `genome_scores.relevance`, `llm_calls.cost_usd`
+and `user_taste.centroid` **cannot** disagree with the metadata by construction.
+A running database is the third source that closes exactly that hole, and until
+today it had never been asked. Asked read-only against the dev catalog —
+`usher_catalog` on `usher-postgres-1`, **PostgreSQL 17.10** — through
+`pg_attribute` and `format_type()` rather than `information_schema`, so a
+`halfvec` comes back at its width instead of as `USER-DEFINED`:
+
+| asked | answered |
+|---|---|
+| `select version_num from alembic_version` | **`m10b`** — one migration behind the tree, so the comparison is scored at `--at m10b`, and `search_queries.surface`/`tier` are correctly absent from the live `search_queries` |
+| bounded columns over the **28** modelled tables — the database holds 30, less `alembic_version` and the rollback table below, and 28 is `len(Base.metadata.tables)` exactly | **81**: `VARCHAR 26, INTEGER 50, NUMERIC 1, BIGINT 1, HALFVEC 3` |
+| `diff` of that set against `--at m10b`'s 81 rows | **empty**, once `NUMERIC(12, 8)` and `NUMERIC(12,8)` are read as one spelling. The agreement is per column, not per total |
+| the three widths the replay admits it cannot check | `genome_scores.relevance halfvec(1128)`, `llm_calls.cost_usd numeric(12,8)`, `user_taste.centroid halfvec(1024)` — all three as declared, so the named tautology is now discharged from outside the tree |
+
+🔴 **And Rule B applied to the database rather than to the metadata gives 83,
+which is the tree's `m10c` total and is not the same 83.** The database holds
+**30** base tables against `Base.metadata`'s 28: `alembic_version`, and
+`titles_rating_backup_20260819` — ADR-0040's rollback copy, which that record
+says is not dropped without the operator's say-so. The second of those is
+in no `Base.metadata` and therefore in no ledger, and its `tmdb_vote_count
+integer` and `imdb_num_votes integer` are two more columns Rule B admits on its
+face: `50 + 2 = 52` integers, and `26 + 52 + 1 + 1 + 3` = **83** at a database
+standing at `m10b`, against **83** in a tree standing at `m10c`. **Two totals
+that agree by coincidence and share no membership.** A live check run without
+that exclusion would have reported this record's headline figure *confirmed*
+against a schema missing two of the columns it counts — which is this
+repository's signature failure in its purest form, and it was one `WHERE` clause
+away.
+
+**So Rule B needs its second half said out loud, and that is the one thing this
+re-measurement adds to the rule itself.** Rule B says what a bounded *column*
+is; it has never said what the *population* is, and all four buckets have
+silently assumed one. The population is **`Base.metadata`** — the columns some
+writer in this package can reach — so an operator's rollback table is out for
+the same reason a table made by hand in a DBA's session is out: no writer, no
+domain model, no port, nothing for a bucket to be about. This belongs in the
+record rather than in the script because it is a decision, and because the
+script's silence about it is precisely what let two different 83s look like
+agreement.
+
+⚠️ **The other four of the five are not database facts, and no `SELECT` can be
+asked for them.** `safe`, `translated`, `exposed-copy` and `exposed-sqlalchemy`
+are properties of writers, `except` clauses, staging DDLs and pydantic fields —
+source, not schema. A live catalog can confirm the census and the widths, and
+that is the whole of what it is good for here. *"Re-measure all five against the
+live catalog"* is answerable for one of the five, and saying which one is part
+of the answer.
+
 ## Evidence
 
 - **The measurement date is 2026-08-20, at `8ca21af`, head `m09f`** — verified
@@ -1065,3 +1232,21 @@ reason.
   `OverflowError` in the COPY); the **`22001` server-side COPY refusal** is the
   one shape this record asserts from the protocol rather than from a run in this
   repository, and F9's guard is where it should be observed.
+- ✅ **The census half is measured against a live Postgres as of 2026-09-07, and
+  the classification half still is not.** Read-only against `usher_catalog` on
+  `usher-postgres-1` (PostgreSQL 17.10) at `alembic_version = m10b`: **81
+  bounded columns, identical column for column to `--at m10b`**, including the
+  three widths the migration replay resolves tautologically. A bucket remains a
+  property of a writer and not of a schema, so the bullet above stands for
+  `safe`/`translated`/`exposed`. ⚠️ **The run's own trap is recorded in the
+  section above**: without excluding `titles_rating_backup_20260819` the live
+  figure is **83** — this record's `m10c` headline — against a database that
+  does not contain two of the columns that 83 counts.
+- 🔴 **Two figures in the 2026-09-07 amendment did not reproduce and are
+  corrected here rather than in the history.** *"Every move is `m10a` renaming a
+  column"* is contradicted by the amendment's own `--at` chain — the census
+  moved by **four columns across three migrations** (`m10a`, `m10b`, `m10c`) and
+  only the two membership claims are `m10a`'s. And the distance between PRD 09's
+  retirement of the candidate fix and its reaffirmation was written as
+  *"ninety-four lines"*; measured at `cb5ac06` it is `:1010` against `:1108`,
+  **98**.
