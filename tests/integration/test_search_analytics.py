@@ -151,6 +151,27 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
         # violation rather than into a slow test. This table has no column
         # this file could mark.
         await session.execute(text("DELETE FROM search_queries"))
+        # **Before the titles, because it resolves through them.** Every root
+        # here drives the real app, so a suggest that returns a hit runs
+        # `VisibilityService.seen_ids` on the way out and commits one
+        # `enrich` job per skeleton -- and the `catalog` fixture's title is a
+        # skeleton by construction. `jobs` has no foreign key to `titles`
+        # (`key` is `str(title_id)`, a text column), so nothing cascades and
+        # the rows outlive the titles that caused them. Three of the six
+        # roots here leave one each, and `test_services_ingest.py::
+        # test_a_walk_enqueues_enrichment_only_for_what_needs_it` reads
+        # `depth()` unscoped, so it saw `3 == 0`.
+        #
+        # Scoped to this file's own titles rather than `DELETE FROM jobs`:
+        # a neighbouring file's committed queue is not this file's to empty.
+        await session.execute(
+            text(
+                "DELETE FROM jobs WHERE key IN ("
+                "  SELECT id::text FROM titles WHERE sort_name LIKE :pattern"
+                ")"
+            ),
+            {"pattern": f"{MARK} %"},
+        )
         await session.execute(
             text("DELETE FROM titles WHERE sort_name LIKE :pattern"), {"pattern": f"{MARK} %"}
         )
