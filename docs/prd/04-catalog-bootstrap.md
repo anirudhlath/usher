@@ -743,8 +743,15 @@ Hard rules encoded in the project:
 
 1. **Never ship a prebuilt database**, and never commit dataset files.
 2. **Never scrape imdb.com** — IMDb's terms permit the published dumps only.
-3. **Honour the TMDb cache ceiling.** `provider_cache_meta` tracks fetch times;
-   nothing is retained past 6 months without refresh.
+3. **Honour the TMDb cache ceiling.** `raw_payloads.fetched_at` is the fetch
+   time; nothing is retained past 6 months without refresh. ⚠️ This rule named
+   a `provider_cache_meta` table until 2026-09-07.
+   [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)
+   refused that table by name and no migration has ever created one, so the
+   rule was stated against something that does not exist — which reads as
+   enforcement while enforcing nothing. `ix_raw_payloads_fetched_at` serves
+   the query and [10](10-telemetry-and-dashboards.md)'s dashboard-5 panel
+   reports it, against a threshold line at `now() - interval '6 months'`.
 4. **Render attribution in clients.** `GET /meta/attribution`
    ([07](07-client-api.md)) serves the four required strings — IMDb, TMDb,
    MovieLens, Wikidata — so every client can display them.
