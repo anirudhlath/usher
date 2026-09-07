@@ -847,6 +847,49 @@ receives traffic, so "it connected" is not a health signal.
 Exit codes: `0` success, `1` a malformed id or an unhandled error, `2` any
 argument error (including `--resolve` without `--title`).
 
+## Backup
+
+**Most of this database is rebuildable and a little of it is not.** The short
+list is the one that matters.
+
+```bash
+uv run usher backup                       # writes usher-backup-<UTC>.jsonl.gz
+uv run usher restore <artifact>           # refuses in one transaction, or applies
+uv run usher restore <artifact> --dry-run # resolve everything, commit nothing
+```
+
+**Precious — nothing recomputes these:** `users`, `watch_states`, `sources`,
+`source_credentials`, `row_provider_settings`, `search_queries` and
+`llm_calls`. `usher backup` writes exactly this set, read from the manifest in
+`usher.db.backup_manifest` rather than from a list anybody maintains by hand.
+
+🔴 **`llm_calls` is the one to care about**, because it is the first thing in
+this project that is not rebuildable from anything, at any price. It is a spend
+ledger. It cannot be recomputed from the catalog, from `curated_rows` (replaced
+nightly), or from the provider — no OpenAI-compatible endpoint offers a per-key
+call history, and the price applied was a setting at the time of the call. It
+is also small and append-only, which makes it the cheapest thing here to keep
+and the most complete loss if you don't.
+
+**Rebuildable — but read the two footnotes.** The catalog, embeddings, the
+search index, neighbour tables, cached images and curated rows all come back
+from `usher bootstrap`, `usher index --backfill`, `usher work` and `usher
+similar --rebuild`. Two qualifications a reader would otherwise get wrong:
+
+- `genome_scores` and `genome_tags` rebuild **only from upstream** — re-download
+  `ml-latest.zip` and re-run the bootstrap — so they depend on GroupLens still
+  serving that file.
+- `curated_rows` rebuilds cheaply but **not to the same rows**. A curated row
+  has no oracle and is not deterministic above `temperature 0`, so
+  "rebuildable" there means *a screen appears*, not *your screen comes back*.
+
+**And one table is neither:** `media_items` is classified `partial`, because a
+sync re-derives the rows but not the manual unmatched resolutions somebody made
+by hand.
+
+Full procedures — including the restore drill this was verified against — are
+in [`docs/runbooks/`](docs/runbooks/README.md).
+
 ## Building a client
 
 Three obligations a client takes on, and neither of the first two is obvious

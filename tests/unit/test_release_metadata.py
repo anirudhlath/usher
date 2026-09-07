@@ -109,3 +109,30 @@ def test_the_security_policy_supports_the_version_that_ships() -> None:
 
     major, minor, *_ = importlib.metadata.version("usher").split(".")
     assert supported[0] == f"{major}.{minor}.x"
+
+
+def test_the_readme_backup_section_names_every_precious_table() -> None:
+    """Read back out of the manifest, never transcribed.
+
+    **A hand-copied list is the exact drift this section exists to warn
+    about.** PRD 08's own prose list of precious tables is missing
+    `row_provider_settings` and `search_queries` — M9 shipped the first and M10
+    the second, and neither edit reached the paragraph. The manifest is the one
+    definition, so the README agrees with it by assertion rather than by
+    somebody remembering.
+
+    The control is `assert precious`: an empty manifest would make the loop
+    below vacuous and this case would pass against a README naming nothing.
+    """
+    from usher.db.backup_manifest import BackupClass, tables_of
+
+    precious = sorted(tables_of(BackupClass.PRECIOUS))
+    assert precious, "the manifest reports no precious tables, so the loop below is vacuous"
+
+    readme = (pathlib.Path(__file__).parents[2] / "README.md").read_text()
+    section = readme.split("\n## Backup\n", 1)
+    assert len(section) == 2, "the README has no Backup section"
+    body = section[1].split("\n## ", 1)[0]
+
+    missing = [table for table in precious if f"`{table}`" not in body]
+    assert not missing, f"README's Backup section does not name {missing}"
