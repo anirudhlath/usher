@@ -1,6 +1,7 @@
 """Ports are ABCs (ADR-0001), not Protocols: an incomplete implementation
 must fail at instantiation, not at the call site."""
 
+import inspect
 from abc import ABC
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -8,6 +9,7 @@ from decimal import Decimal
 from typing import Protocol, get_type_hints
 
 import pytest
+from pydantic import AwareDatetime
 
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.curation import LLMCall
@@ -226,18 +228,30 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
             CuratedRowRepository,
             {"replace_for_user", "list_for_user"},
         ),
-        # M8 Task 10, and the whole content of this entry is the **absence** of
-        # a read. `m08a` ships `llm_calls` with its primary key and no other
-        # index precisely because this port has none, so a `list_since` added
-        # here without that argument being re-opened leaves an index nothing
-        # reads maintained on every write -- `ix_titles_popularity` twice.
-        # `test_the_cost_ledger_has_no_read_method` below is the same claim
-        # spelled as its own case, for the reason `test_suggest_index_has_no_
-        # write_method` is: a surface's deliberate gap is a decision, and a
-        # decision needs something that fails when it is reversed by accident.
+        # M8 Task 10, **updated by M10 rather than deleted**, and the update
+        # is the whole point of the entry. From M8 to M10 this set was
+        # `{"record"}` and the absence of a read was its content: `m08a`
+        # shipped `llm_calls` with its primary key and no other index on the
+        # strength of it. `m10c` then landed `ix_llm_calls_at` and the partial
+        # `ix_llm_calls_generation_id` ahead of any reader, and `list_since`
+        # is what stops those from being `ix_titles_popularity` again.
+        #
+        # `test_the_cost_ledger_has_no_read_method` was the same claim spelled
+        # as its own case and is **deleted in the commit that added the read**
+        # -- it named that deletion as its own exit condition. What that case
+        # contributed beyond this line was a name and a reason rather than a
+        # set, so what replaces it is
+        # `test_the_cost_ledgers_read_answers_a_window_of_the_domain_model`
+        # below: the surface is pinned here, and the *shape* of the method
+        # that closed the gap is pinned there, the way
+        # `test_the_cost_ledger_takes_the_domain_model_rather_than_its_parts`
+        # already pins `record`'s. A guard left standing against a shipped
+        # reader would be a red everybody learns to ignore, which is the
+        # failure `.claude/rules/prd-maintenance.md` records about the PRD
+        # link check.
         (
             LLMCallRepository,
-            {"record"},
+            {"record", "list_since"},
         ),
     ],
 )
@@ -409,32 +423,48 @@ def test_a_scheduled_job_that_forgets_its_name_cannot_be_instantiated() -> None:
         _Nameless()  # type: ignore[abstract]
 
 
-def test_the_cost_ledger_has_no_read_method() -> None:
-    """**The structural half of `LLMCallRepository`'s central decision**, whose
-    argument lives on that port: `llm_calls` has no reader in `src/`, `m08a`
-    shipped it with its primary key and no other index on the strength of
-    that, and a read here would be the third surface this project has built
-    for a consumer that does not exist.
+def test_the_cost_ledgers_read_answers_a_window_of_the_domain_model() -> None:
+    """**What replaces `test_the_cost_ledger_has_no_read_method`**, deleted in
+    the commit that gave this port `list_since`.
 
-    ⚠️ **The index half of that deferral landed in `m10c` and this case is
-    what is left of it.** `ix_llm_calls_at` and `ix_llm_calls_generation_id`
-    now exist, ahead of any reader and deliberately — so "no index on the
-    strength of no read" is history, and the *no read* is now asserted here
-    alone rather than doubly by the schema. That makes this case stronger
-    rather than weaker: it is the only thing left standing between the
-    indexes and a `list_since()` that would look like finishing the job.
+    That case asserted the read's *absence* and named its own exit condition:
+    *"Adding `list_since` and the index it needs, in the milestone that adds
+    the panel reading them, is a decision; adding it without deleting this
+    case is a failing test."* M10 is that milestone -- `m10c` shipped
+    `ix_llm_calls_at` and the partial `ix_llm_calls_generation_id`, and the
+    read arrived against them -- so the case retired on the terms it set for
+    itself. The parametrised entry above was **updated** rather than deleted,
+    so the exact abstract set stays pinned and a *third* method still moves it.
 
-    Not `test_suggest_index_has_no_write_method`'s shape, despite the
-    similarity — `SuggestIndex` is deliberately *not* in the parametrisation
-    above, so for that port the dedicated case is the only thing asserting a
-    surface at all. Here the parametrised entry already pins the exact set, so
-    what this adds is a name and a reason: a set that moves says only that
-    something changed, and this says which direction was the decision. Adding
-    `list_since` *and* the index it needs, in the milestone that adds the
-    panel reading them, is a decision; adding it without deleting this case is
-    a failing test.
+    What the deleted case contributed that a set cannot is a name and a
+    reason, and this is that half, pointed at the decision the read actually
+    embodies. Two things are pinned and both are choices a later edit could
+    undo without reading a word of the port's argument:
+
+    - **`Sequence[LLMCall]` out, symmetric with `record()`'s `LLMCall` in.**
+      The tempting alternative is a narrower return -- `(day, model, purpose,
+      sum(cost_usd), ...)` -- which moves the `GROUP BY` that decides whether a
+      retried generation is one night's spend or two into a repository, where
+      the panel author reading the number cannot see it.
+    - **`until` is optional and keyword-only.** Optional because an unbounded
+      window is the ordinary call and `now()` is the wrong default for a
+      column the caller timestamps; keyword-only because two adjacent
+      `AwareDatetime` parameters are two chances to swap the bounds and still
+      get a well-formed, empty answer.
+
+    Asserted on the annotations rather than on the parameter count, for
+    `test_the_cost_ledger_takes_the_domain_model_rather_than_its_parts`'
+    reason: a parts-shaped `list_since(**window: Any)` has one parameter too.
     """
-    assert LLMCallRepository.__abstractmethods__ == frozenset({"record"})
+    hints = get_type_hints(LLMCallRepository.list_since)
+    assert hints == {
+        "since": AwareDatetime,
+        "until": AwareDatetime | None,
+        "return": Sequence[LLMCall],
+    }
+    parameters = inspect.signature(LLMCallRepository.list_since).parameters
+    assert parameters["until"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["until"].default is None
 
 
 def test_the_cost_ledger_takes_the_domain_model_rather_than_its_parts() -> None:

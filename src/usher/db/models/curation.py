@@ -477,11 +477,14 @@ class LLMCallRow(Base):
         # the write cost of both is bounded by the curation cadence and is not
         # measurable.
         #
-        # ⚠️ **`LLMCallRepository` is still append-only with no read method,
-        # so these two still have no reader in `src/`.** They ship ahead of
-        # one because M10 gets one migration: a reader task authoring its own
-        # DDL would be a second head, and a pre-allocated chain is a serial
-        # spine across every group holding a link in it.
+        # **Both have a reader in `src/` as of M10.**
+        # `LLMCallRepository.list_since` is `WHERE at >= :since ORDER BY at`,
+        # which is `ix_llm_calls_at`'s own query, and `m08a`'s objection --
+        # *"an index nothing reads is `ix_titles_popularity` again"* -- is
+        # discharged rather than merely priced. They shipped one revision
+        # ahead of it because M10 gets one migration: a reader task authoring
+        # its own DDL would be a second head, and a pre-allocated chain is a
+        # serial spine across every group holding a link in it.
         #
         # `(at)` serves dashboard 5's "spend per day and month" and its
         # cost-anomaly alert, both `WHERE at >= :since`.
