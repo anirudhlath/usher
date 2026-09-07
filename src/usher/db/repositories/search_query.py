@@ -191,7 +191,7 @@ _OLDEST_AT = text("SELECT min(at) FROM search_queries")
 # past the window rather than an arbitrary sample of them.
 _PRUNE = text(
     "DELETE FROM search_queries WHERE id IN ("
-    "  SELECT id FROM search_queries WHERE at < :before ORDER BY at LIMIT :limit"
+    "  SELECT id FROM search_queries WHERE at < :before LIMIT :limit"
     ")"
 ).bindparams(bindparam("before", type_=DateTime(timezone=True)))
 

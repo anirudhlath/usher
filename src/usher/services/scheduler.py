@@ -485,7 +485,7 @@ class Scheduler:
 #: `ScheduledJob.period` and `cli._schedule` both already state: an operator
 #: tunes the *window* (`USHER_SEARCH_QUERY_RETENTION_DAYS`), which is the
 #: number PRD 10 prices and the one a household would ask about.
-RETENTION_PERIOD = timedelta(days=1)
+RETENTION_PERIOD = timedelta(days=30)
 
 #: `SearchQueryRetention.name`. **Stable, because it is a metric label**
 #: (`usher.scheduler.job.duration`, `.failures` and `.due` are all labelled

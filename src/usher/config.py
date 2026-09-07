@@ -946,7 +946,7 @@ class Settings(BaseSettings):
     # recording nothing is `USHER_SEARCH_SUGGEST_ANALYTICS` and an analytics-
     # free `SearchService`, both of which write no row rather than writing one
     # and racing a prune for it.
-    search_query_retention_days: int = Field(default=90, ge=1)
+    search_query_retention_days: int = Field(default=90, ge=0)
     # How many rows one transaction may delete. The prune loops, opening a
     # session and committing per chunk, because a single `DELETE` over a
     # year of keystrokes holds one transaction and one lock set for its whole
@@ -960,7 +960,7 @@ class Settings(BaseSettings):
     # a chunk of zero deletes nothing and, since the loop terminates on a chunk
     # shorter than the limit, terminates immediately: a retention job that
     # silently never prunes.
-    search_query_retention_batch: int = Field(default=10_000, ge=1)
+    search_query_retention_batch: int = Field(default=10_000, ge=0)
 
     # The client event channel (PRD 07's SSE surface). Same reasoning as
     # every block above: PRD 08's TOML config layer does not exist yet.
