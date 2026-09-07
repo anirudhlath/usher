@@ -998,9 +998,11 @@ suspicion.
   `45` and `31` do not, and `17` never could have, because no ledger of it was
   ever published to compare a membership against.
 
-  ⚠️ **Re-measured 2026-09-07 at `cb5ac06`, migration head `m10c`. The five
-  verdicts stand; three of the *figures* under them moved, and every move is
-  `m10a` renaming a column rather than the finding changing.**
+  ⚠️ **Re-measured 2026-09-07 at `cb5ac06`, migration head `m10c`, and
+  cross-checked against a running database for the first time. The five verdicts
+  stand; three of the *figures* under them moved, and the moves have two causes
+  rather than one — four columns added across `m10a`, `m10b` and `m10c`, and
+  `m10a`'s rating rename redirecting a COPY writer off a column.**
   `uv run python scripts/audit_bounded_columns.py --summary` prints **83**
   bounded columns (`VARCHAR 28, INTEGER 50, NUMERIC 1, BIGINT 1, HALFVEC 3`),
   **7** CHECK-only value bounds, and under the adopted `path` reading
@@ -1016,6 +1018,22 @@ suspicion.
   own published constants cannot see the document drifting away from both — the
   last unclosed corner of ADR-0044's *"a ledger that agrees with itself is not a
   ledger that is right"*.
+
+  ⚠️ **Both of the ledger's sources are the tree, so the running database was
+  asked for the first time on 2026-09-07** — read-only, `usher_catalog` on
+  `usher-postgres-1`, PostgreSQL 17.10, through `pg_attribute`/`format_type()`.
+  It stands at **`m10b`**, one migration behind the tree, and at that head its
+  bounded columns are `--at m10b`'s column for column: **81**, `VARCHAR 26,
+  INTEGER 50, NUMERIC 1, BIGINT 1, HALFVEC 3`, including the three widths the
+  migration replay says it cannot check independently. 🔴 **Rule B applied to
+  the *database* gives 83 instead — the same number as the tree's `m10c` total,
+  and not the same 83** — because the live schema carries
+  `titles_rating_backup_20260819`, ADR-0040's operator-held rollback table,
+  which is in no `Base.metadata` and so in no ledger, and whose
+  `tmdb_vote_count`/`imdb_num_votes` Rule B admits on its face. **Only the
+  census is a database fact**: `safe`/`translated`/`exposed` are properties of
+  writers and `except` clauses, which no `SELECT` can be asked. ADR-0044 now
+  states the population the rule always assumed and never named.
 
   | claimed at `m08b`, quoted since | verdict, measured 2026-08-20 at `m09f`; re-measured 2026-09-07 at `m10c` |
   |---|---|
@@ -1129,24 +1147,35 @@ suspicion.
   and are deleted here, 2026-09-07.** `705f3ab` (F8, 2026-08-20) deleted the
   paragraph running from *"catches it, evidenced by `id_crosswalk.imdb_id`"* to
   *"The candidate is unchanged: declare staging columns wide"*; the 59-commit
-  merge `c30cae2` (2026-08-21) brought it back. So until today this bullet
-  **retired the candidate fix in one paragraph and reaffirmed it as "unchanged"
-  ninety-four lines later**, re-asserted the `NUMERIC` spelling it corrects directly
-  above, re-asserted *"31 of the 45"* after refuting both figures, and said the
-  debt *"still needs a scoped decision before an owner"* of a decision ADR-0044
-  had already made and F9 had already implemented. It also opened mid-sentence,
+  merge `c30cae2` (2026-08-21) kept both sides of the conflict that deletion
+  produced. So until today this bullet **retired the candidate fix in one
+  paragraph and reaffirmed it as "unchanged" ninety-eight lines later** —
+  `:1010` against `:1108` at `cb5ac06`, measured 2026-09-07, and not the
+  "ninety-four" this paragraph claimed on the day it was written — re-asserted
+  the `NUMERIC` spelling it corrects directly above, re-asserted *"31 of the
+  45"* after refuting both figures, and said the debt *"still needs a scoped
+  decision before an owner"* of a decision ADR-0044 had already made and F9 had
+  already implemented. It also opened mid-sentence,
   on the word *"catches"*, which is what a reader had to notice to find any of
-  the rest. ⚠️ **The tell is that `71a9268` (ADR-0040, 2026-08-19) applied the
-  rating-column renames to the resurrected copy and not to the live paragraph
-  above it** — a later milestone maintaining the dead text is how a merge revert
-  survives three weeks of edits to the same bullet. 🔴 **The same commit that
+  the rest. 🔴 **git asked, and the answer was "both".** Replaying the merge
+  on 2026-09-07 — `git merge-tree --write-tree af918e8 7d4e765` — returns this
+  file **conflicted**, the `af918e8` side opening on F8's replacement and the
+  `7d4e765` side closing on the twenty lines it replaced. Nothing reverted
+  silently: the choice was presented and taken both ways, which is the one
+  resolution that leaves no diff behind to review. ⚠️ **And the copy that was
+  kept was the better-annotated one.** `71a9268` (ADR-0040, 2026-08-19) applied
+  the rating renames to it the day *before* F8 deleted it, so at `cb5ac06` the
+  dead paragraph carried `tmdb_popularity`, `tmdb_vote_average` and
+  `imdb_average_rating` while the live one still said `Title.popularity` and
+  `community_rating`. A stale copy that reads as the maintained one is how this
+  survived three weeks of edits to the same bullet. 🔴 **The same commit that
   restored it got the machine record right**: `c30cae2` updated both of the
   ledger's published censuses for `m10a`, taught the migration replay `_RENAMES`,
   and wrote four paragraphs on `tmdb_vote_count` moving to `translated` — one
-  resolution pass, generator correct, prose reverted. Nothing is lost with it: the
-  candidate fix is quoted and retired at *"What ADR-0044 does retire"*, boundary
-  call 8 is restated at *"M9's boundary call 8 survives all of it"*, and the
-  rename facts are folded into the paragraph above.
+  resolution pass, generator correct, prose taken both ways. Nothing is lost
+  with the deletion: the candidate fix is quoted and retired at *"What ADR-0044
+  does retire"*, boundary call 8 is restated at *"M9's boundary call 8 survives
+  all of it"*, and the rename facts are folded into the paragraph above.
 - **`PortRateLimited.retry_after` reaches no consumer** — an M4 gap found by M8.
   **Six sites across four adapter modules** construct it — `adapters/bulk/
   wikidata.py`, `adapters/bulk/download.py`, `adapters/emby/session.py` (three)
