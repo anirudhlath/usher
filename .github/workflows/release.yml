@@ -1,0 +1,77 @@
+name: Release
+
+# A separate file rather than a job in `ci.yml`, and the reason is arithmetic:
+# `ci.yml` triggers on `push: branches: [main]`, so adding `tags:` there would
+# run the whole suite on the tag *and* on the merge that preceded it -- the
+# same commits, twice. One file, one trigger, one job, readable without
+# reading the gate.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+  # `attest-build-provenance` needs both, and neither is granted by default.
+  id-token: write
+  attestations: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      # ⚠️ Every pin below is a floating major tag that was verified to EXIST
+      # with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`, because an
+      # action reference that resolves to nothing fails the job in about two
+      # seconds at "Set up job", before any step of yours runs, and the error
+      # names the tag rather than the mistake.
+      #
+      # 🔴 The one that bites: **`astral-sh/setup-uv`'s floating majors stop at
+      # `v7`** while its releases have reached v10 -- `@v8`, `@v9` and `@v10`
+      # all 404. `ci.yml` pins `@v9.0.0`, an exact release tag, which is why it
+      # works; "modernising" it to `@v10` would break it. This workflow needs
+      # **no** `setup-uv` at all: the build is `docker build` and `uv` runs inside it.
+      - uses: actions/checkout@v7
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # GHCR rather than Docker Hub: `GITHUB_TOKEN` already authenticates
+          # here with `packages: write` and there is no secret to manage,
+          # which for a single-maintainer project is the whole argument.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # **Multi-arch is declined, explicitly.** This project is developed
+          # on x86_64 with no arm64 machine to test on, and
+          # `platforms: linux/amd64,linux/arm64` under QEMU would publish an
+          # arm64 image that has never been started -- a `uv sync` of a hundred
+          # wheels plus an editable install under emulation, verified by
+          # nothing.
+          #
+          # Nothing in the Dockerfile blocks it: `python:3.13-slim` is
+          # multi-arch and every dependency resolves to a prebuilt manylinux
+          # wheel. **The reversal is two lines** -- add
+          # `docker/setup-qemu-action@v4` above and a `platforms:` key here --
+          # the day there is a machine to test on.
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

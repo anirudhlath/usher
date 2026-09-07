@@ -18,6 +18,20 @@ sentence naming a real row as the *specimen* for a measurement ("21 titles
 in the first 553,395 rows carry a literal quote, e.g. ...") is a factual
 claim about a dataset, not a copy of one. Neither ships.
 
+⚠️ **"Neither ships" is true of `docs/` and false of `README.md`, and the
+coverage is not uniform.** `pyproject.toml` declares `readme = "README.md"`,
+so hatchling embeds the whole file as the distribution's long description --
+`dist-info/METADATA` is the README verbatim, inside `/app/.venv` in the
+image. The runtime image's own-repo payload is **four** things, not three:
+`/app/.venv`, `/app/src`, `alembic.ini` and `/app/web/dist`.
+
+So: `src/` is inside all four checks. `alembic.ini` and `README.md` are
+inside the whole-repository dataset-row scan and **nothing else** -- which
+is adequate, because a dataset row is the licence-relevant shape wherever
+it sits, and that is that check's own argument. And `web/dist` is inside
+**none** of them, because it does not exist in the repository: it is built
+at image time from `web/src/`, which the whole-repo scan does cover.
+
 **The three checks, and why three.**
 
 - `test_every_imdb_id_is_in_the_reserved_synthetic_band` is the general

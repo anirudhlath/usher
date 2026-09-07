@@ -138,6 +138,12 @@ authentication, a VPN, or an SSH tunnel. That decision belongs before the
 
 ## Running it
 
+Tagged releases publish a container image to
+`ghcr.io/anirudhlath/usher`, built and attested by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) on any `v*`
+tag. **`linux/amd64` only** — there is no arm64 machine to test on here, and
+publishing an emulated image nobody has ever started would be a guess.
+
 ```bash
 cp .env.example .env
 openssl rand -hex 32          # paste this into USHER_SECRET_KEY= in .env
