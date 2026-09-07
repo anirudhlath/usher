@@ -42,3 +42,24 @@ def test_the_three_version_sources_agree() -> None:
     assert declared != _UNINSTALLED
 
     assert (declared, installed) == (usher.__version__, usher.__version__)
+
+
+def test_the_declared_version_is_pre_one_point_zero() -> None:
+    """`0.x`, per ADR-0047, and the message names the record so a bump is a
+    decision rather than an edit.
+
+    This is the whole of what a test can honestly say about R3. The rest of
+    that task is prose, and a case grepping the README for the word "Beta"
+    would be a change-detector on the sentence the task exists to make
+    readable.
+    """
+    declared = tomllib.loads((pathlib.Path(__file__).parents[2] / "pyproject.toml").read_text())[
+        "project"
+    ]["version"]
+
+    assert declared.startswith("0."), (
+        f"the declared version is {declared!r}. Going to 1.0.0 overturns "
+        "docs/prd/decisions/0047-the-release-is-v0-1-0.md, which says the "
+        "roadmap's 'v1' is a scope name and not a compatibility promise -- "
+        "read it and amend it rather than deleting this assertion."
+    )

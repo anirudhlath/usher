@@ -9,7 +9,7 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 
 ## Status
 
-Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
+Beta. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
 adapter), M4 (ingest pipeline), M5 (push and read-through), M6 (search),
 M7 (rows and recommendations), M8 (LLM curation) and M9 (the API surface) are
 complete — see [`docs/plans/`](docs/plans/) for the task breakdowns and
@@ -858,6 +858,20 @@ The four, reproduced here for a reader who is not running the service:
 - **MovieLens** — F. Maxwell Harper and Joseph A. Konstan. 2015. The MovieLens
   Datasets: History and Context. ACM Transactions on Interactive Intelligent
   Systems (TiiS) 5, 4: 19:1-19:19. https://doi.org/10.1145/2827872
+
+## Versioning
+
+**Releases are `0.x`, and the first is `v0.1.0`.** The roadmap's *"v1 — the
+abstraction works end to end"* names a **scope** milestone, which is met;
+`1.0.0` in semver would name a **compatibility promise**, which is not. There
+is no authentication anywhere, there is exactly one source adapter — so the
+port's shape has never been tested against a second media server — and six open
+feature issues each move a wire contract.
+
+**Pin the minor version.** `0.x` is where the wire contract may still move, and
+`1.0.0` stays available for the day it is meant.
+[ADR-0047](docs/prd/decisions/0047-the-release-is-v0-1-0.md) carries the
+argument and the counts behind it.
 
 ## License
 

@@ -16,6 +16,12 @@
 Success condition: a client can be built against Usher that fully replaces
 direct Emby access, for both movies and television.
 
+⚠️ **"v1" here is a scope name, not a version number.** The first tagged
+release is `v0.1.0`; meeting this heading's success condition is not a
+compatibility promise, and the two are different claims. See
+[ADR-0047](decisions/0047-the-release-is-v0-1-0.md), which exists because
+getting from this heading to `1.0.0` takes one plausible step.
+
 | Milestone | Contents |
 |---|---|
 | **M1 — Foundation** ✅ | Repo, uv project, compose, Postgres + migrations, domain models, port ABCs, config, health, CI with layering checks, telemetry bootstrap |
