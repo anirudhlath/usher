@@ -88,6 +88,19 @@ def _dashboards(text: str) -> str:
     return rest[: following.start()] if following else rest
 
 
+def _dashboards_preamble(text: str | None = None) -> str:
+    """`## Dashboards`'s own paragraphs, above the first `### N — …` heading.
+
+    Scoped rather than taken over the whole section body because the claim
+    being checked is about *the set* — how many there are, where they live,
+    how they are provisioned — and every per-dashboard section below repeats
+    words like "dashboard" and "JSON" for its own reasons.
+    """
+    body = _dashboards(text if text is not None else _PRD.read_text(encoding="utf-8"))
+    first = _DASHBOARD_HEADING.search(body)
+    return body[: first.start()] if first else body
+
+
 def _sections(text: str) -> list[tuple[int, str, str]]:
     """`(number, title, body)` for every `### N — Title` under `## Dashboards`."""
     body = _dashboards(text)
@@ -188,6 +201,87 @@ def test_every_dashboard_section_carries_a_backing_statement() -> None:
     assert unbacked == [], (
         "every dashboard section must state which of its panels have a series behind "
         f"them, in a paragraph opening with a bolded claim; missing from: {unbacked}"
+    )
+
+
+def test_the_dashboards_preamble_names_a_path_that_exists_and_how_it_is_provisioned() -> None:
+    """M10's D6 lands the first dashboard, and this is the arm that keeps the
+    preamble's promise checkable rather than merely written.
+
+    **The path is resolved on disk, which is the whole point.** The sentence
+    this file's neighbour corrected in 2026-08-19 was wrong in exactly one way —
+    it described JSON that did not exist — and a check that only asserted the
+    *words* `dashboards/` would have passed on it the moment somebody typed
+    them. Every path the preamble names in backticks and ending in `.json`,
+    `.yml` or `/` has to be a real file or directory.
+
+    The count is asserted too, because "six" and "one of them built" are two
+    claims and the second is the one that ages: D7 through D10 each make it
+    false and each has to come here and say so, which is the same currency
+    discipline the section-count assertion above applies.
+    """
+    preamble = normalised(_dashboards_preamble())
+
+    assert "Six" in preamble, (
+        f"the preamble no longer states the count, which is what makes 'one of them built' "
+        f"a fraction rather than a mood: {preamble[:200]!r}"
+    )
+    assert "`dashboards/provisioning/dashboards.yml`" in preamble, (
+        "the preamble does not name the provisioning file, so it says the dashboards are "
+        "provisioned without saying by what"
+    )
+    assert "bind mount" in preamble, (
+        "the provisioning *mechanism* is unnamed — that the file is consumed by another "
+        "repository's compose project is the asymmetry this whole arrangement rests on"
+    )
+    assert "`compose.yml` still gains nothing" in preamble, (
+        "nothing records that Usher's own compose file is deliberately untouched, which is "
+        "the half of the asymmetry an implementer is most likely to undo"
+    )
+
+    quoted = re.findall(r"`([^`]+)`", _dashboards_preamble())
+    paths = [name for name in quoted if name.endswith((".json", ".yml", "/"))]
+    assert paths, f"the preamble names no path at all, so nothing below can fail: {quoted}"
+
+    # **The two kinds of path here are the asymmetry itself**, so they are
+    # separated rather than filtered. A repository-relative path has to resolve;
+    # `~/code/observability/` has to *not* resolve, because the stack that
+    # renders these dashboards is deliberately not an asset of this repository.
+    # Filtering the second out silently would leave a check that reads as
+    # "every path exists" while skipping the only one whose absence is the
+    # design.
+    external = [name for name in paths if name.startswith(("~", "/"))]
+    internal = [name for name in paths if name not in external]
+
+    assert external == ["~/code/observability/"], (
+        "the preamble no longer names the external stack, so a reader has nowhere to look "
+        f"for the compose project that mounts these files: {paths}"
+    )
+    assert internal, f"the preamble names no path inside this repository: {paths}"
+
+    missing = [name for name in internal if not (_ROOT / name.rstrip("/")).exists()]
+    assert missing == [], (
+        f"the preamble names paths that do not exist in this tree: {missing} — which is "
+        "precisely the defect the 2026-08-19 correction was written for"
+    )
+
+
+def test_the_preamble_scan_stops_above_the_first_dashboard_heading() -> None:
+    """`_dashboards_preamble` truncating at the wrong place would let any of
+    the six per-dashboard sections answer a claim about the set. Proved on a
+    synthetic document, where the bait sits *below* the first heading."""
+    document = (
+        "## Dashboards\n\nSix, one built at `dashboards/x.json`.\n\n"
+        "### 1 — Built\n\nProvisioned by a bind mount of `dashboards/decoy.yml`.\n\n"
+        "## Where the stack lives\n\nElsewhere.\n"
+    )
+
+    preamble = _dashboards_preamble(document)
+
+    assert "`dashboards/x.json`" in preamble
+    assert "decoy" not in preamble, (
+        "the preamble ran on into section 1, so a per-dashboard paragraph can satisfy a "
+        f"claim about the whole set: {preamble!r}"
     )
 
 

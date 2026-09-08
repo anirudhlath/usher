@@ -218,7 +218,18 @@ src = ["src", "tests"]
 # files, some of them Markdown carrying Python fences from unrelated projects —
 # and would lint a dependency tree this repository does not own. `oxlint` and
 # `prettier` are that directory's gate; `npm run verify` runs them.
-extend-exclude = ["docs", ".claude", "web"]
+#
+# `dashboards/README.md` is the fourth, and it is here **prophylactically** —
+# stated as such because the alternative is a comment that implies a break
+# nobody saw. Measured 2026-09-07 with the file unexcluded: `ruff format
+# --check dashboards/README.md` reports *1 file already formatted*, because
+# every fence in it is ```sql and ruff has nothing to say about SQL. What it
+# would have to say about a ```python fence is the same thing it says about
+# `docs/` and `.claude/`, and that file is a record of eleven measured panel
+# observations — a fence reshaped by a formatter is a quotation that no longer
+# matches what was measured. The entry is a path rather than the directory so
+# that a real `.py` landing under `dashboards/` is still linted.
+extend-exclude = ["docs", ".claude", "web", "dashboards/README.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]

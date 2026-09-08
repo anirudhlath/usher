@@ -1,0 +1,54 @@
+# Grafana dashboard provisioning for Usher.
+#
+# **The asymmetry this file exists to honour**: the dashboards are an asset of
+# *this* repository — they live with the code that emits the data, so they
+# version together — while the stack that renders them is not. PRD 10's "Where
+# the stack lives" puts Grafana, Prometheus, Loki and Tempo in
+# `~/code/observability/`, shared with Alfred and anything added later, and
+# says Usher's only coupling to telemetry is two environment variables.
+#
+# So this file is consumed by a compose project in another repository, and
+# Usher's own `compose.yml` gains nothing from it. To wire it up, add to
+# `~/code/observability/compose.yml`'s `grafana` service:
+#
+#     volumes:
+#       - ../usher/dashboards/provisioning:/etc/grafana/provisioning/dashboards:ro
+#       - ../usher/dashboards:/var/lib/grafana/dashboards/usher:ro
+#
+# Two mounts and not one, because `path` below is where Grafana *reads the
+# JSON*, and the provisioning directory Grafana scans for *this file* is a
+# different, fixed location (`/etc/grafana/provisioning/dashboards`). Mounting
+# only the second would give Grafana the dashboards and no instruction to load
+# them; mounting only the first gives it the instruction and nothing to load.
+#
+# `foldersFromFilesStructure` is deliberately absent: this repository's
+# dashboards are a flat, numbered set (`01-…json` through `06-…json`) and a
+# folder per file would put each one alone in a folder named for it.
+
+apiVersion: 1
+
+providers:
+  - name: usher
+    # Named rather than defaulted. Grafana keys its provisioned-dashboard
+    # bookkeeping on this string, so renaming it orphans every dashboard this
+    # provider has already written and re-inserts them as new rows.
+    orgId: 1
+    folder: Usher
+    folderUid: usher
+    type: file
+    # A provisioned dashboard is read-only in the UI by design: the JSON in git
+    # is the source, and an edit saved through Grafana would be silently
+    # reverted on the next restart. `editable: false` in each file says the
+    # same thing to the panel editor; this says it to the save path.
+    disableDeletion: false
+    allowUiUpdates: false
+    # Grafana re-reads the directory on this interval, so a `git pull` on the
+    # host is picked up without restarting the container.
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/usher
+      # Every file in this repository's `dashboards/` is a dashboard; the
+      # provisioning YAML itself lives one directory down precisely so that
+      # `dashboards/*.json` is an unambiguous glob for both Grafana and
+      # `tests/unit/test_dashboards.py`.
+      foldersFromFilesStructure: false

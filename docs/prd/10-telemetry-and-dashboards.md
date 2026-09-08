@@ -1142,11 +1142,27 @@ follow-up to this one.
 
 ## Dashboards
 
-Six. **Specified here, and not yet built** — no dashboard JSON exists in this
-repository and no Grafana service is in `compose.yml`; the sentence that said
-they were shipped as provisioned JSON "so a fresh deploy has them without
-clicking" was aspirational and is corrected here (2026-08-19). They live with
-the code that emits the data when they land, so they version together.
+Six specified here, **one of them built**. Dashboard 1 ships as
+[`dashboards/01-library-and-catalog.json`](../../dashboards/01-library-and-catalog.json)
+with its provisioning file at `dashboards/provisioning/dashboards.yml`, so a
+fresh deploy has it without clicking; 2–6 are still specification. They live
+with the code that emits the data, so they version together. **Each panel's
+recorded observation against the live catalog is
+[`dashboards/README.md`](../../dashboards/README.md)** — the query as issued and
+the data it returned, per panel, which is what makes a committed panel
+distinguishable from one nobody has opened.
+
+**The provisioning mechanism is a bind mount from the other repository, and
+Usher's `compose.yml` still gains nothing** — there is deliberately no Grafana
+service in it. "Where the stack lives" below puts the stack in
+`~/code/observability/`; its compose project mounts
+`dashboards/provisioning` at Grafana's own
+`/etc/grafana/provisioning/dashboards` and `dashboards/` at the `path` that file
+names. Two mounts and not one: the first is the instruction, the second is what
+is loaded, and mounting either alone yields no dashboards and no error.
+The sentence that once said all five were already shipped this way was
+aspirational and was corrected on 2026-08-19; **there are six, not five**, and
+as of M10's D6 the claim is true of exactly one of them.
 
 ### 1 — Library & Catalog
 

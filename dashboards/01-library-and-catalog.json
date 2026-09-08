@@ -1,0 +1,252 @@
+{
+  "uid": "usher-library-catalog",
+  "title": "Usher — 1 Library & Catalog",
+  "description": "Eleven panels, every one SQL against the canonical database. PRD 10's first principle: most of what is worth knowing about a media catalog is not a metric. There is deliberately no Prometheus target on this dashboard.",
+  "tags": ["usher", "catalog"],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "timezone": "browser",
+  "refresh": "",
+  "time": {
+    "from": "now-8y",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "piechart",
+      "title": "Titles by enrichment state",
+      "description": "titles.enrichment_state. The whole catalog, no denominator caveat: the column is NOT NULL and every title carries one of skeleton / enriched / stub.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value"] },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "SELECT titles.enrichment_state AS state,\n       count(*) AS titles_in_state\nFROM titles\nGROUP BY titles.enrichment_state\nORDER BY count(*) DESC"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Owned vs catalog coverage",
+      "description": "media_items.available and media_items.title_id against the catalog. 'Owned titles' counts distinct matched titles, so an item with no title_id is in the unmatched row and in no other.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "SELECT 'catalog titles' AS bucket, count(*) AS rows_counted\nFROM titles\nUNION ALL\nSELECT 'owned titles (matched)', count(DISTINCT media_items.title_id)\nFROM media_items\nWHERE media_items.available AND media_items.title_id IS NOT NULL\nUNION ALL\nSELECT 'owned items (available)', count(*)\nFROM media_items\nWHERE media_items.available\nUNION ALL\nSELECT 'owned items (unmatched)', count(*)\nFROM media_items\nWHERE media_items.available AND media_items.title_id IS NULL"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Unmatched review queue depth",
+      "description": "media_items.title_id IS NULL, served by ix_media_items_unmatched (source_id) WHERE title_id IS NULL. This panel is a count, not a page, so list_unmatched's OFFSET cost (PRD 10, dashboard 3) does not apply to it. Deliberately uncoloured: no bar has been set for this queue, and a default threshold would render 5,500 as an alarm nobody declared.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed", "fixedColor": "text" } },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "SELECT sources.name AS source,\n       count(*) AS unmatched\nFROM media_items\nJOIN sources ON sources.id = media_items.source_id\nWHERE media_items.title_id IS NULL\nGROUP BY sources.id, sources.name\nORDER BY count(*) DESC"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "barchart",
+      "title": "Genre distribution",
+      "description": "GROUP BY unnest(titles.genres), which is the exact facet collapse db-and-sql.md names. A title with three genres is counted three times, so the column sum exceeds the catalog and is not a denominator.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 8 },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "legend": { "showLegend": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "SELECT exploded.genre AS genre,\n       count(*) AS titles_with_genre\nFROM (\n    SELECT unnest(titles.genres) AS genre\n    FROM titles\n    WHERE cardinality(titles.genres) > 0\n) AS exploded\nGROUP BY exploded.genre\nORDER BY count(*) DESC\nLIMIT 25"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "barchart",
+      "title": "Decade distribution",
+      "description": "titles.year, non-null on 1,128,000 of 1,276,268 rows (2026-09-07). Bounded below at 1870, which excludes exactly one row carrying year = 1.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 8 },
+      "options": { "orientation": "vertical", "legend": { "showLegend": false } },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "SELECT ((titles.year / 10) * 10)::text AS decade,\n       count(*) AS titles_in_decade\nFROM titles\nWHERE titles.year IS NOT NULL AND titles.year >= 1870\nGROUP BY (titles.year / 10) * 10\nORDER BY (titles.year / 10) * 10"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "barchart",
+      "title": "Language distribution",
+      "description": "⚠️ Enriched tier only. titles.original_language is non-null on exactly 133,447 rows — the enriched count to the row — so this panel is 10.5% of the catalog and 85.0% of the owned library, not the catalog.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 17 },
+      "options": { "orientation": "horizontal", "legend": { "showLegend": false } },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "SELECT titles.original_language AS language,\n       count(*) AS titles_in_language\nFROM titles\nWHERE titles.original_language IS NOT NULL\nGROUP BY titles.original_language\nORDER BY count(*) DESC\nLIMIT 20"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "barchart",
+      "title": "Runtime distribution",
+      "description": "titles.runtime_minutes, non-null on 715,395 of 1,276,268 rows (2026-09-07). Ten-minute buckets; the 240 bucket is 240 and over.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 17 },
+      "options": { "orientation": "vertical", "legend": { "showLegend": false } },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "SELECT least((titles.runtime_minutes / 10) * 10, 240)::text AS runtime_bucket_minutes,\n       count(*) AS titles_in_bucket\nFROM titles\nWHERE titles.runtime_minutes IS NOT NULL AND titles.runtime_minutes > 0\nGROUP BY least((titles.runtime_minutes / 10) * 10, 240)\nORDER BY least((titles.runtime_minutes / 10) * 10, 240)"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Library growth per week",
+      "description": "media_items.added_at, with an explicit IS NOT NULL. 0 of 23,943 rows are null today, so the filter is structural rather than live — the next source to report no DateCreated would empty part of the curve without raising anything.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 26 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "SELECT date_trunc('week', media_items.added_at) AS time,\n       count(*) AS items_added\nFROM media_items\nWHERE media_items.available\n  AND media_items.added_at IS NOT NULL\n  AND $__timeFilter(media_items.added_at)\nGROUP BY date_trunc('week', media_items.added_at)\nORDER BY date_trunc('week', media_items.added_at)"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Quality ladder by decade",
+      "description": "⚠️ The share is of probed items, never of the table. HdrFormat has no SDR member, so hdr_format IS NULL means 'SDR or never probed' — 22,239 of 23,943 rows. The denominator here is media_items.video_codec IS NOT NULL (20,857 rows on 2026-09-07); 3,021 available rows carry no container at all, 3,007 of them series-level rows with no file behind them.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 35 },
+      "options": { "showHeader": true, "footer": { "show": false } },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "SELECT ((titles.year / 10) * 10)::text AS decade,\n       count(*) AS probed_items,\n       count(*) FILTER (WHERE media_items.width >= 3840) AS uhd_items,\n       round(100.0 * count(*) FILTER (WHERE media_items.width >= 3840) / count(*), 1) AS uhd_pct,\n       count(*) FILTER (WHERE media_items.hdr_format IS NOT NULL) AS hdr_items,\n       round(100.0 * count(*) FILTER (WHERE media_items.hdr_format IS NOT NULL) / count(*), 1) AS hdr_pct,\n       round(100.0 * count(*) FILTER (WHERE media_items.video_codec IN ('hevc', 'av1')) / count(*), 1) AS hevc_or_av1_pct\nFROM media_items\nJOIN titles ON titles.id = media_items.title_id\nWHERE media_items.available\n  AND media_items.video_codec IS NOT NULL\n  AND titles.year IS NOT NULL\n  AND titles.year >= 1870\nGROUP BY (titles.year / 10) * 10\nORDER BY (titles.year / 10) * 10"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Most-represented directors and actors",
+      "description": "⚠️ Enriched tier only, and scoped to the owned library on purpose: credits arrive from TMDb enrichment, which is 10.5% of the catalog but 85.0% of the shelf (9,784 of 11,516 owned titles, 2026-09-07). The second figure is the one that bounds a panel drawn over the shelf. One target rather than two: two targets render as two frames behind a selector, so half the panel is a click away and is not observed by anyone reading the dashboard.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 11, "w": 12, "x": 0, "y": 45 },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "WITH owned AS (\n    SELECT DISTINCT media_items.title_id AS title_id\n    FROM media_items\n    WHERE media_items.available AND media_items.title_id IS NOT NULL\n),\ndirectors AS (\n    SELECT people.name AS person,\n           count(DISTINCT credits.title_id) AS owned_titles\n    FROM credits\n    JOIN owned ON owned.title_id = credits.title_id\n    JOIN people ON people.id = credits.person_id\n    WHERE credits.kind = 'crew' AND credits.job = 'Director'\n    GROUP BY people.id, people.name\n    ORDER BY count(DISTINCT credits.title_id) DESC, people.name\n    LIMIT 15\n),\nactors AS (\n    SELECT people.name AS person,\n           count(DISTINCT credits.title_id) AS owned_titles\n    FROM credits\n    JOIN owned ON owned.title_id = credits.title_id\n    JOIN people ON people.id = credits.person_id\n    WHERE credits.kind = 'cast'\n    GROUP BY people.id, people.name\n    ORDER BY count(DISTINCT credits.title_id) DESC, people.name\n    LIMIT 15\n)\nSELECT 'director' AS role, directors.person AS person, directors.owned_titles AS owned_titles\nFROM directors\nUNION ALL\nSELECT 'actor', actors.person, actors.owned_titles\nFROM actors\nORDER BY role DESC, owned_titles DESC, person"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Franchise completeness (the want-list)",
+      "description": "⚠️ Enriched tier only. titles.collection_id arrives from TMDb enrichment (13,381 rows in a collection, 5,298 collections on 2026-09-07), so a franchise whose other entries were never enriched reads as complete. Rows are franchises with at least one owned entry and at least one missing one; 'missing' is the want-list.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+      "gridPos": { "h": 11, "w": 12, "x": 12, "y": 45 },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "usher-postgres" },
+          "rawSql": "WITH owned AS (\n    SELECT DISTINCT media_items.title_id AS title_id\n    FROM media_items\n    WHERE media_items.available\n      AND media_items.title_id IS NOT NULL\n      AND media_items.episode_id IS NULL\n)\nSELECT collections.name AS franchise,\n       count(*) AS entries,\n       count(owned.title_id) AS owned_entries,\n       count(*) - count(owned.title_id) AS missing_entries,\n       string_agg(\n           titles.name || coalesce(' (' || titles.year || ')', ''),\n           ', ' ORDER BY titles.year NULLS LAST, titles.name\n       ) FILTER (WHERE owned.title_id IS NULL) AS missing\nFROM titles\nJOIN collections ON collections.id = titles.collection_id\nLEFT JOIN owned ON owned.title_id = titles.id\nGROUP BY collections.id, collections.name\nHAVING count(owned.title_id) > 0 AND count(owned.title_id) < count(*)\nORDER BY count(*) - count(owned.title_id) DESC, collections.name\nLIMIT 50"
+        }
+      ]
+    }
+  ]
+}
