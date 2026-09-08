@@ -1369,6 +1369,70 @@ suspicion.
   is real and is already closed, and the open residual is that **nothing
   asserts the pinning happened** — a `held` deleted as a leak would look
   exactly like a `held` that works.
+  ✅ **Closed 2026-09-07 by M10's F7, and closed as a guard rather than as the
+  repair the task predicted.** F7 was re-scoped before it was run, because the
+  three-line pinning it was written to add had already shipped in `271b0d4`
+  (2026-08-19) — six days *after* the task text was drafted on 2026-08-13, and
+  the reason F6 found no red to turn green. **F7 therefore reproduces no
+  before-state and claims none**; a repair whose red was never observed is a
+  repair credited to a scheduling change, and the honest form of that here is
+  to say the repair was already in the tree.
+  **A second null result, this time on a different denominator than F6's.**
+  `test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_own`
+  **did not fail in 15 whole-`tests/integration` runs** — HEAD `8263bec`,
+  2026-09-07, sustained concurrent `tests/unit` load throughout, load average
+  7.25–9.80 at run start, `1452 passed / 22 skipped` and `PYTEST EXIT: 0` in
+  every one, `-rA` on a sixteenth run naming the case `PASSED` so this is a run
+  and not a collection. Logs and a protocol `sha256`'d before the first run are
+  at `/var/tmp/m10-f7-verify/`. **This is F6's sustained arm only** — F6's
+  separate 5-run burst arm was not reproduced, and 15 here is not unioned with
+  F6's 15, nor either with the 2-in-7 above. Three environments, three
+  denominators, one answer: **0**.
+  🔴 **What F7 actually fixed is the second residual, which F6 named and which
+  is the reason `held` alone was not enough: `commits` was fed by a handler
+  that pinned nothing.** `log.commits.add(id(session))` wrote an address down
+  and took no reference. Measured here 2026-09-07: on a commit the events fire
+  **`after_commit` then `after_transaction_end`**, so the `ended` handler — the
+  only thing pinning that session — ran a moment *after* the credit was
+  recorded. The arm was safe by an incidental coupling between two
+  independently registered listeners, stated nowhere and checked by nothing.
+  **F6's reading of the direction is confirmed and F7's predicted one is
+  refuted**: an unpinned `commits` can only ever produce a false **green** on
+  `request_sessions <= commits` — a later session landing on a freed,
+  already-credited address inherits the credit — and never the red the task
+  predicted. `_SessionLog.pin()` now takes the reference *before* returning the
+  address and both `record()` and the new `record_commit()` go through it.
+  **The guards, and each was watched to fail on its own `E ` line.**
+  `_SessionLog.held` is now asserted three ways rather than none:
+  `test_the_session_log_holds_every_session_it_records_so_no_address_is_recycled`
+  (a `weakref` that must survive `del`, behind two positive controls — a bare
+  `Session` must die on `del`, and 2,000 created-and-freed ones must occupy
+  fewer than 2,000 addresses, or the case proves nothing);
+  `test_the_session_log_holds_the_session_at_the_moment_it_credits_a_commit`
+  (the only guard that fails on the half-repair); and the `session_log`
+  fixture's own teardown, which asserts every address the log keys on is one it
+  still holds. **The fixture guard is deliberately spelled as coverage, not as
+  `len(set(held)) == len(held)`** — the obvious spelling — because an emptied
+  `held` satisfies that trivially, which would make the guard against the one
+  plant it exists to catch unfalsifiable. That is this project's signature
+  failure written into the guard itself.
+  Plants, verdicts written before they were run: `held.append` deleted killed
+  all three (`assert None is not None` in the weakref case, `assert [False] ==
+  [True]` in the commit case, and `assert {…6 addresses…} <= set()` at fixture
+  teardown of the target case); the half-repair — `commits` back on `id()`
+  while begins and ends stay pinned — killed **only** the commit case, which is
+  why it needed its own guard and why the fixture invariant does not catch it.
+  Equivalent-mutant control, the `after_begin` and `after_commit` `event.listen`
+  calls swapped: green on all five gate steps (`6282 passed, 26 skipped`),
+  confirming SQLAlchemy dispatches by event name and neither handler reads the
+  other's state.
+  **Two citations in F7's task text and one in its acceptance do not resolve at
+  this HEAD** and are recorded rather than worked around: `_SessionLog` is at
+  `:261` and not `:206–248`, the case is at `:391` and not `:292–353`, and this
+  bullet is at `:1313` and not `:1031–1072`. The stale *"eight sessions
+  produced five distinct `id()`"* figure the class docstring carried from
+  2026-08-19 has been replaced in place with the 2,000/7 measurement, on the
+  rule that a number true at one HEAD must not be quoted at another.
 - ⚠️ **A second intermittent integration group is *reported* and did not
   reproduce, and this list is where the report belongs rather than a rate.**
   Raised 2026-08-19 reviewing M10's S4:

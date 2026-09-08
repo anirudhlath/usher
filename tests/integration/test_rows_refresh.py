@@ -36,6 +36,7 @@ reached by `ON CONFLICT (name) DO NOTHING` and is left standing, as
 import asyncio
 import time
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -278,26 +279,59 @@ class _SessionLog:
     a session opened under `usher.lane.rows.refresh` reports that name.
 
     And it does not let `id(session)` be recycled. **`id()` is a CPython
-    address and CPython reuses addresses**: measured on this host on
-    2026-08-19, eight sessions opened back to back through this same listener
-    produced **five distinct `id()` values**. The request's `Session` is
-    unreachable long before the refresh opens one -- measured in **40 of 40**
-    request/refresh cycles -- so its address is free for the refresh's session
-    to land on, and `refresh_sessions.isdisjoint(request_sessions)` would then
-    report *"the refresh reused the request's session"* about two different
-    objects. `held` keeps every observed session alive for the length of the
-    case, which makes the identity unique by construction instead of by luck.
+    address and CPython reuses addresses.** Re-measured on this host
+    2026-09-07, replacing the "eight sessions produced five distinct `id()`"
+    figure this docstring carried from 2026-08-19: **2,000 created-and-freed
+    `Session` objects occupy 7 distinct `id()` values; the same 2,000 held by a
+    strong reference occupy 2,000.** The request's `Session` is unreachable
+    long before the refresh opens one, so its address is free for the refresh's
+    session to land on, and `refresh_sessions.isdisjoint(request_sessions)`
+    would then report *"the refresh reused the request's session"* about two
+    different objects -- a flake accusing the code of the exact defect
+    serve-stale exists to prevent.
+
+    `held` keeps every observed session alive for the length of the case, which
+    makes the identity unique by construction instead of by luck. **It is a
+    deliberate leak**, bounded at the sessions one case opens, and it is load
+    bearing rather than an oversight:
+    `test_the_session_log_holds_every_session_it_records_so_no_address_is_recycled`
+    fails if it is simplified away, and the `session_log` fixture asserts on
+    teardown that everything this log keys on is something it holds. Do not
+    delete it.
+
+    **Every address this log reasons about goes through `pin`**, including the
+    commit credit. `commits` used to be fed by a handler that wrote an address
+    down and pinned nothing; it was safe only because `after_transaction_end`
+    fires just after `after_commit` and pinned the session a moment later --
+    an incidental coupling between two independently registered listeners,
+    which is not a thing to rest `request_sessions <= commits` on.
     """
 
     boundaries: list[_Boundary] = field(default_factory=list)
     commits: set[int] = field(default_factory=set)
     owners: dict[int, str] = field(default_factory=dict)
     held: list[Session] = field(default_factory=list)
+    pinned: set[int] = field(default_factory=set)
+
+    def pin(self, session: Session) -> int:
+        """Take a strong reference to `session`, then return its address.
+
+        The order is the whole point: once the reference is held the address
+        cannot be handed to another object, so the integer this returns keys
+        one session for the log's lifetime. Checking `pinned` rather than
+        scanning `held` is sound *because* of that -- an address already in the
+        set belongs to an object this log is still holding, so it cannot be a
+        different session wearing a recycled address.
+        """
+        identity = id(session)
+        if identity not in self.pinned:
+            self.pinned.add(identity)
+            self.held.append(session)
+        return identity
 
     def record(self, kind: str, session: Session) -> None:
-        identity = id(session)
+        identity = self.pin(session)
         if identity not in self.owners:
-            self.held.append(session)
             task = asyncio.current_task()
             self.owners[identity] = task.get_name() if task is not None else "<no task>"
         self.boundaries.append(
@@ -309,6 +343,18 @@ class _SessionLog:
                 at=time.monotonic(),
             )
         )
+
+    def record_commit(self, session: Session) -> None:
+        """Credit a commit to the session that made it, pinning it first.
+
+        `after_commit` fires *before* `after_transaction_end` (measured on this
+        host 2026-09-07), so at this moment nothing else has pinned the
+        session yet. Writing the address down without holding it would leave
+        `commits` carrying an address the log does not own, and a later session
+        landing on it inherits the credit -- a false green on
+        `request_sessions <= commits`, never a red.
+        """
+        self.commits.add(self.pin(session))
 
     def opened_by(self, owner: str) -> set[int]:
         return {identity for identity, name in self.owners.items() if name == owner}
@@ -337,7 +383,7 @@ def session_log() -> Iterator[_SessionLog]:
         log.record("end", session)
 
     def committed(session: Session) -> None:
-        log.commits.add(id(session))
+        log.record_commit(session)
 
     event.listen(Session, "after_begin", began)
     event.listen(Session, "after_transaction_end", ended)
@@ -348,6 +394,145 @@ def session_log() -> Iterator[_SessionLog]:
         event.remove(Session, "after_begin", began)
         event.remove(Session, "after_transaction_end", ended)
         event.remove(Session, "after_commit", committed)
+
+    # **The premise every identity comparison in this file rests on, asserted
+    # rather than assumed.** `held` is a deliberate leak and reads like one, so
+    # the failure mode worth guarding is somebody tidying it away: a log that
+    # pins nothing produces exactly the same green as a log that pins
+    # everything, right up until two sessions share an address. Stated as
+    # coverage of what the log keys on rather than as `len(set(...)) ==
+    # len(...)`, because an emptied `held` satisfies the latter trivially --
+    # which would make this guard unfalsifiable against the one plant it
+    # exists to catch.
+    addresses = [id(one) for one in log.held]
+    assert len(set(addresses)) == len(addresses), (
+        "two sessions this log holds share an address, which cannot happen "
+        "while both are alive -- so `held` is not holding what it recorded"
+    )
+    keyed_on = set(log.owners) | log.commits
+    assert keyed_on <= set(addresses), (
+        "the log keys on addresses it does not hold, so they can be recycled "
+        f"under it: {sorted(keyed_on - set(addresses))} recorded, "
+        f"{len(addresses)} sessions held"
+    )
+
+
+# The denominator for the recycling control below. 2,000 is the size F6 used
+# when it re-measured the hazard on this host on 2026-09-07, kept here so the
+# number in `_SessionLog`'s docstring and the number this file actually
+# exercises are the same number.
+_RECYCLE_TRIALS = 2000
+
+
+async def test_the_session_log_holds_every_session_it_records_so_no_address_is_recycled() -> None:
+    """`_SessionLog.held` is the whole of why `id(session)` is a safe key, and
+    nothing asserted it until this case.
+
+    **This is a guard for a repair that is already in the tree**, not a repair.
+    `held` landed in `271b0d4` on 2026-08-19 and closes the hazard issue #7
+    predicted; what was missing is that a `held` deleted as a leak -- it *is* a
+    deliberate leak, and reads like an oversight -- looks exactly like a `held`
+    that works. Every other assertion in this file would then be comparing
+    recycled addresses, and `refresh_sessions.isdisjoint(request_sessions)`
+    would accuse the code of the one defect serve-stale exists to prevent.
+
+    Two positive controls first, because without them an interpreter that
+    never freed a `Session` and never reused an address would pass this case
+    for the wrong reason -- this repository's most-repeated failure shape.
+    """
+    # Control 1: a `Session` nothing holds is refcount-freed by `del`, with no
+    # collector pass. If it were not, `held` would be pinning nothing and the
+    # guard below would pass on an object that was never at risk.
+    loose = Session()
+    loose_ref = weakref.ref(loose)
+    del loose
+    assert loose_ref() is None, (
+        "a bare Session outlived `del` on this interpreter, so this case cannot "
+        "tell a pinned session from an unpinned one"
+    )
+
+    # Control 2: the addresses really are handed out again. Measured on this
+    # host 2026-09-07: 2,000 created-and-freed Sessions occupy 7 distinct
+    # `id()` values; 2,000 held by a strong reference occupy 2,000. Asserted as
+    # an inequality rather than as `== 7`, because 7 is an allocator detail and
+    # the claim is only that reuse happens at all.
+    addresses = set()
+    for _ in range(_RECYCLE_TRIALS):
+        churn = Session()
+        addresses.add(id(churn))
+        churn.close()
+        del churn
+    assert len(addresses) < _RECYCLE_TRIALS, (
+        f"{_RECYCLE_TRIALS} created-and-freed Sessions occupied {len(addresses)} "
+        "distinct addresses -- this allocator recycles nothing, so `held` is "
+        "guarding against a hazard that does not exist here and this case proves "
+        "nothing"
+    )
+
+    # The guard: the log, and only the log, keeps the recorded session alive.
+    log = _SessionLog()
+    recorded = Session()
+    recorded_ref = weakref.ref(recorded)
+    recorded_id = id(recorded)
+    log.record("begin", recorded)
+    del recorded
+    survivor = recorded_ref()
+    assert survivor is not None, (
+        "_SessionLog.record kept no reference to the session it recorded, so "
+        f"address {recorded_id} is free for the next Session to land on and "
+        "every identity comparison in this file is comparing addresses rather "
+        "than sessions"
+    )
+    assert id(survivor) == recorded_id, "the pinned session moved, which cannot happen"
+    assert recorded_id in log.owners, "the log recorded no owner for the session it held"
+
+
+async def test_the_session_log_holds_the_session_at_the_moment_it_credits_a_commit(
+    session_log: _SessionLog,
+) -> None:
+    """The commit credit must pin for itself, not inherit a pin from a handler
+    that happens to run next.
+
+    `commits` is a set of bare addresses. Today every session that reaches it
+    is also pinned -- but only *incidentally*, and measured rather than
+    reasoned about: on a no-SQL commit the events fire
+    `after_commit` then `after_transaction_end` (this host, 2026-09-07), so the
+    `ended` handler pins the session a moment **after** `committed` has already
+    written its address down. Nothing states that coupling and nothing checks
+    it, so `request_sessions <= commits` rests on the registration order of two
+    independent listeners.
+
+    F6's reading is the one this case confirms: an unpinned `commits` can only
+    ever produce a false **green** on that arm -- a request session landing on
+    an address some earlier, freed session was credited with inherits the
+    credit -- never the red issue #7 predicted. A false green on *"get_session
+    is the commit boundary"* is the worse of the two.
+
+    A bare `Session` with no bind is enough: it commits without emitting SQL,
+    which is the shortest path that fires `after_commit`.
+    """
+    held_when_credited: list[bool] = []
+
+    def observe(session: Session) -> None:
+        held_when_credited.append(any(one is session for one in session_log.held))
+
+    # Registered after the fixture's own `after_commit` handler, so it observes
+    # the log in exactly the state that handler left it.
+    event.listen(Session, "after_commit", observe)
+    try:
+        ghost = Session()
+        ghost.commit()
+        ghost_id = id(ghost)
+    finally:
+        event.remove(Session, "after_commit", observe)
+
+    assert held_when_credited == [True], (
+        "the log credited a commit to an address it was not holding: `commits` "
+        "is fed by a handler that pins nothing, so a later session landing on "
+        f"address {ghost_id} inherits the credit and `request_sessions <= "
+        "commits` passes for a request that never committed"
+    )
+    assert ghost_id in session_log.commits, "the commit was not observed at all"
 
 
 def _plant(app: FastAPI, household: uuid.UUID, screen: tuple[BuiltRow, ...]) -> None:
@@ -413,6 +598,20 @@ async def test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_o
        request's last transaction end strictly before the refresh's first
        begin. A refresh sharing the request's session satisfies claims 1 and
        2 exactly as well.
+
+       **"Distinct identities" is a property this case has to buy, not one it
+       can read off `id()`.** `id()` is a CPython address and CPython recycles
+       them: measured on this host 2026-09-07, **2,000 created-and-freed
+       `Session` objects occupy 7 distinct `id()` values, and the same 2,000
+       held by a strong reference occupy 2,000.** The request's session is
+       unreachable by the time the refresh opens one, so without a reference
+       held the refresh's session can land on the request's freed address and
+       `refresh_sessions.isdisjoint(request_sessions)` fails -- reporting the
+       `AsyncSession` sharing hazard about two different objects. `_SessionLog`
+       buys the property by holding every session it records (`held`), and
+       that leak is deliberate. **Do not simplify it away**; two cases and the
+       fixture's own teardown assert it, which is the only reason deleting it
+       does not look identical to leaving it.
 
     **Claim 3 is read off a session log, not off the clock, and issue #7 is
     why.** Both halves of it used to be inferred from wall-clock windows over

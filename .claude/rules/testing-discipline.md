@@ -150,6 +150,18 @@ uv run pytest <the case> 2>&1 | grep -E '^E .*<the guard message>'
   identifying nothing.** Hold a strong reference to every observed object, and
   take ownership from `asyncio.current_task().get_name()` (readable inside
   SQLAlchemy's sync ORM events, via the greenlet bridge), not from a clock.
+  Take the reference **before** recording the address, on *every* path that
+  records one: `after_commit` fires before `after_transaction_end`, so a log
+  pinning only in the begin/end handlers credits a commit to an address it does
+  not yet own — safe by the registration order of two independent listeners and
+  by nothing else. That shape yields a false **green** (a later object landing
+  on the freed, already-credited address inherits the credit), never a red, so
+  no flake will ever surface it.
+- **Assert the pinning, as coverage of what the log keys on** — `{id(x) for x
+  in held} >= recorded_ids`, not `len(set(held)) == len(held)`, which an emptied
+  `held` satisfies trivially. The pin is a deliberate leak and reads like an
+  oversight, so the plant to defend against is somebody tidying it away, and the
+  obvious spelling cannot see that plant.
 
 ## Suite-level state
 
