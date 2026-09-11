@@ -1,0 +1,278 @@
+{
+  "uid": "usher-taste-watching",
+  "title": "Usher — 2 Taste & Watching",
+  "description": "Five panels and one statement of absence. PRD 10 specifies eight; M10's D0 audit found three of them have no backing series (#84, #85), and this dashboard states them on a text panel rather than shipping them empty. Every query panel here is SQL against the canonical database: watch state is a table, not a metric.",
+  "tags": [
+    "usher",
+    "watching",
+    "taste"
+  ],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "timezone": "browser",
+  "refresh": "",
+  "time": {
+    "from": "now-8y",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Completion rate",
+      "description": "count(*) FILTER (WHERE watch_states.played) / count(*) over watch_states, per user. Two denominators and both are named, because the first one is mostly a fact about the ingest path: a nightly walk writes a watch_states row for nearly every item it sees, so completion_rate_pct divides by the library and completion_rate_engaged_pct divides by the rows that carry any engagement at all (played, or play_count > 0, or position_seconds > 0).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/_pct$/",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "vertical"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "rawSql": "SELECT users.name AS household,\n       count(*) AS watch_state_rows,\n       count(*) FILTER (WHERE watch_states.played) AS played_rows,\n       round(100.0 * count(*) FILTER (WHERE watch_states.played) / count(*), 2) AS completion_rate_pct,\n       count(*) FILTER (\n           WHERE watch_states.played\n              OR watch_states.play_count > 0\n              OR watch_states.position_seconds > 0\n       ) AS engaged_rows,\n       round(\n           100.0 * count(*) FILTER (WHERE watch_states.played)\n           / nullif(count(*) FILTER (\n                 WHERE watch_states.played\n                    OR watch_states.play_count > 0\n                    OR watch_states.position_seconds > 0\n             ), 0),\n           2\n       ) AS completion_rate_engaged_pct\nFROM watch_states\nJOIN users ON users.id = watch_states.user_id\nGROUP BY users.id, users.name\nORDER BY users.name"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "barchart",
+      "title": "Abandonment cliff",
+      "description": "position_seconds / runtime_seconds over played = false, in ten-point buckets. The denominator is a coalesce and its order is part of the panel: watch_states.runtime_seconds first (nullable by ADR-0014 — a walk's listing cannot determine it), then media_items.runtime_seconds, then titles.runtime_minutes * 60. Three fallbacks silently applied are three different populations plotted as one, so dashboards/README.md records which one supplied this deployment's denominator and for what share of rows. Every bucket is emitted, including empty ones, so a gap is a zero and not a missing bar.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 9,
+        "x": 6,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "stopped_at",
+        "orientation": "vertical",
+        "showValue": "auto",
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": -45,
+        "xTickLabelSpacing": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "rawSql": "WITH abandoned AS (\n    SELECT watch_states.position_seconds AS position_seconds,\n           coalesce(\n               watch_states.runtime_seconds,\n               (SELECT max(media_items.runtime_seconds)\n                FROM media_items\n                WHERE media_items.title_id = watch_states.title_id\n                  AND media_items.available),\n               (SELECT titles.runtime_minutes * 60\n                FROM titles\n                WHERE titles.id = watch_states.title_id)\n           ) AS runtime_seconds\n    FROM watch_states\n    WHERE NOT watch_states.played\n      AND watch_states.position_seconds > 0\n      AND watch_states.title_id IS NOT NULL\n)\nSELECT CASE\n           WHEN deciles.decile_start >= 100 THEN '100%+'\n           ELSE deciles.decile_start::text || '-' || (deciles.decile_start + 9)::text || '%'\n       END AS stopped_at,\n       count(abandoned.position_seconds) AS watch_states_abandoned\nFROM generate_series(0, 100, 10) AS deciles(decile_start)\nLEFT JOIN abandoned\n       ON abandoned.runtime_seconds > 0\n      AND least(floor(100.0 * abandoned.position_seconds / abandoned.runtime_seconds / 10) * 10, 100)\n          = deciles.decile_start\nGROUP BY deciles.decile_start\nORDER BY deciles.decile_start"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "barchart",
+      "title": "When each item was last played",
+      "description": "date_part('hour', watch_states.last_played_at), one hour per item and never a history. PRD 10 specified this as a time-of-day heatmap; the column carries only the hour of an item's LAST play, so the honest title is this one and never 'when this household watches'. The hour is read in the database session's timezone, which is UTC on this deployment — subtract your own offset before reading a mode as a bedtime. All 24 hours are emitted, so an empty hour is a zero bar rather than a missing one.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 9,
+        "x": 15,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "hour_utc",
+        "orientation": "vertical",
+        "showValue": "auto",
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "rawSql": "SELECT hours.hour::text AS hour_utc,\n       count(watch_states.id) AS items_last_played\nFROM generate_series(0, 23) AS hours(hour)\nLEFT JOIN watch_states\n       ON watch_states.last_played_at IS NOT NULL\n      AND date_part('hour', watch_states.last_played_at) = hours.hour\nGROUP BY hours.hour\nORDER BY hours.hour"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Rewatches",
+      "description": "watch_states.play_count > 1. play_count is a counter and last_played_at is a single timestamp, so every row here has had at least one earlier date overwritten — the count is trustworthy, the date is the most recent one only. Episode-scoped rows are labelled from their series.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "rawSql": "WITH episode_labels AS (\n    SELECT episodes.id AS episode_id,\n           titles.name || ' — S' || episodes.season_number || 'E' || episodes.episode_number AS label\n    FROM episodes\n    JOIN titles ON titles.id = episodes.title_id\n)\nSELECT coalesce(titles.name, episode_labels.label) AS item,\n       titles.year AS year,\n       watch_states.play_count AS plays,\n       watch_states.last_played_at AS last_played\nFROM watch_states\nLEFT JOIN titles ON titles.id = watch_states.title_id\nLEFT JOIN episode_labels ON episode_labels.episode_id = watch_states.episode_id\nWHERE watch_states.play_count > 1\nORDER BY watch_states.play_count DESC, watch_states.last_played_at DESC NULLS LAST\nLIMIT 50"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Longest unwatched",
+      "description": "media_items.added_at for owned titles nobody has played, oldest first. The join is not the one PRD 10 originally specified: 'no watch_states row' is the wrong predicate against a walk-fed deployment, because the walk writes a row for nearly everything it sees, and D0's audit measured that spelling at 110 rows against 18,279 for the one that answers the panel's own English — 'no row, or a row with play_count = 0 and NOT played'. One line per title, dated by the oldest available item carrying it.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "rawSql": "SELECT titles.name AS title,\n       titles.year AS year,\n       min(media_items.added_at) AS added_at,\n       (now()::date - min(media_items.added_at)::date) AS days_in_library\nFROM media_items\nJOIN titles ON titles.id = media_items.title_id\nWHERE media_items.available\n  AND media_items.added_at IS NOT NULL\n  AND NOT EXISTS (\n      SELECT 1\n      FROM watch_states\n      WHERE watch_states.title_id = media_items.title_id\n        AND (watch_states.played OR watch_states.play_count > 0)\n  )\nGROUP BY titles.id, titles.name, titles.year\nORDER BY min(media_items.added_at)\nLIMIT 50"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "text",
+      "title": "Three panels PRD 10 specifies that this dashboard does not ship",
+      "description": "The three absences D0's audit found, quoted from PRD 10's Dashboard 2 paragraph word for word. Duplication was chosen over a link on purpose: the operator reading this at 2 a.m. must not have to hold the document. tests/unit/test_dashboards.py asserts the three sentences are byte-identical to the PRD's, so a correction to one is a red on the other rather than a drift.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "options": {
+        "mode": "markdown",
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "### Three panels PRD 10 specifies for this dashboard, and this dashboard does not ship\n\nM10's D0 audit found three of Dashboard 2's eight specified panels have no backing series at all. They are named here rather than shipped empty, because an empty panel is indistinguishable from a healthy zero and on *this* dashboard it reads as a household that watches nothing.\n\n- **\"Watch time by day and user\" has no backing series** (#84). Minutes attributable to a day need a row per play; the only date any row carries is the last one, and `play_count` carries none at all.\n\n- **\"Taste drift as genre affinity in a stacked area over months\" has no backing series** (#84), for the same reason — and ⚠️ **the failure mode is not the one this was expected to have.**\n\n- **\"Row effectiveness: plays attributed per `RowProvider`\" has no backing series** (#85), **and this document already says so in its own words in the paragraph above `## Dashboards`**: *\"This column is joined to a **search**, not to a row: `search_queries` has no row slug, no `generation_id` and no provider, and a play launched from a home shelf carries no `search_id` at all\"*.\n\n**Neither cause is a build task.** A play-event log is a schema change with a writer, a retention policy and a size argument, and `watch_states`' two unique constraints are why the table it would extend cannot carry it; row attribution needs a handle `GET /home` does not hand out. Both are M11 issues — <https://github.com/anirudhlath/usher/issues/84> and <https://github.com/anirudhlath/usher/issues/85>. **None of the three is marked ⏳**, which would mean owed by a named milestone; none of them is owed by M10.\n"
+      },
+      "transparent": false
+    }
+  ]
+}

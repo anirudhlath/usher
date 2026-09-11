@@ -16,15 +16,29 @@ provisioning YAML that the other project's compose file bind-mounts;
 | file | dashboard | datasource |
 |---|---|---|
 | `01-library-and-catalog.json` | 1 — Library & Catalog | Postgres only |
+| `02-taste-and-watching.json` | 2 — Taste & Watching | Postgres only |
 
-Dashboards 2–6 are specified in PRD 10 and not yet built.
+Dashboards 3–6 are specified in PRD 10 and not yet built.
 
-**Every panel on dashboard 1 is SQL against the canonical database and none of
-them is a Prometheus query.** That is PRD 10's first principle doing the thing
-it was written for: *"Most of what is worth knowing about a media catalog is
-**not a metric**… The catalog *is* the record."* No metric the collector holds
-is a catalog count or a watch state, so reaching for one here would produce a
-permanently empty panel.
+**Every panel on both dashboards is SQL against the canonical database and none
+of them is a Prometheus query.** That is PRD 10's first principle doing the
+thing it was written for: *"Most of what is worth knowing about a media catalog
+is **not a metric**… The catalog *is* the record."* No metric the collector
+holds is a catalog count or a watch state, so reaching for one here would
+produce a permanently empty panel. Dashboard 2 makes the same point one level
+down: **watch state is a table, not a series**, and where the table cannot
+answer the question the panel is not shipped at all.
+
+**Dashboard 2 ships six panels against PRD 10's eight, and the sixth is not a
+panel about watching.** M10's D0 audit found three of the eight — watch time by
+day and user, taste drift over months, and row effectiveness per `RowProvider` —
+have no backing series ([#84](https://github.com/anirudhlath/usher/issues/84),
+[#85](https://github.com/anirudhlath/usher/issues/85)), so the file holds five
+query panels and one text panel naming the three absences in PRD 10's own words.
+The argument for the text panel is that a dashboard whose specification lists
+eight and whose JSON holds five reads as a half-finished commit to anyone who
+has not read D0's paragraph — and an empty panel would be worse than either,
+because on *this* dashboard it looks like a household that watches nothing.
 
 ## What the harness checks, and what it cannot
 
@@ -41,7 +55,20 @@ statement in this directory is therefore **unaliased**, and
 `test_the_committed_dashboards_are_not_written_in_aliases` is what keeps it
 that way.
 
-## The observations
+**Dashboard 2 added a fourth question and a fifth arm.** The fourth is about
+what is *not* there:
+`test_dashboard_two_ships_no_panel_the_audit_found_unbacked` reads the three
+unbacked panel names **out of PRD 10's own D2 paragraph** rather than from a
+retyped list, and asserts no committed panel title matches one — in either
+direction of containment, so `"Watch time"` is caught as well as the full
+spelling. `test_the_absence_panels_three_sentences_are_byte_identical_to_prd_tens`
+then pins the text panel's three sentences to the PRD's, so a correction to one
+is a red on the other rather than a drift. The fifth arm is invariant 1 for a
+**text** panel: it draws no data, so "no target" is its correct shape rather
+than an empty rectangle, and what it is exempted into is an assertion that
+`options.content` is non-empty.
+
+## The observations — Dashboard 1
 
 Recorded **2026-09-07** against the live catalog `usher_catalog` (Alembic
 `m10b`) through the running Grafana 13.1.3 at `127.0.0.1:3000`, datasource uid
@@ -423,6 +450,302 @@ recorded here so nobody transplants it onto the number above.
 The panel is deliberately uncoloured. Grafana's default thresholds would render
 5,500 red, and no bar has been set for this queue: a colour would be an alarm
 nobody declared.
+
+## The observations — Dashboard 2
+
+Recorded **2026-09-07** against the live catalog `usher_catalog` (Alembic
+`m10b`) through the running Grafana 13.1.3 at `127.0.0.1:3000`, datasource uid
+`usher-postgres`, provisioned out of this directory into folder `Usher`. Each
+panel was opened alone at `?viewPanel=<id>` in a headless Chromium and read off
+the rendering, **and** its own target was issued through `/api/ds/query`, which
+is the same path the panel takes. The wall times are that round trip warm — the
+third of three calls — so they include Grafana's proxy and not only the
+database; where the cold first call differed materially it is given too.
+
+**The household is the single row in `users`, `name = 'default'`**, and every
+figure below is that household's. Its watch state is **16,782 `watch_states`
+rows**: 142 carry `played`, 139 carry a `last_played_at`, 80 carry
+`play_count > 1`, and `SUM(play_count)` is 347. Library on the day: 23,943
+`media_items` (23,665 of them carrying a `runtime_seconds`), 11,516 distinct
+owned titles, 1,276,268 catalog titles.
+
+⚠️ **Every one of the 16,782 rows arrived from a walk rather than from a push,
+and that is the single fact behind three of the five panels' caveats.** A walk
+lists what exists and writes a row for it; it cannot report a runtime, and it
+cannot report a play it did not observe. So `watch_states.runtime_seconds` is
+null on **all 16,782 rows**, and 16,585 of them carry `played = false`,
+`play_count = 0` **and** `position_seconds = 0` — a row that exists and says
+nothing.
+
+### 1 — Completion rate
+
+`stat` over `watch_states.played`, joined to `users` so the panel names the
+household rather than assuming one.
+
+```sql
+SELECT users.name AS household,
+       count(*) AS watch_state_rows,
+       count(*) FILTER (WHERE watch_states.played) AS played_rows,
+       round(100.0 * count(*) FILTER (WHERE watch_states.played) / count(*), 2) AS completion_rate_pct,
+       count(*) FILTER (
+           WHERE watch_states.played
+              OR watch_states.play_count > 0
+              OR watch_states.position_seconds > 0
+       ) AS engaged_rows,
+       round(
+           100.0 * count(*) FILTER (WHERE watch_states.played)
+           / nullif(count(*) FILTER (
+                 WHERE watch_states.played
+                    OR watch_states.play_count > 0
+                    OR watch_states.position_seconds > 0
+             ), 0),
+           2
+       ) AS completion_rate_engaged_pct
+FROM watch_states
+JOIN users ON users.id = watch_states.user_id
+GROUP BY users.id, users.name
+ORDER BY users.name
+```
+
+**Returned** 1 row in 13.3 ms: household `default`, 16,782 watch-state rows,
+142 played, **0.85%**, 197 engaged rows, **72.08%**. Rendered as two stats side
+by side, the field-name regex `/_pct$/` keeping the three count columns off the
+panel while leaving them in the frame for the tooltip.
+
+⚠️ **Two denominators, and the one the task specifies is mostly a fact about
+the ingest path.** `count(*) FILTER (WHERE played) / count(*)` over
+`watch_states` divides by the library, because the walk wrote a row for nearly
+everything it saw — 16,585 of the 16,782 are the zero rows above. **0.85% is
+what that produces, and read alone it says this household finishes almost
+nothing.** Over the 197 rows carrying any engagement at all it is **72.08%**,
+eighty-five times the first, and both numbers ship on the panel because either
+one alone is a different claim. The second is not the "true" figure either: it
+is the completion rate *of things this household started*, which is the
+question a reader of "completion rate" usually means.
+
+### 2 — Abandonment cliff
+
+`barchart` over `position_seconds / runtime_seconds` for `played = false`, in
+eleven ten-point buckets, **with the denominator coalesced in the order the
+panel description states**.
+
+```sql
+WITH abandoned AS (
+    SELECT watch_states.position_seconds AS position_seconds,
+           coalesce(
+               watch_states.runtime_seconds,
+               (SELECT max(media_items.runtime_seconds)
+                FROM media_items
+                WHERE media_items.title_id = watch_states.title_id
+                  AND media_items.available),
+               (SELECT titles.runtime_minutes * 60
+                FROM titles
+                WHERE titles.id = watch_states.title_id)
+           ) AS runtime_seconds
+    FROM watch_states
+    WHERE NOT watch_states.played
+      AND watch_states.position_seconds > 0
+      AND watch_states.title_id IS NOT NULL
+)
+SELECT CASE
+           WHEN deciles.decile_start >= 100 THEN '100%+'
+           ELSE deciles.decile_start::text || '-' || (deciles.decile_start + 9)::text || '%'
+       END AS stopped_at,
+       count(abandoned.position_seconds) AS watch_states_abandoned
+FROM generate_series(0, 100, 10) AS deciles(decile_start)
+LEFT JOIN abandoned
+       ON abandoned.runtime_seconds > 0
+      AND least(floor(100.0 * abandoned.position_seconds / abandoned.runtime_seconds / 10) * 10, 100)
+          = deciles.decile_start
+GROUP BY deciles.decile_start
+ORDER BY deciles.decile_start
+```
+
+**Returned** 11 rows in 27.0 ms (50.5 ms cold) over **55 abandoned states**:
+0–9% → 11 · 10–19% → 8 · 20–29% → 2 · 30–39% → 8 · 40–49% → 7 · 50–59% → 6 ·
+60–69% → 6 · 70–79% → 4 · 80–89% → 2 · **90–99% → 0** · 100%+ → 1. The cliff is
+at the front: **19 of the 55, 34.5%, stop inside the first fifth** — and the
+single largest bucket is the first.
+
+🔴 **Which fallback supplied the denominator, and for what share of rows — the
+observation this panel is worthless without.** The three sources in the
+coalesce are `watch_states.runtime_seconds`, then `media_items.runtime_seconds`,
+then `titles.runtime_minutes * 60`, and on this household:
+
+| source | covers | supplied |
+|---|---|---|
+| `watch_states.runtime_seconds` (`db/models/watch.py`, nullable by ADR-0014) | **0 of 55** | 0 |
+| `media_items.runtime_seconds` | 55 of 55 | **55 of 55 — 100%** |
+| `titles.runtime_minutes × 60` | 55 of 55 | 0 (never reached) |
+
+**Every bar above is drawn on `media_items.runtime_seconds`, the second entry,
+and not one row on the column the panel names.** The first is null across the
+whole table because these states came from a walk; the third would have covered
+all 55 too and was never reached.
+
+⚠️ **The second and third are not interchangeable, which is why the share is
+recorded rather than the mere fact of a fallback.** Over these 55 rows the two
+disagree on **54 of 55**, by a mean absolute 136 s and a maximum of 4,306 s,
+and **2 of the 55 land in a different ten-point bucket** depending on which is
+used. A run of this panel on a household whose items lack `runtime_seconds`
+would therefore be plotting a *different population*, not a noisier version of
+this one.
+
+All 55 rows are title-scoped (`title_id IS NOT NULL`, `episode_id IS NULL`), so
+the `media_items` sub-select needs no episode arm today; the `title_id IS NOT
+NULL` predicate is written out anyway, because an episode-scoped abandoned
+state would otherwise silently take a `NULL` denominator and vanish.
+
+**The empty 90–99% bucket is emitted on purpose.** `generate_series(0, 100, 10)`
+left-joined to the data is what makes it a zero-height bar with a `0` label
+rather than a missing bar — without it the axis runs 80–89% straight into
+100%+, and a reader counts nine buckets where there are ten.
+
+**The x-axis labels were a repair.** At `w: 9` the eleven horizontal labels
+overlapped into `0-9%10-19%20-29%…` — legible in the frame, unreadable on the
+panel. `xTickLabelRotation: -45` fixed it; the alternative, shortening the
+labels to their bucket start, would have made `0%` the name of the 0–9% bucket.
+
+### 3 — When each item was last played
+
+`barchart` over `date_part('hour', watch_states.last_played_at)`.
+
+```sql
+SELECT hours.hour::text AS hour_utc,
+       count(watch_states.id) AS items_last_played
+FROM generate_series(0, 23) AS hours(hour)
+LEFT JOIN watch_states
+       ON watch_states.last_played_at IS NOT NULL
+      AND date_part('hour', watch_states.last_played_at) = hours.hour
+GROUP BY hours.hour
+ORDER BY hours.hour
+```
+
+**Returned** 24 rows in 4.5 ms over the **139 dated rows**: the mode is 02:00
+with 19, then 04:00 with 17, 05:00 with 13, 06:00 with 11; 12:00 and 14:00 are
+**0** and are drawn as zero bars for the same reason the 90–99% bucket is.
+
+**This panel ships retitled and the retitle is the whole finding.** PRD 10
+specifies a *time-of-day heatmap*; `last_played_at` is one timestamp per row,
+overwritten by every later play, so the only question the column can answer is
+*when each item was last played* — never *when this household watches*. 80 of
+the 139 dated rows carry `play_count > 1`, so at least that many earlier
+timestamps have already been erased.
+
+⚠️ **The hour is UTC and the timestamps two panels over are not, on the same
+dashboard.** `date_part` runs server-side in the database session's timezone,
+which is `Etc/UTC` here, so these 24 buckets are UTC; Grafana converts a
+`timestamptz` *field* to the browser's zone, so panel 4's `last_played` column
+renders at UTC−5 in the same screenshot. Directly observed: the top rewatch row
+holds `2026-07-30 08:12:53+00` and renders `2026-07-30 03:12:53`. **The 02:00
+UTC mode is 21:00 local**, which is a plausible evening and not the 2 a.m. the
+axis appears to claim. The panel description says so; no `AT TIME ZONE` is
+written into the SQL because the zone would then be a deployment fact committed
+to git.
+
+### 4 — Rewatches
+
+`table` over `watch_states.play_count > 1`, labelled from `titles` for
+title-scoped rows and from `episodes` joined to its series for episode-scoped
+ones.
+
+```sql
+WITH episode_labels AS (
+    SELECT episodes.id AS episode_id,
+           titles.name || ' — S' || episodes.season_number || 'E' || episodes.episode_number AS label
+    FROM episodes
+    JOIN titles ON titles.id = episodes.title_id
+)
+SELECT coalesce(titles.name, episode_labels.label) AS item,
+       titles.year AS year,
+       watch_states.play_count AS plays,
+       watch_states.last_played_at AS last_played
+FROM watch_states
+LEFT JOIN titles ON titles.id = watch_states.title_id
+LEFT JOIN episode_labels ON episode_labels.episode_id = watch_states.episode_id
+WHERE watch_states.play_count > 1
+ORDER BY watch_states.play_count DESC, watch_states.last_played_at DESC NULLS LAST
+LIMIT 50
+```
+
+**Returned** 50 rows in 7.5 ms — the `LIMIT` binds, because **80 rows** carry
+`play_count > 1`. Led by Backrooms (2026) at 13 plays, Obsession (2025) at 11,
+The Twilight Saga: Eclipse (2010) at 10, then Interstellar, The Housemaid and
+Dhurandhar at 9. 78 of the 80 are title-scoped and 2 are episodes, which render
+through the `episode_labels` CTE as `Silo — S3E7` and `Silo — S3E5`; their
+`year` column is null, because a `Title`'s year is not an episode's.
+
+**`play_count` is trustworthy here and `last_played_at` is not.** The 80 rows
+account for 288 of the household's 347 plays, and every one of them has had at
+least one earlier date overwritten — which is the same fact that makes "watch
+time by day and user" unbackable, seen from the one angle where it is harmless.
+
+### 5 — Longest unwatched
+
+`table` over `media_items.added_at` for owned titles nobody has played, oldest
+first, one row per title.
+
+```sql
+SELECT titles.name AS title,
+       titles.year AS year,
+       min(media_items.added_at) AS added_at,
+       (now()::date - min(media_items.added_at)::date) AS days_in_library
+FROM media_items
+JOIN titles ON titles.id = media_items.title_id
+WHERE media_items.available
+  AND media_items.added_at IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM watch_states
+      WHERE watch_states.title_id = media_items.title_id
+        AND (watch_states.played OR watch_states.play_count > 0)
+  )
+GROUP BY titles.id, titles.name, titles.year
+ORDER BY min(media_items.added_at)
+LIMIT 50
+```
+
+**Returned** 50 rows in 71.4 ms (144.3 ms cold) — the `LIMIT` binds hard, because
+**11,380 of the household's 11,516 distinct owned titles** qualify. Oldest:
+Wicked City (1987), added 2019-02-12, **2,765 days** in the library; then Cyber
+City Oedo 808, Project A-Ko and Overlord at 2,500 days each, all added
+2019-11-04.
+
+🔴 **The join is not the one PRD 10 originally specified, and the difference is
+166-fold.** *"`media_items.added_at` with no `watch_states` row"* is the wrong
+predicate against a walk-fed deployment: re-measured here, it returns **110** of
+the 18,443 owned matched items, because the walk writes a row for nearly
+everything. The predicate that answers the panel's own English — *never
+played*, i.e. no row **or** a row with `play_count = 0 AND NOT played`, which is
+the `NOT EXISTS` above — returns **18,279**. D0's audit corrected this in PRD 10
+and the panel ships the corrected form; the count differs from the 11,380 above
+only because that one is per *title* and this one is per *item*.
+
+`added_at IS NOT NULL` is written out for the same structural reason Dashboard
+1's growth panel writes it: 0 of 23,943 available rows are null today, and the
+next source to report no `DateCreated` would silently drop titles out of a
+want-list rather than raise anything.
+
+### 6 — Three panels PRD 10 specifies that this dashboard does not ship
+
+`text`, markdown, no datasource and no target — the one panel on either
+dashboard exempted from invariant 1's target rule, and the reason the exemption
+carries a non-empty-`content` assertion instead.
+
+It carries **three sentences quoted from PRD 10's Dashboard 2 paragraph, byte
+for byte**, one per absence, each naming the panel, its reason and its issue
+number: watch time by day and user (#84), taste drift as genre affinity over
+months (#84), and row effectiveness per `RowProvider` (#85). Duplication was
+chosen over a link deliberately, on PRD 10's own rule for label vocabularies —
+the reader of the artefact must not have to hold the document — and the cost of
+that choice is
+`test_the_absence_panels_three_sentences_are_byte_identical_to_prd_tens`, which
+goes red the day either copy is corrected without the other.
+
+**Rendered** and read back off the panel: all three bullets present, in the
+PRD's order, with `#84`, `#84` and `#85` legible and both issue URLs live. The
+`⚠️` and the `⏳` survive the round trip through JSON and Grafana's markdown
+renderer.
 
 ## Two things a reader of this file should not assume
 
