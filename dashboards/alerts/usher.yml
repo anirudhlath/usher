@@ -1,0 +1,218 @@
+# PRD 10's alerts, as a Prometheus rule file.
+#
+# **The asymmetry `provisioning/dashboards.yml` states applies here too**: the
+# rules are an asset of *this* repository -- they are written against the
+# instruments in `src/usher/telemetry.py` and version with them -- while the
+# Prometheus that evaluates them lives in `~/code/observability/`, shared with
+# Alfred. To wire it up, add to that project's `prometheus/prometheus.yml`:
+#
+#     rule_files:
+#       - /etc/prometheus/rules/*.yml
+#
+# and to its `compose.yml`'s `prometheus` service:
+#
+#     volumes:
+#       - ../usher/dashboards/alerts:/etc/prometheus/rules:ro
+#
+# Neither is committed there today, which is why every firing recorded in
+# `../README.md` was produced by a throwaway Prometheus rather than by that one.
+#
+# ⚠️ **Three rules, not seven.** PRD 10's `## Alerts` table names seven and
+# `tests/unit/test_alerts.py` grades this file against all seven in both
+# directions; the other four are M10's D12, D13 and D14, and that test carries
+# an `xfail(strict=True)` naming them until they land.
+#
+# 🔴 **Every metric name here carries a segment the OTel name does not.** The
+# collector appends the instrument's *unit* before the aggregation suffix, so
+# PRD 10's `usher.jobs.queued` is stored as `usher_jobs_queued_ratio` (a gauge's
+# `unit="1"`) and `usher.jobs.duration` as `usher_jobs_duration_seconds_count`
+# (`unit="s"`, plus the histogram's `_count`). A rule written in the mangled
+# OTel spelling -- `usher_jobs_queued` -- parses, evaluates, matches nothing and
+# never fires, which is the same failure D8 found in Dashboard 3's panels.
+# `test_every_rule_is_written_in_the_spelling_prometheus_stores` is the guard.
+
+groups:
+  - name: usher
+    # PRD 10 sets no evaluation interval and the shared Prometheus's global is
+    # 15s, which is finer than every `for:` below by two orders of magnitude.
+    # Left unset deliberately: a rule file that pinned its own would be a
+    # second place to change when that global moves.
+    rules:
+      - alert: Ingest stalled
+        # PRD 10: "Queue depth rising for 30 min with zero completions."
+        #
+        # 🔴 **`unless`, never `and ... == 0`, and the difference is four of the
+        # nine lanes.** `and` is a set *intersection*: it keeps a left-hand
+        # series only where a right-hand one with the same labels exists. The
+        # completions series is a histogram's `_count`, which is *recorded*
+        # (`services/jobs.py`'s `_job_duration.record`), so a lane that has
+        # never settled a single job has no `kind` of its own on that side at
+        # all -- and the intersection drops it. The depth series has the
+        # opposite shape: `PostgresJobQueue.depth` fills every `JobKind` with 0
+        # before returning ("a gauge that stops reporting a series is
+        # indistinguishable from one reporting zero"), so all nine kinds are
+        # always present on the left.
+        #
+        # Measured against this host's Prometheus on 2026-09-11: the `and`
+        # spelling reaches 5 kinds (derive, enrich, index, match,
+        # watch_history) and this one reaches 9. The four it adds --
+        # **bootstrap, curate, sync, watch_writeback** -- are exactly the lanes
+        # that have never settled a job, which is the strongest possible case
+        # of "ingest stalled" and the one `and` is blind to. A lane whose
+        # handler is not registered at all (`USHER_LLM_ENABLED=false` leaves
+        # `curate` unclaimable, `composition.worker_kinds`) is M4's "a queue
+        # that grows forever", and it is the shape this alert exists for.
+        #
+        # 🔴 **`min_over_time`, not `increase`, and this was measured on a
+        # queue that would not fire.** `increase(depth[30m]) > 0` with
+        # `for: 30m` is **unsatisfiable for a queue that rises once and then
+        # stops moving** -- the commonest stall there is. The two windows are
+        # exact complements: the rise stays inside the range vector for exactly
+        # 30 minutes and then leaves it, so the condition is true for at most
+        # as long as `for:` demands and fires on a knife edge it loses. Watched
+        # live on 2026-09-11 with 25 `curate` jobs against a worker that cannot
+        # claim them, depth flat at 25, sampled every two minutes:
+        #
+        #   increase(depth[30m])      42.5 30.8 28.5 ... 25.6 25.6 -> 0.0
+        #   min_over_time(depth[30m])    0    0    0 ...    0    0 -> 25
+        #
+        # The alert went `pending` at 17:09:58Z and back to `inactive` at
+        # 17:39:34Z, one evaluation before its own `for: 30m` would have fired
+        # it. `min_over_time(...) > 0` is the same 30 minutes read the other
+        # way -- "this lane has had work waiting at every sample for thirty
+        # minutes" -- and it becomes true at exactly the moment the last empty
+        # sample leaves the window, which is PRD 10's *"for 30 min"*. The
+        # patience lives in the range vector; `for:` is then a blip guard and
+        # nothing more, because two windows of 30 minutes is 60.
+        #
+        # **The bare `usher_jobs_queued_ratio > 0` conjunct is a freshness
+        # guard and is not redundant.** `min_over_time` answers from whatever
+        # samples are in the window, so a process that exported a backlog and
+        # then died keeps satisfying it for half an hour -- the "a gap would
+        # satisfy it vacuously" objection, which is real. An instant vector
+        # selector requires a sample inside Prometheus's 5-minute staleness
+        # window, so this conjunct is what makes the rule say "there is a queue
+        # **now**". Paging "curate is stalled" at a process that is gone is a
+        # wrong page, and PRD 10 has no exporter-down alert to catch it.
+        #
+        # `on (job, instance, kind)` is explicit rather than implicit. Both
+        # instruments happen to come from `metrics.get_meter("usher.jobs")`
+        # today, so their `otel_scope_name` matches and a bare `unless` behaves
+        # identically -- but if one ever moved meters, a bare `unless` would
+        # stop excluding anything and this rule would page on every lane at
+        # once. `instance` is in the list because two Usher processes exporting
+        # to one Prometheus are two queues, not one.
+        expr: |
+          min_over_time(usher_jobs_queued_ratio[30m]) > 0
+            and on (job, instance, kind)
+          usher_jobs_queued_ratio > 0
+            unless on (job, instance, kind)
+          increase(usher_jobs_duration_seconds_count[30m]) > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.kind }} jobs are queueing and none are settling"
+          description: >-
+            usher.jobs.queued, stored as usher_jobs_queued_ratio and labelled
+            kind, has reported at least {{ $value }} job(s) waiting on the
+            {{ $labels.kind }} lane at every sample for the last 30 minutes,
+            while usher.jobs.duration's count series
+            (usher_jobs_duration_seconds_count, also labelled kind) recorded
+            nothing for it in the same window. Both series carry kind, job and
+            instance and nothing else; the matching is per kind, so a busy
+            enrich lane cannot mask a stalled curate one. Panel: "Queue depth
+            by kind" on dashboard 3 (Pipeline, uid usher-pipeline), with
+            "Enrichment throughput and mean latency" beside it for the other
+            half. Read "settled", not "completed": jobs.py records the duration
+            point after the span block, so a completed job, a retryable failure
+            and a park all count, and a handler that raises something which is
+            not a UsherPortError counts as neither -- which is what makes this
+            rule fire on a crash loop.
+
+      - alert: Jobs parking
+        # PRD 10: "Parked count increasing." The condition is the derivative
+        # and there is deliberately **no absolute threshold**: a deployment
+        # that has carried three parked jobs for a month does not need paging
+        # about them on every evaluation.
+        #
+        # Per `kind` by construction rather than by a grouping clause --
+        # `composition.QueueGauges.refresh` tallies `queue.parked()` into
+        # `dict.fromkeys(JobKind, 0)`, so every kind always has a series and
+        # `increase()` is evaluated on each of the nine separately.
+        #
+        # ⚠️ **This series saturates at 1,000 and the rule inherits that.**
+        # `QueueGauges.refresh` builds the parked counts from
+        # `await queue.parked(limit=1000)` and counts the returned rows in
+        # Python, so the gauge is a floor on the parked population rather than
+        # a count of it. Measured on this host 2026-09-11: the live deployment
+        # reads enrich 890 + index 110 = exactly 1,000, so **that instance
+        # cannot fire this rule at all** -- the 1,001st park does not move the
+        # gauge. D8 measured the same cap from the panel side. The cap is in
+        # `composition.py`, not here, so the rule is written for the series
+        # that exists and `../README.md` records the gap.
+        expr: increase(usher_jobs_parked_ratio[15m]) > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.kind }} jobs are parking"
+          description: >-
+            usher.jobs.parked, stored as usher_jobs_parked_ratio and labelled
+            kind, rose by {{ $value | humanize }} on the {{ $labels.kind }}
+            lane over the last 15 minutes. A park is the non-retryable arm of
+            services/jobs.py -- a handler raising PortDataMalformed, which
+            sets the usher.job.parked span attribute and calls
+            _fail(retryable=False) -- so this is malformed upstream data or a
+            payload the handler cannot use, never a transient failure. The
+            labels are kind, job and instance. Panel: "Parked jobs by kind" on
+            dashboard 3 (Pipeline, uid usher-pipeline); its description
+            carries the 1,000-row cap this gauge saturates at, and the table
+            behind `SELECT kind, count(*) FROM jobs WHERE status = 'parked'`
+            is what to read for the real population.
+
+      - alert: Push down
+        # PRD 10: "`push.connected == 0` for 15 min on a source that supports
+        # it."
+        #
+        # 🔴 **`== 0`, and deliberately not `absent()`.** A source reporting
+        # zero and a source reporting nothing are different failures. Zero is
+        # an open lane whose channel is not delivering -- the incident. No
+        # series at all is a source nobody is running a lane for, which is a
+        # configuration state: `api/lanes.py`'s `push_snapshots()` iterates
+        # `self._open_adapters`, and a lane only opens for an *enabled* source.
+        # So PRD 10's qualifier "on a source that supports it" needs no join
+        # against `sources.supports_push` -- **the series is already scoped to
+        # exactly those sources by construction** -- and an `absent()` arm
+        # would page an operator for having parked a server.
+        #
+        # **The value is delivery, not connection.** `PushSnapshot.delivering`
+        # is the adapter's `supports_push`, which is `PushHealth.is_delivering`
+        # -- a connection, at least one received message, and a recent one. A
+        # channel that upgraded, is held open and delivers nothing reads 0,
+        # which is exactly the failure ADR-0004 measured against a nonexistent
+        # path, and the condition this alert exists for. A gauge fed by the
+        # socket's state would be permanently green through it.
+        expr: usher_source_push_connected_ratio == 0
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          summary: '{{ $labels.source }} has not delivered a push message in 15 minutes'
+          description: >-
+            usher.source.push.connected, stored as
+            usher_source_push_connected_ratio, has read 0 for
+            {{ $labels.source }} for fifteen minutes. 1 means *delivering*,
+            not connected: the value is PushHealth.is_delivering, so a
+            WebSocket that upgraded and is still open reads 0 the moment
+            messages stop arriving. The labels are source, job and instance,
+            and **source is the operator-typed source name** -- the string an
+            operator gave POST /admin/sources, not a UUID: api/lanes.py builds
+            the reader as
+            {self._names[source_id]: PushSnapshot(...)} -- so it is the right
+            thing to page a human with and the wrong thing to join on
+            identity. Panel: "Push connection uptime" on dashboard 3
+            (Pipeline, uid usher-pipeline), which plots this series beside
+            usher_source_push_reconnects_total. The nightly reconciler covers
+            the gap while this is firing (PRD 03), so the data is not lost --
+            it is late.

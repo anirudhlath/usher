@@ -17,15 +17,27 @@ provisioning YAML that the other project's compose file bind-mounts;
 |---|---|---|
 | `01-library-and-catalog.json` | 1 — Library & Catalog | Postgres only |
 | `02-taste-and-watching.json` | 2 — Taste & Watching | Postgres only |
-
-Dashboards 3–6 are specified in PRD 10 and not yet built.
-
 | `03-pipeline.json` | 3 — Pipeline | Prometheus **and** Postgres |
+| `04-performance.json` | 4 — Performance | Prometheus **and** Postgres |
+| `05-cost-and-compliance.json` | 5 — Cost & Compliance | Postgres, and one Prometheus panel |
+| `alerts/usher.yml` | — (Prometheus rules) | Prometheus |
 
-Dashboards 2, 4, 5 and 6 are specified in PRD 10 and not yet built.
+**Dashboard 6 — Quality evals is specified in PRD 10 and not built.** ⚠️ This
+line replaces two contradictory ones: D7 through D10 each appended a row to the
+table above and left the previous task's *"dashboards N–6 are not yet built"*
+sentence standing beneath it, so this file simultaneously claimed that
+dashboards 2, 4 and 5 did not exist and listed two of them. Repaired by D11
+rather than left, because the next reader of a table with a stale sentence
+under it trusts the sentence.
 
-**Every panel on both dashboards is SQL against the canonical database and none
-of them is a Prometheus query.** That is PRD 10's first principle doing the
+**`alerts/usher.yml` is in the table because it is the same kind of asset for
+the same reason** — written against the instruments in `src/usher/` and
+versioned with them, evaluated by a Prometheus this repository does not own. It
+needs a `rule_files:` entry and a bind mount in `~/code/observability/`, neither
+of which is committed there yet; the file's own header spells both out.
+
+**Every panel on dashboards 1 and 2 is SQL against the canonical database and
+none of them is a Prometheus query.** That is PRD 10's first principle doing the
 thing it was written for: *"Most of what is worth knowing about a media catalog
 is **not a metric**… The catalog *is* the record."* No metric the collector
 holds is a catalog count or a watch state, so reaching for one here would
@@ -1288,3 +1300,304 @@ has nothing of ours to grade. That is the one exemption in
 `test_the_committed_dashboards_are_not_written_in_aliases`, and it is asserted
 **by name and by count** rather than merely granted — otherwise the exemption
 becomes how every later panel escapes the check.
+
+# Alerts — `alerts/usher.yml`
+
+PRD 10's `## Alerts` table names seven rules and opens *"Kept few, so they mean
+something."* Three are here — **Ingest stalled**, **Jobs parking** and **Push
+down** — the three whose backing series ship today. D12 owes *Enrichment SLA
+missed* and *Provider degraded*, D13 owes *Disk projection*, D14 owes *Cost
+anomaly*; `tests/unit/test_alerts.py` holds that debt as an `xfail(strict=True)`
+whose message names which task owes which, and which becomes a **hard** failure
+the day the seventh rule lands, because a strict xfail that passes is a failure.
+
+**Nothing in this repository evaluates these rules.** The same asymmetry the
+dashboards have, one step further: the shared Prometheus in
+`~/code/observability/` has **no `rule_files:` entry and no mount for this
+directory**, so committing this file arms nothing. The file's own header spells
+out the two stanzas that would. Every firing below was produced by a throwaway
+Prometheus reading the shared one over `remote_read` — real data, real rule
+engine, shared stack untouched.
+
+## 🔴 Every metric name here carries a segment the OTel name does not
+
+An alert naming a metric nobody stores does not fail and does not draw an empty
+rectangle. It evaluates to an empty vector, which is **what healthy looks
+like** — loaded, green and permanently silent. That is strictly worse than D8's
+version of the same bug, where the cost was a blank panel somebody eventually
+looks at.
+
+The collector appends the instrument's *unit* before the aggregation suffix.
+Read off this host's Prometheus on **2026-09-11**
+(`/api/v1/label/__name__/values`, 76 `usher_`/`http_` names):
+
+| PRD 10 declares | the collector stores | why |
+|---|---|---|
+| `usher.jobs.queued` | `usher_jobs_queued_ratio` | gauge, `unit="1"` |
+| `usher.jobs.parked` | `usher_jobs_parked_ratio` | gauge, `unit="1"` |
+| `usher.source.push.connected` | `usher_source_push_connected_ratio` | gauge, `unit="1"` |
+| `usher.jobs.duration` | `usher_jobs_duration_seconds_count` | histogram, `unit="s"` |
+
+**`unit="1"` becomes `_ratio` on a gauge and on nothing else.** On a counter it
+is dropped in favour of `_total` (`usher.source.push.reconnects` →
+`usher_source_push_reconnects_total`); on a histogram it is dropped entirely
+(`usher.search.results` → `usher_search_results_bucket`). Nothing about an
+instrument's name says which of the three it is, so
+`test_every_rule_is_written_in_the_spelling_prometheus_stores` derives the
+stored spelling from the `create_*` call itself, and
+`test_the_stored_spelling_derivation_matches_this_hosts_prometheus` pins that
+derivation against the names above.
+
+⚠️ **The catalogue check cannot see this failure.** `usher_jobs_queued`
+normalises into PRD 10's metric table perfectly. Measured by planting exactly
+that spelling into the committed rule: the catalogue case stayed **green** and
+only the spelling case went red.
+
+⚠️ **The declaration walk is an AST walk over a docstring-stripped tree, not a
+text scan.** `telemetry.py` spells `create_observable_gauge("usher.jobs.queued",
+callbacks=[other])` twice in prose while arguing about the SDK discarding a
+second registration. A `str.find` scan reports **43** declarations against the
+real **41**, and one of the two phantoms supplies the name with no `unit=` — so
+it would derive `usher_jobs_queued` as the stored spelling and the check meant
+to catch that spelling would be the thing that accepted it.
+
+## 🔴 `unless`, never `and … == 0` — the zero-versus-absence rule, and it cuts both ways
+
+*Ingest stalled* is *"queue depth rising for 30 min with zero completions"*, and
+its two halves have **opposite shapes**:
+
+- **Depth is always nine series.** `PostgresJobQueue.depth` fills
+  `dict.fromkeys(JobKind, 0)` before returning, with its own comment giving the
+  reason: *"A GROUP BY returns only non-empty kinds, and a gauge that stops
+  reporting a series is indistinguishable from one reporting zero."*
+- **Completions are only the kinds that have settled something.**
+  `usher.jobs.duration` is *recorded*, so a lane that has never run a job has no
+  `kind` of its own on that side at all.
+
+`and` is a set intersection, so it keeps only the kinds present on **both**
+sides — dropping exactly the lanes that have never settled a job, which is not an
+edge of "ingest stalled" but the worst case of it. Measured 2026-09-11 against
+this host's Prometheus:
+
+| spelling | `kind`s it can reach on the live deployment |
+|---|---|
+| `and … == 0` | 5 — derive, enrich, index, match, watch_history |
+| `unless … > 0` | 9 — those, plus **bootstrap, curate, sync, watch_writeback** |
+
+**On a fresh deployment the same comparison inverts the alert.** With 25
+`curate` jobs queued against a running worker that cannot claim them
+(`USHER_LLM_ENABLED=false` leaves `CURATE` out of `composition.worker_kinds` —
+M4's *"a queue that grows forever"*), the two full expressions answered:
+
+```
+committed  (unless … > 0):  {kind="curate"} = 27.84     <- the stalled lane
+task text  (and … == 0):    no data                     <- silent
+```
+
+The `and` spelling was not merely late; on that deployment it reported
+**nothing at all**, because the only lane that was stalled was the only lane
+with no completions series.
+
+**Push down takes the same distinction and decides it the other way**, which is
+why they are worth reading together. There a reported **0** is the incident and
+an **absent** series is not: `api/lanes.py`'s `push_snapshots()` iterates
+`self._open_adapters` and a lane only opens for an *enabled* source, so no
+series means nobody is running a lane for that source — a configuration state an
+operator chose. PRD 10's qualifier *"on a source that supports it"* therefore
+needs no join against `sources.supports_push`; the series is already scoped to
+those sources by construction, and an `absent()` arm would page somebody for
+having parked a server that is being rebuilt.
+
+## 🔴 Two windows of thirty minutes is sixty, and the rule fires on neither
+
+The depth half was written `increase(usher_jobs_queued_ratio[30m]) > 0` with
+`for: 30m` — PRD 10's duration in both places, each correct read alone. **That
+pair is unsatisfiable for a queue that rises once and then stops moving**, which
+is the commonest stall there is: the rise sits inside a `[30m]` range vector for
+exactly thirty minutes and then leaves it, so the condition is true for at most
+as long as `for:` demands, and fires on a knife edge one evaluation wide.
+
+Watched live on 2026-09-11 against 25 `curate` jobs and a worker that could not
+claim them, depth flat at 25 the whole time, sampled every two minutes:
+
+```
+increase(depth[30m])       42.5 30.8 28.5 27.5 … 25.7 25.6 25.6 -> 0.0
+min_over_time(depth[30m])     0    0    0    0 …    0    0    0 ->  25
+```
+
+The alert went `pending` at **17:09:58Z** and back to `inactive` at
+**17:39:34Z** — one evaluation before its own `for: 30m` would have fired it. It
+was not a slow alert; it was a silent one.
+
+`min_over_time(…) > 0` reads the same thirty minutes the other way — *"this lane
+has had work waiting at every sample for thirty minutes"* — and becomes true at
+exactly the moment the last empty sample leaves the window, which is PRD 10's
+*"for 30 min"* said properly. The patience lives in the range vector; `for:` is
+then a blip guard and nothing more.
+
+`test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it` is the guard,
+and it is **for D12–D14 more than for D11**: *Provider degraded* is a `rate()`
+over a window and *Cost anomaly* a daily comparison, and both invite the same
+shape, because the PRD sentence names one duration and there are two places to
+put it. It exempts `min_over_time` and the instant selectors by name — their
+answer *persists*, so a long `for:` under them is patience rather than a knife
+edge.
+
+⚠️ **The bare `usher_jobs_queued_ratio > 0` conjunct is a freshness guard, not a
+redundancy.** `min_over_time` answers from whatever samples are in the window,
+so a process that exported a backlog and then died keeps satisfying it for half
+an hour. An instant vector selector needs a sample inside Prometheus's 5-minute
+staleness window, which is what makes the rule say "there is a queue **now**".
+Pinned by the promtool case below: a series that stops at t=40m pages at neither
+50m nor 70m. Paging *"curate is stalled"* at a process that is gone is a wrong
+page, and PRD 10 has no exporter-down alert to catch it.
+
+## `increase()` over a gauge is right for *Jobs parking*, and `delta()` is not
+
+Prometheus 3.13.2 emits an info-level warning on that rule — *"metric might not
+be a counter, name does not end in `_total`/`_sum`/`_count`/`_bucket`"* — and the
+documentation points a gauge at `delta()`. So promtool was asked what each
+actually computes rather than the warning being obeyed (`promtool test rules`,
+1 min interval, `[15m]`, 2026-09-11):
+
+| the gauge over the window | `increase()` | `delta()` |
+|---|---|---|
+| `0 → 100 → 0` — filled, then a worker drained it | **0** | −107.14 |
+| `0` rising by 10 to `140` — a lane backing up | **150** | — |
+| `890 → 0 → 1` — an operator cleared the backlog, then one new job parked | **1.071** | −952.50 |
+
+`increase()` answers the question in all three: a drained queue is **0**, so no
+false page; a rise is the rise; and a cleared-then-reparked backlog still reports
+the one new park, because the reset correction credits the drop rather than
+carrying it. `delta()` is wrong in all three. The warning is about the name, not
+about this arithmetic.
+
+## ⚠️ The parked gauge saturates at 1,000, so the live deployment cannot fire *Jobs parking*
+
+`composition.QueueGauges.refresh` builds the parked counts from
+`await queue.parked(limit=1000)` and tallies the returned rows in Python, so the
+gauge is a **floor** on the parked population, never a count of it. D8 measured
+the cap from the panel side; measured again from the alert side on 2026-09-11:
+
+| | |
+|---|---|
+| `sum(usher_jobs_parked_ratio)` on the live instance | **1000** |
+| `SELECT kind, count(*) FROM jobs WHERE status='parked'` on `usher_catalog` | **enrich 1891 + index 110 = 2001** |
+
+D8 read **1,890 + 110 = 2,000** from the same table on 2026-09-07. **One more
+enrich job has parked since and the gauge has not moved by one**, so on that
+instance this alert has already missed a real park and will miss every future one
+until the parked population drops back under the cap. The cap is in
+`composition.py` and not in the rule, so the rule is written for the series that
+exists and the gap is recorded here rather than worked around.
+
+## ⚠️ The queue gauges do not exist unless a worker lane is running
+
+`register_queue_gauges` is called **inside** the worker lane — `api/lanes.py`'s
+`_work_lane` and `cli.py`'s `work`, nowhere else — and `telemetry._observations`
+returns `[]` with no reader, deliberately: *"a fabricated zero is the one value
+that makes the alert quietly wrong."*
+
+So `USHER_WORKER_ENABLED=false` publishes **no depth series at all** and *Ingest
+stalled* cannot fire against such a process. D11's task text proposed firing it
+by enqueueing against `USHER_WORKER_ENABLED=false` and waiting out the window;
+that recipe cannot work. The recipe below replaces it with a **running** worker
+that settles nothing because the lane's handler was never registered — the same
+operator-visible condition, and the one the gauge can see.
+
+## ⚠️ A silent push channel is given up after ~7.5 minutes, and *Push down* waits 15
+
+Measured while firing this rule, and it narrows what the alert covers. Against a
+stub that upgrades and delivers nothing — ADR-0004's own failure — the shipped
+defaults give the lane up long before the alert's window elapses:
+
+```
+D11 Stub Emby's push channel failed (5/5): /embywebsocket delivered no message
+in 90s (ceiling 90s); treating the channel as dead
+D11 Stub Emby's push channel failed 5 times in a row; marking it unavailable and
+leaving this source to the nightly reconcile
+```
+
+`push_max_consecutive_failures` (5) × `push_stale_after_seconds` (90 s) ≈ **7.5
+minutes**, against `for: 15m`. The lane finishes, `LaneSupervisor.refresh`
+releases its adapter (M10's S10), `push_snapshots()` stops reporting it, and the
+alert correctly stops firing — **absence is not an incident, and here it means
+Usher has already handed the source to the nightly walk.** Watched live: that
+source's alert went from `pending` to gone without ever reaching `firing`.
+
+So *Push down* covers the case where the channel **stays up and goes quiet** — a
+source delivering intermittently, a proxy holding the socket open — and not the
+case where the lane gives up. Both are correct; only the first is an incident
+PRD 08 has no other answer for. The firing below uses
+`USHER_PUSH_STALE_AFTER_SECONDS=1200` to hold a silent socket open past the
+alert's own window, which **is** the condition rather than a way around the rule.
+
+## The firings
+
+Each rule was put through `pending → firing → resolved` against the live stack
+on **2026-09-11**, by a throwaway Prometheus reading the shared one over
+`remote_read`. Times are UTC; `instance` is the exporting process's
+`service.instance.id`.
+
+| rule | fired | labels | `$value` | resolved |
+|---|---|---|---|---|
+| Jobs parking | 17:15:58 (active 17:10:58 + `for: 5m`) | `kind=bootstrap`, `instance=5a6032ac…` | 1.069 | 17:25:02, when the park left the `[15m]` window |
+| Push down | 17:43:13 (active 17:28:13 + `for: 15m`) | `source=D11 Silent Channel`, `instance=4a433056…` | 0 | 18:08:25, when the channel started delivering |
+| Ingest stalled | 17:48:13 (active 17:43:13 + `for: 5m`) | `kind=curate`, `instance=5a6032ac…` | 25 | 17:49:09, 40 s after the queue was drained |
+
+**Jobs parking** — one `bootstrap` job enqueued with the key `d11-not-a-phase`.
+`services/handlers.py`'s `_bootstrap_phase` raises `PortDataMalformed`, which is
+the arm in `services/jobs.py` that sets the `usher.job.parked` span attribute and
+calls `_fail(retryable=False)`. The row landed `status='parked'` with
+`last_error` naming the seven valid phases, and the gauge moved 0 → 1 on the next
+worker pass. It resolved on its own once the park fell out of the `[15m]`
+window, which is the rule saying *"nothing new has parked"* rather than
+*"nothing is parked"* — the distinction the absence of a threshold buys.
+
+**Push down** — a stub Emby on loopback that authenticates, accepts the
+`/embywebsocket` upgrade and **never sends a frame**. At the firing:
+`usher_source_push_reconnects_total` read **0**, so the socket was the original
+one, held open for the whole fifteen minutes; `ss` showed the pair of
+`ESTABLISHED` sockets between the two processes; `/health/ready` listed the lane
+under `push` with an empty `crashed_sources`; and the gauge had sixteen
+consecutive samples of `0`. ⚠️ **This ran against a stub and never against the
+operator's Emby** — `.claude/rules/api-telemetry-and-lanes.md` records that a
+push lane's reconnect gap-closer issues a full `DELTA` reconcile, 1,126,789 items
+against the measured household. The stub's own lane logged the refusal
+(*"no item sync has ever completed for this source, so the reconnect delta would
+walk its entire library"*), which is that guard working. **The resolve was
+produced by making the stub deliver**, not by stopping it: a firing produced by
+stopping the source proves the wrong thing, and so would a resolve.
+
+**Ingest stalled** — 25 `curate` jobs enqueued against a running worker with
+`USHER_LLM_ENABLED=false`, so `CURATE` is absent from `worker_kinds`, the jobs
+are never claimed, and `usher_jobs_duration_seconds_count{kind="curate"}` never
+comes into existence. That is the alert's headline case and the one `and … == 0`
+cannot see. `$value` is **25**, an honest job count matching the 25 pending rows,
+because `min_over_time` reports a depth where `increase()` reported an
+extrapolated 27.84 for the same queue.
+
+### Fire and resolve, without waiting an hour
+
+`promtool test rules` drives the committed file through both transitions at the
+real `for:` durations, including the two negatives no live run produces on
+demand. Rules copied into the container because Prometheus is docker-net-only:
+
+```bash
+docker cp dashboards/alerts/usher.yml observability-prometheus-1:/tmp/usher.yml
+docker exec observability-prometheus-1 promtool check rules /tmp/usher.yml
+docker exec -w /tmp observability-prometheus-1 promtool test rules fire-and-resolve.yml
+```
+
+The cases that matter, all **SUCCESS** on 2026-09-11:
+
+- *Ingest stalled* does not fire at 34m and fires at 40m on `kind="curate"`,
+  which has **no completions series at all**, while `kind="enrich"` beside it —
+  same depth, settling steadily — never fires.
+- The freshness conjunct: a lane whose series **stops being exported** at t=40m
+  pages at neither 50m nor 70m, though `min_over_time` still answers 25.
+- *Jobs parking* does not fire at 9m, fires at 12m, and **resolves at 40m**.
+- *Push down* does not fire at 14m, fires at 20m, and **resolves at 60m** once
+  the gauge reads 1.
+- The absence arm: an instance exporting **no push series at all** never fires
+  *Push down*, at 20m or at 60m. An `absent()` arm would fire for the whole hour.
