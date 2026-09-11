@@ -35,6 +35,11 @@ the same reason** — written against the instruments in `src/usher/` and
 versioned with them, evaluated by a Prometheus this repository does not own. It
 needs a `rule_files:` entry and a bind mount in `~/code/observability/`, neither
 of which is committed there yet; the file's own header spells both out.
+⚠️ **Three stanzas rather than two since D13**: *Disk projection* is the one
+rule whose series Usher does not emit and the stack does not yet produce, so
+that project's collector also needs a `hostmetrics` receiver. It is written out
+above the rule that needs it, and until it lands the rule's `absent()` companion
+is what says so out loud rather than reading green.
 
 **Every panel on dashboards 1 and 2 is SQL against the canonical database and
 none of them is a Prometheus query.** That is PRD 10's first principle doing the
@@ -1293,7 +1298,22 @@ Series verified present: `usher_embedding_duration_seconds_count` = 141.
 no policy derives from it — and which M9's Track 2 treated as a budget, deriving
 a 2.0 GB ceiling and **withdrawing a design** measured at 2.702 GB against a
 number with no forcing function (ADR-0036). A number nothing enforces is not a
-threshold. This panel is where D13's alert is drawn from.
+threshold. This panel is where D13's alert is drawn from, and **the window is the
+same in both**: a 7-day least-squares fit extrapolated 14 days.
+
+⚠️ **The free-disk denominator is not in this panel and cannot be.** The title
+says *headroom against measured free disk* and the query returns
+`pg_total_relation_size` per table — the numerator. There is no portable SQL for
+a filesystem's free space, so the denominator is a Prometheus series,
+`system_filesystem_usage_bytes{state="free"}`, and the pairing is the panel.
+Measured 2026-09-11 on this deployment: `pg_database_size('usher_catalog')`
+**8,384,394,931 B (7,996 MB)** at 1,276,268 titles with 133,576 enriched,
+against **677,427,249,152 B free** on `/`. ⚠️ PRD 08's resource envelope records
+**5,025,650,355 B (4,793 MB)** for the same database at `m09c` on 2026-08-12 —
+**+3.36 GB in thirty days against +3,901 titles**, so the growth followed
+`m09d`, `m09e` and a full re-embed rather than the catalog. That row is dated
+and denominated and this task did not rewrite it; it is flagged for whoever
+owns it.
 
 ⚠️ **It reads `pg_class` and so names no Usher table**, which means invariant 3
 has nothing of ours to grade. That is the one exemption in
@@ -1304,15 +1324,18 @@ becomes how every later panel escapes the check.
 # Alerts — `alerts/usher.yml` and `alerts/grafana/usher.yml`
 
 PRD 10's `## Alerts` table names seven rules and opens *"Kept few, so they mean
-something."* **Six are here, in two files and two engines.** Five are
-Prometheus rules in `alerts/usher.yml` — **Ingest stalled**, **Jobs parking**
-and **Push down** from D11, plus **Enrichment SLA missed** and **Provider
-degraded** from D12 — and the sixth is **Cost anomaly**, which has no series to
-name at all and is a Grafana-managed Postgres rule in
-`alerts/grafana/usher.yml`. D13 owes *Disk projection*;
-`tests/unit/test_alerts.py` holds that debt as an `xfail(strict=True)` whose
-message names which task owes which, and which becomes a **hard** failure the
-day the seventh rule lands, because a strict xfail that passes is a failure.
+something."* **All seven are here, in two files and two engines, as eight
+rules.** Six are Prometheus rules in `alerts/usher.yml` — **Ingest stalled**,
+**Jobs parking** and **Push down** from D11, **Enrichment SLA missed** and
+**Provider degraded** from D12, and **Disk projection**'s two halves from D13.
+Two are Grafana-managed Postgres rules in `alerts/grafana/usher.yml` — **Cost
+anomaly**, which has no series to name at all, and *Disk projection*'s
+**database-growth** half, which has an exact query and no metric. Nothing is
+owed any more;
+`tests/unit/test_alerts.py` held that debt as an `xfail(strict=True)` naming
+which task owed which, and **D13 removed the marker** rather than leaving it to
+XPASS-strict — which is the failure a strict xfail is for, and the mechanism
+that made the last task come back and close the ledger.
 
 ⚠️ **D14 was told to be that day and was not.** Its acceptance reads *"D11's
 bidirectional name check is now green, seven rules against PRD 10's seven
@@ -1567,7 +1590,7 @@ Grafana provisioning file beside `usher.yml` is read as a rule file and rejected
 ```
 promtool check rules /rules/*.yml     # committed layout
   Checking /rules/usher.yml
-    SUCCESS: 5 rules found            # exit 0
+    SUCCESS: 7 rules found            # exit 0
 
 promtool check rules /rules/*.yml     # Grafana file as a sibling
   Checking /rules/grafana.yml
@@ -1582,31 +1605,41 @@ promtool check rules /rules/*.yml     # Grafana file as a sibling
       field execErrState not found in type rulefmt.Rule
       field data       not found in type rulefmt.Rule
   Checking /rules/usher.yml
-    SUCCESS: 5 rules found            # exit 1
+    SUCCESS: 7 rules found            # exit 1
 ```
 
 (The real output prefixes each line with a line number into `grafana.yml`;
 they are elided here because a line number into a file this document does not
 own is a citation that rots — #82's lesson, applied to a transcript.)
 
+⚠️ **Re-run at D13's HEAD and it still holds, with two numbers moved.** D14
+measured **5** rules because D13 had not landed; the committed layout now serves
+**7**, and the sibling layout now reports **17** unmarshal errors rather than 9,
+because the Grafana file has gained a second rule group with its own `orgId`,
+`folder`, `uid`, `title`, `condition`, `noDataState`, `execErrState` and `data`.
+The conclusion is unchanged and the numbers are re-derived rather than
+inherited, which is the point of re-running it.
+
 🔴 **And the server is worse than the linter.** A Prometheus started against the
-committed layout serves all five rules on `/api/v1/rules`; started against the
+committed layout serves all seven rules on `/api/v1/rules`; started against the
 mixed directory it **exits 2 before opening a port**, with
-`Error loading rule file patterns from config`. Not "four rules instead of
-five" and not "a warning in the log" — no Prometheus at all, so D11's three and
-D12's two go with it.
+`Error loading rule file patterns from config`. Not "six rules instead of
+seven" and not "a warning in the log" — no Prometheus at all, so D11's three,
+D12's two and D13's two go with it.
 `test_the_postgres_rule_is_not_in_the_directory_prometheus_globs` is the guard,
 and it asserts the Prometheus directory's glob holds exactly `usher.yml` rather
 than asserting the Grafana file is absent — the second spelling passes for an
 empty directory.
 
-📌 **D13 lands in the same split and this is where its halves go.** Its plan
-says *"the alert is a Postgres-datasource rule, evaluated by Grafana against the
-same query D10's panel plots"* for the database half and
-`predict_linear(usher_disk_free_bytes…)` for the free-space half — one rule per
-engine, so the first belongs in `alerts/grafana/usher.yml` beside this one and
-the second in `alerts/usher.yml`. `alert_names()` in `tests/unit/test_alerts.py`
-already spans both, so the bidirectional check needs nothing new either way.
+✅ **D13 landed in the same split, and its halves went where this paragraph
+said they would.** Its free-space arm and its `absent()` guard are in
+`alerts/usher.yml`; its database-growth arm is the `usher-disk` group of this
+file. Two things about D13's plan were wrong and are corrected where they are
+used: `usher_disk_free_bytes` is a name **no producer on this host emits**, and
+*"a linear fit over `pg_database_size`"* is not expressible in SQL at all
+because Postgres keeps no size history. `alert_names()` spanning both files is
+what lets one alert name cover three rules in two engines, so the bidirectional
+check needed nothing new — that part of the prediction held exactly.
 
 ## The cost-anomaly statement, and the six decisions in it
 
@@ -1793,16 +1826,485 @@ deployment that has never curated has not had a cost anomaly. An **error** is
 decided the other way, because a statement whose answer nobody has is not the
 same as an answer of "no anomaly", and is something an operator can fix.
 
+## 🔴 *Disk projection* names a series nothing on this host produces
+
+**Two alerts here have no metric and they fail differently.** *Cost anomaly*
+names none, because PRD 10's first principle puts LLM spend on Postgres and
+`llm_calls` is the record — so it is a `SELECT`, and a `SELECT` that names
+something absent *raises*. *Disk projection* names one, because a filesystem's
+free space really is a metric, just not one anybody here is producing — so its
+rule **parses, loads and evaluates to an empty vector**, which is
+indistinguishable from healthy. That is the failure mode this whole document
+opens with, and this is the only rule in the file that was one wrong word away
+from it.
+
+Measured 2026-09-11 against the shared Prometheus
+(`/api/v1/label/__name__/values`): **93 metric names, and not one is a disk, a
+filesystem or a node series.** Two reasons, both deliberate and both in the
+stack's own files:
+
+- `prometheus/prometheus.yml` has **no `scrape_configs` at all** — *"the
+  collector is the one front door to this stack, and a scrape target that is
+  not asked for is a series name nobody chose"*;
+- `otel-collector/config.yaml` has three receivers (`otlp`, two `filelog`) and
+  **no `hostmetrics`**.
+
+So the rule needs a third wiring stanza beside the two this file's header
+already carries, and it is written out above the rule. ⚠️ **A node exporter was
+the other candidate and is refused**: it is a scrape target, and that Prometheus
+scrapes nothing by design, so wiring one in reopens a decision the stack made
+instead of using it. `hostmetrics` enters through the front door that exists and
+rides the same `prometheusremotewrite` exporter every other name in that
+Prometheus came through.
+
+### The name is `system_filesystem_usage_bytes`, and free space is a *label*
+
+Measured rather than assumed, because this is precisely where D11 lost a round.
+The stack's own collector image (`otel/opentelemetry-collector-contrib:0.158.0`)
+was run with a `hostmetrics` receiver against a throwaway Prometheus on
+2026-09-11, and what arrived was:
+
+| | |
+|---|---|
+| name | `system_filesystem_usage_bytes` (`system.filesystem.usage`, `unit="By"` → `_bytes`) |
+| labels | `mountpoint`, `device`, `type`, `mode`, **`state`** |
+| `state` values | `free`, `used`, `reserved` — **three series of one name per mountpoint** |
+| `/` on this host | used 1,317,918,756,864 · free 677,411,958,784 · reserved 653,676,544 |
+
+🔴 **`usher_disk_free_bytes` — the name D13's task text supplies — is produced by
+nothing, anywhere.** It is not a mis-spelling of a stored name the way D11's four
+were; no producer on this host or in the stack emits it. A rule written on it
+parses, loads, evaluates empty and reads *healthy forever*, and it is the
+planted control in
+`test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_table`.
+
+🔴 **And `state="free"` is not optional.** Without it the expression projects
+all three series independently, and **the rule fires if any of them trends
+below zero** — so a *falling* `used` pages you. `used` falls every time
+something is cleaned up: a `VACUUM FULL`, a log rotation, a `docker image
+prune`. The selector is the difference between one question and three, and
+`promtool` case 3 below is that arm — a falling `used` and `reserved` beside a
+rising `free`, which must produce nothing.
+
+### Three rules for one alert, and the second exists to make the first falsifiable
+
+All three are named *Disk projection* — two Prometheus rules here and a
+Postgres-datasource rule in `alerts/grafana/usher.yml`. A rule PRD 10's table
+does not name falsifies *"kept few, so they mean something"*, and the
+bidirectional name check grades the two name sets against each other through
+`alert_names()`, which unions both files. `promtool check rules` accepts the
+same alert name twice in one group — **SUCCESS: 7 rules found** — and Grafana
+accepts it across two groups, which the throwaway run below confirms rather than
+assumes.
+
+They answer three different questions: **whether** a filesystem is filling (the
+projection), **whether the alert can see anything at all** (the `absent()`
+guard), and **which consumer** is filling it (the Postgres half). The second is
+this section's subject.
+
+The second rule is `absent(system_filesystem_usage_bytes{state="free"})`, and the
+reason is one query. Both Prometheus arms were evaluated **read-only against the
+shared Prometheus** on 2026-09-11:
+
+```
+predict_linear(system_filesystem_usage_bytes{state="free"}[7d], 14*86400) < 0
+  -> []          <- no alerts. This is what "healthy" looks like.
+absent(system_filesystem_usage_bytes{state="free"})
+  -> {state="free"} = 1     <- "the disk alert is blind"
+```
+
+The first line is D11's failure reproduced on purpose. The second is the repair:
+one hour of no samples and an operator is told the projection cannot see
+anything, rather than being told nothing for as long as the file is installed.
+
+⚠️ **`absent()` here and deliberately not in *Push down*, and the two are worth
+reading together.** There an absent series is a source nobody is running a lane
+for — a configuration state an operator chose — so an `absent()` arm would page
+somebody for having parked a server. Here there is no such state: a deployment
+either produces filesystem facts or has an unwatched disk. The distinction is
+not *does the series exist* but **is its absence a choice**.
+
+It carries `severity: warning` rather than `page`. A blind alert is an
+operations defect and wants a working day; waking somebody because a receiver
+was never configured is the wrong page, and paging for it would train an
+operator to silence the pair.
+
+`test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_series_and_panel`
+gained an arm for it: an `absent()` result carries **only the selector's equality
+matchers**, so `{{ $labels.mountpoint }}` on such a rule renders empty and the
+page names no subject. Proved by planting exactly that — it dies on
+*"`absent()` carries only its own equality matchers ['state'] … ['mountpoint']
+renders empty"*.
+
+### The Postgres half, three refutations, and the file D14 built for it
+
+PRD 10's condition is *"Postgres **or image cache** on track to fill within 14
+days"*, and D13's task text asks for a companion **Postgres-datasource** rule on
+*"the growth of `pg_database_size`"*. Three things about that were wrong, and
+the third stopped being wrong while this task was running.
+
+1. **`pg_database_size` is a function, not a series, and it keeps no history.**
+   There is no `postgres_exporter` in the stack — the 93 names hold nothing
+   `pg_`-prefixed — and a linear fit needs a past. Postgres does not store one.
+   So *"a linear fit over `pg_database_size`"* is not expressible in SQL at all,
+   and this is the instruction that had to be taken as far as it goes rather
+   than followed.
+2. **A second rule under a different name is caught by D11's own check.** PRD 10
+   names seven alerts; an eighth falsifies the sentence the table opens with,
+   and `test_every_alert_prd_10_names_exists_…` grades *"named by no PRD 10
+   row"*. So the growth rule carries the **same** alert name, in a different
+   engine — `alert_names()` unions the two files, and the union is still seven.
+3. ~~**A Postgres-datasource rule cannot live in this repository.**~~ True when
+   D13 started and false by the time it landed: **D14 built
+   `alerts/grafana/usher.yml`**, one directory below the glob, for *Cost
+   anomaly* — which has no series for the same reason and a different one. The
+   growth rule is its second group.
+
+#### What is measurable, since `pg_database_size` has no past
+
+Rows do. Seven relations carry a creation timestamp, and each one's current
+`pg_total_relation_size / count(*)` prices the rows created in the trailing
+week. That is an **estimate of what those rows cost**, labelled as one;
+`pg_database_size` itself is exact and is the denominator.
+
+Run against the live catalog on 2026-09-11, the committed statement answers:
+
+| | |
+|---|---|
+| `database_bytes` (exact) | **8,384,394,931** |
+| `measured_table_bytes` (the seven) | **6,830,292,992** — **81.5%** of it |
+| `added_bytes_7d` | **2,585,865** |
+| `projected_bytes_14d` | **5,171,731** |
+| `projected_pct_of_database` | **0.0617** |
+| `fired` | **0** |
+
+⚠️ **Two of the ten largest relations are invisible to it and that is stated
+rather than worked around.** `title_search_names` (682 MB) and `images`
+(455 MB) carry no creation timestamp, so their growth reaches only the
+denominator. The other 81.5% is what the statement can see.
+
+⚠️ **One seq scan per relation, because only one of the seven time columns is
+indexed** — `ix_raw_payloads_fetched_at`. Measured on the live catalog over
+1.27M titles, 2.9M credits, 3.3M neighbours and 896k people: **1.080 s cold,
+483.6 ms warm**. At `interval: 10m` the cold figure is a 0.18% duty cycle. That
+is the price of the signal and it is recorded rather than assumed; the repair,
+if it ever matters, is an index on `titles.created_at` and not a shorter window.
+
+🔴 **The threshold is the database against itself.** *"The next fortnight adds
+more than everything this database currently holds"* — self-calibrating, and it
+needs no operator to have told it how big the disk is, which is exactly what
+`08-operations.md`'s resource envelope cannot be asked for (ADR-0036). A
+**bootstrap fires it on purpose**: a deployment filling an empty catalog really
+is on track to add more than it holds, and the operator provisioning its disk
+is who should be told.
+
+**`severity: warning`, not `page`, and the asymmetry with the free-space half is
+the point.** That one answers *whether* a filesystem is filling and is the page.
+This one answers *which consumer*, and a page for the diagnostic half would
+train an operator to silence the pair. Read them together: **both firing means
+Postgres is the consumer; the free-space rule alone means something else on that
+filesystem is** — most likely the image cache, which has no eviction and grows
+with browse coverage.
+
+⚠️ **`for: 10m` here and `for: 1h` there, and the `for:` follows the signal
+rather than the alert name.** The free-space half is a least-squares fit over a
+*scraped gauge*, where a single mis-sampled point moves the answer and an hour
+buys a fit that has seen more samples. This half is a `count(*)` over
+*committed rows*: no sampling noise, monotone over the window, changing by at
+most the ingest rate between evaluations. A long `for:` here is a delay with
+nothing to learn in it — *Cost anomaly*'s own argument, and it applies for the
+same reason. One extra interval buys a second opinion from the same statement,
+so a half-committed bulk load cannot page on its own.
+
+**Exactly one numeric column, the rest `::text`** — D14's finding, unchanged:
+Grafana turns every numeric column of a table frame into a series the `> 0`
+threshold judges, so a stray second number fires the alert forever. Confirmed
+against a real PostgreSQL rather than assumed — `format_type` over the
+statement's own output reads `fired integer` and five `text`.
+
+### The image cache half: bounded per image, unbounded over time
+
+`08-operations.md`'s *Image cache* row said *"capped by a configurable LRU
+ceiling"* until 2026-08-14, when `d6d62ec` corrected it — **one day after this
+task was drafted**, so that half of D13's first acceptance bullet was already
+done at HEAD. What the row still lacked was the actual bound, the growth driver
+and three of the four settings, and D13 supplies those from a measurement:
+
+| the cache on this deployment, 2026-09-11 | |
+|---|---|
+| bytes | **146,056,327** |
+| files | **1,116** over **828** distinct images |
+| rungs per image | 609 at one · 155 at two · 59 at three · 5 at four · **none at five** |
+| mean per stored rung | **127.8 KiB** |
+| browse coverage | 828 distinct images cached for a **1,276,268**-title catalog — **0.06%** |
+
+The "none at five" row is `IMAGE_LADDER = (154, 342, 780, 1280)` showing up in
+the data: the ladder bounds the cache at four entries an image *by
+construction*, which is what `services/images.py` claims and what nobody had
+checked. The unboundedness is the other axis — **nothing evicts and the catalog
+grows**, so the size is *images browsed × up to four rungs × their bytes* and
+**the growth driver is browse coverage, not catalog size**. Extrapolating
+today's mix (1.35 rungs an image, 127.8 KiB a rung) to **one image per title**
+gives **~225 GB**, and all four rungs **~668 GB**, against 631 GiB free on this
+host. Both are floors as well as extrapolations: a title has a poster *and* a
+backdrop, so one image per title is the conservative end. Labelled as such —
+and the reason a 14-day projection over this directory is a real question
+rather than a formality.
+
+There is no eviction method to configure: `DiskImageBlobStore` has `get`, `put`,
+`_forget_other_media_types` and `_path`. The four real settings are
+`image_cache_dir`, `image_max_bytes` (a **per-image** 5 MiB refusal, never a
+cache cap), `image_fetch_timeout_seconds` and `image_cdn_base_url`.
+
+### No threshold comes from PRD 08's resource envelope, and a test says so
+
+That table's own header records that nothing reads it, no host enforces it and
+no policy derives from it; M9's Track 2 derived a 2.0 GB ceiling from one row,
+measured a design at 2.702 GB and **withdrew the design** (ADR-0036). So
+`test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_table`
+parses **63 byte figures** out of that table — in both the decimal and the
+binary reading of every ambiguous unit — and forbids any of them appearing as a
+literal in any `expr` in the file.
+
+⚠️ **The positive control the task text names does not land at this HEAD.** It
+proposes planting `8589934592` (the old `~8 GB` row); that row now reads
+*"`~8–12 GB` described a database this project no longer has"*, so `8 GB` is no
+longer a standalone figure and the plant would pass. The controls used instead
+are `5025650355` — the measured baseline, the figure most likely to be promoted
+from a measurement into a threshold — and `2147483648`, ADR-0036's withdrawn
+ceiling. Both die on
+*"a rule in this file carries a byte literal that is a figure from PRD 08's
+resource envelope"*.
+
+The baseline **is** quoted, in the rule's description, as *what the database was
+on a date*: 5,025,650,355 B (4,793 MB) at 1,272,367 titles with 130,647 enriched
+on 2026-08-12, and 8,384,394,931 B (7,996 MB) at 1,276,268 titles with 133,576
+enriched on 2026-09-11. The scan reads `expr` and never the annotations, because
+a scan that could not tell those apart would forbid saying the number at all.
+
+### 7 days predicting 14, and `predict_linear` decays out of its own window
+
+**+3.36 GB in thirty days against +3,901 titles** is the argument for the long
+window: this deployment's growth followed `m09d`, `m09e` and a full re-embed,
+not the catalog. An hour extrapolated to a fortnight would page on every
+`VACUUM`.
+
+`predict_linear` was added to
+`test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it`'s list, and it
+belongs there for the stated reason rather than by family resemblance: a
+least-squares fit over `[7d]` is tilted by a one-off step for exactly seven days
+and then not at all, which is the same knife edge `increase` has. `for: 1h`
+against `[7d]` passes; `for: 7d` planted against it dies on *"is not shorter than
+the [7d] window its own decaying condition lives in"*.
+
+⚠️ **A migration that transiently doubles a table fires this rule, and the
+recovery was measured rather than assumed.** `08-operations.md` prices `m09d` at
++637 MB transient on `credits` (794 → 1,431 MB, settling at 740 only after a
+`VACUUM FULL` the migration does not run). Driven through `promtool` as a 637 MB
+drop over one hour onto a 5 GB filesystem that then goes flat:
+
+| t after the drop | `predict_linear(free[7d], 14d)` |
+|---|---|
+| 2 h | **−102.81 GB** — firing |
+| 4 h | −30.40 GB |
+| 6 h | −12.38 GB |
+| 8 h | −5.44 GB |
+| 10 h | −2.07 GB |
+| 12 h | **−0.18 GB** — still firing |
+| 16 h | **+1.75 GB** — resolved |
+| 24 h | +3.17 GB |
+
+So the entry that belongs in [`upgrade.md`](../docs/runbooks/upgrade.md) is
+**silence for the migration window and roughly twelve to sixteen hours after
+it**, not for the seven days the range vector is long. The figure is for that
+drop's shape on that much free space and scales with both. **Widening the
+window is not the repair** — widening it is how an alert stops seeing the thing
+it is for.
+
+⚠️ **There is nothing to silence it with, so the step was not written.** The
+shared stack has **no Alertmanager**, `prometheus/prometheus.yml` has no
+`alerting:` block, and Grafana provisions no alert rules — checked, not assumed.
+Nothing routes anything in this file, which is the same asymmetry this section
+opens with about `rule_files:`. A silence procedure against an Alertmanager that
+does not exist is a runbook step nobody can run, and this project has a rule
+about those. `upgrade.md` is named here as where it goes; until then a
+migration's firing is visible on Prometheus's own `/alerts` page and nowhere
+else.
+
+### Fired once, on a real filesystem, without lowering anything
+
+🔴 **A firing whose recipe is "we lowered the number until it fired" is recorded
+as not having fired.** Nothing about the rule was changed for this: the same
+committed expression, the same `[7d]`, the same `14 * 86400`, the same `for: 1h`.
+What changed was the disk.
+
+- **The filesystem**: a **256 MiB ext4 image** (`fallocate -l 256M`, `mkfs.ext4`)
+  mounted on a loop device at `/var/tmp/d13/scratchmnt`. Usable **241,081,344 B**,
+  free at t₀ **223,188,992 B**. Nothing of this host's real storage was
+  involved beyond the image file.
+- **The rate**: exactly **1 MiB every 60 s**, `dd` + `sync`, logged with the
+  wall clock and the filesystem's own `df` after each write. The first three
+  deltas are 1,048,576 B each, so the rate is the measurement and not the
+  intention.
+- **The negative control, running at the same time**: this host's real `/` —
+  1.996 TB, 677 GB free — was reported by the same collector under the same
+  rule, because the rule carries no `mountpoint` selector.
+
+What happened, in UTC:
+
+| | |
+|---|---|
+| `pending` | **18:37:58.747Z**, the first evaluation after the first negative fit |
+| fill | 1 MiB/min, **62 writes**, free 223,188,992 → 158,175,232 B (exactly 62 MiB) |
+| **`firing`** | **19:37:58.747Z** — `activeAt` + `for: 1h` to the millisecond |
+| `$value` | **−20,029,396,686** — the free bytes the fit predicts at the 14-day horizon |
+| labels | `mountpoint=/var/tmp/d13/scratchmnt`, `device=/dev/loop0`, `type=ext4`, `mode=rw`, `state=free`, `severity=page` |
+| the page | *"/var/tmp/d13/scratchmnt is projected to fill within 14 days"* |
+| freed | **19:39:18Z**, all 62 blocks deleted, free back to 223,186,944 B |
+| **resolved** | by **20:08:55Z** — 29 min 37 s later, last firing sample **−44,596,514** |
+
+🔴 **The resolve was produced by giving the filesystem its space back, not by
+editing the rule** — the same care D11 took in making the silent Emby stub
+*deliver* rather than stopping it. And it took half an hour rather than an
+instant, which is the `[7d]` window doing what it is for: one minute of
+recovery does not erase an hour of decline from a least-squares fit, and the
+alert stays up until the trend really has turned.
+
+### ⚠️ The rule is noisy until its own window has filled, and that is measured
+
+The same live run produced a **false positive on this host's real `/`**, and it
+is recorded here rather than tuned away because it is the most useful thing the
+run produced.
+
+`predict_linear` answers from whatever samples are inside `[7d]`, however few.
+The throwaway Prometheus had been running half an hour, so the "seven-day
+trend" for `/` was thirty minutes of samples — and one **−4,033 MB step at
+18:45:17Z** (this host runs vLLM, Docker and a dozen other containers) was the
+entire trend in it:
+
+```
+18:44:17  677,174,931,456
+18:45:17  673,141,497,856   -4,033 MB   <- one step
+18:46:17  672,667,385,856     -474 MB
+...       flat to within a few MB
+```
+
+`/` is 1.996 TB with 677 GB free and is in no danger whatever. The rule
+predicted **−3.67 TB** at the 14-day horizon, went `pending` at **18:45:28Z**
+and **reached `firing` at 19:45:28Z** — so this is a false page and not merely a
+false pending, and it is recorded as one.
+
+**It then cleared itself, and the clock on that is the whole of the argument.**
+As flat samples accumulated in the window the prediction climbed
+−3.67 TB → −3.44 TB → −2.22 TB → −1.42 TB → −51.7 GB → −11.6 GB, and the alert
+was **gone by 19:46:53Z** — 85 seconds after it fired, and 61 minutes after the
+step that caused it. It needed roughly eighty minutes of samples in a seven-day
+window before one −4,033 MB step stopped being the whole trend.
+
+🔴 **No data-sufficiency conjunct was added, and that is a decision rather than
+an omission.** The obvious repairs — `and x offset 1d`,
+`count_over_time(x[7d]) > N`, the node-exporter mixin's *"and it is already
+below 40% free"* — each need a number nobody here has measured, and a number
+picked so that a demonstration passes is exactly the thing the firing recipe
+below exists to refuse. In steady state the arithmetic is unremarkable: a
+−4,033 MB step against 677 GB free, spread over a full seven days, moves the
+14-day extrapolation by ~8 GB and the rule stays silent. The mis-firing window
+is the first days after the receiver is wired, it is bounded, and the operator
+living through it is by construction the person who just cleared the `absent()`
+page. The measurement is here for whoever decides to encode a guard.
+
+### The database-growth half, fired through a throwaway Grafana
+
+Not Prometheus, so it was fired the way D14 fired *Cost anomaly*: a throwaway
+**Grafana** (`grafana/grafana:13.1.3`) with `dashboards/alerts/grafana` mounted
+at `/etc/grafana/provisioning/alerting` and a provisioned `usher-postgres`
+datasource, reading a throwaway **PostgreSQL** (`pgvector/pgvector:pg17`)
+migrated to head with `alembic upgrade head` against **its own** database. The
+shared Grafana on `127.0.0.1:3000` and the shared `usher-postgres-1` were not
+touched; the only thing either was asked for was a `SELECT`.
+
+Both rules provisioned from the one file — `usher-cost-anomaly` in group
+`usher-cost` and `usher-disk-projection-postgres` in `usher-disk` — which is
+what says two Grafana rules may share an alert **name** as long as they are in
+different groups. PRD 10's table still has one *Disk projection* row and
+`alert_names()` still unions to seven.
+
+🔴 **The fixture is a bootstrap, because that is the rule's own firing
+condition and not a lowered number.** Nothing about the rule was changed for
+this: the same statement, the same `2 ×`, the same `> 0` threshold, the same
+`for: 10m`. **60,000 `titles` rows were inserted with the schema's own
+`created_at DEFAULT now()`** — a real bootstrap in miniature — so a database
+that was 9,516,723 B empty became 135,468,723 B of which **everything** had been
+created inside the trailing week.
+
+| | |
+|---|---|
+| `Pending` | **20:09:50Z**, the first evaluation after the seed |
+| **`Alerting`** | **20:19:50Z** — `activeAt` + `for: 10m` exactly |
+| `$value` | **1** — the `fired` column, and the comparison that decided is the one in `numeric` |
+| labels | `database_bytes=135468723`, `measured_table_bytes=126197760`, `added_bytes_7d=126001152`, `projected_bytes_14d=252002304`, `projected_pct_of_database=186.0225`, `severity=warning` |
+| the page | *"Postgres is on track to add 252002304 B in 14 days against the 135468723 B it holds"* |
+
+**The resolve was produced by letting the growth leave the window, not by
+deleting the rows.** 59,000 of the 60,000 rows had their `created_at` moved to
+30 days ago — which is the state this same database is in a month later, with
+every byte still present. `added_bytes_7d` fell 126,001,152 → **3,860,070** and
+`projected_pct_of_database` 186.0225 → **3.2023**, against a database that had
+*grown* to 241,079,987 B in the meantime. Resolved at **20:39:50Z**.
+
+⚠️ **D14's series-identity churn, reproduced independently.** Grafana keys an
+alert instance on its label set, and every number this statement returns is a
+label — so the moment the numbers changed, the old instance stopped being
+returned rather than being updated. Watched at 20:30:11Z: the 186.0225 instance
+still `Alerting` because its series had merely vanished, and a fresh 3.2023
+instance `Normal` beside it. It took **one further evaluation interval** — the
+20:39:50Z pass — for the stale one to be dropped and the rule to read
+`inactive`. That is the price D14 records for putting the diagnostics in labels,
+measured here at ten minutes, and it is the reason `interval: 10m` is also the
+churn quantum.
+
+### Fire and resolve, without waiting a fortnight
+
+`promtool test rules` drives both rules through their real `for: 1h` at the real
+durations, including the three negatives no live run produces on demand. All
+**SUCCESS** on 2026-09-11:
+
+- A filesystem losing **1 MiB a minute** does **not** fire at 59m and fires at
+  61m, with the full rendered page compared field by field.
+- A filesystem whose free space is **rising** never fires, at 61m or at 179m.
+- 🔴 **`used` and `reserved` rising are not selected.** The negative control for
+  `state="free"`: the same mountpoint reporting a falling `used` and `reserved`
+  beside a *rising* `free` produces no alert at all.
+- The absence arm fires at 61m and not at 59m on an instance exporting
+  `usher_jobs_queued_ratio` and no filesystem series whatever.
+- The absence arm **resolves** the moment a filesystem starts reporting — a
+  series absent for 70 minutes and then present is not firing at 80m.
+- The migration table above: −102.81 GB at 2 h, −0.18 GB at 12 h, **+1.75 GB at
+  16 h**.
+
+```bash
+docker cp dashboards/alerts/usher.yml <throwaway-prom>:/tmp/d13/usher.yml
+docker exec <throwaway-prom> promtool check rules /tmp/d13/usher.yml
+docker exec -w /tmp/d13 <throwaway-prom> promtool test rules fire-and-resolve.yml
+```
+
 ## The firings
 
 Each rule was put through `pending → firing → resolved` against real data on
-**2026-09-11** — the five Prometheus rules by a throwaway Prometheus reading
-the shared one over `remote_read`, and *Cost anomaly* by a throwaway Grafana
-reading a throwaway Postgres. **In neither case was the shared stack touched**:
+**2026-09-11** — the Prometheus rules by a throwaway Prometheus reading the
+shared one over `remote_read`, and the two Grafana rules by a throwaway Grafana
+reading a throwaway Postgres. **In no case was the shared stack touched**:
 `~/code/observability/`'s Prometheus still has no `rule_files:` entry and its
-Grafana no alerting provisioning. Times are UTC; `instance` is the exporting
-process's `service.instance.id`, and *Cost anomaly* has none because its series
-is a table.
+Grafana no alerting provisioning; D13's disk series came from a *second*
+throwaway collector, not from the shared one. Times are UTC; `instance` is the
+exporting process's `service.instance.id`, and the two Postgres rules have none
+because their series is a table.
+
+🔴 **One row below is a false positive and is in the table on purpose.** The
+free-space rule was run without a `mountpoint` selector, so this host's real `/`
+was graded by it at the same time as the scratch filesystem — and it fired.
+Recording it beside the deliberate firing is the only way the deliberate one
+means anything.
 
 | rule | fired | labels | `$value` | resolved |
 |---|---|---|---|---|
@@ -1812,6 +2314,9 @@ is a table.
 | Provider degraded (D12) | 18:48:44 (active 18:38:43 + `for: 10m`) | `provider=tmdb` | 0.2000 | 19:07:48, 4m00s after the fault lifted — one `[5m]` window |
 | Enrichment SLA missed (D12) | 18:53:45 (active 18:38:43 + `for: 15m`) | `trigger=demand` | 7.475 | 19:08:59, 5m11s after the fault lifted |
 | Cost anomaly | 18:57:50 (active 18:47:50 + `for: 10m`) | `today_spend_usd=0.07324200`, `trailing_median_usd=0.01795800`, `spend_ratio=4.0785`, `floor_usd=0.02000000`, `days_in_window=8`, `days_with_spend=8` | 1 | 19:17:50, two evaluations after the condition went false — see below |
+| Disk projection, free space (D13) | 19:37:58 (active 18:37:58 + `for: 1h`) | `mountpoint=/var/tmp/d13/scratchmnt`, `device=/dev/loop0`, `type=ext4`, `state=free` | −20,029,396,686 | by 20:08:55, 29m37s after the 62 MiB were deleted |
+| Disk projection, free space — **false positive** (D13) | 19:45:28 (active 18:45:28 + `for: 1h`) | `mountpoint=/`, `type=btrfs`, `state=free` | −11,621,552,887 | 19:46:53, 85 s later, once the window held ~80 min of samples |
+| Disk projection, database growth (D13) | 20:19:50 (active 20:09:50 + `for: 10m`) | `database_bytes=135468723`, `added_bytes_7d=126001152`, `projected_bytes_14d=252002304`, `projected_pct_of_database=186.0225` | 1 | 20:39:50, two evaluations after the growth left the window — see the churn note above |
 
 **Jobs parking** — one `bootstrap` job enqueued with the key `d11-not-a-phase`.
 `services/handlers.py`'s `_bootstrap_phase` raises `PortDataMalformed`, which is

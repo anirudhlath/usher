@@ -299,3 +299,267 @@ groups:
                     type: gt
                     params:
                       - 0
+
+  # 🔴 **The other half of *Disk projection*, and it is here for the same
+  # reason *Cost anomaly* is: there is no series and there cannot be one.**
+  # `../usher.yml` carries that alert's free-space arm, which answers *whether*
+  # a filesystem is filling. This one answers *which consumer*, and the answer
+  # is a `pg_*` function rather than a metric. An observable OTel callback
+  # cannot supply it either -- `src/usher/telemetry.py`'s register records that
+  # the metric reader invokes callbacks on its own background thread while
+  # every database call here is a coroutine on asyncpg -- and there is no
+  # `postgres_exporter` in the shared stack: measured 2026-09-11, its
+  # Prometheus holds 93 metric names and not one begins `pg_`.
+  #
+  # 🔴 **`pg_database_size` has no history, so the growth is measured from the
+  # rows that do.** This is the task text's one unbuildable instruction taken
+  # as far as it goes: Postgres does not keep a size series, so a linear fit
+  # over `pg_database_size` is not expressible in SQL at all. What *is*
+  # measurable is rows created in a window, and bytes per row now -- so the
+  # seven largest relations that carry a creation timestamp are counted over
+  # the trailing seven days and priced at their current
+  # `pg_total_relation_size / count(*)`. That is an **estimate of the bytes
+  # those rows cost** and is labelled as one; `pg_database_size` itself is
+  # exact and is the denominator.
+  #
+  # ⚠️ **Seven relations and not all of them, and the omission is named.**
+  # `title_search_names` (682 MB) and `images` (455 MB) carry no creation
+  # timestamp, so their growth is invisible here and shows up only in the
+  # denominator. Measured 2026-09-11 by running the committed statement against
+  # the live catalog: the seven counted relations are **6,830,292,992 B** of an
+  # **8,384,394,931 B** database, so this statement sees **81.5%** of it.
+  #
+  # ⚠️ **One seq scan per relation, because only one of the seven time columns
+  # is indexed.** `ix_raw_payloads_fetched_at` serves `raw_payloads`; the other
+  # six are sequential. Measured on the live catalog 2026-09-11 over 1.27M
+  # titles, 2.9M credits, 3.3M neighbours and 896k people: **1.080 s cold and
+  # 483.6 ms warm**. At `interval: 10m` the cold figure is a 0.18% duty cycle,
+  # which is the price of the signal and is recorded rather than assumed. If it
+  # ever matters, the repair is an index on `titles.created_at`, not a shorter
+  # window.
+  #
+  # 🔴 **The threshold is the database against itself and comes from no
+  # table.** `08-operations.md`'s resource envelope says in its own header that
+  # nothing reads it, no host enforces it and no policy derives from it, and
+  # M9's Track 2 derived a 2.0 GB ceiling from one row and **withdrew a
+  # design** over it (ADR-0036). So there is no byte ceiling here: the
+  # condition is *"the next fortnight adds more than everything this database
+  # currently holds"*, which is self-calibrating and needs no operator to have
+  # told it how big the disk is. Measured on this deployment 2026-09-11:
+  # 2,585,865 B added in seven days, 5,171,731 B projected over fourteen,
+  # against 8,384,394,931 B held -- **0.0617%**, nowhere near firing, which is
+  # what a catalog that is not being rebuilt should read.
+  #
+  # ⚠️ **A bootstrap fires this rule and that is correct.** A deployment
+  # filling an empty catalog really is on track to add more than it holds, and
+  # an operator provisioning a disk is exactly who should be told. It is
+  # `warning` and not `page` for that reason and for one more: this rule
+  # answers *which*, and `../usher.yml`'s free-space arm answers *whether*. A
+  # page for the diagnostic half would train an operator to silence the pair.
+  #
+  # **Exactly one numeric column, the rest `::text`** -- D14's finding, and it
+  # applies unchanged: Grafana turns every numeric column of a table frame into
+  # a series the `> 0` threshold judges, so a stray second number fires this
+  # alert forever.
+  - orgId: 1
+    name: usher-disk
+    folder: Usher
+    # Ten minutes, matching `usher-cost`: the statement costs 1.080 s and its
+    # answer is a seven-day trailing measure, so it moves by a rounding error
+    # between evaluations. A shorter interval would buy nothing and pay for it
+    # seven times an hour.
+    interval: 10m
+    rules:
+      - uid: usher-disk-projection-postgres
+        title: Disk projection
+        condition: FIRED
+        # **`OK`, not `NoData`.** The statement is a `SELECT` over CTEs with no
+        # row source at the top level, so it returns exactly one row whatever
+        # the catalog holds -- an empty database answers
+        # `fired=0, added_bytes_7d=0`. `NoData` is therefore only reachable
+        # through a datasource that cannot be reached at all, and a catalog
+        # that is not growing has not got a disk problem.
+        noDataState: OK
+        # A statement that failed is a statement whose answer nobody has, which
+        # is not the same as an answer of "not growing" -- and it is something
+        # an operator can fix.
+        execErrState: Error
+        # **One interval, and deliberately *not* the free-space half's hour.**
+        # The two halves of this alert watch different kinds of signal and the
+        # `for:` follows the signal rather than the alert name. The other half
+        # is a least-squares fit over a *scraped gauge*, where a single
+        # mis-sampled point moves the answer -- an hour of patience there buys
+        # a fit that has seen more samples. This half is a `count(*)` over
+        # committed rows: there is no sampling noise, the quantity is monotone
+        # over the window, and it changes by at most the ingest rate between
+        # evaluations. A long `for:` here is not patience, it is a delay with
+        # nothing to learn in it -- *Cost anomaly*'s own argument one group up,
+        # and it applies for the same reason. What one extra interval does buy
+        # is a second opinion from the same statement, so a half-committed bulk
+        # load cannot page on its own.
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Postgres is on track to add {{ $labels.projected_bytes_14d }} B in
+            14 days against the {{ $labels.database_bytes }} B it holds
+          description: >-
+            PRD 10's "Postgres or image cache on track to fill within 14 days",
+            read off the catalog rather than off a series -- there is none, and
+            pg_database_size keeps no history, so the growth is rows created in
+            the trailing seven days priced at each relation's current
+            pg_total_relation_size divided by its row count. The labels are
+            database_bytes (exact, pg_database_size), measured_table_bytes,
+            added_bytes_7d, projected_bytes_14d and
+            projected_pct_of_database -- every number the verdict was computed
+            from, so a firing can be told apart from a threshold somebody
+            lowered. THIS IS THE WHICH, NOT THE WHETHER. Its pair is the
+            free-space rule in alerts/usher.yml, which projects
+            system_filesystem_usage_bytes and is the one that knows how much
+            disk is left; this one knows only how fast the database is
+            growing. Read them together: both firing means Postgres is the
+            consumer, the other one alone means something else on that
+            filesystem is -- most likely the image cache, which has no
+            eviction and grows with browse coverage (see du over
+            image_cache_dir). Panel: "Table size, and headroom against measured
+            free disk" on dashboard 5 (Cost & Compliance, uid
+            usher-cost-compliance), which plots the same
+            pg_total_relation_size this statement prices rows at.
+            WHAT IT CANNOT SEE. title_search_names and images carry no creation
+            timestamp, so their growth reaches only the denominator; measured
+            2026-09-11 the seven counted relations were 6,830,292,992 B of an
+            8,384,394,931 B database, i.e. 81.5% of it. And a bootstrap fires
+            this rule on purpose -- a deployment filling an empty catalog is on
+            track to add more than it holds, and the operator provisioning its
+            disk is who should be told.
+        data:
+          - refId: GROWTH
+            # `from: 600, to: 0` and never `0, 0`: D14 measured that Grafana
+            # rejects a zero-width relative range at provisioning time
+            # (`[alerting.alert-rule.invalidRelativeTime]`) and that a rejected
+            # file provisions **no** rules at all. This statement carries its
+            # own window in SQL and reads no `$__timeFilter`, so the value is
+            # the evaluation interval -- the shortest thing that reads as "this
+            # rule has no time range of its own".
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: usher-postgres
+            model:
+              refId: GROWTH
+              datasource:
+                type: grafana-postgresql-datasource
+                uid: usher-postgres
+              editorMode: code
+              format: table
+              rawQuery: true
+              # **`numeric` throughout, and the division is the reason.**
+              # `total_bytes::numeric / count(*)` in `bigint` would truncate to
+              # whole bytes per row -- at raw_payloads' 8,229 B/row that is a
+              # rounding error, but at a wide narrow table it is not, and the
+              # sum is over seven of them. The `::numeric` is on the numerator
+              # so the whole expression stays exact rather than becoming
+              # `double precision`, which is the type ADR-0036's sibling
+              # argument in `Cost anomaly` is about.
+              #
+              # **`nullif(rows_now, 0)`** is what makes an empty relation
+              # contribute nothing instead of raising: `sum()` skips the NULL.
+              #
+              # **Unaliased `table.column` throughout**, deliberately, so
+              # `test_the_disk_growth_statement_names_only_tables_this_schema_holds`
+              # can grade every pair against `Base.metadata`. An alias is not a
+              # table name and an aliased statement is graded on nothing.
+              rawSql: |
+                WITH bounds AS (
+                    SELECT now() - interval '7 days' AS oldest
+                ),
+                sized AS (
+                    SELECT pg_total_relation_size('public.titles') AS total_bytes,
+                           count(*) AS rows_now,
+                           count(*) FILTER (
+                               WHERE titles.created_at >= (SELECT oldest FROM bounds)
+                           ) AS rows_added
+                    FROM titles
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.credits'), count(*),
+                           count(*) FILTER (
+                               WHERE credits.created_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM credits
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.raw_payloads'), count(*),
+                           count(*) FILTER (
+                               WHERE raw_payloads.fetched_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM raw_payloads
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.title_neighbors'), count(*),
+                           count(*) FILTER (
+                               WHERE title_neighbors.computed_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM title_neighbors
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.title_embeddings'), count(*),
+                           count(*) FILTER (
+                               WHERE title_embeddings.created_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM title_embeddings
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.tmdb_ids'), count(*),
+                           count(*) FILTER (
+                               WHERE tmdb_ids.exported_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM tmdb_ids
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.people'), count(*),
+                           count(*) FILTER (
+                               WHERE people.created_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM people
+                ),
+                grown AS (
+                    SELECT coalesce(sum(sized.total_bytes), 0) AS measured_bytes,
+                           coalesce(sum(sized.rows_added
+                                        * (sized.total_bytes::numeric
+                                           / nullif(sized.rows_now, 0))), 0) AS added_bytes
+                    FROM sized
+                ),
+                judged AS (
+                    SELECT grown.measured_bytes,
+                           grown.added_bytes,
+                           2 * grown.added_bytes AS projected_bytes,
+                           pg_database_size(current_database())::numeric AS database_bytes
+                    FROM grown
+                )
+                SELECT
+                    CASE WHEN judged.projected_bytes > judged.database_bytes
+                         THEN 1 ELSE 0 END                                 AS fired,
+                    round(judged.database_bytes)::text                     AS database_bytes,
+                    round(judged.measured_bytes)::text                     AS measured_table_bytes,
+                    round(judged.added_bytes)::text                        AS added_bytes_7d,
+                    round(judged.projected_bytes)::text                    AS projected_bytes_14d,
+                    round(100 * judged.projected_bytes
+                          / nullif(judged.database_bytes, 0), 4)::text     AS projected_pct_of_database
+                FROM judged
+          - refId: FIRED
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: FIRED
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: GROWTH
+              # `> 0` over a column that is 0 or 1. The comparison that decides
+              # anything is the one in `numeric` above; this wire carries its
+              # answer and is deliberately not a second place a multiplier
+              # could live.
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0

@@ -69,10 +69,10 @@ import pathlib
 import re
 from typing import Any
 
-import pytest
 import yaml
 
 from tests.unit.test_dashboards import (
+    _RANGE,
     _aggregations,
     _balanced,
     _declared_histograms,
@@ -87,6 +87,7 @@ _ROOT = pathlib.Path(__file__).parents[2]
 _ALERTS = _ROOT / "dashboards" / "alerts" / "usher.yml"
 _GRAFANA_ALERTS = _ROOT / "dashboards" / "alerts" / "grafana" / "usher.yml"
 _PRD_10 = _ROOT / "docs" / "prd" / "10-telemetry-and-dashboards.md"
+_PRD_08 = _ROOT / "docs" / "prd" / "08-operations.md"
 _DASHBOARD_THREE = _ROOT / "dashboards" / "03-pipeline.json"
 _DASHBOARD_FIVE = _ROOT / "dashboards" / "05-cost-and-compliance.json"
 
@@ -104,26 +105,69 @@ _ALERTS_SECTION = re.compile(r"^## Alerts$(?P<body>.*?)(?=^## |\Z)", re.M | re.S
 # filter is readable where a negative lookahead is not.
 _TABLE_ROW = re.compile(r"^\|(?P<alert>[^|]+)\|(?P<condition>[^|]+)\|\s*$", re.M)
 
-# The alert D13 still owes, and the task that owes it. Retyped here on purpose:
-# the point of the xfail below is to say *who* is missing, and the only source
-# for that is the plan. A wrong name here is loud -- it appears in the failure
-# message next to the set actually parsed out of the PRD.
+# 🔴 **The ledger, and it is empty because D13 was the last.** This map named
+# which task owed which alert, and the `xfail(strict=True)` that used to sit on
+# the bidirectional check below read its entries out in the failure message.
+# D12 landed two, D14 landed *Cost anomaly* -- in the *other* rule file, because
+# it has no metric to name -- and D13 landed *Disk projection*, which had no
+# series at all and therefore ships as three rules in two engines.
 #
-# **D12's two are gone from this table because D12 landed them.** *Enrichment
-# SLA missed* could not be written at all until `usher.enrichment.latency`
-# carried `trigger` -- PRD 10's condition named a dimension the shipped series
-# did not have, which is why the debt outlived M4.
+# **The marker is gone rather than emptied**, which is the point of `strict`: a
+# strict xfail that passes is a failure, so the last task had to come back and
+# turn the case into a plain assertion. It is kept as an empty dict rather than
+# deleted because it is the vocabulary a future debt would be written in, and
+# because the failure message below still reads it -- an alert PRD 10 names with
+# no rule now renders as `(no task)`, which is the honest answer once nobody is
+# assigned.
+_OWED: dict[str, str] = {}
+
+# 🔴 **The one series in this file that Usher does not emit, and the only
+# exemption from the two catalogue checks below.**
 #
-# 🔴 **And "Cost anomaly" is gone because D14 landed it, without being able to
-# delete the marker below.** D14's acceptance says the bidirectional check is
-# *"now green, seven rules against PRD 10's seven rows"*, which assumed it went
-# last. It did not: measured at the milestone HEAD D14 rebased onto
-# (`97d851a`, 2026-09-11), `m10/D13` still had nothing committed on it. So the
-# obligation transfers rather than expiring -- **this dict emptying is what
-# makes the marker XPASS**, and D13 is now the task that has to remove it.
-_OWED = {
-    "Disk projection": "D13",
-}
+# *Disk projection* is the single alert in PRD 10's table whose subject Usher
+# has no instrument for and cannot have one: `telemetry.py`'s own register
+# records why an observable callback cannot query Postgres, and a `du` over
+# `image_cache_dir` would be disk I/O on a lane for one consumer. The disk
+# facts come from the stack instead.
+#
+# **Measured, not assumed.** The OTel collector's `hostmetrics` receiver was
+# run against this host on 2026-09-11 -- the shared stack's own collector image
+# (`otel/opentelemetry-collector-contrib:0.158.0`) and its own
+# `prometheusremotewrite` exporter, pointed at a throwaway Prometheus -- and the
+# name it stores is `system_filesystem_usage_bytes`, carrying `mountpoint`,
+# `device`, `type`, `mode` and **`state` in {free, used, reserved}**. Free space
+# is a *label value*, not a name: `usher_disk_free_bytes` is a name nothing on
+# this host produces, and a rule naming it would be D11's failure exactly --
+# parsed, loaded, evaluated empty, healthy forever.
+#
+# The exemption is a frozenset of one and is asserted by name and by size in
+# `test_the_stack_series_exemption_is_one_measured_name_and_not_a_blanket`,
+# because an exemption nobody counts is how every later rule escapes the check.
+_MEASURED_STACK_SERIES = frozenset({"system_filesystem_usage_bytes"})
+
+# `### Resource envelope` in PRD 08 -- scoped to the heading, and with the same
+# end-of-file lookahead `_ALERTS_SECTION` needs, for the same reason.
+_RESOURCE_SECTION = re.compile(r"^### Resource envelope$(?P<body>.*?)(?=^#{2,3} |\Z)", re.M | re.S)
+
+# A number with a byte unit attached. Unanchored numbers (`1,272,367 titles`,
+# `768`, `50 s`) are deliberately not figures: this parse exists to forbid a
+# *byte threshold*, and a table full of counts would make the prohibition match
+# everything.
+_BYTE_FIGURE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(B|bytes|KB|KiB|MB|MiB|GB|GiB|TB|TiB)\b")
+
+# **Both readings of every ambiguous unit**, because the table is prose and
+# "5 GB" in prose means 5e9 to one writer and 2**30 * 5 to another. A
+# prohibition that guessed would be a prohibition half the spellings walk
+# through.
+_DECIMAL = {"B": 1, "bytes": 1, "KB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12}
+_BINARY = {"B": 1, "bytes": 1, "KB": 2**10, "MB": 2**20, "GB": 2**30, "TB": 2**40}
+_EXPLICIT = {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}
+
+# Every integer literal in a PromQL expression. `\b` on both sides, so a digit
+# embedded in an identifier is not a literal; the range vectors are stripped
+# before this runs, so `[7d]` contributes no `7` either. What is left is the
+# numbers somebody typed as numbers -- `14`, `86400`, `0` in the rules here.
+_INTEGER_LITERAL = re.compile(r"\b\d+\b")
 
 # The instrument factories `src/usher/` calls, mapped to how the OTel
 # collector's Prometheus translation renders the result. **Measured off this
@@ -332,6 +376,17 @@ def _gauge_stored_names() -> set[str]:
     stops being checked the day it is renamed. A gauge is the shape whose
     `increase()` decays out of its own window -- see
     `test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it`.
+
+    ⚠️ **`_MEASURED_STACK_SERIES` is added by name, because the derivation
+    cannot reach it.** `system_filesystem_usage_bytes` is produced by the
+    collector's `hostmetrics` receiver and not by any `create_*` call in
+    `src/usher/`, so a set built from the declarations alone would put D13's
+    rule on the *exempt* side of the split -- and that case's own docstring says
+    in as many words that disk free belongs on the graded side. It is a level by
+    the only test this split cares about, and that was watched rather than
+    assumed: on 2026-09-11 `/` dropped 4,033 MB in one minute and was then flat
+    to within a few MB, which is a step that leaves its own range vector exactly
+    `[W]` later. A counter would have been re-fed the whole time.
     """
     spellings = stored_spellings()
     return {
@@ -339,11 +394,93 @@ def _gauge_stored_names() -> set[str]:
         for name, factory, _unit in _instrument_declarations()
         if factory in _GAUGE_FACTORIES
         for stored in spellings[name]
-    }
+    } | set(_MEASURED_STACK_SERIES)
 
 
 def _tokens_of(rule: dict[str, Any]) -> set[str]:
     return _metric_tokens(str(rule["expr"]))
+
+
+# `state="free"` and not `mountpoint=~"/|/data"`: only an **equality** matcher
+# survives into an `absent()` result. A regex matcher does not, and neither
+# does anything the missing series would have carried.
+_EQUALITY_MATCHER = re.compile(r'(\w+)\s*=\s*"')
+
+
+def _absence_subject_labels(expr: str) -> set[str] | None:
+    """The labels an `absent()` rule can render, or `None` if it is not one.
+
+    🔴 **An `absent()` alert has no per-instance subject, and interpolating one
+    renders empty.** Prometheus builds the result's label set from the
+    selector's equality matchers alone -- there is no series to take labels
+    from, which is the condition. So `{{ $labels.mountpoint }}` on such a rule
+    produces a page reading *"  is projected to fill"*, which is the same defect
+    `sum by (le)` causes on an aggregating rule and is invisible to the same
+    check.
+
+    The recogniser is structural -- the *whole* expression must be one
+    `absent()` call -- so `absent(x) or y > 0` is graded as an ordinary rule and
+    still has to name a subject.
+    """
+    stripped = " ".join(expr.split())
+    opening = len("absent(") - 1
+    if not stripped.startswith("absent("):
+        return None
+    if _balanced(stripped, opening) != len(stripped) - 1:
+        return None
+    return set(_EQUALITY_MATCHER.findall(stripped))
+
+
+def resource_table_figures(text: str | None = None) -> set[int]:
+    """Every byte figure in PRD 08's `### Resource envelope` table, in bytes.
+
+    🔴 **Parsed rather than retyped, and that is the whole point of the case
+    that uses it.** A retyped list is a list somebody has to keep in step with a
+    document nobody reads; the prohibition it defends -- *no threshold in either
+    rule file is derived from that table* -- is about numbers that move, and
+    M9's Track 2 withdrew a design over one of them (ADR-0036).
+
+    Both the decimal and the binary reading of every ambiguous unit are
+    returned, so `~5 GB` forbids 5,000,000,000 **and** 5,368,709,120.
+    """
+    source = text if text is not None else _PRD_08.read_text(encoding="utf-8")
+    section = _RESOURCE_SECTION.search(source)
+    if section is None:
+        return set()
+    figures: set[int] = set()
+    for value, unit in _BYTE_FIGURE.findall(section.group("body")):
+        number = float(value.replace(",", ""))
+        for scale in (_DECIMAL.get(unit), _BINARY.get(unit), _EXPLICIT.get(unit)):
+            if scale is not None:
+                figures.add(int(number * scale))
+    return figures
+
+
+def _byte_thresholds(expressions: list[tuple[str, str]], figures: set[int]) -> list[str]:
+    """Every integer literal in an expression that is one of `figures`.
+
+    The *expressions* and never the annotations: both disk rules **quote** PRD
+    08's measured baseline as what the database was on a date, which is the
+    honest use of that table, and a scan that could not tell the two apart
+    would forbid saying the number at all.
+    """
+    return [
+        f"{name}: {literal}"
+        for name, expression in expressions
+        for literal in _INTEGER_LITERAL.findall(_RANGE.sub(" ", expression))
+        if int(literal) in figures
+    ]
+
+
+def _every_expression() -> list[tuple[str, str]]:
+    """`(alert, expression)` for every rule in both files, in both languages."""
+    found = [(str(rule["alert"]), str(rule["expr"])) for rule in committed_rules()]
+    for rule in grafana_rules():
+        for query in rule["data"]:
+            sql = query["model"].get("rawSql")
+            if sql:
+                found.append((str(rule["title"]), str(sql)))
+    return found
 
 
 def _dashboard_panel_titles(path: pathlib.Path) -> set[str]:
@@ -373,17 +510,6 @@ def _dashboard_three_panel_titles() -> set[str]:
     return _dashboard_panel_titles(_DASHBOARD_THREE)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "D13 owes 'Disk projection', and that is the whole of the debt. D12 landed "
-        "'Enrichment SLA missed' and 'Provider degraded' and D14 landed 'Cost anomaly' "
-        "-- which is in the *other* rule file, `alerts/grafana/usher.yml`, because it "
-        "has no metric to name -- so this ledger is one short rather than four. It stays "
-        "a strict xfail and flips to a hard failure -- XPASS under strict -- on the day "
-        "D13 lands, which is now the task that removes this marker."
-    ),
-)
 def test_every_alert_prd_10_names_exists_and_every_rule_names_a_series_the_catalogue_holds() -> (
     None
 ):
@@ -401,27 +527,21 @@ def test_every_alert_prd_10_names_exists_and_every_rule_names_a_series_the_catal
     three. So the row count is asserted against PRD 10's own number before the
     sets are compared at all.
 
-    ⚠️ **`xfail(strict=True)` rather than a red, and that is a deviation from
-    the task text.** D11's acceptance says this case is *"red until D14 lands"*.
-    A red left in the tree makes `uv run pytest` fail for every task between
-    here and D14, which is the same signal as a real regression and trains
-    whoever sees it to ignore the suite. Strict xfail keeps the assertion live
-    and its failure message readable under `-rx`, keeps the gate honest about
-    everything else, and -- because a strict xfail that *passes* is a failure --
-    forces the task that lands the seventh rule to come back and delete the
-    marker. That is the shape M7 used for exactly this situation, a case held
-    across the two tasks that had to land together.
+    🔴 **The `xfail(strict=True)` is gone, and D13 is the task that removed
+    it.** D11 held this case as a strict xfail rather than a red, so that
+    `uv run pytest` stayed a trustworthy signal for every task between it and
+    the last one -- a red left in the tree reads exactly like a regression and
+    trains whoever sees it to ignore the suite. The `strict` half is what made
+    the debt collectable: a strict xfail that *passes* is a failure, so the task
+    that finally satisfied the assertion could not leave the marker behind.
 
-    🔴 **D14 was told to be that task and could not be.** Its acceptance reads
-    *"D11's bidirectional name check is now green, seven rules against PRD 10's
-    seven rows"*, which assumed it went last. Measured on the milestone HEAD
+    D11 expected that task to be D14. It was not: measured on the milestone HEAD
     D14 rebased onto -- `97d851a`, 2026-09-11 -- D12 had landed its two and
-    `m10/D13` still had nothing committed on it. So D14 shipped its rule, took
-    its own name out of `_OWED`, and left the marker to D13. **That is the
-    honest state and not a deferral**: the assertion still fails, and it fails
-    because one alert really is missing. When D13 lands, `_OWED` empties and
-    this marker XPASSes, which under `strict` is a failure -- that is the
-    handover working rather than a second deferral.
+    `m10/D13` still had nothing committed on it, so D14 shipped *Cost anomaly*,
+    took its own name out of `_OWED` and handed the marker on. D13 is where it
+    lands, `_OWED` is empty above, and this is a plain assertion again. **The
+    handover is the mechanism working, not a deferral** -- at no point did the
+    ledger claim a debt that was paid or hide one that was not.
 
     **The names come from `alert_names()` and so span both files.** PRD 10's
     table is one list that says nothing about which engine evaluates a row;
@@ -442,7 +562,7 @@ def test_every_alert_prd_10_names_exists_and_every_rule_names_a_series_the_catal
         f"{rule['alert']}: {token}"
         for rule in rules
         for token in _tokens_of(rule)
-        if normalise_metric(token) not in catalogue
+        if token not in _MEASURED_STACK_SERIES and normalise_metric(token) not in catalogue
     ]
     assert unknown == [], (
         "these tokens normalise to a name PRD 10's metric table does not hold, so the "
@@ -469,13 +589,19 @@ def test_every_committed_rule_names_a_series_the_catalogue_holds() -> None:
     rule and D14 finding it.
     """
     rules = committed_rules()
-    assert len(rules) == 5, (
-        f"D11 shipped three rules and D12 added two; found {len(rules)}: {_committed_names()}"
+    assert len(rules) == 7, (
+        "D11 shipped three rules, D12 added two, and D13 adds two more -- both named "
+        f"*Disk projection*. Found {len(rules)}: {_committed_names()}"
     )
     catalogue = metric_catalogue()
     assert catalogue, "PRD 10's metric table parsed to nothing"
 
-    graded = [(str(rule["alert"]), token) for rule in rules for token in _tokens_of(rule)]
+    graded = [
+        (str(rule["alert"]), token)
+        for rule in rules
+        for token in _tokens_of(rule)
+        if token not in _MEASURED_STACK_SERIES
+    ]
     assert len(graded) >= 4, (
         "the token scan found fewer metric names than the three rules spell, so it has "
         f"stopped reading the expressions: {graded}"
@@ -513,7 +639,7 @@ def test_every_rule_is_written_in_the_spelling_prometheus_stores() -> None:
         (str(rule["alert"]), token, sorted(spellings.get(_otel_name(token, spellings), set())))
         for rule in committed_rules()
         for token in _tokens_of(rule)
-        if token not in known
+        if token not in known and token not in _MEASURED_STACK_SERIES
     ]
     assert wrong == [], (
         "these tokens are not names this deployment's collector stores -- the exporter "
@@ -629,7 +755,14 @@ def test_the_ingest_stalled_rule_reaches_a_lane_that_has_never_settled_a_job() -
 # change is inside `[W]` for exactly W and then gone. `min_over_time` and the
 # instant selectors are deliberately absent -- their answer persists, so a long
 # `for:` under them is patience rather than a knife edge.
-_DECAYING = re.compile(r"\b(?:increase|rate|irate|delta|idelta|deriv)\(")
+#
+# **`predict_linear` is on this list, added by D13**, and it belongs here on the
+# stated property rather than by family resemblance: it is a least-squares fit
+# over the samples in its range vector, so a one-off step -- the `VACUUM`-less
+# migration `08-operations.md` measures at +637 MB transient -- tilts the line
+# for exactly the window's length and then leaves it. A `for:` as long as the
+# window is the same knife edge `increase` has.
+_DECAYING = re.compile(r"\b(?:increase|rate|irate|delta|idelta|deriv|predict_linear)\(")
 _WINDOW = re.compile(r"\[(\d+)([smhdwy])\]")
 _DURATION = re.compile(r"(\d+)([smhdwy])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
@@ -692,6 +825,16 @@ def test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it() -> None:
     ⚠️ **Still for D13-D14.** *Disk projection* and *Cost anomaly* are both
     predicates over levels -- disk free is a gauge, a daily spend comparison is
     a step -- so both land on the graded side of this split, not the exempt one.
+
+    ✅ **D13 landed on the graded side, as that paragraph said it would**, and
+    it took two changes to get there. `predict_linear` joined `_DECAYING` on the
+    stated property: a least-squares fit is tilted by a step for exactly the
+    window's length and then not at all. And `_MEASURED_STACK_SERIES` joined
+    `_gauge_stored_names()`, because the level set is derived from
+    `src/usher/`'s declarations and the disk series is produced by the
+    collector, not by Usher -- without it D13's rule would have been *exempt*
+    here, which is the opposite of what this docstring promised. `for: 7d`
+    planted against `predict_linear(...[7d], ...)` dies on the assertion below.
     """
     graded = 0
     exempt = 0
@@ -760,6 +903,184 @@ def test_the_push_down_rule_fires_on_a_zero_and_not_on_an_absence() -> None:
     assert rule["for"] == "15m", f"PRD 10's window is 15 min; this rule waits {rule['for']!r}"
 
 
+def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_table() -> None:
+    """🔴 D13's headline, and it is two prohibitions that fail in opposite directions.
+
+    **The series half.** *Disk projection* is the one alert in PRD 10's table
+    with **no series at all** on this deployment -- measured 2026-09-11, the
+    shared Prometheus holds 93 metric names and not one of them is a disk,
+    filesystem or node series, because its `prometheus.yml` carries no
+    `scrape_configs` on purpose and the collector has no `hostmetrics`
+    receiver. So this rule is the one most able to commit D11's failure: a name
+    nothing stores parses, loads, evaluates to an empty vector and reads
+    *healthy* forever. The name in the file therefore has to be one that was
+    **watched arriving**, and the allow-list is the set of those names.
+
+    `usher_disk_free_bytes` -- the spelling this task was handed -- is the
+    planted control, because it is the mistake that was actually available:
+    plausible, prefixed like an Usher instrument, and produced by nothing.
+
+    **The threshold half, which fails the other way round.** A literal lifted
+    out of `08-operations.md`'s resource envelope would select plenty and fire;
+    the defect is that it would be *enforcing a number with no forcing
+    function*. That table's own header says nothing reads it, no host enforces
+    it and no policy derives from it, and M9's Track 2 derived a 2.0 GB ceiling
+    from one row, measured a design at 2.702 GB and **withdrew the design**
+    (ADR-0036). The figures are parsed out of the table rather than retyped, in
+    both the decimal and the binary reading, so the prohibition tracks the
+    document instead of a list somebody has to remember -- and it is applied to
+    **both** rule files, because the Postgres half could carry a byte ceiling
+    just as easily as the PromQL half.
+
+    **The parse is asserted before it is used**, because a scan for numbers that
+    finds none passes exactly like a file with no bad numbers in it.
+    """
+    figures = resource_table_figures()
+    assert figures, "no figures parsed out of the resource table"
+    assert len(figures) >= 40, (
+        f"the resource-table parse found only {len(figures)} figures, so the prohibition "
+        "below is graded against a table it has stopped reading"
+    )
+    assert 5_025_650_355 in figures, (
+        "the parse no longer reads `pg_database_size` 5,025,650,355 B, the measured "
+        "baseline these rules quote -- the single figure most likely to be promoted from "
+        "a measurement into a threshold"
+    )
+    assert 2_147_483_648 in figures and 2_000_000_000 in figures, (
+        "the parse no longer reads M9's withdrawn 2.0 GB ceiling in either reading, which "
+        "is the exact number ADR-0036 records a design being refused against"
+    )
+
+    disk = [rule for rule in committed_rules() if str(rule["alert"]) == "Disk projection"]
+    assert len(disk) == 2, (
+        "PRD 10's one *Disk projection* row is two Prometheus rules -- the projection and "
+        f"the guard that makes its own blindness loud; found {len(disk)}"
+    )
+    assert _grafana_rule("Disk projection"), "the database-growth half is not in the Grafana file"
+
+    def ungrounded(rules: list[dict[str, Any]]) -> list[str]:
+        return [
+            f"{rule['alert']}: {token}"
+            for rule in rules
+            for token in _tokens_of(rule)
+            if token not in _MEASURED_STACK_SERIES
+        ]
+
+    planted_name = [
+        {
+            "alert": "Disk projection",
+            "expr": 'predict_linear(usher_disk_free_bytes{mountpoint="/"}[7d], 1209600) < 0',
+        }
+    ]
+    assert ungrounded(planted_name) != [], (
+        "the series scan cannot see `usher_disk_free_bytes`, a name no producer on this "
+        "host emits -- so it would grade a permanently-empty rule green"
+    )
+    assert ungrounded(disk) == [], (
+        "these tokens are not names anything was watched storing, so the rule evaluates "
+        f"to an empty vector and reads as all-clear forever: {ungrounded(disk)}"
+    )
+
+    planted_threshold = [
+        ("Disk projection", "system_filesystem_usage_bytes < 5025650355"),
+        ("Disk projection", "SELECT pg_database_size(current_database()) > 2147483648"),
+    ]
+    assert len(_byte_thresholds(planted_threshold, figures)) == 2, (
+        "the threshold scan cannot see a literal lifted out of the resource table in both "
+        "languages, so the prohibition ADR-0036 was written for is decorative: "
+        f"{_byte_thresholds(planted_threshold, figures)}"
+    )
+    expressions = _every_expression()
+    assert len(expressions) >= 9, (
+        "the expression scan found fewer than the seven Prometheus rules and the two "
+        f"Grafana statements, so it has stopped reading one of the files: {len(expressions)}"
+    )
+    assert _byte_thresholds(expressions, figures) == [], (
+        "a rule carries a byte literal that is a figure from PRD 08's resource envelope. "
+        "That table is sizing estimates for an operator provisioning a disk -- nothing "
+        "reads them, no host enforces them, and M9's Track 2 withdrew a design against "
+        f"one: {_byte_thresholds(expressions, figures)}"
+    )
+
+
+def test_the_stack_series_exemption_is_one_measured_name_and_not_a_blanket() -> None:
+    """The control for the exemption itself.
+
+    Every other rule in `alerts/usher.yml` is graded twice -- against PRD 10's
+    metric catalogue and against the spelling derived from `src/usher/`'s own
+    `create_*` calls. *Disk projection*'s two Prometheus rules can be graded by
+    neither, because their subject is a filesystem and Usher declares no
+    instrument for one. An exemption is the only way they land, and **an
+    exemption nobody counts is how every later rule escapes the check** -- D10
+    hit the same shape with the `pg_class` panel and asserted its exemption by
+    name and by count rather than merely granting it.
+
+    So: one name, spelled exactly as it was observed arriving, and used by
+    exactly the rules that own it.
+    """
+    assert set(_MEASURED_STACK_SERIES) == {"system_filesystem_usage_bytes"}, (
+        "the exemption has grown past the one series this file measured. Any addition is "
+        "a name somebody has to have watched Prometheus store, and the measurement goes "
+        f"in `dashboards/README.md` beside it: {sorted(_MEASURED_STACK_SERIES)}"
+    )
+
+    exempt_users = {
+        str(rule["alert"])
+        for rule in committed_rules()
+        if _tokens_of(rule) & _MEASURED_STACK_SERIES
+    }
+    assert exempt_users == {"Disk projection"}, (
+        "a rule other than *Disk projection* is reaching through the stack-series "
+        f"exemption: {sorted(exempt_users)}"
+    )
+
+    for name in _MEASURED_STACK_SERIES:
+        assert name not in {
+            spelling for spellings in stored_spellings().values() for spelling in spellings
+        }, (
+            f"{name!r} is now something `src/usher/` declares, so it is no longer an "
+            "exemption -- delete it from the allow-list and let the derivation grade it"
+        )
+
+
+def test_the_resource_table_parse_is_scoped_and_falsifiable() -> None:
+    """The figure parse has to be able to come back wrong, in each of its parts.
+
+    Three separate failures, and only the first is loud. A heading regex that
+    matches nothing hands back an empty set, which the case above catches with
+    `assert figures`. A scope that **leaks past** the section quietly widens the
+    prohibition to every number in PRD 08 -- and then a rule is red for carrying
+    a figure from a table this task was told not to read *and did not*. And a
+    figure pattern that accepted unanchored numbers would forbid `1,272,367`, a
+    title count, as a byte threshold.
+    """
+    document = (
+        "# Operations\n\n"
+        "### Resource envelope\n\n"
+        "| | |\n|---|---|\n"
+        "| Postgres | **~5 GB at 1,272,367 titles**, 2,048 bytes a vector |\n\n"
+        "## Testing\n\n"
+        "| Something else | 99 GB |\n"
+    )
+    parsed = resource_table_figures(document)
+    assert 5_000_000_000 in parsed and 5_368_709_120 in parsed, (
+        f"`~5 GB` no longer parses in both the decimal and the binary reading: {parsed}"
+    )
+    assert 2048 in parsed, f"an explicit `bytes` figure no longer parses: {parsed}"
+    assert 1_272_367 not in parsed, (
+        "an unanchored number is being read as a byte figure, so the prohibition now "
+        f"forbids a title count: {sorted(parsed)}"
+    )
+    assert 99_000_000_000 not in parsed and 106_300_440_576 not in parsed, (
+        "the section scope has leaked past `### Resource envelope` and is reading another "
+        f"section's numbers as resource figures: {sorted(parsed)}"
+    )
+    assert resource_table_figures("# Operations\n\nNo resource section here.\n") == set(), (
+        "a document with no `### Resource envelope` parses to something, so the section "
+        "regex is matching the whole file"
+    )
+
+
 #: The output list of `Cost anomaly`'s statement -- everything between its
 #: final `SELECT` and the `FROM judged` that closes it. Sliced rather than
 #: regex-matched over the whole statement, because four CTEs above it also
@@ -775,6 +1096,22 @@ def _cost_anomaly_outputs(sql: str) -> str:
 
 
 _AN_OUTPUT_ALIAS = re.compile(r"\bAS\s+(\w+),?\s*$", re.M)
+
+
+def disk_growth_sql() -> str:
+    """The statement *Disk projection*'s database-growth half fires on.
+
+    Read out of the committed rule for `cost_anomaly_sql()`'s reason: a
+    statement measured in one place and shipped from another is a statement
+    whose copy is what stops tracking the original.
+    """
+    rule = _grafana_rule("Disk projection")
+    queries = [query for query in rule["data"] if query["model"].get("rawSql")]
+    assert len(queries) == 1, (
+        f"the disk-growth rule carries {len(queries)} SQL queries, not one: "
+        f"{[query['refId'] for query in queries]}"
+    )
+    return str(queries[0]["model"]["rawSql"])
 
 
 def test_the_postgres_rule_is_not_in_the_directory_prometheus_globs() -> None:
@@ -1083,6 +1420,123 @@ def test_the_cost_anomaly_description_names_its_floor_the_two_price_settings_and
         )
 
 
+def test_the_disk_growth_statement_names_only_tables_and_columns_this_schema_holds() -> None:
+    """Invariant 1 for the half of *Disk projection* that has no series.
+
+    Same argument as *Cost anomaly*'s: a `SELECT` naming a column nobody stores
+    raises rather than reading healthy, and `execErrState: Error` carries that
+    to a human -- but a column that exists on a **different** table, or a table
+    renamed by a migration while the rule keeps the old name, is only visible
+    against `Base.metadata`.
+
+    ⚠️ **Seven relations, and the statement is deliberately unaliased so that
+    every one of them is graded.** An alias is not a table name and an aliased
+    statement yields no pairs, so the count assertion is what notices if
+    somebody tidies it.
+    """
+    pairs = _sql_pairs(disk_growth_sql())
+    assert len(pairs) >= 7, (
+        "the table.column scan found fewer than the seven relations this statement "
+        f"counts, so it has been rewritten in aliases or the scan has stopped reading it: "
+        f"{pairs}"
+    )
+    for table, column in pairs:
+        columns = Base.metadata.tables[table].columns
+        assert column in columns, (
+            f"Disk projection selects {table}.{column}, which is not a column of {table}: "
+            f"{sorted(c.name for c in columns)}"
+        )
+    counted = {table for table, _ in pairs}
+    assert counted == {
+        "titles",
+        "credits",
+        "raw_payloads",
+        "title_neighbors",
+        "title_embeddings",
+        "tmdb_ids",
+        "people",
+    }, (
+        "the set of relations this statement prices has changed. Every one of them has to "
+        "carry a creation timestamp -- `title_search_names` and `images` do not, which is "
+        f"the coverage gap the rule's own description states: {sorted(counted)}"
+    )
+
+
+def test_the_disk_growth_rule_hands_grafana_exactly_one_numeric_column() -> None:
+    """🔴 D14's finding, applied to the rule that arrived after it.
+
+    Grafana turns every **numeric** column of a table frame into a series the
+    condition is evaluated over and every **string** column into a label on it.
+    The threshold is `> 0`. So a second numeric column -- `added_bytes_7d`,
+    which is a large positive number on any deployment that has ingested
+    anything -- would be judged by that same threshold and this alert would fire
+    on every evaluation forever, with a page naming no growth. The `::text`
+    casts are the rule's wiring, not its formatting, and they were confirmed
+    rather than assumed: run against the live catalog on 2026-09-11 the
+    statement's output types are `integer` once and `text` five times.
+    """
+    rule = _grafana_rule("Disk projection")
+    outputs = disk_growth_sql().rsplit("\nSELECT\n", 1)[1]
+    columns = _AN_OUTPUT_ALIAS.findall(outputs)
+    assert columns[:1] == ["fired"], (
+        f"the value column is no longer first or no longer named `fired`: {columns}"
+    )
+    assert len(columns) == 6, f"expected six output columns, found {columns}"
+    assert outputs.count("::text") == len(columns) - 1, (
+        "every column but `fired` has to reach Grafana as a *label*, which means a "
+        f"`::text` each; this statement casts {outputs.count('::text')} of "
+        f"{len(columns) - 1}: {outputs}"
+    )
+
+    fired = outputs.split("AS fired", 1)[0]
+    assert "::text" not in fired and "THEN 1 ELSE 0 END" in fired, (
+        f"`fired` is not a bare 0/1 numeric column: {fired!r}"
+    )
+
+    condition = next(query for query in rule["data"] if query["refId"] == rule["condition"])
+    assert condition["model"]["type"] == "threshold", (
+        "the condition is no longer a threshold, so the `> 0` this statement is written "
+        f"against is not what decides: {condition['model']}"
+    )
+    assert condition["model"]["conditions"][0]["evaluator"] == {"type": "gt", "params": [0]}, (
+        "the threshold is not `> 0`, which puts a second number in the decision beside "
+        f"the comparison in the SQL: {condition['model']['conditions']}"
+    )
+
+    interpolated = set(re.findall(r"\$labels\.(\w+)", str(rule["annotations"])))
+    assert interpolated, "the page interpolates no label, so it names no subject"
+    assert interpolated <= set(columns), (
+        "the page interpolates labels this statement does not return, so they render "
+        f"empty: {sorted(interpolated - set(columns))}"
+    )
+
+
+def test_no_grafana_rule_carries_a_zero_width_relative_time_range() -> None:
+    """D14 measured that Grafana rejects `from: 0, to: 0`, and that a rejected
+    file provisions **no** rules at all rather than one bad one.
+
+    So the failure is not "this rule is missing" -- it is *every* rule in the
+    file, including the one that was there first. That makes it worth a check
+    over the whole file rather than a note on the rule that would have caused
+    it: the cost of the mistake falls on somebody else's alert.
+    """
+    ranges = [
+        (str(rule["title"]), query["refId"], query["relativeTimeRange"])
+        for rule in grafana_rules()
+        for query in rule["data"]
+    ]
+    assert len(ranges) >= 4, (
+        f"the scan found {len(ranges)} queries across the Grafana rules, so it has "
+        "stopped reading the file"
+    )
+    zero_width = [entry for entry in ranges if entry[2]["from"] == entry[2]["to"]]
+    assert zero_width == [], (
+        "Grafana rejects a zero-width relative time range at provisioning time "
+        "(`[alerting.alert-rule.invalidRelativeTime]`) and provisions **no** rules from a "
+        f"file it rejected, so this disarms every alert beside it too: {zero_width}"
+    )
+
+
 def test_no_rule_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults() -> None:
     """D9's panel guard, turned on the rule file, and it is here for D12.
 
@@ -1171,11 +1625,27 @@ def test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_ser
     """PRD 10's alerts are pages, and a page has to land somewhere.
 
     D11's acceptance: each description names **the series, the label vocabulary
-    and the panel it corresponds to on Dashboard 3**, so an operator woken at 2
-    a.m. arrives at a panel rather than at a PromQL prompt. All three are
-    checked against something the repository already holds -- the panel titles
-    against `03-pipeline.json` itself, so renaming a panel is red here rather
-    than silently pointing a page at a panel that no longer exists.
+    and the panel it corresponds to**, so an operator woken at 2 a.m. arrives at
+    a panel rather than at a PromQL prompt. All three are checked against
+    something the repository already holds -- the panel titles against the
+    dashboard JSON itself, so renaming a panel is red here rather than silently
+    pointing a page at a panel that no longer exists.
+
+    ⚠️ **The dashboard number is read out of the sentence rather than fixed at
+    3.** D11 wrote `" on dashboard 3"` because all three of its rules landed on
+    the Pipeline board and D12's two joined them there; D13's *Disk projection*
+    is drawn from Dashboard 5's disk panel, and a check that could only look at
+    3 would have had to be relaxed to let it through -- the shape that turns one
+    exemption into a check nobody runs. Two premises rather than one, so a scan
+    that has stopped reading dashboards is red before the loop grades anything.
+
+    🔴 **And an `absent()` rule is graded differently on its labels, because it
+    has none of its own.** Prometheus builds such a result's label set from the
+    selector's equality matchers alone -- there is no series to take labels
+    from, which is the condition -- so `{{ $labels.mountpoint }}` renders empty
+    and the page names no subject. That is the same defect `sum by (le)` causes
+    one paragraph down, arriving by a different route and invisible to the same
+    check.
 
     The label half is two claims, and the second is the one with teeth. An
     annotation that renders `{{ $labels.kind }}` has to (a) explain what `kind`
@@ -1194,10 +1664,16 @@ def test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_ser
     passed. So this is the weaker claim, stated as such: every label the page
     interpolates is a label the page explains.
     """
-    panels = _dashboard_three_panel_titles()
-    assert len(panels) == 10, (
-        f"Dashboard 3 has ten panels; this scan found {len(panels)}: {sorted(panels)}"
+    assert len(_dashboard_three_panel_titles()) == 10, (
+        "Dashboard 3 has ten panels; this scan found "
+        f"{len(_dashboard_three_panel_titles())}: {sorted(_dashboard_three_panel_titles())}"
     )
+    assert len(_dashboard_panel_titles(_DASHBOARD_FIVE)) == 8, (
+        "Dashboard 5 has eight panels; this scan found "
+        f"{len(_dashboard_panel_titles(_DASHBOARD_FIVE))}: "
+        f"{sorted(_dashboard_panel_titles(_DASHBOARD_FIVE))}"
+    )
+    boards = {3: _DASHBOARD_THREE, 5: _DASHBOARD_FIVE}
 
     def dropped_labels(rules: list[dict[str, Any]]) -> list[str]:
         return [
@@ -1219,6 +1695,20 @@ def test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_ser
         "the aggregation scan cannot see a `sum by (le)` dropping the one label the "
         "summary interpolates, so it would pass a page that names no lane"
     )
+
+    absence = 'absent(system_filesystem_usage_bytes{state="free"})'
+    assert _absence_subject_labels(absence) == {"state"}, (
+        "the absence recogniser no longer reads an `absent()` rule's own equality "
+        f"matchers: {_absence_subject_labels(absence)}"
+    )
+    assert _absence_subject_labels(f"{absence} or vector(1) > 0") is None, (
+        "the absence recogniser is matching an expression that is more than one "
+        "`absent()` call, so a rule with a real subject would escape the label check"
+    )
+    assert "mountpoint" not in (_absence_subject_labels(absence) or set()), (
+        "the recogniser thinks an `absent()` result carries `mountpoint`, which is the "
+        "label a page would interpolate to empty"
+    )
     assert dropped_labels(committed_rules()) == [], (
         "these rules interpolate a label their own aggregation has already dropped, so "
         "the rendered page names no subject"
@@ -1236,17 +1726,31 @@ def test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_ser
             assert token in description, (
                 f"{alert}: the description does not name {token!r}, the series it fires on"
             )
-        assert re.search(r'"(?P<panel>[^"]+)" on dashboard 3', description), (
-            f"{alert}: the description names no Dashboard 3 panel, so a page lands on a "
+        named_panels = re.findall(r'"([^"]+)" on dashboard (\d+)', description)
+        assert named_panels, (
+            f"{alert}: the description names no dashboard panel, so a page lands on a "
             f"query rather than on a screen: {description!r}"
         )
-        for named in re.findall(r'"([^"]+)" on dashboard 3', description):
-            assert named in panels, (
-                f"{alert}: names panel {named!r}, which `03-pipeline.json` does not hold: "
-                f"{sorted(panels)}"
+        for named, number in named_panels:
+            assert int(number) in boards, (
+                f"{alert}: names a panel on dashboard {number}, which this case does not "
+                f"know how to read: {sorted(boards)}"
+            )
+            titles = _dashboard_panel_titles(boards[int(number)])
+            assert named in titles, (
+                f"{alert}: names panel {named!r} on dashboard {number}, which "
+                f"`{boards[int(number)].name}` does not hold: {sorted(titles)}"
             )
         rendered = set(re.findall(r"\$labels\.(\w+)", annotations))
-        assert rendered, f"{alert}: the page interpolates no label, so it names no subject"
+        subject = _absence_subject_labels(str(rule["expr"]))
+        if subject is None:
+            assert rendered, f"{alert}: the page interpolates no label, so it names no subject"
+        else:
+            assert rendered <= subject, (
+                f"{alert}: `absent()` carries only its own equality matchers "
+                f"{sorted(subject)}, because there is no series to take labels from -- "
+                f"{sorted(rendered - subject)} renders empty and the page names no subject"
+            )
         for label in rendered:
             assert re.search(rf"\b{label}\b", description), (
                 f"{alert}: interpolates {{{{ $labels.{label} }}}} and never says what "

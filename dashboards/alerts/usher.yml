@@ -17,14 +17,19 @@
 # Neither is committed there today, which is why every firing recorded in
 # `../README.md` was produced by a throwaway Prometheus rather than by that one.
 #
-# ⚠️ **Five rules here, one owed, and a sixth is one directory down.**
-# PRD 10's `## Alerts` table names seven and `tests/unit/test_alerts.py` grades
-# both rule files against all seven in both directions. *Cost anomaly* has no
-# metric to write it against -- PRD 10's own first principle puts LLM spend on
-# Postgres, so there is deliberately no `usher.llm.*` series -- and it ships as
-# a Grafana-managed Postgres rule in `grafana/usher.yml`. D13 owes *Disk
-# projection*, and that test carries an `xfail(strict=True)` naming it until it
-# lands.
+# ⚠️ **Seven rules here, and an eighth is one directory down.** PRD 10's
+# `## Alerts` table names seven alerts and `tests/unit/test_alerts.py` grades
+# both rule files against all seven in both directions. Nothing is owed any
+# more: D13 was the last, and the `xfail(strict=True)` that held the ledger is
+# gone with it.
+#
+# **Seven rules for six alerts here, because *Disk projection* is two** -- a
+# projection and an `absent()` guard that fires when the series it projects is
+# not being produced at all. Same alert name on purpose: a rule PRD 10's table
+# does not name falsifies *"kept few, so they mean something"*, and the name
+# check grades the two sets against each other. *Disk projection*'s **third**
+# rule, the database-growth half, is a Postgres-datasource rule and lives in
+# `grafana/usher.yml` beside *Cost anomaly* for the same reason that one does.
 #
 # 🔴 **`grafana/usher.yml` is one directory down and must stay there.** The
 # `rule_files:` glob below is `*.yml` and is **not** recursive, and Prometheus
@@ -35,6 +40,12 @@
 # the price of adding the seventh alert. Measured on `prom/prometheus:v3.13.2`;
 # `test_the_postgres_rule_is_not_in_the_directory_prometheus_globs` is the
 # guard and `../README.md` carries the transcript.
+#
+# 🔴 **One of the seven names a series nothing on this host produces yet**, and
+# it needs a *third* stanza, in that project's
+# `otel-collector/config.yaml` -- a `hostmetrics` receiver, spelled out above
+# the rule that needs it. Without it the projection is loaded, green and blind,
+# which is why it ships with a companion that says so.
 #
 # 🔴 **Every metric name here carries a segment the OTel name does not.** The
 # collector appends the instrument's *unit* before the aggregation suffix, so
@@ -411,3 +422,236 @@ groups:
             requests) saw none -- so re-measure it the first time this fires.
             Panel: "TMDb requests/sec against the ceiling, with 429 count" on
             dashboard 3 (Pipeline, uid usher-pipeline).
+      # 🔴 **PRD 10's one *Disk projection* row, as two rules, because the
+      # second is what stops the first being the failure D11 names.** Both are
+      # kept under one alert name deliberately: a rule this table does not name
+      # falsifies *"kept few, so they mean something"*, and
+      # `test_every_alert_prd_10_names_exists_...` grades the two name sets
+      # against each other in both directions.
+      #
+      # 🔴 **This is the only alert here whose series does not exist**, and
+      # naming it wrongly is not a degraded alert, it is a permanently green
+      # one. Measured 2026-09-11: the shared Prometheus holds **93** metric
+      # names and not one is a disk, filesystem or node series
+      # (`/api/v1/label/__name__/values`). It has **no `scrape_configs` at
+      # all** -- its own config says so on purpose, *"the collector is the one
+      # front door to this stack, and a scrape target that is not asked for is
+      # a series name nobody chose"* -- and the collector has no `hostmetrics`
+      # receiver. So a third stanza belongs beside the two in this file's
+      # header, in `~/code/observability/otel-collector/config.yaml`:
+      #
+      #     receivers:
+      #       hostmetrics:
+      #         collection_interval: 60s
+      #         root_path: /hostfs
+      #         scrapers:
+      #           filesystem:
+      #             include_mount_points:
+      #               mount_points: ["/"]
+      #               match_type: strict
+      #
+      # `["/"]` because on this host Postgres's volume and `image_cache_dir`
+      # are both on `/` -- checked, not assumed. An operator who has given
+      # either its own disk adds that mount point here rather than to the rule.
+      #
+      # with `/:/hostfs:ro` on the collector service and `hostmetrics` added to
+      # the `metrics` pipeline's `receivers`. **A node exporter was the other
+      # candidate and is refused**: it is a scrape target, and that Prometheus
+      # scrapes nothing by design, so wiring one in reopens a decision the
+      # stack made rather than using it. `hostmetrics` enters through the front
+      # door that already exists and its output rides the same
+      # `prometheusremotewrite` exporter every other name in that Prometheus
+      # came through.
+      #
+      # ⚠️ **`include_mount_points` is the rule's scope and the rule carries no
+      # `mountpoint` selector.** Where Postgres's data directory and
+      # `image_cache_dir` live is a deployment's choice -- on this host both
+      # are on `/` -- so a regex enumerating one deployment's mount layout is a
+      # rule that silently covers nothing on the next one. The scope is set
+      # once, where the facts are produced, and the page carries the mountpoint
+      # it fired on.
+      #
+      # 🔴 **`state="free"` is not optional.** `system.filesystem.usage` is one
+      # instrument with a `state` label -- measured on this host 2026-09-11,
+      # `/` reported `used` 1,317,918,756,864, `free` 677,411,958,784 and
+      # `reserved` 653,676,544 as three series of the same name. Dropping the
+      # selector projects all three independently and fires if **any** trends
+      # below zero, so a *falling* `used` pages an operator -- and `used` falls
+      # on every `VACUUM FULL`, log rotation and `docker image prune`.
+      #
+      # 🔴 **No threshold is derived from `08-operations.md`'s resource
+      # envelope, and this comment is where that is said.** That table's own
+      # header records that nothing reads it, no host enforces it and no policy
+      # derives from it; M9's Track 2 derived a 2.0 GB ceiling from one row,
+      # measured a design at 2.702 GB and **withdrew the design** (ADR-0036).
+      # Every number in both halves is measured: the filesystem's own free
+      # bytes here, and the catalog's own size and growth in the other.
+      # `test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_table`
+      # parses that table's figures out rather than retyping them and forbids
+      # every one of them in **both** rule files.
+      #
+      # ⚠️ **This alert has a third rule and it is not in this file.** The
+      # *which consumer* half is a Postgres-datasource rule in
+      # `grafana/usher.yml`, beside *Cost anomaly* and for the same reason:
+      # `pg_database_size` is a function rather than a series, there is no
+      # `postgres_exporter` in the shared stack, and a Grafana provisioning
+      # file in **this** directory would take every rule here down with it. The
+      # two halves answer different questions -- this one *whether* a
+      # filesystem is filling, that one *how fast Postgres is growing* -- and
+      # an operator reads them together.
+      - alert: Disk projection
+        # PRD 10: "Postgres or image cache on track to fill within 14 days."
+        #
+        # **A 7-day fit predicting 14 days**, and the same pair is stated on
+        # Dashboard 5's disk panel. Not a shorter window: this deployment's
+        # growth is dominated by events days apart rather than by a steady
+        # trickle. Measured on `usher_catalog` -- `pg_database_size` was
+        # 5,025,650,355 B (4,793 MB) at 1,272,367 titles with 130,647 enriched
+        # on 2026-08-12, and 8,384,394,931 B (7,996 MB) at 1,276,268 titles
+        # with 133,576 enriched on 2026-09-11. **+3.36 GB in thirty days
+        # against +3,901 titles**: the size did not follow the catalog, it
+        # followed `m09d`, `m09e` and a full re-embed. A one-hour window
+        # extrapolated to a fortnight would page on every `VACUUM`.
+        #
+        # ⚠️ **A migration that transiently doubles a table will fire this
+        # rule, and that is stated rather than tuned away.**
+        # `08-operations.md`'s resource envelope measures `m09d` at **+637 MB
+        # transient on `credits`** (794 MB -> 1,431 MB, settling at 740 MB only
+        # after a `VACUUM FULL` the migration does not run) and
+        # `titles.credit_names` at **+624 MB settled, +1,368 MB transient**.
+        # Both are real drops in free space and the fit is right to extrapolate
+        # them. The entry that belongs in `docs/runbooks/upgrade.md` is
+        # **silence the rule for the migration window and the twelve to sixteen
+        # hours the fit takes to clear** (measured; `../README.md`), never widen
+        # the range vector -- widening it is how an alert stops seeing the thing
+        # it is for.
+        #
+        # ⚠️ **There is nothing to silence it *with* today, and that is stated
+        # rather than written as a procedure nobody can run.** The stack has no
+        # Alertmanager, `prometheus.yml` has no `alerting:` block and Grafana
+        # provisions no alert rules, so nothing routes or silences anything in
+        # this file -- which is the same asymmetry the header states about
+        # `rule_files:`. Until something routes them, a migration's firing is
+        # visible on Prometheus's own `/alerts` page and nowhere else, and
+        # `upgrade.md` carries no silence step because there is no silence.
+        #
+        # **`predict_linear` decays out of its own window like `increase`
+        # does**, so `for:` must stay well inside it: a step tilts a
+        # least-squares fit for exactly seven days and then leaves.
+        # `for: 1h` against `[7d]` is a blip guard under a week of patience.
+        # `test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it`
+        # grades it, and D13 added `predict_linear` to that guard's list.
+        #
+        # ⚠️ **This rule is noisy until its own window has filled, and that was
+        # measured rather than predicted.** `predict_linear` answers from
+        # whatever samples are in `[7d]`, however few -- so a freshly wired
+        # Prometheus extrapolates *minutes* across a fortnight. Watched on this
+        # host 2026-09-11 with 30 minutes of samples: `/` (1.996 TB, 677 GB
+        # free, entirely healthy) predicted **-3.67 TB** at the 14-day horizon,
+        # because one -4.03 GB step at 18:45:17Z was the whole of the trend in
+        # window. **No data-sufficiency conjunct is added here**, because how
+        # much history is "enough" is a number nobody has measured and one
+        # picked to make a demonstration pass is worse than none. Expect the
+        # first days after the receiver is wired to be noisy; the `absent()`
+        # companion below is what tells an operator the receiver is new, and
+        # `../README.md` records the measurement for whoever encodes a guard.
+        expr: |
+          predict_linear(system_filesystem_usage_bytes{state="free"}[7d], 14 * 86400) < 0
+        for: 1h
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.mountpoint }} is projected to fill within 14 days"
+          description: >-
+            system_filesystem_usage_bytes, the OTel collector's
+            system.filesystem.usage as Prometheus stores it, has a state label
+            whose values are free, used and reserved; a 7-day least-squares fit
+            over the free series for {{ $labels.mountpoint }} reaches zero
+            within 14 days, and predicts {{ $value | humanize }} bytes at that
+            horizon. The labels are mountpoint, device, type, mode and state,
+            and the scope is whichever mount points the collector's hostmetrics
+            receiver was told to include -- this rule filters on state alone,
+            because where Postgres's data directory and image_cache_dir live is
+            a deployment's choice. Which consumer is filling it is not in this
+            series and cannot be. Its pair is the Postgres-datasource rule of
+            the same name in alerts/grafana/usher.yml, which measures how fast
+            the catalog is growing: both firing means Postgres is the consumer,
+            this one alone means something else on that filesystem is -- most
+            likely the image cache, which has no eviction and grows with browse
+            coverage, so du over image_cache_dir is the other thing to read.
+            Panel: "Table size, and headroom against measured free disk" on
+            dashboard 5 (Cost & Compliance, uid usher-cost-compliance).
+            Known false positives, both measured in PRD 08's resource envelope
+            and both migrations rather than incidents:
+            m09d takes credits from 794 MB to 1,431 MB transiently (+637 MB,
+            settling at 740 MB only after a VACUUM FULL it does not run), and
+            titles.credit_names costs +624 MB settled and +1,368 MB transient.
+            Silence this rule for the migration window and the twelve to
+            sixteen hours the fit takes to clear afterwards; do not widen the
+            range vector, which is how an alert stops seeing the thing it is
+            for. Nothing routes or silences these rules yet -- the stack has no
+            Alertmanager -- so today that means expecting the firing rather
+            than suppressing it, and docs/runbooks/upgrade.md is where the step
+            goes when there is something to suppress it with.
+            The measured baseline beside this rule is pg_database_size
+            5,025,650,355 B (4,793 MB) at 1,272,367 titles with 130,647
+            enriched on 2026-08-12, and 8,384,394,931 B (7,996 MB) at 1,276,268
+            titles with 133,576 enriched on 2026-09-11 -- what the database was
+            on those dates, never a budget. And if the receiver was wired in
+            the last few days, suspect the window rather than the disk: the fit
+            answers from whatever samples it has, so half an hour of them
+            extrapolates half an hour of noise across a fortnight.
+
+      - alert: Disk projection
+        # 🔴 **The rule that makes the rule above falsifiable.**
+        #
+        # Every other alert in this file names a series this deployment stores,
+        # so a mis-spelling is the only way it can go quiet. This one names a
+        # series **nothing on this host produces today**, and an expression
+        # that selects nothing does not fail and does not empty a panel -- it
+        # evaluates to no alerts, which is exactly what healthy looks like.
+        # D11's task text supplied four names in that state and all four parsed,
+        # loaded and read green until somebody checked them against the stored
+        # set. The projection above would read green on every deployment that
+        # installs this file without the `hostmetrics` stanza, which is all of
+        # them today.
+        #
+        # So the absence is made loud. One hour of no samples anywhere and an
+        # operator is told that the disk alert is blind, rather than being told
+        # nothing for as long as the file is installed.
+        #
+        # 🔴 **`absent()` here, and deliberately not in *Push down*, and the
+        # two are worth reading together.** There an absent series is a source
+        # nobody is running a lane for -- a configuration state an operator
+        # chose -- so `absent()` would page somebody for having parked a
+        # server. Here there is no such state: a deployment either produces
+        # filesystem facts or has an unwatched disk. The distinction is not
+        # "does the series exist" but "is its absence a choice".
+        #
+        # **`warning`, not `page`.** A blind alert is an operations defect and
+        # wants a working day; waking somebody at 2 a.m. because a receiver was
+        # never configured is the wrong page, and paging for it would train an
+        # operator to silence the pair.
+        expr: absent(system_filesystem_usage_bytes{state="free"})
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "no filesystem is reporting free space, so Disk projection is blind"
+          description: >-
+            No series named system_filesystem_usage_bytes with state="free"
+            has been reported for an hour, so the projection rule beside this
+            one is selecting an empty vector -- which is indistinguishable from
+            healthy and stays that way forever. state is the collector's own
+            label, free / used / reserved, and this arm fires on the free one
+            because that is the one the projection reads. The producer is the
+            OTel collector's hostmetrics receiver, which the shared stack does
+            not run today: measured 2026-09-11, that Prometheus held 93 metric
+            names and no disk series at all. The stanza that fixes it is
+            written out in the comment above the projection rule, beside this
+            one. Panel:
+            "Table size, and headroom against measured free disk" on dashboard
+            5 (Cost & Compliance, uid usher-cost-compliance), which keeps
+            working while this fires -- it reads the Postgres datasource, not
+            this series, so table sizes stay visible and only the free-space
+            denominator is missing.
