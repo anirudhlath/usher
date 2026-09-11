@@ -1209,3 +1209,28 @@ auto-scaled to 0.46 — a panel telling a reader the ceiling was a third of a
 request per second. `vector(30)` carries its own legend entry, names the
 setting it comes from, and pulls the axis to the ceiling so headroom is the
 readable quantity.
+
+## ⚠️ Two Dashboard 3 panels plot a mean, not a quantile, and the reason is an instrument
+
+`Enrichment throughput and mean latency` and `Emby request mean latency by op`
+were written as `histogram_quantile` panels and were changed at integration,
+because `test_no_committed_panel_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults`
+(D9's) caught them.
+
+`usher.enrichment.latency` and `usher.source.request.duration` both still take
+the OTel SDK's **default second-scale boundaries** — `configure_metrics`
+installs no `View` and neither declares an
+`explicit_bucket_boundaries_advisory`. D1 measured what that does: over a real
+export, `histogram_quantile(0.5)` answered a flat **2.5000 s** against a
+sample's true **35.20 ms**. A quantile over those buckets is not a loss of
+resolution, it is a loss of the measurement, and it plots a plausible number
+rather than failing.
+
+`rate(_sum) / rate(_count)` is true whatever the boundaries are, so these two
+plot a mean until the instruments carry a ladder. **A mean has no p99**, so the
+enrichment panel's second quantile target was dropped rather than converted.
+
+Fixing the instruments is the better repair and is not done here: D1's ladder
+was derived from ADR-0002's and ADR-0031's measured distributions, and neither
+of these two instruments has a measured distribution to derive one from. Issue
+filed; the panels are honest in the meantime.

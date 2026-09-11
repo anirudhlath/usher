@@ -1,7 +1,7 @@
 {
   "uid": "usher-pipeline",
-  "title": "Usher — 3 Pipeline",
-  "description": "Ten panels, mixed by design: Prometheus for rates and depths, Postgres for the queue's and the reconciler's own breakdowns. Two of these panels read a series whose label is not the one a reader of the title assumes — the queue-depth pair is two panels because usher.jobs.queued is labelled kind and a priority band exists only in the jobs table, and the enrichment panel splits on outcome because the demand/background split does not exist on that histogram at all.",
+  "title": "Usher \u2014 3 Pipeline",
+  "description": "Ten panels, mixed by design: Prometheus for rates and depths, Postgres for the queue's and the reconciler's own breakdowns. Two of these panels read a series whose label is not the one a reader of the title assumes \u2014 the queue-depth pair is two panels because usher.jobs.queued is labelled kind and a priority band exists only in the jobs table, and the enrichment panel splits on outcome because the demand/background split does not exist on that histogram at all.",
   "tags": [
     "usher",
     "pipeline"
@@ -20,7 +20,7 @@
       "id": 1,
       "type": "table",
       "title": "Queue depth by priority band",
-      "description": "Postgres over jobs.priority, and it is a separate panel from the by-kind gauge beside it rather than the same panel with another datasource. PRD 10 says twice that usher.jobs.queued is labelled kind and not priority — 'JobQueue.depth() counts pending rows per kind, which is what \"which lane is backed up\" asks' — so a priority band only exists in the table. The four rungs are written out as a spine and LEFT/FULL joined, because a GROUP BY alone returns nothing for an empty queue and an empty rectangle is indistinguishable from a healthy zero. jobs.priority is a free integer (0..100) that promotion moves with GREATEST, so any value off the four rungs still appears, labelled 'off-rung'.",
+      "description": "Postgres over jobs.priority, and it is a separate panel from the by-kind gauge beside it rather than the same panel with another datasource. PRD 10 says twice that usher.jobs.queued is labelled kind and not priority \u2014 'JobQueue.depth() counts pending rows per kind, which is what \"which lane is backed up\" asks' \u2014 so a priority band only exists in the table. The four rungs are written out as a spine and LEFT/FULL joined, because a GROUP BY alone returns nothing for an empty queue and an empty rectangle is indistinguishable from a healthy zero. jobs.priority is a free integer (0..100) that promotion moves with GREATEST, so any value off the four rungs still appears, labelled 'off-rung'.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "usher-postgres"
@@ -52,7 +52,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Queue depth by kind",
-      "description": "usher.jobs.queued, which reaches Prometheus as usher_jobs_queued_ratio — the exporter puts the instrument's unit (1) in the name. Its only attribute is kind (telemetry.py's _observations emits Observation(count, {\"kind\": kind})), so this is 'which lane is backed up' and the panel to its left is 'which band is waiting'. Two questions, two panels. The reader is a held snapshot the worker refreshes after each pass, so the value is stale and never wrong; a process with no worker lane reports no observation rather than a zero.",
+      "description": "usher.jobs.queued, which reaches Prometheus as usher_jobs_queued_ratio \u2014 the exporter puts the instrument's unit (1) in the name. Its only attribute is kind (telemetry.py's _observations emits Observation(count, {\"kind\": kind})), so this is 'which lane is backed up' and the panel to its left is 'which band is waiting'. Two questions, two panels. The reader is a held snapshot the worker refreshes after each pass, so the value is stale and never wrong; a process with no worker lane reports no observation rather than a zero.",
       "datasource": {
         "type": "prometheus",
         "uid": "usher-prometheus"
@@ -110,7 +110,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "Parked jobs by kind",
-      "description": "usher.jobs.parked, as usher_jobs_parked_ratio, labelled kind.\n\n⚠️ This series saturates. composition.py's QueueGauges.refresh builds the parked counts from `await queue.parked(limit=1000)` and tallies the returned rows in Python, so the gauge can never sum past 1,000 across all kinds — it is a floor on the parked population and not a count of it. Measured 2026-09-07: the gauge read enrich 890 + index 110 = exactly 1,000 while `SELECT kind, count(*) FROM jobs WHERE status = 'parked' GROUP BY kind` returned enrich 1,890 + index 110 = 2,000. Read this panel as 'at least', and read the table for the number.",
+      "description": "usher.jobs.parked, as usher_jobs_parked_ratio, labelled kind.\n\n\u26a0\ufe0f This series saturates. composition.py's QueueGauges.refresh builds the parked counts from `await queue.parked(limit=1000)` and tallies the returned rows in Python, so the gauge can never sum past 1,000 across all kinds \u2014 it is a floor on the parked population and not a count of it. Measured 2026-09-07: the gauge read enrich 890 + index 110 = exactly 1,000 while `SELECT kind, count(*) FROM jobs WHERE status = 'parked' GROUP BY kind` returned enrich 1,890 + index 110 = 2,000. Read this panel as 'at least', and read the table for the number.",
       "datasource": {
         "type": "prometheus",
         "uid": "usher-prometheus"
@@ -167,8 +167,8 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Enrichment throughput and p50/p99",
-      "description": "usher.enrichment.latency, as usher_enrichment_latency_seconds. **Its label is outcome, and that is a correction M4 made rather than PRD 10's original.** enrich.py: 'Labelled `outcome` rather than PRD 10's original `trigger`: nothing in M4 enriches on demand (JobPriority.DEMAND is defined and unused until M5), so a `trigger` label would carry one constant value, while a failure's latency and a success's are genuinely different populations.'\n\n⚠️ So the demand-versus-background split a reader of this title expects does not exist on this series. M5 shipped demand promotion and the label did not move: the two values here are `enriched` and `failed`, never `demand` and `background`. Splitting this panel that way needs a second label on the histogram, not a different query.\n\nThe rate window is the literal [5m] and not $__rate_interval, which is a portability decision measured on this stack: $__rate_interval is derived from the datasource's configured scrape interval, and a Prometheus fed by remote write from an OTel collector has none — Grafana fell back to 1m15s against a 60 s push interval, which is one sample, and rate() over one sample is empty. Observed 2026-09-07: every rate target on this dashboard returned zero frames until the window was written out.",
+      "title": "Enrichment throughput and mean latency",
+      "description": "usher.enrichment.latency, as usher_enrichment_latency_seconds. **Its label is outcome, and that is a correction M4 made rather than PRD 10's original.** enrich.py: 'Labelled `outcome` rather than PRD 10's original `trigger`: nothing in M4 enriches on demand (JobPriority.DEMAND is defined and unused until M5), so a `trigger` label would carry one constant value, while a failure's latency and a success's are genuinely different populations.'\n\n\u26a0\ufe0f So the demand-versus-background split a reader of this title expects does not exist on this series. M5 shipped demand promotion and the label did not move: the two values here are `enriched` and `failed`, never `demand` and `background`. Splitting this panel that way needs a second label on the histogram, not a different query.\n\nThe rate window is the literal [5m] and not $__rate_interval, which is a portability decision measured on this stack: $__rate_interval is derived from the datasource's configured scrape interval, and a Prometheus fed by remote write from an OTel collector has none \u2014 Grafana fell back to 1m15s against a 60 s push interval, which is one sample, and rate() over one sample is empty. Observed 2026-09-07: every rate target on this dashboard returned zero frames until the window was written out.",
       "datasource": {
         "type": "prometheus",
         "uid": "usher-prometheus"
@@ -232,7 +232,7 @@
             "uid": "usher-prometheus"
           },
           "expr": "sum by (outcome) (rate(usher_enrichment_latency_seconds_count[5m]))",
-          "legendFormat": "{{outcome}} · attempts/s",
+          "legendFormat": "{{outcome}} \u00b7 attempts/s",
           "range": true,
           "instant": false
         },
@@ -243,20 +243,8 @@
             "type": "prometheus",
             "uid": "usher-prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (outcome, le) (rate(usher_enrichment_latency_seconds_bucket[5m])))",
-          "legendFormat": "{{outcome}} · p50",
-          "range": true,
-          "instant": false
-        },
-        {
-          "refId": "C",
-          "editorMode": "code",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "usher-prometheus"
-          },
-          "expr": "histogram_quantile(0.99, sum by (outcome, le) (rate(usher_enrichment_latency_seconds_bucket[5m])))",
-          "legendFormat": "{{outcome}} · p99",
+          "expr": "sum by (outcome) (rate(usher_enrichment_latency_seconds_sum[5m])) / sum by (outcome) (rate(usher_enrichment_latency_seconds_count[5m]))",
+          "legendFormat": "{{outcome}} \u00b7 mean latency",
           "range": true,
           "instant": false
         }
@@ -266,7 +254,7 @@
       "id": 5,
       "type": "table",
       "title": "Promotion latency against the 5 s read-through target",
-      "description": "Every job promoted to VISIBLE or DEMAND, with the seconds between the promoting enqueue and its last transition, and the traceparent the requesting span put on the row — which is what makes this a join to the trace rather than an estimate.\n\n⚠️ Its population is promotions that did not complete. A completed job's row is DELETED (JobStatus has no DONE member), so a promotion that met the target leaves nothing here. Read this as the miss list, never as a distribution over all promotions.",
+      "description": "Every job promoted to VISIBLE or DEMAND, with the seconds between the promoting enqueue and its last transition, and the traceparent the requesting span put on the row \u2014 which is what makes this a join to the trace rather than an estimate.\n\n\u26a0\ufe0f Its population is promotions that did not complete. A completed job's row is DELETED (JobStatus has no DONE member), so a promotion that met the target leaves nothing here. Read this as the miss list, never as a distribution over all promotions.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "usher-postgres"
@@ -369,7 +357,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Emby request latency by op",
-      "description": "usher.source.request.duration, as usher_source_request_duration_seconds, labelled source and op. Two targets on purpose: p95 over the selected window is the live question, and the lifetime mean per op is the reference that keeps the panel readable when the window holds no requests at all — this deployment talks to Emby only while a sync, a watch-state pass or a push lane is running, so an idle window is the ordinary case rather than an outage.\n\nThe rate window is the literal [5m] and not $__rate_interval, which is a portability decision measured on this stack: $__rate_interval is derived from the datasource's configured scrape interval, and a Prometheus fed by remote write from an OTel collector has none — Grafana fell back to 1m15s against a 60 s push interval, which is one sample, and rate() over one sample is empty. Observed 2026-09-07: every rate target on this dashboard returned zero frames until the window was written out.",
+      "description": "usher.source.request.duration, as usher_source_request_duration_seconds, labelled source and op. Two targets on purpose: p95 over the selected window is the live question, and the lifetime mean per op is the reference that keeps the panel readable when the window holds no requests at all \u2014 this deployment talks to Emby only while a sync, a watch-state pass or a push lane is running, so an idle window is the ordinary case rather than an outage.\n\nThe rate window is the literal [5m] and not $__rate_interval, which is a portability decision measured on this stack: $__rate_interval is derived from the datasource's configured scrape interval, and a Prometheus fed by remote write from an OTel collector has none \u2014 Grafana fell back to 1m15s against a 60 s push interval, which is one sample, and rate() over one sample is empty. Observed 2026-09-07: every rate target on this dashboard returned zero frames until the window was written out.",
       "datasource": {
         "type": "prometheus",
         "uid": "usher-prometheus"
@@ -415,8 +403,8 @@
             "type": "prometheus",
             "uid": "usher-prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (op, le) (rate(usher_source_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{op}} · p95",
+          "expr": "sum by (op) (rate(usher_source_request_duration_seconds_sum[5m])) / sum by (op) (rate(usher_source_request_duration_seconds_count[5m]))",
+          "legendFormat": "{{op}} \u00b7 mean latency",
           "range": true,
           "instant": false
         },
@@ -428,7 +416,7 @@
             "uid": "usher-prometheus"
           },
           "expr": "sum by (op) (usher_source_request_duration_seconds_sum) / sum by (op) (usher_source_request_duration_seconds_count)",
-          "legendFormat": "{{op}} · lifetime mean",
+          "legendFormat": "{{op}} \u00b7 lifetime mean",
           "range": true,
           "instant": false
         }
@@ -438,7 +426,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "Push connection uptime",
-      "description": "usher.source.push.connected, as usher_source_push_connected_ratio. **1 means delivering, not connected.** PushSnapshot is fed from PushHealth.is_delivering — connection, at least one message, and a recent one — because ADR-0004 measured a handshake against a nonexistent path upgrading and being held open, and a gauge fed by the socket's state would read 1 for exactly that failure.\n\n**The `source` label is the operator-typed source name** ('Shared Emby'), not a UUID: api/lanes.py's push_snapshots builds the reader as {self._names[source_id]: PushSnapshot(...)} over self._open_adapters.\n\n⚠️ **A source with no open lane produces no series at all** — not a zero. It is simply absent from that comprehension, and telemetry.py's _push_observations returns [] with no reader. A disabled source, or one that does not support push, is therefore invisible here rather than reported down. So the Push-down alert condition is `usher_source_push_connected_ratio == 0` for 15m; `absent(...)` would page about every source nobody configured.\n\nThe left axis is soft-capped at 1 because the series is 0 or 1: without it Grafana auto-scales a flat zero to 0-100 and a reader has to check the legend to learn the range. Reconnects are cumulative and sit on the right axis.",
+      "description": "usher.source.push.connected, as usher_source_push_connected_ratio. **1 means delivering, not connected.** PushSnapshot is fed from PushHealth.is_delivering \u2014 connection, at least one message, and a recent one \u2014 because ADR-0004 measured a handshake against a nonexistent path upgrading and being held open, and a gauge fed by the socket's state would read 1 for exactly that failure.\n\n**The `source` label is the operator-typed source name** ('Shared Emby'), not a UUID: api/lanes.py's push_snapshots builds the reader as {self._names[source_id]: PushSnapshot(...)} over self._open_adapters.\n\n\u26a0\ufe0f **A source with no open lane produces no series at all** \u2014 not a zero. It is simply absent from that comprehension, and telemetry.py's _push_observations returns [] with no reader. A disabled source, or one that does not support push, is therefore invisible here rather than reported down. So the Push-down alert condition is `usher_source_push_connected_ratio == 0` for 15m; `absent(...)` would page about every source nobody configured.\n\nThe left axis is soft-capped at 1 because the series is 0 or 1: without it Grafana auto-scales a flat zero to 0-100 and a reader has to check the legend to learn the range. Reconnects are cumulative and sit on the right axis.",
       "datasource": {
         "type": "prometheus",
         "uid": "usher-prometheus"
@@ -504,7 +492,7 @@
             "uid": "usher-prometheus"
           },
           "expr": "max by (source) (usher_source_push_connected_ratio)",
-          "legendFormat": "{{source}} · delivering",
+          "legendFormat": "{{source}} \u00b7 delivering",
           "range": true,
           "instant": false
         },
@@ -516,7 +504,7 @@
             "uid": "usher-prometheus"
           },
           "expr": "max by (source) (usher_source_push_reconnects_total)",
-          "legendFormat": "{{source}} · reconnects (cumulative)",
+          "legendFormat": "{{source}} \u00b7 reconnects (cumulative)",
           "range": true,
           "instant": false
         }
@@ -526,7 +514,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Push events applied, by kind",
-      "description": "usher.source.push.events, as usher_source_push_events_total, labelled source and kind. This is what separates 'the lane is up' from 'the lane is doing anything': the cumulative counter is plotted rather than its rate, so a flat line is legible as an idle lane and a missing line as a lane that never delivered that kind.\n\n**The `source` label is the same operator-typed source name the uptime panel carries, and a source with no open lane produces no series here either** — the counter is registered by the same lane. The Push-down alert reads the uptime gauge with `== 0` rather than `absent(...)` for that reason.",
+      "description": "usher.source.push.events, as usher_source_push_events_total, labelled source and kind. This is what separates 'the lane is up' from 'the lane is doing anything': the cumulative counter is plotted rather than its rate, so a flat line is legible as an idle lane and a missing line as a lane that never delivered that kind.\n\n**The `source` label is the same operator-typed source name the uptime panel carries, and a source with no open lane produces no series here either** \u2014 the counter is registered by the same lane. The Push-down alert reads the uptime gauge with `== 0` rather than `absent(...)` for that reason.",
       "datasource": {
         "type": "prometheus",
         "uid": "usher-prometheus"
@@ -584,7 +572,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "TMDb requests/sec against the ceiling, with 429 count",
-      "description": "usher.provider.requests, as usher_provider_requests_total, labelled provider and status. **status is the HTTP status code as a string** (adapters/tmdb/client.py: `status = str(response.status_code)`) **or the literal \"error\"** for a transport failure that never reached a status line. Both are recorded from a `finally`, so the rate target selects on provider only and its denominator includes status=\"error\": PRD 10 — 'a denominator that omitted the failures would read low exactly during an outage.'\n\nThe ceiling is a named series — `vector(30)` — and not a threshold line. Measured 2026-09-07: as a threshold Grafana drew it against the *right* axis's scale, so a red line labelled nothing appeared at 0.14 req/s on a left axis that had auto-scaled to 0.46. A series carries its own legend entry and pulls the axis to the ceiling, which is what makes headroom the readable quantity. 30 rps is what USHER_TMDB_REQUESTS_PER_SECOND holds — Settings' default is 30.0 and .env.example sets 30. PRD 10's prose said ~40; that figure is not this setting's value at any spelling and the threshold follows the setting.\n\n`or vector(0)` on the 429 target is what makes 'no 429s' render as a zero instead of an empty panel — at the cost that a metric that stopped existing would read the same, which the requests/sec series beside it is what distinguishes.\n\nThe rate window is the literal [5m] and not $__rate_interval, which is a portability decision measured on this stack: $__rate_interval is derived from the datasource's configured scrape interval, and a Prometheus fed by remote write from an OTel collector has none — Grafana fell back to 1m15s against a 60 s push interval, which is one sample, and rate() over one sample is empty. Observed 2026-09-07: every rate target on this dashboard returned zero frames until the window was written out.",
+      "description": "usher.provider.requests, as usher_provider_requests_total, labelled provider and status. **status is the HTTP status code as a string** (adapters/tmdb/client.py: `status = str(response.status_code)`) **or the literal \"error\"** for a transport failure that never reached a status line. Both are recorded from a `finally`, so the rate target selects on provider only and its denominator includes status=\"error\": PRD 10 \u2014 'a denominator that omitted the failures would read low exactly during an outage.'\n\nThe ceiling is a named series \u2014 `vector(30)` \u2014 and not a threshold line. Measured 2026-09-07: as a threshold Grafana drew it against the *right* axis's scale, so a red line labelled nothing appeared at 0.14 req/s on a left axis that had auto-scaled to 0.46. A series carries its own legend entry and pulls the axis to the ceiling, which is what makes headroom the readable quantity. 30 rps is what USHER_TMDB_REQUESTS_PER_SECOND holds \u2014 Settings' default is 30.0 and .env.example sets 30. PRD 10's prose said ~40; that figure is not this setting's value at any spelling and the threshold follows the setting.\n\n`or vector(0)` on the 429 target is what makes 'no 429s' render as a zero instead of an empty panel \u2014 at the cost that a metric that stopped existing would read the same, which the requests/sec series beside it is what distinguishes.\n\nThe rate window is the literal [5m] and not $__rate_interval, which is a portability decision measured on this stack: $__rate_interval is derived from the datasource's configured scrape interval, and a Prometheus fed by remote write from an OTel collector has none \u2014 Grafana fell back to 1m15s against a 60 s push interval, which is one sample, and rate() over one sample is empty. Observed 2026-09-07: every rate target on this dashboard returned zero frames until the window was written out.",
       "datasource": {
         "type": "prometheus",
         "uid": "usher-prometheus"
@@ -676,7 +664,7 @@
             "uid": "usher-prometheus"
           },
           "expr": "vector(30)",
-          "legendFormat": "ceiling · USHER_TMDB_REQUESTS_PER_SECOND",
+          "legendFormat": "ceiling \u00b7 USHER_TMDB_REQUESTS_PER_SECOND",
           "range": true,
           "instant": false
         }

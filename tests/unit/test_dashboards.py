@@ -132,6 +132,23 @@ _PROMETHEUS_SUFFIXES = ("_bucket", "_count", "_sum", "_total")
 # whole catalogue, in both directions.
 _PROMETHEUS_UNITS = ("_ratio", "_seconds", "_milliseconds", "_bytes")
 
+# 🔴 **And a *unit* segment before them, which this file did not know about
+# until a Prometheus panel was committed against it.** The OTel collector's
+# Prometheus translation appends the instrument's unit to the name: `s` ->
+# `_seconds`, `ms` -> `_milliseconds`, `By` -> `_bytes`, and a gauge's `1` ->
+# `_ratio`. Read off this host's Prometheus on 2026-09-07, PRD 10's
+# `usher.home.compose.duration` is stored as
+# `usher_home_compose_duration_seconds_bucket` and `http.server.duration` as
+# `http_server_duration_milliseconds_bucket`.
+#
+# Stripping only the four above left `usher_home_compose_duration_seconds`,
+# which is in no catalogue -- so invariant 2 **rejected the spelling that
+# renders data and accepted the spelling that renders none**, which is the
+# exact failure it exists to catch.
+# `test_the_catalogue_check_survives_the_unit_suffix_the_collector_appends`
+# is the case; it lists the stored spellings this host actually holds.
+_UNIT_SUFFIXES = ("_seconds", "_milliseconds", "_bytes", "_ratio")
+
 # PromQL's own vocabulary, which a `[a-z][a-z0-9_.]*` scan cannot tell from a
 # metric name. Only the functions and keywords are here: label keys and
 # grouping lists are removed structurally by `_metric_tokens` before the scan
@@ -312,10 +329,12 @@ def normalise_panel_title(title: str) -> str:
 def normalise_metric(name: str) -> str:
     """One OTel or Prometheus spelling of a metric, reduced to a comparable key.
 
-    Dots become underscores and **one** trailing Prometheus suffix is removed,
-    so `usher.suggest.duration` in PRD 10 and `usher_suggest_duration_bucket`
-    in a panel reduce to the same key. Applied to **both** sides, which is what
-    makes it a normalisation rather than a rewrite of one of them.
+    Dots become underscores, then **one** trailing Prometheus suffix and
+    **one** unit segment are removed, in that order — so PRD 10's
+    `usher.suggest.duration` and the `usher_suggest_duration_seconds_bucket`
+    Prometheus actually stores reduce to the same key. Applied to **both**
+    sides, which is what makes it a normalisation rather than a rewrite of one
+    of them.
 
     **Two strips, in the exporter's own order**: one aggregation suffix, then
     one unit. `usher_enrichment_latency_seconds_bucket` needs both to reach
@@ -325,6 +344,12 @@ def normalise_metric(name: str) -> str:
 
     No catalogue row ends in one of the four aggregation suffixes or one of
     the four units today (both checked in
+
+    The order is the storage order and is not interchangeable: the exporter
+    writes `<name>_<unit>_<suffix>`, so stripping the unit first would find
+    nothing to strip on `..._seconds_bucket` and leave the row unmatched.
+
+    No catalogue row ends in one of these eight segments today (checked in
     `test_the_normaliser_is_not_vacuous`), so stripping on the catalogue side
     is a no-op; if one ever does, that row and its `_count` or `_seconds`
     sibling would collapse into one key and the case is what says so.
@@ -337,6 +362,10 @@ def normalise_metric(name: str) -> str:
     for unit in _PROMETHEUS_UNITS:
         if key.endswith(unit):
             return key[: -len(unit)]
+
+    for suffix in _UNIT_SUFFIXES:
+        if key.endswith(suffix):
+            return key[: -len(suffix)]
     return key
 
 
@@ -1135,3 +1164,242 @@ def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
     with pytest.raises(AssertionError, match="ten panels"):
         titles = ["only", "nine", "of", "them", "here", "and", "no", "more", "sadly"]
         assert len(titles) == 10, f"PRD 10's dashboard 3 is ten panels, not {len(titles)}"
+
+
+# ---------------------------------------------------------------------------
+# D9's three additions. The first is the panel invariant Dashboard 4's
+# hit-rate panel exists to keep; the second and third are two ways a committed
+# panel renders nothing-that-looks-like-something, and neither was reachable
+# before a Prometheus panel was committed.
+# ---------------------------------------------------------------------------
+
+_AGGREGATION = re.compile(r"\b(?:sum|avg|min|max|count|topk|bottomk|stddev|quantile)\b")
+_GROUPING_CLAUSE = re.compile(r"\s*(?:by|without)\s*\(([^)]*)\)")
+
+
+def _balanced(text: str, opening: int) -> int:
+    """The index of the `)` closing the `(` at `opening`."""
+    depth = 0
+    for index in range(opening, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    raise AssertionError(f"unbalanced parentheses in {text!r}")
+
+
+def _aggregations(expr: str) -> list[tuple[set[str], str]]:
+    """`(grouping labels, operand)` for every aggregation call in a PromQL
+    expression, in both spellings PromQL allows — `sum by (x) (…)` and
+    `sum(…) by (x)`.
+
+    A substring test for `by (cache` would pass on an expression that carries
+    the grouping on some *other* aggregation than the one wrapping the
+    counter, which is exactly the mistake this pair of panels invites: the
+    numerator grouped and the denominator summed flat renders a hit rate that
+    is a ratio of two different populations and still draws a plausible line.
+    """
+    found: list[tuple[set[str], str]] = []
+    for match in _AGGREGATION.finditer(expr):
+        position = match.end()
+        labels: set[str] = set()
+        leading = _GROUPING_CLAUSE.match(expr, position)
+        if leading:
+            labels = {label.strip() for label in leading.group(1).split(",") if label.strip()}
+            position = leading.end()
+        opening = expr.find("(", position)
+        if opening == -1:
+            continue
+        closing = _balanced(expr, opening)
+        trailing = _GROUPING_CLAUSE.match(expr, closing + 1)
+        if trailing:
+            labels = {label.strip() for label in trailing.group(1).split(",") if label.strip()}
+        found.append((labels, expr[opening + 1 : closing]))
+    return found
+
+
+def _prometheus_targets() -> list[tuple[str, str]]:
+    """`(where, expr)` for every committed Prometheus target."""
+    targets: list[tuple[str, str]] = []
+    for path in _dashboard_files():
+        dashboard = json.loads(path.read_text(encoding="utf-8"))
+        for panel in _panels(dashboard):
+            if panel.get("type") == "row":
+                continue
+            for target in panel.get("targets") or []:
+                if _datasource_type(panel, target) == "prometheus":
+                    where = f"{path.name}:{panel.get('title')}:{target.get('refId')}"
+                    targets.append((where, str(target.get("expr", ""))))
+    return targets
+
+
+def test_the_cache_panel_groups_by_cache_and_never_sums_across_it() -> None:
+    """PRD 10 declares `usher.cache.hits` with `cache` **and** `freshness`
+    while `usher.cache.misses` carries `cache` alone — *"a miss served nothing,
+    so it has no freshness to report"* — and the pair is declared once in
+    `telemetry.py` for three callers precisely because a second stream under
+    one name makes *"a dashboard's hit rate silently stop covering a cache"*.
+
+    A hit rate summed across `cache` is that failure arriving from the panel
+    end instead: the row cache, the screen cache and the image proxy have
+    different populations and different hit rates, and one pooled number is
+    dominated by whichever is busiest. It renders as a healthy line either way.
+    """
+    aggregations = [
+        (where, labels, operand)
+        for where, expr in _prometheus_targets()
+        for labels, operand in _aggregations(expr)
+    ]
+    naming_hits = [
+        (where, labels, operand)
+        for where, labels, operand in aggregations
+        if "usher_cache_hits_total" in operand
+    ]
+
+    assert aggregations, (
+        "no committed Prometheus target carries an aggregation at all, so every assertion "
+        "below is vacuous"
+    )
+    assert naming_hits, (
+        "no committed aggregation names `usher_cache_hits_total`, so this case grades "
+        "nothing — Dashboard 4's hit-rate panel is missing or spells the counter otherwise"
+    )
+
+    ungrouped = [
+        f"{where}: {operand.strip()}"
+        for where, labels, operand in naming_hits
+        if "cache" not in labels
+    ]
+
+    assert ungrouped == [], (
+        "these aggregations sum the hit counter without a `by (cache)`, so three caches "
+        f"with three populations render as one number: {ungrouped}"
+    )
+
+
+_CREATE_HISTOGRAM = "create_histogram("
+
+
+def _declared_histograms() -> dict[str, str]:
+    """Every `create_histogram` in `src/usher/`, name → its keyword body.
+
+    A source scan rather than an import, because the question is what the
+    *declaration* says: importing the modules would give instruments whose
+    advisory the SDK has already folded into an aggregation, and
+    `explicit_bucket_boundaries_advisory` is not readable back off an
+    `opentelemetry.metrics.Histogram`.
+    """
+    declared: dict[str, str] = {}
+    for path in sorted((_ROOT / "src" / "usher").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        cursor = 0
+        while (found := source.find(_CREATE_HISTOGRAM, cursor)) != -1:
+            opening = found + len(_CREATE_HISTOGRAM) - 1
+            closing = _balanced(source, opening)
+            body = source[opening + 1 : closing]
+            cursor = closing
+            name = re.search(r"[\"']([a-z][a-z0-9_.]*)[\"']", body)
+            if name:
+                declared[name.group(1)] = body
+    return declared
+
+
+def test_no_committed_panel_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults() -> None:
+    """D1's finding, made a property of the committed JSON.
+
+    `configure_metrics` installs no `View`, so a seconds-unit histogram with
+    no `explicit_bucket_boundaries_advisory` of its own takes the SDK's
+    `(0.0, 5.0, 10.0, 25.0, …)` — **in seconds** — and every observation under
+    five seconds lands in one bucket. `histogram_quantile` over that does not
+    fail and does not empty: it interpolates inside `le="5"` and answers a
+    flat plausible number. D1 measured 2.5000 s and 4.75 s against a sample
+    whose true p50/p95 were 35.20 ms and 225.07 ms.
+
+    So a quantile panel over an unfixed instrument is the one dashboard defect
+    the other two invariants cannot see — the metric name is real, the
+    structure is valid, and the panel draws a line.
+    """
+    declared = _declared_histograms()
+    seconds = {name for name, body in declared.items() if 'unit="s"' in body}
+    with_advisory = {
+        name for name, body in declared.items() if "explicit_bucket_boundaries_advisory" in body
+    }
+
+    assert len(declared) >= 15, (
+        f"the source scan found only {len(declared)} `create_histogram` calls, so it has "
+        "stopped reading the declarations and every assertion below is vacuous"
+    )
+    assert "usher.suggest.duration" in with_advisory, (
+        "the scan cannot see D1's advisory on `usher.suggest.duration`, so it would grade "
+        f"every instrument as unfixed: {sorted(with_advisory)}"
+    )
+    assert seconds - with_advisory, (
+        "every seconds-unit histogram now carries an advisory — the repo-wide fix has "
+        "landed, and this case has nothing left to protect. Delete it and say so."
+    )
+
+    unfixed = {normalise_metric(name) for name in seconds - with_advisory}
+    offending = [
+        f"{where}: {operand.strip()}"
+        for where, expr in _prometheus_targets()
+        if "histogram_quantile" in expr
+        for _labels, operand in _aggregations(expr)
+        for token in _metric_tokens(operand)
+        if normalise_metric(token) in unfixed
+    ]
+
+    assert offending == [], (
+        "these panels take a quantile over a histogram still on the SDK's second-scale "
+        "default boundaries, which answers a flat number rather than failing — plot "
+        f"`_sum / _count` or fix the instrument's buckets: {offending}"
+    )
+
+
+def test_the_catalogue_check_survives_the_unit_suffix_the_collector_appends() -> None:
+    """🔴 The normaliser was measured against OTel's *name* mangling and not
+    against what the collector actually stores, and the two differ by a
+    segment.
+
+    Read out of this host's Prometheus on 2026-09-07, the committed
+    instruments are `usher_home_compose_duration_seconds_bucket`,
+    `http_server_duration_milliseconds_bucket` and `usher_jobs_queued_ratio` —
+    the exporter appends the *unit* (`s` → `_seconds`, `ms` →
+    `_milliseconds`, `By` → `_bytes`, a gauge's `1` → `_ratio`) before the
+    `_bucket`/`_total` suffix. A normaliser that strips only the latter leaves
+    `usher_home_compose_duration_seconds`, which is in no catalogue.
+
+    The consequence is the worst available ordering. Invariant 2 **rejects the
+    spelling that renders data** and **accepts the spelling that renders
+    none** — a panel written `usher_home_compose_duration_bucket` passes this
+    file and draws an empty rectangle in Grafana forever, which is precisely
+    the failure the invariant exists to catch.
+    """
+    catalogue = metric_catalogue()
+
+    stored = {
+        "usher_home_compose_duration_seconds_bucket": "usher.home.compose.duration",
+        "usher_row_build_duration_seconds_sum": "usher.row.build.duration",
+        "usher_search_duration_seconds_count": "usher.search.duration",
+        "usher_suggest_duration_seconds_bucket": "usher.suggest.duration",
+        "http_server_duration_milliseconds_bucket": "http.server.duration",
+        "usher_jobs_queued_ratio": "usher.jobs.queued",
+        "usher_scheduler_job_due_seconds": "usher.scheduler.job.due",
+        "usher_cache_hits_total": "usher.cache.hits",
+        "usher_search_results_bucket": "usher.search.results",
+    }
+
+    for spelling, row in stored.items():
+        assert normalise_metric(spelling) == normalise_metric(row), (
+            f"{spelling!r} — the spelling Prometheus actually holds — does not reduce onto "
+            f"PRD 10's {row!r}, so a panel that renders data fails invariant 2"
+        )
+        assert normalise_metric(spelling) in catalogue, (
+            f"{spelling!r} normalises to {normalise_metric(spelling)!r}, which PRD 10's "
+            "table does not hold"
+        )
+
+    assert normalise_metric("usher_suggest_results") != normalise_metric(
+        "usher_suggest_duration"
+    ), "the unit strip has eaten a name segment and collapsed two instruments onto one key"
