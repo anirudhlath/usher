@@ -886,8 +886,13 @@ force a mid-swap walk; a timer starting a 3.58-hour one unasked may not.
 operator decision with a number attached. A fresh deployment has no embeddings,
 so the first tick of an enabled scheduler would eventually start a walk nobody
 asked for: measured from the artefact's own timestamps on this deployment's
-catalog, the most recent completed rebuild took **3.58 hours over 132,442
-seeds** (2026-08-19). And there is no mutual exclusion — the exclusion
+catalog, a full rebuild takes **3.46 hours over 133,319 seeds** — M10's J7,
+2026-09-08, measured on a clone rather than projected: 127,420 seeds rebuilt in
+11,895 s at **93.4 ms/seed**, across a run deliberately interrupted once and
+resumed, plus the 5,899 the resume correctly skipped. (The **3.58 h over
+132,442 seeds** this sentence used to carry was 2026-08-19's and is superseded;
+the seed population grew because that walk left 877 embedded titles with no
+neighbour row and J7's closed the gap.) And there is no mutual exclusion — the exclusion
 `JobQueue` provides is a lock on a job **row**, and this component has no rows —
 so a deployment running both the server and a separate `usher work` container
 with the scheduler on in each would start that walk twice.

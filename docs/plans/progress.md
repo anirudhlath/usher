@@ -3083,3 +3083,66 @@ Gate: ruff clean, `ruff format --check` 587 files, `mypy` over 572 files,
 `lint-imports` **9 kept / 0 broken**, **3,946 unit / 4 skipped**, **1,207
 integration / 22 skipped**, PRD link check `OK`. Tree `md5`-verified clean after
 the sweep.
+
+## M10 J7 — the overnight full walk, run once (2026-09-08)
+
+Bar pre-registered at `/var/tmp/m10-J7/BAR.md`, `sha256
+4746557714243417fa7d30742c01f01568346730be7659baacc251da239e88ec`, hashed
+2026-09-07T18:59:37Z — **before** any rebuild started. A hashed addendum
+(`26543bde…`, 23:23:56Z) records the one change of target.
+
+🔴 **It ran on a clone, not on the live catalog, and that was the operator's
+call.** `usher_catalog` cannot be a `TEMPLATE` while `usher-usher-1` holds
+connections to it (12 open), and terminating them is the disruption the
+instruction forbade. So the target is `usher_j7`, created in **25.97 s** from
+the `usher_seed_full` snapshot — 45 embeddings and 58 titles short of live,
+identical in neighbour counts. **The report therefore says `usher_j7` and does
+not claim the deployment's own catalog.** The clone is the reason a wrong-label
+rewrite would have cost a `DROP DATABASE` rather than real data.
+
+### Refutations first
+
+**P7 — "the scheduler drove it" — NOT MET, and stated rather than glossed.**
+`usher schedule --once` drove the **guard-refusal arm** only. The walk itself
+was `usher similar --rebuild`, because the interrupt-and-resume arm needs a
+process to signal and a `--resume` flag to pass, and the scheduler offers
+neither. So the end-to-end claim this task exists to make is made for the
+guard and not for the walk.
+
+🔴 **`usher similar --rebuild` ignores `SIGINT`.** Sent to the running process,
+it was still walking **three minutes later**; `SIGTERM` stopped it at once. The
+bar's own wording — *"a signal that reaches the loop"* — assumes otherwise, and
+an operator interrupting a 3.5-hour job reaches for Ctrl-C first. (My first
+attempt also signalled the `uv` wrapper rather than the child, which forwards
+nothing — a harness error, not a defect, and separate from the above.)
+
+⚠️ **The resume skipped 5,899 seeds, and that is correct rather than a hole.**
+The cursor is defined against the **artefact** — the first embedded seed with
+no neighbour row carrying the current fingerprint — not against "what this run
+has covered". Those 5,899 already carried current-fingerprint rows from before
+the run, so the artefact was complete without them. A resume defined the other
+way would need state, which ADR-0046 refuses.
+
+### Predictions that held
+
+| | prediction | outcome |
+|---|---|---|
+| P1 | 3.58 h ± 15% at 97.3 ms/seed | **3.46 h**, 127,420 seeds in 11,895 s = **93.4 ms/seed** |
+| P2a | ~3.31 M rows at 25/seed | **3,332,975** rows, **25.00**/seed exactly |
+| P2b | the walk closes the 877-seed gap | **closed** — 133,319 seeds = every embedded title |
+| P3 | `stale` 0, with the count beside it | *"no neighbour row disagrees with the running blend"*, over 3,332,975 rows |
+| P4 | exactly one fingerprint, `a7013154…` | **1 distinct**, and it re-stamped the 125 rows the guard arm had left under `afd00fff…` |
+| P5 | the guard refuses, **zero** rows written | refused on the scheduled path, both model strings at `ERROR`, count / `max(computed_at)` / fingerprint-count all unchanged |
+| P6 | a resumed run converges | **`redone_overlap = 0`** — 37,500 seeds before the interrupt, 89,920 after, zero intersection |
+
+**P5's arm is worth keeping.** Run under the wrong model, `usher similar
+--rebuild` **does** write — 125 rows stamped `afd00fff…` — and that is
+deliberate: `similar.py` states the guard is on the job and not on `rebuild`,
+because *"an operator typing a command about a table they can see"* may
+legitimately force a mid-swap rebuild, where *"a timer starting a multi-hour
+walk unasked"* may not. I misread that as a failed guard before reading the
+module; the scheduled path is the one that must refuse, and it does.
+
+Segment timings: seg1 37,500 seeds / 3,546 s / 94.6 ms/seed; seg2 89,920 seeds
+/ 8,349 s / 92.8 ms/seed. `computed_at` is stamped **per page** (500 seeds,
+~48 s), which is what makes segment-level progress measurable at all.
