@@ -20,6 +20,10 @@ provisioning YAML that the other project's compose file bind-mounts;
 
 Dashboards 3–6 are specified in PRD 10 and not yet built.
 
+| `03-pipeline.json` | 3 — Pipeline | Prometheus **and** Postgres |
+
+Dashboards 2, 4, 5 and 6 are specified in PRD 10 and not yet built.
+
 **Every panel on both dashboards is SQL against the canonical database and none
 of them is a Prometheus query.** That is PRD 10's first principle doing the
 thing it was written for: *"Most of what is worth knowing about a media catalog
@@ -760,3 +764,448 @@ renderer.
 - **The wall times above include Grafana's proxy**, so they are upper bounds on
   the database's work and not measurements of it. Where the distinction
   mattered — panel 11 — the `EXPLAIN (ANALYZE)` numbers are given separately.
+
+---
+
+# Dashboard 3 — Pipeline
+
+Ten panels, and the mixed one: Prometheus for rates and depths, Postgres for
+the queue's and the reconciler's own breakdowns. Dashboard 1's principle
+("the catalog *is* the record") does not decide this dashboard on its own,
+because half of what a pipeline does leaves no row behind — a completed job is
+**deleted**, and a request that TMDb refused exists only as a counter.
+
+## The three panels whose series is not what the title implies
+
+Two of these are the deliverable and the third was found while measuring.
+
+**1. "Queue depth by priority" is Postgres, and the gauge beside it is a
+different panel.** PRD 10 says twice that `usher.jobs.queued` is labelled
+`kind`: *"`JobQueue.depth()` counts pending rows per kind, which is what 'which
+lane is backed up' asks"*, and then *"M5 introduces demand promotion and the
+label stays `kind`: a priority band needs a second `GROUP BY` on `JobQueue`…
+The panel reads `jobs` directly."* Verified at this HEAD rather than inherited:
+`telemetry.py`'s `_observations` emits `Observation(count, {"kind": kind})` and
+nothing else, and `QueueSnapshot` holds two `Mapping[str, int]`s keyed by
+`JobKind.value`. **So the pair is two panels, two datasources, two titles.** A
+single panel titled *"by priority"* over that gauge renders perfectly and
+answers a different question, which is the failure
+`test_the_queue_depth_panels_are_two_panels_over_two_datasources` closes.
+
+**2. "Push connection uptime" plots delivery, and its `source` label is an
+operator-typed name.** `PushSnapshot.delivering`, not `connected`, because
+*"a gauge fed by the socket's state would read 1 for the failure ADR-0004
+measured"*. The half nobody had written down is the label: `api/lanes.py`'s
+`push_snapshots` builds the reader as
+`{self._names[source_id]: PushSnapshot(...)}` over `self._open_adapters`, so
+the label is `"Shared Emby"` and never a UUID — **observed as exactly that
+string on the live series**, not read off the source. And a source with no
+open adapter is simply absent from that comprehension, while
+`telemetry.py`'s `_push_observations` returns `[]` with no reader at all:
+**a disabled source, or one that does not support push, produces no
+observation rather than a zero.** That is the sentence D11's *"Push down"*
+alert is written against, and it decides the condition:
+`usher_source_push_connected_ratio == 0` for 15 m, never `absent(...)`, which
+would page about every source nobody configured.
+
+**3. `usher.jobs.parked` saturates at 1,000, and this was not in the task.**
+`composition.py`'s `QueueGauges.refresh` builds the parked counts from
+`await queue.parked(limit=1000)` and tallies the returned rows in Python
+rather than asking the database for a count, so the gauge is a **floor** on
+the parked population. Measured 2026-09-07: the gauge read `enrich` 890 +
+`index` 110 = **exactly 1,000**, while
+
+```sql
+SELECT kind, count(*) FROM jobs WHERE status = 'parked' GROUP BY kind
+```
+
+returned `enrich` 1,891 + `index` 110 = **2,001**. The 1,000 the gauge sees are
+the 1,000 most recently updated (`_PARKED` orders `updated_at DESC, id DESC`),
+which is why the `index` half is exact and the `enrich` half is not. The panel
+keeps PRD 10's series and its own title and **says so in its description**
+rather than being renamed to match a wrong number; the repair is a
+`parked_depth()` on the queue port beside `depth()`, which is a change to
+`ports/`, `db/` and `composition.py` and not to this directory.
+
+## Two more things measured here that a panel author needs
+
+**`$__rate_interval` empties every rate panel on this stack.** Grafana derives
+it from the datasource's configured scrape interval, and a Prometheus fed by
+remote write from an OTel collector has none — so it resolved to `1m15s`
+against a 60 s push interval, which is one sample, and `rate()` over one sample
+is empty. Observed directly: `executedQueryString` read
+`rate(usher_enrichment_latency_seconds_count[1m15s])` and the response carried
+zero frames. **Every rate window on this dashboard is the literal `[5m]`**, so
+the file does not depend on an operator having set `timeInterval`.
+
+**The exporter puts the unit in the name.** Every gauge Usher registers carries
+`unit="1"` and every histogram `unit="s"`, and the OTel Prometheus exporter
+appends that unit ahead of the aggregation suffix. So the name a panel must be
+written in is `usher_jobs_queued_ratio`, not `usher_jobs_queued`, and
+`usher_enrichment_latency_seconds_bucket`, not
+`usher_enrichment_latency_bucket`. D6's normaliser stripped only
+`_bucket`/`_count`/`_sum`/`_total` and would have graded **every** Prometheus
+target on this dashboard as a metric PRD 10 does not document; it could not
+have found this, because dashboard 1 has no Prometheus panel and D6's synthetic
+control was written in a spelling the exporter does not produce.
+`normalise_metric` now strips one unit as well, and
+`test_the_prometheus_normaliser_strips_the_exporters_unit_suffix` pins twelve
+names read off `/api/v1/label/__name__/values` on the running stack.
+
+## The observations
+
+Recorded **2026-09-07** through the running Grafana 13.1.3 at
+`127.0.0.1:3000` (served from the sub-path `/grafana/`, so a panel's own URL is
+`/grafana/d/usher-pipeline/…?viewPanel=<id>`), against Prometheus
+`prom/prometheus:v3.13.2` and the live catalog `usher_catalog` (Alembic
+`m10b`). Each panel was opened alone at `?viewPanel=<id>&kiosk` in a headless
+Chrome 151 over CDP and screenshotted, and **every one of its committed targets
+was also issued through `/api/ds/query`**, which is the same path the panel
+takes; the wall times below are that round trip and include Grafana's proxy.
+
+⚠️ **The bind mounts `provisioning/dashboards.yml` describes are not
+present on this host's Grafana.** `/etc/grafana/provisioning/dashboards` does
+not exist in the container and `/var/lib/grafana/dashboards/usher` is an empty
+directory inside the `grafana-data` volume rather than this repository. So the
+observation loaded the committed JSON through `POST /api/dashboards/db`
+instead. That is a gap in `~/code/observability/compose.yml`, not in this file,
+and it is recorded because a reader of the provisioning YAML would otherwise
+assume the mechanism is wired.
+
+### How the traffic was generated, and what was *not* run
+
+Three panels needed traffic. **No app was started for any of it.** The
+operator's own deployment (`usher-usher-1`, running since 2026-09-02 with
+`USHER_PUSH_ENABLED=true` and `USHER_WORKER_ENABLED=true`) is already exporting
+every series on this dashboard, so the observation is a read of a running
+system plus HTTP requests to its public API:
+
+- **The job, enrichment and TMDb panels**: 130 `GET /titles/{id}` requests
+  against skeleton titles carrying a `tmdb_id`, which is M5's read-through
+  path — `services/titles.py` promotes the title it answers to
+  `JobPriority.DEMAND`. The deployment's own worker then drained the queue.
+  Cost: **+129 enrichments and +130 TMDb requests**, all of them work the
+  catalog wanted.
+- **The Emby latency panel**: four `GET /admin/sources/{id}/status` calls,
+  which is one `verify()` each — `authenticate`, `verify`, `verify_policy`,
+  `verify_public` and nothing that walks.
+- 🔴 **The push panels needed no run at all, and that is the finding.**
+  `.claude/rules/api-telemetry-and-lanes.md` warns that starting the shipped
+  app against a real source is itself an unbounded walk, because the push
+  lane's reconnect gap-closer calls `reconcile(source, DELTA, adapter)`. The
+  task specified a bounded scratch source for this reason. **It was not
+  needed**: the running deployment publishes both push series continuously, so
+  the observation is a read and **no lane was pointed at the operator's Emby
+  library by this task.** No scratch source was created, and no `usher sync`,
+  `usher work` or `usher push` was run.
+
+⚠️ **One live fact bounds the queue panels, and it is why the depth had to be
+generated rather than waited for.** Every owned skeleton title in this catalog
+already carries a *parked* `enrich` job, and `_ENQUEUE`'s
+`WHERE jobs.status <> 'parked'` refuses to revive one — *"a title TMDb has
+permanently refused is not revived by being scrolled past"*. Measured: of 40
+owned skeleton titles opened, **0** produced a pending job. The 130 that
+worked were skeletons with no `jobs` row at all.
+
+### 1 — Queue depth by priority band
+
+`table`, Postgres, over `jobs.priority` and `jobs.status`.
+
+```sql
+SELECT coalesce(band.name, 'off-rung ' || pending.priority::text) AS priority_band,
+       coalesce(band.priority, pending.priority) AS priority,
+       coalesce(pending.pending, 0) AS pending
+FROM (VALUES ('DEMAND', 100), ('VISIBLE', 80), ('NEW', 50), ('BACKFILL', 20))
+         AS band(name, priority)
+FULL OUTER JOIN (
+    SELECT jobs.priority AS priority, count(*) AS pending
+    FROM jobs
+    WHERE jobs.status = 'pending'
+    GROUP BY jobs.priority
+) AS pending ON pending.priority = band.priority
+ORDER BY coalesce(band.priority, pending.priority) DESC
+```
+
+**Returned** 4 rows in 11.6 ms. Observed twice, deliberately:
+
+| when | DEMAND 100 | VISIBLE 80 | NEW 50 | BACKFILL 20 |
+|---|---|---|---|---|
+| 19:38:43, immediately after 60 read-throughs | **61** | 0 | 0 | 0 |
+| 19:54:06, after the worker drained | 0 | 0 | 0 | 0 |
+
+**The four-rung spine is the panel's whole structural claim.** A bare
+`GROUP BY jobs.priority` returns *nothing* for an empty queue, and an empty
+table is indistinguishable from a panel whose datasource is misconfigured — the
+failure `tests/unit/test_dashboards.py` exists for. With the spine, the second
+row of the table above is legible as "the queue is empty" at a glance.
+`jobs.priority` is a free `integer` with a `CHECK (priority >= 0 AND
+priority <= 100)` and promotion moves it with `GREATEST`, so the `FULL OUTER
+JOIN` and the `'off-rung '` label are what keep a value off the four rungs
+visible instead of silently dropped. **No off-rung value exists today**: the
+whole `jobs` table holds 20, 50 and 80 only.
+
+### 2 — Queue depth by kind
+
+`timeseries`, Prometheus.
+
+```
+sum by (kind) (usher_jobs_queued_ratio)
+```
+
+**Returned** 9 frames × 361 points in 7.6 ms — one per `JobKind`, because
+`PostgresJobQueue.depth()` fills `dict.fromkeys(JobKind, 0)` before applying
+the `GROUP BY`, so an empty kind reports 0 rather than dropping its series.
+Over the six-hour window only `enrich` was ever non-zero (5 points, max 1);
+the 61-deep moment above is **not** in this series, and that is worth
+understanding rather than explaining away: the reader is a snapshot the worker
+refreshes *after* each pass, and the drain finished between two refreshes.
+The gauge is stale and never wrong, which is exactly what
+`register_queue_gauges`' docstring claims for it — and the reason the panel
+beside it reads the table.
+
+### 3 — Parked jobs by kind
+
+`timeseries`, Prometheus.
+
+```
+sum by (kind) (usher_jobs_parked_ratio)
+```
+
+**Returned** 9 frames × 361 points in 9.9 ms, flat for the whole window:
+`enrich` **890**, `index` **110**, every other kind 0. Against the table at the
+same moment: `enrich` **1,891**, `index` **110**. See "the three panels" above
+— this series saturates at 1,000 and the panel says so.
+
+### 4 — Enrichment throughput and p50/p99
+
+`timeseries`, Prometheus, three targets, all split on `outcome`.
+
+```
+sum by (outcome) (rate(usher_enrichment_latency_seconds_count[5m]))
+histogram_quantile(0.5,  sum by (outcome, le) (rate(usher_enrichment_latency_seconds_bucket[5m])))
+histogram_quantile(0.99, sum by (outcome, le) (rate(usher_enrichment_latency_seconds_bucket[5m])))
+```
+
+**Returned** 2 frames per target in 5.4 / 8.7 / 8.0 ms. Peak throughput
+**0.417 enrichments/s** for `enriched` against **0.0167/s** for `failed`;
+lifetime counts moved from 122/77 to **251 enriched / 82 failed** over the
+observation. **p50 2.50 s and p99 4.95 s — identical for both outcomes**, and
+that is a real limit of the instrument rather than a coincidence: at this
+histogram's bucket widths a success and a failure land in the same two buckets,
+so the panel separates the two populations' *rates* far better than their
+*latencies*.
+
+⚠️ **The label is `outcome` and there is no demand/background split on this
+series.** `enrich.py`: *"Labelled `outcome` rather than PRD 10's original
+`trigger`: nothing in M4 enriches on demand… while a failure's latency and a
+success's are genuinely different populations."* M5 shipped demand promotion
+and the label did not move — every sample above came from a `JobPriority.DEMAND`
+read-through, and the series still says only `enriched` or `failed`. Splitting
+this panel the way D12 wants needs a second label on the histogram, not a
+different query.
+
+### 5 — Promotion latency against the 5 s read-through target
+
+`table`, Postgres, over `jobs` at `VISIBLE` or above, with a red threshold at
+5 s.
+
+```sql
+SELECT jobs.kind AS kind,
+       jobs.priority AS priority,
+       jobs.status AS status,
+       round(extract(epoch FROM (jobs.updated_at - jobs.created_at))::numeric, 3)
+           AS seconds_since_promotion,
+       jobs.key AS title_id,
+       jobs.traceparent AS traceparent
+FROM jobs
+WHERE jobs.priority >= 80
+ORDER BY jobs.updated_at DESC
+LIMIT 50
+```
+
+**Returned** 24 rows in 5.5 ms. Twenty-three of them are the M5 `VISIBLE`
+promotions this deployment already had, and **every one of them reached its
+terminal state inside the target — 2.483 s to 4.959 s, none over 5 s — and
+every one of them terminated as `parked`.** Speed is not success, and this
+panel is the one place that is visible.
+
+The twenty-fourth row is one this observation produced: a `DEMAND` (100)
+promotion that retried four times against *"title … conflicts with an existing
+title"* and parked at **286.099 s**, rendered red. That is the panel doing its
+job.
+
+⚠️ **Its population is promotions that did not complete.** A completed job's
+row is `DELETE`d — `JobStatus` has no `DONE` member, for the reason
+`domain/jobs.py` gives — so the 129 read-throughs that *succeeded* during this
+observation left nothing here at all. Read it as the miss list; it is a floor
+on the misses and never a distribution over all promotions. The `traceparent`
+column is what `current_traceparent()` put on the row at enqueue, and it is
+what makes the panel a join to the requesting span rather than an estimate.
+
+### 6 — Sync run outcomes and duration
+
+`table`, Postgres, over `sync_runs`.
+
+```sql
+SELECT sync_runs.kind AS kind,
+       sync_runs.status AS status,
+       count(*) AS runs,
+       sum(sync_runs.items_seen) AS items_seen,
+       sum(sync_runs.items_unmatched) AS items_unmatched,
+       round(avg(extract(epoch FROM
+           (sync_runs.finished_at - sync_runs.started_at)))::numeric, 1)
+           AS avg_seconds,
+       round(max(extract(epoch FROM
+           (sync_runs.finished_at - sync_runs.started_at)))::numeric, 1)
+           AS max_seconds
+FROM sync_runs
+GROUP BY sync_runs.kind, sync_runs.status
+ORDER BY sync_runs.kind, sync_runs.status
+```
+
+**Returned** 7 rows in 4.7 ms, over the 119 rows `sync_runs` holds:
+
+| kind | status | runs | items_seen | items_unmatched | avg_seconds | max_seconds |
+|---|---|---|---|---|---|---|
+| delta | completed | 66 | 29,914 | 5,846 | 3.9 | 66.2 |
+| delta | failed | 1 | 0 | 0 | 0.1 | 0.1 |
+| full | completed | 1 | 60 | 0 | 9.6 | 9.6 |
+| full | failed | 1 | 120 | 0 | 19.3 | 19.3 |
+| watch_state | completed | 27 | 1,194,855 | 1,168,679 | 17,855.6 | 481,988.4 |
+| watch_state | failed | 20 | 3,231,000 | 3,223,036 | 5,310.6 | 30,342.2 |
+| watch_state | running | 3 | 615,000 | 614,760 | *null* | *null* |
+
+**The outcome breakdown is Postgres and not the histogram, and that is a
+measurement rather than a preference.** `usher.sync.run.duration` does carry a
+`status` label, but the histogram holds only what the *current* process
+recorded: on the day it was one series, `kind="delta" status="completed"`,
+count 15. Every failure above predates that process. **Three runs are still
+`running`** — started 2026-08-19 and never finished — so their `finished_at` is
+NULL and their duration columns are NULL rather than zero; an `avg` that
+coalesced them to 0 would have reported those three as instant.
+
+**No `$__timeFilter`, deliberately.** The table is 119 rows — this
+deployment's entire recorded history — and any window short enough to be an
+operational default hides exactly the failed and never-finished runs the panel
+exists to show. The dashboard's time picker therefore does not move this panel,
+which the description says out loud.
+
+### 7 — Emby request latency by op
+
+`timeseries`, Prometheus, two targets.
+
+```
+histogram_quantile(0.95, sum by (op, le) (rate(usher_source_request_duration_seconds_bucket[5m])))
+sum by (op) (usher_source_request_duration_seconds_sum) / sum by (op) (usher_source_request_duration_seconds_count)
+```
+
+**Returned** 7 frames per target in 12.4 / 6.7 ms. Lifetime means, which are
+the readable number here: `get_watch_state` **0.255 s**, `get_item`
+**0.423 s**, `list` **1.080 s**, `authenticate` **1.339 s** (down from 3.528 s
+as the four probes below diluted it), `verify_policy` **0.144 s**, `verify`
+**0.145 s**, `verify_public` **0.478 s**. The p95 target was non-empty only
+where the window held requests — 10 points for `authenticate`, 5 each for the
+three `verify_*` ops, 4 for `get_item`, **0 for `list` and
+`get_watch_state`**.
+
+**Two targets on purpose, and that asymmetry is the reason.** This deployment
+talks to Emby only while a sync, a watch-state pass or a push lane is running,
+so an idle window is the ordinary case rather than an outage — a panel that
+carried only the p95 would be blank most of the time and a reader could not
+tell that from a broken datasource. The lifetime mean is always present and is
+what the axis is scaled by.
+
+### 8 — Push connection uptime
+
+`timeseries`, Prometheus, two targets, left axis soft-capped at 1.
+
+```
+max by (source) (usher_source_push_connected_ratio)
+max by (source) (usher_source_push_reconnects_total)
+```
+
+**Returned** 1 frame each in 4.6 / 5.5 ms: `Shared Emby · delivering` **0** for
+every one of 361 points, `Shared Emby · reconnects (cumulative)` **11**.
+
+**The label rendered in the legend is `Shared Emby`** — the operator-typed
+source name, from `self._names[source_id]`, exactly as
+`api/lanes.py::push_snapshots` builds it. There is **one** series and the
+`sources` table holds **one** row, so this observation does not on its own
+demonstrate the absence half; what does is the code path
+(`_push_observations` returns `[]` with no reader, and the comprehension omits
+any source with no open adapter) plus the live shape below.
+
+🔴 **A second fact, observed rather than looked for: this series should not
+exist right now.** `GET /health/ready` on the same process reports
+`"lanes": {"push": [], "worker": true}` — **no running push lane** — while the
+gauge has gone on publishing `0` every 60 s for the whole window. That is the
+defect M10's S10 fixed: before it, a lane that hit `PushSupervisor.run`'s
+failure ceiling had its task complete and nothing popped it, so the
+`SourceAdapter` stayed in `self._open_adapters` and `push_snapshots()` kept
+reading it. The running image was built **2026-08-26** and predates the repair.
+On this HEAD the same state would produce *no series* — which is the honest
+behaviour, and the reason D11's alert is
+`usher_source_push_connected_ratio == 0` and never `absent(...)`: a source with
+no lane is invisible here, so an `absent()` alert would fire for every source
+nobody configured and stay silent for the one whose lane died holding a socket.
+
+### 9 — Push events applied, by kind
+
+`timeseries`, Prometheus.
+
+```
+sum by (kind) (usher_source_push_events_total)
+```
+
+**Returned** 4 frames × 361 points in 5.4 ms, flat for the whole window:
+`item_added` **94**, `watch_state_changed` **74**, `item_updated` **70**,
+`item_removed` **17**.
+
+**The cumulative counter is plotted rather than its rate**, which is what makes
+this panel answer PRD 10's question — *"separates 'the lane is up' from 'the
+lane is doing anything'"* — in the state the deployment is actually in. Four
+flat lines say "this lane has delivered 255 events in its life and none of them
+recently"; a `rate()` would say `0` and look identical to a source that has
+never delivered anything at all. The `source` label is the same operator-typed
+name panel 8 carries, and a source with no open lane produces no series here
+either.
+
+### 10 — TMDb requests/sec against the ceiling, with 429 count
+
+`timeseries`, Prometheus, three targets.
+
+```
+sum(rate(usher_provider_requests_total{provider="tmdb"}[5m]))
+sum(usher_provider_requests_total{provider="tmdb", status="429"}) or vector(0)
+vector(30)
+```
+
+**Returned** 1 frame each in 5.1 / 5.5 / 5.2 ms. Peak **0.417 req/s** against
+a ceiling of **30**, so 1.4% of the budget at the busiest minute this
+observation produced; **429 count 0**; lifetime totals `status="200"` **255**
+and `status="404"` **3**, with no `status="error"` row — this deployment has
+not had a TMDb transport failure.
+
+⚠️ **PRD 10's "~40 ceiling" is not a figure this deployment has at any
+spelling.** `Settings.tmdb_requests_per_second` defaults to **30.0**,
+`.env.example` sets `USHER_TMDB_REQUESTS_PER_SECOND=30`, and the running
+container sets the variable at all. The ceiling series is 30 and PRD 10's
+sentence has been corrected in the same commit.
+
+**Two spellings here are load-bearing.** The rate target selects on `provider`
+only: `status` is the HTTP status code as a string
+(`adapters/tmdb/client.py`, `status = str(response.status_code)`) **or the
+literal `"error"`** for a transport failure that never reached a status line,
+and both are recorded from a `finally` — *"a denominator that omitted the
+failures would read low exactly during an outage."* And `or vector(0)` is what
+makes "no 429s" render as a zero instead of an empty series, at the stated cost
+that a metric which stopped existing entirely would read the same; the
+requests/sec series beside it is what distinguishes those two.
+
+**The ceiling is a named series and not a threshold line, and that was a
+repair.** As a threshold Grafana drew it against the *right* axis's scale, so a
+red line labelled nothing appeared at 0.14 req/s on a left axis that had
+auto-scaled to 0.46 — a panel telling a reader the ceiling was a third of a
+request per second. `vector(30)` carries its own legend entry, names the
+setting it comes from, and pulls the axis to the ceiling so headroom is the
+readable quantity.

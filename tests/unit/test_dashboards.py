@@ -23,9 +23,17 @@ dashboard's three silent failures live.
    dropped, because the catalogue's 42nd row is `http.server.duration` — no
    `usher.` prefix, supplied by `FastAPIInstrumentor` — and a catalogue check
    that cannot see it cannot grade an API-latency panel at all.
-   **Prometheus mangles dots to underscores and appends
-   `_bucket`/`_count`/`_sum`/`_total`**, so both sides go through one
-   normaliser and the normaliser has its own case.
+   **Prometheus mangles dots to underscores, appends the instrument's
+   *unit* and then appends `_bucket`/`_count`/`_sum`/`_total`**, so both
+   sides go through one normaliser and the normaliser has its own case.
+   The unit half was added by D8 and is not cosmetic: every gauge Usher
+   declares carries `unit="1"` and reaches Prometheus as `..._ratio`, every
+   histogram carries `unit="s"` and arrives as `..._seconds_bucket`, so a
+   normaliser that stripped only the aggregation suffix graded **the real
+   name of every Prometheus panel D8 commits as an unknown metric**. D6
+   could not have found this: dashboard 1 has no Prometheus panel, and its
+   synthetic control was written in `usher_suggest_duration_bucket`, a
+   spelling this deployment's exporter does not produce.
 
 3. **Postgres targets name tables and columns that exist.** Against
    `Base.metadata`, which is the live schema the ORM already holds — not
@@ -109,6 +117,20 @@ _METRIC_ROW = re.compile(r"^\|\s*`([a-z][a-z0-9_.]*)`\s*\|\s*(\w+)\s*\|", re.M)
 # one of these to a histogram or a monotonic counter; `_bucket`, `_count` and
 # `_sum` come from the histogram, `_total` from the counter.
 _PROMETHEUS_SUFFIXES = ("_bucket", "_count", "_sum", "_total")
+
+# The exporter's *unit* suffix, which sits between the mangled name and the
+# aggregation suffix -- `usher.jobs.queued` (`unit="1"`, a gauge) reaches
+# Prometheus as `usher_jobs_queued_ratio` and `usher.enrichment.latency`
+# (`unit="s"`) as `usher_enrichment_latency_seconds_bucket`. Measured against
+# the running stack on 2026-09-07 rather than read out of a specification:
+# `/api/v1/label/__name__/values` holds 61 `usher_`-prefixed names and every
+# one of them carries a unit or is a `_total` counter.
+#
+# ⚠️ **Stripping this is only safe while no catalogue row is itself named for
+# a unit**, because `usher.x` and `usher.x.seconds` would collapse onto one
+# key. `test_the_normaliser_is_not_vacuous` is what checks that, over the
+# whole catalogue, in both directions.
+_PROMETHEUS_UNITS = ("_ratio", "_seconds", "_milliseconds", "_bytes")
 
 # PromQL's own vocabulary, which a `[a-z][a-z0-9_.]*` scan cannot tell from a
 # metric name. Only the functions and keywords are here: label keys and
@@ -295,15 +317,26 @@ def normalise_metric(name: str) -> str:
     in a panel reduce to the same key. Applied to **both** sides, which is what
     makes it a normalisation rather than a rewrite of one of them.
 
-    No catalogue row ends in one of the four suffixes today (checked in
+    **Two strips, in the exporter's own order**: one aggregation suffix, then
+    one unit. `usher_enrichment_latency_seconds_bucket` needs both to reach
+    `usher_enrichment_latency`, and doing them in the other order reaches
+    nothing -- `_bucket` is not a unit and `_seconds_bucket` is not a suffix
+    in either list.
+
+    No catalogue row ends in one of the four aggregation suffixes or one of
+    the four units today (both checked in
     `test_the_normaliser_is_not_vacuous`), so stripping on the catalogue side
-    is a no-op; if one ever does, that row and its `_count` sibling would
-    collapse into one key and the case is what says so.
+    is a no-op; if one ever does, that row and its `_count` or `_seconds`
+    sibling would collapse into one key and the case is what says so.
     """
     key = name.strip().replace(".", "_")
     for suffix in _PROMETHEUS_SUFFIXES:
         if key.endswith(suffix):
-            return key[: -len(suffix)]
+            key = key[: -len(suffix)]
+            break
+    for unit in _PROMETHEUS_UNITS:
+        if key.endswith(unit):
+            return key[: -len(unit)]
     return key
 
 
@@ -524,11 +557,34 @@ def test_the_normaliser_is_not_vacuous() -> None:
     assert normalise_metric("usher.suggest.duration") != normalise_metric("usher.suggest.results")
     assert normalise_metric("usher.suggest.duration") != normalise_metric("usher.suggest.latency")
 
+    assert normalise_metric("usher_jobs_queued_ratio") == "usher_jobs_queued"
+    assert normalise_metric("usher_enrichment_latency_seconds_bucket") == (
+        "usher_enrichment_latency"
+    )
+    assert normalise_metric("usher.jobs.queued") == normalise_metric("usher_jobs_queued_ratio")
+
+    assert normalise_metric("usher_jobs_queued_ratio") != normalise_metric(
+        "usher_jobs_parked_ratio"
+    )
+    assert normalise_metric("usher.sync.run.duration") != normalise_metric(
+        "usher.jobs.duration_seconds"
+    )
+
     catalogue = metric_catalogue()
-    collisions = [name for name in catalogue if name.endswith(_PROMETHEUS_SUFFIXES)]
+    collisions = [
+        name for name in catalogue if name.endswith(_PROMETHEUS_SUFFIXES + _PROMETHEUS_UNITS)
+    ]
     assert collisions == [], (
-        "a catalogue row's own name ends in a Prometheus suffix, so it now normalises onto "
-        f"whatever row it is the suffix of: {collisions}"
+        "a catalogue row's own name ends in a Prometheus aggregation suffix or a unit, so "
+        f"it now normalises onto whatever row it is the suffix of: {collisions}"
+    )
+
+    # The strip is only sound while it is injective over the catalogue: two rows
+    # that reduced to one key would make invariant 2 accept a panel naming
+    # either of them for the other, and nothing else in this module would say so.
+    assert len(catalogue) == len({normalise_metric(name) for name in catalogue}), (
+        "two catalogue rows now normalise onto one key, so the unit strip has stopped "
+        "being a normalisation and become a rewrite"
     )
 
 
@@ -818,3 +874,264 @@ def test_a_text_panel_with_no_content_is_caught() -> None:
         "a text panel with no `options` at all reads as filled, so the arm passes on the "
         "commonest spelling of the defect"
     )
+
+
+# --- Dashboard 3, and the panels whose series is not what their name implies ---
+
+_PIPELINE = _DASHBOARDS / "03-pipeline.json"
+
+
+def _live_panels(path: pathlib.Path) -> list[dict[str, Any]]:
+    """Every drawable panel of one committed file — rows carry no targets."""
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    return [panel for panel in _panels(dashboard) if panel.get("type") != "row"]
+
+
+def _kinds(panel: dict[str, Any]) -> set[str]:
+    return {_datasource_type(panel, target) for target in panel.get("targets") or []}
+
+
+def _exprs(panel: dict[str, Any]) -> list[str]:
+    return [str(target.get("expr", "")) for target in panel.get("targets") or []]
+
+
+def _sql(panel: dict[str, Any]) -> str:
+    return "\n".join(_target_sql(target) for target in panel.get("targets") or [])
+
+
+def test_the_queue_depth_panels_are_two_panels_over_two_datasources() -> None:
+    """The failure this closes renders perfectly and answers a different
+    question: one panel titled *"queue depth by priority"* whose target is
+    `usher.jobs.queued`, a gauge PRD 10 says twice is labelled `kind`.
+
+    *"`usher.jobs.queued` is labelled `kind`, not `priority`. `JobQueue.depth()`
+    counts pending rows per kind, which is what 'which lane is backed up'
+    asks"*, and then again under the observable-callback rules: *"M5 introduces
+    demand promotion and the label stays `kind`: a priority band needs a second
+    `GROUP BY` on `JobQueue`… The panel reads `jobs` directly."* Verified at
+    this HEAD rather than inherited: `telemetry.py`'s `_observations` emits
+    `Observation(count, {"kind": kind})` and nothing else, and `QueueSnapshot`
+    holds two `Mapping[str, int]`s keyed by `JobKind.value`.
+
+    So the pair is two panels, two datasources, two titles and two questions —
+    *which band is waiting* is Postgres over `jobs.priority`, *which lane is
+    backed up* is the Prometheus gauge — and neither is the other with its
+    datasource swapped.
+    """
+    panels = _live_panels(_PIPELINE)
+
+    assert panels, "the pipeline dashboard parsed to no drawable panels"
+    titles = [str(panel["title"]) for panel in panels]
+    assert "Parked jobs by kind" in titles, (
+        f"the known-title anchor is gone, so this scan is reading something else: {titles}"
+    )
+    assert len(panels) == 10, f"PRD 10's dashboard 3 is ten panels, not {len(panels)}: {titles}"
+
+    depth = [panel for panel in panels if "queue depth" in str(panel["title"]).lower()]
+    assert len(depth) == 2, (
+        "the queue-depth question is two panels — a Postgres band count and the by-kind "
+        f"gauge — and this file has {len(depth)}: {[p['title'] for p in depth]}"
+    )
+    assert len({str(panel["title"]) for panel in depth}) == 2, (
+        "the two queue-depth panels share one title, so a reader cannot tell which "
+        "question either of them answers"
+    )
+
+    postgres = [panel for panel in depth if _kinds(panel) == {"grafana-postgresql-datasource"}]
+    prometheus = [panel for panel in depth if _kinds(panel) == {"prometheus"}]
+    assert len(postgres) == 1 and len(prometheus) == 1, (
+        "the pair is one Postgres panel and one Prometheus panel; got "
+        f"{[(p['title'], sorted(_kinds(p))) for p in depth]}"
+    )
+
+    banded, by_kind = postgres[0], prometheus[0]
+
+    assert ("jobs", "priority") in _sql_pairs(_sql(banded)), (
+        f"{banded['title']!r} is the Postgres half and does not select `jobs.priority`, "
+        "which is the only place a priority band exists at all"
+    )
+    assert "priority" in str(banded["title"]).lower(), (
+        f"the Postgres half is titled {banded['title']!r} and does not say priority"
+    )
+
+    tokens = {token for expr in _exprs(by_kind) for token in _metric_tokens(expr)}
+    assert {normalise_metric(token) for token in tokens} == {"usher_jobs_queued"}, (
+        f"the Prometheus half queries {sorted(tokens)}, not `usher.jobs.queued`"
+    )
+    assert "kind" in str(by_kind["title"]).lower(), (
+        f"the Prometheus half is titled {by_kind['title']!r}, which does not name the "
+        "label it actually splits on — the exact lie this case exists to close"
+    )
+    assert "priority" not in str(by_kind["title"]).lower(), (
+        f"the by-kind gauge is titled {by_kind['title']!r}: it claims a band its series "
+        "does not carry, renders perfectly, and answers a different question"
+    )
+
+
+def test_the_prometheus_normaliser_strips_the_exporters_unit_suffix() -> None:
+    """The real names, which D6's normaliser could not reach.
+
+    Every gauge Usher registers carries `unit="1"` and every histogram
+    `unit="s"`, and the OTel Prometheus exporter puts that unit into the name
+    ahead of the aggregation suffix. So the name a panel must be written in is
+    `usher_jobs_queued_ratio`, never `usher_jobs_queued` — and under D6's
+    normaliser the former graded as a metric PRD 10 does not document.
+
+    Every left-hand side below was read off the running Prometheus on
+    2026-09-07 (`/api/v1/label/__name__/values`), not constructed here.
+    """
+    catalogue = metric_catalogue()
+    assert catalogue, "no metric rows parsed out of PRD 10"
+
+    live_to_catalogue = {
+        "usher_jobs_queued_ratio": "usher_jobs_queued",
+        "usher_jobs_parked_ratio": "usher_jobs_parked",
+        "usher_source_push_connected_ratio": "usher_source_push_connected",
+        "usher_source_push_reconnects_total": "usher_source_push_reconnects",
+        "usher_source_push_events_total": "usher_source_push_events",
+        "usher_provider_requests_total": "usher_provider_requests",
+        "usher_enrichment_latency_seconds_bucket": "usher_enrichment_latency",
+        "usher_enrichment_latency_seconds_count": "usher_enrichment_latency",
+        "usher_sync_run_duration_seconds_bucket": "usher_sync_run_duration",
+        "usher_source_request_duration_seconds_sum": "usher_source_request_duration",
+        "usher_scheduler_job_due_seconds": "usher_scheduler_job_due",
+        "http_server_duration_milliseconds_bucket": "http_server_duration",
+    }
+
+    wrong = {
+        live: normalise_metric(live)
+        for live, expected in live_to_catalogue.items()
+        if normalise_metric(live) != expected
+    }
+    assert wrong == {}, (
+        f"the normaliser does not reach the exporter's own spelling: {wrong} — every one "
+        "of these is the name a committed panel has to be written in"
+    )
+
+    outside = sorted(name for name in live_to_catalogue.values() if name not in catalogue)
+    assert outside == [], (
+        f"these normalise cleanly and are still absent from PRD 10's table: {outside}"
+    )
+
+
+def test_the_push_panels_say_what_their_source_label_is_and_when_there_is_no_series() -> None:
+    """The sentence D11's *"Push down"* alert is written against, pinned on the
+    panel rather than left in a rules file.
+
+    `api/lanes.py`'s `push_snapshots` builds the reader as
+    `{self._names[source_id]: PushSnapshot(...)}` over `self._open_adapters`,
+    so the `source` label is **the operator-typed source name** and never a
+    UUID, and a source with no open adapter is simply not in the
+    comprehension. `telemetry.py`'s `_push_observations` then returns `[]`
+    with no reader at all. Both halves mean the same thing for an alert: a
+    disabled source, or one that does not support push, produces **no
+    observation** rather than a zero — so the condition is `== 0` and
+    `absent()` would page about every source nobody configured.
+    """
+    panels = _live_panels(_PIPELINE)
+    push = [panel for panel in panels if "push" in str(panel["title"]).lower()]
+
+    assert len(push) == 2, (
+        f"PRD 10's dashboard 3 has two push panels, not {len(push)}: {[p['title'] for p in push]}"
+    )
+
+    for panel in push:
+        description = str(panel.get("description", ""))
+        where = f"{panel['title']!r}"
+        assert "operator-typed" in description, (
+            f"{where} does not say the `source` label is the operator-typed source name, "
+            "so a panel author reads it as a UUID"
+        )
+        assert "no series" in description, (
+            f"{where} does not say a source with no lane produces no series, which is the "
+            "sentence D11's alert condition is written against"
+        )
+        assert "== 0" in description and "absent(" in description, (
+            f"{where} does not spell out which alert condition follows — `== 0` rather "
+            f"than `absent()`: {description!r}"
+        )
+
+
+def test_the_enrichment_panel_says_its_label_is_outcome_and_carries_no_demand_split() -> None:
+    """M4's correction, carried onto the panel that reads it.
+
+    `services/enrich.py`: *"Labelled `outcome` rather than PRD 10's original
+    `trigger`: nothing in M4 enriches on demand… while a failure's latency and
+    a success's are genuinely different populations."* The panel splits on
+    `outcome` and says so, because the demand-versus-background split a reader
+    expects here does not exist on this series at all.
+    """
+    panels = _live_panels(_PIPELINE)
+    enrichment = [panel for panel in panels if "enrichment" in str(panel["title"]).lower()]
+
+    assert len(enrichment) == 1, (
+        f"expected exactly one enrichment panel: {[p['title'] for p in enrichment]}"
+    )
+    panel = enrichment[0]
+    description = str(panel.get("description", ""))
+
+    assert "outcome" in description, "the enrichment panel does not name its label"
+    assert "enrich.py" in description, (
+        "the enrichment panel does not cite the module that made the correction"
+    )
+    for phrase in ("demand", "background"):
+        assert phrase in description.lower(), (
+            f"the enrichment panel does not say the {phrase} split is absent from this "
+            f"series, which is the thing a reader of the title assumes: {description!r}"
+        )
+
+    labels = {str(target.get("legendFormat", "")) for target in panel.get("targets") or []}
+    assert all("{{outcome}}" in label for label in labels), (
+        f"a target on the enrichment panel does not split on `outcome`: {sorted(labels)}"
+    )
+
+
+def test_the_tmdb_panel_counts_429s_and_denominates_on_every_status_including_error() -> None:
+    """PRD 10: *"a denominator that omitted the failures would read low exactly
+    during an outage."*
+
+    `adapters/tmdb/client.py` sets `status = str(response.status_code)` inside
+    the span and leaves it at the literal `"error"` for a transport failure
+    that never reached a status line, recording both from a `finally`. So the
+    429 series is `status="429"` and the rate beside it must select on
+    `provider` only.
+    """
+    panels = _live_panels(_PIPELINE)
+    tmdb = [panel for panel in panels if "tmdb" in str(panel["title"]).lower()]
+
+    assert len(tmdb) == 1, f"expected exactly one TMDb panel: {[p['title'] for p in tmdb]}"
+    exprs = _exprs(tmdb[0])
+    assert exprs, "the TMDb panel has no Prometheus target"
+
+    rate_exprs = [expr for expr in exprs if "rate(" in expr]
+    count_exprs = [expr for expr in exprs if 'status="429"' in expr]
+
+    assert count_exprs, f'no target selects `status="429"`: {exprs}'
+    assert rate_exprs, f"no target takes a rate for the requests/sec ceiling: {exprs}"
+    for expr in rate_exprs:
+        assert "status=" not in expr, (
+            "the requests/sec denominator filters on `status`, so it drops the "
+            f'`status="error"` transport failures and reads low during an outage: {expr}'
+        )
+
+    description = str(tmdb[0].get("description", ""))
+    assert 'status="error"' in description, (
+        "the TMDb panel does not state that its denominator includes the transport "
+        f"failures that never reached a status line: {description!r}"
+    )
+
+
+def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
+    """The four description checks above are substring scans, and a substring
+    scan over prose nobody can make fail is decoration. Each is exercised here
+    against a description with the sentence removed, which is the only place
+    they can be shown red once the real file is committed."""
+    panel = {"title": "Push connection uptime", "description": "a socket, probably"}
+    assert "operator-typed" not in str(panel["description"])
+
+    assert 'status="error"' not in "429s over the total"
+    assert "{{outcome}}" not in "{{trigger}}"
+
+    with pytest.raises(AssertionError, match="ten panels"):
+        titles = ["only", "nine", "of", "them", "here", "and", "no", "more", "sadly"]
+        assert len(titles) == 10, f"PRD 10's dashboard 3 is ten panels, not {len(titles)}"
