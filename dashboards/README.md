@@ -1234,3 +1234,57 @@ Fixing the instruments is the better repair and is not done here: D1's ladder
 was derived from ADR-0002's and ADR-0031's measured distributions, and neither
 of these two instruments has a measured distribution to derive one from. Issue
 filed; the panels are honest in the meantime.
+
+## 5 — Cost & Compliance (`05-cost-and-compliance.json`, uid `usher-cost-compliance`)
+
+Eight panels: three compliance, three spend, one freshness, one disk.
+
+🔴 **Panel 1–3 are a licence term, not a metric, and they are the panels that do
+not get trimmed.** Every other panel here is a blind spot when it breaks; these
+are TMDb's six-month cache ceiling. `tests/unit/test_no_third_party_data.py`
+enforces the *redistribution* half of that licence mechanically; **nothing
+enforces the retention half**, and these three plus their threshold are the
+whole of it.
+
+They read `raw_payloads.fetched_at` and deliberately not `titles.enriched_at`,
+which records when Usher enriched a title and does not move when a cached
+payload is re-read (ADR-0016). The ceiling is spelled `interval '6 months'` and
+never `'180 days'` — the two are never equal, and 180 days matches *more* rows,
+so it over-reports a breach that has not happened. `<` and never `<=`: TMDb's
+term is *no more than* six months.
+
+**Three statements rather than one**, because `count(*)` reads every row and
+folding them together costs the other two their index — measured separately at
+0.48 / 4.46 ms against one `Parallel Seq Scan` combined.
+
+**Observed 2026-09-07 on the live catalog: 133,631 cached payloads, oldest
+`fetched_at` 2026-08-11 21:40:59+00 against a ceiling of 2026-03-11, 0 past it,
+share 0.** The obligation is being met. That was the first time anyone looked.
+
+**Panels 4–5, spend.** Both return **zero rows on this deployment** — `llm_calls`
+and `curated_rows` are genuinely empty — which is a real state and not a panel
+fault. ⚠️ **A dashboard reading $0.00 is not evidence of a free deployment**:
+`cost_usd` defaults to `0`, honest for a local model and *wrong* for a hosted
+one an operator forgot to price. The mitigation is that the token counts are
+exact, so spend is recomputable after the fact, which is why panel 4 plots
+tokens beside money. Panel 5's join is one join wide and its index is partial
+(`WHERE generation_id IS NOT NULL`), so which population it reads depends on
+`USHER_QUERY_EXPANSION_ENABLED`.
+
+**Panel 6, embedding compute — a mean, not a quantile.** Same reason as
+Dashboard 3's two: `usher.embedding.duration` declares no bucket advisory, so a
+quantile over the SDK defaults answers a flat plausible number (issue #86).
+Series verified present: `usher_embedding_duration_seconds_count` = 141.
+
+**Panel 8, disk.** 🔴 **Plotted against measured free disk, never against PRD
+08's resource table**, which carries its own warning that nothing reads it and
+no policy derives from it — and which M9's Track 2 treated as a budget, deriving
+a 2.0 GB ceiling and **withdrawing a design** measured at 2.702 GB against a
+number with no forcing function (ADR-0036). A number nothing enforces is not a
+threshold. This panel is where D13's alert is drawn from.
+
+⚠️ **It reads `pg_class` and so names no Usher table**, which means invariant 3
+has nothing of ours to grade. That is the one exemption in
+`test_the_committed_dashboards_are_not_written_in_aliases`, and it is asserted
+**by name and by count** rather than merely granted — otherwise the exemption
+becomes how every later panel escapes the check.

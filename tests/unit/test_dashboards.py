@@ -525,6 +525,16 @@ def test_every_committed_dashboard_is_structurally_valid_and_names_only_metrics_
     )
 
 
+#: A target that reads only PostgreSQL's own catalogue names no Usher table, so
+#: invariant 3 has nothing to grade. Spelled as "every table it names is a
+#: `pg_`/`information_schema` one" rather than "it mentions `pg_class`", so a
+#: panel joining the catalogue *to* an Usher table is still graded on the Usher
+#: half.
+def _reads_only_the_postgres_catalogue(sql: str) -> bool:
+    tables = set(re.findall(r"\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_.]*)", sql, re.IGNORECASE))
+    return bool(tables) and all(table.startswith(("pg_", "information_schema")) for table in tables)
+
+
 def test_the_committed_dashboards_are_not_written_in_aliases() -> None:
     """Invariant 3's coverage is a property of the committed SQL, so it is
     asserted per *panel* rather than once over the glob.
@@ -537,7 +547,8 @@ def test_the_committed_dashboards_are_not_written_in_aliases() -> None:
     files = _dashboard_files()
     assert files, "the dashboard glob found nothing"
 
-    unchecked = []
+    unchecked: list[str] = []
+    exempt: list[str] = []
     for path in files:
         dashboard = json.loads(path.read_text(encoding="utf-8"))
         for panel in _panels(dashboard):
@@ -549,8 +560,22 @@ def test_the_committed_dashboards_are_not_written_in_aliases() -> None:
                     "grafana-postgresql-datasource",
                 }:
                     continue
-                if not _sql_pairs(_target_sql(target)):
-                    unchecked.append(f"{path.name}:{panel.get('title')}:{target.get('refId')}")
+                sql = _target_sql(target)
+                if _sql_pairs(sql):
+                    continue
+                if _reads_only_the_postgres_catalogue(sql):
+                    exempt.append(f"{path.name}:{panel.get('title')}")
+                    continue
+                unchecked.append(f"{path.name}:{panel.get('title')}:{target.get('refId')}")
+
+    # **The exemption is asserted by size, not just granted.** A disk-headroom
+    # panel reads `pg_class` and names no Usher table, so invariant 3 has
+    # nothing of ours to grade and demanding a pair would mean inventing one.
+    # Pinning the count is what stops the exemption becoming the way every
+    # later panel escapes the check.
+    assert exempt == [
+        "05-cost-and-compliance.json:Table size, and headroom against measured free disk"
+    ], exempt
 
     assert unchecked == [], (
         "these Postgres targets yield no table.column pair, so invariant 3 grades them on "
