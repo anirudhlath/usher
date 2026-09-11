@@ -1,0 +1,586 @@
+{
+  "uid": "usher-performance",
+  "title": "Usher — 4 Performance",
+  "description": "Nine panels: seven Prometheus and two SQL against the canonical database. Every one has a writer behind it. Three of the duration panels plot a mean rather than a quantile because their instruments are still on the OTel SDK's second-scale default bucket boundaries, where histogram_quantile answers a flat 2.5 s for everything under five seconds; the two panels PRD 10 also lists for this dashboard — DB query time / pool saturation, and image-proxy cache size — have no instrument at all and are not drawn. dashboards/README.md carries the observation for each panel.",
+  "tags": [
+    "usher",
+    "performance"
+  ],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "timezone": "browser",
+  "refresh": "",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "API latency by endpoint — p50 and p95",
+      "description": "`http.server.duration`, and **Group O's recorded convention is quoted here so the day somebody moves it the panel that goes quiet is not a mystery.** `FastAPIInstrumentor` (wired in `create_app`, `api/app.py`) emits this histogram on every request — unit `ms`, scope `opentelemetry.instrumentation.fastapi` — with `http.target` set to the **route template** (`/titles/{title_id}`, not the raw path, so two distinct title ids collapse into one series) and `http.status_code`. It carries no `usher.` prefix on purpose: it is OpenTelemetry's own semantic-convention name, and recording `usher.http.server.duration` beside it would double the export for one relabelled series.\n\n⚠️ **What empties this panel, silently, with no error anywhere.** Measured 2026-08-14 on sdk 1.44.0 / instrumentation 0.65b0: `OTEL_SEMCONV_STABILITY_OPT_IN=http` *replaces* this metric with `http.server.request.duration`, unit `s` not `ms`, `http.route` not `http.target` — the old name is gone rather than renamed. Under `http/dup` both spellings are emitted, which is the migration path. It cannot be set from `.env`, `.env.example` or `compose.yml` without failing a test or every entry point; only the launching process's own environment does.\n\n**This is the one duration histogram on this dashboard whose quantiles are readable, and the reason is the unit.** The SDK's default boundaries `(0, 5, 10, 25, …)` are *numbers*, and this instrument reports **milliseconds**, so the ladder lands where the measurements are. Every seconds-unit histogram on this dashboard takes the same boundaries and is unreadable below five seconds — see the composition panels.\n\nAn unrouted request carries no `http.target` at all; Prometheus renders that as the empty-label series rather than dropping it, so the unnamed line is the 404s.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "histogram_quantile(0.50, sum by (http_target, le) (rate(http_server_duration_milliseconds_bucket{job=\"usher\"}[5m])))",
+          "legendFormat": "p50 {{http_target}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "histogram_quantile(0.95, sum by (http_target, le) (rate(http_server_duration_milliseconds_bucket{job=\"usher\"}[5m])))",
+          "legendFormat": "p95 {{http_target}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Cache hit rate by cache, with served-stale as its own series",
+      "description": "`usher.cache.hits` / `usher.cache.misses`, declared once in `telemetry.py` for three callers — the row cache, the screen cache and the image proxy — because a second `create_counter` under one meter for one name is *\"either a duplicate-instrument warning or a second stream, and either way a dashboard's hit rate silently stops covering a cache\"*.\n\n**So this panel groups by `cache` and never sums across it.** The three caches have three populations and three hit rates; one pooled number is whichever is busiest, and it renders as a healthy line either way.\n\n**Stale is plotted as its own series rather than folded into the good one.** A served-stale read is a **hit** — the request was answered out of the cache and paid no rebuild — but not a plain one, because a plain hit hides the thing being traded: the household is looking at a screen older than its TTL, and no other series would say so. `freshness` (`fresh` | `stale`) is on the **hits** counter only: a miss served nothing, so it has no freshness to report. An entry found *expired* is a miss, not a hit — it is a rebuild.\n\n🔴 **The image proxy sets no `freshness` at all** (`services/images.py` adds `{\"cache\": \"image\"}` alone), so a panel keyed on `fresh`/`stale` would drop its hits from both series. Measured on this host 2026-09-07. Both targets below aggregate by `cache` and select `freshness` rather than grouping on it, which is what keeps the image cache's rate correct.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum by (cache) (rate(usher_cache_hits_total{job=\"usher\"}[5m]))\n/\n(sum by (cache) (rate(usher_cache_hits_total{job=\"usher\"}[5m]))\n + sum by (cache) (rate(usher_cache_misses_total{job=\"usher\"}[5m])))",
+          "legendFormat": "{{cache}} — hit rate"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum by (cache) (rate(usher_cache_hits_total{job=\"usher\", freshness=\"stale\"}[5m]))\n/\n(sum by (cache) (rate(usher_cache_hits_total{job=\"usher\"}[5m]))\n + sum by (cache) (rate(usher_cache_misses_total{job=\"usher\"}[5m])))",
+          "legendFormat": "{{cache}} — served stale"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Home composition time — mean",
+      "description": "`usher.home.compose.duration`, which carries **no labels** and that is a decision: the natural one would be the row count or the user, and the first is an outcome rather than a dimension while the second is unbounded by construction. The per-provider breakdown is the panel beside this one, not a label on this metric.\n\n**The population is compositions that happened.** A cached screen returns before `_compose` runs, so a warm request records no point here at all.\n\n🔴 **A mean and not a quantile, and that is a measurement rather than a preference.** `configure_metrics` installs no `View`, so this instrument takes the SDK's default explicit boundaries `(0.0, 5.0, 10.0, 25.0, …)` — in **seconds** — and every observation under five seconds falls in the first of them. `histogram_quantile` over that does not fail and does not empty: it interpolates inside `le=\"5\"` and answers a flat, plausible number. `_sum / _count` is the exact mean whatever the boundaries are.\n\nMeasured on this host 2026-09-07 over the two compositions driven for the observation: `histogram_quantile(0.5, …)` answered **2.5000 s** against a true mean of **601.2 ms**. The p50/p95 panel this dashboard would rather have is owed the repo-wide bucket fix PRD 10 asks for and is not shipped before it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum(rate(usher_home_compose_duration_seconds_sum{job=\"usher\"}[5m]))\n/\nsum(rate(usher_home_compose_duration_seconds_count{job=\"usher\"}[5m]))",
+          "legendFormat": "mean compose"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Home composition broken down per row — mean by provider",
+      "description": "`usher.row.build.duration`, labelled `provider` — **the ten `slug_prefix` constants, never the row slug**, because `because-you-watched-<seed>` emits one row per seed and a slug-keyed label would be bounded by the catalog rather than by the registry. This is the panel that finds the one slow provider; **D2's `propose` span is the drill-down beside it** — this answers *which provider*, the span answers *in which phase*.\n\n⚠️ the build histogram's population is cache *misses* only, so a p50 that rises after a deploy may be a colder cache rather than a slower provider.\n\n**And since M9 the population is wider than one request's misses.** A `rows.refresh` builds outside any request and opens no `home.compose`, so its points are here, carrying the same `provider` label, with no parent composition — the histogram's population is *all* builds while the span drill-down under a request shows only that request's.\n\n🔴 **A mean and not a quantile, and that is a measurement rather than a preference.** `configure_metrics` installs no `View`, so this instrument takes the SDK's default explicit boundaries `(0.0, 5.0, 10.0, 25.0, …)` — in **seconds** — and every observation under five seconds falls in the first of them. `histogram_quantile` over that does not fail and does not empty: it interpolates inside `le=\"5\"` and answers a flat, plausible number. `_sum / _count` is the exact mean whatever the boundaries are.\n\n**This panel is where that stops being abstract.** Measured on this host 2026-09-07: `histogram_quantile(0.5, …)` answered **2.5000 s for all four providers — the same number** — while the means separate them 15-fold: `genre-affinity` 26.19 ms, `because-you-watched` 4.36 ms, `continue-watching` 2.91 ms, `next-up` 1.72 ms. A quantile panel here would have made *\"which provider is slow\"* unanswerable while looking answered.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum by (provider) (rate(usher_row_build_duration_seconds_sum{job=\"usher\"}[5m]))\n/\nsum by (provider) (rate(usher_row_build_duration_seconds_count{job=\"usher\"}[5m]))",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Search latency by mode — mean",
+      "description": "`usher.search.duration`, labelled `mode`, whose vocabulary is `SearchMode`'s own lower-case values: `full_text` / `semantic` / `fused`.\n\n**It is the mode that *ran*, not the mode that was requested.** A `fused` search served as full-text — which is what a deployment with no embedder gets — is attributed to `full_text`, because attributing full-text latency to a lane that did not run is ADR-0002's prohibition arriving in the panel an operator would use to check for it. **There is no `suggest` value here**: the type-ahead box has its own pair of rows and its own panels below, because a mode and a tier are disjoint vocabularies.\n\n🔴 **A mean and not a quantile, and that is a measurement rather than a preference.** `configure_metrics` installs no `View`, so this instrument takes the SDK's default explicit boundaries `(0.0, 5.0, 10.0, 25.0, …)` — in **seconds** — and every observation under five seconds falls in the first of them. `histogram_quantile` over that does not fail and does not empty: it interpolates inside `le=\"5\"` and answers a flat, plausible number. `_sum / _count` is the exact mean whatever the boundaries are.\n\nMeasured on this host 2026-09-07: `histogram_quantile(0.5, …)` answered **2.5000 s for all three modes**, against means of **14.1 ms** (`full_text`), **1,206.5 ms** (`fused`) and **1,152.9 ms** (`semantic`) — an 85-fold spread the quantile flattens to nothing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum by (mode) (rate(usher_search_duration_seconds_sum{job=\"usher\"}[5m]))\n/\nsum by (mode) (rate(usher_search_duration_seconds_count{job=\"usher\"}[5m]))",
+          "legendFormat": "{{mode}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Type-ahead latency by tier, against the 50 ms budget",
+      "description": "`usher.suggest.duration`, labelled `tier` — `SuggestTier`'s own two lower-case members, `prefix` and `fuzzy`, and it is the tier that *answered*.\n\n**The two tiers are plotted separately rather than summed, and that is the whole reason the label exists.** One histogram over this route is a mixture of two populations: ADR-0002's shipped row measures tier 2 at p50 33.6 ms / p95 211 ms over whole names, while tier 1's figures on the same denominator are p50 0.6 ms / p95 1.0 ms — 56× and 211× apart. A merged series' position between the two is set by client debounce behaviour the server never sees, so it is a measure of typing rather than of the index.\n\n**This is the one duration histogram in `src/usher/` that carries an `explicit_bucket_boundaries_advisory`** — `(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0)`, declared beside its `create_histogram` — so it is also the only one on this dashboard whose quantiles mean anything. `0.05` is a boundary exactly rather than incidentally: it is ADR-0002's as-you-type budget, drawn as the threshold line, which makes *\"what fraction of keystrokes made it\"* a bucket ratio rather than an interpolation.\n\n⚠️ **A reading at one prefix length says nothing about this panel.** Tier 1's cost is a function of prefix length spanning three orders of magnitude — ADR-0031 measures the shipped union at 2,707 ms at one character and 2.3 ms at seven. A blank or whitespace-only prefix, and one below its tier's `min_query_length`, records no point at all; counted, they would make this a measure of how fast somebody types.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "histogram_quantile(0.50, sum by (tier, le) (rate(usher_suggest_duration_seconds_bucket{job=\"usher\"}[5m])))",
+          "legendFormat": "p50 {{tier}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "histogram_quantile(0.95, sum by (tier, le) (rate(usher_suggest_duration_seconds_bucket{job=\"usher\"}[5m])))",
+          "legendFormat": "p95 {{tier}}"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum by (tier) (rate(usher_suggest_duration_seconds_bucket{job=\"usher\", le=\"0.05\"}[5m]))\n/\nsum by (tier) (rate(usher_suggest_duration_seconds_count{job=\"usher\"}[5m]))",
+          "legendFormat": "{{tier}} — fraction inside the 50 ms budget"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Type-ahead results returned per keystroke, by tier",
+      "description": "`usher.suggest.results`, the same `tier` label and the same refusal to sum across it.\n\n**Results and not hits**, which is a distinction this path has and `search` does not: `suggest` drops a hit whose title `list_by_ids` did not return, so the two numbers differ exactly when the index and the catalog disagree. The hydrated count is the one a client painted, so it is the one plotted.\n\n**A mean rather than a quantile, for a different reason than the duration panels.** This instrument declares `unit=\"1\"` and takes the same SDK default boundaries, whose first step is 5 — so a ten-result ladder has three usable buckets and a quantile is an interpolation across most of the range. The count itself is exact.\n\nA tier answering an empty list is the reading worth watching: it is the same shape as a tier that is not being asked, and only the request rate beside it tells them apart.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum by (tier) (rate(usher_suggest_results_sum{job=\"usher\"}[5m]))\n/\nsum by (tier) (rate(usher_suggest_results_count{job=\"usher\"}[5m]))",
+          "legendFormat": "{{tier}} — mean results"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum by (tier) (rate(usher_suggest_results_count{job=\"usher\"}[5m]))",
+          "legendFormat": "{{tier}} — answered keystrokes/s"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Zero-result rate — of answered searches, how many came back empty",
+      "description": "`search_queries.result_count = 0` over answered searches, which is ADR-0002's gate turned into a live measurement rather than a synthetic one.\n\n**`WHERE surface = 'search'`, and every panel over this table now owes it.** `m10c` split the table into two denominators: *answered searches* is `surface = 'search'` and *answered keystrokes* is `surface = 'suggest'`. An unqualified `count(*)` is neither — at tier 1's measured rate a type-ahead box out-numbers the searches by an order of magnitude, so the pooled denominator is dominated by the box and every rate computed over it is a rate about typing.\n\n**No `$__timeFilter`, and that is this panel's denominator rule rather than an oversight.** The rate is over *answered searches*, and a window containing none does not produce a zero — it produces no denominator at all, which renders identically to a healthy zero. The time picker governs the seven Prometheus panels above; these two are whole-table, which is also what the table's own retention design assumes (pruning is an operator's `DELETE`).\n\n**The count is beside the rate on purpose.** A percentage with no denominator cannot be read: the same figure is a broken index on a thousand searches and one unlucky query on three. A blank or whitespace-only query is not a row here, so the denominator is searches rather than characters typed.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS answered_searches,\n       count(*) FILTER (WHERE search_queries.result_count = 0) AS zero_result_searches,\n       round(100.0 * count(*) FILTER (WHERE search_queries.result_count = 0)\n             / nullif(count(*), 0), 1) AS zero_result_pct\nFROM search_queries\nWHERE search_queries.surface = 'search'"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Of searches, how many led to a play Usher was told about",
+      "description": "`search_queries.played` over answered searches, with the no-click rate (`clicked_title_id IS NULL`) beside it.\n\n⚠️ Read both against the absence table above before quoting either: a play carrying no `search_id` is not in this table at all, so the conversion rate is *\"of searches, how many led to a play Usher was told about\"* and never *\"of plays, how many came from a search\"*.\n\n**The panel is titled in that direction rather than described in it**, because the title is what gets quoted. A play from a home row, a deep link or a bookmark is simply unattributed — not a search that led nowhere, and counting it as one would make the denominator the whole library.\n\n**`WHERE surface = 'search'`, and every panel over this table now owes it.** `m10c` split the table into two denominators: *answered searches* is `surface = 'search'` and *answered keystrokes* is `surface = 'suggest'`. An unqualified `count(*)` is neither — at tier 1's measured rate a type-ahead box out-numbers the searches by an order of magnitude, so the pooled denominator is dominated by the box and every rate computed over it is a rate about typing.\n\n**No `$__timeFilter`, and that is this panel's denominator rule rather than an oversight.** The rate is over *answered searches*, and a window containing none does not produce a zero — it produces no denominator at all, which renders identically to a healthy zero. The time picker governs the seven Prometheus panels above; these two are whole-table, which is also what the table's own retention design assumes (pruning is an operator's `DELETE`).\n\n**The three no-click shapes are not one number.** A row with no click and no play is the signal this table exists to compute; a row with a click and no play is also the signal, and is the row a synthetic typo set cannot imitate; a row with `played = true` and no `clicked_title_id` is legal — the household played a result without ever opening its detail page — and is not a hole.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS answered_searches,\n       count(*) FILTER (WHERE search_queries.played) AS searches_that_led_to_a_play,\n       round(100.0 * count(*) FILTER (WHERE search_queries.played)\n             / nullif(count(*), 0), 1) AS play_conversion_pct,\n       count(*) FILTER (WHERE search_queries.clicked_title_id IS NULL) AS searches_with_no_click,\n       round(100.0 * count(*) FILTER (WHERE search_queries.clicked_title_id IS NULL)\n             / nullif(count(*), 0), 1) AS no_click_pct\nFROM search_queries\nWHERE search_queries.surface = 'search'"
+        }
+      ]
+    }
+  ]
+}
