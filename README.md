@@ -136,6 +136,83 @@ it behind whatever already fronts your other services — a reverse proxy with
 authentication, a VPN, or an SSH tunnel. That decision belongs before the
 `docker compose up` below, which is why this paragraph is above it.
 
+## Quickstart
+
+Seven steps from clone to a screen with rows on it. Each is one command and
+links the section that explains it. **It is a path, not a substitute** — every
+step's detail is below.
+
+Everything runs through `docker compose exec`, so these work in any shell.
+
+**1. Configure and start.** See [Running it](#running-it) for what each line is
+for — especially the `chown`, which has the best paragraph in this file.
+
+```
+cp .env.example .env
+openssl rand -hex 32          # paste into USHER_SECRET_KEY= in .env
+mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images data/bulk
+docker compose up -d --build
+```
+
+**2. Check it is up.**
+
+```
+curl -sf http://localhost:8100/health/ready
+```
+
+**3. Load a catalog — and this step takes a shortcut, stated here rather than
+in a footnote.**
+
+```
+docker compose exec usher usher bootstrap --phase imdb
+```
+
+⚠️ **`--phase imdb` only.** The full bootstrap is **~3–5 hours**, mostly the
+TMDb crawl ([catalog bootstrap](docs/prd/04-catalog-bootstrap.md)). What you
+give up by stopping here, and you should know it before you judge the result:
+
+- **No TMDb enrichment**, so every title is a *skeleton* — no overview, no
+  artwork, no genres.
+- **No embeddings**, so search is full-text and type-ahead only. Semantic
+  search and "more like this" need `usher index --backfill`.
+- **No genome**, so similarity blends fewer signals.
+
+A degraded answer that looks like a working one is worse than an error — see
+[Command line](#command-line) for the full path when you want it.
+
+**4. Register a source.** There is no CLI subcommand for this — it is the
+admin API, and the credentials are encrypted at rest with `USHER_SECRET_KEY`.
+
+```
+curl -sf -X POST http://localhost:8100/admin/sources \
+  -H 'content-type: application/json' \
+  -d '{"kind":"emby","name":"Living Room","base_url":"https://emby.example.com","username":"YOUR_USER","password":"YOUR_PASSWORD"}'
+```
+
+⚠️ That route requires no authentication, like every route here — read the
+posture under [Requirements](#requirements) before exposing this port.
+
+**5. Walk it.**
+
+```
+docker compose exec usher usher sync --source "Living Room"
+```
+
+**6. Drain the queue once**, rather than leaving a worker running.
+
+```
+docker compose exec usher usher work --once
+```
+
+**7. Ask for a screen.**
+
+```
+curl -sf http://localhost:8100/home | head -c 400
+```
+
+Rows back means the whole path worked: catalog, source, ingest, composition.
+The console is at <http://localhost:8100/console>.
+
 ## Running it
 
 Tagged releases publish a container image to
