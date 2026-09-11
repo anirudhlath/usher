@@ -147,6 +147,14 @@ Everything runs through `docker compose exec`, so these work in any shell.
 **1. Configure and start.** See [Running it](#running-it) for what each line is
 for — especially the `chown`, which has the best paragraph in this file.
 
+⚠️ **Already running Usher on this host?** `compose.yml` pins its network name
+(`usher_default`) deliberately, so a second stack joins the first one's network
+and **both `postgres` containers answer to the alias `postgres`**. Docker's DNS
+then round-robins between them and the CLI reaches the wrong server — the
+symptom is `database "usher" does not exist` from `usher bootstrap` while
+`psql -d usher` works fine. Give the second stack its own network with an
+override file, or run it on a host that has none.
+
 ```
 cp .env.example .env
 openssl rand -hex 32          # paste into USHER_SECRET_KEY= in .env

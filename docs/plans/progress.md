@@ -3146,3 +3146,64 @@ module; the scheduled path is the one that must refuse, and it does.
 Segment timings: seg1 37,500 seeds / 3,546 s / 94.6 ms/seed; seg2 89,920 seeds
 / 8,349 s / 92.8 ms/seed. `computed_at` is stamped **per page** (500 seeds,
 ~48 s), which is what makes segment-level progress measurable at all.
+
+## M10 R13 — the clean-checkout run (2026-09-11)
+
+Cloned from the **public remote** at `2cb8361` into `/var/tmp/r13-clean` (2 s,
+no `.venv` carried), scratch stack on port 8231, every command pasted as
+written. Wall clock per step:
+
+| step | | |
+|---|---|---|
+| clone | 2 s | from GitHub, not a copy of the worktree |
+| 1 · configure | 0 s | `cp .env.example .env`, `openssl rand -hex 32`, the `chown` |
+| 1 · `compose up -d --build` | 28 s | build included |
+| 2 · `/health/ready` | 0 s | `{"status":"ready","checks":{"database":true,"migrations":true}}` |
+| 3 · `bootstrap --phase imdb` | **94 s** | 1,277,520 titles; ratings 1,708,600 seen / 539,207 written |
+| 7 · `GET /home` | 29 ms | HTTP 200 |
+
+`/health` also answered `{"status":"ok","version":"0.1.0"}` — R1's and R2's work
+observed in a clean deployment rather than in a test.
+
+**"A few minutes" is honest.** Clone to a populated catalog is **~2 minutes**.
+
+### 🔴 The finding: a second Usher stack on one host collides on `postgres`
+
+`docker compose up` succeeded, `/health/ready` was green, and then
+`usher bootstrap` died with `asyncpg.exceptions.InvalidCatalogNameError:
+database "usher" does not exist` — while `psql -U usher -d usher` on the very
+same stack answered `0` rows from `titles`.
+
+`compose.yml` **pins `default.name: usher_default`** deliberately, so that the
+name is a contract for sidecars rather than a consequence of the directory. The
+consequence nobody had met: a second project joins the *first* stack's network,
+**both postgres containers hold the alias `postgres`**, and `getent hosts
+postgres` returns two addresses. Docker's DNS round-robins, so the CLI reached
+this host's existing `usher-postgres-1` — which has `usher_catalog` and no
+`usher`. The server had connected to the right one and stayed connected, which
+is why readiness was green and only the CLI failed.
+
+Diagnosed by `getent hosts postgres` returning `172.30.0.2` and `172.26.0.2`.
+Isolated with a one-key override file and step 3 then passed first time.
+Recorded in the README's quickstart, at step 1, where somebody will meet it.
+
+**This is a host-environment collision and not a defect in the quickstart** —
+on a machine with no Usher it cannot happen — but it is exactly the class this
+run exists to surface, and the symptom points at the wrong thing.
+
+### Steps 4–6 are NOT verified, and the reason is a credential
+
+`POST /admin/sources` requires `username` and `password`. The only Emby
+credential on this host is a **token** (`emby_token`), which is what Home
+Assistant uses; there is no password. Verifying the documented path would have
+meant either asking the operator for one or swapping `_authenticate_locked`
+through a `sitecustomize.py` the way S11's harness does — and a harness is not
+the path a stranger takes, so it would not have verified the quickstart.
+
+So: **steps 1, 2, 3 and 7 are verified; 4, 5 and 6 are not.** `GET /home`
+returned `200` with **zero rows**, which is correct for a catalog with no
+registered source — every row provider needs owned titles — and is exactly why
+the quickstart's step 7 says *rows back* means the whole path worked.
+
+Torn down with `down -v`; no containers, no network, and this host's
+`usher-postgres-1` still has no database named `usher`.
