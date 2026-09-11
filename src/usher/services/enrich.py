@@ -63,17 +63,84 @@ _meter = metrics.get_meter("usher.enrich")
 # throughput and p50/p99") and its "enrichment SLA missed" alert both query
 # `usher.enrichment.latency`, and a metric emitted under a near-miss name is
 # a permanently empty panel that nothing distinguishes from a healthy zero.
-# Labelled `outcome` rather than PRD 10's original `trigger`: nothing in M4
-# enriches on demand (`JobPriority.DEMAND` is defined and unused until M5),
-# so a `trigger` label would carry one constant value, while a failure's
-# latency and a success's are genuinely different populations. PRD 10 is
-# corrected rather than approximated.
+# Labelled `outcome` **and** `trigger`, and the second label arrived late on
+# purpose. M4 recorded `outcome` alone and corrected PRD 10 in writing:
+# "nothing in M4 enriches on demand (`JobPriority.DEMAND` is defined and
+# unused until M5), so a `trigger` label would carry one constant value,
+# while a failure's latency and a success's are genuinely different
+# populations."
+#
+# **That withholding was conditional and M5 spent the condition.**
+# `services/titles.py` and three routers now enqueue `ENRICH` at `DEMAND`,
+# and `services/visibility.py` at `VISIBLE`, so `trigger` is a real series
+# rather than one constant value -- the same test `:604`'s sibling bullet
+# applied to `usher.jobs.queued`'s priority band ("M5 introduces demand
+# promotion and is where the band becomes a real series"). The M4 correction
+# is amended rather than reversed: `outcome` stays, because a failure's
+# latency and a success's are still different populations, and PRD 10's
+# "Enrichment SLA missed -- demand-triggered p99 > 5 s" is expressible only
+# once `trigger` is on the series it names.
+#
+# ⚠️ **Two labels is 2 x |outcome| = 4 series, and the cardinality claim is
+# stated rather than assumed.** `outcome`'s vocabulary is closed at
+# `enriched`/`failed`, `trigger`'s at `demand`/`background`; neither is
+# catalog-sized, which is the test PRD 10 applies to every label in its
+# table. A third label on this series is argued before it is appended.
+#
+# **`explicit_bucket_boundaries_advisory`, because the alert is a quantile.**
+# With no advisory a seconds-unit histogram takes the SDK's defaults, which
+# are the *millisecond* scale (0, 5, 10, ... 10000) applied to a seconds
+# instrument -- read off this host's Prometheus on 2026-09-11, that was
+# exactly this series' stored `le` set, so every enrichment under five
+# seconds fell in the single `le="5"` bucket.
+#
+# ⚠️ **The harm here is the reported value, not a rule that cannot fire, and
+# that is narrower than #86's general statement.** 5 s is itself a boundary
+# of the default ladder, so `> 5` does still discriminate: a deployment with
+# 99% of enrichments under 5 s reads a p99 of **4.95 s** and does not fire,
+# and one where more than 1% cross reads **9.95 s** and does. What it cannot
+# do is report a *latency*: a perfectly healthy 100 ms deployment pages an
+# operator a p99 of 4.95 s -- 50 ms from the SLA it is nowhere near -- and
+# there is no resolution on either side of the threshold to see a drift
+# coming. Measured 2026-09-11 against the ladder below: a true 6 s reads
+# **7.4750 s** and a true 100 ms reads **0.0995 s**, both matching
+# `lo + (hi - lo) * q` exactly.
+#
+# So these boundaries keep 5 s as a boundary (the comparison stays exact)
+# and bracket it at 4 and 7.5 so the number in the page is a latency. Issue
+# #86 is the general case -- thirteen seconds-unit histograms are still on
+# the defaults -- and this is the one instrument an alert quantiles.
+_ENRICHMENT_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 30.0, 60.0)
 _enrich_duration = _meter.create_histogram(
-    "usher.enrichment.latency", unit="s", description="Wall time per title enrichment"
+    "usher.enrichment.latency",
+    unit="s",
+    description="Wall time per title enrichment",
+    explicit_bucket_boundaries_advisory=list(_ENRICHMENT_BUCKETS),
 )
 _enriched = _meter.create_counter(
     "usher.enrich.result", unit="1", description="Enrichment attempts, by outcome"
 )
+
+
+def _trigger_for(priority: int) -> str:
+    """PRD 10's `trigger` vocabulary -- `demand` or `background` -- for a rung.
+
+    **The threshold is `VISIBLE`, and it is the one this module already
+    draws.** `_apply` classifies its follow-up jobs on exactly this boundary
+    with the reason written out: *"Above `VISIBLE` the rung is a statement
+    that somebody is looking at this title now"*. Enrich jobs arrive at
+    `DEMAND` (`services/titles.py`, and the bootstrap/rows/sources routers)
+    and at `VISIBLE` (`services/visibility.py`); both are a client waiting,
+    which is what PRD 10's *"demand-triggered"* names, and `NEW`/`BACKFILL`
+    are the sweep.
+
+    `int` rather than `JobPriority` for `_apply`'s reason: `Job.priority` is
+    an integer column bounded `[0, 100]`, so a value between two members is
+    representable and reaches here. A comparison classifies one; a
+    `JobPriority(value)` lookup would raise on it.
+    """
+    return "demand" if priority >= JobPriority.VISIBLE else "background"
+
 
 # Which `Title` column a provider addresses a title by, and whether that id
 # space is namespaced by kind. The same three-row table
@@ -193,8 +260,17 @@ class EnrichService:
         """
         started = time.perf_counter()
         outcome = "failed"
+        trigger = _trigger_for(priority)
         with _tracer.start_as_current_span("enrich.title") as span:
             span.set_attribute("usher.title_id", str(title_id))
+            # PRD 10: "Spans carry `title_id`, `source`, and `trigger`
+            # (`demand` vs `background`) as attributes, so 'why did the title
+            # I just opened take 45 seconds' is one query." That sentence was
+            # true of no span until now -- the vocabulary is minted here, in
+            # one place, and the histogram label below reads the same
+            # variable, so the span and the metric cannot drift into two
+            # spellings of one word.
+            span.set_attribute("usher.trigger", trigger)
             title = await self._titles.get(title_id)
             if title is None:
                 # No error row to write -- there is no row. Malformed rather
@@ -207,12 +283,16 @@ class EnrichService:
                 await self._record_failure(title, exc)
                 span.set_attribute("usher.failed", True)
                 _enriched.add(1, {"outcome": "failed"})
-                _enrich_duration.record(time.perf_counter() - started, {"outcome": "failed"})
+                _enrich_duration.record(
+                    time.perf_counter() - started, {"outcome": "failed", "trigger": trigger}
+                )
                 raise
             outcome = "enriched"
             span.set_attribute("usher.enrichment_state", enriched.enrichment_state.value)
         _enriched.add(1, {"outcome": outcome})
-        _enrich_duration.record(time.perf_counter() - started, {"outcome": outcome})
+        _enrich_duration.record(
+            time.perf_counter() - started, {"outcome": outcome, "trigger": trigger}
+        )
         return enriched
 
     async def _apply(self, title: Title, priority: int) -> Title:

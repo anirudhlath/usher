@@ -42,7 +42,7 @@ from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.job_scope import worker_over
 from tests.fakes.media_item_repository import FakeMediaItemRepository
-from tests.fakes.metadata_provider import FakeMetadataProvider
+from tests.fakes.metadata_provider import _MOVIE_PAYLOAD, FakeMetadataProvider
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
@@ -55,6 +55,7 @@ from usher.domain.jobs import Job, JobKind, JobPriority
 from usher.domain.rows import RowCard
 from usher.domain.title import Title
 from usher.ports.errors import PortUnavailable
+from usher.ports.ingest import ProviderRef
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.enrich import EnrichService
@@ -218,6 +219,83 @@ async def test_enrichment_records_prd_10s_latency_metric(
     recorded = _recorded(meter_reader)
     assert "usher.enrichment.latency" in recorded
     assert recorded["usher.enrichment.latency"][0][0]["outcome"] == "enriched"
+
+
+async def test_a_demand_enrichment_and_a_background_one_are_two_series_on_the_latency_histogram(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """🔴 D12's headline: `usher.enrichment.latency` has to carry `trigger`.
+
+    PRD 10's alert table asks for *"Demand-triggered p99 > 5 s for 15 min"*, and
+    at M4 the series carried `outcome` alone -- so the alert named a dimension
+    the shipped series did not have and could not be written at all. The
+    withholding was deliberate and **conditional**: *"nothing in M4 enriches on
+    demand (`JobPriority.DEMAND` is defined and unused until M5), so a `trigger`
+    label would carry one constant value"*. M5 spent that condition --
+    `services/titles.py` and three routers now enqueue `enrich` at
+    `JobPriority.DEMAND` -- so the label is a real series and the alert is
+    expressible.
+
+    **Two drives, not one, and that is the positive control.** A case that
+    recorded a single point and asserted `"trigger" in attributes` would pass
+    against a hard-coded constant, which is exactly the state M4 declined to
+    ship. Two points whose attribute sets *differ on `trigger`* and *agree on
+    `outcome`* is the claim that cannot be satisfied by a constant, and it is
+    also the claim the alert's `{trigger="demand"}` selector depends on.
+
+    ⚠️ **OTel aggregates on the attribute *set*.** Swapping the two keys in the
+    record call's dict literal produces an identical stream, so this case
+    deliberately asserts on values by key rather than on any ordering.
+    """
+    titles = FakeTitleRepository()
+    provider = FakeMetadataProvider()
+    made: list[Title] = []
+    for name, tmdb_id in (("Fight Club", 90000550), ("Se7en", 90000807)):
+        title = Title(
+            kind=TitleKind.MOVIE,
+            name=name,
+            sort_name=name,
+            year=1999,
+            tmdb_id=tmdb_id,
+            enrichment_state=EnrichmentState.STUB,
+        )
+        await titles.add(title)
+        made.append(title)
+        # Two *titles*, so the two drives are two independent passes through
+        # `_apply` rather than one title enriched twice -- a second enrichment
+        # of the same row takes the cache-age branch and records nothing.
+        provider.seed(
+            ProviderRef(provider="tmdb", value=str(tmdb_id), kind=TitleKind.MOVIE),
+            {**_MOVIE_PAYLOAD, "id": tmdb_id, "title": name},
+        )
+    service = EnrichService(
+        titles=titles,
+        episodes=FakeEpisodeRepository(),
+        payloads=FakeRawPayloadStore(),
+        provider=provider,
+        commit=_no_commit,
+        events=FakeEventPublisher(),
+        queue=FakeJobQueue(),
+    )
+    await service.enrich(made[0].id, priority=JobPriority.DEMAND)
+    await service.enrich(made[1].id, priority=JobPriority.BACKFILL)
+
+    points = _recorded(meter_reader).get("usher.enrichment.latency", [])
+    assert points, "no latency points recorded"
+    assert len(points) == 2, (
+        "the two enrichments collapsed into one series, so `trigger` is not on the "
+        f"attribute set OTel aggregates by: {[attributes for attributes, _ in points]}"
+    )
+
+    by_trigger = {str(attributes.get("trigger")): attributes for attributes, _ in points}
+    assert set(by_trigger) == {"demand", "background"}, (
+        "PRD 10's vocabulary for this label is `demand` | `background`, the same two "
+        f"values its span attributes use; this recorded {sorted(by_trigger)}"
+    )
+    assert {str(attributes["outcome"]) for attributes in by_trigger.values()} == {"enriched"}, (
+        "the two drives disagree on `outcome`, so the difference this case measures is "
+        "not the one it names"
+    )
 
 
 async def test_a_provider_request_is_counted_by_status(

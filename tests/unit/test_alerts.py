@@ -87,13 +87,16 @@ _ALERTS_SECTION = re.compile(r"^## Alerts$(?P<body>.*?)(?=^## |\Z)", re.M | re.S
 # filter is readable where a negative lookahead is not.
 _TABLE_ROW = re.compile(r"^\|(?P<alert>[^|]+)\|(?P<condition>[^|]+)\|\s*$", re.M)
 
-# The four alerts D12-D14 owe, and which task owes each. Retyped here on
+# The alerts D13 and D14 still owe, and which task owes each. Retyped here on
 # purpose: the point of the xfail below is to say *who* is missing, and the
 # only source for that is the plan. A wrong name here is loud -- it appears in
 # the failure message next to the set actually parsed out of the PRD.
+#
+# **D12's two are gone from this table because D12 landed them.** *Enrichment
+# SLA missed* could not be written at all until `usher.enrichment.latency`
+# carried `trigger` -- PRD 10's condition named a dimension the shipped series
+# did not have, which is why the debt outlived M4.
 _OWED = {
-    "Enrichment SLA missed": "D12",
-    "Provider degraded": "D12",
     "Disk projection": "D13",
     "Cost anomaly": "D14",
 }
@@ -233,6 +236,24 @@ def stored_spellings() -> dict[str, set[str]]:
     return spellings
 
 
+def _gauge_stored_names() -> set[str]:
+    """The stored spellings of every instrument declared as an observable gauge.
+
+    Derived from the declarations rather than listed, for
+    `stored_spellings()`'s reason: a name typed into a set here is a name that
+    stops being checked the day it is renamed. A gauge is the shape whose
+    `increase()` decays out of its own window -- see
+    `test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it`.
+    """
+    spellings = stored_spellings()
+    return {
+        stored
+        for name, factory, _unit in _instrument_declarations()
+        if factory in _GAUGE_FACTORIES
+        for stored in spellings[name]
+    }
+
+
 def _tokens_of(rule: dict[str, Any]) -> set[str]:
     return _metric_tokens(str(rule["expr"]))
 
@@ -256,10 +277,10 @@ def _dashboard_three_panel_titles() -> set[str]:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "D12 owes 'Enrichment SLA missed' and 'Provider degraded', D13 owes 'Disk "
-        "projection', D14 owes 'Cost anomaly'. This case is the ledger for that debt and "
-        "flips to a hard failure -- XPASS under strict -- on the day D14 lands, which is "
-        "the task that removes this marker."
+        "D13 owes 'Disk projection' and D14 owes 'Cost anomaly'. D12 has landed "
+        "'Enrichment SLA missed' and 'Provider degraded', so this ledger is two short "
+        "rather than four. It stays a strict xfail and flips to a hard failure -- XPASS "
+        "under strict -- on the day D14 lands, which is the task that removes this marker."
     ),
 )
 def test_every_alert_prd_10_names_exists_and_every_rule_names_a_series_the_catalogue_holds() -> (
@@ -330,7 +351,9 @@ def test_every_committed_rule_names_a_series_the_catalogue_holds() -> None:
     rule and D14 finding it.
     """
     rules = committed_rules()
-    assert len(rules) == 3, f"D11 ships three rules; found {len(rules)}: {_committed_names()}"
+    assert len(rules) == 5, (
+        f"D11 shipped three rules and D12 added two; found {len(rules)}: {_committed_names()}"
+    )
     catalogue = metric_catalogue()
     assert catalogue, "PRD 10's metric table parsed to nothing"
 
@@ -519,35 +542,74 @@ def test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it() -> None:
     rather than banning long `for:` outright -- the patience has to live
     somewhere, and under a decaying window it cannot live in both places.
 
-    ⚠️ **This case is for D12-D14 more than for D11.** *Provider degraded* is a
-    `rate()` over a window, *Cost anomaly* a daily comparison, and both invite
-    exactly this shape: the PRD sentence names a duration, so it gets written
-    into the range vector *and* into `for:` because each reads correct alone.
+    🔴 **D11 stated this as a law about `increase()`/`rate()`; D12 measured it
+    and it is a law about the *instrument*.** The knife edge is not a property
+    of the function -- it is a property of whether the signal under the function
+    is *regenerated while the fault lasts*:
+
+    - A **gauge** is a level. It steps once and freezes, so the step leaves the
+      range vector exactly `[W]` later and the condition is true for at most W.
+      D11's queue depth is this, and its measurement stands.
+    - A **counter** (and a histogram's bucket/count series) is fed by *every
+      event*. Under a fault lasting D, `rate()` stays above the threshold for
+      about D + W, so a `for:` longer than W is patience and not a race.
+
+    Measured with `promtool test rules` on 2026-09-11, against D12's own rules,
+    both of which put a `for:` **longer** than their `[5m]` window:
+
+    - *Provider degraded* (`for: 10m` over `[5m]`, a sustained 10 % 429 rate):
+      silent at 9m, **firing at 16m**, still firing at 60m, resolved by 40m once
+      the 429s stopped.
+    - *Enrichment SLA missed* (`for: 15m` over `[5m]`, demand p99 ~6 s): silent
+      at 14m, **firing at 21m** with `trigger="demand"` and `$value` 7.475s,
+      still firing at 60m.
+
+    So the blanket rule would have forbidden two rules that demonstrably fire,
+    and forced their windows out to `[20m]`/`[15m]` -- which buys nothing and
+    makes both slow to resolve. The guard is narrowed to the case it was
+    measured on rather than deleted, and the exemption is **derived from the
+    declarations** (`create_observable_gauge`) rather than listed, so a new
+    gauge is covered the day it is declared.
+
+    ⚠️ **Still for D13-D14.** *Disk projection* and *Cost anomaly* are both
+    predicates over levels -- disk free is a gauge, a daily spend comparison is
+    a step -- so both land on the graded side of this split, not the exempt one.
     """
-    checked = 0
+    graded = 0
+    exempt = 0
     for rule in committed_rules():
         expr = str(rule["expr"])
         wait = _seconds(str(rule["for"]))
         # The window has to come from *inside* a decaying call, not from
-        # anywhere in the expression: this rule's depth half is a
+        # anywhere in the expression: `Ingest stalled`'s depth half is a
         # `min_over_time(...[30m])` whose answer persists, and grading `for:`
         # against that window would forbid the very spelling that repairs the
         # defect.
         for call in _DECAYING.finditer(expr):
             opening = call.end() - 1
             body = expr[opening + 1 : _balanced(expr, opening)]
+            over_a_level = bool(_metric_tokens(body) & _gauge_stored_names())
             for value, unit in _WINDOW.findall(body):
                 window = int(value) * _UNIT_SECONDS[unit]
-                checked += 1
+                if not over_a_level:
+                    exempt += 1
+                    continue
+                graded += 1
                 assert wait < window, (
                     f"{rule['alert']}: `for: {rule['for']}` is not shorter than the "
-                    f"[{value}{unit}] window its own decaying condition lives in, so a "
-                    "step change leaves the range vector at the moment `for:` is "
-                    "satisfied and the rule fires on a knife edge it loses"
+                    f"[{value}{unit}] window its own decaying condition lives in, and "
+                    "that condition is over a *gauge* -- a level that steps once leaves "
+                    "the range vector at the moment `for:` is satisfied, so the rule "
+                    "fires on a knife edge it loses"
                 )
-    assert checked >= 2, (
-        f"the scan graded only {checked} decaying windows, so it has stopped reading the "
-        "expressions and this case is vacuous"
+    assert graded >= 1, (
+        f"the scan graded {graded} decaying windows over a gauge, so it has stopped "
+        "reading the expressions and this case is vacuous"
+    )
+    assert exempt >= 2, (
+        f"the scan exempted {exempt} decaying windows over a counter or histogram; D12's "
+        "two rules are both that shape, so a zero here means the exemption has stopped "
+        "recognising them and they are passing for the wrong reason"
     )
 
 
@@ -598,11 +660,18 @@ def test_no_rule_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults() -
     p99 > 5 s"* is a quantile over `usher.enrichment.latency`, which carries no
     advisory today.
 
-    ⚠️ **The committed file has no quantile rule, so this grades zero
-    expressions and says so** rather than asserting it graded something, which
-    would be red today for a correct tree. Its teeth are proved on a synthetic
-    rule below, which is the stronger control anyway: it names the token that
-    dies.
+    ⚠️ **D12 landed the quantile rule this case was written for, and fixed the
+    instrument rather than the expression.** `usher.enrichment.latency` now
+    declares `explicit_bucket_boundaries_advisory` boundaries that bracket the
+    5 s threshold, so *Enrichment SLA missed* is graded here and passes on its
+    merits. The plant below therefore moved to `usher.jobs.duration`, which is
+    still on the SDK defaults -- a plant naming the one instrument D12 fixed
+    would have been a control that stopped controlling anything the moment it
+    was fixed, which is the failure this whole module is about.
+
+    #86 is **not** closed: thirteen seconds-unit histograms still carry no
+    advisory (measured 2026-09-11). What D12 closed is the one instrument an
+    alert takes a quantile of.
     """
     declared = _declared_histograms()
     seconds = {name for name, body in declared.items() if 'unit="s"' in body}
@@ -628,19 +697,24 @@ def test_no_rule_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults() -
             if normalise_metric(token) in unfixed
         ]
 
+    assert "usher_enrichment_latency" not in unfixed, (
+        "`usher.enrichment.latency` is back on the SDK's second-scale defaults, so the "
+        "p99 the `Enrichment SLA missed` rule compares against 5 s is a flat "
+        "interpolation across a bucket whose own edge is 5 s"
+    )
     planted = [
         {
-            "alert": "Enrichment SLA missed",
+            "alert": "Job duration SLA",
             "expr": (
                 "histogram_quantile(0.99, sum by (le) "
-                "(rate(usher_enrichment_latency_seconds_bucket[5m]))) > 5"
+                "(rate(usher_jobs_duration_seconds_bucket[5m]))) > 5"
             ),
         }
     ]
     assert offenders(planted) != [], (
-        "the scan cannot see a quantile over `usher.enrichment.latency`, which carries no "
-        "advisory -- so it would grade D12's rule green whatever bucket boundaries it "
-        "lands on"
+        "the scan cannot see a quantile over `usher.jobs.duration`, which carries no "
+        "advisory -- so it would grade a quantile rule green whatever bucket boundaries "
+        "it lands on"
     )
     assert offenders(committed_rules()) == [], (
         "these rules take a quantile over a histogram still on the SDK's second-scale "
@@ -831,4 +905,177 @@ class Meter:
     assert ("usher.jobs.queued", "create_observable_gauge", "1") in declared, (
         'the walk lost the `unit="1"` on the real declaration, which is the whole of the '
         "stored spelling"
+    )
+
+
+# One range-vector selector, `name[5m]` or `name{matchers}[5m]`. Used to
+# compare a ratio's two sides matcher-for-matcher rather than by eyeball.
+#
+# **The matcher block is optional and the `[` lookahead is what makes that
+# safe.** `Provider degraded`'s denominator is a bare
+# `usher_provider_requests_total[5m]` -- which is the whole point of a
+# denominator -- and a pattern requiring `{...}` finds one selector in a
+# two-sided ratio and grades the rule against itself.
+_SELECTOR = re.compile(r"\b(?P<name>[a-z_][a-z0-9_]*)(?:\{(?P<matchers>[^}]*)\})?(?=\[)")
+_MATCHER = re.compile(r"(?P<label>\w+)\s*(?P<op>=~|!~|!=|=)\s*\"(?P<value>[^\"]*)\"")
+
+
+def _matchers(block: str | None) -> dict[str, tuple[str, str]]:
+    return {
+        m.group("label"): (m.group("op"), m.group("value")) for m in _MATCHER.finditer(block or "")
+    }
+
+
+def test_every_quantile_rule_collapses_the_labels_it_is_not_a_quantile_of() -> None:
+    """🔴 A `histogram_quantile` without `by (le)` is a quantile *per label set*.
+
+    `usher.enrichment.latency` carries `outcome` as well as `trigger`, so
+    `histogram_quantile(0.99, rate(..._bucket[5m]))` -- no aggregation at all --
+    computes one p99 for `outcome="enriched"` and another for
+    `outcome="failed"`, and PRD 10's *"demand-triggered p99 > 5 s"* is neither
+    of them. The failure is quiet in the way this module is about: both numbers
+    are plausible, both draw a line, and the alert fires on whichever crosses
+    first -- most likely the failures, whose latency is a timeout rather than a
+    fetch.
+
+    **`le` must be in the grouping and every other label of the histogram must
+    not be**, except one the selector has already pinned to a single value.
+    That exception is why the committed rule groups `by (le, trigger)`: keeping
+    a pinned label changes no arithmetic and is what lets the page name its
+    subject, which
+    `test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_series_and_panel`
+    separately requires.
+
+    This is a static defect and needs no Prometheus, which is the point: the
+    live firing in `dashboards/README.md` proves the rule *can* fire, and a
+    firing cannot tell you it fired on the wrong population.
+    """
+    quantile_rules = [
+        rule for rule in committed_rules() if "histogram_quantile" in str(rule["expr"])
+    ]
+    assert len(quantile_rules) == 1, (
+        "this case grades the quantile rules and found "
+        f"{len(quantile_rules)}: {[r['alert'] for r in quantile_rules]}"
+    )
+
+    def offenders(rules: list[dict[str, Any]]) -> list[str]:
+        found: list[str] = []
+        for rule in rules:
+            expr = str(rule["expr"])
+            # Only the quantile rules. Without this the ratio rules below are
+            # graded as quantiles with no aggregation and the case is red for a
+            # correct tree -- the shape `.claude/rules/testing-discipline.md`
+            # calls a check that has stopped reading its own subject.
+            if "histogram_quantile" not in expr:
+                continue
+            aggregations = [
+                (labels, operand)
+                for labels, operand in _aggregations(expr)
+                if any("_bucket" in token for token in _metric_tokens(operand))
+            ]
+            if not aggregations:
+                found.append(f"{rule['alert']}: the quantile wraps no aggregation at all")
+                continue
+            for labels, operand in aggregations:
+                if "le" not in labels:
+                    found.append(f"{rule['alert']}: `{operand.strip()}` is not grouped by `le`")
+                pinned = {
+                    label
+                    for selector in _SELECTOR.finditer(operand)
+                    for label, (op, _value) in _matchers(selector.group("matchers")).items()
+                    if op == "="
+                }
+                for label in sorted(labels - {"le"} - pinned):
+                    found.append(
+                        f"{rule['alert']}: groups by {label!r}, which the selector does not "
+                        "pin, so this is one quantile per value of it"
+                    )
+        return found
+
+    planted = [
+        {
+            "alert": "Enrichment SLA missed",
+            "expr": (
+                "histogram_quantile(0.99, sum by (le, outcome) "
+                '(rate(usher_enrichment_latency_seconds_bucket{trigger="demand"}[5m]))) > 5'
+            ),
+        },
+        {
+            "alert": "No aggregation at all",
+            "expr": (
+                "histogram_quantile(0.99, "
+                'rate(usher_enrichment_latency_seconds_bucket{trigger="demand"}[5m])) > 5'
+            ),
+        },
+    ]
+    assert len(offenders(planted)) == 2, (
+        "the scan does not catch a quantile grouped by an unpinned `outcome`, nor one "
+        f"taken over no aggregation at all: {offenders(planted)}"
+    )
+    assert offenders(committed_rules()) == [], (
+        "these rules take a quantile per label set rather than over the population PRD 10 "
+        f"names: {offenders(committed_rules())}"
+    )
+
+
+def test_the_provider_degraded_ratio_counts_transport_failures_on_both_sides() -> None:
+    """🔴 `error` in the denominator only makes the ratio *fall* during an outage.
+
+    PRD 10 states one half of this and not the other: *"a denominator that
+    omitted the failures would read low exactly during an outage."* The
+    numerator half follows and is nowhere written down -- a transport failure
+    never reached a status line, so `status="error"` is what
+    `adapters/tmdb/client.py` records for it, and a numerator matching only
+    `429|5..` counts it nowhere. In the limit that is silent: when *every*
+    request fails in the transport, the numerator is 0, the denominator is the
+    error count, and the rule reads a healthy **0%** during a total outage.
+    `promtool` drives exactly that case in `dashboards/README.md`; this case is
+    the static half, which is the one that survives somebody rewriting the
+    expression.
+
+    **The two sides must differ only by the status match.** A denominator that
+    also picked up an extra matcher -- or lost the one the numerator has -- is a
+    ratio of two different populations, which still renders a plausible number.
+    """
+    expr = str(_rule("Provider degraded")["expr"])
+    selectors = [
+        (match.group("name"), _matchers(match.group("matchers")))
+        for match in _SELECTOR.finditer(expr)
+    ]
+    assert len(selectors) == 2, (
+        f"this rule is a ratio and should hold exactly two selectors; found {selectors}"
+    )
+    (numerator_name, numerator), (denominator_name, denominator) = selectors
+    assert numerator_name == denominator_name == "usher_provider_requests_total", (
+        f"the two sides name different series: {numerator_name} over {denominator_name}"
+    )
+
+    assert "status" in numerator, (
+        f"the numerator has no `status` matcher, so it selects every request: {expr!r}"
+    )
+    operator, pattern = numerator["status"]
+    assert operator == "=~", f"the numerator's `status` match is {operator!r}, not a regex"
+    assert "error" in pattern, (
+        "`error` is not in the numerator's status match, so a transport failure is counted "
+        "in the denominator alone and this ratio *falls* during a total outage -- the "
+        f"quietest way for this rule to be wrong: {pattern!r}"
+    )
+    assert "429" in pattern, f"PRD 10's condition names 429 and this pattern does not: {pattern!r}"
+    assert "5.." in pattern, (
+        f"PRD 10's condition names 5xx; `5..` is the anchored spelling: {pattern!r}"
+    )
+    assert "4.." not in pattern, (
+        "a `4..` class puts 404 in the numerator, which is a title TMDb does not have "
+        f"rather than a degraded provider: {pattern!r}"
+    )
+
+    assert {label: match for label, match in numerator.items() if label != "status"} == {
+        label: match for label, match in denominator.items() if label != "status"
+    }, (
+        "the numerator and denominator differ by something other than the status match, "
+        f"so this is a ratio of two different populations: {numerator} over {denominator}"
+    )
+    assert "status" not in denominator, (
+        "the denominator filters on `status` too, so it is not the total request count "
+        f"PRD 10's rate is taken against: {denominator}"
     )
