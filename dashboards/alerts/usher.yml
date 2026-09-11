@@ -17,10 +17,24 @@
 # Neither is committed there today, which is why every firing recorded in
 # `../README.md` was produced by a throwaway Prometheus rather than by that one.
 #
-# ⚠️ **Three rules, not seven.** PRD 10's `## Alerts` table names seven and
-# `tests/unit/test_alerts.py` grades this file against all seven in both
-# directions; the other four are M10's D12, D13 and D14, and that test carries
-# an `xfail(strict=True)` naming them until they land.
+# ⚠️ **Five rules here, one owed, and a sixth is one directory down.**
+# PRD 10's `## Alerts` table names seven and `tests/unit/test_alerts.py` grades
+# both rule files against all seven in both directions. *Cost anomaly* has no
+# metric to write it against -- PRD 10's own first principle puts LLM spend on
+# Postgres, so there is deliberately no `usher.llm.*` series -- and it ships as
+# a Grafana-managed Postgres rule in `grafana/usher.yml`. D13 owes *Disk
+# projection*, and that test carries an `xfail(strict=True)` naming it until it
+# lands.
+#
+# 🔴 **`grafana/usher.yml` is one directory down and must stay there.** The
+# `rule_files:` glob below is `*.yml` and is **not** recursive, and Prometheus
+# unmarshals rule files strictly -- a Grafana provisioning file beside this one
+# would be read as a rule file, fail on `apiVersion`/`folder`/`condition`/`data`
+# and take **this whole file down with it** -- a server started on such a
+# directory exits 2 before opening a port, so every rule below goes with it as
+# the price of adding the seventh alert. Measured on `prom/prometheus:v3.13.2`;
+# `test_the_postgres_rule_is_not_in_the_directory_prometheus_globs` is the
+# guard and `../README.md` carries the transcript.
 #
 # 🔴 **Every metric name here carries a segment the OTel name does not.** The
 # collector appends the instrument's *unit* before the aggregation suffix, so

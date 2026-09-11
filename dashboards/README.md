@@ -1301,23 +1301,35 @@ has nothing of ours to grade. That is the one exemption in
 **by name and by count** rather than merely granted — otherwise the exemption
 becomes how every later panel escapes the check.
 
-# Alerts — `alerts/usher.yml`
+# Alerts — `alerts/usher.yml` and `alerts/grafana/usher.yml`
 
 PRD 10's `## Alerts` table names seven rules and opens *"Kept few, so they mean
-something."* Five are here — **Ingest stalled**, **Jobs parking** and **Push
-down** from D11, plus **Enrichment SLA missed** and **Provider degraded** from
-D12. D13 owes *Disk projection* and D14 owes *Cost anomaly*;
+something."* **Six are here, in two files and two engines.** Five are
+Prometheus rules in `alerts/usher.yml` — **Ingest stalled**, **Jobs parking**
+and **Push down** from D11, plus **Enrichment SLA missed** and **Provider
+degraded** from D12 — and the sixth is **Cost anomaly**, which has no series to
+name at all and is a Grafana-managed Postgres rule in
+`alerts/grafana/usher.yml`. D13 owes *Disk projection*;
 `tests/unit/test_alerts.py` holds that debt as an `xfail(strict=True)` whose
 message names which task owes which, and which becomes a **hard** failure the
 day the seventh rule lands, because a strict xfail that passes is a failure.
 
+⚠️ **D14 was told to be that day and was not.** Its acceptance reads *"D11's
+bidirectional name check is now green, seven rules against PRD 10's seven
+rows"*, which assumed it went last. Measured at the milestone HEAD D14 rebased
+onto — `97d851a`, 2026-09-11 — D12 had landed its two and `m10/D13` still had
+nothing committed on it. So the marker stays with *Cost anomaly* struck from
+the ledger it names, and it is D13's to remove.
+
 **Nothing in this repository evaluates these rules.** The same asymmetry the
 dashboards have, one step further: the shared Prometheus in
 `~/code/observability/` has **no `rule_files:` entry and no mount for this
-directory**, so committing this file arms nothing. The file's own header spells
-out the two stanzas that would. Every firing below was produced by a throwaway
-Prometheus reading the shared one over `remote_read` — real data, real rule
-engine, shared stack untouched.
+directory**, and its Grafana has no alerting provisioning, so committing either
+file arms nothing. Each file's own header spells out the stanzas that would.
+Every firing below was produced by a throwaway engine against real data — a
+throwaway Prometheus reading the shared one over `remote_read` for the five,
+and a throwaway Grafana over a throwaway Postgres for *Cost anomaly* — real
+data, real rule engine, shared stack untouched.
 
 ## 🔴 Every metric name here carries a segment the OTel name does not
 
@@ -1532,12 +1544,265 @@ PRD 08 has no other answer for. The firing below uses
 `USHER_PUSH_STALE_AFTER_SECONDS=1200` to hold a silent socket open past the
 alert's own window, which **is** the condition rather than a way around the rule.
 
+## 🔴 The seventh alert has no series, and its file must not be in the other file's glob
+
+PRD 10's *Cost anomaly* is *"Daily LLM spend > 3x trailing 7-day median"*, and
+there is nothing in Prometheus to write it against. That is a refusal with a
+sentence behind it, not a gap: PRD 10's own first principle puts LLM spend on
+Postgres — *"`llm_calls` is the record — so there is no `usher.llm.*` series at
+all"* — and `telemetry.py`'s register records the mechanical half, that an OTel
+observable callback runs on the metric reader's background thread while every
+database call here is a coroutine on asyncpg. So the rule is SQL, evaluated by
+Grafana against the same datasource Dashboard 5's spend panels use.
+
+**It is in `alerts/grafana/`, one directory down, and that is load-bearing.**
+`alerts/usher.yml`'s header tells an operator to mount `dashboards/alerts` at
+`/etc/prometheus/rules` with `rule_files: [/etc/prometheus/rules/*.yml]`. That
+glob is not recursive and Prometheus unmarshals rule files **strictly**, so a
+Grafana provisioning file beside `usher.yml` is read as a rule file and rejected
+— and the cost is not one ignored file. Measured 2026-09-11 on
+`prom/prometheus:v3.13.2`, with the committed Grafana file copied to
+`/rules/grafana.yml`:
+
+```
+promtool check rules /rules/*.yml     # committed layout
+  Checking /rules/usher.yml
+    SUCCESS: 5 rules found            # exit 0
+
+promtool check rules /rules/*.yml     # Grafana file as a sibling
+  Checking /rules/grafana.yml
+    FAILED: yaml: unmarshal errors:
+      field apiVersion not found in type rulefmt.RuleGroups
+      field orgId      not found in type rulefmt.RuleGroup
+      field folder     not found in type rulefmt.RuleGroup
+      field uid        not found in type rulefmt.Rule
+      field title      not found in type rulefmt.Rule
+      field condition  not found in type rulefmt.Rule
+      field noDataState not found in type rulefmt.Rule
+      field execErrState not found in type rulefmt.Rule
+      field data       not found in type rulefmt.Rule
+  Checking /rules/usher.yml
+    SUCCESS: 5 rules found            # exit 1
+```
+
+(The real output prefixes each line with a line number into `grafana.yml`;
+they are elided here because a line number into a file this document does not
+own is a citation that rots — #82's lesson, applied to a transcript.)
+
+🔴 **And the server is worse than the linter.** A Prometheus started against the
+committed layout serves all five rules on `/api/v1/rules`; started against the
+mixed directory it **exits 2 before opening a port**, with
+`Error loading rule file patterns from config`. Not "four rules instead of
+five" and not "a warning in the log" — no Prometheus at all, so D11's three and
+D12's two go with it.
+`test_the_postgres_rule_is_not_in_the_directory_prometheus_globs` is the guard,
+and it asserts the Prometheus directory's glob holds exactly `usher.yml` rather
+than asserting the Grafana file is absent — the second spelling passes for an
+empty directory.
+
+📌 **D13 lands in the same split and this is where its halves go.** Its plan
+says *"the alert is a Postgres-datasource rule, evaluated by Grafana against the
+same query D10's panel plots"* for the database half and
+`predict_linear(usher_disk_free_bytes…)` for the free-space half — one rule per
+engine, so the first belongs in `alerts/grafana/usher.yml` beside this one and
+the second in `alerts/usher.yml`. `alert_names()` in `tests/unit/test_alerts.py`
+already spans both, so the bidirectional check needs nothing new either way.
+
+## The cost-anomaly statement, and the six decisions in it
+
+D14's task text calls out four properties of this query — the eight-day window,
+the median, the floor, and staying in `numeric`. Two more were forced by
+writing it: the day series has to be **generated** rather than grouped, and the
+day boundary has to be **spelled UTC**. All six are below.
+
+The statement lives in the rule and is executed by
+`tests/integration/test_cost_anomaly_query.py` against a real
+`pgvector/pgvector:pg17`, read out of the YAML rather than retyped. **Every arm
+there also executes a planted variant and asserts the two disagree**, because
+each of these decisions is one token wide and reads correct alone.
+
+**Eight calendar days, seven of them judged.** The trailing median excludes
+today, so the window holds seven complete days *plus* the partial one being
+judged. A seven-day window including today compares today against a median it
+is a member of, which is a bar that moves toward whatever fired it.
+
+⚠️ **A median is robust to dropping its lowest value, which is what makes this
+hard to pin** — and the obvious fixture (an ascending week) cannot see the
+window narrow at all. The committed case seeds the *oldest* in-window day as the
+**largest**, so narrowing the window by a day drops the median from `4N` to
+`3N`; and it seeds a real row on the day before the window, so widening it by a
+day does the same. Today spends `11N`, under the correct bar of `12N` and over
+both mutants' `9N`, so **both** a narrowed and a widened window page on a night
+the committed statement correctly ignores.
+
+**A median, not a mean**, as PRD 10 specifies, and the reason is this
+deployment's shape: one generation per household per night, so a single failed
+night at $0 and a single re-run at 2x are both ordinary and a mean carries both
+into the bar.
+
+⚠️ **The fixture the plan prescribed for this ratifies the mean.** D14's task
+text says to seed *"one zero day and one double day"* — over `[0, N, N, N, N,
+N, 2N]` the mean is `7N/7 = N` and the median is `N`, exactly equal, so that
+week cannot tell the two statistics apart any better than a flat one can. The
+committed case seeds `[0, 0, N, N, N, N, 6N]`: median `N`, mean `10N/7`, and a
+night at `3.5N` pages under the first and is silent under the second.
+
+🔴 **The trailing days are *generated*, not grouped, so a silent night is a
+zero and not an absence.** A plain `GROUP BY day` over `llm_calls` produces no
+row at all for a night with no calls, so a deployment that curates three nights
+a week would take its median over three nonzero days and never notice the week
+it ran every night. The statement generates the eight-day calendar from its own
+bounds and `LEFT JOIN`s the ledger onto it. That is D11's zero-versus-absence
+rule, one datasource over, and it is also what fixes the trailing set's
+cardinality at **seven** — which the median's spelling depends on, below.
+
+🔴 **The comparison stays in `numeric`, and `percentile_cont` is a `float8`
+cast arriving without anyone writing one.** PostgreSQL has no `numeric`
+overload of it. Measured on PostgreSQL 17.10, 2026-09-11:
+
+```sql
+SELECT pg_typeof(percentile_cont(0.5) WITHIN GROUP (ORDER BY cost_usd)),  -- double precision
+       pg_typeof(percentile_disc(0.5) WITHIN GROUP (ORDER BY cost_usd))   -- numeric
+FROM llm_calls;
+```
+
+So the statement the task text supplies — which spells `percentile_cont` in the
+same breath as *"the comparison stays in `numeric`"* — is not the statement that
+shipped. `percentile_disc` is `WITHIN GROUP (ORDER BY anyelement) -> anyelement`
+and, over a set whose size is fixed at seven and therefore odd, returns the same
+element `percentile_cont` would.
+
+⚠️ **And the float is not academic at the boundary, which is the only place a
+threshold alert ever is.** At a trailing median of exactly `0.14500000` and a
+today of exactly `0.43500000`, `3 * 0.145` is `0.43499999999999994` in binary
+floating point and `0.435` in `numeric`. PRD 10's condition is *greater than*
+three times, so the honest answer is silence and the float spelling **pages**.
+Both spellings report `spend_ratio = 3.0000`; only `fired` differs, which makes
+a float firing indistinguishable from a real one unless somebody knows to look.
+
+**`round(..., 8)` on the diagnostic columns turns out to be a type guard as
+well as a renderer**, which was found by planting the swap rather than by
+reasoning about it: `round(double precision, integer)` does not exist in
+PostgreSQL, so `percentile_disc` -> `percentile_cont` does not quietly start
+comparing floats — the statement raises
+`UndefinedFunctionError: function round(double precision, integer) does not
+exist` and Grafana's `execErrState: Error` carries it to a human. That is a
+better failure than a wrong answer and it is worth not tidying away.
+
+🔴 **The floor: `0.02` USD in a day, and without it this alert is useless on
+most deployments.** A trailing median of `0` makes `3 x median` zero and any
+spend at all greater than it — and that is the default state, because
+`llm_price_in_per_mtok` and `llm_price_out_per_mtok` both default to
+`Decimal(0)`, which `src/usher/config.py` calls *"the honest value for a local
+model and the wrong one for a hosted model an operator forgot to price"*. This
+host's LLM is a local vLLM. So without a floor, the day an operator finally
+fills those two settings in is the day this alert starts paging and never
+stops.
+
+`0.02` sits between one ordinary night and a tripled one, and both ends are
+measured rather than chosen: one generation per household per night cost exactly
+**`0.01658700`** in the 2026-08-07 live verification at `3`/`15` USD per Mtok,
+so `3x` of it is `0.04976100`. ⚠️ **It is a spend, not a ratio**, so a
+deployment whose ordinary night is larger has to raise it; the rule's
+description says so and names the two settings.
+
+**UTC days, spelled out.** `date_trunc('day', <timestamptz>)` truncates in the
+*session's* time zone, and nothing in this repository sets Grafana's — the
+datasource inherits whatever the server was started with. The integration case
+runs the statement under `Pacific/Kiritimati` (+14) and `Pacific/Midway` (−11)
+and asserts the answer is byte-identical, then runs the unqualified spelling
+under the same zones and asserts it is **not**. On the committed fixture the
+unqualified one does not merely re-bucket a label: it flips `fired` from 1 to 0.
+
+**The window bound is on the raw `timestamptz` column**, never on the truncated
+expression, so `ix_llm_calls_at` still serves it. `EXPLAIN` at 4,000 seeded
+rows, one every six hours, so the eight-day window selects 32 rows whatever the
+table holds (measured 2026-09-11, PostgreSQL 17.10):
+
+| seeded rows | plan chosen | chosen | next best | ratio |
+|---|---|---|---|---|
+| 100   | `Seq Scan`   | 46.42 | 46.42  | **1.00** |
+| 300   | `Index Scan` | 50.64 | 54.42  | **1.07** |
+| 1,000 | `Index Scan` | 50.77 | 83.92  | **1.65** |
+| 2,000 | `Index Scan` | 50.77 | 124.92 | 2.46 |
+| 4,000 | `Index Scan` | 50.77 | 208.80 | 4.11 |
+
+At 300 rows the planner already picks the index — on a margin of **1.07**, which
+is a tie-break wearing a measurement's clothes, and flatter than the 1.17 D3
+records for `list_since`. At 1,000 it is still under the 2.0 `A_DECISIVE_MARGIN`
+calls decided. The case seeds 4,000. ⚠️ The whole-plan ratio understates the
+index because both plans carry the same ~42 of CTE-scan cost for the calendar
+and the aggregate; the scan node alone reads `9.01` against `166.16`, **18.4x**.
+`Index Cond: (at >= ((date_trunc('day', (now() AT TIME ZONE 'UTC')) - '7 days'
+::interval) AT TIME ZONE 'UTC'))`, with nothing left over to `Filter`.
+
+## ⚠️ Three things Grafana does with a table frame, each of which decides whether this rule works at all
+
+All three measured against `grafana/grafana:13.1.3` on 2026-09-11, with the
+committed file mounted at `/etc/grafana/provisioning/alerting`.
+
+🔴 **Every numeric column becomes a series the condition judges; every string
+column becomes a label on it.** The condition here is a `> 0` threshold, so a
+second numeric column would be a second series that clears it on every
+evaluation — `days_in_window` is `8` by construction — and this alert would fire
+forever with a page naming no anomaly. That is the Postgres-side twin of the
+empty-vector failure the Prometheus header opens with, failing loudly instead of
+silently, and an operator's response to it is to turn the alert off. Hence
+`::text` on all six diagnostics and on nothing else. The firing below is one
+instance carrying six labels, which is that behaviour confirmed rather than
+assumed.
+
+⚠️ **The price of that is that the numbers are series identity.** Grafana keys
+an alert instance on its label set, so the moment `today_spend_usd` changes —
+which is the moment a new `llm_calls` row lands — the old instance stops being
+returned and a **new** one starts at `Pending`. Measured: one evaluation after
+the trailing week was raised for the resolve below, this rule reported
+`{'alerting': 1, 'normal': 1}` — the `spend_ratio=4.0785` instance still
+Alerting because its series had merely vanished, and a fresh `spend_ratio=1.0000`
+instance Normal beside it. A day whose spend keeps growing therefore
+re-instantiates rather than updates, and an operator sees a resolve and a
+re-fire rather than one page that moves.
+
+**The trade is taken deliberately**, because the alternative is a page with no
+numbers on it: Grafana's annotation templates can only reach a SQL frame's
+values *through* `$labels`, so a diagnostic that is not a label is not on the
+page. D14's acceptance is that *"the firing records the `cost_usd` values it
+was computed from, because a firing whose inputs were not written down cannot
+be distinguished from a threshold that was lowered"* — and what bounds the
+churn is the ledger's own shape, one row per generation per household per
+night rather than one per scrape.
+
+🔴 **`relativeTimeRange: {from: 0, to: 0}` is rejected, and a rejected file
+provisions *no* rules rather than one bad one.** The statement carries its own
+window in SQL and reads no `$__timeFilter`, so the obvious spelling for "this
+rule has no time range" is zero-width — and Grafana answers
+`[alerting.alert-rule.invalidRelativeTime] Invalid alert rule query LEDGER:
+invalid relative time range [From: 0s, To: 0s]`, logs `Failed to provision
+alerting`, and loads nothing. It is set to the evaluation interval instead.
+**This was caught by provisioning the committed file into a real Grafana and
+not by any test here**, which is the argument for the firing being part of the
+task rather than a formality.
+
+**`noDataState: OK`, `execErrState: Error`.** The statement is a `SELECT` over
+CTEs with no top-level row source, so it returns exactly one row whatever
+`llm_calls` holds — on this deployment, where that table is genuinely **0 rows**,
+`fired=0, today_spend_usd=0.00000000, trailing_median_usd=0.00000000,
+days_with_spend=0`. `NoData` is therefore unreachable through the data and is
+set for the other way it arrives: a datasource that cannot be reached. A
+deployment that has never curated has not had a cost anomaly. An **error** is
+decided the other way, because a statement whose answer nobody has is not the
+same as an answer of "no anomaly", and is something an operator can fix.
+
 ## The firings
 
-Each rule was put through `pending → firing → resolved` against the live stack
-on **2026-09-11**, by a throwaway Prometheus reading the shared one over
-`remote_read`. Times are UTC; `instance` is the exporting process's
-`service.instance.id`.
+Each rule was put through `pending → firing → resolved` against real data on
+**2026-09-11** — the five Prometheus rules by a throwaway Prometheus reading
+the shared one over `remote_read`, and *Cost anomaly* by a throwaway Grafana
+reading a throwaway Postgres. **In neither case was the shared stack touched**:
+`~/code/observability/`'s Prometheus still has no `rule_files:` entry and its
+Grafana no alerting provisioning. Times are UTC; `instance` is the exporting
+process's `service.instance.id`, and *Cost anomaly* has none because its series
+is a table.
 
 | rule | fired | labels | `$value` | resolved |
 |---|---|---|---|---|
@@ -1546,6 +1811,7 @@ on **2026-09-11**, by a throwaway Prometheus reading the shared one over
 | Ingest stalled | 17:48:13 (active 17:43:13 + `for: 5m`) | `kind=curate`, `instance=5a6032ac…` | 25 | 17:49:09, 40 s after the queue was drained |
 | Provider degraded (D12) | 18:48:44 (active 18:38:43 + `for: 10m`) | `provider=tmdb` | 0.2000 | 19:07:48, 4m00s after the fault lifted — one `[5m]` window |
 | Enrichment SLA missed (D12) | 18:53:45 (active 18:38:43 + `for: 15m`) | `trigger=demand` | 7.475 | 19:08:59, 5m11s after the fault lifted |
+| Cost anomaly | 18:57:50 (active 18:47:50 + `for: 10m`) | `today_spend_usd=0.07324200`, `trailing_median_usd=0.01795800`, `spend_ratio=4.0785`, `floor_usd=0.02000000`, `days_in_window=8`, `days_with_spend=8` | 1 | 19:17:50, two evaluations after the condition went false — see below |
 
 **Jobs parking** — one `bootstrap` job enqueued with the key `d11-not-a-phase`.
 `services/handlers.py`'s `_bootstrap_phase` raises `PortDataMalformed`, which is
@@ -1674,6 +1940,86 @@ pages. What the defaults cannot do is report a *latency*: a healthy 100 ms
 deployment reads a p99 of 4.95 s, fifty milliseconds from an SLA it is nowhere
 near, with no resolution on either side of the threshold to watch a drift
 approach it.
+
+**Cost anomaly** — the one that is not Prometheus, so it was fired through a
+throwaway **Grafana** (`grafana/grafana:13.1.3`) reading a throwaway Postgres,
+with `dashboards/alerts/grafana` mounted at
+`/etc/grafana/provisioning/alerting` and a provisioned `usher-postgres`
+datasource. The shared Grafana on `127.0.0.1:3000` was not touched.
+
+🔴 **The firing records the `cost_usd` values it was computed from**, because a
+firing whose inputs were not written down cannot be told apart from a threshold
+somebody lowered. The database was a clone of the 1.27M-title seed catalog at
+head `m10c`, with `USHER_LLM_PRICE_IN_PER_MTOK=3` and
+`USHER_LLM_PRICE_OUT_PER_MTOK=15` — the pair the 2026-08-07 live verification
+used — and `USHER_LLM_BASE_URL` on the local vLLM (`gemma-4-26b-a4b`). Four
+**real** `usher curate` generations were run in one evening against a trailing
+week seeded at one generation a night:
+
+| `at` (UTC) | `tokens_in` | `tokens_out` | `cost_usd` |
+|---|---|---|---|
+| 2026-09-04 … 09-10, 12:00 (7 seeded rows) | 4881 | 221 | `0.01795800` each |
+| 2026-09-11 18:46:10 | 4881 | 221 | `0.01795800` |
+| 2026-09-11 18:46:29 | 4881 | 247 | `0.01834800` |
+| 2026-09-11 18:46:31 | 4881 | 257 | `0.01849800` |
+| 2026-09-11 18:46:34 | 4881 | 253 | `0.01843800` |
+
+Today `0.01795800 + 0.01834800 + 0.01849800 + 0.01843800 = 0.07324200`; the
+trailing median `0.01795800`; the ratio `4.0785`; the bar `3 x 0.01795800 =
+0.05387400`; the floor `0.02000000`, cleared three times over so it is not what
+decided. The four generations' own costs reconcile exactly:
+`(4881x3 + 221x15) / 1e6 = 0.017958` and so on, which is the 2026-08-07
+eight-decimal reconciliation reproduced on a different model.
+
+**The rendered page**, which is what an operator actually gets — read off a
+second firing at **19:26:30Z** on the same fixture, because the first firing's
+summary was the spelling this one replaced (below):
+
+> **LLM spend today is 0.07324200 USD against a trailing 7-day median of
+> 0.01795800; ratio 4.0785**
+
+**The resolve was produced by making the week catch up with the night, not by
+deleting the night.** Money already spent cannot be un-spent, and an alert that
+resolved because somebody removed its evidence would prove the wrong thing —
+this is the same care D11 took in making the silent Emby stub *deliver* rather
+than stopping it. Three more generations were added to each of the seven
+trailing days, with the token counts and costs of today's second, third and
+fourth, so every day in the window became the identical four-generation night:
+trailing median `0.07324200`, ratio `1.0000`, `fired = 0`. That is also what
+tomorrow does on its own, when today joins the trailing week.
+
+⚠️ **It resolved two evaluations late, and that is the label-as-identity
+property above, observed.** The condition went false at the **19:07:50**
+evaluation — but under a *different* label set (`spend_ratio=1.0000`,
+`trailing_median_usd=0.07324200`), so Grafana saw a brand-new `Normal` series
+appear beside a firing one that had merely stopped being returned:
+`{'alerting': 1, 'normal': 1}`. It resolved at **19:17:50**, when the missing
+series aged out, leaving `{'normal': 1}` and an empty
+`/api/alertmanager/grafana/api/v2/alerts`. So the ten-minute `for:` is not the
+only latency in this rule; a resolve costs the missing-series grace as well,
+and an operator reading the timestamps should expect it.
+
+⚠️ **Three things this firing caught that no test here could**, which is the
+argument for the live run being part of the task rather than a formality.
+
+1. The rule as first written carried `relativeTimeRange: {from: 0, to: 0}` —
+   correct in intent, since the statement has no time range of its own — and
+   Grafana **refused the whole provisioning file** for it, loading no rules at
+   all.
+2. The string-columns-become-labels conversion the `::text` casts depend on was
+   a *reading* of Grafana's behaviour until this run showed **one** instance
+   carrying exactly the six diagnostic columns as labels and `value = 1e+00`
+   from the seventh.
+3. 🔴 The summary's first spelling was
+   `{{ $labels.spend_ratio }}x the trailing 7-day median (…)`, which reads
+   perfectly here and renders **"LLM spend today is undefined (zero trailing
+   median)x the trailing 7-day median"** on this rule's *other* reachable
+   firing — a zero trailing median above the floor, where `spend_ratio` is a
+   sentence rather than a number. The two numbers lead now and the ratio
+   follows as its own clause.
+   `test_the_cost_anomaly_summary_survives_an_undefined_ratio` guards the
+   adjacency; the rendered page quoted above is from the re-firing that
+   confirmed the new spelling.
 
 ## 🔴 `for:` longer than its own `rate()` window — the D11 guard, narrowed by measurement
 

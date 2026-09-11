@@ -32,15 +32,28 @@ anything":
    retyped, and the derivation is pinned against the names this host's
    Prometheus holds.
 
-3. **The name sets agree with PRD 10's table in both directions.** A rule the
-   PRD does not name falsifies *"kept few, so they mean something"* as surely as
-   an alert with no rule. That case is `xfail(strict=True)` today and names
-   which task owes which rule.
+3. **The name sets agree with PRD 10's table in both directions**, across
+   **both** rule files. A rule the PRD does not name falsifies *"kept few, so
+   they mean something"* as surely as an alert with no rule. That case is
+   `xfail(strict=True)` today and names which task owes which rule.
 
 4. **The two spellings that are a decision get a case each.** "Ingest stalled"
    must reach a lane that has *never settled a job*, and "Push down" must fire
    on a zero and not on an absence. Both are one PromQL operator wide and both
    are invisible to every other check in this file.
+
+5. **The Postgres rule's own three ways of reading healthy forever.** PRD 10's
+   seventh alert is *Cost anomaly*, and it has no metric to name: the same
+   first principle that puts spend on `llm_calls` refuses a `usher.llm.*`
+   series, so the rule is SQL evaluated by Grafana and lives in
+   `dashboards/alerts/grafana/usher.yml`. Its analogue of invariant 1 is that
+   every `table.column` it names is one `Base.metadata` holds (D6's invariant
+   3, turned on a rule); its analogue of invariant 2 is the **file's
+   location** -- one directory below the Prometheus rule file, because
+   `rule_files: [/etc/prometheus/rules/*.yml]` is not recursive and a sibling
+   would take the other five rules down with it; and its own is that a
+   Grafana table frame yields **one** numeric column, since every numeric
+   column becomes a series the threshold judges.
 
 ⚠️ **What this module cannot check, stated rather than implied.** It does not
 evaluate PromQL. Whether `increase()` over a gauge answers what the rule's
@@ -64,14 +77,18 @@ from tests.unit.test_dashboards import (
     _balanced,
     _declared_histograms,
     _metric_tokens,
+    _sql_pairs,
     metric_catalogue,
     normalise_metric,
 )
+from usher.db.base import Base
 
 _ROOT = pathlib.Path(__file__).parents[2]
 _ALERTS = _ROOT / "dashboards" / "alerts" / "usher.yml"
+_GRAFANA_ALERTS = _ROOT / "dashboards" / "alerts" / "grafana" / "usher.yml"
 _PRD_10 = _ROOT / "docs" / "prd" / "10-telemetry-and-dashboards.md"
 _DASHBOARD_THREE = _ROOT / "dashboards" / "03-pipeline.json"
+_DASHBOARD_FIVE = _ROOT / "dashboards" / "05-cost-and-compliance.json"
 
 # PRD 10's `## Alerts` section, scoped to the heading rather than to the file.
 # The table is the last thing in the document today, so the lookahead has to
@@ -87,18 +104,25 @@ _ALERTS_SECTION = re.compile(r"^## Alerts$(?P<body>.*?)(?=^## |\Z)", re.M | re.S
 # filter is readable where a negative lookahead is not.
 _TABLE_ROW = re.compile(r"^\|(?P<alert>[^|]+)\|(?P<condition>[^|]+)\|\s*$", re.M)
 
-# The alerts D13 and D14 still owe, and which task owes each. Retyped here on
-# purpose: the point of the xfail below is to say *who* is missing, and the
-# only source for that is the plan. A wrong name here is loud -- it appears in
-# the failure message next to the set actually parsed out of the PRD.
+# The alert D13 still owes, and the task that owes it. Retyped here on purpose:
+# the point of the xfail below is to say *who* is missing, and the only source
+# for that is the plan. A wrong name here is loud -- it appears in the failure
+# message next to the set actually parsed out of the PRD.
 #
 # **D12's two are gone from this table because D12 landed them.** *Enrichment
 # SLA missed* could not be written at all until `usher.enrichment.latency`
 # carried `trigger` -- PRD 10's condition named a dimension the shipped series
 # did not have, which is why the debt outlived M4.
+#
+# 🔴 **And "Cost anomaly" is gone because D14 landed it, without being able to
+# delete the marker below.** D14's acceptance says the bidirectional check is
+# *"now green, seven rules against PRD 10's seven rows"*, which assumed it went
+# last. It did not: measured at the milestone HEAD D14 rebased onto
+# (`97d851a`, 2026-09-11), `m10/D13` still had nothing committed on it. So the
+# obligation transfers rather than expiring -- **this dict emptying is what
+# makes the marker XPASS**, and D13 is now the task that has to remove it.
 _OWED = {
     "Disk projection": "D13",
-    "Cost anomaly": "D14",
 }
 
 # The instrument factories `src/usher/` calls, mapped to how the OTel
@@ -145,6 +169,70 @@ def committed_rules(text: str | None = None) -> list[dict[str, Any]]:
     source = text if text is not None else _ALERTS.read_text(encoding="utf-8")
     document: Any = yaml.safe_load(source)
     return [rule for group in document["groups"] for rule in group["rules"]]
+
+
+def grafana_rules(text: str | None = None) -> list[dict[str, Any]]:
+    """Every Grafana-managed rule in `alerts/grafana/usher.yml`.
+
+    **A second loader rather than a second format in one file**, and the
+    separation is forced from both ends. Prometheus cannot evaluate a
+    `SELECT`; Grafana's provisioning shape is not a Prometheus rule group
+    (`title` where the other says `alert`, a `data` list where the other says
+    `expr`); and `rule_files: [/etc/prometheus/rules/*.yml]` would read a
+    sibling file and refuse the whole directory.
+    `test_the_postgres_rule_is_not_in_the_directory_prometheus_globs` is the
+    case that holds the location.
+    """
+    source = text if text is not None else _GRAFANA_ALERTS.read_text(encoding="utf-8")
+    document: Any = yaml.safe_load(source)
+    return [rule for group in document["groups"] for rule in group["rules"]]
+
+
+def alert_names() -> set[str]:
+    """Every alert this repository ships, across both engines.
+
+    PRD 10's table is one list and does not say which engine evaluates a row,
+    so the bidirectional check has to be over the union or it grades one file
+    against a table describing two.
+    """
+    return {str(rule["alert"]) for rule in committed_rules()} | {
+        str(rule["title"]) for rule in grafana_rules()
+    }
+
+
+def _grafana_rule(title: str) -> dict[str, Any]:
+    for rule in grafana_rules():
+        if rule["title"] == title:
+            return rule
+    raise AssertionError(
+        f"no Grafana rule titled {title!r}; the file has "
+        f"{sorted(str(rule['title']) for rule in grafana_rules())}"
+    )
+
+
+def cost_anomaly_sql() -> str:
+    """The statement *Cost anomaly* fires on, read out of the committed rule.
+
+    Exported because `tests/integration/test_cost_anomaly_query.py` executes
+    **this** string against a real `pgvector/pgvector:pg17` rather than a
+    transcription of it -- `db/repositories/llm_call.py` exports
+    `_LIST_SINCE_SQL` for the same reason, and its own plan case imports it.
+    A statement measured in one file and shipped from another is a statement
+    whose copy is what stops tracking the original.
+    """
+    rule = _grafana_rule("Cost anomaly")
+    queries = [query for query in rule["data"] if query["refId"] == rule["condition"]]
+    assert len(queries) == 1, (
+        f"the rule's `condition` names {rule['condition']!r}, which matches "
+        f"{len(queries)} of its queries"
+    )
+    sql = [
+        str(query["model"]["rawSql"])
+        for query in rule["data"]
+        if "rawSql" in query.get("model", {})
+    ]
+    assert len(sql) == 1, f"expected exactly one SQL query on this rule, found {len(sql)}"
+    return sql[0]
 
 
 def _rule(alert: str) -> dict[str, Any]:
@@ -258,10 +346,17 @@ def _tokens_of(rule: dict[str, Any]) -> set[str]:
     return _metric_tokens(str(rule["expr"]))
 
 
-def _dashboard_three_panel_titles() -> set[str]:
+def _dashboard_panel_titles(path: pathlib.Path) -> set[str]:
+    """Every panel title in a committed dashboard, collapsed rows included.
+
+    Takes the path rather than closing over Dashboard 3's: the Prometheus
+    rules all point at the Pipeline board and *Cost anomaly* points at Cost &
+    Compliance, and a second copy of this walk would be a second thing to fix
+    when a nested row stops being read.
+    """
     import json
 
-    document: Any = json.loads(_DASHBOARD_THREE.read_text(encoding="utf-8"))
+    document: Any = json.loads(path.read_text(encoding="utf-8"))
     titles: set[str] = set()
     queue: list[Any] = list(document.get("panels", []))
     while queue:
@@ -274,13 +369,19 @@ def _dashboard_three_panel_titles() -> set[str]:
     return titles
 
 
+def _dashboard_three_panel_titles() -> set[str]:
+    return _dashboard_panel_titles(_DASHBOARD_THREE)
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "D13 owes 'Disk projection' and D14 owes 'Cost anomaly'. D12 has landed "
-        "'Enrichment SLA missed' and 'Provider degraded', so this ledger is two short "
-        "rather than four. It stays a strict xfail and flips to a hard failure -- XPASS "
-        "under strict -- on the day D14 lands, which is the task that removes this marker."
+        "D13 owes 'Disk projection', and that is the whole of the debt. D12 landed "
+        "'Enrichment SLA missed' and 'Provider degraded' and D14 landed 'Cost anomaly' "
+        "-- which is in the *other* rule file, `alerts/grafana/usher.yml`, because it "
+        "has no metric to name -- so this ledger is one short rather than four. It stays "
+        "a strict xfail and flips to a hard failure -- XPASS under strict -- on the day "
+        "D13 lands, which is now the task that removes this marker."
     ),
 )
 def test_every_alert_prd_10_names_exists_and_every_rule_names_a_series_the_catalogue_holds() -> (
@@ -307,9 +408,26 @@ def test_every_alert_prd_10_names_exists_and_every_rule_names_a_series_the_catal
     whoever sees it to ignore the suite. Strict xfail keeps the assertion live
     and its failure message readable under `-rx`, keeps the gate honest about
     everything else, and -- because a strict xfail that *passes* is a failure --
-    forces D14 to come back and delete the marker. That is the shape M7 used for
-    exactly this situation, a case held across the two tasks that had to land
-    together.
+    forces the task that lands the seventh rule to come back and delete the
+    marker. That is the shape M7 used for exactly this situation, a case held
+    across the two tasks that had to land together.
+
+    🔴 **D14 was told to be that task and could not be.** Its acceptance reads
+    *"D11's bidirectional name check is now green, seven rules against PRD 10's
+    seven rows"*, which assumed it went last. Measured on the milestone HEAD
+    D14 rebased onto -- `97d851a`, 2026-09-11 -- D12 had landed its two and
+    `m10/D13` still had nothing committed on it. So D14 shipped its rule, took
+    its own name out of `_OWED`, and left the marker to D13. **That is the
+    honest state and not a deferral**: the assertion still fails, and it fails
+    because one alert really is missing. When D13 lands, `_OWED` empties and
+    this marker XPASSes, which under `strict` is a failure -- that is the
+    handover working rather than a second deferral.
+
+    **The names come from `alert_names()` and so span both files.** PRD 10's
+    table is one list that says nothing about which engine evaluates a row;
+    six of its seven are Prometheus rules and *Cost anomaly* is a Grafana
+    Postgres rule, so a check reading only `alerts/usher.yml` would report the
+    seventh missing forever while it sat one directory down.
     """
     named = prd_alerts()
     assert named, "no alert rows parsed out of PRD 10"
@@ -331,7 +449,7 @@ def test_every_alert_prd_10_names_exists_and_every_rule_names_a_series_the_catal
         f"rule selects nothing and reads as all-clear forever: {unknown}"
     )
 
-    committed = {str(rule["alert"]) for rule in rules}
+    committed = alert_names()
     missing = sorted(set(named) - committed)
     assert committed == set(named), (
         "the rule file and PRD 10's table disagree. Owed: "
@@ -640,6 +758,329 @@ def test_the_push_down_rule_fires_on_a_zero_and_not_on_an_absence() -> None:
         f"PRD 10's condition is `push.connected == 0`, spelled on the stored name: {expr!r}"
     )
     assert rule["for"] == "15m", f"PRD 10's window is 15 min; this rule waits {rule['for']!r}"
+
+
+#: The output list of `Cost anomaly`'s statement -- everything between its
+#: final `SELECT` and the `FROM judged` that closes it. Sliced rather than
+#: regex-matched over the whole statement, because four CTEs above it also
+#: end lines in `AS <name>` and a scan that read those would grade the
+#: `bounds`/`ledger`/`daily` internals as if Grafana saw them.
+def _cost_anomaly_outputs(sql: str) -> str:
+    marker = "\nSELECT\n"
+    assert sql.count(marker) >= 1, (
+        f"no top-level `SELECT` found in the cost-anomaly statement, so the column scan "
+        f"below reads nothing: {sql!r}"
+    )
+    return sql.rsplit(marker, 1)[1]
+
+
+_AN_OUTPUT_ALIAS = re.compile(r"\bAS\s+(\w+),?\s*$", re.M)
+
+
+def test_the_postgres_rule_is_not_in_the_directory_prometheus_globs() -> None:
+    """🔴 A Grafana provisioning file beside `usher.yml` disarms the other
+    five rules, and the directory layout is the whole of the defence.
+
+    `alerts/usher.yml`'s header tells an operator to mount `dashboards/alerts`
+    at `/etc/prometheus/rules` and set
+    `rule_files: [/etc/prometheus/rules/*.yml]`. That glob is not recursive,
+    Prometheus unmarshals rule files **strictly**, and a Grafana rule group
+    carries `apiVersion`, `folder`, `condition` and `data` -- none of which a
+    Prometheus rule group has. The result is not one ignored file: a server
+    started on such a directory **exits 2 before opening a port**, so every
+    rule in `usher.yml` stops existing as the price of adding the seventh
+    alert. Measured on `prom/prometheus:v3.13.2`, 2026-09-11, and recorded in
+    `dashboards/README.md` -- the same server on the committed layout serves
+    all five.
+
+    So this case pins two things at once: that the Prometheus directory holds
+    exactly the one file Prometheus can read, and that the Grafana rule is
+    somewhere that glob does not reach. The first assertion is what fails if
+    somebody adds `grafana.yml` beside `usher.yml`; the second is what fails
+    if the Grafana file is moved up rather than deleted.
+    """
+    prometheus_directory = _ALERTS.parent
+    globbed = sorted(path.name for path in prometheus_directory.glob("*.yml"))
+    assert globbed == ["usher.yml"], (
+        "`rule_files: [/etc/prometheus/rules/*.yml]` reads every one of these, and "
+        "Prometheus refuses the whole set if one of them is not a Prometheus rule file: "
+        f"{globbed}"
+    )
+    assert _GRAFANA_ALERTS.is_file(), f"{_GRAFANA_ALERTS} does not exist"
+    assert _GRAFANA_ALERTS not in set(prometheus_directory.glob("*.yml")), (
+        f"{_GRAFANA_ALERTS.name} is in the directory Prometheus globs"
+    )
+    assert _GRAFANA_ALERTS.parent.parent == prometheus_directory, (
+        "the Grafana rules have moved out from under `dashboards/alerts/`, so the two "
+        "engines' alert files no longer live together and nothing points from one to the "
+        f"other: {_GRAFANA_ALERTS}"
+    )
+
+    # The positive control for the glob itself: a `*.yml` that matched nothing
+    # would satisfy the equality above for an empty directory just as happily.
+    assert _ALERTS.name in globbed, "the glob does not even find the file it is about"
+
+
+def test_the_postgres_rule_names_only_tables_and_columns_this_schema_holds() -> None:
+    """Invariant 1, in the only form a rule with no metric can have it.
+
+    A PromQL expression naming a series nobody stores evaluates to an empty
+    vector and reads as healthy forever; a `SELECT` naming a column nobody
+    stores does **not** -- it raises, and Grafana's `execErrState: Error` is
+    what carries that to a human. The failure this case is really for is the
+    one in between: a column that exists on a *different* table, or a table
+    renamed by a migration while the rule keeps the old name. Both are only
+    visible against `Base.metadata`, which is where D6's invariant 3 already
+    looks, so this reuses `_sql_pairs` rather than teaching a second scanner
+    the same lesson.
+
+    ⚠️ The same coverage limit applies as there, and it is why the statement
+    writes `llm_calls.at` rather than aliasing the table: an alias is not a
+    table name, so an aliased statement yields no pairs and is graded on
+    nothing. The count assertion below is what notices that.
+    """
+    pairs = _sql_pairs(cost_anomaly_sql())
+    assert len(pairs) >= 3, (
+        "the table.column scan found almost nothing in the cost-anomaly statement, so "
+        "either it has been rewritten in aliases or the scan has stopped reading it: "
+        f"{pairs}"
+    )
+    for table, column in pairs:
+        columns = Base.metadata.tables[table].columns
+        assert column in columns, (
+            f"Cost anomaly selects {table}.{column}, which is not a column of {table}: "
+            f"{sorted(c.name for c in columns)}"
+        )
+    assert {table for table, _ in pairs} == {"llm_calls"}, (
+        "PRD 10's cost ledger is `llm_calls` and this rule reads something else too, "
+        f"which makes its window a different question: {sorted({t for t, _ in pairs})}"
+    )
+
+
+def test_the_cost_anomaly_statement_carries_its_floor_its_window_and_stays_in_numeric() -> None:
+    """🔴 The four decisions the task text calls "properties of that query",
+    each spelled so that deleting it is red here.
+
+    - **Eight calendar days, seven of them judged.** The trailing median
+      excludes today, so the window has to hold seven *complete* days plus the
+      partial one being judged -- a seven-day window including today compares
+      today against a median it is a member of.
+    - **A median, not a mean**, as PRD 10 specifies: one generation per
+      household per night means a single failed night at $0 and a single re-run
+      at 2x drag a mean far enough that 3x stops meaning anything.
+    - **The comparison stays in `numeric`.** `cost_usd` is `NUMERIC(12, 8)`
+      precisely so money is not a float, and a rule that casts to `float8` for
+      the ratio reintroduces the rounding that column exists to refuse.
+      ⚠️ **`percentile_cont` is that cast**: Postgres has no `numeric`
+      overload of it, so `percentile_cont(0.5) WITHIN GROUP (ORDER BY
+      <numeric>)` returns `double precision` -- measured with `pg_typeof` on
+      PostgreSQL 17.10, 2026-09-11. `percentile_disc` is
+      `anyelement -> anyelement` and over a seven-element set returns the same
+      element. That is why the statement the task text supplies is not the
+      statement that shipped.
+    - **An absolute floor**, because a `0` trailing median makes `3 x median`
+      zero and any spend at all an anomaly -- the default state of every
+      deployment that has not priced its model.
+
+    The scans are substrings, which `testing-discipline.md` warns is how a
+    rendered artefact becomes a change-detector. They are substrings *here*
+    because each is a claim another component honours: the floor literal is
+    compared against the number the description promises an operator, and the
+    window and the aggregate are the two the mutation sweep is aimed at.
+    """
+    sql = cost_anomaly_sql()
+
+    assert sql.count("interval '7 days'") == 2, (
+        "the seven trailing days are spelled twice on purpose -- once for the calendar "
+        "series and once for the index-served lower bound -- and the two must move "
+        f"together or the query reads more rows than it judges: {sql}"
+    )
+    assert "generate_series(" in sql and "coalesce(ledger.spend, 0)" in sql, (
+        "the day series is grouped rather than generated, so a night with no LLM calls "
+        "is *absent* from the trailing set instead of being a 0 -- and a deployment that "
+        "curates three nights a week then takes its median over three nonzero days"
+    )
+    assert "percentile_disc(0.5)" in sql, "the trailing statistic is no longer a median"
+    assert "percentile_cont" not in sql, (
+        "`percentile_cont` has no `numeric` overload, so it casts `cost_usd` to "
+        "`double precision` and returns one -- the float this column was declared "
+        "`NUMERIC(12, 8)` to refuse"
+    )
+    assert not re.search(r"float8|double\s+precision|::real", sql), (
+        f"the comparison has left `numeric`: {sql}"
+    )
+    assert "AT TIME ZONE 'UTC'" in sql, (
+        "`date_trunc('day', <timestamptz>)` truncates in the *session's* time zone, so "
+        "without this the answer depends on how the Grafana server was started"
+    )
+
+    floors = re.findall(r">= (\d+\.\d+)\b", sql)
+    assert floors == ["0.02"], (
+        "the floor is one stated constant and this statement has a different number of "
+        f"them: {floors}"
+    )
+
+
+def test_the_cost_anomaly_rule_hands_grafana_exactly_one_numeric_column() -> None:
+    """🔴 The Postgres-side twin of "a metric nobody stores reads healthy
+    forever", and it fails in the opposite, louder direction.
+
+    Grafana's SQL-to-alerting conversion turns every **numeric** column of a
+    table frame into a series the condition is evaluated over and every
+    **string** column into a label on it. The threshold below is `> 0`. So a
+    second numeric column -- `days_in_window`, which is 8 by construction --
+    would be judged by that same threshold and this alert would fire on every
+    evaluation, forever, with a page naming no anomaly. That is why every
+    diagnostic column carries `::text`: the casts are the rule's wiring, not
+    its formatting.
+
+    The types themselves are read out of a real PostgreSQL in
+    `tests/integration/test_cost_anomaly_query.py`, through
+    `information_schema`; what is checkable here is the shape that produces
+    them, and that the summary interpolates only labels this statement
+    actually returns.
+    """
+    rule = _grafana_rule("Cost anomaly")
+    outputs = _cost_anomaly_outputs(cost_anomaly_sql())
+    columns = _AN_OUTPUT_ALIAS.findall(outputs)
+    assert columns[:1] == ["fired"], (
+        f"the value column is no longer first or no longer named `fired`: {columns}"
+    )
+    assert len(columns) == 7, f"expected seven output columns, found {columns}"
+    assert outputs.count("::text") == len(columns) - 1, (
+        "every column but `fired` has to reach Grafana as a *label*, which means a "
+        f"`::text` each; this statement casts {outputs.count('::text')} of "
+        f"{len(columns) - 1}: {outputs}"
+    )
+
+    fired = outputs.split("AS fired", 1)[0]
+    assert "::text" not in fired and "THEN 1 ELSE 0 END" in fired, (
+        f"`fired` is not a bare 0/1 numeric column: {fired!r}"
+    )
+
+    condition = next(query for query in rule["data"] if query["refId"] == rule["condition"])
+    assert condition["model"]["type"] == "threshold", (
+        "the condition is no longer a threshold, so the `> 0` this statement is written "
+        f"against is not what decides: {condition['model']}"
+    )
+    assert condition["model"]["conditions"][0]["evaluator"] == {"type": "gt", "params": [0]}, (
+        "the threshold is not `> 0`, which puts a second number in the decision beside "
+        f"the 3x in the SQL: {condition['model']['conditions']}"
+    )
+
+    interpolated = set(re.findall(r"\$labels\.(\w+)", str(rule["annotations"])))
+    assert interpolated, "the page interpolates no label, so it names no subject"
+    assert interpolated <= set(columns), (
+        "the page interpolates labels this statement does not return, so they render "
+        f"empty: {sorted(interpolated - set(columns))}"
+    )
+
+
+def test_the_cost_anomaly_summary_survives_an_undefined_ratio() -> None:
+    """🔴 The one label on this rule that is sometimes a **sentence**, and the
+    page has to stay a sentence when it is.
+
+    `spend_ratio` is `round(today / nullif(median, 0), 4)` with a
+    `coalesce(..., 'undefined (zero trailing median)')` behind it, because a
+    ratio against a zero median has no value and rendering it as `0.0000` or
+    `Infinity` would put a number in front of an operator meaning neither "no
+    anomaly" nor "an enormous one". That path is **reachable and is a real
+    page**: a zero trailing median with today above the floor fires, which is
+    the second arm of
+    `test_a_zero_trailing_median_is_held_by_the_floor_and_not_by_the_comparison`.
+
+    The summary's first spelling was `{{ $labels.spend_ratio }}x the trailing
+    7-day median`, which renders *"LLM spend today is undefined (zero trailing
+    median)x the trailing 7-day median"*. Measured against
+    `grafana/grafana:13.1.3` on 2026-09-11 -- by reading the rendered
+    annotation off a real alert instance, which is the only place a template
+    becomes a sentence. So the guard is on the adjacency rather than on the
+    whole line: a label that can be prose must not be glued to a unit.
+    """
+    rule = _grafana_rule("Cost anomaly")
+    summary = " ".join(str(rule["annotations"]["summary"]).split())
+    assert "{{ $labels.spend_ratio }}" in summary, (
+        f"the page no longer carries the ratio it fired on: {summary!r}"
+    )
+    assert not re.search(r"\$labels\.spend_ratio\s*\}\}\s*[a-zA-Z]", summary), (
+        "`{{ $labels.spend_ratio }}` is glued to a word, and that label is the sentence "
+        "`undefined (zero trailing median)` on every firing with a zero trailing median "
+        f"-- which is a page this rule really does send: {summary!r}"
+    )
+    for label in ("today_spend_usd", "trailing_median_usd"):
+        assert f"{{{{ $labels.{label} }}}}" in summary, (
+            f"the page does not carry {label}, so the numbers the verdict was computed "
+            f"from are only in the description: {summary!r}"
+        )
+
+
+def test_the_cost_anomaly_description_names_its_floor_the_two_price_settings_and_its_panel() -> (
+    None
+):
+    """A page has to land somewhere, and this one has two things to explain
+    that the Prometheus three do not.
+
+    **The floor**, because a constant that suppresses the alert is a constant
+    an operator will eventually need to raise, and a number in the SQL that
+    the description does not carry is a number nobody finds. It is asserted as
+    *the same string* the statement uses, so the two cannot drift.
+
+    **The two price settings**, because their defaults make this alert silent
+    by construction. `llm_price_in_per_mtok` and `llm_price_out_per_mtok` both
+    default to `Decimal(0)` (`src/usher/config.py`), which that file calls the
+    honest value for a local model and the wrong one for a hosted model an
+    operator forgot to price -- and this host's LLM is a local vLLM. With them
+    unset every `cost_usd` is `0.00000000` and no multiple of zero is an
+    anomaly. An operator who believes this rule is watching a hosted model has
+    to be told where to look, in the page itself.
+
+    The panel is on **Dashboard 5**, not 3, and is checked against
+    `05-cost-and-compliance.json` for the reason the Prometheus case checks
+    Dashboard 3's: renaming a panel should be red here rather than silently
+    pointing a page at a screen that no longer exists.
+    """
+    rule = _grafana_rule("Cost anomaly")
+    description = " ".join(str(rule["annotations"]["description"]).split())
+
+    assert rule.get("for"), "PRD 10's conditions are all durations; this rule has no `for:`"
+    assert rule["labels"]["severity"], "no severity"
+    assert rule["annotations"]["summary"], "no summary"
+    assert rule["noDataState"] == "OK", (
+        "a ledger with no rows is a deployment that has not curated, not an anomaly; "
+        f"this rule answers no-data with {rule['noDataState']!r}"
+    )
+
+    floor = re.findall(r">= (\d+\.\d+)\b", cost_anomaly_sql())[0]
+    assert floor in description, (
+        f"the statement does not fire below {floor} and the description never says so, so "
+        "the one number an operator has to change is only in the SQL"
+    )
+    for setting in ("llm_price_in_per_mtok", "llm_price_out_per_mtok"):
+        assert setting in description, (
+            f"the description does not name {setting}, whose default of 0 is what makes "
+            "an unpriced deployment silent"
+        )
+    # **Qualified, and the `or column in description` fallback was deleted after
+    # a plant survived it.** `llm_calls.at`'s column name is `at`, which is a
+    # substring of "that", "later" and a dozen other words this paragraph
+    # contains -- so the unqualified arm graded the description green with the
+    # column removed. The qualified form is also what an operator can paste.
+    for table, column in _sql_pairs(cost_anomaly_sql()):
+        assert f"{table}.{column}" in description, (
+            f"the description does not name {table}.{column}, which the rule fires on"
+        )
+
+    panels = _dashboard_panel_titles(_DASHBOARD_FIVE)
+    named = re.findall(r'"([^"]+)" on dashboard 5', description)
+    assert named, (
+        "the description names no Dashboard 5 panel, so a page lands on a query rather "
+        f"than on a screen: {description!r}"
+    )
+    for title in named:
+        assert title in panels, (
+            f"names panel {title!r}, which `05-cost-and-compliance.json` does not hold: "
+            f"{sorted(panels)}"
+        )
 
 
 def test_no_rule_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults() -> None:
