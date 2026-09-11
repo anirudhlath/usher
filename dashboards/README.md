@@ -1304,12 +1304,12 @@ becomes how every later panel escapes the check.
 # Alerts — `alerts/usher.yml`
 
 PRD 10's `## Alerts` table names seven rules and opens *"Kept few, so they mean
-something."* Three are here — **Ingest stalled**, **Jobs parking** and **Push
-down** — the three whose backing series ship today. D12 owes *Enrichment SLA
-missed* and *Provider degraded*, D13 owes *Disk projection*, D14 owes *Cost
-anomaly*; `tests/unit/test_alerts.py` holds that debt as an `xfail(strict=True)`
-whose message names which task owes which, and which becomes a **hard** failure
-the day the seventh rule lands, because a strict xfail that passes is a failure.
+something."* Five are here — **Ingest stalled**, **Jobs parking** and **Push
+down** from D11, plus **Enrichment SLA missed** and **Provider degraded** from
+D12. D13 owes *Disk projection* and D14 owes *Cost anomaly*;
+`tests/unit/test_alerts.py` holds that debt as an `xfail(strict=True)` whose
+message names which task owes which, and which becomes a **hard** failure the
+day the seventh rule lands, because a strict xfail that passes is a failure.
 
 **Nothing in this repository evaluates these rules.** The same asymmetry the
 dashboards have, one step further: the shared Prometheus in
@@ -1544,6 +1544,8 @@ on **2026-09-11**, by a throwaway Prometheus reading the shared one over
 | Jobs parking | 17:15:58 (active 17:10:58 + `for: 5m`) | `kind=bootstrap`, `instance=5a6032ac…` | 1.069 | 17:25:02, when the park left the `[15m]` window |
 | Push down | 17:43:13 (active 17:28:13 + `for: 15m`) | `source=D11 Silent Channel`, `instance=4a433056…` | 0 | 18:08:25, when the channel started delivering |
 | Ingest stalled | 17:48:13 (active 17:43:13 + `for: 5m`) | `kind=curate`, `instance=5a6032ac…` | 25 | 17:49:09, 40 s after the queue was drained |
+| Provider degraded (D12) | 18:48:44 (active 18:38:43 + `for: 10m`) | `provider=tmdb` | 0.2000 | 19:07:48, 4m00s after the fault lifted — one `[5m]` window |
+| Enrichment SLA missed (D12) | 18:53:45 (active 18:38:43 + `for: 15m`) | `trigger=demand` | 7.475 | 19:08:59, 5m11s after the fault lifted |
 
 **Jobs parking** — one `bootstrap` job enqueued with the key `d11-not-a-phase`.
 `services/handlers.py`'s `_bootstrap_phase` raises `PortDataMalformed`, which is
@@ -1601,3 +1603,131 @@ The cases that matter, all **SUCCESS** on 2026-09-11:
   the gauge reads 1.
 - The absence arm: an instance exporting **no push series at all** never fires
   *Push down*, at 20m or at 60m. An `absent()` arm would fire for the whole hour.
+
+**Provider degraded** (D12) — the real `TmdbClient` driven through
+`httpx.MockTransport` against an upstream answering **10 % 429 and 10 % a
+transport drop** that never reaches a status line. Both arms go through
+`client.py`'s `finally`, which is what makes the transport failure *counted*
+rather than absent. At the firing, the numerator and denominator were recorded
+**separately** rather than inferred from the ratio:
+
+| series | rate |
+|---|---|
+| `…{status="200"}` | 4.9116 /s |
+| `…{status="429"}` | 0.6124 /s |
+| `…{status="error"}` | 0.6124 /s |
+| **numerator** `sum by (provider) (rate(…{status=~"429\|5..\|error"}[5m]))` | **1.2252 /s** |
+| **denominator** `sum by (provider) (rate(…[5m]))` | **6.1409 /s** |
+| ratio | **0.19959** |
+
+🔴 **The `error`-in-both decision, observed rather than asserted.** `error`
+appears in the numerator (1.2252 = 0.6124 + 0.6124) *and* in the denominator
+(6.1409 = 4.9116 + 0.6124 + 0.6124). The same instant with `error` dropped from
+the numerator reads **0.09948** — exactly half, because the two failure arms ran
+at equal rates. That is the mild case. The severe one is a *total* transport
+outage, where the numerator would be 0 and the denominator the error count, so
+the ratio reads a healthy **0 %** at the worst possible moment;
+`promtool` drives exactly that (test 2 below) and the rule fires at **100 %**.
+PRD 10 states only the denominator half of this — *"a denominator that omitted
+the failures would read low exactly during an outage"* — and the numerator half
+follows from the same sentence without being in it.
+
+**The resolve was produced by fixing the fault, not by stopping the load.** The
+driver kept both lanes running at full rate for another fifteen minutes with the
+delay removed and the upstream answering 200; a resolve produced by stopping the
+traffic proves nothing, the same way D11's push resolve had to come from the
+stub *delivering* rather than from the stub going away. Provider degraded
+cleared at **19:07:48**, four minutes after the fault lifted at 19:03:48 — one
+`[5m]` rate window draining — and Enrichment SLA missed at **19:08:59**, its
+`$value` visibly decaying through **6.2017 s** at 19:07:48 as fast enrichments
+displaced slow ones inside the window.
+
+**Enrichment SLA missed** (D12) — `EnrichService` driven through its real
+`_apply` with a provider stub sleeping **6 s**, at `JobPriority.DEMAND`. 🔴 **A
+second lane ran at `BACKFILL` the whole time at 50 ms**, because an alert fired
+by making *all* enrichment slow proves the quantile works and not the scoping,
+and the scoping is the whole content of this task. At the firing, with both
+lanes live:
+
+| `trigger` | p99 over `[5m]` |
+|---|---|
+| `demand` | **7.4750 s** — over the SLA, fires |
+| `background` | **0.0995 s** — under it, silent |
+
+and the fired alert carries `trigger="demand"` in its own label set. Before
+D12 this alert could not be written at all: read off this host's Prometheus on
+2026-09-11, `usher_enrichment_latency_seconds_bucket` carried exactly
+`instance`, `job`, `le`, `otel_scope_name`, `outcome` — **PRD 10 specified an
+alert against a `trigger` dimension the shipped series did not carry, and its
+own correction bullet three hundred lines above the table recorded why.**
+
+⚠️ **Both `$value`s are bucket interpolations, and both match
+`lo + (hi − lo) × q` exactly** — 7.4750 = 5 + 2.5 × 0.99, 0.0995 =
+0.05 + 0.05 × 0.99. That is the honest reading of any `histogram_quantile`, and
+it is why `usher.enrichment.latency` gained an
+`explicit_bucket_boundaries_advisory` in the same task. ⚠️ **The advisory's
+justification is narrower than "the rule could not fire".** 5 s is *also* a
+boundary of the SDK's default ladder, so under the defaults the comparison
+still discriminates — a deployment with 99 % of enrichments inside 5 s reads
+**4.95 s** and stays silent, one where more than 1 % cross reads **9.95 s** and
+pages. What the defaults cannot do is report a *latency*: a healthy 100 ms
+deployment reads a p99 of 4.95 s, fifty milliseconds from an SLA it is nowhere
+near, with no resolution on either side of the threshold to watch a drift
+approach it.
+
+## 🔴 `for:` longer than its own `rate()` window — the D11 guard, narrowed by measurement
+
+D11 measured that `increase(depth[30m])` with `for: 30m` is unsatisfiable and
+generalised it to *every* decaying call:
+`test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it` asserted
+`for: < window` for all of them, and its own docstring said the case was *"for
+D12–D14 more than for D11"*. **Both of D12's rules fail that assertion and both
+demonstrably fire**, so the generalisation was too wide and D12 narrowed it
+rather than working around it.
+
+The knife edge is not a property of the function. It is a property of whether
+the signal underneath is *regenerated while the fault lasts*:
+
+- a **gauge** is a level — it steps once and freezes, so the step leaves the
+  range vector exactly `[W]` later and the condition is true for at most W.
+  D11's queue depth is this, and its measurement stands unchanged;
+- a **counter** (or a histogram's bucket series) is fed by *every event*, so
+  under a fault lasting D the condition holds for about D + W and a `for:`
+  longer than W is patience rather than a race.
+
+Measured twice, live and synthetically. Live, against this host's data: both
+rules went `pending` within ~90 s of the fault starting and fired at exactly
+`activeAt + for:` — Provider degraded at **18:48:44** (`for: 10m` over `[5m]`)
+and Enrichment SLA missed at **18:53:45** (`for: 15m` over `[5m]`).
+Synthetically, `promtool test rules` drives the same two through both
+transitions plus the negatives no live run produces on demand. The guard now
+grades a decaying window only when its operand is a **gauge**, derived from
+`create_observable_gauge` declarations rather than listed, and it still bites:
+moving *Jobs parking* to `for: 20m` over its `[15m]` gauge window fails on its
+own `E ` line.
+
+### D12's `promtool` cases, all SUCCESS on 2026-09-11
+
+1. *Provider degraded* is silent at 9m, **fires at 16m**, still firing at 60m —
+   `for: 10m` over `[5m]`, sustained 10 % 429.
+2. **A total transport outage fires at 100 %** — only `status="error"` moving.
+   With `error` in the denominator alone this reads 0 % and never pages.
+3. **A 404 storm never fires**, at 16m or 60m: a title TMDb does not have is the
+   enrichment lane's ordinary business, which is why the numerator names `429`
+   rather than a `4..` class.
+4. *Provider degraded* **resolves by 40m** once the 429s stop.
+5. *Enrichment SLA missed* is silent at 14m, **fires at 21m** with
+   `trigger="demand"` and `$value` 7.475s, still firing at 60m.
+6. 🔴 **Slow `background` enrichment never fires**, at 21m or 60m. Without
+   `{trigger="demand"}` on the selector this case fires — which is what an alert
+   written before the label existed would have done.
+
+⚠️ **The 5 % threshold is provisional and is labelled as one in the rule
+itself.** The only live run this project has is M9's S3 crawl — 130,334 requests
+over 1.98 h, **no 429 and one 400** — so the observed degraded rate at the one
+load ever measured is `0/130,334 = 0 %`, and the single non-2xx is a code this
+numerator deliberately excludes. That argues 5 % is *safe*, not that it is
+*right*: nothing here knows what fraction of 429s TMDb returns under sustained
+load, because this deployment has never seen one. The re-measure is named — the
+first real 429 this deployment sees. The 20 % above is a *stub* answering on
+demand and is not evidence about TMDb.

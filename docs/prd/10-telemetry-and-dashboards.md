@@ -210,7 +210,7 @@ rather than aspirational. **42 rows: 41 instruments Usher declares, plus one
 | `usher.jobs.queued` | gauge | kind | ✅ M4 |
 | `usher.jobs.duration` | histogram | kind | ✅ M4 |
 | `usher.jobs.parked` | gauge | kind | ✅ M4 |
-| `usher.enrichment.latency` | histogram | outcome | ✅ M4 |
+| `usher.enrichment.latency` | histogram | outcome, trigger | ✅ M4 (`trigger` M10) |
 | `usher.enrich.result` | counter | outcome | ✅ M4 |
 | `usher.ingest.items` | counter | source, result | ✅ M4 |
 | `usher.match.result` | counter | method, confident | ✅ M4 |
@@ -296,7 +296,12 @@ bucket boundaries in `configure_metrics`; it is **not** yet done, and nothing
 in this document's dashboard section should be built before it is. Method and
 the full table: `.claude/rules/emby-push-and-ingest.md`.
 
-⚠️ **`usher.suggest.duration` is the one exception, and it is an exception
+⚠️ **`usher.suggest.duration` and `usher.enrichment.latency` are the two
+exceptions, and they are exceptions rather than the fix.** (The second was
+added by M10's D12 and is described at the end of this bullet; thirteen
+seconds-unit histograms still carry no advisory, so the defect below is open.)
+
+⚠️ **`usher.suggest.duration` is the first exception, and it is an exception
 rather than the fix.** M10's D1 could not add a keystroke-latency series under
 these boundaries and have it mean anything — every value the series exists to
 separate falls in the first bucket — so that instrument carries an
@@ -325,6 +330,32 @@ all — but it fixes exactly one row of this table. Walking every
 [ADR-0002](decisions/0002-postgres-first-search.md)'s as-you-type budget —
 which is what makes *"what fraction of keystrokes made the budget"* the bucket
 ratio measured above rather than an interpolation between two bounds.
+
+⚠️ **`usher.enrichment.latency` is the second exception, added by M10's D12,
+and it was forced by an alert rather than by a panel.** The `## Alerts` table
+below asks for *"demand-triggered p99 > 5 s"*. ⚠️ **The harm is narrower than
+the general statement above, and saying so is the point.** 5 s is itself a
+boundary of the default ladder, so the comparison still discriminates — under
+the defaults a deployment with 99% of enrichments inside 5 s reads a p99 of
+**4.95 s** and stays silent, and one where more than 1% cross reads **9.95 s**
+and pages. What the defaults cannot do is report a *latency*: a healthy 100 ms
+deployment reads 4.95 s, fifty milliseconds from an SLA it is nowhere near, and
+there is no resolution on either side of the threshold to watch a drift
+approach it. Measured 2026-09-11 on the ladder below, a true 6 s reads
+**7.4750 s** and a true 100 ms reads **0.0995 s** — both exactly
+`lo + (hi − lo) × q`, which is what says the number is a bucket rather than a
+measurement. The instrument now declares
+`(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 30.0, 60.0)` beside
+its `create_histogram` in `services/enrich.py`: 5 s is a boundary, and 4 s and
+7.5 s bracket it so the p99 the alert reads is resolved rather than
+interpolated across the threshold. Read off this host's Prometheus on
+2026-09-11, the series' stored `le` set was the millisecond-scale default
+`(0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000, +Inf)`
+before the change and these boundaries after it. **This closes one row, not the
+defect**: walking `src/usher/` on 2026-09-11 finds **15** histograms declaring
+`unit="s"` and **13 still on the SDK defaults**.
+`tests/unit/test_alerts.py::test_no_rule_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults`
+is what keeps the next quantile rule from landing on an unfixed one.
 
 **`http.server.duration` is a correction, not an addition, and carries no
 `usher.` prefix on purpose.** M9 re-measured through a real `create_app()` and
@@ -607,6 +638,38 @@ can only answer the question it actually has:
   different populations. It was also emitted under the name
   `usher.enrich.duration` until M4 — a near-miss name that would have left
   this row's panel and the "enrichment SLA missed" alert permanently blank.
+
+  **Amended 2026-09-11 (M10, D12): the withholding condition expired; the
+  correction did not.** This bullet's argument was explicitly conditional —
+  *"`trigger` has one value until M5"* — and M5 spent that condition:
+  `services/titles.py` and the bootstrap, rows and sources routers enqueue
+  `ENRICH` at `JobPriority.DEMAND`, and `services/visibility.py` at
+  `VISIBLE`. So the series carries **both** labels now. `outcome` is *not*
+  reversed and is not a mistake: a failed enrichment's latency and a
+  successful one's are still different populations, which is the half of
+  this bullet that was never conditional on anything.
+
+  What forced the amendment is that the `## Alerts` table below went on
+  specifying *"Enrichment SLA missed — demand-triggered p99 > 5 s for 15
+  min"* against a label this bullet records as absent — **this document
+  specified an alert against a dimension it also recorded as not
+  existing**, and a rule written to that table would have selected nothing
+  and read as healthy forever. Measured on this host 2026-09-11: before the
+  change the stored series carried exactly `instance`, `job`, `le`,
+  `otel_scope_name`, `outcome`; after it, `trigger` as well, with the two
+  values `demand` and `background`.
+
+  ⚠️ **Two labels is 2 × |outcome| = four series, and that is the
+  cardinality claim rather than an assumption.** Both vocabularies are
+  closed and tiny — `enriched`/`failed` and `demand`/`background` — so
+  neither is the catalog-sized dimension this document's footgun rule is
+  about. A third label on this series is argued before it is appended.
+
+  PRD 10 `:151` claims *"Spans carry `title_id`, `source`, and `trigger`"*.
+  That was true of no span until D12; `enrich.title` now sets
+  `usher.trigger` from the same derivation the metric label uses, so the
+  two cannot drift into two spellings of one word. `source` on that span
+  remains unimplemented.
 - **`usher.provider.requests` counts failures too**, labelled
   `status="error"`. A transport failure never reaches a status line, and the
   "provider degraded" alert divides 429s and 5xxs by the total — a
