@@ -352,9 +352,15 @@ to the arithmetic rather than to the decision; `config.py`'s comment on
 
 **The walk a tick might start, from the artefact's own timestamps.** The
 completed rebuild this deployment most recently ran spans
-`min(computed_at)` **2026-08-19 18:30:43Z** → `max(computed_at)`
-**2026-08-19 22:05:27Z** = **12,884 s = 3.58 hours over 132,442 seeds, 97.3
-ms/seed**. The M10 plan quotes **3.33 h** — 11,981 s over 130,720 seeds at 91.7
+`min(computed_at)` **2026-09-07 23:25:26Z** → `max(computed_at)`
+**2026-09-08 02:45:59Z** = **12,033 s = 3.34 hours over 127,420 seeds, 94.4
+ms/seed** (M10's J7, on a clone). ⚠️ **That span is wall clock across a run
+deliberately interrupted and resumed**, so it carries the ~2 m the process was
+stopped; the two segments' own working time is 11,895 s. The seed count is what
+this run rebuilt — the resume correctly skipped 5,899 that already carried a
+current-fingerprint row — so **a walk of the whole 133,319-seed embedded
+population at this rate is ~3.50 h**, which is the number to budget a recovery
+against. The M10 plan quotes **3.33 h** — 11,981 s over 130,720 seeds at 91.7
 ms/seed, `usher similar --rebuild` on **2026-08-13**, recorded in
 `.claude/rules/search-and-embeddings.md`. **Both are real and the newer one is
 the one to plan against**: a 1.3% larger seed population on a busier host, which

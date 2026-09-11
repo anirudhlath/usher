@@ -134,8 +134,8 @@ class ScheduledJob(ABC):
         instant a walk *finishes*, `min` already answers the walk's own
         duration earlier. Measured on this deployment's last completed walk
         (2026-08-27, `max(computed_at) - min(computed_at)` on `title_neighbors`):
-        **3 h 34 m 44 s**. So a declared period *P* behaves as *P* minus the
-        walk, and **at any *P* at or under 3.58 h the job is due the moment it
+        **3 h 20 m 33 s**. So a declared period *P* behaves as *P* minus the
+        walk, and **at any *P* at or under 3.34 h the job is due the moment it
         completes and runs back to back forever**. A registration's period has
         to clear its own artefact's build time with room to spare; any job
         registered here owes both this argument and the `min`/`max` one about

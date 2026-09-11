@@ -153,10 +153,10 @@ and is more current than this file. **Spelling: `titles.popularity`,
 ## `nearest_for` and `usher similar --rebuild`
 
 - **`nearest_for` forces `_EXACT_SCAN_OFF`**, so it is an exact scan per seed
-  and HNSW is not involved: **93.4 ms/seed** at 1024 lanes on `PLAIN`, a
-  **3.46 h** walk on this catalog (M10's J7, 2026-09-08, 127,420 seeds rebuilt
-  in 11,895 s across an interrupted-and-resumed run; the 97.3 ms/seed figure it
-  replaces was 2026-08-19's, over 132,442 seeds). Price it by driving the repository method —
+  and HNSW is not involved: **94.4 ms/seed** at 1024 lanes on `PLAIN` — M10's
+  J7, 2026-09-08, 127,420 seeds over a 12,033 s wall clock that includes a
+  deliberate interrupt. A walk of the whole 133,319-seed embedded population at
+  that rate is **~3.50 h**. Price it by driving the repository method —
   a hand-written `ORDER BY embedding <=> …` is served from the index and prices
   a query nobody runs. **A per-seed price without its population is not a
   price** (cost is linear per seed, the walk quadratic); bound a walk by seed

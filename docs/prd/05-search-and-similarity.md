@@ -938,7 +938,7 @@ automatic** ([ADR-0046](decisions/0046-the-scheduler-stores-nothing.md)). The
 `false` by default — so a deployment that has not opted in is exactly where M6
 left it. Three things came with it and each closes a different half of the gap
 above. `rebuild(resume=True)` reads a **start cursor** off the artefact once
-per run, so an interrupted walk of 3.46 h is not redone from page one and a
+per run, so an interrupted walk of ~3.5 h is not redone from page one and a
 process restarted more often than the walk takes still reaches the end of the
 catalog; the scheduled job **refuses** a `title_embeddings` written by a model
 this deployment is not configured with, because the blend fingerprint labels
