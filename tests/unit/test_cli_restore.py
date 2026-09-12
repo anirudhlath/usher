@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.commands import configured, dispatched
 from usher.cli import _print_restore_report, build_parser, main, parse_args
 from usher.config import Settings
 from usher.ports.repository import RestoreRefusal
@@ -52,11 +53,6 @@ def _report(
         dry_run=dry_run,
         committed=committed,
     )
-
-
-def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/usher")
-    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
 
 
 def test_restore_takes_a_required_artifact_and_two_flags() -> None:
@@ -104,36 +100,17 @@ def test_restore_is_advertised_by_the_parser() -> None:
 def test_restore_dispatches_to_restore_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**`_dispatch`'s `else` arm is `serve`**, so a subcommand with no arm of
-    its own silently starts the HTTP server and looks like it worked, because
-    the server does start.
+    """Measured for `usher curate` in M8: deleting its arm left the whole
+    boundary selection green. `dispatched` carries the arguments."""
+    configured(monkeypatch)
 
-    Measured for `usher curate` in M8: deleting its arm left the whole
-    boundary selection green. The two are made to differ here -- `_restore`
-    records, `uvicorn.run` raises -- which is the only shape that can tell
-    them apart.
-    """
-    _configured(monkeypatch)
-    ran: list[tuple[Path, bool]] = []
-
-    async def _record(
-        settings: Settings, *, artifact: Path, dry_run: bool, skip_unresolvable: bool
-    ) -> None:
-        ran.append((artifact, dry_run))
-
-    def _served(*_: object, **__: object) -> None:
-        raise AssertionError("usher restore started the HTTP server")
-
-    monkeypatch.setattr("usher.cli._restore", _record)
-    monkeypatch.setattr("uvicorn.run", _served)
-
-    main(["restore", str(ARTIFACT), "--dry-run"])
+    calls = dispatched(monkeypatch, arm="_restore", argv=["restore", str(ARTIFACT), "--dry-run"])
 
     # **Both arguments, not a call count.** An arm that reached `_restore` and
     # dropped `--dry-run` would commit an artifact an operator asked to be
     # shown, which is the single most damaging thing this command can do and
     # is invisible to a spy that only counts.
-    assert ran == [(ARTIFACT, True)]
+    assert [(kwargs["artifact"], kwargs["dry_run"]) for _, kwargs in calls] == [(ARTIFACT, True)]
 
 
 def test_a_missing_artifact_is_one_line_and_exit_one(
@@ -152,7 +129,7 @@ def test_a_missing_artifact_is_one_line_and_exit_one(
     `BackupService` checks its destination first, and naming the type is what
     makes this a statement about the path.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     missing = tmp_path / "no-such-artifact.jsonl.gz"
 
     with pytest.raises(SystemExit) as exit_info:
@@ -179,7 +156,7 @@ def test_a_damaged_artifact_is_one_line_and_never_a_stack(
     is never reached: a run that got as far as the connection would say
     `ConnectionRefusedError` instead.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     damaged = tmp_path / "damaged.jsonl.gz"
     damaged.write_bytes(b"this is not a gzip member")
 
@@ -201,7 +178,7 @@ def test_traceback_re_raises_rather_than_rendering(
     subcommand -- `usher --traceback restore`, which is what the message the
     case above asserts on tells an operator to type.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
 
     with pytest.raises(FileNotFoundError):
         main(["--traceback", "restore", str(tmp_path / "nope.jsonl.gz")])
@@ -220,7 +197,7 @@ def test_the_traceback_flag_does_not_reopen_a_refusal(
     and the case that would fail if somebody added it to the tuple is this
     one.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     damaged = tmp_path / "damaged.jsonl.gz"
     with gzip.open(damaged, "wt", encoding="utf-8") as handle:
         handle.write("not json at all\n")
@@ -422,7 +399,7 @@ def test_a_run_that_refused_a_row_exits_non_zero(
     scheduler reads, so both are asserted -- the message, and that the exit is
     a `SystemExit` carrying a string, which is what exits 1.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     monkeypatch.setattr(
         "usher.cli.RestoreService",
         _StubService(
@@ -457,7 +434,7 @@ def test_a_run_that_refused_nothing_exits_zero(monkeypatch: pytest.MonkeyPatch) 
     successfully. So the same stub, the same command, an empty `refused`, and
     no `SystemExit` at all.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     monkeypatch.setattr("usher.cli.RestoreService", _StubService(_report()))
 
     main(["restore", str(ARTIFACT)])
@@ -472,7 +449,7 @@ def test_a_dry_run_that_refused_nothing_exits_zero(monkeypatch: pytest.MonkeyPat
     distinction between *refused* and *not committed* is the whole reason
     `RestoreReport` carries both.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     monkeypatch.setattr(
         "usher.cli.RestoreService", _StubService(_report(dry_run=True, committed=False))
     )
@@ -551,7 +528,7 @@ def test_a_rung_three_refusal_names_the_flag_rather_than_an_impossible_errand(
     a message that named the flag for every refusal would be the mirror defect
     -- telling an operator to skip rows an importer really would fix.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     monkeypatch.setattr(
         "usher.cli.RestoreService",
         _StubService(
@@ -597,7 +574,7 @@ def test_a_refusal_that_names_a_provider_id_does_not_advertise_the_flag(
     finishing `usher bootstrap`. Nothing here is unfindable, so nothing here
     should offer to be skipped.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     monkeypatch.setattr(
         "usher.cli.RestoreService",
         _StubService(
@@ -647,7 +624,7 @@ def test_the_flag_reaches_restore_and_composes_with_dry_run(
     rows -- the two worst outcomes of this command in one run, and neither
     visible to a spy that only counts calls.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     ran: list[tuple[Path, bool, bool]] = []
 
     async def _record(

@@ -59,7 +59,6 @@ from usher.api.app import create_app
 from usher.api.lanes import LaneSupervisor
 from usher.composition import DefaultUserId, run_bootstrap, unit_of_work
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.repositories.title import PostgresTitleRepository
@@ -96,15 +95,6 @@ def settings(postgres_url: str) -> Settings:
         push_enabled=False,
         worker_enabled=False,
     )
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:

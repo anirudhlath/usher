@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from tests.unit.commands import configured, dispatched
 from usher.cli import build_parser, main
 from usher.config import Settings
 from usher.ports.scheduler import ScheduledJob
@@ -59,29 +60,15 @@ def test_schedule_mirrors_works_argument_surface() -> None:
 def test_schedule_dispatches_to_the_scheduler_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**`_dispatch`'s `else` arm is `serve`.** So the two are made to differ:
-    `_schedule` records, the server raises.
+    """Both forms, because `--once` and the daemon reach the same arm through
+    the same `args.once` and a dispatch that ignored the flag would still
+    record."""
+    configured(monkeypatch)
 
-    Both forms, because `--once` and the daemon reach the same arm through the
-    same `args.once` and a dispatch that ignored the flag would still record.
-    """
-    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/usher")
-    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
-    ran: list[bool] = []
+    once = dispatched(monkeypatch, arm="_schedule", argv=["schedule", "--once"])
+    daemon = dispatched(monkeypatch, arm="_schedule", argv=["schedule"])
 
-    async def _record(settings: object, *, once: bool) -> None:
-        ran.append(once)
-
-    def _served(*_: object, **__: object) -> None:
-        raise AssertionError("usher schedule started the HTTP server")
-
-    monkeypatch.setattr("usher.cli._schedule", _record)
-    monkeypatch.setattr("uvicorn.run", _served)
-
-    main(["schedule", "--once"])
-    main(["schedule"])
-
-    assert ran == [True, False]
+    assert [kwargs["once"] for _, kwargs in once + daemon] == [True, False]
 
 
 def test_one_tick_over_an_empty_registry_says_so_and_exits(

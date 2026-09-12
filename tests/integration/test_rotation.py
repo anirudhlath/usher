@@ -39,7 +39,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.cli import main
 from usher.config import get_settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.models.source import SourceRow
 from usher.db.repositories.credentials import (
     PostgresCredentialRotationStore,
@@ -88,16 +87,6 @@ class _InterruptedRun(Exception):
     state -- row 1 committed, row 2 written and rolled back, row 3 never
     read -- and leaves something the case can be about.
     """
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one."""
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest_asyncio.fixture(autouse=True)

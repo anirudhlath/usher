@@ -71,6 +71,7 @@ from typing import Any
 
 import yaml
 
+from tests.unit.grafana import panel_titles
 from tests.unit.test_dashboards import (
     _RANGE,
     _aggregations,
@@ -483,31 +484,8 @@ def _every_expression() -> list[tuple[str, str]]:
     return found
 
 
-def _dashboard_panel_titles(path: pathlib.Path) -> set[str]:
-    """Every panel title in a committed dashboard, collapsed rows included.
-
-    Takes the path rather than closing over Dashboard 3's: the Prometheus
-    rules all point at the Pipeline board and *Cost anomaly* points at Cost &
-    Compliance, and a second copy of this walk would be a second thing to fix
-    when a nested row stops being read.
-    """
-    import json
-
-    document: Any = json.loads(path.read_text(encoding="utf-8"))
-    titles: set[str] = set()
-    queue: list[Any] = list(document.get("panels", []))
-    while queue:
-        panel = queue.pop(0)
-        if not isinstance(panel, dict):
-            continue
-        if panel.get("title"):
-            titles.add(str(panel["title"]))
-        queue.extend(panel.get("panels", []))
-    return titles
-
-
 def _dashboard_three_panel_titles() -> set[str]:
-    return _dashboard_panel_titles(_DASHBOARD_THREE)
+    return panel_titles(_DASHBOARD_THREE)
 
 
 def test_every_alert_prd_10_names_exists_and_every_rule_names_a_series_the_catalogue_holds() -> (
@@ -1407,7 +1385,7 @@ def test_the_cost_anomaly_description_names_its_floor_the_two_price_settings_and
             f"the description does not name {table}.{column}, which the rule fires on"
         )
 
-    panels = _dashboard_panel_titles(_DASHBOARD_FIVE)
+    panels = panel_titles(_DASHBOARD_FIVE)
     named = re.findall(r'"([^"]+)" on dashboard 5', description)
     assert named, (
         "the description names no Dashboard 5 panel, so a page lands on a query rather "
@@ -1668,10 +1646,10 @@ def test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_ser
         "Dashboard 3 has ten panels; this scan found "
         f"{len(_dashboard_three_panel_titles())}: {sorted(_dashboard_three_panel_titles())}"
     )
-    assert len(_dashboard_panel_titles(_DASHBOARD_FIVE)) == 8, (
+    assert len(panel_titles(_DASHBOARD_FIVE)) == 8, (
         "Dashboard 5 has eight panels; this scan found "
-        f"{len(_dashboard_panel_titles(_DASHBOARD_FIVE))}: "
-        f"{sorted(_dashboard_panel_titles(_DASHBOARD_FIVE))}"
+        f"{len(panel_titles(_DASHBOARD_FIVE))}: "
+        f"{sorted(panel_titles(_DASHBOARD_FIVE))}"
     )
     boards = {3: _DASHBOARD_THREE, 5: _DASHBOARD_FIVE}
 
@@ -1736,7 +1714,7 @@ def test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_ser
                 f"{alert}: names a panel on dashboard {number}, which this case does not "
                 f"know how to read: {sorted(boards)}"
             )
-            titles = _dashboard_panel_titles(boards[int(number)])
+            titles = panel_titles(boards[int(number)])
             assert named in titles, (
                 f"{alert}: names panel {named!r} on dashboard {number}, which "
                 f"`{boards[int(number)].name}` does not hold: {sorted(titles)}"

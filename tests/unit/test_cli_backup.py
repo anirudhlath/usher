@@ -23,8 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.commands import configured, dispatched
 from usher.cli import _print_backup_report, build_parser, main, parse_args
-from usher.config import Settings
 from usher.services.backup import CREDENTIAL_KEY_WARNING, BackupReport
 
 AT = datetime(2026, 8, 25, 14, 30, 0, tzinfo=UTC)
@@ -57,11 +57,6 @@ def _report(
     )
 
 
-def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/usher")
-    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
-
-
 def test_backup_takes_one_optional_output_path() -> None:
     """`--output` and nothing else, and it is `None` by default rather than a
     computed name.
@@ -92,34 +87,19 @@ def test_backup_is_advertised_by_the_parser() -> None:
 def test_backup_dispatches_to_backup_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**`_dispatch`'s `else` arm is `serve`**, so a subcommand with no arm of
-    its own silently starts the HTTP server and looks like it worked, because
-    the server does start.
+    """Measured for `usher curate` in M8: deleting its arm left the whole
+    boundary selection green. `dispatched` carries the argument."""
+    configured(monkeypatch)
 
-    Measured for `usher curate` in M8: deleting its arm left the whole
-    boundary selection green. The two are made to differ here -- `_backup`
-    records, `uvicorn.run` raises -- which is the only shape that can tell
-    them apart.
-    """
-    _configured(monkeypatch)
-    ran: list[Path | None] = []
-
-    async def _record(settings: Settings, *, output: Path | None) -> None:
-        ran.append(output)
-
-    def _served(*_: object, **__: object) -> None:
-        raise AssertionError("usher backup started the HTTP server")
-
-    monkeypatch.setattr("usher.cli._backup", _record)
-    monkeypatch.setattr("uvicorn.run", _served)
-
-    main(["backup", "--output", "/srv/usher/backups/x.jsonl.gz"])
+    calls = dispatched(
+        monkeypatch, arm="_backup", argv=["backup", "--output", "/srv/usher/backups/x.jsonl.gz"]
+    )
 
     # The argument as well as the call: an arm that reached `_backup` and
     # dropped `--output` would write to the default name in whatever
     # directory the operator happened to be in, and a call-count spy cannot
     # see that.
-    assert ran == [Path("/srv/usher/backups/x.jsonl.gz")]
+    assert [kwargs["output"] for _, kwargs in calls] == [Path("/srv/usher/backups/x.jsonl.gz")]
 
 
 def test_a_missing_directory_is_one_line_and_exit_one(
@@ -148,7 +128,7 @@ def test_a_missing_directory_is_one_line_and_exit_one(
     typo reported in milliseconds instead of after the whole carried set),
     and naming the type is what makes this case a statement about the path.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     missing = tmp_path / "no-such-directory" / "x.jsonl.gz"
 
     with pytest.raises(SystemExit) as exit_info:
@@ -171,7 +151,7 @@ def test_traceback_re_raises_rather_than_rendering(
     subcommand -- `usher --traceback backup`, which is what the message the
     case above asserts on tells an operator to type.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
 
     with pytest.raises(FileNotFoundError):
         main(["--traceback", "backup", "--output", str(tmp_path / "nope" / "x.jsonl.gz")])

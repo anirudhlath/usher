@@ -29,7 +29,13 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.integration.conftest import run_alembic
+from tests.integration.conftest import (
+    column_set,
+    drop_database,
+    index_set,
+    run_alembic,
+    scratch_database,
+)
 from usher.db.base import build_engine
 from usher.domain.ids import new_id
 
@@ -38,34 +44,6 @@ _RETENTION_DELETE = "DELETE FROM search_queries WHERE at < now() - interval '90 
 (`docs/prd/10-telemetry-and-dashboards.md`, `## Analytics tables`). Quoted
 rather than paraphrased: an index that serves a statement nobody writes is
 `ix_titles_popularity` again."""
-
-
-async def _column_set(url: str, table: str) -> set[str]:
-    engine = build_engine(url)
-    try:
-        async with engine.connect() as conn:
-            rows = await conn.execute(
-                text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_schema = 'public' AND table_name = :table"
-                ),
-                {"table": table},
-            )
-            return {row[0] for row in rows}
-    finally:
-        await engine.dispose()
-
-
-async def _index_set(url: str) -> set[str]:
-    engine = build_engine(url)
-    try:
-        async with engine.connect() as conn:
-            rows = await conn.execute(
-                text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
-            )
-            return {row[0] for row in rows}
-    finally:
-        await engine.dispose()
 
 
 async def _indexdef(url: str, name: str) -> str:
@@ -87,23 +65,23 @@ async def _indexdef(url: str, name: str) -> str:
 
 
 async def test_search_queries_has_the_surface_column(postgres_url: str) -> None:
-    assert "surface" in await _column_set(postgres_url, "search_queries")
+    assert "surface" in await column_set(postgres_url, "search_queries")
 
 
 async def test_search_queries_has_the_tier_column(postgres_url: str) -> None:
-    assert "tier" in await _column_set(postgres_url, "search_queries")
+    assert "tier" in await column_set(postgres_url, "search_queries")
 
 
 async def test_the_retention_index_exists(postgres_url: str) -> None:
-    assert "ix_search_queries_at" in await _index_set(postgres_url)
+    assert "ix_search_queries_at" in await index_set(postgres_url)
 
 
 async def test_the_cost_ledgers_time_index_exists(postgres_url: str) -> None:
-    assert "ix_llm_calls_at" in await _index_set(postgres_url)
+    assert "ix_llm_calls_at" in await index_set(postgres_url)
 
 
 async def test_the_cost_ledgers_generation_index_exists(postgres_url: str) -> None:
-    assert "ix_llm_calls_generation_id" in await _index_set(postgres_url)
+    assert "ix_llm_calls_generation_id" in await index_set(postgres_url)
 
 
 # --- the shapes `compare_metadata` cannot see -----------------------------
@@ -195,30 +173,6 @@ async def test_a_search_row_with_no_tier_round_trips(session: AsyncSession) -> N
 # --- the two cases that need a database of their own ----------------------
 
 
-async def _scratch(postgres_url: str, prefix: str) -> tuple[str, str, str]:
-    """`(admin_url, scratch_name, scratch_url)`, the database created."""
-    admin = postgres_url.rsplit("/", 1)[0]
-    scratch = f"{prefix}_{uuid.uuid4().hex[:12]}"
-    engine = build_engine(f"{admin}/postgres")
-    try:
-        async with engine.connect() as conn:
-            await conn.execution_options(isolation_level="AUTOCOMMIT")
-            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
-    finally:
-        await engine.dispose()
-    return admin, scratch, f"{admin}/{scratch}"
-
-
-async def _drop(admin: str, scratch: str) -> None:
-    engine = build_engine(f"{admin}/postgres")
-    try:
-        async with engine.connect() as conn:
-            await conn.execution_options(isolation_level="AUTOCOMMIT")
-            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
-    finally:
-        await engine.dispose()
-
-
 async def test_the_backfill_reaches_a_row_that_existed_before_the_migration_ran(
     postgres_url: str,
 ) -> None:
@@ -236,7 +190,7 @@ async def test_the_backfill_reaches_a_row_that_existed_before_the_migration_ran(
     because `SearchService._record_search` is reachable from exactly those two
     callers and `SearchService.suggest` writes nothing at this revision.
     """
-    admin, scratch, url = await _scratch(postgres_url, "backfill")
+    admin, scratch, url = await scratch_database(postgres_url, "backfill")
     try:
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10b", direction="up"))
         engine = build_engine(url)
@@ -286,7 +240,7 @@ async def test_the_backfill_reaches_a_row_that_existed_before_the_migration_ran(
         finally:
             await engine.dispose()
     finally:
-        await _drop(admin, scratch)
+        await drop_database(admin, scratch)
 
 
 async def _delete_plan(url: str) -> str:
@@ -321,7 +275,7 @@ async def test_the_retention_delete_plans_onto_the_index_and_did_not_before(
     `ix_search_queries_at`. The two arms differ observably, which is the
     premise proved rather than assumed.
     """
-    admin, scratch, url = await _scratch(postgres_url, "prune")
+    admin, scratch, url = await scratch_database(postgres_url, "prune")
     try:
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10b", direction="up"))
         before = await _delete_plan(url)
@@ -332,7 +286,7 @@ async def test_the_retention_delete_plans_onto_the_index_and_did_not_before(
         after = await _delete_plan(url)
         assert "ix_search_queries_at" in after, after
     finally:
-        await _drop(admin, scratch)
+        await drop_database(admin, scratch)
 
 
 @pytest.mark.parametrize(
@@ -356,14 +310,14 @@ async def test_one_step_back_and_forward_restores_each_artefact(
     already past it is a silent no-op and the assertions then describe a schema
     nobody moved.
     """
-    admin, scratch, url = await _scratch(postgres_url, "cycle1")
+    admin, scratch, url = await scratch_database(postgres_url, "cycle1")
     try:
         await asyncio.to_thread(run_alembic, url, "head")
 
         async def present() -> bool:
             if artefact in ("surface", "tier"):
-                return artefact in await _column_set(url, "search_queries")
-            return artefact in await _index_set(url)
+                return artefact in await column_set(url, "search_queries")
+            return artefact in await index_set(url)
 
         assert await present(), f"the premise: {artefact} exists at head"
         await asyncio.to_thread(run_alembic, url, "-1")
@@ -371,7 +325,7 @@ async def test_one_step_back_and_forward_restores_each_artefact(
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10c", direction="up"))
         assert await present(), f"{artefact} did not come back"
     finally:
-        await _drop(admin, scratch)
+        await drop_database(admin, scratch)
 
 
 async def test_a_down_and_up_cycle_relabels_a_suggest_row_and_the_artefact_check_cannot_see_it(
@@ -401,7 +355,7 @@ async def test_a_down_and_up_cycle_relabels_a_suggest_row_and_the_artefact_check
     *"the suggest row reads `search` afterwards"* is also what a cycle that
     deleted every row and re-seeded defaults would produce.
     """
-    admin, scratch, url = await _scratch(postgres_url, "relabel")
+    admin, scratch, url = await scratch_database(postgres_url, "relabel")
     try:
         await asyncio.to_thread(run_alembic, url, "head")
         engine = build_engine(url)
@@ -467,4 +421,4 @@ async def test_a_down_and_up_cycle_relabels_a_suggest_row_and_the_artefact_check
         finally:
             await engine.dispose()
     finally:
-        await _drop(admin, scratch)
+        await drop_database(admin, scratch)

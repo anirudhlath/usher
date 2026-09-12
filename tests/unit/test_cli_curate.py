@@ -30,7 +30,8 @@ from decimal import Decimal
 import pytest
 from loguru import logger
 
-from usher.cli import _curate, _print_curation_report, build_parser, main, parse_args
+from tests.unit.commands import configured, dispatched
+from usher.cli import _curate, _print_curation_report, build_parser, parse_args
 from usher.config import Settings
 from usher.domain.curation import CuratedRow
 from usher.ports.errors import PortDataMalformed
@@ -110,37 +111,15 @@ def test_curate_is_advertised_by_the_parser() -> None:
 def test_curate_dispatches_to_curate_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**`_dispatch`'s `else` arm is `serve`**, so a subcommand that parses and
-    has no arm of its own does not fail -- it silently starts the HTTP server.
-    That is the same defect `main`'s own docstring records one layer up, where
-    an `argv is None` treated as "no arguments" made `usher sync-status` start
-    uvicorn and look like it worked, because the server does start.
+    """Measured: deleting the `curate` arm from `_dispatch` survived the whole
+    selection M8 swept until this case was written."""
+    configured(monkeypatch)
 
-    **`test_every_command_reports_a_dead_database_the_same_way` cannot see
-    it**, and that is why this case exists rather than being folded in there:
-    that one makes every command coroutine *and* `uvicorn.run` raise the
-    identical exception on purpose, so the two arms are indistinguishable by
-    construction. Measured -- deleting the `curate` arm from `_dispatch`
-    survived the whole selection this task swept until this case was written.
+    calls = dispatched(monkeypatch, arm="_curate", argv=["curate"])
 
-    So the two are made to differ: `_curate` records, the server raises.
-    """
-    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/usher")
-    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
-    ran: list[str] = []
-
-    async def _record(settings: Settings) -> None:
-        ran.append("curate")
-
-    def _served(*_: object, **__: object) -> None:
-        raise AssertionError("usher curate started the HTTP server")
-
-    monkeypatch.setattr("usher.cli._curate", _record)
-    monkeypatch.setattr("uvicorn.run", _served)
-
-    main(["curate"])
-
-    assert ran == ["curate"]
+    # The shape as well as the call: `usher curate` takes no flags, so an arm
+    # that grew a keyword is a flag the parser is not offering.
+    assert [kwargs for _, kwargs in calls] == [{}]
 
 
 def test_the_report_prints_the_pool_it_chose_from_and_not_the_rows_it_kept(

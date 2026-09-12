@@ -49,7 +49,13 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.integration.conftest import run_alembic
+from tests.integration.conftest import (
+    column_set,
+    drop_database,
+    index_set,
+    run_alembic,
+    scratch_database,
+)
 from usher.db.base import Base, build_engine
 from usher.domain.ids import new_id
 
@@ -419,7 +425,7 @@ async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url:
     row carrying `"community_rating": "tmdb"` while its *next* enrichment adds
     `"tmdb_vote_average": "tmdb"` beside it -- permanently, because
     `services/enrich.py` merges provenance rather than assigning it. Nothing
-    else here would notice: `_column_set`, `_constraint_set`, `_index_set` and
+    else here would notice: `column_set`, `_constraint_set`, `index_set` and
     `compare_metadata` all read the catalog, and this is data.
 
     Seeded **below** the revision and read above it, then read again after the
@@ -429,17 +435,7 @@ async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url:
     a `tmdb_popularity` entry pointing at nothing -- an invented provenance
     claim, which is exactly the inference this revision's docstring refuses.
     """
-    admin = postgres_url.rsplit("/", 1)[0]
-    scratch = f"prov_{uuid.uuid4().hex[:12]}"
-    engine = build_engine(f"{admin}/postgres")
-    try:
-        async with engine.connect() as conn:
-            await conn.execution_options(isolation_level="AUTOCOMMIT")
-            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
-    finally:
-        await engine.dispose()
-
-    url = f"{admin}/{scratch}"
+    admin, scratch, url = await scratch_database(postgres_url, "prov")
     seeded = new_id()
     try:
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09f", direction="up"))
@@ -495,13 +491,7 @@ async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url:
         finally:
             await scratch_engine.dispose()
     finally:
-        engine = build_engine(f"{admin}/postgres")
-        try:
-            async with engine.connect() as conn:
-                await conn.execution_options(isolation_level="AUTOCOMMIT")
-                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
-        finally:
-            await engine.dispose()
+        await drop_database(admin, scratch)
 
 
 async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str) -> None:
@@ -528,17 +518,7 @@ async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str
     default, and that the default is the 0 a walk restarting from the top
     means.
     """
-    admin = postgres_url.rsplit("/", 1)[0]
-    scratch = f"resume_{uuid.uuid4().hex[:12]}"
-    engine = build_engine(f"{admin}/postgres")
-    try:
-        async with engine.connect() as conn:
-            await conn.execution_options(isolation_level="AUTOCOMMIT")
-            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
-    finally:
-        await engine.dispose()
-
-    url = f"{admin}/{scratch}"
+    admin, scratch, url = await scratch_database(postgres_url, "resume")
     source_id, run_id = new_id(), new_id()
     try:
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10a", direction="up"))
@@ -578,7 +558,7 @@ async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str
                 # The premise: the column really is absent below the
                 # revision, so what is read back above it was written by
                 # `m10b.upgrade()` and not by this INSERT.
-                assert "position" not in await _column_set(url, "sync_runs")
+                assert "position" not in await column_set(url, "sync_runs")
 
             await asyncio.to_thread(run_alembic, url, "head")
             async with scratch_engine.connect() as conn:
@@ -594,13 +574,7 @@ async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str
         finally:
             await scratch_engine.dispose()
     finally:
-        engine = build_engine(f"{admin}/postgres")
-        try:
-            async with engine.connect() as conn:
-                await conn.execution_options(isolation_level="AUTOCOMMIT")
-                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
-        finally:
-            await engine.dispose()
+        await drop_database(admin, scratch)
 
 
 async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) -> None:
@@ -663,16 +637,16 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     that alters one:
 
     - a unique **constraint**, `uq_images_owner_provider_path`, which carries
-      an index of the same name and so is visible to `_index_set`;
+      an index of the same name and so is visible to `index_set`;
     - a **column rename**, `remote_url` -> `provider_path`, visible only to
-      `_column_set`;
+      `column_set`;
     - a **constraint rename**, `ck_images_remote_url_not_empty` ->
       `..._provider_path_not_empty`, visible to neither, which is why
       `_constraint_set` exists. That one is worth spelling out: a
       `downgrade()` that forgot it would leave a CHECK named for a column that
       no longer exists, and **the whole-chain `base`/`head` half cannot see
       it** -- `base` drops the table and `head` rebuilds it clean, exactly the
-      blind spot `_column_set`'s own docstring records for a column-only
+      blind spot `column_set`'s own docstring records for a column-only
       migration.
 
     Each head's displaced assertions move into the revision-pinned block
@@ -706,20 +680,10 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     The displaced assertion has moved into the revision-pinned block below,
     where revision ids do not drift.
     """
-    admin = postgres_url.rsplit("/", 1)[0]
-    scratch = f"cycle_{uuid.uuid4().hex[:12]}"
-    engine = build_engine(f"{admin}/postgres")
-    try:
-        async with engine.connect() as conn:
-            await conn.execution_options(isolation_level="AUTOCOMMIT")
-            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
-    finally:
-        await engine.dispose()
-
-    url = f"{admin}/{scratch}"
+    admin, scratch, url = await scratch_database(postgres_url, "cycle")
     try:
         await asyncio.to_thread(run_alembic, url, "head")
-        before = await _index_set(url)
+        before = await index_set(url)
 
         # One step back first, which is what an operator rolling back the
         # last migration actually runs -- and the only state in which a
@@ -754,8 +718,8 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # **One assertion per artefact kind**, which is the rule `m08a` needed
         # per *table* generalised to a head that alters one. `m09c` reverses
         # three things and each is invisible to the other two's reader: a
-        # unique constraint (an index, so `_index_set`), a column rename
-        # (`_column_set`), and a CHECK's rename (`_constraint_set`, which
+        # unique constraint (an index, so `index_set`), a column rename
+        # (`column_set`), and a CHECK's rename (`_constraint_set`, which
         # exists for this -- see that helper).
         #
         # The mutation this block catches is a `downgrade()` body replaced by
@@ -779,9 +743,9 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # naming only `surface`. Contrast `m08a`, whose `drop_index` really was
         # redundant because a `drop_table` followed it — the redundancy test is
         # *can this artefact fail independently*, and all five here can.
-        # The two columns are invisible to `_index_set` and the three indexes
-        # to `_column_set`, which is `m09c`'s per-artefact-kind rule as well.
-        at_m10b_columns = await _column_set(url, "search_queries")
+        # The two columns are invisible to `index_set` and the three indexes
+        # to `column_set`, which is `m09c`'s per-artefact-kind rule as well.
+        at_m10b_columns = await column_set(url, "search_queries")
         assert "surface" not in at_m10b_columns, "surface should not exist below m10c"
         assert "tier" not in at_m10b_columns, "tier should not exist below m10c"
         # The premise, for the reason the `m09a` stop below records: an empty
@@ -789,7 +753,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # would pass at any depth at which `search_queries` had ceased to
         # exist.
         assert at_m10b_columns, "the premise: `search_queries` still exists at `m10b`"
-        at_m10b_indexes = await _index_set(url)
+        at_m10b_indexes = await index_set(url)
         assert "ix_search_queries_at" not in at_m10b_indexes
         assert "ix_llm_calls_at" not in at_m10b_indexes
         assert "ix_llm_calls_generation_id" not in at_m10b_indexes
@@ -812,7 +776,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # same redundancy `m08a` shipped an index assertion for and had it
         # removed.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10a", direction="down"))
-        at_m10a_columns = await _column_set(url, "sync_runs")
+        at_m10a_columns = await column_set(url, "sync_runs")
         assert "position" not in at_m10a_columns, "position should not exist below m10b"
         assert at_m10a_columns, "the premise: `sync_runs` still exists at `m10a`"
 
@@ -821,15 +785,15 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # they had teeth*: `-1`-from-`m10b` lands on `m10a`'s applied state,
         # where the renames have happened and every `not in` below is false.
         #
-        # `m10a` is a *renaming* head, so `_column_set` carries it in both
+        # `m10a` is a *renaming* head, so `column_set` carries it in both
         # directions at once: the new spellings are absent here and the old
         # ones present, and a `downgrade()` that renamed only some of them
         # fails on the half it forgot. One assertion per artefact kind — the
-        # columns via `_column_set`, the constraints via `_constraint_set`,
+        # columns via `column_set`, the constraints via `_constraint_set`,
         # because a rename that moved a column and left its CHECK named for
         # the old one is invisible to the column reader.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09f", direction="down"))
-        at_m09f_columns = await _column_set(url, "titles")
+        at_m09f_columns = await column_set(url, "titles")
         for new in ("tmdb_vote_average", "tmdb_vote_count", "tmdb_popularity"):
             assert new not in at_m09f_columns, f"{new} should not exist below m10a"
         for old in ("community_rating", "vote_count", "popularity"):
@@ -856,7 +820,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
             assert await _column_storage(url, table, column) == "e", (
                 f"{table}.{column} should be back to pgvector's EXTERNAL default here"
             )
-        assert "ix_title_embeddings_hnsw" in await _index_set(url)
+        assert "ix_title_embeddings_hnsw" in await index_set(url)
 
         # **A named stop at `m09d`, holding `m09e`'s three.** Displaced from the
         # `-1` half the moment `m09f` became head, and displaced *because they
@@ -865,7 +829,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09d", direction="down"))
         assert await _column_type(url, "title_embeddings", "embedding") == "halfvec(384)"
         assert await _column_type(url, "user_taste", "centroid") == "halfvec(384)"
-        assert "ix_title_embeddings_hnsw" in await _index_set(url)
+        assert "ix_title_embeddings_hnsw" in await index_set(url)
 
         # **A named stop at `m09c`, holding `m09d`'s five.** Displaced from the
         # `-1` half the moment `m09e` became head, and displaced *because they
@@ -877,11 +841,11 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # artefact kinds, one assertion each, because none is observable
         # through another's reader.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09c", direction="down"))
-        at_m09c = await _index_set(url)
+        at_m09c = await index_set(url)
         assert "ix_credits_source_natural_key" not in at_m09c
         assert "ix_people_imdb_id" not in at_m09c
-        assert "source" not in await _column_set(url, "credits")
-        people_columns = await _column_set(url, "people")
+        assert "source" not in await column_set(url, "credits")
+        people_columns = await column_set(url, "people")
         assert "imdb_id" not in people_columns
         # The pre-existing column, asserted present in the same breath: a
         # `downgrade()` that dropped `tmdb_id` instead would satisfy the line
@@ -892,7 +856,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # **A second named stop, at `m09a`, and it exists because `m09c`'s
         # artefacts are not observable at the deep one.** `m09c` alters
         # `images`, and `images` is created by `m09a` -- so at
-        # `fe1d40c8b7a3` the table is gone and `_column_set(url, "images")` is
+        # `fe1d40c8b7a3` the table is gone and `column_set(url, "images")` is
         # the empty set, which makes a column assertion there vacuous in one
         # direction and false in the other. That was measured rather than
         # reasoned: moving these four assertions straight into the block below
@@ -908,7 +872,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `m09a` is a revision id and not a step count, for the reason the
         # deep stop gives: every migration added later shifts what `-2` means.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09a", direction="down"))
-        at_m09a = await _index_set(url)
+        at_m09a = await index_set(url)
         # `m09c`'s four, displaced from the `-1` half the moment `m09d` became
         # head -- and displaced *because they had teeth*:
         # `uq_images_owner_provider_path` failed loudly on the first run with
@@ -918,7 +882,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # rather than renaming it back satisfies the absence and leaves
         # `images` a column short.
         assert "uq_images_owner_provider_path" not in at_m09a
-        images_columns = await _column_set(url, "images")
+        images_columns = await column_set(url, "images")
         assert "provider_path" not in images_columns
         assert "remote_url" in images_columns
         images_constraints = await _constraint_set(url, "images")
@@ -941,7 +905,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         await asyncio.to_thread(
             functools.partial(run_alembic, url, "fe1d40c8b7a3", direction="down")
         )
-        stepped = await _index_set(url)
+        stepped = await index_set(url)
         # `ffa`'s, `ffb`'s and `ffc`'s own artefacts, checked here rather than
         # after `-1`. These targets are **revision ids**, so unlike the
         # step-back above they do not drift when a migration lands on top --
@@ -1002,52 +966,27 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # out below, and so is `ix_title_search_names_name_lower_prefix`: none
         # can fail independently of its own table's primary key.
         assert "ix_titles_name_lower_prefix" not in stepped
-        assert "blend_fingerprint" not in await _column_set(url, "title_neighbors")
+        assert "blend_fingerprint" not in await column_set(url, "title_neighbors")
         assert "ix_watch_states_user_recent" not in stepped
         assert "ix_media_items_recently_added" not in stepped
         assert "ix_watch_states_user_played" in stepped
 
         await asyncio.to_thread(run_alembic, url, "base")
         await asyncio.to_thread(run_alembic, url, "head")
-        after = await _index_set(url)
+        after = await index_set(url)
         assert after == before, sorted(before ^ after)
         assert "ix_watch_states_user_recent" in after
         assert "ix_media_items_recently_added" in after
         assert "ix_watch_states_user_played" not in after
     finally:
-        engine = build_engine(f"{admin}/postgres")
-        async with engine.connect() as conn:
-            await conn.execution_options(isolation_level="AUTOCOMMIT")
-            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
-        await engine.dispose()
-
-
-async def _column_set(url: str, table: str) -> set[str]:
-    """One table's column names. The sibling of `_index_set`, for the
-    migrations that add a column rather than an index -- without it, a
-    column-only migration's `downgrade()` has nothing that can observe it
-    short of the whole-chain `base`/`head` round trip, which passes against a
-    no-op downgrade because `base` drops the table anyway."""
-    engine = build_engine(url)
-    try:
-        async with engine.connect() as conn:
-            rows = await conn.execute(
-                text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_schema = 'public' AND table_name = :table"
-                ),
-                {"table": table},
-            )
-            return {row[0] for row in rows}
-    finally:
-        await engine.dispose()
+        await drop_database(admin, scratch)
 
 
 async def _column_type(url: str, table: str, column: str) -> str:
     """One column's rendered type, typmod included -- `halfvec(1024)`.
 
     The third sibling, added for `m09e`, which is the first head that changes
-    a column's **type** rather than adding or dropping one. `_column_set`
+    a column's **type** rather than adding or dropping one. `column_set`
     cannot see it: `embedding` is in that set before and after, so a
     `downgrade()` replaced by `pass` passes every assertion the name-only
     reader can make.
@@ -1083,8 +1022,8 @@ async def _column_storage(url: str, table: str, column: str) -> str:
 
     The fourth sibling, added for `m09f`, which changes *only* this. Every
     other reader in this file answers identically on both sides of that
-    revision: the name is in `_column_set`, the type and typmod are unchanged
-    for `_column_type`, and the index is in `_index_set`. So without this a
+    revision: the name is in `column_set`, the type and typmod are unchanged
+    for `_column_type`, and the index is in `index_set`. So without this a
     `downgrade()` body replaced by `pass` is invisible.
 
     It is also the only schema fact in this file the ORM does not model.
@@ -1114,7 +1053,7 @@ async def _column_storage(url: str, table: str, column: str) -> str:
 async def _constraint_set(url: str, table: str) -> set[str]:
     """One table's constraint names, of every kind.
 
-    The third sibling of `_index_set` and `_column_set`, and it exists for the
+    The third sibling of `index_set` and `column_set`, and it exists for the
     same reason spelled one artefact further out: a migration that **renames a
     constraint** is invisible to both of the others, and the whole-chain
     `base`/`head` round trip cannot see a `downgrade()` that forgot the rename
@@ -1132,18 +1071,6 @@ async def _constraint_set(url: str, table: str) -> set[str]:
             rows = await conn.execute(
                 text("SELECT conname FROM pg_constraint WHERE conrelid = CAST(:table AS regclass)"),
                 {"table": table},
-            )
-            return {row[0] for row in rows}
-    finally:
-        await engine.dispose()
-
-
-async def _index_set(url: str) -> set[str]:
-    engine = build_engine(url)
-    try:
-        async with engine.connect() as conn:
-            rows = await conn.execute(
-                text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
             )
             return {row[0] for row in rows}
     finally:

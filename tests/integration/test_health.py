@@ -28,7 +28,6 @@ from usher.api.app import create_app
 from usher.api.lanes import IDLE_SLEEP_SECONDS
 from usher.api.routers.health import _check_migrations
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority
 
@@ -204,18 +203,6 @@ def worker_app(postgres_url: str) -> FastAPI:
             worker_enabled=True,
         )
     )
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Real, separately-committing sessions -- not this suite's usual
-    rolled-back one. The lane under test commits from another task, so a case
-    that watched it through one shared transaction would see nothing."""
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
