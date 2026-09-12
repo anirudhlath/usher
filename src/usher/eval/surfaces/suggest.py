@@ -11,7 +11,7 @@ Neither is a degraded form of the other, so a mean over them describes
 neither -- the same argument `SuggestTier` exists for rather than a
 `typo_tolerant: bool`.
 
-🔴 **This harness resolves no household, and that is what keeps it out of
+**This harness resolves no household, and that is what keeps it out of
 `search_queries`.** `SearchService.suggest` writes one row per answered
 keystroke and writes none for a call carrying no `user_id`, whatever
 `USHER_SEARCH_SUGGEST_ANALYTICS` says -- which is the half that holds now that

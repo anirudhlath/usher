@@ -301,57 +301,104 @@ class SearchQueryBuffer:
 
     `submit` appends and returns; `drain` -- one task per process, started by
     the composition root -- writes what has accumulated, one transaction per
-    batch. A synchronous row is half again the cost of the tier-1 request it
-    measures, which is what kept `USHER_SEARCH_SUGGEST_ANALYTICS` off; an
-    appended one is not measurable against it.
+    batch. What a request pays is an append, which is what lets
+    `USHER_SEARCH_SUGGEST_ANALYTICS` ship on.
 
-    **Bounded, and a full buffer drops rather than blocks.** Back-pressure here
-    would let an analytics row slow down the answer it is about, which is the
-    one property this class exists to remove, and an unbounded queue in front
-    of a database that is down is a memory leak per keystroke.
+    **Bounded twice, by rows and by the characters they carry, and a full
+    buffer drops rather than blocks.** Back-pressure would let an analytics row
+    slow down the answer it is about, which is the property this class exists
+    to remove; `q` has no maximum length, so a row bound alone would let one
+    caller hold arbitrary memory per keystroke.
 
-    Nothing here escapes: a refused row loses that row and a batch that cannot
-    be written at all loses that batch, both at `ERROR`, because the drain is
-    a lane and a lane that raises stops recording silently.
+    **`flush` is a barrier**: it returns with nothing pending and nothing in
+    flight, which is what `aclose` and a reader of the table both need.
+
+    Nothing here escapes: a refused row loses that row and an unwritable batch
+    loses that batch, both at `ERROR`, because a drain that raises stops
+    recording silently.
     """
 
-    def __init__(self, batches: SearchQueryBatch, *, capacity: int = 1024, batch: int = 64) -> None:
+    def __init__(
+        self,
+        batches: SearchQueryBatch,
+        *,
+        capacity: int = 1024,
+        batch: int = 64,
+        budget: int = 64 * 1024,
+    ) -> None:
         self._batches = batches
         self._capacity = capacity
         self._batch = batch
+        self._budget = budget
         self._pending: deque[SearchQueryRecord] = deque()
+        self._held = 0
+        self._dropped = 0
+        self._stopped = False
         self._submitted = asyncio.Event()
+        # Held across the pop as well as the write, which is what makes `flush`
+        # a barrier rather than a drain of whatever happens to be left.
+        self._writing = asyncio.Lock()
 
     def submit(self, record: SearchQueryRecord) -> bool:
         """Take the row, or refuse it because the buffer is full.
 
         Never awaits and never raises, so a caller can treat recording as free.
         """
-        if len(self._pending) >= self._capacity:
-            logger.error(
-                "the {surface} analytics buffer is full at {capacity} rows; "
-                "this request is unrecorded",
-                surface=record.surface.value,
-                capacity=self._capacity,
-            )
+        if len(self._pending) >= self._capacity or self._held + len(record.query) > self._budget:
+            # Reported once per run of drops rather than once per keystroke:
+            # the shape this defends against is a database that is down, and on
+            # this route that is a log line per character typed. `flush` reports
+            # the count when the buffer next empties.
+            self._dropped += 1
+            if self._dropped == 1:
+                logger.error(
+                    "the {surface} analytics buffer is full; keystrokes are unrecorded",
+                    surface=record.surface.value,
+                )
             return False
         self._pending.append(record)
+        self._held += len(record.query)
         self._submitted.set()
         return True
 
     async def drain(self) -> None:
-        """Write submitted rows until cancelled -- the composition root's task."""
-        while True:
+        """Write submitted rows until `aclose` stops it -- the root's task."""
+        while not self._stopped:
             await self._submitted.wait()
             self._submitted.clear()
             await self.flush()
 
     async def flush(self) -> None:
-        """Write everything submitted so far. Called on shutdown, so a process
-        that stops between two keystrokes does not lose the last of them."""
-        while self._pending:
-            batch = [self._pending.popleft() for _ in range(min(self._batch, len(self._pending)))]
-            await self._write(batch)
+        """Write everything submitted, and wait for a batch already in flight.
+
+        A barrier on both counts. A caller that only drained the deque would
+        return while the drain task held a batch of its own -- which is a
+        shutdown that cancels an INSERT, and a reader that races one.
+        """
+        async with self._writing:
+            while self._pending:
+                batch = [
+                    self._pending.popleft() for _ in range(min(self._batch, len(self._pending)))
+                ]
+                self._held -= sum(len(record.query) for record in batch)
+                await self._write(batch)
+            if self._dropped:
+                logger.error(
+                    "{count} analytics rows were dropped while the buffer was full",
+                    count=self._dropped,
+                )
+                self._dropped = 0
+
+    async def aclose(self) -> None:
+        """Stop the drain and write what is left.
+
+        Told to stop rather than cancelled: `CancelledError` is not an
+        `Exception`, so a cancel landing inside the write escapes the guard
+        below it and rolls that batch back.
+        """
+        self._stopped = True
+        self._submitted.set()
+        await self.flush()
 
     async def _write(self, records: Sequence[SearchQueryRecord]) -> None:
         try:
@@ -773,27 +820,16 @@ class SearchService:
         # is exactly what it was before F2 and the search is unrecorded rather
         # than wrong.
         self._analytics = analytics
-        # **A second switch beside it, and it narrows one surface rather than
-        # the collaborator.** `analytics=None` is a *caller* state -- a caller
-        # inside a larger unit of work it does not own -- and turns off both
-        # writers; this is an *operator* state, `USHER_SEARCH_SUGGEST_ANALYTICS`,
-        # and turns off only the keystroke one. Two different questions:
-        # collapsing them would make "do not record keystrokes" also mean "do
-        # not record searches", which is a setting nobody asked for and PRD 10
-        # would refuse.
-        #
-        # **On, because the row is buffered rather than written inside the
-        # request.** It shipped off while the write was synchronous: tier 1 end
-        # to end was p50 2.53 ms without the row and 6.29 ms with it, so the
-        # write was half again the request it measured.
-        #
-        # **It defaults the same way here as in `Settings`, deliberately.** Two
-        # defaults for one decision is how they come to disagree, and every
-        # shipped construction goes through `composition.build_search_service`
-        # -- so a disagreement here is invisible until somebody builds a
-        # `SearchService` by hand, which is what every unit case does.
-        #
-        # A `bool` and never a rate -- `_record_suggest` has the argument.
+        # A second switch beside it, narrowing one surface rather than the
+        # collaborator: `analytics=None` is a caller inside a unit of work it
+        # does not own and turns off both writers, where this is an operator
+        # turning off the keystroke one. Collapsing them would make "do not
+        # record keystrokes" also mean "do not record searches".
+
+        # It defaults the same way here as in `Settings`, because every shipped
+        # construction goes through `composition.build_search_service` -- so a
+        # disagreement is invisible until somebody builds a `SearchService` by
+        # hand, which is what every unit case does.
         self._suggest_analytics = suggest_analytics
 
     @property
@@ -1242,11 +1278,9 @@ class SearchService:
         question about this box and which M9 could not answer.
 
         **The volume argument is answered by where the write happens rather
-        than by switching it off.** A synchronous row took tier 1 from p50
-        2.53 ms to 6.29 ms -- half again the request it measures, on the path
-        ADR-0031 exists to make cheap -- so `USHER_SEARCH_SUGGEST_ANALYTICS`
-        shipped `false`. The row now goes to `SearchAnalytics.buffer` and a
-        drain writes it, and the switch ships on.
+        than by switching it off.** The row goes to `SearchAnalytics.buffer`
+        and a drain writes it, so an answered keystroke pays an append on the
+        path ADR-0031 exists to make cheap.
 
         ✅ **It also emits `usher.suggest.duration` and
         `usher.suggest.results` since M10's D1, both labelled `tier`, and the

@@ -756,12 +756,10 @@ def test_the_suggest_writer_ships_on_and_the_two_defaults_for_it_agree(
     """The keystroke writer ships **on**, because the row no longer sits on the
     request that produced it.
 
-    It shipped off while the write was synchronous: end to end against a clone
-    of the real catalog, tier 1 was p50 2.53 ms without the row and 6.29 ms
-    with it, so the analytics write was half again the cost of the request it
-    measured. `SearchQueryBuffer` takes the row and a drain writes it, so what
-    the request pays is an append and the knob is no longer a knob over a
-    feature nobody can afford to turn on.
+    `SearchQueryBuffer` takes the row and a drain writes it, so what the
+    request pays is an append -- which is what makes this a setting an operator
+    might turn *off* rather than a knob over a feature nobody could afford to
+    turn on.
 
     **Both defaults are asserted, and that pairing is the point.** The value
     lives in two places -- `Settings.search_suggest_analytics`, which is what a

@@ -714,22 +714,13 @@ class Settings(BaseSettings):
     search_suggest_candidates: int = Field(default=200, ge=1, le=2000)
     # Whether `GET /search/suggest` and `usher suggest` write a
     # `search_queries` row (`surface = 'suggest'`, `tier` naming the index that
-    # answered). PRD 10's amendment 2; `m10c` landed the columns.
-    #
-    # **A `bool` and deliberately not a sample rate.** Every absence in PRD
-    # 10's *"which absence means what"* table is exact, so a rate makes every
-    # count over this surface an estimate and adds a further absence nobody
-    # can name. Volume is bounded by retention instead.
-    #
-    # **On, because the row no longer sits on the request a keystroke waits
-    # for.** It shipped off while the write was synchronous, when it cost half
-    # again the tier-1 answer it measured; `SearchQueryBuffer` takes the row
-    # and a drain writes it, so the request pays an append.
-    #
-    # It narrows the suggest surface only. `GET /search` and `usher search`
-    # write regardless -- a household that turns off keystroke analytics has
-    # not asked to stop recording searches, and one switch for both would make
-    # it look as though they had.
+    # answered). The row is buffered off the request path, so what a keystroke
+    # pays for it is an append.
+
+    # A `bool` and never a sample rate: every absence in PRD 10's *"which
+    # absence means what"* table is exact, and a rate adds one nobody can name.
+    # It narrows the suggest surface only -- turning keystroke analytics off is
+    # not a request to stop recording searches.
     search_suggest_analytics: bool = True
 
     # The push lane and the worker lane (PRD 03, PRD 01's concurrency

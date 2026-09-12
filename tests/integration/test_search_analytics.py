@@ -100,28 +100,22 @@ def settings(postgres_url: str) -> Settings:
         # and a worker lane would poll the database these cases count rows in.
         push_enabled=False,
         worker_enabled=False,
-        # **Explicit, and the opposite of the shipped default.** The writer is
-        # `false` out of the box because on tier 1 the row costs more than the
-        # request; a deployment that wants the data turns it on, and that is
-        # the deployment every case here is about. Stated rather than defaulted
-        # so a reader is not left thinking these rows appear by themselves --
-        # and so the case below that turns it *off* is a real second
-        # configuration rather than the default wearing a name.
+        # Stated rather than defaulted, and it agrees with what ships: the
+        # fixture below turns it off, so the pair reads as two configurations
+        # rather than one configuration and an absence.
         search_suggest_analytics=True,
     )
 
 
 @pytest.fixture
 def settings_without_the_writer(postgres_url: str) -> Settings:
-    """The same deployment with `USHER_SEARCH_SUGGEST_ANALYTICS` off -- which
-    is the **shipped** default, spelled out rather than omitted.
+    """The same deployment with `USHER_SEARCH_SUGGEST_ANALYTICS` turned off.
 
     A second `Settings` rather than a monkeypatched field: the switch is read
     once, in `composition.build_search_service`, and a case that reached in and
     moved it afterwards would be asserting about an object no deployment
-    builds. Spelled rather than defaulted so the pair above and below reads as
-    two configurations rather than one configuration and an absence -- and so
-    the day the default moves again, both fixtures say which side they are on.
+    builds. Both fixtures state their side, so the day the default moves
+    neither of them is a default wearing a name.
     """
     return Settings(
         database_url=postgres_url,

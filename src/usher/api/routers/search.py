@@ -411,22 +411,18 @@ async def suggest(
     client can use — a keystroke has no click or play to attribute against it.
     An operator can switch the recording off; nothing else changes if they do.
     """
-    # **The writer, and why the paragraph above is short.** A route handler's
+    # The writer, and why the paragraph above is short: a route handler's
     # docstring is published as the operation's `description` in
-    # `/openapi.json`, so the internal half of this argument is a comment:
-    # three descriptions in this API already leak a rules-file path.
-    #
-    # One `search_queries` row per answered request, on both tiers, and the
-    # vocabulary objection it used to carry is answered by two columns rather
-    # than a fourth `SearchMode` member: `surface` says which box asked and
-    # `tier` says which index ran. Every mode-split panel owes a
-    # `WHERE surface = 'search'` it did not previously need.
-    #
-    # **The short-`q` arm below writes nothing, and that is this route's
-    # decision rather than the service's.** It returns before
-    # `SearchService.suggest` is called, so there is no answered query to
-    # record; a writer moved above this line would be a row per keystroke a
-    # client never meant to send.
+    # `/openapi.json`, so the internal half of this argument is a comment.
+
+    # `surface` says which box asked and `tier` says which index ran, so a
+    # keystroke and a search do not collapse into one vocabulary -- and every
+    # mode-split panel owes a `WHERE surface = 'search'`.
+
+    # The short-`q` arm below writes nothing, and that is this route's decision
+    # rather than the service's: it returns before `SearchService.suggest` is
+    # called, so there is no answered query to record. A writer above this line
+    # would be a row per keystroke a client never meant to send.
     minimum = _MIN_CHARS_FOR_TIER[tier]
     if len(q.strip()) < minimum:
         return SuggestResponse.of(q, tier=tier, min_query_length=minimum)

@@ -235,13 +235,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # disposed under a live lane makes that lane's next statement
             # raise into a task that is about to be cancelled anyway.
             await lanes.stop()
-            # Cancel, then flush: the task is parked on an `Event` and what is
-            # still in the deque is a handful of keystrokes a process stopping
-            # between two of them would otherwise lose.
-            draining.cancel()
+            # Told to stop, never cancelled: `CancelledError` is not an
+            # `Exception`, so a cancel landing inside the write escapes the
+            # guard that absorbs everything else and rolls that batch back.
+            # `aclose` flushes, and `flush` waits for a batch already in flight.
+            await search_queries.aclose()
             with suppress(asyncio.CancelledError):
                 await draining
-            await search_queries.flush()
             await close_provider()
             await close_model()
             await close_client()

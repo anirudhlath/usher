@@ -92,10 +92,9 @@ def settings(postgres_url: str) -> Settings:
         # assert on.
         push_enabled=False,
         worker_enabled=False,
-        # Opposite the shipped default, deliberately: the suggest writer is
-        # off out of the box (the row is 148% of a tier-1 request, measured),
-        # and the keystroke case below is about the deployment that turned it
-        # on. `tests/integration/test_search_analytics.py` owns the semantics.
+        # Stated rather than defaulted, so the keystroke case below reads as a
+        # deployment that records rather than as an absence.
+        # `tests/integration/test_search_analytics.py` owns the semantics.
         search_suggest_analytics=True,
     )
 

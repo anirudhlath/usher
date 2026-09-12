@@ -27,16 +27,13 @@ from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
 from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
 # Every column named explicitly, never `INSERT INTO search_queries VALUES
-# (...)`: positional values shift silently the moment a column is added, and a
-# reader is what would find such a shift, possibly years later, in a dashboard.
-#
+# (...)`: positional values shift silently the moment a column is added, and
+# the reader that finds such a shift is a dashboard, years later.
+
 # `clicked_title_id` and `played` are literals rather than binds because
-# neither is a fact `record()`'s caller has; `record_outcome` is the only thing
-# that moves them.
-#
-# `result_count` and `latency_ms` carry no `bindparam` type on purpose: an
-# untyped integer bind is what lets asyncpg refuse an out-of-range value
-# client-side, which is the behaviour `record` documents.
+# neither is a fact `record()`'s caller has. `result_count` and `latency_ms`
+# carry no `bindparam` type on purpose: an untyped integer bind is what lets
+# asyncpg refuse an out-of-range value client-side.
 _INSERT_QUERY = text(
     "INSERT INTO search_queries "
     "(id, at, user_id, query, mode, result_count, latency_ms, "
