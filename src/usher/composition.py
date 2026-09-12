@@ -131,7 +131,6 @@ from usher.ports.repository import (
     PersonRepository,
     RawPayloadStore,
     RowProviderSettingsRepository,
-    SearchQueryRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -1026,81 +1025,63 @@ def build_worker(
     )
 
 
-def search_query_scope(sessions: async_sessionmaker[AsyncSession]) -> SearchQueryScope:
-    """One session, one `SearchQueryRepository`, **committed on a clean
-    exit**.
+def scope[T](
+    sessions: async_sessionmaker[AsyncSession],
+    build: Callable[[AsyncSession], T],
+    *,
+    commit: bool,
+) -> Callable[[], AbstractAsyncContextManager[T]]:
+    """One session, one `build(session)`, opened per use.
 
-    `unit_of_work`'s shape one port wide, and for its reasons: returned as a
-    callable so `usher.services` and `usher.api.lanes` reach a database
-    without either of them importing SQLAlchemy, and opened per use so a
-    long-lived lane never holds a session -- hours, idle in transaction, on a
-    snapshot from whenever the scheduler started.
+    Returned as a callable so `usher.services` and `usher.api.lanes` reach a
+    database without importing SQLAlchemy, and opened per use so a lane that
+    ticks for weeks never holds a session idle in transaction.
 
-    🔴 **The commit is here and it is the whole of "a commit per chunk".**
-    Every repository in this package flushes and never commits, and
-    `SearchQueryRetention.run` opens one of these per chunk -- so a scope that
-    forgot to commit would be a prune that deleted a year of keystrokes inside
-    one transaction and then, on a process that died before the loop ended,
-    deleted none of them. Nothing about the failure would be visible: the run
-    logs its count either way.
-
-    Deliberately **not** `unit_of_work`: that builds a whole `Pipeline` --
-    twenty-odd repositories, two suggest indexes, an embedder -- for a job
-    that reads one aggregate and issues one `DELETE`, and it would put a
-    source-gate registry and a metadata provider behind a retention prune.
+    `commit=True` commits after the body, so a raise inside leaves the unit
+    uncommitted rather than half-committed. Pass `commit=False` when the built
+    object commits on its own cadence.
     """
 
     @asynccontextmanager
-    async def open() -> AsyncIterator[SearchQueryRepository]:
+    async def open() -> AsyncIterator[T]:
         async with sessions() as session:
-            yield PostgresSearchQueryRepository(session)
-            # After the body, so a raise inside the chunk leaves the chunk
-            # uncommitted rather than half-committed. `async with sessions()`
-            # closes the session either way and rolls back what was not
-            # committed.
-            await session.commit()
+            yield build(session)
+            if commit:
+                await session.commit()
 
     return open
+
+
+def search_query_scope(sessions: async_sessionmaker[AsyncSession]) -> SearchQueryScope:
+    """One `SearchQueryRepository` per use, committed on a clean exit.
+
+    The commit is what makes `SearchQueryRetention.run`'s "a commit per chunk"
+    true: every repository here flushes and never commits, so a scope that did
+    not commit would delete a year of keystrokes inside one transaction and,
+    on a process that died mid-loop, delete none of them.
+    """
+    return scope(sessions, PostgresSearchQueryRepository, commit=True)
 
 
 def similarity_scope(
     sessions: async_sessionmaker[AsyncSession], settings: Settings
 ) -> SimilarityScope:
-    """One session, one `SimilarityService`, **committing nothing on exit**.
+    """One `SimilarityService` per use, committing nothing on exit.
 
-    `search_query_scope`'s shape one service wide, and for its reasons:
-    returned as a callable so `usher.services` reaches a database without
-    importing SQLAlchemy, and opened per use so a lane that ticks for weeks
-    never holds a session idle in transaction on a snapshot from whenever the
-    scheduler started.
-
-    🔴 **No commit here, and that is the difference from the retention
-    scope.** `SimilarityService` is handed the session's own `commit` and calls
-    it **per page** -- that is where *"an interrupted walk keeps the pages it
-    finished"* comes from, and it is what `NeighborRebuildJob`'s resume cursor
-    then reads back. A commit at scope exit would land after the last page had
-    already committed, and `last_done()`'s scope issues one `SELECT`.
-
-    Deliberately **not** `unit_of_work`: that builds a whole `Pipeline` --
-    twenty-odd repositories, two suggest indexes, an embedder -- and would put
-    a source-gate registry and a metadata provider behind a batch that reads
-    stored vectors. Three repositories is the whole of what this needs, and
-    `embedding_model` is a *name* rather than an `Embedder` precisely so a
-    scheduler process loads no model (`SimilarityService.__init__`).
+    `SimilarityService` is handed the session's own `commit` and calls it per
+    page, which is what lets an interrupted walk keep the pages it finished.
     """
-
-    @asynccontextmanager
-    async def open() -> AsyncIterator[SimilarityService]:
-        async with sessions() as session:
-            yield SimilarityService(
-                PostgresTitleEmbeddingRepository(session),
-                PostgresTitleNeighborRepository(session),
-                PostgresTitleRepository(session),
-                session.commit,
-                embedding_model=settings.embedding_model,
-            )
-
-    return open
+    return scope(
+        sessions,
+        lambda session: SimilarityService(
+            PostgresTitleEmbeddingRepository(session),
+            PostgresTitleNeighborRepository(session),
+            PostgresTitleRepository(session),
+            session.commit,
+            embedding_model=settings.embedding_model,
+        ),
+        commit=False,
+    )
 
 
 def build_scheduler(
