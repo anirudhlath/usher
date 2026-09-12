@@ -42,7 +42,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.app import create_app
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.image import PostgresImageRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.source import PostgresSourceRepository
@@ -65,21 +64,6 @@ class _Household:
     bare: uuid.UUID
     poster: uuid.UUID
     backdrop: uuid.UUID
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one.
-
-    The route commits from a session of its own, so seeding through the
-    suite's shared transaction would write rows the request's connection
-    cannot see.
-    """
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest_asyncio.fixture

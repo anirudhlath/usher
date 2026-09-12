@@ -1,40 +1,18 @@
 """`usher work`'s loop: what a pass that crashes costs, and what it records.
 
-**The subject is an asymmetry between two roots, not a new feature.** The same
-`JobWorker` runs under `usher work` and under `api/lanes.py`'s worker lane, and
-until this file they disagreed about what one bad pass means: the lane caught
-`Exception`, logged and looped, while `usher work` had no per-pass `except` at
-all -- `JobWorker._pass` re-raises the first task failure after every task has
-settled, so one job's bug ended the process. Nothing said so, and the two are
-the same deployment one `USHER_WORKER_ENABLED` apart.
-
-Issue #8 is why it matters that the *record* is a stack. That crash left two
-lines, and the reason was `cli.OPERATOR_ERRORS` naming `SQLAlchemyError` --
-already repaired (`DBAPIError`, 2026-08-19, `tests/unit/test_cli_errors.py::
-test_a_missing_greenlet_keeps_its_traceback`). What was still missing at the
-daemon root is the arm those frames have to survive: a daemon that dies on the
-first bug has no second occurrence to record.
-
-**No database and no network.** `build_engine` connects to nothing, an
-`AsyncSession` opens no connection until something executes on it, and every
-composition call `_work` makes is substituted -- so the DSN below is
-deliberately unreachable and the loop is the only live code here.
+Both roots run one `WorkerLoop`, so a case here is a case about the lane too.
+No database and no network: the DSN below is deliberately unreachable.
 """
 
-import ast
 import asyncio
-import inspect
-import textwrap
 import uuid
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from loguru import logger
 from sqlalchemy.exc import MissingGreenlet
 
-import usher.cli
-from usher.api.lanes import LaneSupervisor
 from usher.cli import _work
 from usher.config import Settings
 
@@ -46,14 +24,14 @@ def _settings() -> Settings:
 
 
 class _Worker:
-    """A `JobWorker` reduced to the two calls `_measure` makes of it.
+    """A `JobWorker` reduced to the two calls `WorkerLoop.pass_once` makes.
 
     `run_once` raises **every** time on purpose. A stub that raised once and
     then succeeded would prove the daemon survived *and* would need the rest
-    of `_measure` -- the gauge refresh, and so a `Pipeline` over a real
-    session -- to run. Raising every pass keeps the failure at the first
-    `await` and still separates the two outcomes this file is about: a daemon
-    that died called this once.
+    of the pass -- `_refresh`, and so a `Pipeline` over a real session -- to
+    run. Raising every pass keeps the failure at the first `await` and still
+    separates the two outcomes this file is about: a daemon that died called
+    this once.
     """
 
     def __init__(self, failure: BaseException) -> None:
@@ -180,62 +158,3 @@ async def test_one_pass_keeps_its_exit_code_rather_than_logging_and_returning(
         await _work(_settings(), once=True)
 
     assert worker.passes == 1, f"`--once` ran {worker.passes} passes"
-
-
-def test_both_worker_roots_record_a_crashed_pass_with_its_frames() -> None:
-    """The asymmetry this file closed, read off the source so it cannot
-    reopen in one root only.
-
-    A behavioural case per root lets the two drift again in the direction that
-    is hard to see: a lane keeps its arm, the command loses one in a refactor,
-    and neither suite reads as different. So the shared property is asserted
-    structurally, scoped to **the two worker loops** rather than to their
-    modules -- `LaneSupervisor` has four `except Exception` arms and two of
-    them already used `logger.exception`, so a class-wide walk would pass on
-    `_run_worker`'s `logger.warning` without ever looking at it.
-
-    🔴 **`BaseException` is asserted here rather than behaviourally, and that
-    is `.claude/rules/testing-discipline.md`'s rule rather than a shortcut.** A
-    guard that caught `CancelledError` would turn a Ctrl-C into a logged pass
-    and keep going, and the *only* way a case can observe that is a daemon
-    that never finishes -- so the case reports a **timeout**, and it does not
-    even report that: written behaviourally (cancel, then `asyncio.wait` with a
-    deadline), the assertion fails correctly and then pytest-asyncio's teardown
-    cancels the same unstoppable task and hangs on it. Measured: the planted
-    `except BaseException` produced a 300-second timeout with no output rather
-    than a red line. A claim whose failure mode is a deadlock has no timing
-    case; this is the achievable form.
-    """
-    for name, function in (
-        ("cli._work", usher.cli._work),
-        ("lanes.LaneSupervisor._run_worker", LaneSupervisor._run_worker),
-    ):
-        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
-        caught = [
-            handler
-            for handler in ast.walk(tree)
-            if isinstance(handler, ast.ExceptHandler) and isinstance(handler.type, ast.Name)
-        ]
-        assert not [one for one in caught if cast(ast.Name, one.type).id == "BaseException"], (
-            f"{name} catches `BaseException`, so a Ctrl-C is a logged pass and this "
-            "daemon cannot be stopped -- the arm that exists to keep it alive killing "
-            "the one thing that ends it"
-        )
-        handlers = [one for one in caught if cast(ast.Name, one.type).id == "Exception"]
-        assert handlers, f"{name} has no per-pass guard at all"
-        # Both loguru spellings, because they are the same call and this
-        # project uses each somewhere: `logger.exception(...)` here and
-        # `logger.opt(exception=True).error(...)` in `services/jobs.py`. A
-        # check keyed on one of them would fail a correct rewrite into the
-        # other, which is a change-detector rather than a guard.
-        framed = [
-            node
-            for handler in handlers
-            for node in ast.walk(handler)
-            if (isinstance(node, ast.Attribute) and node.attr == "exception")
-            or (isinstance(node, ast.keyword) and node.arg == "exception")
-        ]
-        assert framed, (
-            f"{name} catches a crashed pass and records it without frames, which is "
-            "the half of issue #8 that was not the CLI boundary"
-        )

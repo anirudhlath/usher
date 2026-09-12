@@ -97,6 +97,7 @@ from typing import Any
 
 import pytest
 
+from tests.unit.grafana import panels
 from usher.db import models  # noqa: F401  -- registers every table on Base.metadata
 from usher.db.base import Base
 
@@ -379,24 +380,6 @@ def _dashboard_files() -> list[pathlib.Path]:
     return sorted(_DASHBOARDS.glob("*.json"))
 
 
-def _panels(dashboard: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every panel, including the children a collapsed row nests under itself.
-
-    Grafana keeps an *expanded* row's panels as siblings and a *collapsed*
-    row's under `panel["panels"]`, so a scan of the top level alone stops
-    seeing a dashboard's panels the moment someone collapses a row and saves.
-    """
-    found: list[dict[str, Any]] = []
-    queue: list[Any] = list(dashboard.get("panels", []))
-    while queue:
-        panel = queue.pop(0)
-        if not isinstance(panel, dict):
-            continue
-        found.append(panel)
-        queue.extend(panel.get("panels", []))
-    return found
-
-
 def _datasource_type(panel: dict[str, Any], target: dict[str, Any]) -> str:
     """The datasource type a target queries, target overriding panel."""
     for holder in (target, panel):
@@ -470,10 +453,10 @@ def test_every_committed_dashboard_is_structurally_valid_and_names_only_metrics_
         )
         seen_uids[uid] = path
 
-        panels = _panels(dashboard)
-        assert panels, f"{path.name} carries no panels"
+        found = panels(dashboard)
+        assert found, f"{path.name} carries no panels"
 
-        for panel in panels:
+        for panel in found:
             where = f"{path.name}:{panel.get('title') or '<untitled>'}"
             assert panel.get("title"), f"{path.name} carries a panel with no title"
             if panel.get("type") == "row":
@@ -551,7 +534,7 @@ def test_the_committed_dashboards_are_not_written_in_aliases() -> None:
     exempt: list[str] = []
     for path in files:
         dashboard = json.loads(path.read_text(encoding="utf-8"))
-        for panel in _panels(dashboard):
+        for panel in panels(dashboard):
             if panel.get("type") == "row":
                 continue
             for target in panel.get("targets") or []:
@@ -701,7 +684,7 @@ def test_the_panel_walk_reaches_a_collapsed_rows_children() -> None:
         }
     )
 
-    titles = [panel.get("title") for panel in _panels(dashboard)]
+    titles = [panel.get("title") for panel in panels(dashboard)]
 
     assert titles == ["Composition", "Nested"], (
         f"the nested panel is invisible to the scan, so it is graded on nothing: {titles}"
@@ -733,7 +716,7 @@ def _query_panel_titles(dashboard: dict[str, Any]) -> list[str]:
     """
     return [
         str(panel.get("title") or "")
-        for panel in _panels(dashboard)
+        for panel in panels(dashboard)
         if panel.get("type") not in {"row", "text"}
     ]
 
@@ -850,7 +833,7 @@ def test_the_absence_panels_three_sentences_are_byte_identical_to_prd_tens() -> 
         )
 
     dashboard = json.loads(_DASHBOARD_TWO.read_text(encoding="utf-8"))
-    text_panels = [panel for panel in _panels(dashboard) if panel.get("type") == "text"]
+    text_panels = [panel for panel in panels(dashboard) if panel.get("type") == "text"]
     assert len(text_panels) == 1, (
         f"Dashboard 2 carries {len(text_panels)} text panels, not the one the absences are "
         "stated on"
@@ -938,7 +921,7 @@ _PIPELINE = _DASHBOARDS / "03-pipeline.json"
 def _live_panels(path: pathlib.Path) -> list[dict[str, Any]]:
     """Every drawable panel of one committed file — rows carry no targets."""
     dashboard = json.loads(path.read_text(encoding="utf-8"))
-    return [panel for panel in _panels(dashboard) if panel.get("type") != "row"]
+    return [panel for panel in panels(dashboard) if panel.get("type") != "row"]
 
 
 def _kinds(panel: dict[str, Any]) -> set[str]:
@@ -1250,7 +1233,7 @@ def _prometheus_targets() -> list[tuple[str, str]]:
     targets: list[tuple[str, str]] = []
     for path in _dashboard_files():
         dashboard = json.loads(path.read_text(encoding="utf-8"))
-        for panel in _panels(dashboard):
+        for panel in panels(dashboard):
             if panel.get("type") == "row":
                 continue
             for target in panel.get("targets") or []:
@@ -1265,7 +1248,7 @@ def _legend_targets() -> list[tuple[str, str, str]]:
     targets: list[tuple[str, str, str]] = []
     for path in _dashboard_files():
         dashboard = json.loads(path.read_text(encoding="utf-8"))
-        for panel in _panels(dashboard):
+        for panel in panels(dashboard):
             if panel.get("type") == "row":
                 continue
             for target in panel.get("targets") or []:

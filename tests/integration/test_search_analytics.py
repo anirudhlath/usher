@@ -130,18 +130,6 @@ def settings_without_the_writer(postgres_url: str) -> Settings:
     )
 
 
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one: every
-    root here commits in its own transaction, so a reader inside the suite's
-    single transaction could not see what it wrote."""
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
-
-
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
         # **Before the titles, and unscoped.** `search_queries.user_id` is

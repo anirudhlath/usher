@@ -29,6 +29,7 @@ import re
 import pytest
 from pydantic import SecretStr
 
+from tests.unit.commands import configured, dispatched
 from usher.cli import _new_secret_key, _print_rotation_report, build_parser, main, parse_args
 from usher.config import Settings
 from usher.services.rotation import RotationReport
@@ -48,11 +49,6 @@ NEW_KEY = "z9-rotation-canary-" + "n" * 21
 # 32 characters, so `min_length` alone does not refuse it -- which is what
 # makes it a case about the validator rather than about the bound.
 PLACEHOLDER = "change-me-to-a-long-random-string"
-
-
-def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/usher")
-    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
 
 
 def _settings() -> Settings:
@@ -154,7 +150,7 @@ def test_a_key_passed_as_new_key_is_refused_and_never_appears_anywhere(
     it in `~/.bash_history` and in `ps` output, and nothing about exiting 2
     tells them to go and deal with that. So the message is what is pinned.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     argv = ["rotate-secret", "--new-key", NEW_KEY]
     assert NEW_KEY in argv, "the premise: the key really is in this invocation"
 
@@ -182,7 +178,7 @@ def test_an_abbreviation_cannot_bind_a_value_into_the_variable_name(
     `_parse_without_echoing_unknown_values` exists for. Both are asserted,
     because fixing the first is what creates the second.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
 
     for argv in (
         ["rotate-secret", "--new-k", NEW_KEY],
@@ -203,7 +199,7 @@ def test_a_key_given_to_the_variable_flag_itself_is_refused_without_being_echoed
 
     Two premises, and the second is the whole reason this case exists.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     # Premise 1: this really is a legal environment variable name, so the
     # grammar check cannot be what refuses it.
     assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", HEX_KEY_THAT_IS_A_LEGAL_NAME)
@@ -229,7 +225,7 @@ def test_a_name_that_is_not_an_environment_variable_name_is_refused_without_bein
     hyphenated key carries `-`, none of which is a legal name -- so the
     commonest way to reach this refusal is to have passed the key, and
     repeating it is the defect."""
-    _configured(monkeypatch)
+    configured(monkeypatch)
     assert not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", BASE64_KEY), "the premise"
 
     code, seen = _merged(["rotate-secret", "--new-key-env", BASE64_KEY])
@@ -248,7 +244,7 @@ def test_an_unrecognised_argument_names_its_value_on_every_command_except_this_o
     so it is kept verbatim everywhere else. It is suppressed on
     `rotate-secret` alone, where an unrecognised value is most likely a key.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
 
     _, elsewhere = _merged(["backup", "--nonsense", NEW_KEY])
     assert "unrecognized arguments" in elsewhere
@@ -269,7 +265,7 @@ def test_prefix_matching_is_off_for_this_command_and_on_for_every_other(
     **not** inherit it from the parser that created it -- so exactly three
     option strings lose prefix matching and nineteen other commands keep it.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
 
     # Off here: an abbreviation of the one real flag no longer parses.
     with pytest.raises(SystemExit):
@@ -332,31 +328,17 @@ def test_the_variable_name_is_required() -> None:
 def test_rotate_secret_dispatches_to_rotate_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**`_dispatch`'s `else` arm is `serve`**, so a subcommand with no arm of
-    its own silently starts the HTTP server and looks like it worked.
-
-    The argument is asserted as well as the call, and here that is a security
-    assertion rather than only a wiring one: what crosses `_dispatch` is the
-    **variable name**, so a frame summary of this call site cannot print a
-    key.
-    """
-    _configured(monkeypatch)
+    """The argument is asserted as well as the call, and here that is a
+    security assertion rather than only a wiring one: what crosses `_dispatch`
+    is the **variable name**, so a frame summary of this call site cannot
+    print a key."""
+    configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
-    ran: list[str] = []
 
-    async def _record(settings: Settings, *, new_key_env: str) -> None:
-        ran.append(new_key_env)
+    calls = dispatched(monkeypatch, arm="_rotate", argv=["rotate-secret", "--new-key-env", VAR])
 
-    def _served(*_: object, **__: object) -> None:
-        raise AssertionError("usher rotate-secret started the HTTP server")
-
-    monkeypatch.setattr("usher.cli._rotate", _record)
-    monkeypatch.setattr("uvicorn.run", _served)
-
-    main(["rotate-secret", "--new-key-env", VAR])
-
-    assert ran == [VAR]
-    assert NEW_KEY not in repr(ran)
+    assert calls == [{"new_key_env": VAR}]
+    assert NEW_KEY not in repr(calls)
 
 
 def test_an_unset_variable_is_a_sentence_naming_it_rather_than_a_traceback(
@@ -505,7 +487,7 @@ def test_a_refused_row_exits_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     credentials` asserts the exit code on the other arm, so nothing this case
     used to cover is now uncovered.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
 
     async def _refusing(*_: object, **__: object) -> RotationReport:
@@ -525,7 +507,7 @@ def test_a_refused_row_exits_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_run_with_nothing_refused_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """The control for the case above, and the one that would catch a command
     that exits non-zero on every run."""
-    _configured(monkeypatch)
+    configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
 
     async def _clean(*_: object, **__: object) -> RotationReport:
@@ -580,7 +562,7 @@ def test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_credentials
     its partial values needs the saturated case named, or the message written
     for the partial case is the one that gets acted on.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
 
     async def _all_refused(*_: object, **__: object) -> RotationReport:
@@ -617,7 +599,7 @@ def test_a_run_that_refused_only_some_rows_still_says_to_re_register_those(
     right, so a row it could not open really is unreadable and really does have
     to be re-entered. Today's sentence is correct here and is kept verbatim.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
 
     async def _partly_refused(*_: object, **__: object) -> RotationReport:
@@ -648,7 +630,7 @@ def test_a_run_where_every_row_was_already_rotated_and_one_refused_is_not_satura
     report.rotated` would call this saturated and tell an operator their
     intact, already-rotated credentials were fine when one of them is not.
     """
-    _configured(monkeypatch)
+    configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
 
     async def _already_and_one_refused(*_: object, **__: object) -> RotationReport:

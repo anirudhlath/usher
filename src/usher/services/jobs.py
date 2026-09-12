@@ -593,6 +593,97 @@ class JobWorker:
         )
 
 
+class WorkerLoop:
+    """The poll loop around a `JobWorker`, shared by both composition roots.
+
+    `usher work` and the server's worker lane are the same deployment one
+    setting apart, so the three things that decide what a pass *means* -- when
+    recovery is allowed to run, what a crashed pass costs, and how long a pass
+    that claimed nothing waits -- belong in one place rather than in two that
+    have to be compared. What differs between the roots is passed in: the
+    worker, the per-pass refresh, where a recovery count goes, and the line a
+    crash is recorded on.
+
+    `worker` is a callable and is resolved on the first pass, because the lane
+    needs its first database call to happen inside the loop rather than at
+    process start.
+    """
+
+    def __init__(
+        self,
+        worker: Callable[[], Awaitable[JobWorker]],
+        *,
+        lease_seconds: float,
+        idle_seconds: float,
+        refresh: Callable[[], Awaitable[None]],
+        recovered: Callable[[int], None],
+        failure: str,
+    ) -> None:
+        self._worker = worker
+        self._built: JobWorker | None = None
+        self._lease_seconds = lease_seconds
+        self._idle_seconds = idle_seconds
+        self._refresh = refresh
+        self._recovered = recovered
+        self._failure = failure
+        # **`-inf`, never `0.0`.** `time.monotonic()` is seconds since boot
+        # on Linux, so a `0.0` origin suppresses recovery for the first half
+        # lease of host uptime -- exactly when a stack coming up with the
+        # machine is holding the previous boot's orphans.
+        self._throttled_at = float("-inf")
+
+    async def pass_once(self) -> int:
+        """One pass, unguarded. Returns how many jobs ran.
+
+        Recovery is throttled to half the lease because it is an `UPDATE`
+        scanning `status = 'running'` and between leases there is nothing to
+        find. It runs *before* the claim, so a dead process's abandoned claims
+        are this pass's work rather than nobody's.
+        """
+        if self._built is None:
+            self._built = await self._worker()
+        now = time.monotonic()
+        if now - self._throttled_at >= self._lease_seconds / 2:
+            self._recovered(await self._built.recover())
+            self._throttled_at = now
+        ran = await self._built.run_once()
+        await self._refresh()
+        return ran
+
+    async def guarded_pass(self) -> int:
+        """`pass_once`, with a crashed pass costing the pass rather than the
+        process. Returns `0` on a crash, which is what makes the caller sleep
+        instead of hot-looping a failing pass.
+
+        **`logger.exception`, never `logger.warning`.** An arm that
+        swallowed a bug and logged a *message* would turn a dead worker --
+        which is at least visible -- into a healthy-looking one silently
+        retrying a deterministic fault. The stack is what makes the next
+        occurrence evidence; `configure_logging` sets `diagnose=False`, so the
+        frames carry no locals.
+
+        **`Exception`, never `BaseException`:** `CancelledError` is how a
+        SIGINT reaches this loop, and catching it would build a worker that
+        cannot be stopped out of the arm that stops it dying.
+        """
+        try:
+            return await self.pass_once()
+        except Exception as exc:
+            logger.exception(self._failure, error=str(exc))
+            return 0
+
+    async def run(self, *, after: Callable[[int], None] | None = None) -> None:
+        """Guarded passes until cancelled, sleeping after one that claimed
+        nothing. `after` is the root's chance to report a pass it has just
+        seen."""
+        while True:
+            ran = await self.guarded_pass()
+            if after is not None:
+                after(ran)
+            if ran == 0:
+                await asyncio.sleep(self._idle_seconds)
+
+
 def _links_for(job: Job) -> list[Link]:
     """A `Link` to the span that enqueued this job, if it recorded one.
 

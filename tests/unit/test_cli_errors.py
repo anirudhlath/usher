@@ -116,7 +116,12 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
 
 def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """A `Settings` that validates, so a case about the *command* failing is
-    not accidentally a case about the settings failing."""
+    not accidentally a case about the settings failing.
+
+    Its own values rather than `tests.unit.commands.configured`'s: the host
+    and the key are what this file's rendering cases scan a failure message
+    for, so they have to be distinguishable from every other file's.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
 

@@ -462,15 +462,6 @@ async def _mixed_releases(session: AsyncSession) -> None:
     await _seed_tags(session, _RELEASE_A)
 
 
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
-
-
 async def _wipe_status(factory: async_sessionmaker[AsyncSession]) -> None:
     """Back to the shipped state: no import has run, no genome is loaded.
 

@@ -70,7 +70,7 @@ from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from tests.unit.rows import Library
 from usher.api.lanes import LaneSupervisor
-from usher.composition import Pipeline
+from usher.composition import Pipeline, SourceRegistry
 from usher.config import Settings
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
@@ -1546,6 +1546,43 @@ async def test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass(
     )
 
 
+async def test_a_cancel_in_the_idle_sleep_still_closes_the_worker_lanes_registry(
+    fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registry holds one connection pool per adapter it built, and
+    `stop()` lands its cancel in the idle sleep nearly every time: a pass over
+    an empty queue is milliseconds and the sleep after it is the shipped five
+    seconds.
+
+    The close therefore has to be a `finally` around the whole loop rather
+    than an arm around the pass. It was the latter until both worker roots
+    were folded into one loop, with the sleep *outside* that `try` -- so an
+    ordinary shutdown, which is exactly a cancel arriving while the queue is
+    empty, was the one path that leaked every adapter.
+    """
+    closed: list[str] = []
+
+    class _Registry(SourceRegistry):
+        async def aclose(self) -> None:
+            closed.append("aclose")
+            await super().aclose()
+
+    monkeypatch.setattr("usher.api.lanes.SourceRegistry", _Registry)
+    # The shipped idle floor, deliberately not dialled down: a fast sleep is
+    # what would let the cancel land in the pass instead.
+    supervisor = _supervisor(fakes)
+    await supervisor.start()
+    await _drain(lambda: fakes.queue.claims >= 1, bound=2.0)
+    assert fakes.queue.claims >= 1, "the premise: the lane ran a pass and is now sleeping"
+
+    await supervisor.stop()
+
+    assert closed == ["aclose"], (
+        "the worker lane was cancelled in its idle sleep and never closed its registry, "
+        "so every adapter it had built kept its connection pool for the life of the process"
+    )
+
+
 async def test_a_crashed_worker_pass_is_recorded_with_its_frames_and_the_lane_lives(
     fakes: _Fakes,
 ) -> None:
@@ -1603,13 +1640,19 @@ class _JustBooted:
     Substituted for the **module's** `time`, never the global one:
     `asyncio`'s own timers resolve `time.monotonic` through `loop.time()` at
     call time, so patching `time.monotonic` globally freezes every sleep in
-    the event loop and the case hangs instead of failing.
+    the event loop and the case hangs instead of failing. The module is
+    `services/jobs.py`, which is where the throttle both worker roots share
+    reads the clock; `perf_counter` is carried because a job's duration
+    histogram reads the same module attribute.
     """
 
     def __init__(self, uptime: float) -> None:
         self._uptime = uptime
 
     def monotonic(self) -> float:
+        return self._uptime
+
+    def perf_counter(self) -> float:
         return self._uptime
 
 
@@ -1639,7 +1682,7 @@ async def test_the_worker_lane_recovers_on_its_first_pass_on_a_host_that_just_bo
     one `test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass`
     makes at a normal uptime. Against `0.0` this reports **0** requeues.
     """
-    monkeypatch.setattr("usher.api.lanes.time", _JustBooted(10.0))
+    monkeypatch.setattr("usher.services.jobs.time", _JustBooted(10.0))
     supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
     assert _settings().job_lease_seconds / 2 > 10.0, (
         "the premise: the shimmed uptime is inside the window the throttle would skip"

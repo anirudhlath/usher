@@ -46,6 +46,7 @@ a plan takes.
 
 import os
 import re
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -56,7 +57,7 @@ import pytest_asyncio
 from alembic.command import downgrade, upgrade
 from alembic.config import Config
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 from usher.config import get_settings
 from usher.db import models  # noqa: F401  — registers all tables
@@ -450,3 +451,88 @@ async def session(
             inherited=inherited,
         )
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Separately-committing sessions, not the `session` fixture above.
+
+    Anything whose subject is what a *different* session or another task can
+    see is only a question at all once something has committed, so these
+    sessions are real: a case that seeded through the shared rolled-back
+    transaction would be handing a route, or a lane, rows it cannot see.
+
+    Function-scoped like everything else here, so a case owns its engine and
+    disposes of it; the shared container is what `postgres_url` carries.
+    """
+    engine = build_engine(postgres_url)
+    try:
+        yield build_session_factory(engine)
+    finally:
+        await engine.dispose()
+
+
+async def column_set(url: str, table: str) -> set[str]:
+    """One table's column names, read off the catalog.
+
+    The reader a column-only migration's `downgrade()` needs: without it the
+    only thing that can observe one is the whole-chain `base`/`head` round
+    trip, which passes against a no-op downgrade because `base` drops the
+    table anyway.
+    """
+    engine = build_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = :table"
+                ),
+                {"table": table},
+            )
+            return {row[0] for row in rows}
+    finally:
+        await engine.dispose()
+
+
+async def index_set(url: str) -> set[str]:
+    """Every index name in the public schema. `column_set`'s sibling."""
+    engine = build_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
+            )
+            return {row[0] for row in rows}
+    finally:
+        await engine.dispose()
+
+
+async def scratch_database(postgres_url: str, prefix: str) -> tuple[str, str, str]:
+    """Create a throwaway database. Returns `(admin_url, name, url)`.
+
+    What a case needs when its subject is a migration's effect on rows that
+    existed before it ran, or the pre-migration schema as a control arm --
+    neither of which the shared, already-migrated database can give.
+    """
+    admin = postgres_url.rsplit("/", 1)[0]
+    scratch = f"{prefix}_{uuid.uuid4().hex[:12]}"
+    engine = build_engine(f"{admin}/postgres")
+    try:
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
+    finally:
+        await engine.dispose()
+    return admin, scratch, f"{admin}/{scratch}"
+
+
+async def drop_database(admin: str, scratch: str) -> None:
+    """`scratch_database`'s other half, for the `finally` that owns it."""
+    engine = build_engine(f"{admin}/postgres")
+    try:
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
+    finally:
+        await engine.dispose()

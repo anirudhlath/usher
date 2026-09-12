@@ -300,7 +300,9 @@ async def adapter(emby: FakeEmbyServer, source: Source) -> AsyncIterator[EmbyAda
 
 @pytest_asyncio.fixture
 async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Engine-bound sessions that genuinely commit.
+    """Engine-bound sessions that genuinely commit, **overriding `conftest`'s
+    `sessions`** rather than repeating it: the teardown below is the whole
+    difference and nothing else in this directory needs it.
 
     `JobWorker` opens a scope per claim and a scope per job and commits inside
     each, which is the whole reason the claim is durable while the handler

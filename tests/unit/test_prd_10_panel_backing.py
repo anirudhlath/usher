@@ -59,6 +59,8 @@ from typing import Any
 
 import pytest
 
+from tests.unit.grafana import panels
+
 _ROOT = pathlib.Path(__file__).parents[2]
 _PRD = _ROOT / "docs" / "prd" / "10-telemetry-and-dashboards.md"
 # The *second* transcription of the compliance block. The PRD is the source and
@@ -600,14 +602,7 @@ def test_the_panel_sql_never_names_the_column_or_the_table_adr_0016_refused() ->
 
 def _dashboard_five_panels() -> list[dict[str, Any]]:
     """Every panel of the committed compliance dashboard, rows flattened."""
-    dashboard = json.loads(_DASHBOARD_FIVE.read_text(encoding="utf-8"))
-    found: list[dict[str, Any]] = []
-    pending: list[dict[str, Any]] = list(dashboard.get("panels") or [])
-    while pending:
-        panel = pending.pop()
-        pending.extend(panel.get("panels") or [])
-        found.append(panel)
-    return found
+    return panels(json.loads(_DASHBOARD_FIVE.read_text(encoding="utf-8")))
 
 
 def committed_compliance_sql() -> list[str]:

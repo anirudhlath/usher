@@ -423,11 +423,12 @@ async def test_work_names_the_claims_it_took_back_from_a_process_that_stopped(
 class _JustBooted:
     """`time`, with `monotonic()` frozen at a small uptime.
 
-    Substituted for `usher.cli`'s **module** attribute, never the global one:
-    `asyncio` resolves `time.monotonic` through `loop.time()` at call time, so
-    a global patch freezes every sleep in the event loop and this hangs rather
-    than fails. `usher.cli` reads `time` for exactly two things -- this
-    throttle and a `perf_counter()` in `_suggest` -- so the shim carries both.
+    Substituted for `usher.services.jobs`'s **module** attribute, never the
+    global one: `asyncio` resolves `time.monotonic` through `loop.time()` at
+    call time, so a global patch freezes every sleep in the event loop and this
+    hangs rather than fails. That module is where the throttle both worker
+    roots share reads the clock, and it reads `perf_counter` for a job's
+    duration histogram, so the shim carries both.
     """
 
     def __init__(self, uptime: float) -> None:
@@ -436,7 +437,7 @@ class _JustBooted:
     def monotonic(self) -> float:
         return self._uptime
 
-    def perf_counter(self) -> float:  # pragma: no cover -- `_suggest`'s, not `_work`'s
+    def perf_counter(self) -> float:
         return self._uptime
 
 
@@ -447,8 +448,8 @@ async def test_work_recovers_on_its_first_pass_on_a_host_that_just_booted(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """🔴 **`usher work --once` from a cron inside the first 150 s of host
-    uptime used to recover nothing at all**, while `_measure`'s own comment
-    claimed it recovers "before the first claim".
+    uptime used to recover nothing at all**, while `WorkerLoop.pass_once`'s
+    own docstring claims it recovers "before the claim".
 
     `time.monotonic()` on Linux is seconds since boot, and the throttle's
     origin was `0.0`, so `now - origin >= lease / 2` was false for half a
@@ -460,7 +461,7 @@ async def test_work_recovers_on_its_first_pass_on_a_host_that_just_booted(
     "no orphans" about a question it never asked, which is the precise lie the
     API side spends four paragraphs refusing.
     """
-    monkeypatch.setattr("usher.cli.time", _JustBooted(10.0))
+    monkeypatch.setattr("usher.services.jobs.time", _JustBooted(10.0))
     assert cli_settings.job_lease_seconds / 2 > 10.0, (
         "the premise: the shimmed uptime is inside the window the throttle would skip"
     )

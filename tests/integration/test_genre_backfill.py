@@ -41,7 +41,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.cli import _genres, _index
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.db.repositories.search import STALE_EMBEDDING, PostgresTitleEmbeddingRepository
 from usher.db.repositories.title import PostgresTitleRepository
@@ -92,15 +91,6 @@ async def _wipe(session: AsyncSession) -> None:
         text("DELETE FROM titles WHERE sort_name LIKE :pattern"), {"pattern": f"{_MARK} %"}
     )
     await session.commit()
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest_asyncio.fixture

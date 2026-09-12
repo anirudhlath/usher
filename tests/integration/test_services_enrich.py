@@ -26,7 +26,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.fakes.metadata_provider import FakeMetadataProvider
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.sync import PostgresRawPayloadStore
@@ -112,19 +111,6 @@ async def _wipe(session: AsyncSession) -> None:
     # became `CREATE TEMP TABLE ... ON COMMIT DROP`; the commit below is now
     # what removes it rather than what persists it.
     await session.commit()
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Its own engine, because every case here needs two live connections at
-    once -- the suite's usual per-test session is one connection inside one
-    rolled-back transaction, which is exactly what this file cannot use.
-    """
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest_asyncio.fixture

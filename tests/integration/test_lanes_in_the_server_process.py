@@ -47,7 +47,6 @@ from usher.api.app import create_app
 from usher.api.lanes import LaneSupervisor
 from usher.composition import DefaultUserId, Pipeline, build_pipeline, unit_of_work
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.domain.enums import SourceKind
@@ -82,24 +81,6 @@ def lane_settings(postgres_url: str) -> Settings:
         worker_enabled=True,
         push_enabled=False,
     )
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Real, separately-committing sessions -- not the suite's usual
-    rolled-back one.
-
-    The lane under test commits for real from another task, so a test that
-    wanted to see its writes through a single shared transaction would see
-    nothing. Each case therefore cleans up after itself; `jobs` and `titles`
-    do not cascade from anything (CLAUDE.md's "a route-driven test commits
-    for real").
-    """
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:

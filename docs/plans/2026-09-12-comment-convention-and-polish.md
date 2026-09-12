@@ -97,7 +97,7 @@ independently by three agents each, the third by two; they lead the list.
 7. ✅ `scripts/measure_source_lane.py:628` — `Timing` → dict hand-typed; three
    sites want `dataclasses.asdict`.
 8. ✅ `scripts/*` — `build_session(...)` triplicated with placeholder credentials.
-9. `tests/integration/` — `_column_set`/`_index_set` verbatim copies; 26 copies
+9. ✅ `tests/integration/` — `_column_set`/`_index_set` verbatim copies; 26 copies
    of the `sessions` fixture; `_scratch`/`_drop`; the Grafana panel walk ×3; the
    CLI dispatch test ×4 and its env helper ×5.
 
@@ -145,7 +145,7 @@ independently by three agents each, the third by two; they lead the list.
 
 ### Altitude
 
-28. `cli.py:737` — the `usher work` daemon is a hand-copied
+28. ✅ `cli.py:737` — the `usher work` daemon is a hand-copied
     `LaneSupervisor._run_worker`, guarded by an AST test asserting the two
     copies still look alike. One loop in `services/jobs.py`.
 29. `config.py:751` — `USHER_SEARCH_SUGGEST_ANALYTICS` is a knob over a

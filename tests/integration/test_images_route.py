@@ -46,7 +46,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from usher.adapters.images.provider import ProviderCdnImageFetcher
 from usher.api.app import create_app
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.image import PostgresImageRepository
 from usher.domain.enums import ImageKind
 from usher.domain.ids import new_id
@@ -102,19 +101,6 @@ def cdn() -> httpx.MockTransport:
         return httpx.Response(400, text="")
 
     return httpx.MockTransport(handler)
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one: the
-    route commits from its own session in its own transaction, so a test that
-    seeded through a shared transaction would hand the app rows it cannot
-    see."""
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture

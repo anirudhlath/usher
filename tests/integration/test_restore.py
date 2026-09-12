@@ -50,7 +50,6 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from usher.db.base import build_engine, build_session_factory
 from usher.db.migrations.status import code_head_revision, database_revision
 from usher.db.repositories.backup import (
     PostgresBackupRepository,
@@ -102,20 +101,6 @@ STALE_REVISION = "m09e"
 @pytest.fixture
 def artifact_path(tmp_path: Path) -> Path:
     return tmp_path / "restore.jsonl.gz"
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one.
-
-    Every assertion in this file is about what a *different* session can see,
-    which is only a question at all once something has committed.
-    """
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest_asyncio.fixture

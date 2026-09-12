@@ -50,7 +50,6 @@ from usher.api.app import create_app
 from usher.api.deps import get_source_adapter_factory
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
@@ -125,21 +124,6 @@ def settings(postgres_url: str) -> Settings:
         push_enabled=False,
         worker_enabled=False,
     )
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one.
-
-    The route reads through its own session in its own transaction, so a test
-    that seeded through a single shared transaction would be handing the app
-    rows it cannot see.
-    """
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 class _Seeded:
