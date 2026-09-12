@@ -1,14 +1,4 @@
-"""PRD 03 stage 4's queued half, against port fakes. No database, no model.
-
-`FakeEmbedder` is a hash, so **no case here asserts relevance** -- that is its
-documented divergence and a test ignoring it is a defect in the test. What is
-asserted is plumbing: what gets written, what gets called, and what happens the
-second time. Relevance is asserted only where a real model runs.
-
-`FakeTitleEmbeddingRepository` has no `halfvec` quantisation, no width
-constraint and no SQL predicate, so the dimension check is tested directly
-rather than through a write, and the drain is an integration case.
-"""
+"""PRD 03 stage 4's queued half, against port fakes. No database, no model."""
 
 import uuid
 from collections.abc import Sequence

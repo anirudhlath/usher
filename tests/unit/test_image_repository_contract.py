@@ -1,16 +1,4 @@
-"""The image contract against the in-memory double. No Docker.
-
-`tests/integration/test_image_repository.py` runs the identical assertions
-against Postgres, plus the cases only a real constraint and a real second
-session can demonstrate. See `tests/fakes/image_repository.py` for the five
-places this half is more forgiving.
-
-The one case below that is *not* in the shared contract is the statement count,
-and it is here rather than there for the reason `rows-and-genome.md` records:
-the claim is "one statement per shelf", and against an in-memory dict a
-**timing** assertion measures the dict. Counting is the only honest way to see
-it, and only the fake can be counted.
-"""
+"""The image contract against the in-memory double. No Docker."""
 
 import uuid
 

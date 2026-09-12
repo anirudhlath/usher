@@ -1,7 +1,7 @@
-"""The shared contract against real Postgres, plus the five things a fake
-cannot express: a duplicate that raises rather than being last-wins, a CHECK
-that fires, a foreign key, a poisoned session, and "one statement per
-batch"."""
+"""The shared contract against real Postgres, plus the five things a fake cannot
+express: a duplicate that raises rather than being last-wins, a CHECK that fires, a
+foreign key, a poisoned session, and "one statement per batch".
+"""
 
 import dataclasses
 import uuid
@@ -382,34 +382,7 @@ async def test_list_for_title_does_not_grow_with_a_series_episode_count(
     source_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """The bound, measured rather than asserted about a lookalike.
-
-    999,827 of the one measured source's 1,126,789 items are episodes, and an
-    episode's `media_items` row carries its series' `title_id` as well as its
-    own `episode_id`. So the natural read -- `WHERE title_id = :id` -- answers
-    a *series* with one row per episode file, which puts a badge per episode
-    in PRD 07's `availability` array and makes the response length a property
-    of the show rather than of the household. "Fine for a ten-season series,
-    unbounded by contract" is what M4 recorded about the neighbouring
-    `EpisodeRepository.list_for_title`; this is where the media-item one is
-    settled.
-
-    Held fixed: the series, the source, the row shape. Varied: the episode
-    count, by two orders of magnitude. Both the rows returned and the
-    statements issued must be flat -- a count that tracked the episodes would
-    be the defect, and a *statement* count that tracked them would be a
-    different one.
-
-    500 episodes is enough to fail the assertion and cheap enough to keep in
-    the suite; the cost of getting it wrong was measured separately, at a
-    scale a test should not pay for. On 80,201 `media_items` rows with one
-    20,000-episode series, EXPLAIN (ANALYZE, BUFFERS) on the statement this
-    repository actually issued -- captured off `before_cursor_execute`, never
-    transcribed -- reports **1 row in 0.251 ms over 21 buffers** as shipped
-    and **20,001 rows in 22.901 ms over 402 buffers** with the `episode_id IS
-    NULL` clause deleted. The numbers and the plans are recorded on
-    `_FOR_TITLE` in `usher.db.repositories.media_item`.
-    """
+    """The bound, measured rather than asserted about a lookalike."""
     small = await _seed_a_series_with_episodes(session, source_id, episodes=5)
     large = await _seed_a_series_with_episodes(session, source_id, episodes=500)
 

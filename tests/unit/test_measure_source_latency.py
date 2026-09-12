@@ -1,60 +1,5 @@
-"""`scripts/measure_source_latency.py`'s budget, against the transport it must never reach.
-
-**The one property this file exists to pin.** The harness issues live requests
-to somebody else's Emby, and M10's Group S declares ≤ 256 for the whole group
-with **≤ 60** of them S1's. A budget that is a comment is not a budget: the
-number has to be enforced at a point *before* the transport, so that the
-budget+1st request is refused rather than merely counted afterwards.
-
-**Its positive control fires first, and that ordering is the point.** A harness
-that issued zero requests satisfies an "it did not exceed the budget" assertion
-exactly as a correct one does — `CLAUDE.md`'s first evidence rule, one layer
-over. So `sent == 5` is asserted *before* anything about the refusal, with a
-message that says what a zero would have meant.
-
-**Second arm: `--budget 0` sends nothing at all**, which is what a dry run has
-to mean. A dry run that quietly issues its warm-up is the failure that looks
-like a pass.
-
-🔴 **And that second arm was pinned in the wrong place for one commit, which is
-the finding this file now carries.** It drove `run_probes`' zero-guard — but by
-the time `run_probes` is reached the four warm-ups have already gone to the
-operator's server, so in production that guard is **unreachable** and the real
-one is the early return in `_run`. A review planted exactly that and got
-`ruff check` clean and `3 passed`. The sentence two paragraphs up was in this
-file at the time and describes the defect precisely.
-`test_a_dry_run_is_enforced_where_the_guard_actually_lives` drives `_run`
-itself through an injected client factory and is the case that sees it.
-**The general form: a guard has one reachable spelling and a test that drives a
-different one is a test of dead code — find where the production path enters
-before choosing what to drive.**
-
-**Two spellings of that defect, measured rather than described**, because the
-first write-up of this paragraph asserted the second one's behaviour for both
-and was wrong — *the same failure the finding above is about, committed inside
-the fix for it*:
-
-- **`_run`'s guard moved below the warm-ups, alone → 0 requests on the wire**,
-  and an **uncaught `BudgetExceeded`**. `Budget(0)` refuses the first spend, so
-  the case dies inside `_drive_run` and never reaches its own `# The claim.`
-  block at all.
-- **The same, plus `Budget.spend`'s `if self.limit and …` idiom → 4 requests**
-  on somebody else's Emby, and it returns 0 while doing it.
-- **`_run`'s guard moved below the *client construction* → 0 requests, but a
-  client is built.** This is literally the shape the harness shipped before the
-  guard was hoisted, and it is the plant `built == []` earns its place against;
-  `return 1` in the dry-run branch is what `code == 0` earns its.
-
-Three spellings, three different deaths, and **the third is why those two
-assertions are not decoration** — an earlier version of this paragraph credited
-them with catching the first, which dies before they run.
-
-**The import mechanism is `test_scripts_measure_pair_rates.py`'s, for its
-reasons**: `scripts/` has no `__init__.py`, `[tool.mypy] files = ["src",
-"tests"]` means **mypy does not check `scripts/` at all**, and so the script
-gets `ruff`, this file, and no type checking. Every name reached for is bound
-once, at module scope, through a typed local, so a rename in the script fails
-at import rather than as an `AttributeError` three cases deep.
+"""`scripts/measure_source_latency.py`'s budget, against the transport it must never
+reach.
 """
 
 import asyncio
@@ -208,15 +153,8 @@ def test_the_harness_refuses_to_issue_more_requests_than_its_declared_budget() -
         f"the refusal must name the budget it is enforcing; it said {caught.value!r}"
     )
 
-    # **Second arm: a budget of zero refuses at the transport**, and it
-    # *raises* rather than returning quietly. `run_probes` used to carry its
-    # own `if budget.limit == 0: return []` -- dead code, because the only
-    # production caller is downstream of `_run`'s early return, and it
-    # *disagreed* with `Budget.spend`. Two spellings of one rule is how the
-    # wrong one gets tested; the branch is gone and this arm now pins what the
-    # surviving guard does. Its own control is the arm above: five requests on
-    # an identical transport, so an empty `sent` here is the budget and not a
-    # broken stub.
+    # **Second arm: a budget of zero refuses at the transport**, and it *raises* rather
+    # than returning quietly.
     dry: list[httpx.Request] = []
     with pytest.raises(_BUDGET_EXCEEDED):
         _drive(_six_probes(), _BUDGET(0), dry)
@@ -363,12 +301,9 @@ def test_a_dry_run_is_enforced_where_the_guard_actually_lives(
     before the guard was hoisted), and `code == 0` to a dry run that returns
     non-zero. See the module docstring for all three measured.
     """
-    # **The positive control fires first**, and it is a strong one: it drives
-    # the whole of `_run` and pins that the four warm-ups *do* leave through
-    # this seam, first and in order, which is precisely what the dry run must
-    # not do. Without it, a `_run` that returned 0 immediately for every budget
-    # passes the claim below. `budget=8, reps=1` is the smallest run
-    # `check_budget_is_sufficient` permits (4 warm-up + 4x1).
+    # **The positive control fires first**, and it is a strong one: it drives the whole
+    # of `_run` and pins that the four warm-ups *do* leave through this seam, first and
+    # in order, which is precisely what the dry run must not do.
     control: list[httpx.Request] = []
     built_control: list[dict[str, Any]] = []
     control_code = _drive_run(

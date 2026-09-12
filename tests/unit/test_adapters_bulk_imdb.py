@@ -1,7 +1,4 @@
-"""IMDb TSV parsing and batching, over a committed synthetic slice.
-
-No network, no Docker, no real dataset file.
-"""
+"""IMDb TSV parsing and batching, over a committed synthetic slice."""
 
 import gzip
 from pathlib import Path

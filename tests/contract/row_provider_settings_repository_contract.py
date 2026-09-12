@@ -1,19 +1,4 @@
-"""Behaviour every `RowProviderSettingsRepository` implementation must satisfy.
-
-Two methods, and almost the whole contract is one decision:
-**`overrides()` must never manufacture a `False` for a slug nobody has
-touched.** The trap this suite exists to catch is a mirror of the registry
-disguised as a map of overrides -- correctly shaped, populated, and
-indistinguishable from a working toggle right up until an operator disables
-one provider and reads every other one as disabled too.
-
-Subclass and provide a `repository` fixture:
-
-    class TestFakeRowProviderSettingsRepository(RowProviderSettingsRepositoryContract):
-        @pytest.fixture
-        def repository(self) -> FakeRowProviderSettingsRepository:
-            return FakeRowProviderSettingsRepository()
-"""
+"""Behaviour every `RowProviderSettingsRepository` implementation must satisfy."""
 
 from usher.ports.repository import RowProviderSettingsRepository
 

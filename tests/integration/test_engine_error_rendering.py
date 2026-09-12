@@ -1,30 +1,4 @@
-"""What a refused statement renders, and what it must not.
-
-`build_engine` passes `hide_parameters=True`, so a `DBAPIError` carries the
-statement and never the values bound into it. The reason is PRD 08's *"a
-rejected request never echoes the body it rejected"* arriving at a third door:
-`usher.api.errors` closed it on the 422 path and `cli._settings_problem` closed
-it on the settings path, and both of those are about a **rejected input** being
-read back. This one is about a *statement* — same failure, one layer down, and
-the layer every repository, route, lane and CLI command shares, because
-`build_engine` is where all but one of this project's engines come from.
-
-🔴 **It reaches an operator's terminal without `--traceback`.** `DBAPIError` is
-in `cli.OPERATOR_ERRORS`, so `_operator_problem` catches it and prints
-`str(exc)` as one line. M10's K8 drill hit exactly that: a rotation whose
-`UPDATE source_credentials` failed printed the row's ciphertext.
-
-⚠️ **This closes the client-side door and not the server-side one**, which is
-measured rather than assumed and is why the case below is built on a *numeric
-overflow* rather than on a CHECK violation. Measured 2026-08-26 on
-`pgvector/pgvector:pg17`: a CHECK violation's `DETAIL: Failing row contains
-(...)` is composed by **Postgres**, carries every column of the failing row, and
-survives `hide_parameters=True` untouched — on `source_credentials` it renders
-the `ciphertext` as a `\\x`-prefixed hex literal. No client flag can suppress
-that. A numeric overflow's DETAIL is the generic *"A field with precision 12,
-scale 8 must round to an absolute value less than 10^4"*, so it is the family
-where the client-side rendering is the whole of the exposure.
-"""
+"""What a refused statement renders, and what it must not."""
 
 import pytest
 import sqlalchemy.ext.asyncio as sa_asyncio

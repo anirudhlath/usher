@@ -1,8 +1,4 @@
-"""GitHub issue forms, and the fields that earn their place.
-
-A form's fields are *required*; a Markdown template's headings are deleted.
-That is the whole reason these are YAML forms.
-"""
+"""GitHub issue forms, and the fields that earn their place."""
 
 import pathlib
 from typing import Any

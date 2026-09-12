@@ -33,12 +33,8 @@ def test_watch_state_attaches_to_a_title() -> None:
     )
     assert state.played is False
     assert state.play_count == 0
-    # The load-bearing invariant: watch state attaches to the canonical
-    # Title, never to a source-specific record. Asserted against
-    # model_fields, not just "the constructor doesn't require one", so a
-    # future refactor that reintroduces source_id/media_item_id onto
-    # WatchState fails this test instead of silently reintroducing the
-    # coupling watch state is designed to survive.
+    # The load-bearing invariant: watch state attaches to the canonical Title, never to
+    # a source-specific record.
     assert "source_id" not in WatchState.model_fields
     assert "media_item_id" not in WatchState.model_fields
 

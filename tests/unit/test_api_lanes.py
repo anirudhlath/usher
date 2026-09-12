@@ -1,21 +1,4 @@
-"""The server process's background lanes.
-
-Driven against a `Pipeline` of port fakes rather than a database, which is
-what `composition.UnitOfWork` being a callable buys: the supervisor's own
-subject is task lifecycle, and a real Postgres would only make the same
-assertions slower. The lanes are exercised against real Postgres in
-`tests/integration/test_lanes_in_the_server_process.py`, which is where
-"the worker lane really runs inside `create_app`" is settled.
-
-**Two concurrency claims live here and neither is asserted on a count.**
-"A lane that crashes does not take the others down" is satisfied by a
-supervisor whose other lane never started at all, so the case asserts that
-the survivor makes *progress after* the crash. "The lanes run at the same
-time" is satisfied by a serialised run of the same events, so the case
-measures the two lanes' wall-clock windows and asserts on their observed
-intersection-over-union -- the shape `JobQueueContract.overlapping()`
-established.
-"""
+"""The server process's background lanes."""
 
 import asyncio
 import dataclasses
@@ -178,17 +161,11 @@ class _Adapters(SourceAdapterFactory):
         self.built: dict[str, FakeSourceAdapter] = {}
         self.crashing: set[str] = set()
         self.slow: set[str] = set()
-        # Two spellings of one precondition, kept because each side's cases
-        # use its own: `_start_lane` builds the adapter and hands it straight
-        # to `PushSupervisor.run`, whose first act after connecting is to
-        # close the gap, so seeding off `built[...]` afterwards races the
-        # very walk the case is trying to observe -- and a case that lost the
-        # race would assert against a library of zero items, which is exactly
-        # what a broken ceiling produces.
-        #
-        # `library` is the declarative form (a list of items to seed);
-        # `prepare` is the general one (any set-up a case wants), and it runs
-        # first so a case can use both.
+        # Two spellings of one precondition, kept because each side's cases use its own:
+        # `_start_lane` builds the adapter and hands it straight to
+        # `PushSupervisor.run`, whose first act after connecting is to close the gap, so
+        # seeding off `built[...]` afterwards races the very walk the case is trying to
+        # observe -- and a case that lost the race would assert against a library of
         self.prepare: Callable[[FakeSourceAdapter], None] | None = None
         self.library: list[tuple[SourceItem, datetime]] = []
 
@@ -341,26 +318,10 @@ class _Fakes:
     sources: FakeSourceRepository
     credentials: FakeCredentialStore
     media_items: FakeMediaItemRepository
-    # Shared for the reason the docstring gives, and it is load-bearing for
-    # the gap-closer's guard specifically: "has this source ever completed
-    # an item-lane run" is a question about the *database*, so a `sync_runs`
-    # table minted per unit of work answers "no" for every source forever.
-    #
-    # **What that costs is measured rather than reasoned about, and it is
-    # not what an earlier version of this comment claimed.** Planted
-    # (`runs = fakes.runs` back to `runs = FakeSyncRunRepository()`), the
-    # gap-closer's case goes **red** -- it does not quietly pass while
-    # testing nothing. What makes it impossible to miss is the case's own
-    # third arm: `Cellar` has a `COMPLETED` run, so a per-unit-of-work
-    # table refuses `Cellar` too, `watch_synced` never fills, and the
-    # second `_drain` expires. So the shared table is load-bearing for the
-    # *positive control*, and the positive control is what reports.
-    #
-    # Put another way: `sync_runs` is where a *cursor* lives, so a fresh one
-    # per unit of work models a database that forgets every completed walk the
-    # instant the session closes -- under which no delta ever has a `since`
-    # and "the gap-closer is bounded once a walk has completed" is
-    # unobservable.
+    # Shared for the reason the docstring gives, and it is load-bearing for the gap-
+    # closer's guard specifically: "has this source ever completed an item-lane run" is
+    # a question about the *database*, so a `sync_runs` table minted per unit of work
+    # answers "no" for every source forever.
     runs: FakeSyncRunRepository
     queue: _CountingQueue
     adapters: _Adapters
@@ -414,12 +375,9 @@ def _pipeline(
     # slot here would fail at construction instead of at the lane behaviour
     # each of these cases is about.
     people = FakePersonRepository()
-    # One instance, three consumers, because that is what the composition root
-    # produces: `build_pipeline` and `build_search_service` each construct a
-    # `PostgresTasteRepository` over the **same session**, so they read one
-    # table. Two independent fakes here would let a case store a centroid
-    # through one and search through the other, which is a state no deployment
-    # has.
+    # One instance, three consumers, because that is what the composition root produces:
+    # `build_pipeline` and `build_search_service` each construct a
+    # `PostgresTasteRepository` over the **same session**, so they read one table.
     taste_rows = FakeTasteRepository(watch_states)
     taste = TasteService(
         watch_states=watch_states,
@@ -498,12 +456,11 @@ def _pipeline(
         # composes", so every case written before the toggle existed keeps
         # meaning what it meant.
         row_provider_settings=provider_settings or FakeRowProviderSettingsRepository(),
-        # Over the port double rather than `cast(Any, None)`, and no longer
-        # only on the terms `search` above states: the worker lane *writes*
-        # this one whenever it holds an `LLMClient`, because
-        # `build_curation_service` takes `rows=pipeline.curated_rows` and a
-        # generation replaces the household's shelves through it. Rendering
-        # is still only `GET /home`'s.
+        # Over the port double rather than `cast(Any, None)`, and no longer only on the
+        # terms `search` above states: the worker lane *writes* this one whenever it
+        # holds an `LLMClient`, because `build_curation_service` takes
+        # `rows=pipeline.curated_rows` and a generation replaces the household's shelves
+        # through it.
         curated_rows=FakeCuratedRowRepository(),
         # Over the port double for the same reason, one table over. The
         # worker lane *does* reach this one whenever it holds an
@@ -513,12 +470,8 @@ def _pipeline(
         llm_calls=FakeLLMCallRepository(),
         taste=taste,
         # Read by the worker lane on the same terms as the two above:
-        # `build_curation_service` takes `pool=pipeline.pool`, and the pool
-        # is the first thing a generation asks for. Still constructed here
-        # for the reason `taste` is, which has not changed: the dataclass has
-        # no defaults, deliberately, so a field added later is a compile
-        # error at every construction site rather than a `None` that
-        # surfaces as an `AttributeError` on the one path that reads it.
+        # `build_curation_service` takes `pool=pipeline.pool`, and the pool is the first
+        # thing a generation asks for.
         pool=CandidatePoolService(titles=titles, embeddings=embeddings, taste=taste, size=8),
         events=fakes.events,
         commit=commit,
@@ -785,34 +738,8 @@ async def test_push_availability_for_a_source_with_no_lane_is_not_probed(
 async def test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator_is_told(
     fakes: _Fakes,
 ) -> None:
-    """A delta with no cursor is not a delta, it is a full walk wearing a
-    delta's name -- and the lane is the one caller nobody typed a command
-    for.
-
-    `_start_lane` runs for every enabled source before the refresher's first
-    sleep and `PushSupervisor.run` closes the gap immediately after every
-    successful connection, so **the first thing a freshly started
-    `uvicorn usher.api.app:create_app --factory` does against every enabled
-    source is close a gap**. With no completed item-lane run there is no
-    cursor, `reconcile` walks `list_items(since=None)`, and that is the whole
-    library -- 1,134,919 items over 5,675 pages on the one household this
-    project measures, i.e. 7.3-11.8 hours (M10 S1, 2026-08-15;
-    `.claude/rules/emby-push-and-ingest.md`). `push_gap_min_interval_seconds`
-    cannot help: it bounds *cadence*, and `_Gate.at` is `None` until a gap
-    has run, so the first one is never skipped
-    (`test_the_first_gap_after_an_outage_is_never_skipped`).
-
-    **Three arms, because the middle one is what makes this a test of the
-    cursor rather than of emptiness.** A source with no runs at all is
-    refused; a source with a `FAILED` run and no completed one is refused
-    identically -- that is the state a killed probe leaves behind, and
-    `latest_completed_cursor` is `status = 'completed'` for exactly the
-    reason a delta must not resume from a walk that stopped halfway; a
-    source with one `COMPLETED` run is gap-closed.
-
-    **The positive control is the third arm and it is the first assertion**:
-    a refusal that refuses everything is not a guard, it is an off switch,
-    and every other assertion here passes against one.
+    """A delta with no cursor is not a delta, it is a full walk wearing a delta's name --
+    and the lane is the one caller nobody typed a command for.
     """
     atrium, belfry, cellar = _source("Atrium"), _source("Belfry"), _source("Cellar")
     for source in (atrium, belfry, cellar):
@@ -824,14 +751,7 @@ async def test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator
     sink = logger.add(lines.append, level="WARNING", format="{level.name}|{message}")
     try:
         await supervisor.start()
-        # Every lane has *decided*: it either walked or refused. At HEAD all
-        # three decide at once, so this returns immediately and the case
-        # fails on its own assertions rather than on the drain's deadline.
-        #
-        # **When it does fail here, the deadline is the reporting site**, so
-        # the counts go in its message: a WARNING downgraded to DEBUG never
-        # reaches `_refusals`, this condition is never met, and the count
-        # assertion below is never evaluated. Measured, not predicted.
+        # Every lane has *decided*: it either walked or refused.
         await _drain(
             lambda: len(fakes.reconciled) + len(_refusals(lines)) >= 3,
             note=lambda: (
@@ -868,37 +788,17 @@ async def test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator
     assert named == {"Atrium", "Belfry"}, f"the refusal names the source it refused: {refusals}"
     for line in refusals:
         assert line.startswith("WARNING|"), f"the refusal is a WARNING, not an ERROR: {line}"
-        # The command and nothing more specific. This branch's own S5 spelled
-        # the remedy `usher sync --kind full`; the implementation that shipped
-        # is `main`'s (issue #9), whose line names `usher sync --source "..."`
-        # and the `USHER_PUSH_GAP_CLOSE=always` escape beside it. The claim
-        # worth pinning is neither spelling -- it is that **a refusal that does
-        # not say what to run is a dead end**, so the assertion is on the
-        # command an operator types.
+        # The command and nothing more specific.
         assert "usher sync" in line, (
             f"a refusal that does not say what to run is a dead end: {line}"
         )
         assert "USHER_PUSH_GAP_CLOSE" in line, (
             f"the refusal names the setting that lifts it, or it reads as a wall: {line}"
         )
-        # PRD 08's credentials rule, and `reconcile.py`'s own failure line is
-        # the local precedent: the *name* is what an operator typed, and it
-        # is the positive control that makes the three absences below claims
-        # about redaction rather than about an empty string.
-        #
-        # **Each of the three has been shown to fire, and the obvious plant
-        # shows none of them.** Swapping `source.name` for `source.base_url`
-        # dies two assertions earlier, on `named == {"Atrium", "Belfry"}` --
-        # `base_url` is lower-cased (`https://atrium.invalid`), so the name
-        # is simply absent and this loop is never entered. The plants that
-        # reach here keep the line count at 2 *and* the name present, and
-        # add one field each: `{source} ({url})` dies on the first line
-        # below, `{source} ({password})` on the second, `{source}
-        # ({credentials_ref})` on the third. All three KILLED, each on its
-        # own assertion -- which is what makes the password line a claim
-        # rather than a decoration, since `Source` does not carry a password
-        # and no mutation of the *shipped* call site can put one there.
-        # `.claude/rules/mutation-sweeps.md` has the round.
+        # PRD 08's credentials rule, and `reconcile.py`'s own failure line is the local
+        # precedent: the *name* is what an operator typed, and it is the positive
+        # control that makes the three absences below claims about redaction rather than
+        # about an empty string.
         assert atrium.base_url not in line and belfry.base_url not in line
         assert CREDENTIALS.password.get_secret_value() not in line
         assert atrium.credentials_ref not in line and belfry.credentials_ref not in line
@@ -1007,36 +907,7 @@ async def test_an_operators_delta_on_a_fresh_source_still_walks(fakes: _Fakes) -
 async def test_a_deferred_push_event_on_a_cursorless_source_is_refused_and_its_items_are_dropped(
     fakes: _Fakes,
 ) -> None:
-    """`_close_gap` has a **second** caller, and it is on the delivery path.
-
-    `PushSupervisor.run` closes the gap on reconnect *and* whenever an
-    applied event comes back `deferred_to_delta` -- an event naming more
-    than `push_max_items_per_event` items with no payload
-    (`services/push.py`), which is deferred precisely because a request per
-    item against a 1.13M-item library is worse than a paged walk. Against a
-    cursorless source that walk is now refused, so those items are applied
-    **neither inline nor by a walk**: the event is discarded until an
-    operator runs `usher sync --kind full`.
-
-    **That is a deliberate trade and it was undocumented and untested until
-    this case.** The alternative is the whole-library walk the refusal
-    exists to prevent, triggered by an event rather than by a reconnect, so
-    the refusal is the right answer -- but "the items are dropped" is a
-    behaviour a reader must be able to find, and an absence nothing asserts
-    is an absence nobody chose.
-
-    **Two arms, and the second is the positive control.** `Belfry` has a
-    `COMPLETED` run, so its deferred event reaches a gap-closer that walks,
-    and its two items arrive in the catalog *by the walk* -- which is what
-    makes "the deferral really does call `_gap`" a measured fact rather
-    than an assumption. Without it, `Atrium`'s empty catalog is equally
-    what a supervisor that ignored `deferred_to_delta` entirely produces.
-
-    `push_gap_min_interval_seconds=0.0` because the gate is a **cadence**
-    guard and would otherwise skip the second gap on both lanes: `_gap`
-    stamps `gate.at` before it delegates, so the deferral's gap is inside
-    the default 60 s window opened by the reconnect's.
-    """
+    """`_close_gap` has a **second** caller, and it is on the delivery path."""
     atrium, belfry = _source("Atrium"), _source("Belfry")
     for source in (atrium, belfry):
         await _seed(fakes, source)
@@ -1130,13 +1001,7 @@ async def test_a_lane_that_crashes_does_not_take_the_others_down(fakes: _Fakes) 
         survivor.push(SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("b-1",)))
         await _drain(lambda: _stored(fakes.media_items) == ["b-1"])
     finally:
-        # And shutdown itself survives the crashed lane. Measured which half
-        # carries that: `stop()`'s `return_exceptions=True` alone fails 11
-        # cases when removed (every lane is cancelled at teardown, and a
-        # cancelled task raises `CancelledError` into `gather`), while
-        # `_guard`'s catch survives its own deletion -- the isolation comes
-        # from one task per lane, not from the `except`. What `_guard` buys
-        # is the log line, which is what the case below pins.
+        # And shutdown itself survives the crashed lane.
         await supervisor.stop()
 
 
@@ -1223,30 +1088,7 @@ async def test_a_crashed_lane_says_so(fakes: _Fakes) -> None:
 async def test_a_lane_that_reached_the_failure_ceiling_releases_its_adapter_and_is_named_as_stopped(
     fakes: _Fakes,
 ) -> None:
-    """The leak M10's S10 closed, and its positive control in the same case.
-
-    A lane whose task finished -- the failure ceiling, or a crash -- used to
-    keep its `SourceAdapter` in `_open_adapters` for the process lifetime.
-    That adapter is an `EmbyAdapter` holding a live `httpx.AsyncClient`
-    **against a server this deployment does not own**, and it went on feeding
-    `push_snapshots()`, which is the series PRD 10's "Push down" alert reads.
-    A dead lane reporting `delivering=False` forever and a dead lane reporting
-    nothing are different alerts.
-
-    Three things are asserted and the fourth is the control:
-
-    * the adapter is closed **exactly once**, not once per refresh tick -- a
-      count, because `aclose` is idempotent and a flag cannot tell the two
-      apart;
-    * it is gone from the push-gauge snapshot, so the series stops;
-    * the lane is **not restarted**, which is PRD 08's own remedy ("lean on
-      the nightly walk") -- a refresh that replaced it would reconnect forever
-      against the buffering proxy the ceiling exists for;
-    * and source B, whose lane is **live**, keeps its adapter and its series
-      through the same `refresh()`. Without that arm a `refresh` that closed
-      every adapter would pass the first three assertions and break push
-      entirely, which is the loudest regression this file can ship.
-    """
+    """The leak M10's S10 closed, and its positive control in the same case."""
     await _seed(fakes, _source("A"))
     await _seed(fakes, _source("B"))
     fakes.adapters.crash("A")
@@ -1312,15 +1154,9 @@ async def test_push_snapshots_report_the_adapters_own_ledger(fakes: _Fakes) -> N
         await supervisor.stop()
 
 
-# -- the reconnect gap-closer -------------------------------------------
-#
-# The gap-closer runs `reconcile(source, DELTA, adapter)` on every reconnect,
-# and a DELTA with no cursor is `list_items(since=None)` -- the whole library.
-# So on a deployment that has never completed an item walk, starting the
-# process is a full walk of a server the operator may not own, issued by
-# `uvicorn` with default settings and no command. `USHER_PUSH_GAP_CLOSE` is
-# the switch and `cursored` is the shipped answer; these cases are the three
-# arms plus the log-rate one.
+# -- the reconnect gap-closer ------------------------------------------- The gap-closer
+# runs `reconcile(source, DELTA, adapter)` on every reconnect, and a DELTA with no
+# cursor is `list_items(since=None)` -- the whole library.
 
 # Before any run these cases create, so a stocked item is inside the window a
 # completed run's cursor opens.
@@ -1511,28 +1347,7 @@ async def test_the_worker_lane_runs_when_enabled(fakes: _Fakes) -> None:
 async def test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass(
     fakes: _Fakes,
 ) -> None:
-    """PRD 08's recovery, and **both** halves of what M9's W1 changed about it.
-
-    `JobQueue.requeue_running`'s `older_than_seconds=0.0` default requeues
-    everything currently running. That was the only lever this project had, and
-    M9's S3 measured the dead end it leads to: one of three workers died holding
-    twenty claims, and pulling that lever would have taken the other two
-    workers' **live** claims with it. It is now unsafe inside one process too,
-    because one worker holds several claims at a time.
-
-    So two assertions, and the second is the one with teeth:
-
-    - **not per pass**, because recovery is an `UPDATE` scanning
-      `status = 'running'` and there is nothing to find between leases; and
-    - **never at age zero**, which is the difference between recovery and
-      theft. A lane calling `requeue_running()` bare answers "1 requeue" over
-      three passes exactly as a correct one does, so counting alone ratifies
-      it.
-
-    `idle_seconds` is dialled down so several passes fit in milliseconds: at
-    the shipped five seconds this case would take fifteen, and a case that
-    asserted after one pass could not tell "once" from "per pass".
-    """
+    """PRD 08's recovery, and **both** halves of what M9's W1 changed about it."""
     supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
     await supervisor.start()
     await _drain(lambda: fakes.queue.claims >= 3, bound=2.0)
@@ -1659,28 +1474,8 @@ class _JustBooted:
 async def test_the_worker_lane_recovers_on_its_first_pass_on_a_host_that_just_booted(
     fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """🔴 **The throttle's origin is the identity element of its own
-    comparison, and that made the field above lie.**
-
-    `time.monotonic()` on Linux is seconds since **boot**. Against an origin of
-    `0.0`, `now - origin >= lease / 2` is *false* for the first
-    `job_lease_seconds / 2` -- 150 s at the shipped lease -- so a
-    worker-enabled process started with the machine skips its first recovery
-    pass entirely and `/health/ready` answers `recovered_claims: null`, the
-    value `LaneReport` documents as *"this process runs no worker"*. That is
-    the field lying about the one thing it exists to report, at exactly the
-    moment a compose stack comes up holding the previous boot's orphans.
-
-    `.claude/rules/testing-discipline.md` already names the shape: a fixture
-    whose origin is the identity element of the operation under test cannot
-    distinguish the operation from its absence. Here `0.0` is the identity for
-    the subtraction, and every case in this file that recovers passes only
-    because the host it runs on has been up for longer than half a lease --
-    which is a property of the machine, not of the code.
-
-    So the clock is shimmed rather than trusted, and the assertion is the same
-    one `test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass`
-    makes at a normal uptime. Against `0.0` this reports **0** requeues.
+    """🔴 **The throttle's origin is the identity element of its own comparison, and that
+    made the field above lie.**
     """
     monkeypatch.setattr("usher.services.jobs.time", _JustBooted(10.0))
     supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
@@ -1937,18 +1732,8 @@ async def test_a_worker_lane_with_an_llm_client_claims_curate_work(fakes: _Fakes
         assert JobKind.INDEX not in kinds
 
 
-# -- the rows.refresh lane ----------------------------------------------
-#
-# PRD 06's "served stale while refreshing". The two claims that need care are
-# **the request never waits** -- settled against `HomeService` in
-# `tests/unit/test_services_home_stale.py`, where the coroutine is driven by
-# hand -- and **exactly one refresh per key while one is in flight**, which is
-# a concurrency claim and therefore needs observed overlap. What overlaps is
-# *not* two requests: a stale serve never suspends, which is the whole feature,
-# so two of them cannot intersect in wall-clock and a case that asserted they
-# did would be asserting the feature is broken. The intersection with teeth is
-# **a request against the running refresh**, and that is the pair the case
-# below records.
+# -- the rows.refresh lane ---------------------------------------------- PRD 06's
+# "served stale while refreshing".
 
 
 class _GatedRow(FakeRow):
@@ -2301,29 +2086,7 @@ async def test_no_cache_means_no_refresh_lane(fakes: _Fakes) -> None:
 async def test_the_refresh_is_a_root_span_linked_to_the_request_that_served_stale(
     fakes: _Fakes,
 ) -> None:
-    """PRD 10's `rows.refresh`, and the two invariants that move with it.
-
-    **A root with a `Link`, never a child.** The request that served the stale
-    screen has usually already returned, so a child span of a finished parent
-    misstates causality -- the same reason a worker's `job.*` is a root, and
-    the convention PRD 10 already specifies. Asserted as *parentage*: a refresh
-    that nested still produces valid ids, still exports, and still carries the
-    name the document asks for. The schedule happens inside a span here so
-    there is a context to be wrongly parented to -- without one, "root" is
-    what an implementation with no ambient span produces anyway and the
-    assertion could not fail.
-
-    **And its `row.build` spans have no `home.compose` parent at all.** PRD 10
-    said "the number of `row.build` children of a `home.compose` is the number
-    of misses"; a background refresh builds outside any request, so
-    `HomeService.rebuild` opens none and the sentence is corrected in the same
-    commit. A refresh that minted one would nest perfectly and quietly double
-    the `home.compose` count on every dashboard reading it as "requests that
-    composed".
-
-    Written because a documented span nobody emits is the trace-side
-    permanently-empty panel, indistinguishable from a quiet system.
-    """
+    """PRD 10's `rows.refresh`, and the two invariants that move with it."""
     exporter = InMemorySpanExporter()
     tracers = TracerProvider()
     tracers.add_span_processor(SimpleSpanProcessor(exporter))

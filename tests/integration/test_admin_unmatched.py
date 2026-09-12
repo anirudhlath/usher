@@ -1,23 +1,4 @@
-"""The review queue on the wire, against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_unmatched.py` drives
-both routes over `FakeMediaItemRepository`, whose keyset is a tuple comparison
-in Python -- and a NULL cannot poison a comparison in Python, so the defect
-this route exists to avoid is not expressible there. Against Postgres it is:
-`((added_at IS NOT NULL), added_at, id) > (...)` evaluates to **NULL rather
-than false** at an unkeyed boundary, so a walk drops the whole undated tail
-while every page it served looks full (ADR-0034, corrected by measurement).
-The undated items are precisely the population an operator is reviewing -- a
-source that could not date a file is a source that told us least about it --
-so the headline case below puts a NULL-dated item *on the page boundary*.
-
-**This module commits for real, so it cleans up after itself.**
-`get_session` commits every request even when the handler only read, and
-CLAUDE.md records what leaving rows behind did to four tests in three other
-files, each of which passed in isolation. `media_items` cascades from
-`sources`, so deleting this file's own sources takes its items with them; the
-titles a resolve case needs are deleted by their own marker.
-"""
+"""The review queue on the wire, against a real schema."""
 
 import uuid
 from collections.abc import AsyncIterator

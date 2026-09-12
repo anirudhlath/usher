@@ -1,16 +1,4 @@
-"""The canonical genre vocabulary (ADR-0039). No database, no network.
-
-`titles.genres` is written by two importers with no shared vocabulary — the
-IMDb bulk phase writes IMDb's 28 labels, `EnrichService` writes TMDb's 19
-movie + 16 TV ones — and on the live catalog (2026-08-19, 1,272,866 titles)
-the two alphabets are **disjoint on every concept they both name**: 20,051
-titles carry `Sci-Fi`, 6,223 carry `Science Fiction`, and **zero** carry both.
-
-These cases are about the map that makes those one concept, and about the two
-properties a reader has to be able to trust: that expanding a filter is
-symmetric in the spelling the client sent, and that an unknown label is left
-exactly alone.
-"""
+"""The canonical genre vocabulary (ADR-0039). No database, no network."""
 
 from usher.domain.genres import (
     CANONICAL_GENRES,

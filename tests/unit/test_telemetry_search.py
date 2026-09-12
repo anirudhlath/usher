@@ -1,23 +1,4 @@
-"""PRD 10's metric catalogue for M6's search and index lanes.
-
-**A metric that is documented and never emitted is a dashboard panel that is
-permanently empty, and nothing distinguishes that from a healthy zero.** M4
-found three of PRD 10's rows in that state -- two gauges that did not exist,
-one emitted under a different name than documented -- so every case here
-drives the code that owns the instrument and reads the value back out of an
-`InMemoryMetricReader`. Asserting an instrument *exists* would pass against a
-`create_histogram` nobody ever calls.
-
-**The catalogue is read out of `docs/prd/10-telemetry-and-dashboards.md`, not
-retyped here.** That is the one difference from `test_telemetry_push.py`'s
-otherwise-identical shape, and it closes the failure the M5 list cannot see:
-a rename applied to `src/` *and* to a hand-copied list in a test leaves the
-PRD -- which is what a dashboard is written from -- pointing at nothing. The
-names this milestone owes invite near misses in particular:
-`usher.search.result` singular, by analogy with `usher.enrich.result` two
-rows up the same table, and `usher.search.hits`, and
-`usher.embed.duration`.
-"""
+"""PRD 10's metric catalogue for M6's search and index lanes."""
 
 import inspect
 import re
@@ -82,20 +63,8 @@ _EMBEDDING_MODEL = "fake:test-embedding"
 
 _PRD_10 = Path(__file__).resolve().parents[2] / "docs" / "prd" / "10-telemetry-and-dashboards.md"
 
-# `| \`usher.search.duration\` | histogram | mode | M6 |` -- name, type and
-# milestone, so the *type* is part of what the PRD is read for. PRD 10's own
-# header calls the "Emitted" column maintained rather than aspirational, so a
-# shipped metric left marked `M6` instead of `✅ M6` is the same defect in the
-# other direction and this parse is what makes that visible.
-#
-# ⚠️ **This table has a second reader**, and the two are deliberately not
-# merged: `tests/unit/test_telemetry_metric_names.py:_ROW` parses the same rows
-# for the *name* alone, to census the catalogue against what `src/usher/` hands
-# to a `Meter` factory (41 declared vs 42 rows). This one is the only reader of
-# the *type* column. Merging them would collapse two different questions into
-# one — measured, in M10 O4's sweep: deleting one catalogue row kills a case in
-# *both* files, and that independence is what made the blast radius
-# informative. Change the table's shape and both regexes need checking.
+# `| \`usher.search.duration\` | histogram | mode | M6 |` -- name, type and milestone,
+# so the *type* is part of what the PRD is read for.
 _ROW = re.compile(r"^\|\s*`(usher\.[a-z0-9._]+)`\s*\|\s*(\w+)\s*\|[^|]*\|\s*([^|]*?)\s*\|", re.M)
 
 # `get_metrics_data()` is typed as optional and never is here.
@@ -459,32 +428,8 @@ def _suggest_service(
 async def test_a_suggest_records_its_duration_and_its_result_count_under_the_tier_that_answered(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """`usher.suggest.duration` and `usher.suggest.results`, both labelled
-    `tier`, driven once per tier through the real `SearchService`.
-
-    **One unlabelled histogram over this route would be a mixture of two
-    populations**, and the ratio between them is decided by a client's
-    debounce behaviour rather than by anything the server can see. ADR-0031
-    measures tier 2's whole-name p50 at 33.6 ms and tier 1's shipped union p95
-    at 2,707 ms at one character against 112 ms at four -- so an unlabelled
-    p50 answers a question about a keyboard. The label is a label rather than
-    two instrument names for the reason `usher.row.build.duration` carries
-    `provider`: a group-by is one query and two names are two panels that
-    cannot be summed.
-
-    **The results point is the hydrated count, not the hit count**, and the
-    two are seeded apart here because nothing else in this file makes them
-    differ: `suggest` drops a hit whose title `list_by_ids` did not return
-    (`if hit.title_id in by_id`), so a series recording `len(hits)` would
-    report a type-ahead box that answered when the box was empty. Both tiers
-    match both seeded names; only one of the two is in the catalog.
-
-    The near misses this pair invites are `usher.suggest.latency` (by analogy
-    with `usher.enrichment.latency` in the same table),
-    `usher.search.suggest.duration` -- which would put the type-ahead box
-    inside every `usher.search.*` panel -- and `usher.suggest.result`
-    singular. None raises and none fails an assertion that a histogram was
-    recorded.
+    """`usher.suggest.duration` and `usher.suggest.results`, both labelled `tier`, driven
+    once per tier through the real `SearchService`.
     """
     titles = FakeTitleRepository()
     hydrated = _title("Quiet Vacuum")
@@ -589,36 +534,7 @@ def test_the_suggest_series_are_histograms_and_not_counters(
 def test_the_duration_buckets_resolve_a_keystroke_rather_than_a_five_second_page(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """🔴 **The one assertion without which this whole pair is decorative.**
-
-    `configure_metrics` installs no `View`, so every histogram in this project
-    takes the SDK's default explicit boundaries -- `(0.0, 5.0, 10.0, 25.0, …)`,
-    in **seconds** -- and every observation under five seconds lands in one
-    bucket. PRD 10 records that defect against the seconds-unit histograms it
-    already documents. A type-ahead path is the case where it stops being a
-    loss of resolution and becomes a loss of the measurement: measured
-    2026-09-07 through this host's OTLP collector into its Prometheus, 2,000
-    points (seed 20260907) on ADR-0002's shipped tier-2 row answered
-    `histogram_quantile(0.5, …) = 2.5000 s` and `histogram_quantile(0.95, …) =
-    4.75 s` on the default boundaries -- against the sample's own 35.20 ms and
-    225.07 ms, so 71x and 21x wrong -- and 38.12 ms / 240.70 ms on the
-    boundaries below. PRD 10 carries the run and its method.
-
-    So `usher.suggest.duration` carries an
-    `explicit_bucket_boundaries_advisory`, which the SDK's default aggregation
-    reads off the instrument (verified through the `_ProxyInstrument` path
-    this module's import order actually takes). **Deliberately on the
-    instrument and not a `View` in `configure_metrics`**: the repo-wide fix
-    PRD 10 asks for is every seconds-unit histogram at once and is not this
-    task, and an advisory travels with the instrument rather than with
-    whichever provider a caller installed -- including the one this fixture
-    installs, which is why this case can see it at all.
-
-    The premise is the 50 ms as-you-type budget being an exact boundary: the
-    fraction of keystrokes inside the budget is then a bucket ratio rather
-    than an interpolation, so the panel answers the question ADR-0002 gated
-    on without inventing a number between two bounds.
-    """
+    """🔴 **The one assertion without which this whole pair is decorative.**"""
     from usher.services import search as search_module
 
     search_module._suggest_duration.record(0.0336, {"tier": "fuzzy"})

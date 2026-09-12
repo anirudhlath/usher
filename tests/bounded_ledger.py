@@ -1,21 +1,4 @@
-"""The one import of `scripts/audit_bounded_columns.py` the suite makes.
-
-[ADR-0044](../docs/prd/decisions/0044-a-bounded-column-is-a-declared-type-that-refuses.md)
-generates the bounded-column ledger and publishes its census; F9's guard is
-what makes `--check` a thing CI runs rather than a thing a person remembers to.
-The script lives in `scripts/` rather than in `tests/` for the reason that
-record states -- *"17 provably safe" was quoted three times in two milestones
-and could not be reproduced* -- so the loader below is the seam, and it is
-written once here rather than in each of the two test modules that need it.
-
-**Loaded by path rather than by `sys.path.insert("scripts")`.** `scripts/` is
-not a package and is not on `mypy_path`, so an ordinary import is a
-`Cannot find implementation or library stub` under the gate's `mypy src tests`.
-`importlib.util.spec_from_file_location` gives the module object with no import
-side effect on the rest of the suite, and the accessors below are the typed
-surface -- so a rename inside the script fails here, once, rather than in every
-caller.
-"""
+"""The one import of `scripts/audit_bounded_columns.py` the suite makes."""
 
 import importlib.util
 from functools import lru_cache

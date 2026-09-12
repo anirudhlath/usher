@@ -1,35 +1,5 @@
-"""What every `SuggestIndex` implementation owes the type-ahead box, and what
-only the typo-tolerant one does.
-
-**Two classes since M9, because there are two implementations and they do not
-promise the same thing.** ADR-0002's typo-tolerance gate failed on real data
-(27.8% on a 2-4-character name against a 0.75 bar, and no configuration within
-6x of a 50 ms keystroke budget), and what it obliges is a *two-tier* suggest:
-`PostgresPrefixSuggestIndex`, a btree prefix probe at p50 0.6 ms with **1.9%**
-typo recall, on every keystroke; `PostgresSuggestIndex`, the trigram +
-`levenshtein_less_equal` path, debounced behind it.
-
-- **`SuggestIndexContract`** is the half both owe: a typed prefix finds the
-  title that starts with it, and equally-good matches come back ordered rather
-  than arbitrary. Subclassed by all three arms.
-- **`TypoTolerantSuggestIndexContract`** adds the three cases that are claims
-  about `pg_trgm` and `levenshtein` -- a single-character typo, a
-  transposition, and the candidate cap that keeps the re-rank off the whole
-  table. Subclassed by `PostgresSuggestIndex` and `FakeSuggestIndex` only.
-
-**Leaving the typo cases on the base and skipping them for tier 1 would have
-been the wrong shape**, and not by a little: a skipped case reads as coverage
-in the summary line and asserts nothing, and a *tier whose entire design is the
-absence of typo tolerance* would then be described by three permanently-skipped
-cases instead of by one integration case that asserts the absence and proves
-the path ran first. The split says which contract each implementation signed.
-
-**The port has no write method** (ADR-0021: adding one is how the dual write
-arrives without a decision), so arrangement cannot go through the port at all.
-`given_title` is therefore a hook rather than a convenience: the fake writes
-into its own dict through a test-only method, and both Postgres arms insert a
-`titles` row, which is the honest shape of a port that reads a table somebody
-else owns.
+"""What every `SuggestIndex` implementation owes the type-ahead box, and what only the
+typo-tolerant one does.
 """
 
 import uuid

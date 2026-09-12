@@ -1,23 +1,4 @@
-"""`usher.cache.hits`/`.misses` -- PRD 10, M9.
-
-**`services/rows/cache.py`'s own docstring said cache effectiveness is not
-observable in M7, and `services/home.py:329` says why a histogram cannot
-substitute**: a cache hit records no `usher.row.build.duration` point because
-the cache returns before the timer opens, so that histogram's population is
-misses only and a hit rate is not recoverable from it. These two counters are
-the fix, and the read is where the counter goes -- inside `RowCache.get_row`
-and `RowCache.get_screen` -- so every future *reader* is counted rather than
-every future caller remembering to.
-
-Driven through the real `HomeService`/`RowCache` pair rather than by calling
-`counter.add` directly, so an instrument created at import and never recorded
-to fails here -- same discipline as `test_telemetry_search.py`.
-
-`tests/conftest.py::reset_otel_meter_provider` (autouse) is what makes
-installing a fresh `MeterProvider` per case here work at all: `set_meter_
-provider` is set-once and every `usher` module's counter is a `_Proxy*` shell
-caching the first real instrument it is ever handed.
-"""
+"""`usher.cache.hits`/`.misses` -- PRD 10, M9."""
 
 import datetime as dt
 import uuid

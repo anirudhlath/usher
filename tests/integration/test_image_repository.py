@@ -1,13 +1,4 @@
-"""`PostgresImageRepository` against the real database.
-
-The shared contract runs here unchanged, plus the four things a dict cannot
-express: a foreign key, a column narrower than the field feeding it, a real row
-count behind the upsert, and — the one that matters most — **that the key is
-`NULLS NOT DISTINCT` and the obvious spelling would not have been**. That last
-case is the whole reason `m09c` exists, and it is invisible on the fake arm by
-construction: a Python tuple key treats `None` as an ordinary value, so the
-careless DDL passes every shared case.
-"""
+"""`PostgresImageRepository` against the real database."""
 
 import uuid
 
@@ -67,33 +58,7 @@ async def _row_count(session: AsyncSession, title_id: uuid.UUID) -> int:
 async def test_the_key_is_nulls_not_distinct_and_the_obvious_spelling_would_not_be(
     session: AsyncSession,
 ) -> None:
-    """**The case `m09c` exists for, and the only one that can see it.**
-
-    The request in ADR-0032 reads *"a unique key over `(title_id, provider,
-    provider_path)`"*, and the plain transcription of that is inert for two
-    owner kinds in three: Postgres defaults a unique constraint to
-    `NULLS DISTINCT`, so an episode- or person-owned duplicate indexes
-    `(NULL, 'tmdb', '/x.jpg')` and never conflicts with another one. That
-    spelling passes review, passes every test M9 writes — because M9 writes
-    only title-owned artwork — and is silently missing for exactly the rows
-    nobody is looking at.
-
-    So this case does not assert on this repository at all. It asserts on the
-    *constraint*, from the two directions that separate the two spellings:
-
-    1. A **person-owned** duplicate is refused. Under `NULLS DISTINCT` it would
-       be admitted, and this is the assertion that fails against the careless
-       DDL.
-    2. Two **different titles** sharing one path are still two rows. Without
-       this the case would also pass against something merely stricter — a key
-       on `(provider, provider_path)` alone, which would give one title the
-       other's poster id.
-
-    Written against raw SQL rather than through the port because the port
-    writes title-owned rows only: the arm that the careless spelling breaks is
-    the one no method here can reach, which is precisely why it needed a case
-    of its own.
-    """
+    """**The case `m09c` exists for, and the only one that can see it.**"""
     person_id = new_id()
     await session.execute(
         text(

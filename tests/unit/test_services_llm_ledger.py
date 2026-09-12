@@ -1,23 +1,5 @@
-"""`LLMLedger` -- the one home for *record on every path that attempted a call,
-and commit what you recorded.*
-
-**Why this module exists at all**, and it is this repository's own finding
-applied one level up. `.claude/rules/testing-discipline.md` records that the
-rule *"record **and** commit"* was spelled verbatim at three exits of
-`CurationService.generate`, that deleting the commit from one of them passed
-all 42 cases, and that the repair had to be structural as well as behavioural:
-*"a rule spelled three times is a rule one deletion is invisible in ... N copies
-means N chances for one to go quiet."*
-
-That argument was then applied **inside** one service and not **across** the
-two that spend money. `CurationService` and `QueryExpansionService` each
-carried their own `_settle` / `_ledger_row` / `_record`, identical but for the
-purpose constant and the generation id, so five invariants -- `ok` derived
-rather than passed, `str(exc) or type(exc).__name__`, the `usage is None`
-fallback, `except UsherPortError` and not `except Exception`, and
-record-then-commit -- were each argued and pinned twice. This file is the one
-place they are now pinned once, and `test_no_service_mints_its_own_ledger_row`
-is what stops a third copy appearing.
+"""`LLMLedger` -- the one home for *record on every path that attempted a call, and
+commit what you recorded.*
 """
 
 import ast

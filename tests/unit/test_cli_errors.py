@@ -1,30 +1,5 @@
-"""The CLI's error boundary: what an operator sees when the thing that
-failed is theirs to fix.
-
-M7's smoke test recorded the finding this module closes: `usher
-bootstrap-status` and `usher sync-status` against an unreachable database
-printed **60 lines of asyncpg and greenlet internals** and exited 1. The
-exit code was right and the presentation was not -- the operator's actual
-information, `Connect call failed`, was the last line of a stack whose
-first fifty frames are library code they cannot act on.
-
-Two properties are under test here, and they pull in opposite directions,
-which is why both are pinned:
-
-1. **A failure the operator can fix is a message.** No stack, one line,
-   still exit 1.
-2. **A failure the operator cannot fix keeps its stack.** A `TypeError` in
-   row composition is a bug, and the traceback is the bug report. A
-   boundary that swallows it has traded a wart for a blindfold.
-
-And one that is a security control rather than a presentation choice:
-**a settings failure may not echo the value it rejected.** pydantic's
-`ValidationError` message carries `input_value=...`, so `USHER_DATABASE_URL`
-with the wrong driver printed the whole DSN -- password included -- and a
-short `USHER_SECRET_KEY` printed the key. Both fields are `SecretStr`
-precisely so that cannot happen. This is the same defect `usher.api.errors`
-exists to prevent on the HTTP side, on the surface an operator is *more*
-likely to run while pasting output into an issue.
+"""The CLI's error boundary: what an operator sees when the thing that failed is theirs
+to fix.
 """
 
 import argparse
@@ -104,12 +79,9 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
     # coroutine is patched to raise before the path is read, which is what
     # makes this a case about the *boundary* rather than about the artifact.
     "restore": ["restore", "usher-backup.jsonl.gz"],
-    # `--new-key-env` is required, and what it carries is a **variable name**
-    # rather than a key -- so this row, unlike every other one here, would be
-    # a place a secret could be written down if the surface had been designed
-    # the other way. It names a variable that need not be set: `_rotate` is
-    # patched to raise before `os.environ` is read, which is what keeps this a
-    # case about the boundary.
+    # `--new-key-env` is required, and what it carries is a **variable name** rather
+    # than a key -- so this row, unlike every other one here, would be a place a secret
+    # could be written down if the surface had been designed the other way.
     "rotate-secret": ["rotate-secret", "--new-key-env", "USHER_NEW_SECRET_KEY"],
 }
 
@@ -534,52 +506,16 @@ def test_the_boundary_catches_families_and_not_exception() -> None:
 
 
 def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> None:
-    """**The shape of ADR-0026's 2026-08-07 amendment, asserted rather than
-    described**, and the assertion that fails on the one-line version of it.
-
-    `OPERATOR_ERRORS + (UsherPortError,)` is what an implementer reaches for
-    on reading "an unreachable LLM endpoint should be a sentence", and it
-    passes every behavioural case in this module. It also swallows
-    `PortDataMalformed` from the embedder (`fastembed` returning a different
-    number of vectors than texts, which its own adapter calls the most
-    damaging bug available in that milestone) and `RepositoryConflict` from
-    `TitleNeighborRepository.replace` (a score outside `[0, 1]` or a
-    self-neighbour, which that repository documents as a bug in the blend
-    rather than a conflict a retry clears).
-
-    So the line is drawn between the port families about **reaching** an
-    upstream and everything else, and both halves are pinned -- a later
-    widening to the base class fails here rather than in review.
-
-    **`UsherPortError` has nine subclasses, not the six in
-    `ports/errors.py`.** `SourceNotSupported`, `FilterNotSupported` and
-    `AvailabilitySweepRefused` live beside the ports whose contract they
-    belong to, which is documented at each of them and is easy to miss from
-    the taxonomy module -- so the set is read off `__subclasses__()` rather
-    than written out, and a tenth member arriving with no decision about it
-    fails here instead of defaulting into either half.
+    """**The shape of ADR-0026's 2026-08-07 amendment, asserted rather than described**,
+    and the assertion that fails on the one-line version of it.
     """
     reaching = {PortUnavailable, PortAuthFailed, PortRateLimited}
     everything_else = set(UsherPortError.__subclasses__()) - reaching
-    # The six that stay out, named so the count is checkable: three that are
-    # about what came back or what we tried to write and carry deliberate
-    # bug tripwires, and three that no measured path reaches this boundary
-    # with -- `ReconcileService` and `PushService` absorb two of them, and
-    # `_TRANSLATORS` covers every `SearchFilters` field, so the third fires
-    # only for a field a later milestone forgets.
-    #
-    # ⚠️ **`AvailabilitySweepRefused` stays out for the *absorbed* half of that
-    # sentence and no longer for the other half** (M10 S9): the family has been
-    # observed in the field, and it is still unreachable here because
-    # `reconcile` promises never to raise it. `_sync` reports it off the run row
-    # and exits non-zero -- see the three cases at the end of this module.
-    #
-    # 🔴 **`RepositoryConflict`'s exclusion carries its own measurement since
-    # M10's F4**, because it is the member somebody keeps arriving here to add
-    # -- PRD 09 carried *"a one-line change"* for it from M9 to M10 -- and an
-    # omission with no number beside it reads as an oversight. The reason
-    # travels in the assertion messages below rather than only in this comment,
-    # so a widening meets the argument at the point it fails.
+    # The six that stay out, named so the count is checkable: three that are about what
+    # came back or what we tried to write and carry deliberate bug tripwires, and three
+    # that no measured path reaches this boundary with -- `ReconcileService` and
+    # `PushService` absorb two of them, and `_TRANSLATORS` covers every `SearchFilters`
+    # field, so the third fires only for a field a later milestone forgets.
     exclusion = (
         "RepositoryConflict stays out: 22 raise sites across 14 modules "
         "(re-derived 2026-08-20, M10 F4), of which exactly ONE is reachable "
@@ -721,12 +657,9 @@ def test_a_malformed_upstream_payload_keeps_its_traceback(
         usher_cli.main(["search", "dune"])
 
 
-# -- a failed sync run is a non-zero exit -------------------------------------
-#
-# The stand-ins below drive `_sync`'s real body -- every other case in this
-# module patches the dispatch coroutine, which is what makes them tests of the
-# *boundary*. This one is about what the command itself does with a run row it
-# was handed, so the body has to run.
+# -- a failed sync run is a non-zero exit ------------------------------------- The
+# stand-ins below drive `_sync`'s real body -- every other case in this module patches
+# the dispatch coroutine, which is what makes them tests of the *boundary*.
 
 
 def _run(
@@ -832,40 +765,10 @@ def _sync_against(
 def test_a_refused_sweep_is_reported_at_the_boundary_the_operator_actually_watches(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A run that recorded `FAILED` must not leave the command exiting 0.
-
-    🔴 **Measured on a real deployment before this case existed.** The
-    operator's own `sync_runs` holds a `full` run from 2026-08-13 that recorded
-    `FAILED` with *"refusing to mark 60 of 180 items unavailable in one run
-    (33% exceeds the 25% ceiling)"* -- and `usher sync` printed that line and
-    **exited 0**. The same table holds ten `watch_state` runs that have failed
-    every night since, also at exit 0. A human watching the terminal sees it; a
-    cron entry, a CI step and a systemd unit all see success.
-
-    **The plan for this task said the fix is adding `AvailabilitySweepRefused`
-    to `OPERATOR_ERRORS`, and that would have changed nothing.**
-    `ReconcileService.reconcile` absorbs it into a `FAILED` row by contract and
-    its own docstring promises exactly that -- a promise worth keeping, since a
-    multi-source sync must not abort on one source's refusal. The exception
-    never reaches `main`'s boundary, so the tuple never sees it. What reaches
-    the operator is the **run row**, and the exit status is what was lying
-    about it.
-
-    Three assertions, and the reporting one is not redundant with the exit:
-    a command that exits 1 having printed nothing is a worse outcome than the
-    one being fixed, and the numbers are the operator's actual information.
-
-    The positive control is the second case below: the same wiring with both
-    runs completing must exit **0**, or "raises SystemExit" is satisfied by a
-    command that fails unconditionally.
-    """
-    # The code comes from the same constant `ReconcileService._recorded_failure`
-    # writes, because this case and the service are two halves of one
-    # agreement: the CLI matches a column the service has to have filled. A
-    # literal here would let either side drift and leave both suites green --
-    # `test_a_refused_sweep_records_the_token_the_cli_matches_on` in
-    # `tests/integration/test_services_reconcile.py` is the other half, and it
-    # drives a real refusal through real Postgres rather than composing a row.
+    """A run that recorded `FAILED` must not leave the command exiting 0."""
+    # The code comes from the same constant `ReconcileService._recorded_failure` writes,
+    # because this case and the service are two halves of one agreement: the CLI matches
+    # a column the service has to have filled.
     refusal = (
         "refusing to mark 60 of 180 items unavailable in one run "
         "(33% exceeds the 25% ceiling); nothing was retracted"

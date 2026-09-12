@@ -1,16 +1,4 @@
-"""The shared contract, against the in-memory implementation.
-
-Half of a pair. Every `COALESCE` case here passes for a reason that has
-nothing to do with the code under test -- Python's `if value is not None` is
-naturally that shape -- so this file proves the assertions are *expressible*
-and `tests/integration/test_watch_state_repository.py` proves they *bite*.
-
-The episode fixtures are wired to one series on purpose: `list_recent` rolls a
-watched episode up through `episodes.title_id`, and this fake has no episodes
-table, so the mapping is handed to it at construction. `episode_id` and every
-id in `episode_ids` belong to `episode_series_id`, exactly as they do against
-Postgres.
-"""
+"""The shared contract, against the in-memory implementation."""
 
 import uuid
 

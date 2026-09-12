@@ -1,55 +1,5 @@
-"""`CandidatePoolService` -- the pool, and the four configurations it has to be
-correct in.
-
-**The degradation is the contract, not a fallback.** `USHER_EMBEDDING_ENABLED`
-defaults to `False`, so the configuration this file spends the most cases on is
-the one with no embedder at all: that is the shipped deployment, and a pool
-that only works with a model is curation that never fires on it. M8's boundary
-call 5, and `GenreAffinityProvider`'s corrected failure arriving one layer
-down.
-
-The four, each with the case that pins it:
-
-| configuration | pinned by |
-|---|---|
-| no embedder | `test_with_no_embedder_the_pool_is_the_base_order` |
-| an embedder, no history | `test_a_new_household_gets_a_full_pool_in_the_base_order` |
-| a centroid, a mostly-unembedded pool | `test_a_candidate_with_no_vector_keeps_its_index` |
-| the full configuration | `test_a_centroid_re_ranks_the_pool_it_is_given` |
-
-**A configuration is only pinned by a case whose fixture cannot also be the
-configuration next to it**, which cost the first row of that table a rewrite: it
-originally seeded a household with no history at all, which is *state-identical*
-to row two, so it passed for the wrong reason and a planted no-embedder path
-that read a stored centroid survived it. Row one now starts from a household
-that already has a `user_taste` row on file, so the only thing standing between
-it and a re-rank is `embedder is None`.
-
-**Every cosine here is planted, never hoped for.**
-`tests/unit/test_services_taste.py`'s module docstring records why: a
-`FakeEmbedder` is a hash, so the similarity between two titles is whatever the
-digest said today, and a re-rank asserted against noise is a case that goes red
-on an unrelated change and gets loosened once, permanently. `planted_pair`
-gives two unit vectors at an exact angle; the poles below are built the same
-way.
-
-**What this file's fixtures deliberately do not hold constant**, because
-holding one of them constant is how a predicate becomes indistinguishable from
-one it merely correlates with:
-
-- **The household's history lives in two fakes here and one table in
-  production.** `TasteService` reads `FakeWatchStateRepository` for the
-  centroid's window; `FakeTitleRepository.list_unwatched_candidates` reads its
-  own `watch_states` list for the exclusion. `_Household.watched` writes both,
-  and `test_the_title_that_built_the_centroid_is_not_in_the_pool_it_ranks` is
-  what fails if a later edit lets them drift.
-- **Not every candidate is embedded.** A fixture in which every pool member
-  has a vector cannot tell "unembedded candidates keep their index" from
-  "unembedded candidates are dropped", and M7 measured the genome's real
-  candidate-pair rate at 1.81% -- coverage is the normal state, not the
-  exception.
-- **Not every candidate is owned**, and not every one carries an affinity
-  genre, so neither ranking key is constant across the pool.
+"""`CandidatePoolService` -- the pool, and the four configurations it has to be correct
+in.
 """
 
 import inspect
@@ -91,17 +41,7 @@ _DIMENSION = 384
 # engaged, embedded titles and a case that wants none must stay under it.
 _MIN_TITLES = 5
 
-#: The `size` every case that is not about the cap is built with.
-#:
-#: **Deliberately not 200**, and that is the point of the number rather than an
-#: accident of it. `curation_pool.DEFAULT_POOL_SIZE` was the production default
-#: written down twice and is deleted (see
-#: `test_the_measured_two_hundred_is_declared_once_and_read_once`), so a
-#: fixture that restated `200` would put the copy straight back -- in the one
-#: file whose own docstring names this fixture as a place the number had
-#: already leaked to. What a case that is not about the cap needs is "larger
-#: than anything seeded here", which is what this says and what 200 only
-#: happened to be. The two cases that *are* about the cap pass their own.
+# : The `size` every case that is not about the cap is built with.
 _UNCAPPED = 50
 
 
@@ -172,16 +112,11 @@ class _Household:
         )
         await self.titles.add(one)
         if owned:
-            # **Both stores that stand in for `media_items`.** The pool read
-            # semi-joins it through `FakeTitleRepository.available_copies`;
+            # **Both stores that stand in for `media_items`.** The pool read semi-joins
+            # it through `FakeTitleRepository.available_copies`;
             # `TasteService.genre_affinity` divides by it through
             # `FakeTasteRepository.library_genre_counts`, which walks
-            # `FakeMediaItemRepository`. Seeding only the first was a real
-            # defect in this file's first draft: every affinity came back
-            # empty, because a library of zero tagged titles is `[]` by
-            # `genre_affinity`'s own `ZeroDivisionError` guard, and the two
-            # cases about affinity failed for a reason that had nothing to do
-            # with the code under test.
+            # `FakeMediaItemRepository`.
             self.titles.available_copies.setdefault(one.id, []).append(None)
             await self.media_items.upsert_many(
                 [
@@ -209,26 +144,8 @@ class _Household:
         return one
 
     async def watched(self, title: Title, *, user_id: uuid.UUID = USER) -> None:
-        """One *finished* watch state, written into **both** stores that stand
-        in for one table.
-
-        `FakeWatchStateRepository` is what `TasteService` reads for the
-        centroid's window; `FakeTitleRepository.watch_states` is what the pool
-        read anti-joins. In production these are one `watch_states` row, and a
-        helper that wrote only the first would let the centroid be built from
-        titles the pool still offered back.
-
-        **`played` and `play_count` were parameters and are gone.** No caller
-        ever passed either, so both were defaults wearing the shape of a
-        choice -- `RowCard.artwork`'s argument, in a fixture: a knob whose
-        other arm is never taken is a branch nobody has checked, and the day
-        somebody takes it every case written against the default is already
-        wrong. Neither belongs here anyway. An unplayed state is what
-        `TitleRepositoryCandidateContract`'s
-        `test_a_title_started_and_abandoned_is_still_a_candidate` is for, on
-        both arms, where the predicate actually lives; and `play_count`'s only
-        effect is `TasteService`'s rewatch weighting, which is that service's
-        own file and changes nothing this one asserts.
+        """One *finished* watch state, written into **both** stores that stand in for one
+        table.
         """
         self._seeded += 1
         await self.watch_states.merge_from_source(
@@ -270,31 +187,10 @@ class _Household:
 
 
 async def test_with_no_embedder_the_pool_is_the_base_order() -> None:
-    """**The configuration curation actually runs in**, and the one whose
-    failure is hardest to see: no embedder, therefore no centroid, therefore
-    nothing to re-rank with -- and the pool must still be built, still be
-    ordered by something defensible, and still be full.
-
-    The wrong implementation this kills is the literal reading of PRD 06 --
-    *"pre-filtered by taste-centroid proximity and popularity"* -- which on
-    `USHER_EMBEDDING_ENABLED=False` selects on a signal that does not exist
-    and returns nothing at all. It is exactly `GenreAffinityProvider`'s
-    corrected failure: the screen still renders, the other nine providers
-    still fire, and the curated shelves are simply absent forever with
-    nothing counting their absence.
-
-    **The household here has a real, stored centroid, and that is what makes
-    the case about the *embedder* rather than about the history.** An earlier
-    version seeded nothing at all, which is state-identical to configuration 2
-    below -- so it passed for the "no watch history" reason and a planted
-    no-embedder path that read `user_taste` anyway survived it. This one is
-    also the honest production shape: a deployment that had an embedder and
-    turned it off still has its `user_taste` rows, and `TasteService.centroid`
-    checks `self._embedder is None` **before** reading them for exactly that
-    reason.
-
-    Seeded so that the stored centroid, if it were consulted, would give the
-    opposite answer -- asserted as a premise rather than assumed.
+    """**The configuration curation actually runs in**, and the one whose failure is
+    hardest to see: no embedder, therefore no centroid, therefore nothing to re-rank
+    with -- and the pool must still be built, still be ordered by something defensible,
+    and still be full.
     """
     household = await _household_with_a_centroid()
     far = await household.title(
@@ -437,29 +333,8 @@ async def test_a_household_below_the_centroid_floor_is_the_same_case() -> None:
 
 
 async def test_a_candidate_with_no_vector_keeps_its_index() -> None:
-    """**The configuration that decides whether the pool is a function of the
-    household or of the embedder's backfill.**
-
-    M7 measured the genome's *candidate-pair* rate at 1.81% rather than its
-    coverage, precisely because both sides of a pair need a vector; the
-    analogous question here is what fraction of a real pool has an embedding
-    at all, and the honest answer on a draining backfill is "most of it does
-    not". So the re-rank is defined to permute the embedded members **among
-    the positions they already occupy**, which makes an unembedded
-    candidate's index provably independent of the centroid.
-
-    Two wrong implementations this kills, and both are populated:
-
-    - **Unembedded candidates dropped.** The pool silently becomes the
-      embedded subset, which on a half-drained backfill is a fraction of the
-      configured size, addressed by indices that no longer reach the rest.
-    - **Unembedded candidates sorted to the back**, e.g. by coalescing their
-      cosine to zero or to -1. That is the same failure wearing a full-length
-      pool: the household's own library sinks below whatever the backfill
-      happened to reach first.
-
-    The middle candidate is deliberately unembedded and deliberately *between*
-    the two embedded ones, so both defects move it.
+    """**The configuration that decides whether the pool is a function of the household or
+    of the embedder's backfill.**
     """
     household = await _household_with_a_centroid()
     top = await household.title(
@@ -695,13 +570,11 @@ async def test_the_re_rank_orders_by_proximity_rather_than_by_a_threshold() -> N
     assert similarities[0] > similarities[1] > similarities[2], (
         "the premise: the three poles must be strictly ordered by proximity"
     )
-    # **`assert similarities[0] < 1.0` was here and is deleted.** It read as a
-    # premise ("none of the three is the centroid itself") and protected
-    # nothing: a candidate sitting exactly on the centroid is still strictly
-    # nearer than the other two, so the guard above already carries everything
-    # this case depends on and no plant that falsifies this one breaks it.
-    # Found by planting it -- the suite stayed green -- rather than by reading
-    # it, which is the only way a dead assertion is ever found.
+    # **`assert similarities[0] < 1.0` was here and is deleted.** It read as a premise
+    # ("none of the three is the centroid itself") and protected nothing: a candidate
+    # sitting exactly on the centroid is still strictly nearer than the other two, so
+    # the guard above already carries everything this case depends on and no plant that
+    # falsifies this one breaks it.
 
     pool = await household.service(embedder=FakeEmbedder()).for_user(USER)
     candidates = [one.id for one in pool if one.id in {farthest.id, middle.id, nearest.id}]
@@ -710,30 +583,8 @@ async def test_the_re_rank_orders_by_proximity_rather_than_by_a_threshold() -> N
 
 
 async def test_the_re_rank_writes_the_ranked_members_into_the_positions_it_read_them_from() -> None:
-    """**Every other re-rank case in this file asserts a permutation that is
-    its own inverse, and that makes the two halves of the write unobservable.**
-
-    `_reranked` walks `pool` in order to collect the positions the comparable
-    members occupy, sorts a copy of that list by proximity, and writes the
-    *sorted* members into the *ascending* positions. Swap the two lists over --
-    write the ascending members into the sorted positions -- and the answer is
-    the inverse permutation, which for a swap of two candidates is the same
-    list. Measured 2026-08-10: with the pairing reversed, all 20 cases in this
-    file passed, because `[bottom, middle, top]` and `[nearest, middle,
-    farthest]` are each a transposition and a transposition is an involution.
-
-    So the fixture's angles are chosen to make the answer a **3-cycle**: the
-    base order is `top, middle, bottom` and the centroid orders them `middle,
-    bottom, top`, whose inverse is `bottom, top, middle`. That premise is
-    asserted rather than described, because it is the whole reason this case
-    exists and a later fixture edit that flattened it back to a swap would
-    leave the case passing and observing nothing.
-
-    Same family as the entries in `.claude/rules/testing-discipline.md` about a
-    fixture whose shape is the identity element of the operation under test --
-    a clock starting at zero, an insertion order that is already the sort
-    order. Here the identity element is the *shape of the permutation* rather
-    than a value in it.
+    """**Every other re-rank case in this file asserts a permutation that is its own
+    inverse, and that makes the two halves of the write unobservable.**
     """
     household = await _household_with_a_centroid()
     _, quarter = planted_pair(math.pi / 4, dimension=_DIMENSION)
@@ -814,13 +665,9 @@ async def test_the_cap_survives_the_re_rank() -> None:
     nearest = await household.title("Kept, Nearest", vote_count=3, vector=_pole(0))
     centroid = await _centroid_of(household)
     assert centroid is not None, "the premise: this household has a centroid"
-    # **Two premises, and the weaker one was the only one here.** `assert
-    # dropped` guards a literal `range(3)` -- a fact about the line above it,
-    # which is the shape M8 Task 9's dead guard had. What the case actually
-    # rests on is angular: the three the cap keeps must be strictly ordered by
-    # proximity (or the expected order is not the re-rank's answer), and the
-    # three it drops must be *nearer* than two of them (or a re-selecting
-    # implementation would have no reason to reach for them).
+    # **Two premises, and the weaker one was the only one here.** `assert dropped`
+    # guards a literal `range(3)` -- a fact about the line above it, which is the shape
+    # M8 Task 9's dead guard had.
     kept = [
         _cos(centroid.vector, v)
         for v in await _stored_vectors(household, nearest, middle, farthest)
@@ -858,12 +705,11 @@ async def test_the_household_affinities_are_what_the_read_is_asked_for() -> None
     asked: list[tuple[str, ...]] = []
     original = household.titles.list_unwatched_candidates
 
-    # **`limit` carries no default here either, and that is the point of the
-    # spelling.** A stand-in for a port method is a seventh copy of that
-    # method's signature, so a `limit: int = 200` left behind on it is a copy
-    # of the very number `test_the_measured_two_hundred_is_declared_once_and_
-    # read_once` deleted from the other three -- sitting in the pinning file,
-    # where nothing would ever look for it. Spelled required, it cannot drift.
+    # **`limit` carries no default here either, and that is the point of the spelling.**
+    # A stand-in for a port method is a seventh copy of that method's signature, so a
+    # `limit: int = 200` left behind on it is a copy of the very number
+    # `test_the_measured_two_hundred_is_declared_once_and_ read_once` deleted from the
+    # other three -- sitting in the pinning file, where nothing would ever look for it.
     async def _recorded(
         user_id: uuid.UUID, *, genres: Sequence[str] = (), limit: int
     ) -> list[Title]:
@@ -911,32 +757,7 @@ async def test_an_empty_catalog_is_an_empty_pool() -> None:
 
 
 async def test_an_empty_pool_writes_no_taste_row_for_the_household_it_has_nothing_for() -> None:
-    """**The empty-pool guard's real subject, which is a write and not a
-    return value.**
-
-    `for_user` returns `pool` before `taste.centroid(user_id)`, and the case
-    above cannot see why: `[] == []` on both sides of the guard. Two spellings
-    of the defect pass every gate step -- deleting the early return outright,
-    and the lint-clean respelling that *moves* it to after the centroid read --
-    and they are **not** equivalent to each other or to the shipped code.
-    `TasteService.centroid` writes a **refusal row** for a household below
-    `_MIN_TITLES`, deliberately (a skipped write is the recompute-forever bug
-    that column exists to prevent), so with the read reached at all this
-    household gets a stored `user_taste` row: exactly *"a write this service
-    must not make on behalf of a household it has nothing to recommend to"*,
-    plus a wasted round trip per nightly generation.
-
-    The embedder has to be configured for the write to be reachable at all --
-    `centroid` answers `None` and touches nothing when it is `None` -- so this
-    is configuration 2's fixture asked a question about a *port call* rather
-    than about an ordering.
-
-    **The premise is the second half and it needs the pool to be the only
-    thing that changed.** `writes == 0` is also what a `TasteService` that
-    never writes produces, so the same household, the same service and the
-    same embedder are asked again with one candidate in the catalog; that
-    arm's `writes == 1` is what makes the first arm mean something.
-    """
+    """**The empty-pool guard's real subject, which is a write and not a return value.**"""
     household = _Household()
     service = household.service(embedder=FakeEmbedder())
 
@@ -987,36 +808,7 @@ async def _household_with_a_centroid() -> _Household:
 
 
 async def _stored_vectors(household: _Household, *titles: Title) -> list[tuple[float, ...]]:
-    """What the fixture actually stored for each title, in the order asked.
-
-    **A premise guard computed from the *literal* vector a case handed to
-    `title()` is a guard no fixture change can falsify** -- it is an assertion
-    about two module-level constants wearing the shape of an assertion about
-    the fixture. Four of this file's guards were written that way and all four
-    survived a plant that moved a title onto a different pole: the case failed,
-    on its own final assertion, and the guard never ran. (Found only after the
-    harness was tightened to require the guard's own message on pytest's `E`
-    line; matching it anywhere in the output matches the *source context*
-    pytest prints around a different failing assertion.)
-
-    Reading the vectors back through the port is what makes the premise about
-    the fixture. Same family as the `similarities[0] < 1.0` guard this file
-    deleted, and the reason that one was deleted rather than repaired: there
-    was no fixture fact behind it at all.
-
-    **That repair fixed four of five, and the fifth was found by the next
-    review rather than by the round that went looking for the shape.**
-    `test_a_centroid_re_ranks_the_pool_it_is_given` kept the literal spelling
-    for one more commit, so the file simultaneously documented the defect here
-    and shipped an instance of it forty lines down. Two more cases -- the
-    another-width and zero-norm ones -- had no angular premise **at all**,
-    which is why counting repairs is the wrong check: both assert a *swap* of
-    two embedded members and so rest on the same centroid-disagrees-with-the-
-    base-order fact the repaired guards state, and a search for guards to
-    repair cannot see a case that never wrote one. **Enumerate the cases whose
-    expected answer depends on the fixture's angles, not the guards that
-    happen to exist.**
-    """
+    """What the fixture actually stored for each title, in the order asked."""
     vectors = await household.embeddings.list_for_titles([one.id for one in titles])
     return [vectors[one.id] for one in titles]
 
@@ -1049,48 +841,7 @@ async def test_the_size_is_honoured_whatever_it_is(size: int) -> None:
 
 
 def test_the_measured_two_hundred_is_declared_once_and_read_once() -> None:
-    """`200` used to appear **six** times and this case pinned three of them.
-
-    The three it missed were the two implementation defaults
-    (`PostgresTitleRepository` and `FakeTitleRepository`) and this file's own
-    `_Household.service`. Measured in review: setting the fake's to `5` left
-    the whole unit suite green and setting the Postgres one's to `5` left the
-    whole integration suite green, because no contract case called without a
-    limit while seeding more than five candidates -- so the two arms of a
-    contract suite could disagree with each other about the size of the very
-    artefact ADR-0028's index handles address.
-
-    **Fixed by deletion rather than by a wider assertion.** `limit` now has no
-    default on the port or on either implementation, which is
-    `DERIVED_COLUMNS`' and `_PROVIDER_ID_CONSTRAINTS`' shape: one definition,
-    no copies. Asserting that N literals are equal is a check that runs
-    *after* the drift; deleting them makes the drift unspellable.
-
-    **And then the same argument was applied to the pair that was left**, on
-    2026-08-10. `curation_pool.DEFAULT_POOL_SIZE` was a constant equal to
-    `Settings.curation_pool_size`'s default -- exactly what `HISTORY_SIZE`'s
-    own comment one module over refuses, *"a constant equal to a default is a
-    constant no case can prove is read"*. Nothing in `src/` read it:
-    `composition.build_pipeline` passes the setting on the only construction
-    path there is, so the constant's only readers were this file's fixture and
-    the two assertions above, which is a copy kept alive by the check written
-    to watch it. `size` is a required argument now and `Settings` is the single
-    definition, so the drift this case used to check for is unspellable rather
-    than merely observed. **Not by importing `usher.config` into `services/`**,
-    which ADR-0009 forbids and which would be a different fix to a different
-    problem -- by removing the duplicate.
-
-    The number is not decorative: ADR-0028's three handle arms all ran against
-    a 200-film pool, and the shipped prompt costs ~20.4 tokens a candidate at
-    that size, so a default that quietly became something else would make
-    every recorded figure describe a pool nobody sends.
-
-    Read off `model_fields` rather than off a constructed `Settings`, because
-    constructing one reads the process environment and `.env`: a case that
-    instantiated it would pass or fail on whatever the operator running the
-    suite happens to export, which is a different assertion than "the declared
-    default is 200".
-    """
+    """`200` used to appear **six** times and this case pinned three of them."""
     limit = inspect.signature(TitleRepository.list_unwatched_candidates).parameters["limit"]
     size = inspect.signature(CandidatePoolService).parameters["size"]
 

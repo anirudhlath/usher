@@ -1,25 +1,5 @@
-"""`usher.ports.repository` is a package mirroring `usher.db.repositories`
-module for module, and these cases are what keep it one.
-
-It was a single 3,434-line module holding 19 ABCs, 107 abstract methods and 19
-supporting dataclasses, against implementations that had already split per
-aggregate under `src/usher/db/repositories/`. 99 files imported it, so every
-service that wanted one port imported a module holding eighteen others, and M8
-alone added 616 insertions to it -- because a new port goes where the ports
-already are.
-
-**Splitting it once fixes nothing by itself.** The next port lands in whichever
-module its author happened to open, and a decade of that is how the single
-module got there in the first place. The mirror is what makes the answer
-mechanical -- `PostgresThingRepository` lives in `usher.db.repositories.thing`,
-so `ThingRepository` lives in `usher.ports.repository.thing` -- and this file is
-what makes the mirror a failing test rather than a convention. Four groups of
-M9 add a port to this package; none of them has to decide anything.
-
-`usher.ports.repository.search` collides by name with `usher.ports.search` and
-is deliberately not renamed: `usher.db.repositories.search` and
-`usher.adapters.search` are already that same pair one layer down, and the
-mirror is the whole value.
+"""`usher.ports.repository` is a package mirroring `usher.db.repositories` module for
+module, and these cases are what keep it one.
 """
 
 import ast
@@ -34,28 +14,16 @@ from types import ModuleType
 import usher.db.repositories
 import usher.ports.repository
 
-# The two `Postgres*` classes under `usher.db.repositories` whose port is not,
-# and never will be, a repository port. `CredentialStore` is declared in
-# `usher.ports.credentials` and `JobQueue` in `usher.ports.jobs`; both sit in
-# `db/repositories/` because that is where Postgres implementations live, not
-# because they are repositories. Exempted **by name** rather than by a rule
-# that would also excuse a genuinely misplaced port -- and the reason travels
-# into the assertion message, because a bare name in a skip list is the thing a
-# later reader deletes without knowing what it bought.
+# The two `Postgres*` classes under `usher.db.repositories` whose port is not, and never
+# will be, a repository port.
 NOT_REPOSITORY_PORTS: dict[str, str] = {
     "PostgresCredentialStore": "usher.ports.credentials",
     "PostgresJobQueue": "usher.ports.jobs",
 }
 
-# Measured by AST over `ports/repository.py` at the commit before the split, and
-# stated as **floors** rather than equalities on this repository's own
-# precedent (`test_decision_register.py` asserts `>= 23` ADRs against 28 that
-# exist). Four M9 groups add a port to this package, and an equality here would
-# be a line each of them has to edit -- which is how a count stops being a
-# measurement and becomes a number people bump until it is green. The claim
-# that the move itself lost nothing is not made here at all: it was made once,
-# by comparing `inspect.getsource` of all 38 public objects against
-# `git show HEAD:src/usher/ports/repository.py`, byte for byte.
+# Measured by AST over `ports/repository.py` at the commit before the split, and stated
+# as **floors** rather than equalities on this repository's own precedent
+# (`test_decision_register.py` asserts `>= 23` ADRs against 28 that exist).
 PORTS_AT_THE_SPLIT = 19
 ABSTRACT_METHODS_AT_THE_SPLIT = 107
 SUPPORTING_TYPES_AT_THE_SPLIT = 19

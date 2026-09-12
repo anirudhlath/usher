@@ -1,19 +1,4 @@
-"""IMDb `title.akas` parsing and batching, over a committed synthetic slice.
-
-No network, no Docker, no real dataset file. Sibling of
-`test_adapters_bulk_imdb.py`, which covers `title.basics`/`title.ratings`;
-this file exists separately because the akas parser has a retention policy
-those two do not, and every clause of that policy is measured rather than
-argued (see `.claude/rules/bootstrap-and-datasets.md`).
-
-**The file is named for `title.akas` and not for `name.basics` /
-`title.principals`.** The M9 plan's T5 named this file
-`test_adapters_bulk_imdb_people.py` and asked for three parsers; T3 measured
-the people+credits design at 2.702 GB against a 2.0 GB ceiling and it was
-refused, so the two people-side parsers are withdrawn and only the akas one
-survives. A test file named for the two datasets nobody parses would be the
-plan drifting into the tree.
-"""
+"""IMDb `title.akas` parsing and batching, over a committed synthetic slice."""
 
 import ast
 import gzip
@@ -376,28 +361,10 @@ def test_the_malformed_error_names_the_row_and_never_carries_the_line() -> None:
 
 
 async def test_a_titles_aliases_are_never_split_across_two_batches(tmp_path: Path) -> None:
-    """A batch is a transaction and `replace_aliases` is a **scoped delete
-    followed by an insert**, so a title split across two batches loses the
-    aliases in the first: the second call's scope names that title again and
-    the delete takes the rows the first call wrote.
-
-    **The port cannot detect it** -- its `ValueError` guard fires only for a
-    row whose `imdb_id` is outside the scope, and both halves of a split title
-    are perfectly in scope in their own call. Nothing raises, nothing counts
-    it, and the title is left holding whichever half arrived last.
-    `IMDbCreditNamesDataset` closes a title's run before it closes a batch for
-    the identical reason; this is the same rule one file over.
-
-    Measured over the whole pinned `title.akas.tsv.gz`
-    (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`, 2026-08-11): at the shipped
-    `bulk_batch_size` of 50,000 a full import flushes 924 batches, **every one
-    of the 924 boundaries lands inside a title**, and **3,867 retained rows**
-    are deleted after being written. The bias is the bad part -- a boundary is
-    likelier to land inside a title with many aliases than one with two.
-
-    The premise is asserted rather than assumed: with one retained row per
-    title in the slice, no batch size could split anything and the case would
-    pass against the defect.
+    """A batch is a transaction and `replace_aliases` is a **scoped delete followed by an
+    insert**, so a title split across two batches loses the aliases in the first: the
+    second call's scope names that title again and the delete takes the rows the first
+    call wrote.
     """
     per_title = Counter(imdb_id for imdb_id, _, _ in _kept())
     assert max(per_title.values()) > 1, "the premise: some title has more than one alias"

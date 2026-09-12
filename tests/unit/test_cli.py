@@ -1,9 +1,4 @@
-"""The CLI's argument surface and its default. No database, no network.
-
-Plus one case that is not about arguments: `usher push` with no `--probe`
-is a composition root nothing else calls, and wiring nothing calls is
-wiring nothing checks.
-"""
+"""The CLI's argument surface and its default. No database, no network."""
 
 import argparse
 import ast
@@ -189,26 +184,7 @@ def test_resolving_an_unmatched_item_needs_both_ids() -> None:
 
 
 # -- `--resolve --title`'s three answers ---------------------------------------
-#
 # `--title` has three bad values and they are three different conditions.
-# A value that is not a UUID never reaches a port -- `_as_uuid` refuses it
-# (`test_resolving_an_unmatched_item_needs_both_ids`' neighbours). The other
-# two both reach `attach_title`, and until M10's F4 only one of them had an
-# answer: a `--resolve` naming no media item is `rowcount == 0` and prints
-# `no such media item`, while a well-formed `--title` naming no row is a
-# foreign key -- `RepositoryConflict`, which is deliberately **not** in
-# `OPERATOR_ERRORS` (ADR-0026's amendment), so `main` re-raises it and the
-# operator gets the stack. The fix is a lookup here rather than a tenth
-# member of that tuple, and the enumeration that argues for it is in
-# ADR-0026's Consequences.
-#
-# These two cases are the fake-backed half. The fake has **no foreign key**
-# (see its own divergence list), so it cannot exhibit the defect at all --
-# what it can pin, and what a `try/except RepositoryConflict` around the
-# write would fail, is that nothing was attempted and nothing was committed.
-# `tests/integration/test_cli_pipeline.py::
-# test_an_unknown_title_id_is_a_sentence_against_real_postgres` is where the
-# FK actually exists.
 
 
 @dataclasses.dataclass
@@ -299,53 +275,7 @@ async def _resolve_harness(monkeypatch: pytest.MonkeyPatch) -> _ResolveHarness:
 async def test_resolving_to_a_title_that_does_not_exist_names_the_id_and_keeps_the_stack_out_of_it(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**Issue #5, and the reason the fix is here rather than in
-    `OPERATOR_ERRORS`.**
-
-    An operator resolving a review-queue line reads a listing and pastes an
-    id; pasting the wrong *column* of it is a well-formed UUID naming no
-    title. Against Postgres that is `fk_media_items_title_id_titles`,
-    translated to `RepositoryConflict` by
-    `PostgresMediaItemRepository.attach_title`, and re-raised by `main`
-    because the family is deliberately out of the tuple -- so the answer to a
-    typo was **40 frames** at a real terminal (measured 2026-08-20 against a
-    throwaway container; the integration twin's docstring has the
-    decomposition and why the pytest run's 62 is not that number).
-
-    Widening the tuple would answer this by muting every raise site of that
-    family, of which exactly one is reachable from a CLI argument -- this one
-    (ADR-0026's Consequences carries the enumeration and the count). So the
-    answer is a lookup at the call site, which is what issue #5's own *Done
-    when* asks for and what `POST /admin/unmatched/{id}/resolve` has done
-    since M9's E4.
-
-    🔴 **`attached == []` is the assertion that separates a lookup from a
-    swallow, and it is only assertable here.** `except RepositoryConflict`
-    around the write reads the same way to an operator and is not the same
-    thing: Postgres refuses the row *after* the statement ran, inside a
-    SAVEPOINT the command then has to unwind. The integration twin **cannot**
-    tell the two apart -- the SAVEPOINT rolls the refused row back, so the
-    swallow passes every assertion it makes -- which is why the ordering
-    claim lives here and the foreign key lives there.
-
-    Note what this fake can and cannot show. It has **no foreign key** (its
-    own divergence list says so), so it cannot produce the conflict at all:
-    at HEAD before the pre-check existed this case failed having printed
-    `resolved`, which is the honest red for a *pre-check*. The same property
-    means the swallow plant also dies here on the printed sentence rather
-    than on `attached == []` -- see the F4 ledger in
-    `.claude/rules/mutation-sweeps.md`, which records that as a refinement of
-    the plan's prediction rather than a match to it.
-
-    ⚠️ **It prints and returns; it does not exit 1**, and this branch's own
-    F4 spelled it as `SystemExit`. `main`'s implementation is the one that
-    shipped and its argument is stated in `_unmatched`: one command naming
-    two things that do not exist owes them one exit code, and `no such media
-    item` -- the arm below -- has printed and returned since M4. The
-    assertion that used to read `isinstance(exit_info.value.code, str)` is
-    therefore gone rather than inverted, because there is no exit status left
-    to state.
-    """
+    """**Issue #5, and the reason the fix is here rather than in `OPERATOR_ERRORS`.**"""
     harness = await _resolve_harness(monkeypatch)
     unknown = new_id()
 
@@ -797,18 +727,8 @@ async def _no_commit() -> None:
     return None
 
 
-# One movie, a **full-width** vocabulary, and a links row joining it to the
-# catalog title seeded below. Every value invented; see `tests/unit/
-# test_adapters_bulk_movielens.py` for why the fixture is Python literals
-# rather than a committed archive.
-#
-# Full width rather than the three tags the adapter's own tests use, because
-# `_movielens` constructs `MovieLensGenomeDataset` with the production
-# `expected_tags` and a narrower vocabulary is refused before a score is read
-# -- which is the check that exists precisely so a release whose vocabulary
-# moved cannot be stored under `halfvec(1128)`. The first three names are
-# spelled out so the lane-order assertions below read as assertions rather
-# than as arithmetic.
+# One movie, a **full-width** vocabulary, and a links row joining it to the catalog
+# title seeded below.
 _TAG_NAMES = (
     "zeppelins",
     "atmospheric",
@@ -963,31 +883,9 @@ async def test_the_vocabulary_is_stamped_with_the_token_the_vectors_were_stamped
 async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_vocabulary(
     tmp_path: Path,
 ) -> None:
-    """**The upgrade path, and the one case that decides where this call
-    goes.** A catalog bootstrapped under M7 has a *completed*
-    `movielens.genome` checkpoint and no vocabulary at all, because `ffa`
-    deliberately did not store one. Re-running the phase resumes from that
-    cursor, yields no batch and writes no vector -- and the vocabulary has to
-    land anyway. Deleting the write kills this (measured), and so does gating
-    it on a **per-run** count of rows written, which is the defect an
-    implementer would actually introduce.
-
-    **What this case does not kill is `if run.rows_written:`, and an earlier
-    version of this docstring claimed it did.** `ImportRun.rows_written` is
-    *cumulative across resumes* -- `PostgresImportRunRepository.start()` keeps
-    it when the revision has not moved -- so the second run below inherits the
-    first's count, that gate reads truthy, and the vocabulary is written for
-    the wrong reason. Measured 2026-08-07: the `rows_written` spelling passes
-    all 2,883 unit and all 899 integration cases, this one included. It is
-    still not the predicate to ship (`_movielens`' own docstring has the
-    argument), but the reason is that the two answers differ only for a
-    completed run that never wrote a vector at all -- not anything this case
-    can see.
-
-    Modelled by running the phase twice against one catalog: the second run
-    resumes from the first's completed cursor, which is the state a re-run
-    against an unchanged archive really produces (`_movielens`' own docstring
-    records it as measured -- 16,376 runs skipped, nothing written).
+    """**The upgrade path, and the one case that decides where this call goes.** A catalog
+    bootstrapped under M7 has a *completed* `movielens.genome` checkpoint and no
+    vocabulary at all, because `ffa` deliberately did not store one.
     """
     cache = _genome_archive(tmp_path)
     catalog = FakeBulkCatalogRepository()
@@ -1312,13 +1210,9 @@ def test_home_has_no_cross_argument_rule_and_that_is_deliberate() -> None:
 
 
 # --- `usher search`, query expansion --------------------------------------
-#
 # `_print_search_answer` is a pure function over a `SearchAnswer` -- the split
-# `_print_curation_report` already makes -- so the report an operator reads can
-# be driven without a database. `_search`'s two cases below drive the
-# composition root itself, because "the client was built" and "the client
-# reached the pipeline" are different claims and only the second is the one
-# that decides whether a search on the *only* user-facing surface ever expands.
+# `_print_curation_report` already makes -- so the report an operator reads can be
+# driven without a database.
 
 
 def _answer(**changes: object) -> SearchAnswer:
@@ -1638,13 +1532,9 @@ def _recording_pipeline(captured: dict[str, object]) -> Callable[..., object]:
     return _build
 
 
-# --- the IMDb expansion phases ----------------------------------------
-#
-# `credit-names` and `aliases` are the two phases M9 adds, and both are joins
-# against a catalog the `imdb` phase has to have built first. The fixtures are
-# the committed synthetic slices the adapters' own tests read; the transports
-# below serve them out of a scratch cache directory, so no case here opens a
-# socket and no third-party row is committed.
+# --- the IMDb expansion phases ---------------------------------------- `credit-names`
+# and `aliases` are the two phases M9 adds, and both are joins against a catalog the
+# `imdb` phase has to have built first.
 
 _BULK_FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
 
@@ -1732,40 +1622,7 @@ async def _seeded_catalog() -> tuple[FakeBulkCatalogRepository, BootstrapService
 
 
 def test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first() -> None:
-    """Two edges, both measured, in a tuple `--phase all` executes in order.
-
-    **`credit-names` and `aliases` after `imdb`**: both join to `titles` on
-    `imdb_id`, so against an empty catalog they match nothing -- the same
-    argument `movielens` already makes, arriving at a 1.57 GiB download rather
-    than a 335 MiB one.
-
-    **`credit-names` before everything that enriches a title.**
-    `fill_credit_names` writes only where `enrichment_state = 'skeleton'`, so
-    a title an enrichment crawl has already reached is deferred to TMDb -- on
-    that run and on every later one. **203,969 of the 204,335 titles with
-    >=100 votes (99.82%)** gain a `credit_names` in this order and none of
-    them in the other, and no re-run repairs it. Ordering is the whole
-    mitigation and there is no other one.
-
-    It stales **no** embedding in either order, and this docstring said
-    otherwise until 2026-08-12: the embedded population is
-    `enrichment_state <> 'skeleton'`, the exact complement of what the fill
-    writes.
-
-    Kills a tidy-up that alphabetises `PHASES` -- which would put `aliases`
-    and `credit-names` before `imdb` and produce two phases that download
-    1.57 GiB, write nothing and report success.
-
-    ⚠️ **`ratings` sits at index 1 and is not one of the edges this case is
-    about.** It is an alias rather than a step
-    (`usher.domain.bootstrap.PHASE_ALIASES`) -- `--phase all` imports that
-    file inside its IMDb arm and never dispatches this member -- so its
-    position is a statement about where an operator reads it in `--help`,
-    beside the phase whose second half it is, and nothing joins on it. The
-    *steps* are still in `FULL_SEQUENCE`'s order and that is what the two
-    measured edges below assert, by name rather than by index, so an alias
-    added between two of them cannot quietly satisfy them.
-    """
+    """Two edges, both measured, in a tuple `--phase all` executes in order."""
     assert PHASES == (
         "imdb",
         "ratings",
@@ -1972,13 +1829,10 @@ async def test_the_credit_names_report_carries_a_denominator_and_the_crawl_order
         ("name.basics.slice.tsv", "name.basics.tsv.gz"),
         ("title.principals.slice.tsv", "title.principals.tsv.gz"),
     )
-    # Two of the slice's three titles, so all three counters carry a number
-    # rather than a zero: `tt99000020` is filled, `tt99000030` is enriched and
-    # so belongs to TMDb, and `tt99000040`'s record never arrives at all --
-    # its only principal names a person `name.basics` does not hold. The
-    # catalog is missing nothing the dump credits, so `unmatched` is 0 here
-    # and the case says so rather than asserting a number the fixture cannot
-    # produce.
+    # Two of the slice's three titles, so all three counters carry a number rather than
+    # a zero: `tt99000020` is filled, `tt99000030` is enriched and so belongs to TMDb,
+    # and `tt99000040`'s record never arrives at all -- its only principal names a
+    # person `name.basics` does not hold.
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles([_EXPANSION_TITLES[1], _EXPANSION_TITLES[2]])
     catalog.mark_enriched("tt99000030")
@@ -2104,39 +1958,8 @@ def _without_docstrings(tree: ast.Module) -> str:
 async def test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`usher bootstrap` is `composition.run_bootstrap` plus an engine, and
-    both halves of that sentence are asserted.
-
-    The behavioural proof that the two roots run the *same* phases in the
-    same order is
-    `tests/unit/test_composition.py::test_the_cli_and_the_handler_run_the_
-    same_phase_dispatch`, which needs a `Pipeline` and so lives beside the
-    helper that builds one. What can only be seen from here is the two facts
-    that make that proof about the CLI at all: this command calls the shared
-    function with the phase it was given and `print` as the sink, and this
-    module can no longer spell a dispatch of its own.
-
-    **The structural half is not decoration.** *"The CLI calls
-    `run_bootstrap`"* is satisfied by a module that calls it and then does
-    something else beside it, which is exactly the drift the extraction
-    exists to prevent -- so `usher.cli` is asserted to name no `BulkDataset`
-    and no `BootstrapService`, the way `test_api_bootstrap.py` asserts it of
-    the router.
-
-    ⚠️ **The `BootstrapService` half is asserted on the *name*, not on the
-    module, and that narrowing is E6's rather than a weakening.** E5 spelled it
-    as `"usher.services.bootstrap" not in named` because at the time that
-    module held one public class. It now also holds `BootstrapReport` and the
-    two pure functions both surfaces call, and `usher bootstrap-status` reads
-    them -- so a module-level ban would forbid exactly the sharing E6 exists
-    to create. The claim the docstring above always made is the one now
-    checked: no *driver*. Read off `ast.unparse` of a docstring-stripped tree,
-    so a string annotation and an attribute access are both caught and this
-    paragraph is not.
-
-    No connection is opened: `create_async_engine` is lazy, an `AsyncSession`
-    that issues no statement never connects, and `run_bootstrap` is replaced
-    before it could.
+    """`usher bootstrap` is `composition.run_bootstrap` plus an engine, and both halves of
+    that sentence are asserted.
     """
     seen: list[tuple[object, ...]] = []
 

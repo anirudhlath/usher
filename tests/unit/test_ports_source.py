@@ -1,10 +1,4 @@
-"""The source port's settled shape.
-
-Every 🔶 marker in `usher/ports/source.py` that named M3 has an assertion
-here, and each one is written so that reverting the corresponding
-production line fails it — not so that it reads as a description of the
-code.
-"""
+"""The source port's settled shape."""
 
 import dataclasses
 import inspect

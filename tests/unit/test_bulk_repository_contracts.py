@@ -1,8 +1,4 @@
-"""The bulk contracts, run against the in-memory doubles. No Docker.
-
-tests/integration/test_bulk_repository.py runs the identical assertions
-against Postgres.
-"""
+"""The bulk contracts, run against the in-memory doubles. No Docker."""
 
 import uuid
 

@@ -1,18 +1,4 @@
-"""`usher.composition`'s process-level wiring.
-
-Most of this module is exercised through its callers -- the lane supervisor
-in `tests/unit/test_api_lanes.py`, the CLI in `tests/unit/test_cli.py`, and
-both against real Postgres in `tests/integration/`. What lives here is the
-one decision `metadata_provider` makes *for the process*: whether this
-deployment has a metadata provider at all.
-
-That decision is a per-process fact and its log line has to be too. It was
-`build_worker`'s, which is called once per worker *pass*, so a default
-deployment with no TMDb key produced a `WARNING` every `IDLE_SLEEP_SECONDS`
--- ~17,280 a day. The lane's half of that is pinned in
-`test_a_missing_tmdb_key_is_not_re_reported_on_every_pass`; this file pins
-that the information is still surfaced rather than merely quieted.
-"""
+"""`usher.composition`'s process-level wiring."""
 
 import ast
 import dataclasses
@@ -122,14 +108,8 @@ from usher.services.rows import ROW_PROVIDERS
 from usher.services.rows.cache import RowCache
 from usher.services.taste import TasteService
 
-#: The size of the pool `_pipeline_over_fakes` puts on the pipeline, and it is
-#: deliberately neither 200 nor the number of candidates any case seeds.
-#: `build_curation_service` has to take `pipeline.pool` rather than construct a
-#: second `CandidatePoolService` over the same repositories -- a second one
-#: would be built at `settings.curation_pool_size`, which is 200, and would
-#: answer *identically* on every fixture seeding fewer than 200 candidates. The
-#: pool's size is the one thing that tells the two apart, and
-#: `_schema(len(candidates))` puts it on the wire where a case can read it.
+# : The size of the pool `_pipeline_over_fakes` puts on the pipeline, and it is :
+# deliberately neither 200 nor the number of candidates any case seeds.
 POOL_SIZE = 6
 
 
@@ -225,12 +205,9 @@ def _pipeline_over_fakes(
 #: subscript chain.
 _PROPERTIES = "properties"
 
-#: One shelf of five handles -- `DEFAULT_MIN_CARDS` exactly, so a validator
-#: floor moving up is a failure here rather than a silently shorter screen --
-#: every one of them inside `POOL_SIZE`. What this response is *not* is
-#: interesting: nothing here exercises `validate_curation`, which has its own
-#: file and 60 cases; these cases need a generation that survives so the write
-#: has somewhere to land.
+# : One shelf of five handles -- `DEFAULT_MIN_CARDS` exactly, so a validator : floor
+# moving up is a failure here rather than a silently shorter screen -- : every one of
+# them inside `POOL_SIZE`.
 _ROWS = {
     ROWS_KEY: [
         {
@@ -536,33 +513,8 @@ async def test_a_worker_built_without_a_row_cache_still_enriches() -> None:
 
 
 def test_only_the_worker_defers_and_the_push_and_reconcile_lanes_do_not() -> None:
-    """The push and reconcile lanes publish as they go, and that is a
-    decision rather than an omission.
-
-    Neither is a job: each commits its own subject before it publishes
-    (`push.py:170` and `:275`, `reconcile.py:245`), so both already satisfy
-    ADR-0033's stronger form with no buffer at all -- and a `sync.progress`
-    frame held behind a 1,127-batch walk turns a progress bar into a single
-    jump at the end.
-
-    **Structural, because the defect is an absence and no lane's output can
-    show it.** "Published as it went" and "published at the end" are the same
-    list of frames in the same order; only a second commit boundary
-    distinguishes them, and a lane has none to hang the assertion on. So the
-    claim asserted is the one that can be: a `DeferredEventPublisher` is
-    constructed in exactly one place in `src/`, and no composition root can
-    acquire one for a lane by wrapping something.
-
-    ⚠️ **That one place moved in M9's W1, from `services/jobs.py` to
-    `composition.py`, and the claim is unchanged.** The buffer used to be
-    `JobWorker`'s, wrapped once for the life of the worker; it is now built per
-    *scope*, because two concurrent jobs sharing one buffer means the failing
-    one's `discard()` empties the surviving one's frames. The construction site
-    is therefore inside `build_worker`'s scope factory -- still exactly one, and
-    still not reachable by a lane.
-
-    Carries its own premise, because a scan that resolves nothing passes
-    exactly like a scan that passes.
+    """The push and reconcile lanes publish as they go, and that is a decision rather than
+    an omission.
     """
     root = pathlib.Path(usher.__file__).parent
     sites = sorted(
@@ -1624,26 +1576,9 @@ async def _journal_of_a_full_bootstrap(
     phase: BootstrapPhase = BootstrapPhase.ALL,
     over_a_populated_catalog: bool = False,
 ) -> list[str]:
-    """One bootstrap run's datasets and window edges, driven either the way
-    `usher bootstrap` drives it or the way the `bootstrap` job handler does,
-    over the same fakes.
-
-    `phase` defaults to `ALL` because that is what every caller wanted until
-    ADR-0040's `RATINGS` arm needed a journal of its own; a single-phase run
-    goes through the identical fakes rather than a second set, which is what
-    makes *"this phase imports one file and opens no window"* an assertion
-    about the same dispatch the parity case walks.
-
-    `over_a_populated_catalog` seeds **one** title, and it defaults to `False`
-    because an empty catalog is what makes the `--phase all` journal legible
-    at all: `credit-names`, `aliases` and `movielens` each answer an empty
-    `titles` with a refusal *sentence* rather than a dataset name, which is how
-    all six phases show up in one run whose transport refuses everything.
-    `ratings` refuses the same way and for a worse reason (its checkpoint is
-    shared with `imdb`), so a journal of what that phase *imports* has to be
-    taken over a catalog it will not refuse. The seed is invisible to the
-    journal -- neither fake records an `upsert_titles` -- so it changes what
-    the dispatch does and not what is written down.
+    """One bootstrap run's datasets and window edges, driven either the way `usher
+    bootstrap` drives it or the way the `bootstrap` job handler does, over the same
+    fakes.
     """
     journal: list[str] = []
     catalog = _JournallingCatalog(journal)
@@ -1727,50 +1662,8 @@ def _phases_in(journal: list[str]) -> list[BootstrapPhase]:
 async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """The proof that the extraction landed is **behavioural, not
-    structural**: the same phases, in the same order, whichever root drove
-    them.
-
-    A structural assertion -- "the handler imports `run_bootstrap`" -- is
-    satisfied by a handler that imports it and then does something else, and
-    it is satisfied forever by a `run_bootstrap` whose arms have drifted from
-    the ones `usher bootstrap` reaches. What cannot be satisfied that way is
-    an identical journal of window edges, dataset names and the crosswalk
-    link, produced twice over the same fakes.
-
-    Three facts about that journal are asserted by name, because each is a
-    measured decision the order alone would not pin:
-
-    - **One window, both IMDb passes inside it.** Wrapping each pass
-      separately rebuilds `ix_titles_sort_name` and
-      `ix_titles_name_lower_year` between them and pays for the rebuild
-      twice -- 35.8 s suspended against 40.2 s kept (11.0% faster) with a
-      rebuilt pair ~24% smaller, 97 MB against 127 MB
-      (`.claude/rules/bootstrap-and-datasets.md`).
-    - **`link-crosswalk` immediately after the crosswalk import.** The import
-      stores pairs; the link is what attaches them to `titles`.
-    - **Every step of the full run, in `FULL_SEQUENCE`'s declared order**,
-      asserted against that tuple rather than against the other driver. It
-      read `[one for one in BootstrapPhase if one is not BootstrapPhase.ALL]`
-      until ADR-0040 added `RATINGS`, at which point the expectation demanded
-      a phase `--phase all` never emits -- because `--phase all` reaches those
-      rows *inside* its IMDb arm -- and this case went red on a correct
-      implementation. The repair is not a second name in the exclusion: the
-      enum holds steps and aliases, `FULL_SEQUENCE` and `PHASE_ALIASES` say
-      which is which in the domain, and
-      `test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias`
-      is what stops that pair drifting from the enum. **A parity assertion
-      cannot see a permutation** -- both roots call one function, so a
-      reordered dispatch reorders both journals identically and they still
-      match. Measured: moving the `credit-names` arm in front of the `imdb`
-      one survived this case until the order was pinned against the enum, and
-      the damage is the one Track 2 named -- `credit-names` joins to `titles`
-      on `imdb_id`, so ahead of `imdb` it refuses an empty catalog and the
-      phase silently does nothing, while behind a TMDb crawl it defers every
-      enriched title to TMDb permanently and 203,969 of the 204,335
-      >=100-vote titles never gain a `credit_names` at all. (It stales no
-      embedding in either position; this sentence said it staled that tier
-      until an audit checked it against `fill_credit_names`' own predicate.)
+    """The proof that the extraction landed is **behavioural, not structural**: the same
+    phases, in the same order, whichever root drove them.
     """
     through_cli = await _journal_of_a_full_bootstrap(
         monkeypatch, tmp_path, through_the_worker=False
@@ -1787,14 +1680,8 @@ async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
     assert inside == ["imdb.title.basics", "imdb.title.ratings"]
     assert through_cli.count("window-open") == 1
     assert through_cli.count("window-close") == 1
-    # **"the ratings file is imported once" is deliberately *not* asserted
-    # here**, and the reason is this case's own fixture. Its catalog is empty,
-    # so a `RATINGS` arm wrongly reached by `--phase all` refuses instead of
-    # importing, and `journal.count("imdb.title.ratings") == 1` would hold
-    # against the very defect it looks like it is for -- an assertion that
-    # cannot fail, on the line most likely to be trusted. It lives in
-    # `test_a_full_run_imports_the_ratings_file_exactly_once`, over a seeded
-    # catalog, which is the only fixture in which the doubling is reachable.
+    # **"the ratings file is imported once" is deliberately *not* asserted here**, and
+    # the reason is this case's own fixture.
 
     assert through_cli[through_cli.index("wikidata.crosswalk") + 1] == "link-crosswalk"
     assert _phases_in(through_cli) == list(FULL_SEQUENCE)
@@ -1822,15 +1709,11 @@ def test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias() -> N
     # The premise: both halves are non-empty, so the equality above is not
     # satisfied by an empty set on either side.
     assert FULL_SEQUENCE and PHASE_ALIASES
-    # **And the two orders are one order.** The three assertions above are
-    # about *membership* and cannot see a permutation, so the enum's
-    # declaration order and `FULL_SEQUENCE`'s could drift apart in green:
-    # measured 2026-08-19 by swapping `CROSSWALK` and `TMDB_IDS` in the enum
-    # *and* in `test_cli`'s `PHASES` literal -- a coherent-looking edit -- and
-    # leaving `FULL_SEQUENCE` and the dispatch alone: 4,237 passed. The damage
-    # is that `--help` derives its `choices=` from the enum and would then
-    # advertise, to an operator reading it as the run order, a sequence
-    # `--phase all` does not execute.
+    # **And the two orders are one order.** The three assertions above are about
+    # *membership* and cannot see a permutation, so the enum's declaration order and
+    # `FULL_SEQUENCE`'s could drift apart in green: measured 2026-08-19 by swapping
+    # `CROSSWALK` and `TMDB_IDS` in the enum *and* in `test_cli`'s `PHASES` literal -- a
+    # coherent-looking edit -- and leaving `FULL_SEQUENCE` and the dispatch alone: 4,237
     assert tuple(one for one in BootstrapPhase if one not in PHASE_ALIASES) == FULL_SEQUENCE
 
 
@@ -1838,31 +1721,7 @@ def test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias() -> N
 async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, through_the_worker: bool
 ) -> None:
-    """**The point of the phase, asserted rather than described.**
-
-    `--phase imdb` imports `title.basics.tsv.gz` (214.4 MiB) before
-    `title.ratings.tsv.gz` (8.2 MiB) and rewrites every name and year; a name
-    change stales that title's embedding, and this phase exists to be run
-    against a live catalog that the deployed backend is serving.
-
-    The equality is against the whole journal rather than a membership test,
-    because the two defects this is for are both *additions*: an arm that
-    reused the IMDb arm's body pulls basics as well, and one that opened
-    `bulk_load_window()` would drop and rebuild two `titles` indexes under a
-    SHARE lock on a catalog nobody asked it to reindex.  Note what that buys
-    over `"imdb.title.basics" not in journal`: it also fails on
-    `window-open`/`window-close`, which is the second defect and the one no
-    membership test aimed at basics would catch.
-
-    **Both drivers, because only the worker arm can see the `Job.key`.**
-    `usher bootstrap` hands `run_bootstrap` a `BootstrapPhase` directly; the
-    `bootstrap` job handler reads `Job.key` and converts. The parity case above
-    drives only `ALL`, for which `phase.value` is indistinguishable from the
-    literal `"all"` that used to be there -- measured: reverting that site to
-    `BootstrapPhase.ALL.value` leaves the whole unit suite green. This arm is
-    what makes the threading observable, since a handler that ignored the key
-    would run `--phase all` here and journal seven datasets.
-    """
+    """**The point of the phase, asserted rather than described.**"""
     journal = await _journal_of_a_full_bootstrap(
         monkeypatch,
         tmp_path,
@@ -1876,38 +1735,7 @@ async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
 async def test_a_full_run_imports_the_ratings_file_exactly_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """**The forbidden edit, over the only fixture that can see it.**
-
-    `run_bootstrap`'s ratings arm is spelled `is BootstrapPhase.RATINGS` and
-    not `in (BootstrapPhase.RATINGS, BootstrapPhase.ALL)`, because `--phase
-    all` already imports that file inside its IMDb arm -- so the second
-    spelling downloads 8.2 MiB twice and rewrites the same rows twice. That
-    was held by a **comment** until 2026-08-19, when the edit was planted and
-    the whole suite came back 5,479 passed, byte-identical to clean:
-    `_phases_in` collapses the duplicate onto `IMDB`, both window counts are
-    unmoved because the second import lands outside the window, the parity
-    equality holds because both drivers double it identically, and the
-    integration case drives `IMDB` and never `ALL`.
-
-    **The seeded catalog is what gives this case teeth, and it is the whole
-    difference from the parity case above.** Against an *empty* catalog the
-    wrongly-reached arm hits `_ratings`' refusal and imports nothing, so the
-    count is 1 under the defect too -- the fixture repairs the bug on the
-    test's behalf. One title is enough, since the refusal is
-    `count_titles() == 0`.
-
-    **And the seeding is why this drives `run_bootstrap` here rather than
-    calling `_journal_of_a_full_bootstrap`**, over the same two fakes rather
-    than a second set. With `titles` non-empty, `_movielens` no longer refuses
-    at its own guard and reaches `await dataset.revision()`, which it resolves
-    **outside** `import_dataset` -- so it is not covered by that method's
-    `except UsherPortError` and the offline transport ends the run by raising.
-    That happens in the last phase, long after both arms this case is about,
-    so the journal is complete for the claim; the `raises` is stated rather
-    than worked around because a run that ended some other way would satisfy
-    a bare `count(...) == 1` by never having got there at all -- which is what
-    the membership premise on the line above is for.
-    """
+    """**The forbidden edit, over the only fixture that can see it.**"""
     journal: list[str] = []
     catalog = _JournallingCatalog(journal)
     runs = _JournallingRuns(journal)
@@ -1932,44 +1760,8 @@ async def test_a_full_run_imports_the_ratings_file_exactly_once(
 async def test_the_ratings_phase_refuses_an_empty_catalog_before_downloading(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """**The damage lands on a phase other than the one mis-run, which is what
-    makes this the worst outcome available here.**
-
-    `apply_ratings` is an `UPDATE titles ... WHERE t.imdb_id = s.imdb_id`, so
-    against an empty catalog the phase matches nothing -- and matching nothing
-    is not an error. It would stream the file to EOF, write 0 rows, and
-    checkpoint `imdb.title.ratings` **COMPLETED at the end**. That row is
-    deliberately the same one `--phase imdb` checkpoints against, so the next
-    real bootstrap resumes at EOF and imports no ratings *ever*, on that run
-    and on every later one. Measured end to end against real Postgres with the
-    committed fixtures, before the guard existed:
-
-        after --phase ratings on an empty catalog:
-            status=completed rows_seen=3 rows_written=0 position=4
-        after --phase imdb:
-            status=completed rows_seen=3 rows_written=0 position=4
-        titles: 5      titles carrying imdb_num_votes: 0
-
-    Five titles, zero ratings, and `bootstrap-status` green. `ratings` is the
-    **fourth** phase joining `titles` on `imdb_id` and was the only one without
-    the refusal `_credit_names`, `_aliases` and `_movielens` each carry; the
-    precedent is
-    `tests/unit/test_cli.py::test_the_genome_phase_refuses_an_empty_catalog_before_downloading`
-    and this is worse than the case that one guards, because the phase it
-    sterilises is a different one and it is reachable from
-    `POST /admin/bootstrap/ratings` on the serving box rather than only from a
-    CLI. It was stated as a precondition in a comment -- *"this phase only ever
-    runs against a populated catalog"* -- which is not a thing that runs.
-
-    Three assertions, one per property, following the genome case's shape.
-    **No request of any kind**: the transport fails this test if reached, which
-    pins "before the download" rather than merely "before the write". **No
-    `ImportRun` at all** -- this is the assertion that carries the finding,
-    because a FAILED row would be a lie and a COMPLETED one is precisely the
-    poison above; the absence of a row is what `bootstrap-status` renders as
-    "this phase has not run". **A message naming the reason and the fix**,
-    because PRD 08 requires every operator command to work against an empty
-    database, and "work" means saying why.
+    """**The damage lands on a phase other than the one mis-run, which is what makes this
+    the worst outcome available here.**
     """
 
     def refuse(request: httpx.Request) -> httpx.Response:
@@ -2108,33 +1900,8 @@ async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(
 async def test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers_buffer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """The one registration in `build_worker` that is handed `pipeline.events`
-    rather than `worker.events`, pinned from **both** sides.
-
-    G2 measured that swapping those two objects at a registration site is
-    invisible to every unit case of `JobWorker` -- the handler runs, the job
-    completes, the frames arrive, and only *when* they arrive differs. That
-    blind spot is why the enrich registration has a composition-level case,
-    and it is exactly as wide here with the polarity inverted: this producer
-    must **not** be deferred.
-
-    `DeferredEventPublisher`'s own docstring sizes its buffer for *"a handful
-    of events at most"*, and a bootstrap raises one per committed batch -- 26
-    for `--phase imdb`'s title pass alone at the shipped 50,000 batch size. So
-    a deferred bootstrap delivers its whole progress bar as a single jump
-    after the run it was describing has finished, which is the `0% to 100%`
-    failure `ReconcileService._publish_progress` already names, and
-    `discard()` on a failing job would throw away frames naming batches that
-    really did commit.
-
-    Both assertions are needed and neither implies the other: `is` the bus
-    says the right object was passed, and the `DeferredEventPublisher` check is
-    what fails if a later reader "fixes" this registration to match the four
-    below it. The second used to be spelled `is not worker.events`; since M9's
-    W1 the buffer belongs to the *scope* rather than to the worker, so there is
-    no such attribute to compare against and the type is what carries the
-    claim -- the buffer is the only `EventPublisher` in `src/` a handler can be
-    handed that is not a bus.
+    """The one registration in `build_worker` that is handed `pipeline.events` rather than
+    `worker.events`, pinned from **both** sides.
     """
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
     seen: list[EventPublisher] = []
@@ -2284,17 +2051,7 @@ def _emby_gate(adapter: SourceAdapter) -> object:
     return adapter._session._limiter
 
 
-#: Where each `SourceKind`'s adapter keeps the gate it was handed.
-#:
-#: **A table rather than one `isinstance`, because the hole this closes is a
-#: *new class*.** The realistic second construction site for an adapter is not
-#: a second `EmbyAdapter(...)` somewhere -- it is `adapters/jellyfin/adapter.py`
-#: arriving as a new branch of `ConfiguredSourceAdapterFactory.build` at the
-#: `SourceKind` seam (`factory.py`'s own docstring names it), added by someone
-#: who forgets `limiter=`. A per-class scan for "one construction site" cannot
-#: see a class that does not exist yet; a table keyed by the **enum** can,
-#: because `test_every_source_kind_has_a_gate_reader` goes red the moment the
-#: member lands and stays red until this entry is written.
+# : Where each `SourceKind`'s adapter keeps the gate it was handed.
 _GATE_READERS: dict[SourceKind, Callable[[SourceAdapter], object]] = {
     SourceKind.EMBY: _emby_gate,
 }
@@ -2347,40 +2104,7 @@ def _kind_id(kind: object) -> str:
 async def test_two_adapters_for_one_source_share_one_gate_and_two_sources_do_not(
     kind: SourceKind,
 ) -> None:
-    """🔴 **The finding S3 exists for: the obvious placement is per request.**
-
-    `adapter_factory` is called from `build_pipeline`, i.e. **once per unit of
-    work** -- the server opens a pipeline per lane task, `usher work`'s worker
-    opens a scope per claim and per job, and `api/deps.py` builds one per
-    request. So a gate held on the `EmbySession` (per adapter) or on the
-    `ConfiguredSourceAdapterFactory` (per factory) is a gate per *request*,
-    which is `api/deps.py`'s own recorded defect verbatim: *"a request-scoped
-    `TmdbClient` gives every concurrent request a fresh bucket, so N in-flight
-    requests get N x 30 rps"*. The gate is therefore owned by the composition
-    root and keyed by `source.id`, and every pipeline that root opens hands
-    out the same one.
-
-    **The second assertion is the positive control and it is not decoration.**
-    An implementation that returned one *global* gate satisfies the first
-    assertion and halves the configured rate for every source after the
-    first -- a two-server household would run at `rate/2` each with nothing
-    saying so. A case carrying only the first assertion would ratify it.
-
-    A real `AsyncSession` factory over a real engine, for the reason
-    `test_the_candidate_pool_reads_the_pipelines_own_taste_service` gives:
-    `create_async_engine` does not connect and nothing here issues a
-    statement, so a wiring assertion stays in the unit suite.
-
-    **Parametrised over `SourceKind`, which is one arm today and grows with the
-    enum for free.** The alternative considered and declined was a scan
-    asserting that each adapter class has one construction site: that closes a
-    narrower hole than it looks, because the realistic second site is a *new
-    class* at the `SourceKind` seam (`adapters/jellyfin/adapter.py`, added as a
-    `factory.build` branch that forgets `limiter=`), which no per-class scan can
-    see. `_GATE_READERS` plus `test_every_source_kind_has_a_gate_reader` does:
-    the new member is red until somebody says where its adapter keeps the gate,
-    and then this case covers it.
-    """
+    """🔴 **The finding S3 exists for: the obvious placement is per request.**"""
     gated = _source_of(kind, "Living Room", "ref-1")
     second_server = _source_of(kind, "Bedroom", "ref-2")
     engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
@@ -2418,45 +2142,7 @@ async def test_two_adapters_for_one_source_share_one_gate_and_two_sources_do_not
 async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_source(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The four roots, driven rather than argued (M10 S3's acceptance).
-
-    Each arm is a **real** composition root, spelled the way its own module
-    spells it:
-
-    | root | how it composes | arm below |
-    |---|---|---|
-    | the server's push lane | `LaneSupervisor` reads `create_app`'s one `UnitOfWork` | 1 + 2 |
-    | the server's worker lane | the same `UnitOfWork`, a scope per claim and per job | 1 + 2 |
-    | an HTTP request | a real one, resolving `get_source_adapter_factory` off the graph | 1 |
-    | `usher work` | `unit_of_work(...)`, a scope per job | 2 |
-    | `usher sync` | one `build_pipeline`, sources looped inside it | 3 |
-
-    🔴 **The request arm is a request, and as S3 shipped it, it was not.** That
-    row read the same then and the arm below it called
-    `adapter_factory(settings, app.state.source_gates)` — which is
-    `get_source_adapter_factory`'s *body* re-derived here, so it asserted the
-    wiring this file writes rather than the wiring `api/deps.py` has. Measured
-    on the shipped tree: planting `get_source_adapter_factory` to
-    `return adapter_factory(settings, SourceGateRegistry())` — a fresh registry
-    per request, i.e. verbatim the defect `api/deps.py`'s `EnrichService`
-    comment records and this task exists to remove — passed `ruff`, `mypy`,
-    `lint-imports` and **the whole 5,329-case suite**, because every test that
-    names that dependency overrides it and `get_source_gates` was executed by
-    no test at all. `.claude/rules/testing-discipline.md` has the general
-    form: *a dependency every test overrides is a dependency no test covers*.
-    So the arm drives a real request through a probe route and reads the
-    factory the graph resolved.
-
-    **What "one process" means here, stated plainly because the flattering
-    reading is available.** Within one process, one source has one gate however
-    many pipelines, lanes, adapters or requests exist -- that is what these
-    arms assert. `usher work` and `usher sync` are *separate processes* from the
-    server, so their registries are separate from its by construction, and a
-    second `usher work` container is a second registry and therefore twice the
-    configured rate. That is a capacity decision an operator makes; nothing in a
-    process can reach across to another one, and this case does not pretend
-    otherwise.
-    """
+    """The four roots, driven rather than argued (M10 S3's acceptance)."""
     settings = _settings(
         push_enabled=False,
         worker_enabled=False,
@@ -2466,12 +2152,7 @@ async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_s
 
     # -- 1. the server: the lanes' unit of work and the request path -------
     app = create_app(settings)
-    # The request path, driven rather than re-derived. A probe route on the
-    # real app, because a `SourceAdapterFactory` cannot come back over HTTP and
-    # what this arm needs is the object the graph built:
-    # `get_source_adapter_factory` -> `get_source_gates` -> `app.state`. The
-    # same shape `tests/integration/test_pipeline_deps.py` uses for the four
-    # other dependencies whose wiring no route can show.
+    # The request path, driven rather than re-derived.
     resolved: list[SourceAdapterFactory] = []
 
     @app.get("/_probe/adapter-factory")
@@ -2612,40 +2293,8 @@ def _calls_of(root: ast.AST, callee: str) -> tuple[int, int]:
 
 
 def test_the_cli_roots_compose_once_rather_than_per_scope() -> None:
-    """🔴 **Rows 4 and 5 of the table above are re-derivations, and the defect
-    they miss is the one row 3 already shipped with.**
-
-    The four-roots case drives `usher work` and `usher sync` by calling
-    `unit_of_work(...)` and `build_pipeline(...)` *in the test* -- which is not
-    what its own header promises (*"a **real** composition root, spelled the way
-    its own module spells it"*), and is exactly the shape the spec round found
-    and repaired for the request arm. Measured on the shipped tree: replacing
-    `cli._work`'s `work = unit_of_work(...)` with an
-    `@asynccontextmanager`-wrapped `work()` that calls `unit_of_work(...)` fresh
-    on every scope -- **a new `SourceGateRegistry` per claim and per job**,
-    verbatim the multiplication ADR-0043 §4 exists to remove -- passes `ruff`,
-    `ruff format --check`, `mypy`, `lint-imports` and the whole suite.
-
-    **A source scan rather than a drive, and the choice is argued rather than
-    assumed.** `cli._work` opens an engine, a metadata provider, an embedder, an
-    LLM client and a worker loop before it reaches the line in question, so
-    driving it needs a database; and lifting the construction into a helper the
-    four-roots case could call would move the boundary rather than close it --
-    the plant would simply go in `_work`'s body, one level above the helper, and
-    survive again. What distinguishes the correct spelling from the defect is
-    **structural**: the builder is called in the root's own body, not inside a
-    closure that runs per scope. That is a claim an AST can settle, in the shape
-    `test_get_source_gates_is_the_only_reader_of_app_state_source_gates` uses
-    over `api/`.
-
-    **A count is deliberately not asserted, and `_sync` is why.** A *second*
-    `build_pipeline` in `usher sync` is an equivalent mutant -- both spellings
-    were planted and both survive, correctly, because `_sync` opens one adapter
-    per source and hands it to both lanes, so the second registry is never
-    reached. Doubling a source's rate takes two registries **and** two adapters;
-    what carries `usher sync` is the adapter count, which is asserted here as
-    itself rather than through a proxy that would kill a mutant nothing is wrong
-    with.
+    """🔴 **Rows 4 and 5 of the table above are re-derivations, and the defect they miss is
+    the one row 3 already shipped with.**
     """
     source = pathlib.Path(usher.__file__).parent / "cli.py"
     module = ast.parse(source.read_text(encoding="utf-8"), str(source))
@@ -2671,32 +2320,7 @@ def test_the_cli_roots_compose_once_rather_than_per_scope() -> None:
 
 
 async def test_a_request_without_the_lifespan_is_refused_rather_than_quietly_ungated() -> None:
-    """`api/deps.get_source_gates`' `RuntimeError` arm, which nothing ran.
-
-    🔴 **This dependency was executed by no test in the suite** — not one, in
-    either direction. Every case that names `get_source_adapter_factory`
-    replaces it through `dependency_overrides` (`test_api_playback.py`,
-    `test_api_playback_leaks.py`, and three integration files),
-    `test_api_health.py::test_readiness_never_touches_a_source` asserts that
-    readiness does **not** resolve it, and the arm above reaches it only with a
-    started lifespan. So the code path that decides what happens when the
-    registry is missing had never been taken, and its message had never been
-    read by anything.
-
-    **It matters because the alternative failure is silent.** `app.state` is
-    typed `Any` and raises `AttributeError` for a missing name, so the
-    defensive `getattr(..., None)` here is what turns "the lifespan did not
-    run" into a sentence naming the attribute and the fix, rather than into a
-    500 from an attribute lookup — or, if the default had been a fresh
-    `SourceGateRegistry()`, into a process that dials a household's server
-    completely unthrottled and reports nothing at all. A limiter's missing
-    owner has to be loud.
-
-    Driven as a real request through `httpx.ASGITransport` **without**
-    `LifespanManager`, because that is precisely the configuration the message
-    is written for: the transport speaks HTTP to the app and never sends it a
-    lifespan event, so `create_app`'s startup block never runs.
-    """
+    """`api/deps.get_source_gates`' `RuntimeError` arm, which nothing ran."""
     settings = _settings(push_enabled=False, worker_enabled=False)
     app = create_app(settings)
 

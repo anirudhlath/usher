@@ -1,24 +1,5 @@
-"""`scripts/measure_pair_rates.py`'s accumulator, against the counter it must agree with.
-
-**The one fatal spelling this file exists to kill.** `/tmp/m9-gate/BAR.md` asks
-for the **candidate-pair** rate — of all `(seed, candidate)` pairs a real
-neighbour rebuild *considers*, the fraction carrying the signal on both sides —
-and the plausible wrong answer is a rate over the pairs a rebuild *stores*.
-`_CANDIDATE_POOL` is 100 and `_NEIGHBORS_PER_TITLE` is 25, so the two
-denominators differ by four, and by the time a row is stored the blend has
-sorted the pool **by the very signal being measured**. A stored-row accumulator
-therefore produces a different, plausible, wrong — and specifically
-*inflated* — ratio while every other assertion still passes, which is why the
-comparison here is against `NeighborRebuild`'s own two fields rather than
-against a literal.
-
-**The import mechanism is `test_scripts_enqueue_tier_enrichment.py`'s, for its
-reasons**, restated because they are load-bearing rather than incidental:
-`scripts/` has no `__init__.py`, `[tool.mypy] files = ["src", "tests"]` means
-**mypy does not check `scripts/` at all**, and so the script gets `ruff`, this
-file, and no type checking. Every name reached for is bound once, at module
-scope, through a typed local, so a rename in the script fails at import rather
-than as an `AttributeError` three cases deep.
+"""`scripts/measure_pair_rates.py`'s accumulator, against the counter it must agree
+with.
 """
 
 import importlib.util

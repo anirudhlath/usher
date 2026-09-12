@@ -1,51 +1,4 @@
-"""A `SourceAdapter` with no wire format at all, and its harness.
-
-Exists to prove `SourceAdapterContract` is expressible without reference to
-Emby. If the suite passes here *and* against `EmbyAdapter`, the assertions
-are about the port; if it only passed against Emby, they would only be
-about Emby.
-
-Its round-trip cases are close to tautological -- it hands back the
-`SourceItem`s it was seeded with. That is deliberate and not a defect: the
-round-trip has teeth in `EmbyHarness`, where the same seeded item has to
-survive being rendered into JSON and parsed back. What this fake models for
-real is the two behaviours a no-op would let pass on *both* sides:
-
-- a session token that can expire and must be silently re-minted, with
-  concurrent expiries collapsing into a single authentication; and
-- a rejected credential that is remembered, so a wrong password cannot turn
-  every subsequent call into another doomed authentication.
-
-Without those, `test_operations_recover_from_an_expired_credential` and
-`test_rejected_credentials_do_not_produce_a_request_storm` would pass here
-against an adapter that did nothing at all, and a reviewer would have no
-signal that the assertions mean anything.
-
-**Where this fake is more forgiving than a real source, on purpose.** Its
-walk returns the *true* `play_count`/`last_played_at`, because it yields
-back the very `SourceWatchState` the harness seeded. So
-`test_a_walk_never_reports_play_history_it_cannot_know` passes here on its
-`== 7` branch and never exercises the `is None` branch -- the branch that
-matters, and the branch the measured Emby behaviour lands on. That case has
-teeth only in `EmbyHarness`, where the fake server's *listing* renderer
-omits the two fields exactly as Emby 4.9.5.0 does. The fake's job is to
-prove the assertion is expressible without reference to Emby; it is not
-evidence that any adapter needed it.
-
-**Its push channel is the same kind of forgiving, and worse.** There is no
-transport under it at all: no handshake, no frames, no close code, no
-backpressure. Its health ledger decays only because a test advanced a clock
-it owns, and it goes silent or drops because a test said so, so nothing
-about a real socket's failure modes is expressible here. What it *is*
-evidence for is that the six push contract cases are statable without a wire
-format -- and that they are satisfiable by a second, independently written
-three-clause health rule, which is the only sense in which "the port stated
-the rule" is a testable claim rather than "`EmbyAdapter` happens to behave
-that way". The same six run against the real `EmbyAdapter` over a real
-`EmbyPushChannel` with a real watchdog
-(`tests/unit/test_adapters_emby_contract.py`), and only M5's live
-verification closes the gap after that.
-"""
+"""A `SourceAdapter` with no wire format at all, and its harness."""
 
 import asyncio
 import uuid
@@ -119,20 +72,10 @@ class FakeSourceAdapter(SourceAdapter):
         self._auth_rejected = False
         self._lock = asyncio.Lock()
         self.authentications = 0
-        # One entry per `watch_state` walk, in the order the walks were
-        # started: the `start_index` each one was asked for. Recorded rather
-        # than inferred from what came back, because a resumed walk and a
-        # restarted one over an already-merged prefix produce the *same*
-        # stored rows -- the merge is an idempotent upsert -- so the only
-        # observable difference between "resumed from page 2,844" and "walked
-        # the library again" is the number that was asked for.
+        # One entry per `watch_state` walk, in the order the walks were started: the
+        # `start_index` each one was asked for.
         self.resumed_from: list[int] = []
-        # The push channel. A ledger of its own shape and the same
-        # three-clause health rule, written out below rather than importing
-        # `PushHealth` -- for the reason `FakeEmbyServer` defines
-        # `_TICKS_PER_SECOND` itself: a fake that shared the
-        # implementation's own rule could not disagree with it, and
-        # disagreement is the only thing a contract suite is for.
+        # The push channel.
         self._push_queue: asyncio.Queue[SourceEvent] = asyncio.Queue()
         self._push_open = False
         self._push_supported = True
@@ -344,12 +287,8 @@ class FakeSourceAdapter(SourceAdapter):
     def watch_state(
         self, since: AwareDatetime | None = None, *, start_index: int = 0
     ) -> AsyncIterator[SourceWatchState]:
-        # Recorded here rather than in `_walk_states`, so that it is what the
-        # **port** was asked for. A subclass that overrides the walk -- and
-        # the two in `test_services_watch_sync.py` both do -- would otherwise
-        # record whatever it chose to pass down, which for an adapter that
-        # re-frames `start_index` is a different number from the one the
-        # service asked to resume at.
+        # Recorded here rather than in `_walk_states`, so that it is what the **port**
+        # was asked for.
         self.resumed_from.append(start_index)
         return self._walk_states(since, start_index)
 
@@ -362,13 +301,11 @@ class FakeSourceAdapter(SourceAdapter):
         for external_id in list(self._items):
             if since is not None and self._changed_at[external_id] < since:
                 continue
-            # The skip comes *after* the filter, because `start_index` is an
-            # offset into the stream this walk yields rather than into the
-            # source's unfiltered set -- which is what a server that filters
-            # before it pages hands back, and is exactly what
-            # `FakeEmbyServer._list` does (`_ordered` filters, then the slice).
-            # Skipping first would make a resumed delta checkpoint a position
-            # the real adapter cannot produce.
+            # The skip comes *after* the filter, because `start_index` is an offset into
+            # the stream this walk yields rather than into the source's unfiltered set
+            # -- which is what a server that filters before it pages hands back, and is
+            # exactly what `FakeEmbyServer._list` does (`_ordered` filters, then the
+            # slice).
             if skipped < start_index:
                 skipped += 1
                 continue
@@ -396,13 +333,11 @@ class FakeSourceAdapter(SourceAdapter):
 
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
         await self._ready()
-        # Preserve whatever history is already recorded rather than
-        # rebuilding the state from scratch: a real source's write-back does
-        # not reset `PlayCount` (verified on Emby -- marking played advances
-        # it to 1 idempotently, and a position write leaves it alone), so a
-        # fake that zeroed it would make
-        # `test_get_watch_state_is_authoritative_about_play_history`
-        # order-dependent.
+        # Preserve whatever history is already recorded rather than rebuilding the state
+        # from scratch: a real source's write-back does not reset `PlayCount` (verified
+        # on Emby -- marking played advances it to 1 idempotently, and a position write
+        # leaves it alone), so a fake that zeroed it would make
+        # `test_get_watch_state_is_authoritative_about_play_history` order-dependent.
         existing = self._states.get(external_id)
         self._states[external_id] = SourceWatchState(
             external_id=external_id,

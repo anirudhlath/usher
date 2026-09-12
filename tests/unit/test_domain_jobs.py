@@ -71,47 +71,7 @@ def test_an_empty_key_is_rejected() -> None:
 
 
 def test_the_nine_kinds_this_tree_ships() -> None:
-    """Each kind arrives with the artefacts it maintains, not before.
-
-    M4's version asserted three members and explained the absence: "a job
-    kind whose handler is a stub is a queue that grows forever". M6 retired
-    that reasoning for `index` rather than reversing it, shipping the
-    handler, the enqueue and the draining backfill together, and M7 does the
-    same for `derive` -- the member, the handler, the enqueue site and
-    `usher derive` in one commit.
-
-    **`curate` is the first member whose handler is registered
-    conditionally**, which is a different question from the rule above and
-    does not weaken it: the handler exists in every build, and
-    `composition.build_worker` withholds the *registration* from a deployment
-    with no `LLMClient`, exactly as it withholds `index` from one with no
-    embedder. What M4 forbade was a member with no handler anywhere.
-
-    **`watch_writeback` arrived across two commits and the rule held anyway.**
-    M9's D7 owns the enqueue -- the four watch-write routes cannot enqueue a
-    kind that does not exist -- and D8 owns the handler and the unconditional
-    registration. Between them there really was a member no worker claimed,
-    which is exactly the queue M4 forbade; the marker that said so is struck
-    because D8 has landed, and what is left is the ordinary rule. Had D8 been
-    dropped, the member would have gone with it.
-
-    **`sync` is M9's E3: the M4 boundary call that deferred
-    `POST /admin/sources/{id}/sync` to "a route that would exist someday".**
-    Its handler is registered unconditionally, in every build, the way
-    `match` and `watch_history` already are -- there is no optional process
-    resource behind it, only the adapter factory every root already builds.
-
-    **`bootstrap` is M9's E5, and it is M2's last boundary call**: the bulk
-    importers have been runnable since M2 and only as a separate process,
-    which is the fact `ports/events.py` cites for `bootstrap.progress`
-    having no producer. Member, handler, unconditional registration and the
-    enqueue site (`POST /admin/bootstrap/{phase}`) all land in one commit,
-    which is the rule this case exists for -- D7/D8 having just demonstrated
-    what the two-commit version costs.
-
-    An exact set rather than a membership check, so a tenth kind cannot be
-    added without this list moving and someone reading that rule.
-    """
+    """Each kind arrives with the artefacts it maintains, not before."""
     assert set(JobKind) == {
         JobKind.MATCH,
         JobKind.ENRICH,

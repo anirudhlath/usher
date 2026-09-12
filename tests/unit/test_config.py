@@ -269,52 +269,7 @@ def test_the_worker_concurrency_settings_have_the_measured_defaults(
 def test_the_four_concurrency_entries_that_are_bounds_are_pinned_by_value_and_say_which_measurement_moved_them() -> (  # noqa: E501
     None
 ):
-    """The four entries the case above leaves unpinned, each with its run.
-
-    🔴 **Until M10's S7 these four were pinned by nothing at all, and that was
-    demonstrated rather than argued**: `MATCH` set to 7 and `DERIVE` to 9 --
-    arbitrary values -- passed all **4,119** unit cases on 2026-08-19. The case
-    above asserts `set(KIND_CONCURRENCY) == set(JobKind)` and pins `ENRICH`,
-    `INDEX`, `CURATE` and `BOOTSTRAP` by value, and asserts nothing whatever
-    about `MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK`, `DERIVE` or `SYNC` --
-    which are exactly the entries issue #13 is about. This is D4's
-    `TICKET_TTL_SECONDS`, B9's `CAST_LIMIT` and S7's own `_WEIGHTS` finding a
-    fourth time, in its weakest form: not pinned by a derived assertion, **not
-    pinned**.
-
-    **Every number below is a literal**, and none is read back out of
-    `KIND_CONCURRENCY` -- that is the tell the three prior instances shared. A
-    case whose expectation is computed from the thing under test pins that the
-    constant is *in force* and can never pin its *value*.
-
-    The measurements, both run 2026-08-19 and both recorded with their
-    denominators in `.claude/rules/emby-push-and-ingest.md`:
-
-    * **4 for the three Emby-facing kinds.** 44 bounded read-only requests
-      against the operator's real Emby, `get_item` at 1, 2 and 4 in flight with
-      the outbound gate off. Per-request median **0.1377 / 0.1405 / 0.1363 s**
-      -- flat, the c=4 median 1% *below* the c=1 median -- and steady-state
-      throughput **7.40 / 14.21 / 28.75 rps**, i.e. **3.89x** at four in
-      flight. This server does not degrade at 4 concurrent single-item reads,
-      which refutes the W1-shaped prediction that it would.
-    * **4 for `derive`.** 200 jobs a rung against a throwaway
-      `pgvector/pgvector:pg17`, one pool, own session per coroutine:
-      **48.7 / 85.3 / 115.7 / 130.7 jobs/s** at 1 / 2 / 4 / 8, with per-job
-      median **19.8 / 22.6 / 31.8 / 54.2 ms**. The knee is at 4: the fourth
-      in-flight job buys +36% throughput, the eighth buys **+13%** for +71%
-      per-job latency. Reproduced within 2% on a second run.
-    * **1 for `sync`**, unchanged and not a concurrency measurement at all --
-      ADR-0015's retraction ceiling is computed per run, so two overlapping
-      walks each see half the retractions and neither trips it.
-
-    ⚠️ **The three Emby numbers are a slot count, not a request rate, and the
-    difference is measured.** With `USHER_SOURCE_REQUESTS_PER_SECOND` at its
-    shipped **0.4**, four coroutines against one source produced requests
-    **2.50 s apart with a peak of one in flight** -- `_MinInterval` holds its
-    lock across the wait and `SourceGateRegistry` gives one source one gate.
-    So since S3 landed, this entry has not been what bounds the request rate to
-    a source; the gate is. Raising it would not raise the rate.
-    """
+    """The four entries the case above leaves unpinned, each with its run."""
     assert KIND_CONCURRENCY[JobKind.MATCH] == 4
     assert KIND_CONCURRENCY[JobKind.WATCH_HISTORY] == 4
     assert KIND_CONCURRENCY[JobKind.WATCH_WRITEBACK] == 4
@@ -602,30 +557,8 @@ def test_the_backoff_and_the_failure_ceiling_cannot_be_switched_off(
 def test_the_retention_window_and_the_chunk_cannot_be_switched_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both `ge=1` floors on the retention pair, and **the two zeros fail
-    differently**, which is why the comments beside them are not
-    interchangeable.
-
-    `USHER_SEARCH_QUERY_RETENTION_DAYS=0` is a cutoff at `now`: the prune
-    deletes the row the answered search has just written, so a household
-    keeps no history at all. The switch for that is
-    `USHER_SEARCH_SUGGEST_ANALYTICS` and an analytics-free `SearchService`,
-    which write no row rather than writing one and racing a prune for it.
-
-    🔴 `USHER_SEARCH_QUERY_RETENTION_BATCH=0` is the sharper one and it is the
-    **opposite** of what `config.py` claimed until 2026-09-07. That comment
-    read *"a chunk of zero deletes nothing and, since the loop terminates on
-    a chunk shorter than the limit, terminates immediately"*. It does not
-    terminate at all: `SearchQueryRetention.run` breaks on `deleted < batch`,
-    and `0 < 0` is false, so the drain re-opens a scope and re-issues
-    `DELETE ... LIMIT 0` forever. Measured 2026-09-07 against a three-row
-    fake -- 253,501 `prune` calls in 2.0 s with all three rows still present.
-
-    Both floors were **relaxed to `ge=0` and the whole suite stayed green**
-    when this was written, which is what this case is for. The default is
-    re-read afterwards so a floor that had been turned into a *clamp* -- a
-    `Field` that silently coerced rather than refused -- would not read as a
-    pass here.
+    """Both `ge=1` floors on the retention pair, and **the two zeros fail differently**,
+    which is why the comments beside them are not interchangeable.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -692,28 +625,8 @@ def test_the_source_rate_default_is_the_courtesy_margin_derived_from_s1(
 def test_the_search_and_embedding_settings_have_the_measured_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nine fields pinned together, and most of them are *measurements*
-    rather than choices -- which is why an edit to any one of them has to be
-    visible somewhere.
-
-    `embedding_batch_size` 16 is CPU throughput at 229.5 texts/s at 38
-    tokens, flat 16-64 and degrading at 128. `search_rrf_k` 60 is RRF's
-    original paper and ADR-0002's assumption. **`search_hnsw_ef_search` 200
-    is the first value of this constant measured against a real index**
-    (2026-08-19, 132,409 real 1024-lane vectors, 12 typed plot queries):
-    recall@10 against an exact scan is 0.858 at the old default of 100 and
-    **0.917 at 200**, for p50 4.77 -> 10.59 ms and p95 7.30 -> 16.18 ms
-    beside a 5.7 ms query embed. 400 buys 0.967 and costs a p50 of 20.13 ms,
-    which is outside the budget this repository has recorded for the query
-    side. `search_trigram_threshold` 0.3 is `pg_trgm`'s own default and sits
-    on the right side of a measured cliff (0.5 admits 23 candidates where 0.3
-    admits 1,774).
-
-    They landed across three commits -- Group C's four `embedding_*` with the
-    embedder, Group D and E's five `search_*` with the indexes and the
-    service -- because `test_every_setting_is_read_by_something` means a
-    field cannot ship ahead of its reader. This is the case that finally
-    holds the whole block in one place.
+    """Nine fields pinned together, and most of them are *measurements* rather than choices
+    -- which is why an edit to any one of them has to be visible somewhere.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -733,12 +646,10 @@ def test_the_search_and_embedding_settings_have_the_measured_defaults(
         settings.embedding_api_key.get_secret_value(),
         settings.embedding_timeout_seconds,
     ) == ("http://localhost:8001/v1", "", 30.0)
-    # **The default checkpoint has to be as wide as the column**, which is
-    # the invariant `m09e` made breakable: `EMBEDDING_DIMENSIONS` is a
-    # deployment-wide `halfvec` typmod, so a default narrower than it ships
-    # a deployment whose `USHER_EMBEDDING_ENABLED=true` claims nothing but
-    # unclaimed index jobs. Asserted against the constant rather than
-    # against `1024`, so the two cannot drift apart in a passing suite.
+    # **The default checkpoint has to be as wide as the column**, which is the invariant
+    # `m09e` made breakable: `EMBEDDING_DIMENSIONS` is a deployment-wide `halfvec`
+    # typmod, so a default narrower than it ships a deployment whose
+    # `USHER_EMBEDDING_ENABLED=true` claims nothing but unclaimed index jobs.
     assert EMBEDDING_DIMENSIONS == 1024
     assert settings.embedding_model.endswith("bge-large-en-v1.5")
     assert (
@@ -958,29 +869,8 @@ def test_query_expansion_without_an_llm_is_refused_rather_than_silently_ignored(
 def test_the_image_proxy_settings_have_the_measured_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Four fields pinned together, and two of them are *measurements* rather
-    than choices — which is why an edit to either has to be visible somewhere.
-
-    `image_cdn_base_url` was read live from the provider's `/configuration`
-    endpoint on 2026-08-11 (`secure_base_url`), and **every byte figure in
-    ADR-0032 is a measurement against this host** — a default pointing anywhere
-    else makes that whole document a claim about a server nobody tested. It is
-    also the *only* definition of the host: `ProviderCdnImageFetcher` takes
-    `base_url` as a required argument rather than carrying one of its own, so
-    there is nothing here for a second copy to disagree with.
-
-    `image_max_bytes` at 5 MiB is above every byte this proxy can legitimately
-    receive: the largest artwork ADR-0032 measured anywhere is 4,731,805 bytes,
-    and that is an `original`, which the ladder cannot express and the fetcher
-    never requests. The largest *rung* measured is a 563 KB median poster at
-    `w1280`, so the ceiling is roughly 9x the biggest ordinary answer — loose
-    enough never to refuse a real image and tight enough to bound a lying
-    upstream.
-
-    `image_cache_dir` sits beside `bulk_data_dir`'s `data/bulk`, inside
-    `.gitignore`'s `data/`. `image_fetch_timeout_seconds` is an order of
-    magnitude below `llm_timeout_seconds`' 120 because the *lane* decides it:
-    that one is a worker job and this is a request.
+    """Four fields pinned together, and two of them are *measurements* rather than choices
+    — which is why an edit to either has to be visible somewhere.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)

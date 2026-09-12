@@ -1,46 +1,4 @@
-"""`TasteService`, and the sign trap caught with a planted angle.
-
-**Every cosine in this file is planted, never hoped for.** M6 recorded the
-technique in `tests/unit/test_services_similar.py`'s module docstring --
-`FakeEmbedder` is a hash, so similarity between two related titles is noise --
-and this milestone's headline is the reason it matters here: *"a taste centroid
-computed over the wrong sign returns the user's least favourite genre with total
-confidence."* That failure raises nothing, is not empty, and returns a
-populated, correctly-typed, 384-lane unit vector. Only a number can see it.
-
-So this file builds an **orthonormal triple** and plants each population at its
-own pole. `planted_pair(pi/2)` gives `e0` and `e1` exactly (`dot == 0.0` to
-2.22e-16); `_third_pole()` gives `e2` the same way. Three poles rather than the
-plan's two, and the reason is a defect in the plan's own layout:
-
-    The plan seeds engaged at `a`, abandoned at `-a`, never-touched at `b`,
-    and predicts that "the mean over everything with a watch state" lands on
-    `cos == 0.0`. It does not. With both watched populations on the +/-a axis,
-    *every* weighted mixture of them is still +/-a, so that implementation
-    scores `+1.0` or `-1.0` depending only on which side happened to outweigh
-    the other -- and at `+1.0` it is **indistinguishable from correct**. The
-    mutation the case exists to kill survives it.
-
-With abandoned titles at `b` and never-touched titles at `c`, all four
-implementations land on four different numbers:
-
-| Implementation                          | cos(centroid, a) |
-|---|---|
-| correct                                 | **+1.0**         |
-| sign flipped                            | -1.0             |
-| mean over the never-watched set         | 0.0              |
-| mean over everything with a watch state | strictly between |
-
-`-a` is still used, in `test_a_title_abandoned_at_ten_percent_is_absent_rather_
-than_negative`, which is where it belongs: that case is about a *negative
-weight*, not about the population.
-
-**Tolerances are `abs=1e-9` here and `abs=1e-3` in
-`tests/integration/test_taste_repository.py`.** Both are stated so nobody
-"fixes" the unit tolerance to match the integration one: the gap is
-`halfvec(384)`'s measured max round-trip cosine error of 1.21e-04, which exists
-only where a vector crosses the database.
-"""
+"""`TasteService`, and the sign trap caught with a planted angle."""
 
 import math
 import uuid
@@ -674,28 +632,7 @@ async def test_genre_affinity_is_identical_with_and_without_an_embedder() -> Non
 
 
 async def test_recent_engagement_outweighs_old_engagement_in_the_affinity() -> None:
-    """The same counts in two orders, and the recent genre wins in each.
-
-    **The plan's own seeding for this case cannot pass and the arithmetic says
-    why.** It asks for forty dramas at the old end against twelve horrors at
-    the new end, and expects horror. The ramp runs `1.0 -> 0.25`, so its
-    steepest possible verdict is 4:1 per title -- twelve recent titles cannot
-    outweigh forty old ones (or the thirty-eight that survive the 50-title
-    window) under any floor above zero, and drama wins at a lift of 2.35
-    against 1.65. A floor low enough to flip it would be the silent second
-    edge `_RECENCY_FLOOR` exists to refuse.
-
-    So the recency claim is tested the way it can be true: **fourteen of each,
-    seeded in both orders.** Whichever genre is recent has the higher lift, and
-    the two runs are otherwise identical.
-
-    Fails the implementation that runs its own unweighted lifetime `GROUP BY`,
-    which returns the *same* two lifts in both runs -- an exact tie, resolved
-    by the name tiebreak to `["drama", "horror"]` both times. That is what PRD
-    06's "tracks changing taste rather than averaging a lifetime" means for the
-    count-based signal, and it is free only because the affinity reads the same
-    weighted window the centroid does.
-    """
+    """The same counts in two orders, and the recent genre wins in each."""
 
     async def _run(recent: str, older: str) -> list[str]:
         house = _Household()
@@ -779,12 +716,7 @@ async def test_an_untagged_watched_title_is_not_a_genre_named_empty_string() -> 
 
     assert "" not in {one.genre for one in affinities}
     assert [one.genre for one in affinities] == ["western"]
-    # **The lift, not just the genre**, and that is what makes the mutation
-    # visible. Every *tagged* engaged title here is a western, so
-    # `share_watched` is exactly 1.0 and the lift is exactly `1 / 0.04`. An
-    # implementation counting the thirty untagged titles in the denominator
-    # still returns `["western"]` -- it just returns a lift near 6, which no
-    # assertion about membership or order can see.
+    # **The lift, not just the genre**, and that is what makes the mutation visible.
     assert affinities[0].lift == pytest.approx(25.0, abs=1e-9)
 
 

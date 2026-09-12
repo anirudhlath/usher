@@ -1,40 +1,5 @@
-"""`PostgresPrefixSuggestIndex` against real Postgres: tier 1 of the two-tier
-suggest, the btree `lower(name) text_pattern_ops` prefix probe.
-
-**This file exists because ADR-0002's typo-tolerance gate failed.** Run
-2026-08-03 against 1,271,138 real names, the shipped trigram type-ahead finds
-the right title **27.8%** of the time for a 2-4-character name and **68.3%**
-for 5-7, against bars of 0.75 and 0.85 written down before the numbers were
-known -- and **no configuration under any threshold, cap or index type comes
-within 6x of a 50 ms keystroke budget**. The one configuration that does fit is
-the btree prefix probe: **p50 0.6 ms / p95 1.0 ms / max 10 ms, 44 MB, 0.559 s
-to build**, with **no typo tolerance at all (1.9%)**. Tier 1 is that probe;
-tier 2 is the path this file's neighbour tests, debounced behind it.
-
-Three things are asserted here that no shared contract can express, because
-they are properties of *this* backend and of the schema `m09a` built:
-
-- **The near-miss index.** `ix_titles_name_lower_year` is a plain btree on
-  `(lower(name), year)` with the default operator class. It reads as if it
-  would serve `LIKE 'pre%'` and cannot under this database's collation --
-  measured, the plan is a `Seq Scan` even with `enable_seqscan = off`. The
-  plan case asserts which index the tier-1 statement *takes*.
-- **The union.** Tier 1 reads `titles` and `title_search_names` as one
-  deduplicated set, so a director's name reaches their films from the first
-  keystroke. **B3 is the task authorised to narrow this**, on a measurement.
-- **Tier 2 is untouched.** `ix_titles_name_trgm` is still GIN, still the only
-  trigram index on `titles`, and the tier-2 statement still plans to it. That
-  last clause is the whole assertion: **no plan-shape test can distinguish GIN
-  from GiST for `%`** (GiST serves it too), and with a GiST index present
-  beside the GIN one the planner takes GiST and the shipped configuration goes
-  33.3 ms -> 141.5 ms p50 for byte-identical recall. So the retention case
-  asserts the index the planner **takes** and the operator class `pg_indexes`
-  reports, never merely that an index exists.
-
-`tests/unit/test_suggest_index_contract.py` and the `TestPostgresSuggestIndex`
-class in `test_adapters_search_postgres.py` run the *typo-tolerant* contract;
-`TestPostgresPrefixSuggestIndex` below runs the base one, which is the half
-both implementations owe.
+"""`PostgresPrefixSuggestIndex` against real Postgres: tier 1 of the two-tier suggest,
+the btree `lower(name) text_pattern_ops` prefix probe.
 """
 
 import ast
@@ -59,17 +24,6 @@ from usher.domain.ids import new_id
 from usher.ports.search import SuggestIndex
 
 # The tier-1 index `m09a` builds on `titles`, and the near-miss beside it.
-# Both spelled once here so a case asserts the name rather than a substring
-# that happens to appear in a plan.
-#
-# **`ix_titles_name_lower_prefix` is the shipped name, and the M9 plan's own
-# acceptance for this task calls it `ix_titles_name_prefix`.** The drift is
-# recorded here rather than left for the next reader to re-derive, because of
-# what it sits next to: `ix_titles_name_lower_year` differs from the real index
-# by a single token in `_SUSPENDABLE_INDEXES` (the opclass), and it is a plain
-# btree that cannot answer a prefix at all. Three names one token apart, one of
-# which appears only in a plan document -- a half-remembered spelling is one
-# search-and-replace away from a green suite asserting over the wrong index.
 _TIER_ONE_INDEX = "ix_titles_name_lower_prefix"
 _NEAR_MISS_INDEX = "ix_titles_name_lower_year"
 _TIER_TWO_INDEX = "ix_titles_name_trgm"
@@ -103,14 +57,11 @@ async def _given_title(
     title_id = new_id()
     await session.execute(
         text(
-            # **The bind names are not the column names and only the columns
-            # moved.** ADR-0040 renamed `popularity`/`vote_count` to
-            # `tmdb_popularity`/`tmdb_vote_count`; `:popularity` and
-            # `:vote_count` stay because they are this helper's own keyword
-            # arguments, which are test-local vocabulary. Its sibling
-            # `test_adapters_search_postgres.py::_insert_title` draws the same
-            # line for a sharper reason -- there the bind is read off a
-            # `SearchDocument` attribute that deliberately did not move.
+            # **The bind names are not the column names and only the columns moved.**
+            # ADR-0040 renamed `popularity`/`vote_count` to
+            # `tmdb_popularity`/`tmdb_vote_count`; `:popularity` and `:vote_count` stay
+            # because they are this helper's own keyword arguments, which are test-local
+            # vocabulary.
             "INSERT INTO titles (id, kind, name, sort_name, tmdb_popularity, "
             "tmdb_vote_count, enrichment_state) VALUES (CAST(:id AS uuid), :kind, :name, "
             ":sort_name, :popularity, :vote_count, :state)"
@@ -180,30 +131,7 @@ def _index_conditions(node: dict[str, Any]) -> list[str]:
 async def _plan_tree(
     session: AsyncSession, statement: str, parameters: dict[str, Any]
 ) -> dict[str, Any]:
-    """The plan the planner takes for `statement`, with sequential scans
-    disabled.
-
-    **The lever is necessary and it is not sufficient, and #79 is where the
-    second half was learned.** At fixture scale a sequential scan really is
-    cheaper and the planner is right to take it, so without `enable_seqscan =
-    off` the plan says nothing about which index *could* serve the query. With
-    it, an index that cannot serve the predicate still does not appear: the
-    pre-`m09a` measurement of exactly this query against
-    `ix_titles_name_lower_year` is `Seq Scan on titles` at cost 1e10 -- not
-    merely not-chosen, **not choosable**. That is what makes "the near miss is
-    absent from the plan" a claim about the operator class rather than about
-    cost estimation.
-
-    What it does *not* settle is which of several *usable* indexes wins, and on
-    a table `pg_class` describes as empty they all cost the same: with seq
-    scans priced at the disabled penalty, a full walk of `pk_titles` is a
-    candidate too. That is how this file's tier-1 case failed in CI on
-    2026-08-25 -- `['pk_titles', 'ix_title_search_names_name_lower_prefix',
-    'pk_titles']`, with the near-miss assertion passing **vacuously** beside
-    it, because the plan reached neither the right index nor the wrong one. A
-    caller asserting which index wins therefore has to seed a population and
-    `analyze` it first.
-    """
+    """The plan the planner takes for `statement`, with sequential scans disabled."""
     await session.execute(text("SET LOCAL enable_seqscan = off"))
     plan = await session.execute(text(f"EXPLAIN (FORMAT JSON) {statement}"), parameters)
     return cast("dict[str, Any]", plan.scalar_one()[0]["Plan"])
@@ -378,27 +306,7 @@ async def test_both_sides_of_the_comparison_are_lower_cased(session: AsyncSessio
 async def test_the_cap_is_ordered_so_the_top_of_the_list_is_not_arbitrary(
     session: AsyncSession,
 ) -> None:
-    """The `ORDER BY` deleted from the statement's `LIMIT`.
-
-    **An unordered cap is not a cheaper cap, it is a different answer**, and
-    this project has the measurement: dropping the trigram floor with an
-    unordered `LIMIT` in place took recall 66.2% -> 48.5% -> 2.6%, because the
-    cap truncates whichever rows the scan reached first. The same statement
-    here, with the same shape of defect, hands the type-ahead box its answer
-    in `UNION`-hash order.
-
-    Twenty candidates rather than two, with popularity **ascending** in
-    insertion order, so the wanted rows are the *last* three written -- and a
-    UUIDv7 primary key makes insertion order and id order one sequence, so
-    "the last three written" is also "the three a scan reaches last".
-
-    **The premise is derived from the fixture's own mapping rather than from a
-    slice**, which is what makes it a guard instead of a comment: written as
-    `seeded[-3:]` it states a fact about a literal and no fixture change can
-    falsify it, and the obvious fixture change -- seeding popularity
-    descending -- would then break the case's final assertion while the guard
-    sat there passing.
-    """
+    """The `ORDER BY` deleted from the statement's `LIMIT`."""
     popularity = {number: float(number) for number in range(20)}
     seeded = [
         await _given_title(session, name=f"Vane {number:04d}", popularity=popularity[number])
@@ -418,28 +326,9 @@ async def test_the_cap_is_ordered_so_the_top_of_the_list_is_not_arbitrary(
 
 @pytest.mark.integration
 async def test_a_wildcard_typed_into_the_box_is_not_a_wildcard(session: AsyncSession) -> None:
-    """`LIKE`'s own metacharacters reaching the pattern, and the three ways
-    the escaping can be wrong. **Four arms, because each kills a different
-    spelling and no one of them kills the others.**
-
-    - **`%` alone** -- unescaped it matches the entire catalog, which is
-      1,271,138 rows collected, de-duplicated and sorted to answer one
-      keystroke. Kills "no escaping at all".
-    - **`_` alone** -- unescaped it matches every name of one character or
-      more, i.e. all of them. Kills an escape list that forgot the underscore,
-      which is the one a reader adds second.
-    - **`100%`** -- an ordinary film title and an ordinary thing to type.
-      Kills the escape list applied in the **wrong order**: doubling the
-      backslash *after* introducing the escapes re-escapes the escapes, and
-      the `%` becomes a wildcard again. Every other arm here survives that
-      spelling, which is why this one exists.
-    - **a lone backslash** -- kills an escape list that handles `%` and `_`
-      and not the escape character itself, where `\\` + `%` reads as a
-      *literal per cent* and the typed backslash is silently dropped.
-
-    All four are ordinary characters in a film title, so refusing them is not
-    an option either -- which is what makes this escaping rather than
-    validation.
+    """`LIKE`'s own metacharacters reaching the pattern, and the three ways the escaping
+    can be wrong. **Four arms, because each kills a different spelling and no one of
+    them kills the others.**
     """
     await _given_title(session, name="Vane Alpha", popularity=1.0)
     await _given_title(session, name="Harbour Lights", popularity=900.0)
@@ -479,39 +368,8 @@ async def test_the_tier_one_statement_plans_to_the_prefix_index_and_not_the_near
     session: AsyncSession,
     analyze: Analyze,
 ) -> None:
-    """The statement reaching `titles` any way other than through the
-    `text_pattern_ops` btree.
-
-    **`ix_titles_name_lower_year` is the trap this case exists for.** It is
-    `(lower(name), year)` with the *default* operator class, it is named as if
-    it were a prefix index, it is the entry immediately above the real one in
-    `_SUSPENDABLE_INDEXES`, and it **cannot serve `LIKE 'pre%'` at all** under
-    this database's collation -- measured on `pgvector/pgvector:pg17` at the
-    pre-`m09a` schema, the plan is `Seq Scan on titles` at cost 1e10 with
-    `enable_seqscan = off`. With `(lower(name) text_pattern_ops)` present the
-    same query is `Index Cond: ((lower(name) ~>=~ 'pre') AND (lower(name) ~<~
-    'prf'))`.
-
-    **The statement is imported, never transcribed.** `_PREFIX` is the literal
-    constant the implementation issues, so this cannot drift from what ships;
-    a hand-copied lookalike that drifts reads exactly like coverage, which is
-    how two earlier tasks in this repository were replaced.
-
-    Both arms of the union are asserted, because the second one's index is a
-    different index on a different table and a statement that lost it would
-    still plan the first correctly.
-
-    **This case failed in CI on 2026-08-25 against a Markdown-only diff, and
-    the repair is the fixture rather than the assertion (issue #79).** The plan
-    it got was `['pk_titles', 'ix_title_search_names_name_lower_prefix',
-    'pk_titles']`: on a `titles` of one row the planner walked the primary key
-    and filtered, which `enable_seqscan = off` does nothing about because a
-    full index walk is not a sequential scan. Two things follow, and both are
-    below. A population, `analyze`d, is what makes the prefix index *cheaper*
-    rather than merely available -- and the near-miss assertion **passed on
-    that failing run while asserting nothing**, because a plan that reaches
-    neither index satisfies it, so the absence is now asserted beside an
-    `Index Cond` that says the right index positioned the scan.
+    """The statement reaching `titles` any way other than through the `text_pattern_ops`
+    btree.
     """
     await _given_a_catalog_to_plan_against(session, _ENOUGH_TO_PLAN_AGAINST)
     film = await _given_title(session, name="Vane Alpha", popularity=1.0)

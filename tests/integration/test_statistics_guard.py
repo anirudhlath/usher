@@ -1,17 +1,4 @@
-"""The machinery `conftest.py` added for issue #79, against a real Postgres.
-
-Every other file in this directory *relies* on `session`'s teardown asserting
-that `pg_class` describes this database. A guard nothing plants against passes
-exactly like a guard that works — the standing rule this repository has learned
-from a `sitecustomize.py` that was never on `PYTHONPATH` and an import contract
-that substituted an anchor string that did not exist — so the leak is created
-here on purpose and the guard is watched finding it.
-
-These cases are also the executable form of two findings that are otherwise
-only prose: `ANALYZE` outliving its own rollback (issues #26, #43) and
-`CREATE INDEX` doing the identical thing through the identical catalog path,
-which no grep for `ANALYZE` would ever have turned up (#79).
-"""
+"""The machinery `conftest.py` added for issue #79, against a real Postgres."""
 
 import pytest
 from sqlalchemy import text

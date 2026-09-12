@@ -1,10 +1,4 @@
-"""The source-adapter contract against an adapter with no wire format.
-
-The companion run is tests/unit/test_adapters_emby_contract.py, which
-executes the identical assertions against the real EmbyAdapter over an
-in-memory Emby. Both are needed: this one proves the assertions are not
-secretly Emby-shaped, that one proves they survive a wire format.
-"""
+"""The source-adapter contract against an adapter with no wire format."""
 
 from collections.abc import AsyncIterator
 

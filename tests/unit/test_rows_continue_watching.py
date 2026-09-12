@@ -1,25 +1,4 @@
-"""`ContinueWatchingProvider`, and the three wrong rows it renders identically
-to.
-
-Every case here asserts on **position** and every one seeds a distractor that a
-broken implementation ranks first. The wrong implementations, named so a reader
-knows what these cases buy:
-
-1. **Returns played titles.** A finished film is the most recently touched
-   thing in the household, so it heads the row -- and a Continue Watching shelf
-   opening with last night's finished film is populated, correctly shaped, and
-   wrong forever.
-2. **Ignores `position_seconds > 0`.** The answer becomes the entire unwatched
-   library in physical order, which satisfies every `len(cards) > 0` assertion
-   ever written about it.
-3. **Orders by `id`.** `ix_watch_states_user_played` carries no recency key, so
-   the tempting implementation takes whatever order the scan produced -- UUIDv7
-   insertion order, *which a fixture seeded in the right order satisfies*. Every
-   ordering case here seeds in the wrong order.
-4. **Falls back to popular titles when it finds nothing.** A home screen that
-   looks personalised on a household that has watched nothing, and the failure
-   mode that survives review because the screen looks right.
-"""
+"""`ContinueWatchingProvider`, and the three wrong rows it renders identically to."""
 
 from datetime import timedelta
 

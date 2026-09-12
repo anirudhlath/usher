@@ -1,23 +1,5 @@
-"""`m10c`'s five artefacts, one assertion each, plus the two things a
-catalog reader cannot see.
-
-**One assertion per artefact and not one combined case.** A migration that
-ships four of five passes a check naming only the first -- the rule `m08a`
-needed per table and `m09c` generalised per artefact kind
-(`tests/integration/test_migrations.py`). The five are `search_queries.surface`,
-`search_queries.tier`, `ix_search_queries_at`, `ix_llm_calls_at` and
-`ix_llm_calls_generation_id`.
-
-**Two things are asserted off the catalog rather than off `Base.metadata`**,
-because `compare_metadata` is blind to both: a partial index's predicate (a
-full index answers every membership check a partial one does), and a
-`server_default` (the model would report whatever the model says, which is not
-what the migration left behind).
-
-**And two things need a database the session fixture cannot give**, so they
-build a scratch one and drive alembic through it: the backfill, which is only
-observable against a row that existed *before* the migration ran, and the
-planner probe, which needs the pre-`m10c` schema as its control arm.
+"""`m10c`'s five artefacts, one assertion each, plus the two things a catalog reader
+cannot see.
 """
 
 import asyncio
@@ -338,29 +320,10 @@ async def test_one_step_back_and_forward_restores_each_artefact(
 async def test_a_down_and_up_cycle_relabels_a_suggest_row_and_the_artefact_check_cannot_see_it(
     postgres_url: str,
 ) -> None:
-    """🔴 **The five artefacts above come back and the data does not**, and
-    nothing in this file could say so: every assertion beside this one reads
-    `information_schema` or `pg_indexes`, so a cycle that restored the whole
-    schema over silently rewritten rows passes all five.
-
-    `m10c.downgrade()` drops `surface` and `tier` from a table it does not
-    drop, so the values are gone with no side table to park them in; the
-    re-`upgrade()` then backfills `'search'` over every row, which is *true*
-    of every row that existed at `m10c` and **false of every row J2's writer
-    has written since**. The migration's docstring states this and this case
-    is what makes the statement a measurement -- a paragraph nothing runs is
-    how a claim about reversibility goes stale.
-
-    ⚠️ **It is deliberately not a test of the missing `WHERE`.**
-    `WHERE surface IS NULL` on that `UPDATE` would change nothing here,
-    because the column has just been re-added and every row is NULL; the
-    assertions below would read identically with it in place. What is being
-    pinned is the `drop_column`, which is where the values actually go.
-
-    The `search` row is the control. Both rows go round the same cycle, and
-    only one of them comes back carrying a different fact -- without it,
-    *"the suggest row reads `search` afterwards"* is also what a cycle that
-    deleted every row and re-seeded defaults would produce.
+    """🔴 **The five artefacts above come back and the data does not**, and nothing in this
+    file could say so: every assertion beside this one reads `information_schema` or
+    `pg_indexes`, so a cycle that restored the whole schema over silently rewritten rows
+    passes all five.
     """
     admin, scratch, url = await scratch_database(postgres_url, "relabel")
     try:

@@ -1,9 +1,4 @@
-"""`usher eval`'s argument surface and its exit codes.
-
-The exit code is what CI gates on, so it is pinned here rather than left to
-the workflow file -- a job that greps stdout is a job that goes green when a
-message is reworded.
-"""
+"""`usher eval`'s argument surface and its exit codes."""
 
 import pytest
 

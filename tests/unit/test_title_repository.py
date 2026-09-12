@@ -1,8 +1,6 @@
-"""Unit coverage for usher.db.repositories.title's pure helpers -- no
-Postgres needed: `_to_row` only constructs a `TitleRow` ORM instance in
-memory, it never touches a connection. Everything that needs a live
-database (add/get/update/... themselves) lives in
-tests/integration/test_title_repository.py instead.
+"""Unit coverage for usher.db.repositories.title's pure helpers -- no Postgres needed:
+`_to_row` only constructs a `TitleRow` ORM instance in memory, it never touches a
+connection.
 """
 
 from usher.db.models.title import TitleRow

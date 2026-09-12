@@ -1,32 +1,4 @@
-"""Structural guarantees about `usher.eval` that no runtime test can see.
-
-Each is an absence claim -- *nothing imports this package*, *nothing outside
-one package imports `ranx`*, *no migration has quietly acquired this schema* --
-and an absence is exactly what rots silently, because the thing that would
-falsify it is a line somebody adds in a file this test does not name.
-
-**Two groups, nine cases.** Three are about the import contracts: the
-eleventh's source list, the twelfth's, and the one inch of the twelfth's claim
-that a `forbidden` contract cannot express. The other six are Task 7's, and
-they are about the `eval` schema staying outside the alembic chain. **Four of
-those six are one claim asserted four ways, because alembic can acquire a
-schema through any of them and a guard that checks one reads exactly like a
-guard that checks all four**: a migration file naming it, a model putting a
-table in `Base.metadata`, the chain growing a second head, and `env.py`
-widening what `--autogenerate` reflects. The last two are about the DDL file
-itself -- that it ships beside the module, and that it is spelled so applying
-it twice is safe. This docstring said there were three and predicted a fourth
-until Task 7 landed; a docstring promising cases that do not exist is the same
-kind of rot one layer up, and so is one that under-counts them.
-
-**Every case here derives its expectation from a walk of the package**, which
-is the repair `test_ports_repository_package.py` makes for the same failure
-mode one contract up: a static-analysis contract configured by an enumeration
-needs a test that the enumeration is complete, and a hand-written expected list
-is a second copy of the thing under test. Each walk carries its own premise
-guard, because a scan that globs nothing passes exactly like a scan that
-passes.
-"""
+"""Structural guarantees about `usher.eval` that no runtime test can see."""
 
 import ast
 import pkgutil
@@ -46,21 +18,13 @@ from usher.db.base import Base
 
 _ROOT = Path(__file__).resolve().parents[2]
 
-# `usher.cli` is the eval package's composition root -- `usher eval` is a
-# subcommand -- so it is exempt, exactly as `usher.composition` is exempt from
-# the contracts it composes. `usher.eval` is the forbidden module itself and
-# cannot be a source of a contract forbidding it. Every other top-level name
-# is a source, and the case below is what makes that sentence true rather than
-# aspirational.
+# `usher.cli` is the eval package's composition root -- `usher eval` is a subcommand --
+# so it is exempt, exactly as `usher.composition` is exempt from the contracts it
+# composes.
 _EXEMPT = {"usher.cli"}
 _THE_PACKAGE_ITSELF = {"usher.eval"}
 
 # The twelfth contract's exemption, and it is a different one on purpose.
-# `usher.cli` is *not* exempt there: being the harness's composition root is a
-# reason to let it import `usher.eval`, and no reason at all to let it import
-# `ranx`. What is exempt is the one package allowed to name the library, and it
-# is exempted from *both* walks by subtraction -- `usher.eval` drops out of the
-# top-level walk because its children are enumerated instead.
 _MAY_IMPORT_RANX = "usher.eval.metrics"
 
 # The fifth contract, found by what it forbids rather than by its name, for the
@@ -69,12 +33,9 @@ _MAY_IMPORT_RANX = "usher.eval.metrics"
 # `test_the_eval_package_is_named_by_an_import_contract`.
 _THE_COMPOSITION_ROOT = "usher.cli"
 
-# The one source the eleventh contract lists that nothing in the fifth
-# contract's six can reach -- which is what makes it the documented exception to
-# that contract's safety argument. It is the *only* thing named here: the case
-# below derives the unreachable set from the graph and asserts it equals exactly
-# this, rather than looping over the three modules that are reachable, which
-# would be a second copy of a fact a reader has to trust somebody enumerated.
+# The one source the eleventh contract lists that nothing in the fifth contract's six
+# can reach -- which is what makes it the documented exception to that contract's safety
+# argument.
 _REACHED_BY_NOTHING = "usher.__main__"
 
 # The second group's two paths. `schema.sql` is reached through
@@ -120,53 +81,10 @@ def _contracts() -> list[dict[str, Any]]:
 
 
 def test_the_eval_package_is_named_by_an_import_contract() -> None:
-    """The allowlist note in `[tool.importlinter]` says a new top-level package
-    must be named by some contract or it escapes all of them -- and **the
-    contract's `source_modules` list is the whole contract**, so a top-level
-    name that lands unlisted is a module free to import a dev-only extra while
-    the gate still reports 11 kept.
-
-    That is not hypothetical here: `usher.__main__` was missing from the list
-    as first written, and a *used* `from usher.eval import goldens` planted in
-    it reported **11 kept, 0 broken**. The container entrypoint could have
-    imported the eval harness and nothing would have said so.
-
-    So the expectation is **derived rather than hand-written**, which is the
-    repair `test_ports_repository_package.py` makes for the same failure mode
-    one contract up: the membership is exactly what `_top_level_names()` walks,
-    so the two agree by construction instead of by someone remembering. A
-    hand-written subset -- four layers checked in a loop, as this case began --
-    passes just as happily against a list missing five.
-
-    **`allow_indirect_imports` is asserted here too, and it is the same kind of
-    claim: the configuration *is* the contract.** Measured 2026-08-19 -- with
-    the flag deleted and the `usher eval` subcommand planted (a used,
-    ruff-clean `from usher.eval.metrics import ir` in `usher/cli.py`), this
-    contract reports **11 kept, 1 broken** on
-    `usher.__main__ -> usher.cli -> usher.eval.metrics.ir`, because a
-    `forbidden` contract reports indirect chains by default and the container
-    entrypoint imports the CLI. So the `usher.cli` exemption does not hold for
-    the one case it exists for, and the flag is what makes it hold.
-
-    **The assertion is here because the repair somebody will reach for is the
-    wrong one.** The red names `usher.__main__`, so the obvious fix is to drop
-    it from `source_modules` -- which unpicks the measured hole recorded above
-    (a used `from usher.eval import goldens` in `__main__.py` reported *11
-    kept, 0 broken* while unlisted) and then fails the set equality below,
-    pointing the reader further from the repair. A one-token deletion that
-    re-arms a trap is exactly the shape a configuration test exists for.
-
-    **And the flag's *safety* argument is pinned too, which until 2026-08-19 it
-    was not.** The flag is defensible because the fifth contract still reports a
-    chain through `usher.cli` for every source that can reach it -- a measured
-    graph fact (`usher.config`, `usher.composition` and `usher.telemetry` had
-    3, 3 and 12 direct importers inside that contract's six on the day it was
-    written) with nothing checking it, next to four things about the same flag
-    that *were* checked. A refactor leaving one of those three unimported from
-    within the six would reopen the hole with the gate still at 12 kept and
-    every existing assertion here green, so the last block below derives the
-    reachability from `grimp` instead, and derives `usher.__main__` as the
-    single exception rather than repeating the prose.
+    """The allowlist note in `[tool.importlinter]` says a new top-level package must be
+    named by some contract or it escapes all of them -- and **the contract's
+    `source_modules` list is the whole contract**, so a top-level name that lands
+    unlisted is a module free to import a dev-only extra while the gate still reports 11
     """
     naming = [one for one in _contracts() if "usher.eval" in one.get("forbidden_modules", [])]
     assert len(naming) == 1, (
@@ -214,21 +132,11 @@ def test_the_eval_package_is_named_by_an_import_contract() -> None:
         f"listed but gone: {sorted(set(contract['source_modules']) - walked)}"
     )
 
-    # **The safety argument for `allow_indirect_imports`, which until now rested
-    # on a measured graph fact that nothing checked.** What the flag gives up is
-    # a chain through `usher.cli`; what makes that acceptable is that the fifth
-    # contract ("cli is a composition root, nothing depends on it") carries no
-    # such flag, so any source it *can reach* still gets the chain reported
-    # there. `usher.__main__` is the documented exception -- nothing imports it,
-    # which is exactly what it is for -- and the rest of the argument is a
-    # property of the graph that a refactor could quietly falsify with the gate
-    # still reporting 12 kept.
-    #
-    # So the exception is **derived** rather than asserted in prose: every
-    # source the eleventh contract lists and the fifth does not is checked for
-    # reachability, and the set that comes back unreached must be exactly
-    # `usher.__main__`. A refactor that left `usher.telemetry` unimported from
-    # within those six fails here by name.
+    # **The safety argument for `allow_indirect_imports`, which until now rested on a
+    # measured graph fact that nothing checked.** What the flag gives up is a chain
+    # through `usher.cli`; what makes that acceptable is that the fifth contract ("cli
+    # is a composition root, nothing depends on it") carries no such flag, so any source
+    # it *can reach* still gets the chain reported there.
     guarding = [
         one for one in _contracts() if one.get("forbidden_modules") == [_THE_COMPOSITION_ROOT]
     ]

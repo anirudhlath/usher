@@ -1,26 +1,5 @@
-"""`usher.http.server.duration` -- the positive control behind PRD 10's
-correction rather than a new instrument.
-
-**The bar was written before this ran:** if the shipped app already emits a
-route-templated server-duration histogram, PRD 10's row is corrected to name
-it rather than duplicated under a `usher.` prefix; if it does not,
-`usher.http.server.duration` gets added. Re-measured 2026-08-11 through a real
-`create_app()` against a real Postgres and real requests with an
-`InMemoryMetricReader`: `FastAPIInstrumentor.instrument_app(app)`
-(`api/app.py:127`) already emits `http.server.duration` -- unit `ms`, scope
-`opentelemetry.instrumentation.fastapi` -- on every request, carrying
-`http.status_code` and `http.target` = the **route template**. Recording a
-second histogram over the same measurement would double the export for one
-relabelled series and is exactly the two-vocabularies-under-one-name hazard
-PRD 10 already warns about for `provider`.
-
-This is the case that makes that a measurement rather than a claim: two
-requests to `GET /titles/{id}` with two *distinct* unknown ids collapse into
-**one** series, because `http.target` is the template
-(`/titles/{title_id}`), not the path. Same discipline that caught
-`SQLAlchemyInstrumentor` producing no spans for three milestones while its
-wiring reported success -- an instrument existing is not the same claim as an
-instrument being emitted.
+"""`usher.http.server.duration` -- the positive control behind PRD 10's correction
+rather than a new instrument.
 """
 
 from collections.abc import AsyncIterator, Iterator

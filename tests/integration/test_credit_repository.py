@@ -1,14 +1,4 @@
-"""`PostgresCreditRepository` against the real database.
-
-The shared contract runs here unchanged, plus the four things a dict cannot
-express: a foreign key, a CHECK constraint, the partial unique index doing its
-one job, and a poisoned session.
-
-`FakeCreditRepository`'s delete scope is structurally correct -- a dict filter
-cannot be derived from the wrong collection by accident -- so
-`test_replacing_for_a_title_with_no_new_credits_still_clears_it` is a real
-assertion only here.
-"""
+"""`PostgresCreditRepository` against the real database."""
 
 import uuid
 
@@ -37,12 +27,7 @@ _PEOPLE = {
 }
 
 # **`ORDER BY id`, because `m09a` gives this table no rank column and that is
-# deliberate** -- an alias is a set, not a ranking. The credited-person half
-# does have an order (`credit_names`', top-billed first) and the only thing
-# carrying it is the UUIDv7 primary key: `PostgresCreditRepository` mints one
-# per name, in one pass, in the sequence the caller gave. So this read is the
-# ordering assertion's whole mechanism and it is spelled here rather than
-# inside a helper.
+# deliberate** -- an alias is a set, not a ranking.
 _READ_SEARCH_NAMES = """
 SELECT name FROM title_search_names
 WHERE title_id = CAST(:title_id AS uuid) AND kind = :kind

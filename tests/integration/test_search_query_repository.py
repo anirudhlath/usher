@@ -1,14 +1,4 @@
-"""`PostgresSearchQueryRepository` against the real database.
-
-The shared contract runs here unchanged, and this is the arm where nearly all
-of it is load-bearing rather than structural -- `tests/fakes/
-search_query_repository.py` enumerates the four things a dict cannot express.
-Plus the cases only a real column, a real foreign key and a real transaction
-can produce: a `latency_ms` too large for the `integer` column that holds it,
-an empty `query` the table's own CHECK refuses, a `user_id` and a
-`clicked_title_id` naming no row, and the SAVEPOINT that lets a caller keep
-using its session after a refused write.
-"""
+"""`PostgresSearchQueryRepository` against the real database."""
 
 import uuid
 
@@ -132,12 +122,10 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         return await _seed_title(self._session)
 
     async def add_user(self) -> uuid.UUID:
-        # A real second `users` row, not an invented id: `search_queries`
-        # scopes by `user_id` in a `WHERE`, which no foreign key defends, so
-        # a made-up id would make the scope case pass for the wrong reason
-        # only if the *predicate* were also what refused it. It is not --
-        # `record_outcome` never writes `user_id` -- but the control half of
-        # that case does have to be a household this schema accepts.
+        # A real second `users` row, not an invented id: `search_queries` scopes by
+        # `user_id` in a `WHERE`, which no foreign key defends, so a made-up id would
+        # make the scope case pass for the wrong reason only if the *predicate* were
+        # also what refused it.
         return await _seed_user(self._session)
 
     async def test_a_query_naming_no_household_is_a_port_error(
@@ -183,26 +171,8 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """**The case the whole error contract rests on**, and Postgres-only
-        because a Python `int` has no ceiling to hit.
-
-        `latency_ms` is `integer`, so `2**31` overflows it -- reachable
-        because `SearchQueryRecord.latency_ms` is a plain, unbounded `int`,
-        the identical shape `curated_rows."position"` and
-        `genome_tags.tag_id` measured
-        (`.claude/rules/db-and-sql.md`). It is refused **client-side**, by
-        asyncpg's own binary encoder, before a byte reaches Postgres --
-        `sqlalchemy.exc.DBAPIError`, `exc.orig.__cause__` an
-        `asyncpg.exceptions.DataError`, SQLSTATE `22000`, and there is no
-        constraint to name: this is the column's declared width refusing a
-        value, not a named constraint firing.
-
-        **The exception this must catch is not the obvious one.** An
-        implementation catching `IntegrityError` alone -- which is most
-        sibling repositories' house style, and was this table's precedent
-        before the measurement -- lets a raw SQLAlchemy exception cross the
-        port boundary, and the only way a caller could then handle it is to
-        import `sqlalchemy` itself, the one thing ADR-0009 forbids.
+        """**The case the whole error contract rests on**, and Postgres-only because a
+        Python `int` has no ceiling to hit.
         """
         too_large = search_query_record(user_id=user_id, latency_ms=2**31)
 

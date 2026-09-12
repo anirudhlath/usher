@@ -1,21 +1,4 @@
-"""`GET /titles/{id}/similar`, over `SimilarityService` and port fakes.
-
-**Two providers are overridden, `get_similarity_service` and
-`get_title_repository`, and nothing about the service is stubbed.** The real
-`SimilarityService` runs over `FakeTitleNeighborRepository`/
-`FakeTitleEmbeddingRepository`/`FakeTitleRepository`, so a case here is
-exercising the route, the DTO and the service's own ordering and staleness
-arithmetic on one path, not a stub of them.
-
-**Every id below is a fixed `uuid.UUID(int=...)` where order matters, for the
-reason `test_services_similar.py` gives:** a `Title.id` defaults to a
-monotonic UUIDv7, so leaving two neighbours to mint in creation order would
-make "stored rank order" and "id order" and "insertion order" agree by
-accident and prove nothing about which one the route actually used.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""`GET /titles/{id}/similar`, over `SimilarityService` and port fakes."""
 
 import ast
 import inspect

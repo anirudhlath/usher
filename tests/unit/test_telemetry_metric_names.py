@@ -1,83 +1,4 @@
-"""PRD 10's metric catalogue, pinned against what the process actually emits.
-
-**A dashboard panel is written against a *name*, and every way of getting that
-name wrong is silent.** This file closes the two doors M10 Phase 0 measured
-open, and they are independent of each other:
-
-- **The catalogue drifts from the code.** A documented metric nothing emits is
-  a permanently empty panel, indistinguishable from a healthy zero -- the
-  hazard `docs/prd/10-telemetry-and-dashboards.md`'s own preamble names. The
-  declared half below walks `src/usher/` for the seven `Meter` instrument
-  factories and compares the harvested names against the catalogue's rows.
-- **The convention in force changes underneath both.** Setting
-  `OTEL_SEMCONV_STABILITY_OPT_IN=http` does not rename
-  `http.server.duration`; it *removes* it and emits
-  `http.server.request.duration` at unit `s` instead. Nothing raises. The
-  measured half drives one real request and reads the name and the unit back.
-
-**The counts are 41 and 42 and neither is a typo.** The catalogue has **42**
-rows; the AST scan finds **41** declared instrument names; the difference is
-exactly `http.server.duration`, which Usher does not declare because
-`FastAPIInstrumentor` emits it (`src/usher/api/app.py:168`). Asserting
-`declared == catalogue - {"http.server.duration"}` is what states that in a
-form that cannot go stale silently. *(34/35 until M10's S2 added
-`usher.source.throttle.wait`, the outbound rate gate's own series, 35/36 until
-its S8 added `usher.sync.retraction.fraction`, 36/37 until its J4 added the
-scheduler's three -- `usher.scheduler.job.duration` and `.failures` in
-`services/scheduler.py`, `.due` in `telemetry.py` -- and 39/40 until its D1
-added `usher.suggest.duration` and `.results` in `services/search.py`.)*
-
-⚠️ **That equality is load-bearing beyond this file.** It is what makes the
-catalogue fully-shipped by construction -- a row for an instrument nothing
-declares fails here -- which is the fact
-`test_telemetry_search.py::test_prd_10_marks_every_milestones_rows_as_shipped`
-relies on to assert `✅` over *every* row rather than over one milestone's.
-Weaken this to a subset check and that case silently becomes a hope.
-
-**Both halves are scans, and a scan that globs nothing passes exactly like a
-scan that found nothing to report** -- CLAUDE.md's *"a run that did not run is
-not a pass"*. So each carries a premise guard placed *before* the value it
-protects: the instrument walk must find something and must find a named
-anchor; the table parse must find 42 rows, which is the premise a Markdown
-regex loses the moment the table is reformatted; and the request must have
-produced points before any unit is read off one.
-
-⚠️ **The measured half cannot be made red from inside this suite, and the
-reason is a fixture rather than anything here.** `tests/conftest.py`'s autouse
-`clean_environment` deletes every `USHER_*`/`OTEL_*` variable from
-`os.environ`, and `_OpenTelemetrySemanticConventionStability._initialize()`
-runs inside `create_app()` (`fastapi/__init__.py:271`, `asgi/__init__.py:597`)
--- i.e. *after* the scrub. So `OTEL_SEMCONV_STABILITY_OPT_IN=http uv run
-pytest` on this node passes: the variable never reaches the instrumentation.
-Demonstrated red 2026-08-14 by planting one `continue` into that fixture's
-scrub loop, which produced *"the default HTTP semantic conventions are not in
-force: http.server.duration is absent and the scope emitted
-['http.server.active_requests', 'http.server.request.duration',
-'http.server.response.body.size'] at units ['By', 's', '{request}']"*.
-
-**The cheaper way to show a fixture ate something, worth reaching for first:**
-a throwaway case that prints its own view of the environment. With
-`OTEL_SEMCONV_STABILITY_OPT_IN=http` genuinely set in the parent shell, one
-that printed `os.environ.get(...)` and
-`_OpenTelemetrySemanticConventionStability._initialized` reported `None` and
-`False`. Non-invasive, no plant to restore, and it distinguishes *"the
-variable never arrived"* from *"it arrived and had no effect"* -- which a
-plant into the fixture cannot.
-
-Read the consequence precisely: **inside pytest this assertion is held by
-`clean_environment`, so it does not pin the deployment's environment.** What it
-does pin, and what it is worth keeping for, is the *other* way the name moves
--- a dependency upgrade that changes the default convention, which no
-environment variable is involved in and which is the drift PRD 10's catalogue
-is written against. The environment-variable half is pinned by
-`test_the_semconv_opt_in_cannot_be_set_from_a_dotenv_file` below and by the
-three deployment-config assertions it cites, not by this case.
-
-The full measurement -- the two-row semconv table, the two predicates in the
-installed contrib package that produce it, the `http/dup` third mode and the
-four places the opt-in cannot be set -- is in
-`.claude/rules/api-telemetry-and-lanes.md`.
-"""
+"""PRD 10's metric catalogue, pinned against what the process actually emits."""
 
 import ast
 import re
@@ -97,21 +18,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SOURCE = _REPO_ROOT / "src" / "usher"
 _PRD_10 = _REPO_ROOT / "docs" / "prd" / "10-telemetry-and-dashboards.md"
 
-# The seven factories on `opentelemetry.metrics.Meter`. Filtering on the
-# *factory* name and never on a `usher.` prefix is deliberate and measured: a
-# naive walk for any attribute starting with `create_` finds 122 call sites in
-# `src/usher/`, of which 79 are Alembic's `op.create_table`/`create_index`/
-# `create_foreign_key` under `db/migrations/versions/`, one is
-# `sa_asyncio.create_async_engine` (`db/base.py:110`) and six are
-# `asyncio.create_task` -- 79 + 36 + 1 + 6 = 122, with no overlap.
-# **All six tasks carry a `name=`, and every one of them renders `usher.*`.**
-# Four are string literals: `usher.lane.worker`, `usher.lane.refresh`,
-# `usher.lane.rows.refresh` (`api/lanes.py:204-208`) and `usher.jobs.heartbeat`
-# (`services/jobs.py:317`). Two more are f-strings a literal-only scan does not
-# see at all -- `f"usher.lane.push.{source.name}"` (`api/lanes.py:358`) and
-# `f"usher.job.{job.kind.value}"` (`services/jobs.py:340`). So a prefix filter
-# would drag **six** task names into the comparison looking exactly like six
-# undocumented metrics, not the three an earlier draft of this comment claimed.
+# The seven factories on `opentelemetry.metrics.Meter`.
 _INSTRUMENT_FACTORIES = frozenset(
     {
         "create_counter",
@@ -129,16 +36,6 @@ _INSTRUMENT_FACTORIES = frozenset(
 _INHERITED = "http.server.duration"
 
 # `| Metric | Type | Labels | Emitted |`, and the header that anchors it.
-#
-# ⚠️ **This table has a second reader**, and the two are deliberately not
-# merged: `tests/unit/test_telemetry_search.py:_ROW` parses the same rows with
-# its own regex, capturing the *type* and *milestone* columns to assert M6's
-# "documented as a histogram, not a counter" claim, while this one captures
-# only the name for the 41-vs-42 census. Merging them would collapse two
-# different questions into one and destroy the independence — measured, in M10
-# O4's sweep: deleting one catalogue row kills a case in *both* files, and that
-# second cover is only visible to a sweep run over the whole of `tests/unit`.
-# Change the table's shape and both regexes need checking.
 _TABLE_HEADER = "| Metric |"
 _ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|")
 

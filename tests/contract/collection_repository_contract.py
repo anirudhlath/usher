@@ -1,19 +1,4 @@
-"""Behaviour every `CollectionRepository` implementation must satisfy.
-
-`FranchiseProvider`'s whole question is `list_owned`, and PRD 06's signal is
-*"you own 2 of 4"* -- two numbers **and** the cards to render. Four of the
-nine cases below are about the ways that sentence comes out wrong while still
-rendering: a completeness signal that always reads complete, an unavailable
-film counted as owned, a franchise you own one of, and a movie's collection
-landing on a series.
-
-**Every case names the wrong implementation it rules out.**
-
-Subclass and provide `repository` and `seeder`. The seeder writes the two
-things this port cannot -- titles, and the `media_items` rows that make a
-title *owned* -- and its `ABC` shape is ADR-0001's argument applied to a test
-double: a `Protocol` would let a subclass drift out of the suite silently.
-"""
+"""Behaviour every `CollectionRepository` implementation must satisfy."""
 
 import uuid
 from abc import ABC, abstractmethod

@@ -1,14 +1,4 @@
-"""Behaviour every `TitleMatchRepository` implementation must satisfy.
-
-Matching at catalog scale. `FakeTitleMatchRepository` matches on
-`name.lower()` in Python, so it agrees with `lower(name)` by construction and
-nothing here can tell a query that uses `ix_titles_name_lower_year` from one
-that seq-scans 1,271,138 rows per probe --
-`tests/integration/test_title_match_repository.py` asserts on the plan for
-exactly that reason.
-
-Subclass and provide `repository` and `catalog`.
-"""
+"""Behaviour every `TitleMatchRepository` implementation must satisfy."""
 
 import uuid
 from abc import ABC, abstractmethod

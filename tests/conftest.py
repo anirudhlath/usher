@@ -12,25 +12,11 @@ from opentelemetry.metrics._internal import _ProxyMeter
 
 from usher.config import Settings, get_settings
 
-# **`tests/contract/*_contract.py` does not match `python_files`, so nothing
-# rewrites its assertions unless this line does.** Every shared contract suite
-# in this repository lives in a module pytest never collects -- the subclasses
-# under `tests/unit/` and `tests/integration/` are what get collected, and the
-# suite itself is only ever *imported* by them. Assertion rewriting happens at
-# import time and only for modules pytest collects or is told about, so without
-# this every `assert` in ~20 contract suites reports a bare `AssertionError`
-# with no values.
-#
-# Measured on one failure while reviewing M8 Task 10: `assert stored == call`
-# inside `llm_call_repository_contract.py` printed `AssertionError` and nothing
-# else, while the identical comparison written in an integration file printed
-# the full pydantic diff. That is also *why* two dead assertions in that suite
-# were expensive to find -- a bare `AssertionError` at a line number says
-# nothing about which of eleven columns moved.
-#
-# Must run before the first import of anything under `tests.contract`. This is
-# the rootdir conftest, which pytest imports before collecting anything, so it
-# does.
+# **`tests/contract/*_contract.py` does not match `python_files`, so nothing rewrites
+# its assertions unless this line does.** Every shared contract suite in this repository
+# lives in a module pytest never collects -- the subclasses under `tests/unit/` and
+# `tests/integration/` are what get collected, and the suite itself is only ever
+# *imported* by them.
 pytest.register_assert_rewrite("tests.contract")
 
 
@@ -66,46 +52,9 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def reset_otel_tracer_provider() -> Iterator[None]:
-    """Isolate every test from any real SDK `TracerProvider` a previous
-    test (or `usher.telemetry.configure_tracing`, which every `create_app()`
-    call runs) installed.
-
-    `opentelemetry.trace.set_tracer_provider()` is deliberately set-once at
-    the API level — `configure_tracing`'s own idempotency guard relies on
-    exactly that behaviour to avoid leaking a `BatchSpanProcessor` thread
-    across repeated `create_app()` calls in one process (see its
-    docstring). That same set-once behaviour becomes a test-order
-    dependency without this fixture: whichever test in the session
-    installs a real provider first "wins" it for every test after.
-    Verified directly: without this reset, running a test that calls
-    `trace.set_tracer_provider(TracerProvider())` before
-    `test_no_trace_context_outside_a_span` makes the latter fail with
-    `KeyError('trace_id')` — a stale, still-valid span context leaks in
-    from the earlier test's span instead of the "no active span" state
-    the test's name promises.
-
-    There is no public "unset" API — a real deployment is never meant to
-    call `set_tracer_provider` more than once per process. Reaching into
-    the module's private `_TRACER_PROVIDER`/`_TRACER_PROVIDER_SET_ONCE`
-    state is the same trick OpenTelemetry's own test suite uses for this.
-
-    **Clearing the global provider is not enough on its own**, which is
-    what the second half below is for. `usher.adapters.emby.session` and
-    friends call `trace.get_tracer(...)` at *import* time, when no real
-    provider exists yet, so each holds a `ProxyTracer` — and a `ProxyTracer`
-    caches the first real provider it ever resolves in `_real_tracer` and
-    never looks at the global again (verified against the installed SDK's
-    own source; an in-code comment in
-    `tests/unit/test_adapters_emby_session.py` previously claimed it
-    resolved per call, which is wrong). Whichever test first starts a span
-    through one of those tracers while a real provider is installed
-    therefore owns that tracer for the rest of the session, and every later
-    test's in-memory exporter silently receives nothing. Reproduced
-    directly: adding a span-capturing integration test for the admin
-    routes — which reaches `EmbySession` through the real adapter, earlier
-    in collection order — made
-    `test_every_upstream_request_produces_a_span` fail with an empty span
-    list while it still passed in isolation.
+    """Isolate every test from any real SDK `TracerProvider` a previous test (or
+    `usher.telemetry.configure_tracing`, which every `create_app()` call runs)
+    installed.
     """
 
     def _reset() -> None:
@@ -125,31 +74,8 @@ def reset_otel_tracer_provider() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def reset_otel_meter_provider() -> Iterator[None]:
-    """`reset_otel_tracer_provider`'s twin, for metrics, and it fails in a
-    louder way than the tracer one does.
-
-    `metrics.set_meter_provider()` is set-once exactly like its tracing
-    counterpart -- `configure_metrics`'s own `isinstance` guard depends on
-    that (see its docstring) -- and every `usher` module that emits a metric
-    calls `metrics.get_meter(...)` at *import* time, when no real provider
-    exists yet, so each holds a `_ProxyMeter` whose instruments are
-    `_Proxy*` shells. A `_ProxyMeter` caches the first real meter it is ever
-    handed, and each proxy instrument caches the first real instrument, so
-    whichever test installs a real `MeterProvider` first owns every
-    module-level instrument in the process for the rest of the session.
-
-    Verified directly, and the failure is not a subtle one: three rounds of
-    "install a `MeterProvider` with an `InMemoryMetricReader`, record
-    through `usher.services.jobs._job_duration`, read the reader" print the
-    metric once and then raise `AttributeError: 'NoneType' object has no
-    attribute 'resource_metrics'` -- the SDK logs "Overriding of current
-    MeterProvider is not allowed", the second `set_meter_provider` is a
-    no-op, and the second reader is never registered with any provider at
-    all so `get_metrics_data()` answers `None`. With this reset in place the
-    same three rounds each report `['usher.jobs.duration']`.
-
-    There is no public unset API, for the same reason there is none for
-    tracing: a real deployment installs one provider per process.
+    """`reset_otel_tracer_provider`'s twin, for metrics, and it fails in a louder way than
+    the tracer one does.
     """
 
     def _reset() -> None:

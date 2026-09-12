@@ -1,10 +1,4 @@
-"""`TmdbClient` over `httpx.MockTransport`. No network, no real clock.
-
-The three things a fixture-serving fake provider can never show: the
-throttle, the status-code translation, and that the API key never reaches a
-message. `tests/fakes/metadata_provider.py`'s own docstring names all three
-as its divergences and points here.
-"""
+"""`TmdbClient` over `httpx.MockTransport`. No network, no real clock."""
 
 import asyncio
 from typing import Any

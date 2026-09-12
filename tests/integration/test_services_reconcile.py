@@ -1,21 +1,5 @@
-"""`ReconcileService` against real Postgres, for the one thing the fakes
-cannot say about a refused sweep: whether the session survives it.
-
-`FakeMediaItemRepository` raises `AvailabilitySweepRefused` from Python and
-has no transaction, so "the refusal left the session usable" is true there by
-construction. Against Postgres it is a real question -- any statement error
-aborts the whole transaction until a `ROLLBACK`, and `reconcile` writes the
-`FAILED` run row *after* the refusal. If the refusal came out of a failed
-statement rather than out of a successful `SELECT`, that write would raise
-`PendingRollbackError` and the run would vanish, which is the mirror-image of
-the bug ADR-0015 exists to prevent: the sweep declines to retract, and the
-record that says so is lost.
-
-`commit` is `session.flush` here rather than `session.commit`: the
-integration fixture owns one connection-bound transaction that it rolls back,
-which is what gives each test its isolation. Committing inside it would
-defeat that. The property under test is the *ordering* of the writes, not
-their durability.
+"""`ReconcileService` against real Postgres, for the one thing the fakes cannot say
+about a refused sweep: whether the session survives it.
 """
 
 from collections.abc import AsyncIterator, Iterator
@@ -246,30 +230,7 @@ async def test_a_refused_sweep_reports_both_numbers_where_an_operator_can_see_th
     adapter: _Adapter,
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The refusal's numbers reach a series, and the clean sweep reaches it too.
-
-    🔴 **At HEAD the exception carried `would_retract`, `total` and `ceiling`
-    and nothing published any of them.** `sync_runs.items_retracted` stores the
-    numerator alone, and PRD 10's catalogue had no retraction series at all --
-    so *"this library shed nothing"* and *"this guard refused a walk"* were the
-    same silence to every dashboard.
-
-    **The clean-sweep arm is not decoration.** A histogram published only on a
-    refusal is one an operator cannot distinguish from an exporter that stopped,
-    which is the whole reason `usher.sync.retraction.fraction` is recorded on
-    every finished full walk. A case that seeded only the refusal would pass
-    against exactly that defect.
-
-    **And the refused arm's numerator is `would_retract`, never
-    `SweepResult.retracted`.** A refused sweep retracts nothing, so a fraction
-    computed from what it *did* would record 0.0 for the one state this series
-    exists to make visible. The two differ only when the guard fires.
-
-    **Both arms assert the `source` label as well as the value**, which the
-    first draft of this case did not -- see `_fraction_points`. The premise that
-    makes it a real assertion is the fixture's own: the source is named
-    `Reconcile Source`, which no rendering of a UUID can equal.
-    """
+    """The refusal's numbers reach a series, and the clean sweep reaches it too."""
     for index in range(10):
         adapter.items[f"m{index}"] = _item(f"m{index}")
     first = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
@@ -318,29 +279,7 @@ async def test_a_refused_sweep_records_the_token_the_cli_matches_on(
     source: Source,
     adapter: _Adapter,
 ) -> None:
-    """`sync_runs.error_code` holds `RETRACTION_ERROR_CODE`, and the CLI reads it.
-
-    **Two halves of one agreement, and this is the half a literal in the other
-    would hide.** `cli._sync_failed` names `--allow-full-retraction` only when
-    a failed run carries this code, because that flag resolves a refusal and
-    nothing else -- an escape hatch offered for every read timeout is one an
-    operator learns to paste without reading. If the service stopped writing
-    the column, the CLI would silently stop offering the flag on the one
-    failure it fixes, and `tests/unit/test_cli_errors.py` would stay green
-    because it composes its own row. So the code is asserted here, against a
-    **real** refusal raised by real Postgres and read back through the
-    repository, and imported there rather than spelled twice.
-
-    The negative arm is the point of the second assertion: a transport failure
-    must **not** carry it. Without that, `_recorded_failure` returning the code
-    unconditionally passes -- and the flag would be advertised for every
-    failure, which is the defect the column exists to prevent rather than a
-    weaker version of it.
-
-    A column and not a prefix on `error`: that sentence is built in
-    `ports/ingest.py` from three numbers and PRD 08 lets it be reworded in any
-    release, so a classifier reading it is one wording away from silent.
-    """
+    """`sync_runs.error_code` holds `RETRACTION_ERROR_CODE`, and the CLI reads it."""
     for index in range(10):
         adapter.items[f"m{index}"] = _item(f"m{index}")
     assert (await service.reconcile(source, SyncRunKind.FULL, adapter)).status is (  # type: ignore[arg-type]
@@ -375,30 +314,7 @@ async def test_a_full_walk_of_a_source_holding_nothing_records_a_real_zero(
     adapter: _Adapter,
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """A source with no `media_items` at all is a **division**, not an edge case.
-
-    🔴 `_fraction`'s `if whole else 0.0` guard was unpinned when it was written,
-    and a sweep on 2026-08-19 proved it: deleting the guard survived every
-    reconcile case and the whole of `tests/unit`, because no case anywhere ran a
-    full walk against a source holding nothing. It is not a defensive guard
-    against an impossible state -- **an empty source is the ordinary state of
-    one that has just been registered**, `_SWEEP_COUNTS` answers
-    `total = 0, stale = 0`, `mark_unseen_unavailable` returns
-    `SweepResult(retracted=0, total=0)`, and without the guard the *first*
-    nightly walk of a new source dies of `ZeroDivisionError` inside the
-    instrument rather than completing.
-
-    The guard in `db/repositories/media_item.py:482-485` is a **count
-    comparison rather than a division** for the same reason, so the repository
-    reaches this state happily and hands it on; the metric is the one place the
-    division actually happens.
-
-    Two assertions, because either alone is satisfied by the wrong thing: the
-    run must **complete** (a crash inside the instrument fails it), and the
-    series must carry a **real 0.0** (a service that skipped the record on an
-    empty source would complete too, and would reintroduce exactly the silence
-    the instrument exists to remove).
-    """
+    """A source with no `media_items` at all is a **division**, not an edge case."""
     assert not adapter.items, "the premise: this walk yields nothing at all"
 
     run = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
@@ -491,33 +407,7 @@ async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_do
     source: Source,
     adapter: _Adapter,
 ) -> None:
-    """M10 S6, and the reason the ceiling may not let its run complete.
-
-    `latest_completed_cursor` is `started_at` of the newest **completed**
-    run in the lane, so a delta that stopped at a ceiling and recorded
-    `COMPLETED` would advance the cursor to its own start instant — and
-    everything past the ceiling would never be requested by any delta
-    again. Nothing in `src/` schedules the nightly full reconcile that would
-    otherwise cover it (M9's boundary call 6), so on a shipped deployment
-    with no cron a truncated-and-completed delta is a hole with no closer.
-
-    **Three arms, in this order, because each is a different claim and the
-    third is the one the task exists for.**
-
-    1. The walk really stopped: exactly `CEILING` items were committed and
-       are readable, and the item past the ceiling is not there. Committed,
-       not merely counted — `_flush` commits per batch, so a ceiling costs
-       the cursor advance and nothing else.
-    2. The run is `FAILED` with a ceiling-shaped `error`, read back off the
-       row rather than off the returned object.
-    3. A **second** delta re-requests from the *original* cursor rather than
-       from the truncated run's `started_at`, asserted on the `since` that
-       crossed the port.
-
-    **Real Postgres rather than the fake arm**, because the property is
-    `latest_completed_cursor`'s `WHERE status = 'completed'` and a dict has
-    no such predicate.
-    """
+    """M10 S6, and the reason the ceiling may not let its run complete."""
     service = _service(session, runs, media_items, batch_size=30)
     adapter.items["seed"] = _item("seed")
     completed = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]

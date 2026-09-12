@@ -1,33 +1,4 @@
-"""The playback surface through a real request, a real schema and a real adapter.
-
-**What only this level can see.** `tests/unit/test_api_playback.py` drives the
-same three routes over port fakes with scripted targets, so what is left here
-is everything the fakes stand in for:
-
-- the **un-overridden** dependency graph -- `get_playback_service`,
-  `get_ticket_cipher`, `get_credential_store` and four repositories resolving
-  through FastAPI's own machinery against Postgres, which is a startup error a
-  direct call cannot produce;
-- `PostgresCredentialStore` really **decrypting** a stored credential, so the
-  adapter is built from a round trip rather than from a literal;
-- `PostgresMediaItemRepository.list_for_title` and `list_for_episode`, which
-  are two different statements -- the first carries `AND episode_id IS NULL`,
-  which excludes precisely the rows the second is about, and no fake can make
-  that mistake observable;
-- the **real `EmbyAdapter`** building a real `MediaSources`-derived URL with a
-  real `AccessToken` in it. The unit file's targets are scripted, so its leak
-  assertions are over a token a test wrote; here the token is one the server
-  minted and the adapter fetched, which is the only version of that assertion
-  the shipped path can fail.
-
-**One override and one only**: the adapter factory, pointed at
-`FakeEmbyServer` over an `httpx.MockTransport`. This suite makes no network
-request -- `test_admin_sources.py` states the same rule for the same reason.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request. `media_items` cascades from `sources`; `titles`,
-`seasons` and `episodes` do not cascade from it, so they go by hand.
-"""
+"""The playback surface through a real request, a real schema and a real adapter."""
 
 import uuid
 from collections.abc import AsyncIterator
@@ -136,15 +107,11 @@ class _Seeded:
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
-        # **First, and it is an obligation this file inherited rather than a
-        # tidy-up.** `search_queries.user_id` is `ON DELETE RESTRICT`, so a
-        # committed row from the attribution case below turns another
-        # committing file's `DELETE FROM users WHERE name = 'default'` into a
-        # foreign-key violation -- in that file, not in this one, which is
-        # the shape CLAUDE.md records for `titles` and `jobs`. The rows this
-        # file writes belong to the singleton default household, which it
-        # does not own and must not delete, so the rows go and the household
-        # stays.
+        # **First, and it is an obligation this file inherited rather than a tidy-up.**
+        # `search_queries.user_id` is `ON DELETE RESTRICT`, so a committed row from the
+        # attribution case below turns another committing file's `DELETE FROM users
+        # WHERE name = 'default'` into a foreign-key violation -- in that file, not in
+        # this one, which is the shape CLAUDE.md records for `titles` and `jobs`.
         await session.execute(text("DELETE FROM search_queries"))
         # Takes `media_items` and `source_credentials` with it
         # (`ON DELETE CASCADE`), which is what leaves `titles` unreferenced.

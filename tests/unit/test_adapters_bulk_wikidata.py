@@ -1,8 +1,4 @@
-"""Wikidata SPARQL crosswalk, driven by an httpx MockTransport.
-
-No live WDQS: the handler answers from a table keyed by the property and
-prefix the query names.
-"""
+"""Wikidata SPARQL crosswalk, driven by an httpx MockTransport."""
 
 import datetime as dt
 import email.utils

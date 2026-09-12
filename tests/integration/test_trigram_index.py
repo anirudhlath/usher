@@ -1,10 +1,4 @@
-"""The trigram index the type-ahead path scans, and the GUC that bounds it.
-
-Every assertion here is about the *plan* or about the *candidate set*, never
-about wall clock. A latency assertion on a near-empty test table measures
-the fixture, and this suite has a standing rule against a check that any
-implementation satisfies.
-"""
+"""The trigram index the type-ahead path scans, and the GUC that bounds it."""
 
 import pytest
 from sqlalchemy import text
@@ -95,32 +89,7 @@ async def test_a_fuzzy_lookup_uses_the_trigram_index(session: AsyncSession) -> N
 async def test_the_similarity_threshold_is_set_local_and_does_not_outlive_it(
     session: AsyncSession,
 ) -> None:
-    """The pooled-connection hazard, pinned.
-
-    A bare `SET pg_trgm.similarity_threshold = 0.2` outlives the transaction,
-    outlives the request, and hands the *next* unrelated caller on that
-    pooled connection a threshold it never chose -- which changes how many
-    rows a search returns, silently, for a reason nothing in a log can
-    explain. `SET LOCAL` reverts at the transaction boundary.
-
-    The boundary used here is a SAVEPOINT rather than the whole transaction,
-    and that is a deliberate departure from the plan's own draft. This
-    suite's `session` fixture *is* one transaction, rolled back in teardown,
-    so a `session.rollback()` inside a case ends the fixture's transaction
-    under it. PostgreSQL reverts a `SET LOCAL` on `ROLLBACK TO SAVEPOINT`
-    exactly as it does on `ROLLBACK`, so the property under test is the same
-    one and the fixture survives.
-
-    **This case does not distinguish `SET` from `SET LOCAL`, and saying so is
-    the point.** PostgreSQL reverts a *bare* `SET` too when the transaction
-    that issued it is rolled back, so any rollback-based case -- including the
-    plan's own draft, which used `session.rollback()` -- passes against both
-    spellings. Measured: mutating this case's `SET LOCAL` to `SET` leaves it
-    green. What it does pin is that the threshold is transaction-scoped and
-    the default is 0.3.
-    `test_a_bare_set_outlives_a_commit_and_set_local_does_not` is the one with
-    teeth, because the difference only appears at COMMIT.
-    """
+    """The pooled-connection hazard, pinned."""
     await _warm(session)
     assert await _threshold(session) == pytest.approx(0.3)
 
@@ -173,29 +142,8 @@ async def test_a_bare_set_outlives_a_commit_and_set_local_does_not(
 async def test_a_contrib_guc_is_unreadable_until_something_loads_the_library(
     session: AsyncSession,
 ) -> None:
-    """The lazy-load trap, measured for `pg_trgm` rather than worked around
-    silently in `_warm`, and it is sharper than the `hnsw.%` version the plan
-    records.
-
-    Four measured facts, in the order they bite:
-
-    1. On a backend that has done nothing `pg_trgm`-related,
-       `SHOW pg_trgm.similarity_threshold` **raises**
-       `unrecognized configuration parameter`. The GUC is registered by the
-       library's `_PG_init`, and the library is loaded lazily per backend.
-    2. A *failed* `SHOW` does not load it. Retrying gets the same error, so
-       there is no self-healing probe here.
-    3. `SET LOCAL` of that same GUC **does** load it, and succeeds, and
-       `SHOW` works from then on. So the write path never sees the failure
-       the read path does.
-    4. `pg_settings` still reports **zero** `pg_trgm%` rows at that point,
-       while `SHOW` returns the value that was just set. The two disagree.
-
-    Together those make any feature-detection of a contrib GUC a
-    flaky-test generator and a worse production check: the answer is decided
-    by whatever ran earlier on the pooled connection this caller happened to
-    be handed. `PostgresSuggestIndex` must therefore `SET LOCAL` and move on,
-    never probe first.
+    """The lazy-load trap, measured for `pg_trgm` rather than worked around silently in
+    `_warm`, and it is sharper than the `hnsw.%` version the plan records.
     """
     savepoint = await session.begin_nested()
     with pytest.raises(ProgrammingError):
@@ -217,28 +165,8 @@ async def test_a_contrib_guc_is_unreadable_until_something_loads_the_library(
 
 
 async def test_a_high_threshold_destroys_fuzzy_recall(session: AsyncSession) -> None:
-    """The cliff, asserted as a candidate set rather than quoted as a number,
-    so it stays true on whatever data the fixture holds.
-
-    Measured at 300k rows against one prefix: 0.1 -> 8,020 candidates,
-    0.2 -> 5,611, 0.3 -> 1,774, 0.4 -> 1,057, **0.5 -> 23**. Between 0.4 and
-    0.5 the set collapses 46x, so above roughly 0.45 a single-character typo
-    on a short title produces no candidate at all -- which is exactly the
-    weakness ADR-0002 names.
-
-    This is why 0.3 stays. The wrong implementation it fails: a
-    `PostgresSuggestIndex` that "tightens" the threshold to reduce the
-    re-rank's work, trading away the one thing the fuzzy path exists for.
-
-    **The pair is chosen by measurement, not by eye, and the plan's own draft
-    pair does not work.** `similarity('Harbour Nine', 'harbor nine')` is
-    0.6667 -- still a match at 0.6, so that case asserted `0 == 1`. Length is
-    what decides it: a one-character typo on a long name barely moves the
-    trigram overlap. `similarity('Iron', 'irom')` is **0.4286**, which lands
-    inside the 0.4-to-0.5 band where the measured candidate set collapses
-    46x, so this pair straddles the cliff instead of sitting well clear of
-    it -- and a short title with a single-character typo is precisely the
-    weakness ADR-0002 names.
+    """The cliff, asserted as a candidate set rather than quoted as a number, so it stays
+    true on whatever data the fixture holds.
     """
     await _seed(session, ["Iron"])
     typo = "irom"

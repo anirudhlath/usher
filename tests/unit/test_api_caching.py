@@ -1,16 +1,5 @@
-"""`usher.api.caching` -- the conditional-GET helper, over `GET /home`, the
-adopter whose TTL these cases are written against.
-
-**The real composer, over the repository fakes**, following the same
-correction M5 made for `test_api_home.py`: the router, the DTO and the
-caching helper all stay on the path a request takes, so a wrong ETag reads as
-a wrong ETag rather than as a stub answering whatever a case expected.
-
-Every case here builds its own `create_app()` and overrides `get_row_context`
-(and, where the case needs to control the screen cache's clock, `get_row_cache`
-too) -- the same shape `test_api_home.py` uses, kept local rather than shared
-because this file's cases are about headers and status codes, not about row
-ordering.
+"""`usher.api.caching` -- the conditional-GET helper, over `GET /home`, the adopter
+whose TTL these cases are written against.
 """
 
 import ast
@@ -94,13 +83,7 @@ def _app(
     if cache is not None:
         built.dependency_overrides[get_row_cache] = lambda: cache
     if refreshes is not None:
-        # A queue **nothing drains**, for the cases about the stale-serve
-        # window. `create_app`'s `rows.refresh` lane closes over the app's own
-        # cache and queue in the lifespan, so a `dependency_overrides` entry
-        # does not reach it -- which is what makes this override the way to
-        # observe a scheduled refresh without racing one that runs. (The lane
-        # against the app's own queue has nothing to do here either: its unit
-        # of work opens a session to the dead port above, fails, and logs.)
+        # A queue **nothing drains**, for the cases about the stale-serve window.
         built.dependency_overrides[get_refresh_queue] = lambda: refreshes
     return built
 
@@ -188,29 +171,8 @@ async def test_a_changed_screen_changes_the_etag() -> None:
 
 
 async def test_a_read_inside_the_grace_window_serves_the_previous_bytes_and_the_same_etag() -> None:
-    """**The interaction the case above exists on the other side of**, and it
-    is intended behaviour rather than a tolerated one.
-
-    Inside `SCREEN_STALE_GRACE` the screen cache answers with the entry it
-    already has, so the household is served bytes composed before the new title
-    arrived -- and the ETag is a hash of exactly those bytes, so it is
-    *correctly* unchanged. A conditional GET at this moment is a 304, which is
-    the right answer: nothing the client holds has gone out of date relative to
-    what this server will serve it.
-
-    **The third assertion is what keeps "serve stale" from being "serve stale
-    forever".** Two things bound it and only one of them is the grace constant:
-    the entry stops being servable at `TTL + grace` (the case above), and a
-    stale read *hands the key to the refresher* rather than merely shrugging.
-    Without the `depth == 1` assertion, a `HomeService` that opened the grace
-    window and scheduled nothing passes this whole file, and the household sees
-    the same screen for the full 90 s with no rebuild in flight.
-
-    The queue is overridden with one **nothing drains**, deliberately: the
-    `rows.refresh` lane `create_app` starts holds the app's *own* cache and
-    queue rather than these overrides, so leaving it to race would make an
-    ETag case depend on whether a background rebuild landed between two
-    requests. Here the refresh is observed as *scheduled* and never runs.
+    """**The interaction the case above exists on the other side of**, and it is intended
+    behaviour rather than a tolerated one.
     """
     library = Library()
     resuming = await library.title("A Film Half Watched", added=days_ago(200))
@@ -240,12 +202,7 @@ async def test_a_read_inside_the_grace_window_serves_the_previous_bytes_and_the_
             "serve-stale-forever rather than serve-stale-while-refreshing"
         )
 
-        # The control that makes the absence above falsifiable. `str(arrived)
-        # not in ...` is a negative assertion over a body, and a negative
-        # assertion is satisfied by a body that could never have contained the
-        # value -- a renamed DTO field, a title the provider would not have
-        # shown anyway. Past the grace window the same fixture, the same
-        # client and the same title produce a body that *does* carry it.
+        # The control that makes the absence above falsifiable.
         clock.advance(SCREEN_STALE_GRACE)
         third = await client.get("/home")
         assert str(arrived) in third.text, (
@@ -256,31 +213,9 @@ async def test_a_read_inside_the_grace_window_serves_the_previous_bytes_and_the_
 
 
 async def test_a_conditional_get_against_a_stale_but_served_screen_is_a_304() -> None:
-    """`usher/api/caching.py`'s module docstring reasons about this case and
-    invites A6 to agree with it or contradict it; this is the agreement, in a
-    case rather than in prose.
-
-    The helper hashes whatever the handler handed it, so it is **orthogonal to
-    freshness**: there is no second notion of "fresh enough to 304", only
-    "identical to what was last sent". A client holding the bytes a stale entry
-    is still serving has nothing to re-fetch, so 304 is the correct answer and
-    not a leniency. The day the refresh lands, the served bytes change and the
-    next ETag changes with them -- which is the case above, one boundary over.
-
-    **A title is added between the two requests, and that is what gives this
-    case teeth.** Without it a hard miss would recompose the *same* screen from
-    an unchanged household, hash to the same ETag and answer 304 as well -- so
-    the case would pass whether or not the stale entry was served, and would be
-    a test of nothing. With it, only a stale serve can still answer 304: a
-    rebuild sees the new title, produces different bytes, and answers 200. The
-    third request is the control that says so out loud.
-
-    **What it still cannot see, measured rather than reasoned.** A path that
-    serves the stale entry and then *drops* it survives this whole file: the
-    damage lands on the *next* read, and this case's third request is past the
-    grace window and rebuilding anyway.
-    `tests/unit/test_services_home_stale.py::test_two_reads_over_one_stale_key_schedule_one_refresh`
-    is where that one dies, on the second of two reads inside a single window.
+    """`usher/api/caching.py`'s module docstring reasons about this case and invites A6 to
+    agree with it or contradict it; this is the agreement, in a case rather than in
+    prose.
     """
     library = Library()
     resuming = await library.title("A Film Half Watched", added=days_ago(200))

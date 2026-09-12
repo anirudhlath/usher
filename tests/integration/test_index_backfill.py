@@ -1,18 +1,4 @@
-"""`usher index --backfill`, against real Postgres.
-
-**Two things live here and nowhere else.** `FakeJobQueue.enqueue` counts a
-no-op re-enqueue as a row written while `_ENQUEUE`'s `WHERE jobs.priority <
-excluded.priority` makes Postgres answer 0 -- the fake's seventh recorded
-divergence -- so the zero-rows-on-rerun property is only observable here, and
-a unit case would assert the opposite of the truth and pass. And the stale
-predicate is a join over `title_embeddings` with `md5` evaluated in SQL, which
-a dict cannot answer at all.
-
-**The sweep is driven through `_index` itself rather than through a
-reimplementation of it.** A test that re-wrote the loop would be testing the
-test: the cursor's advance rule is the thing at issue, and it is one line
-inside that function.
-"""
+"""`usher index --backfill`, against real Postgres."""
 
 import asyncio
 import uuid
@@ -492,45 +478,7 @@ async def test_a_re_run_terminates_and_still_honours_limit(
 async def test_a_title_embedded_before_its_credits_landed_is_stale_again(
     sessions: async_sessionmaker[AsyncSession], settings: Settings, clean: None
 ) -> None:
-    """**Why one backfill pass over a freshly enriched tier is not enough.**
-
-    `EnrichService` enqueues `INDEX` and `DERIVE` for the same title in the
-    same breath, both at `BACKFILL`, and deliberately does not order them --
-    the queue claims by `priority DESC, created_at` and the two rows are
-    written in one transaction, so which is served first is the executor's
-    choice. A title whose `INDEX` is claimed first is embedded from a document
-    whose weight-class-B segment is empty, and the instant `DERIVE` writes
-    `credit_names` the stored fingerprint stops reproducing -- because
-    `_FINGERPRINT_SQL` reads that column at position three. The title is stale
-    again, with nothing having failed.
-
-    This is the mirror of
-    `test_search_repository.py::test_an_indexed_title_with_credits_stops_matching_the_stale_predicate`,
-    which pins the *closure*: index a credited title and it stops matching.
-    This one pins the *opening*: index an uncredited title and it starts
-    matching again the moment it acquires credits. Both are properties of the
-    same seventh segment and neither implies the other -- a fingerprint that
-    ignored `credit_names` entirely satisfies the closure case and fails this
-    one.
-
-    **The premise is the first assertion, not a comment**: a title embedded
-    with the composer's own fingerprint is not stale. Without it a case that
-    reported "stale" throughout -- which is what a fingerprint that cannot
-    reproduce an *uncredited* document does -- would read as a pass.
-
-    Red demonstrated by mutation rather than claimed, since the shipped
-    `_FINGERPRINT_SQL` already satisfies this. Both spellings were planted,
-    and the pair is the point:
-
-    - the `usher_array_text(t.credit_names) || CHR(10) ||` line deleted --
-      the careless spelling -- fails the **premise**, because SQL then
-      assembles six segments against `compose_document`'s seven and no
-      uncredited title agrees either;
-    - `usher_array_text(t.credit_names)` replaced by `''` -- the careful
-      spelling, seven segments with a permanently empty third -- passes the
-      premise and fails the **second** assertion, which is the one this case
-      is named for.
-    """
+    """**Why one backfill pass over a freshly enriched tier is not enough.**"""
     title = _title("The Quiet Vacuum")
     await _seed(sessions, title)
     async with sessions() as session:

@@ -1,9 +1,4 @@
-"""The version number, and the three places it is written down.
-
-**A guard, not a discovery.** All three sources already agreed when this file
-was written (measured 2026-09-07: `0.1.0` from each). Nothing here found a bug;
-it exists so that a later edit to one of them cannot pass unnoticed.
-"""
+"""The version number, and the three places it is written down."""
 
 import importlib.metadata
 import pathlib

@@ -1,17 +1,4 @@
-"""`usher.adapters.http` -- the helpers three adapters used to hold a copy of
-each. No network, no adapter: every case here drives a synthesized
-`httpx.Response`, because the point of this module is that it is the *same*
-code on the Emby, TMDb and LLM paths and a case routed through one of them
-would only ever prove it for that one.
-
-The three adapters keep their own cases for what is genuinely theirs --
-`TmdbClient`'s 404 arm sits above this ladder rather than in it, and the
-credential-hygiene cases stay with the client whose credential it is. What
-moved here is the part where they had all written the same thing, and the
-reason it moved is `decode_json`'s `RecursionError` arm: it was fixed in the
-newest copy only, so the two older ones were still one deeply nested payload
-away from taking the worker down.
-"""
+"""`usher.adapters.http` -- the helpers three adapters used to hold a copy of each."""
 
 import asyncio
 import json
@@ -39,15 +26,7 @@ from usher.ports.errors import (
     PortUnavailable,
 )
 
-#: A JSON nesting depth past the one `json.loads` refuses. Measured on CPython
-#: 3.13 at the default recursion limit of 1,000: **9,998 parses and 9,999
-#: raises** `RecursionError` -- the C scanner has its own budget and it is an
-#: order of magnitude past `sys.getrecursionlimit()`, which is why the obvious
-#: guess of "a bit over 1,000" does not reach it and a case built on that guess
-#: would pass against the unfixed code. Clear of the boundary rather than on
-#: it: the exact number is an interpreter property, not this project's. Same
-#: constant and same measurement as `tests/unit/test_adapters_llm.py`, which
-#: pins the two LLM-side halves of this defect.
+# : A JSON nesting depth past the one `json.loads` refuses.
 _DEEP = 12_000
 
 
@@ -399,28 +378,8 @@ async def test_a_disabled_gate_records_no_throttle_series_at_all() -> None:
 
 
 async def test_a_registrys_gate_paces_and_a_second_source_gets_its_own_budget() -> None:
-    """The **behavioural** half of "keyed by `source.id`", which the identity
-    assertions elsewhere cannot state.
-
-    `tests/unit/test_composition.py` pins that two adapters for one source hold
-    the *same* gate object and two sources hold different ones. That is an
-    identity claim, and identity is not the thing an operator experiences —
-    what they experience is that a second server is paced at the full rate
-    rather than at half of it. So this drives two sources through one registry
-    and reads the clock:
-
-    - the second call **for one source** waits `1/rate`;
-    - the first call for a **different** source waits nothing, because it is a
-      different gate with its own `_next`.
-
-    An implementation returning one global gate passes every identity
-    assertion's first half and fails the second arm here, with a number rather
-    than an `is`.
-
-    This is also the only reader of `SourceGateRegistry`'s injected `clock` and
-    `sleep`. They exist so a registry-owned gate can be driven without
-    sleeping, and a constructor argument nothing passes is one nothing covers —
-    `.claude/rules/testing-discipline.md` records that in both directions.
+    """The **behavioural** half of "keyed by `source.id`", which the identity assertions
+    elsewhere cannot state.
     """
     clock = _Clock()
     gates = SourceGateRegistry(2.0, clock=clock, sleep=clock.sleep)
@@ -444,35 +403,7 @@ async def test_a_registrys_gate_paces_and_a_second_source_gets_its_own_budget() 
 
 
 def test_every_httpx_timeout_stringifies_to_the_empty_string() -> None:
-    """The premise `failure_detail` exists for, asserted rather than cited.
-
-    Issue #35: a `watch_state` sync walked 121,000 items for 57 minutes
-    against a real Emby 4.9.5.0, failed, and recorded the whole of
-    `GET /Users/{id}/Items failed:` -- a message ending at the colon,
-    because `str(exc)` was the entire payload.
-
-    The mechanism is general, not per-class. `httpcore.map_exceptions`
-    re-raises as `to_exc(exc)` around whatever it caught -- a bare
-    `TimeoutError()` for every timeout, an `anyio.EndOfStream()` for a read
-    error, both of which stringify empty -- and httpx's
-    `map_httpcore_exceptions` then re-raises with `message = str(exc)`. So
-    the emptiness is a property of the wrapping, and a `TimeoutException`
-    subclass added by a later httpx will have it too.
-
-    Measured on httpx 0.28.1 against real sockets: a server that accepts and
-    never answers gives `ReadTimeout` with `str(exc) == ""`; the blackholed
-    TEST-NET-1 address 192.0.2.1 gives `ConnectTimeout` with `str(exc) ==
-    ""`; a pool of one with a request already in flight gives `PoolTimeout`
-    with `str(exc) == ""`.
-
-    Two of the issue's five are refuted here and the refutation is the
-    reason this case lists them: `RemoteProtocolError` carries h11's own
-    text in all three ways it could be provoked (`"Server disconnected
-    without sending a response."`, `"illegal status line: …"`, `"peer closed
-    connection without sending complete message body …"`) and `ConnectError`
-    carries `"All connection attempts failed"`. Both are *lost* by the fix,
-    deliberately -- see `failure_detail`.
-    """
+    """The premise `failure_detail` exists for, asserted rather than cited."""
     for cls in (
         httpx.ConnectTimeout,
         httpx.ReadTimeout,

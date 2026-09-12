@@ -1,37 +1,4 @@
-"""PRD 06's "served stale while refreshing", against a real Postgres.
-
-**What only this level can see, and it is the whole reason M7 deferred the
-feature rather than half-implementing it.** A background refresh needs a
-session it did not get from a request: the request's own is committed and
-closed by `get_session` when the handler returns, and sharing it with a task is
-the `AsyncSession` concurrency hazard ADR-0025 refuses one layer up -- with the
-same "usually works" signature, which is precisely why a refresh that shared
-the request's session passes almost every test that does not look for it.
-`tests/unit/test_api_lanes.py` can only count units of work opened against a
-fake; here they are real sessions on a real pool.
-
-**The lane is stopped for the first half of each case, deliberately.** That is
-what turns two timing claims into two orderings a case can state without a
-race: with nothing draining the queue, *"the response came back with the
-refresh still queued"* is a fact rather than a coincidence, and *"the request's
-session had already committed and closed before the refresh opened one"* is
-guaranteed rather than usually true. Restarting the lane afterwards is the same
-`LaneSupervisor` the lifespan built, over the same queue and the same cache.
-
-**Stopping the lane makes the ordering true; it does not make it observable,
-and issue #7 is the difference.** A held-back lane guarantees the refresh
-happens after the request -- but the first version of the case then *read* that
-ordering off two `time.monotonic()` windows over `id(session)`, which is a
-guess about ownership dressed as a measurement. `_SessionLog` below records
-which `asyncio` task opened each session and orders the boundaries by its own
-counter, so claim 3 is checked against what was observed rather than against
-when it happened.
-
-**Both cases commit for real and clean up after themselves.** Their footprint
-is the two titles they insert, deleted by id; the `users` row is a singleton
-reached by `ON CONFLICT (name) DO NOTHING` and is left standing, as
-`test_rows_route.py` leaves it.
-"""
+"""PRD 06's "served stale while refreshing", against a real Postgres."""
 
 import asyncio
 import time
@@ -243,52 +210,7 @@ class _Boundary:
 
 @dataclass(slots=True)
 class _SessionLog:
-    """Every ORM session's transaction boundaries, attributed to the task that
-    opened it.
-
-    Registered on `sqlalchemy.orm.Session` itself rather than on one factory,
-    because the claim is about *two* factories: the app's, which the request
-    and the lane both draw from, and this file's own.
-
-    **Two things this deliberately does not do, and both were how the previous
-    version was a race rather than an observation.**
-
-    It does not classify a session by *when* it began. A wall-clock window
-    says "some session started while the request was in flight", which is a
-    statement about the clock; `asyncio.current_task().get_name()` at
-    `after_begin` says which side opened it, which is the statement claim 3
-    actually makes. Verified directly that the name is readable there:
-    SQLAlchemy's greenlet bridge runs the sync event on the awaiting task, so
-    a session opened under `usher.lane.rows.refresh` reports that name.
-
-    And it does not let `id(session)` be recycled. **`id()` is a CPython
-    address and CPython reuses addresses.** Re-measured on this host
-    2026-09-07, replacing the "eight sessions produced five distinct `id()`"
-    figure this docstring carried from 2026-08-19: **2,000 created-and-freed
-    `Session` objects occupy 7 distinct `id()` values; the same 2,000 held by a
-    strong reference occupy 2,000.** The request's `Session` is unreachable
-    long before the refresh opens one, so its address is free for the refresh's
-    session to land on, and `refresh_sessions.isdisjoint(request_sessions)`
-    would then report *"the refresh reused the request's session"* about two
-    different objects -- a flake accusing the code of the exact defect
-    serve-stale exists to prevent.
-
-    `held` keeps every observed session alive for the length of the case, which
-    makes the identity unique by construction instead of by luck. **It is a
-    deliberate leak**, bounded at the sessions one case opens, and it is load
-    bearing rather than an oversight:
-    `test_the_session_log_holds_every_session_it_records_so_no_address_is_recycled`
-    fails if it is simplified away, and the `session_log` fixture asserts on
-    teardown that everything this log keys on is something it holds. Do not
-    delete it.
-
-    **Every address this log reasons about goes through `pin`**, including the
-    commit credit. `commits` used to be fed by a handler that wrote an address
-    down and pinned nothing; it was safe only because `after_transaction_end`
-    fires just after `after_commit` and pinned the session a moment later --
-    an incidental coupling between two independently registered listeners,
-    which is not a thing to rest `request_sessions <= commits` on.
-    """
+    """Every ORM session's transaction boundaries, attributed to the task that opened it."""
 
     boundaries: list[_Boundary] = field(default_factory=list)
     commits: set[int] = field(default_factory=set)
@@ -378,15 +300,11 @@ def session_log() -> Iterator[_SessionLog]:
         event.remove(Session, "after_transaction_end", ended)
         event.remove(Session, "after_commit", committed)
 
-    # **The premise every identity comparison in this file rests on, asserted
-    # rather than assumed.** `held` is a deliberate leak and reads like one, so
-    # the failure mode worth guarding is somebody tidying it away: a log that
-    # pins nothing produces exactly the same green as a log that pins
-    # everything, right up until two sessions share an address. Stated as
-    # coverage of what the log keys on rather than as `len(set(...)) ==
-    # len(...)`, because an emptied `held` satisfies the latter trivially --
-    # which would make this guard unfalsifiable against the one plant it
-    # exists to catch.
+    # **The premise every identity comparison in this file rests on, asserted rather
+    # than assumed.** `held` is a deliberate leak and reads like one, so the failure
+    # mode worth guarding is somebody tidying it away: a log that pins nothing produces
+    # exactly the same green as a log that pins everything, right up until two sessions
+    # share an address.
     addresses = [id(one) for one in log.held]
     assert len(set(addresses)) == len(addresses), (
         "two sessions this log holds share an address, which cannot happen "
@@ -473,26 +391,8 @@ async def test_the_session_log_holds_every_session_it_records_so_no_address_is_r
 async def test_the_session_log_holds_the_session_at_the_moment_it_credits_a_commit(
     session_log: _SessionLog,
 ) -> None:
-    """The commit credit must pin for itself, not inherit a pin from a handler
-    that happens to run next.
-
-    `commits` is a set of bare addresses. Today every session that reaches it
-    is also pinned -- but only *incidentally*, and measured rather than
-    reasoned about: on a no-SQL commit the events fire
-    `after_commit` then `after_transaction_end` (this host, 2026-09-07), so the
-    `ended` handler pins the session a moment **after** `committed` has already
-    written its address down. Nothing states that coupling and nothing checks
-    it, so `request_sessions <= commits` rests on the registration order of two
-    independent listeners.
-
-    F6's reading is the one this case confirms: an unpinned `commits` can only
-    ever produce a false **green** on that arm -- a request session landing on
-    an address some earlier, freed session was credited with inherits the
-    credit -- never the red issue #7 predicted. A false green on *"get_session
-    is the commit boundary"* is the worse of the two.
-
-    A bare `Session` with no bind is enough: it commits without emitting SQL,
-    which is the shortest path that fires `after_commit`.
+    """The commit credit must pin for itself, not inherit a pin from a handler that happens
+    to run next.
     """
     held_when_credited: list[bool] = []
 
@@ -563,47 +463,8 @@ async def test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_o
     session_log: _SessionLog,
     owned: Callable[[str], "asyncio.Future[uuid.UUID]"],
 ) -> None:
-    """The whole feature, end to end, with the lane held back across the
-    request so both orderings are facts rather than races.
-
-    Three claims, and the third is the one M7 deferred the feature for:
-
-    1. **The response is the stale screen.** A slug no provider mints, so this
-       cannot be satisfied by a route that composed a fresh one.
-    2. **The request did not wait for the refresh.** With the lane stopped,
-       the key is still sitting in the queue when the response arrives -- the
-       strongest available spelling of it at the HTTP boundary, and it fails
-       against an implementation that awaited the refresh by *hanging*, which
-       is why `tests/unit/test_services_home_stale.py` also drives the
-       coroutine by hand.
-    3. **The refresh opened a session of its own, after the request's had
-       committed and closed.** Distinct `Session` identities, and the
-       request's last transaction end strictly before the refresh's first
-       begin. A refresh sharing the request's session satisfies claims 1 and
-       2 exactly as well.
-
-       **"Distinct identities" is a property this case has to buy, not one it
-       can read off `id()`.** `id()` is a CPython address and CPython recycles
-       them: measured on this host 2026-09-07, **2,000 created-and-freed
-       `Session` objects occupy 7 distinct `id()` values, and the same 2,000
-       held by a strong reference occupy 2,000.** The request's session is
-       unreachable by the time the refresh opens one, so without a reference
-       held the refresh's session can land on the request's freed address and
-       `refresh_sessions.isdisjoint(request_sessions)` fails -- reporting the
-       `AsyncSession` sharing hazard about two different objects. `_SessionLog`
-       buys the property by holding every session it records (`held`), and
-       that leak is deliberate. **Do not simplify it away**; two cases and the
-       fixture's own teardown assert it, which is the only reason deleting it
-       does not look identical to leaving it.
-
-    **Claim 3 is read off a session log, not off the clock, and issue #7 is
-    why.** Both halves of it used to be inferred from wall-clock windows over
-    `id(session)`: *"a session began between these two `time.monotonic()`
-    readings, therefore it is the request's"*. That is a race twice over --
-    `id()` is a reusable address, and a window is not an owner -- and the
-    repair is to observe both. Each session carries the name of the
-    `asyncio` task that opened it, and the ordering is asserted over the log's
-    own event counter rather than over two floats. See `_SessionLog`.
+    """The whole feature, end to end, with the lane held back across the request so both
+    orderings are facts rather than races.
     """
     await owned("A Film That Arrived Before The Request")
     await app.state.lanes.stop()

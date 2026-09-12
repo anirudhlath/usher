@@ -1,35 +1,4 @@
-"""In-memory `RawPayloadStore`.
-
-**Where this is more forgiving than Postgres, on purpose.** Four places, each
-of which the paired `tests/integration/test_raw_payload_store.py` run is what
-actually closes:
-
-- **It stores Python objects, not JSONB.** Postgres's `jsonb` is a
-  normalising representation: it drops object key order, collapses duplicate
-  keys, and renders every numeric as `numeric`, so a payload does not
-  necessarily come back `==` to what went in. This fake `deepcopy`s and hands
-  back exactly what it was given, so it can never catch a type that survives
-  Python and not JSON.
-- **No unique constraint on `(provider, kind, reference)`** -- it is a dict
-  key, so a collision is structurally impossible rather than rejected. The
-  real one needs `ON CONFLICT` naming that constraint.
-- **The clock is nudged, not real.** `fetched_at` uses `datetime.now(UTC)`
-  and is forced strictly forward if two writes land in the same microsecond,
-  so `test_a_refresh_moves_fetched_at` can never flake here. Postgres's
-  `clock_timestamp()` advances on its own -- and the real trap it guards
-  against, an upsert that leaves `fetched_at` out of its `DO UPDATE SET` and
-  keeps a six-month-old timestamp on a payload fetched this morning, is a
-  mistake this file has no way to make.
-- **No transaction**, so nothing here can leave a session poisoned.
-- **The id is minted here rather than by the caller, and it is preserved
-  across a refresh.** The real `_PUT` supplies a fresh `new_id()` on every
-  call and discards it on the conflict arm, because its `DO UPDATE SET` names
-  `payload` and `fetched_at` and not `id`. This fake has no `ON CONFLICT` to
-  express that with, so it must do it by hand: `put` keeps any id already
-  stored under the key. Getting that wrong is the one way this file can make
-  `iterate` non-terminating, which is why the contract pins it rather than
-  leaving it to the integration run.
-"""
+"""In-memory `RawPayloadStore`."""
 
 import copy
 import uuid
@@ -101,11 +70,6 @@ class FakeRawPayloadStore(RawPayloadStore):
             if name == provider
         ]
         # **Actually sorted**, rather than leaning on dict insertion order.
-        # Insertion order agrees with UUIDv7 order in every test that only
-        # ever calls `put` in ascending order, which is every test -- which is
-        # exactly why an implementation that leans on it passes here and
-        # diverges from Postgres the first time a deployment writes
-        # concurrently.
         rows.sort(key=lambda row: row.id)
         if after is not None:
             rows = [row for row in rows if row.id > after]

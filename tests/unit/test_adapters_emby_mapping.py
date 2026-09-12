@@ -1,11 +1,5 @@
 # tests/unit/test_adapters_emby_mapping.py
-"""Emby's JSON -> the port's DTOs, against the committed fixtures.
-
-No HTTP and no fake server: this is the test that makes the fixtures a real
-drift guard rather than decoration. If `FakeEmbyServer` and the mapper both
-got a field name wrong in the same way, the contract suite would still
-pass; this would not.
-"""
+"""Emby's JSON -> the port's DTOs, against the committed fixtures."""
 
 from datetime import UTC, datetime, timedelta, timezone
 

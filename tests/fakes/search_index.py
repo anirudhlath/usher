@@ -1,72 +1,4 @@
-"""In-memory `SearchIndex` and `SuggestIndex`.
-
-**Where `FakeSearchIndex` is more forgiving than Postgres, on purpose. Seven
-places, and the first is not a nuance -- it is most of what a search engine
-is:**
-
-- **It has no text analysis at all.** Substring matching over casefolded
-  fields: no stemming, no stop words, no `tsquery` parsing, no phrase
-  handling, no `ts_rank` and no length normalisation. So "searching for
-  *running* finds *run*", "`the` matches nothing", and every real ranking
-  property are invisible from here. `PostgresSearchIndex` runs the identical
-  contract with the real analyzer.
-- **Its weight classes are four hand-coded constants**, not `setweight` plus
-  `ts_rank`'s own normalisation. `test_a_name_match_outranks_an_overview_
-  match` therefore proves the *fake* is weighted; that the shipped index is
-  weighted is proved by the same case against real Postgres.
-- **Idempotence is free.** It is a dict keyed by `title_id`, so an
-  `index_many` that appends is structurally impossible here. The case exists
-  for the real one, where an `INSERT` without `ON CONFLICT` is one keystroke
-  away.
-- **No dimension check.** `SearchDocument.vector` may be any width; the real
-  column is `halfvec(384)` and rejects anything else. There is also no
-  quantisation, so a vector round-trips exactly where Postgres loses float16
-  precision (measured max cosine error 1.21e-04).
-- **`semantic_coverage` is exact**, computed over the whole filtered
-  population because the whole filtered population is in memory. A real
-  implementation computes it over a candidate window and may approximate.
-- **Its exact-name key is Python's `casefold()`**, where the statement spells
-  `lower(t.name) = lower(btrim(...))` -- the two agree on ASCII and diverge on
-  the handful of code points where the algorithms differ, and no case in this
-  repository names a title in anything else. Same divergence
-  `FakeSuggestIndex` already carries, in a second place.
-- **It cannot fail.** No connection, no lock, no index build cost, no
-  timeout, no `PortUnavailable`. Nothing here exercises a single error path.
-
-**`FakeSuggestIndex` doubles for the typo-tolerant tier, and the prefix tier's
-double answers a different question rather than the same one.** M9's two-tier
-suggest ships a second `SuggestIndex` -- `PostgresPrefixSuggestIndex`, a btree
-prefix probe whose measured typo recall is 1.9% -- and `FakeSuggestIndex`
-subclasses `TypoTolerantSuggestIndexContract`, i.e. the trigram path's
-contract. **`FakePrefixSuggestIndex` deliberately subclasses no contract at
-all**, and the reason this paragraph gave for having no double is still the
-reason: an in-memory prefix double checked against `SuggestIndexContract`
-would be `str.startswith` asserting against `str.startswith`, and what that
-tier's own cases are about is which index Postgres takes, so **that arm stays
-integration-only** (`tests/integration/test_adapters_search_prefix.py`).
-
-What the double is for is the question B5's route asks and no contract does:
-*which tier answered*. Its whole value is that the two doubles **disagree on a
-typo** -- one finds it, the other cannot -- which is a property no single index
-can have and therefore the one thing a two-armed case can hold a tier selector
-to. Seeded from one catalog with explicit ids so both tiers see the same rows.
-
-**Where `FakeSuggestIndex` is more forgiving, on purpose. Four places:**
-
-- **No candidate cap.** It computes edit distance over its whole dict, so
-  the one property the real path exists for is structurally absent -- and its
-  typo tolerance is therefore *better* than the real one, which is the
-  dangerous direction. `TypoTolerantSuggestIndexContract`'s cap case is
-  skipped here by capability flag rather than passed.
-- **Levenshtein only**, with no trigram pre-filter and therefore none of
-  `pg_trgm`'s similarity threshold or its recall cliff on short names.
-- **`given()` is a test-only writer.** The port has no write method
-  (ADR-0021) and neither real implementation writes anything at all, so the
-  one fact this class *cannot* model is the absence it exists to stand in
-  for.
-- **Python's `casefold()`, not Postgres's `lower()`** and not its collation,
-  so nothing here says anything about non-ASCII names.
-"""
+"""In-memory `SearchIndex` and `SuggestIndex`."""
 
 import uuid
 from collections.abc import Iterable, Sequence
@@ -313,15 +245,8 @@ def _dot(left: tuple[float, ...] | None, right: tuple[float, ...] | None) -> flo
 def _rank(
     scored: Iterable[tuple[SearchDocument, float]], *, query: str | None = None
 ) -> list[SearchHit]:
-    # An exact name match leads, then score descending, then popularity
-    # descending, then id. The exact-name key is issue #25's: `ts_rank_cd`
-    # ties are pervasive on short names, so a title whose name *is* the query
-    # otherwise shares a dense rank with everything tied to it and the blend
-    # decides on popularity. `None` for the vector lane, which has no typed
-    # string. The popularity key is what makes the weight-class case's
-    # distractor bite: without it an unweighted implementation ties and the
-    # case coin-flips into a pass. The id key makes the order total, so a tie
-    # cannot come back differently on two runs.
+    # An exact name match leads, then score descending, then popularity descending, then
+    # id.
     ordered = sorted(
         scored,
         key=lambda pair: (

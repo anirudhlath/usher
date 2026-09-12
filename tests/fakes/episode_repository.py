@@ -1,42 +1,4 @@
-"""In-memory `EpisodeRepository`.
-
-**Where this is more forgiving than Postgres, on purpose.** Six places, each
-of which the paired `tests/integration/test_episode_repository.py` run is
-what actually closes:
-
-- **No foreign keys**, so an episode here can name a `title_id` or a
-  `season_id` no row carries. The real one raises and
-  `PostgresEpisodeRepository` translates it, which is why
-  `test_a_title_id_no_title_carries_is_a_port_error` is a Postgres-only case
-  rather than a contract one -- a dict has nothing to violate.
-- **It is a `dict` keyed on the natural key**, so a duplicate inside one
-  batch is structurally last-wins. The real one raises
-  `CardinalityViolationError` unless its staging read is
-  `SELECT DISTINCT ON (...)`, so
-  `test_a_duplicate_episode_inside_one_batch_is_tolerated` passes here for a
-  reason that has nothing to do with the code under test.
-- **The `COALESCE` rule is Python's `if value is not None`**, which is
-  naturally that shape and is the same three lines whichever field it is
-  applied to. In SQL it is one `COALESCE(excluded.x, episodes.x)` per column
-  and a forgotten one is invisible until the field it guards is the one a
-  walk blanks.
-- **No CHECK constraints**: `ck_episodes_season_number_non_negative` and its
-  three siblings are enforced here only by `Episode`/`Season`'s own pydantic
-  bounds, which fire at a different moment and with a different exception
-  type.
-- **No transaction**, so a batch that raises part-way cannot leave a session
-  poisoned and nothing here exercises the SAVEPOINT.
-- **`resolve_natural_keys` joins a seeded dict**, `title_keys`, where the
-  real one joins `titles` three ways inside one statement. So "one statement
-  per call" is a claim only the integration arm can falsify -- there is no
-  round trip here to count, and `calls` is a stand-in rather than the thing.
-
-`calls` and `reset_calls()` are test-double affordances rather than port
-methods: `IngestService`'s scale case asserts that a page of 500 episodes
-costs a bounded number of *round trips*, and nothing about the answers this
-fake returns can express that. The paired integration case counts real
-statements instead.
-"""
+"""In-memory `EpisodeRepository`."""
 
 import uuid
 from collections.abc import Sequence
@@ -75,33 +37,10 @@ class FakeEpisodeRepository(EpisodeRepository):
     def __init__(self) -> None:
         self._seasons: dict[_SeasonKey, Season] = {}
         self._episodes: dict[_EpisodeKey, Episode] = {}
-        # `next_up` reads watch state, and `EpisodeRepository` has no write
-        # path for it. Rather than give the port one it does not want, the
-        # subclass writes here through `set_watch_state` and the Postgres
-        # subclass merges through `PostgresWatchStateRepository` instead.
-        #
-        # Keyed on `(user_id, target_id)` where `target_id` is *either* an
-        # episode id or a series' `title_id`, which is deliberately the shape
-        # of the real `watch_states` table: a row carries one or the other,
-        # never both (`ck_watch_states_exactly_one_target`). Keeping them in
-        # one map is what leaves `test_a_series_level_watch_state_does_not_
-        # finish_the_series` something to catch -- two separate maps would
-        # make the mistake it names structurally unspellable here, and a case
-        # that cannot fail is not coverage.
+        # `next_up` reads watch state, and `EpisodeRepository` has no write path for it.
         self._watch: dict[tuple[uuid.UUID, uuid.UUID], tuple[bool, datetime | None]] = {}
-        # `titles`, as much of it as `resolve_natural_keys` reads -- the two
-        # provider ids, the kind and the id. Public and seeded directly, the
-        # affordance `FakeTitleRepository.available_copies` already is and for
-        # the same reason: this fake models one table and that read joins
-        # another, so the alternative is a fake that answers "no such series"
-        # for everything and a contract case that cannot be written.
-        #
-        # **A sixth divergence, and it is that the join is a seeded dict.**
-        # The real statement resolves the series and the episode in one
-        # `unnest ... WITH ORDINALITY` joined four ways, so an episode hung
-        # off a `title_id` no `titles` row carries is unreachable there and
-        # perfectly ordinary here -- the same shape as this fake's missing
-        # foreign keys, one read over.
+        # `titles`, as much of it as `resolve_natural_keys` reads -- the two provider
+        # ids, the kind and the id.
         self.title_keys: dict[uuid.UUID, TitleReference] = {}
         self.calls = 0
 
@@ -275,12 +214,9 @@ class FakeEpisodeRepository(EpisodeRepository):
             key=lambda one: (one.episode_number, one.id),
         )
         if after is not None:
-            # Python's tuple comparison is lexicographic and strict, which is
-            # the two-arm predicate spelled in one expression -- the same
-            # relationship `_NEXT_UP`'s row comparison has to its hand-expanded
-            # form. ADR-0034's third arm, `key IS NULL`, has no spelling here
-            # because `Episode.episode_number` is a non-optional `int`: the
-            # unkeyed group it exists for cannot be constructed.
+            # Python's tuple comparison is lexicographic and strict, which is the two-
+            # arm predicate spelled in one expression -- the same relationship
+            # `_NEXT_UP`'s row comparison has to its hand-expanded form.
             ordered = [
                 one
                 for one in ordered

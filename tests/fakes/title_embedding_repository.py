@@ -1,46 +1,4 @@
-"""In-memory `TitleEmbeddingRepository`, for the index and similarity plumbing.
-
-**Where this is more forgiving than the real thing, on purpose. Six.**
-
-1. **No `halfvec` quantisation.** A vector round-trips exactly here and
-   loses float16 precision in Postgres (measured max cosine error 1.21e-04).
-   Nothing about ranking stability across that cast is visible from here.
-2. **No SQL fingerprint.** The real predicate evaluates `md5` over the
-   title's own columns *in Postgres*; this one is handed a string by the
-   caller and compares it to the string it was handed last time. So the
-   single most likely defect in this area -- the composer and
-   `_FINGERPRINT_SQL` assembling different text -- is structurally
-   unexpressible against this fake, and is pinned only by the cross-check
-   test the composer's own task owes and by the integration suite.
-3. **No foreign key.** An embedding for a title that does not exist is
-   accepted here and is a `RepositoryConflict` there.
-4. **No staging table and therefore no lock.** The real `upsert_many` takes
-   two ACCESS EXCLUSIVE locks on a shared staging name per call; this one
-   takes none, so the contention the small-batch escape exists to remove is
-   invisible.
-5. **`nearest_for` is a Python loop, so there is no plan and no GUC.** The real
-   one brackets its statement with `SET LOCAL enable_indexscan = off` so the
-   precompute is exact rather than an ANN scan whose recall loss would be
-   *permanent* in a cached artefact; nothing about that -- neither the
-   exclusion of the HNSW index nor the restoration of the GUCs afterwards --
-   is expressible here. It also skips a NULL embedding by the accident of its
-   own control flow where Postgres needs `WHERE e.embedding IS NOT NULL`
-   written down.
-6. **It counts its own pages and refuses to hand out more than
-   `_MAX_PAGES`.** That is not a divergence a real repository has; it exists
-   because a rebuild that stopped advancing its cursor would *hang* rather
-   than answer wrongly, and `asyncio.wait_for` cannot bound a coroutine that
-   never yields.
-
-Consequence, stated so it is a rule rather than a hope: **any test that
-asserts staleness against this fake is asserting the fake's own
-arithmetic.** Use it for order, counts, cursor mechanics and call plumbing;
-assert the predicate itself only where real Postgres evaluates it.
-
-There is deliberately no shared contract suite. The three properties worth
-sharing are exactly the three above, and a case both implementations could
-satisfy would be the vacuous pass the plan's trap section warns about.
-"""
+"""In-memory `TitleEmbeddingRepository`, for the index and similarity plumbing."""
 
 import math
 import uuid
@@ -58,13 +16,8 @@ from usher.ports.repository import (
     TitleRepository,
 )
 
-# How many pages the similarity rebuild may ask for before this fake calls it a
-# non-terminating loop. A rebuild that re-read a predicate instead of advancing
-# its keyset cursor does not answer *wrongly*, it never answers -- and
-# `asyncio.wait_for` cannot bound a coroutine that never yields, so a mutated
-# rebuild would hang the suite rather than fail a case. A plain
-# `AssertionError`, never a `UsherPortError`, so nothing can catch it. Same
-# device, same reason, as the push supervisor's connection cap.
+# How many pages the similarity rebuild may ask for before this fake calls it a non-
+# terminating loop.
 _MAX_PAGES = 200
 
 
@@ -133,15 +86,9 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
     async def list_for_titles(
         self, title_ids: Sequence[uuid.UUID], *, model_name: str | None = None
     ) -> dict[uuid.UUID, tuple[float, ...]]:
-        # A title with no row and a title whose row carries a NULL vector are
-        # both simply absent -- never a key mapped to `None` and never one
-        # mapped to a zero vector. ADR-0014, and the caller drops the title
-        # from its mean rather than averaging in an origin.
-        #
-        # A row under another `model_name` joins them when the caller scoped
-        # the read, and is a *third* way to be absent that the caller likewise
-        # does not need to tell apart: it has no vector this centroid can be
-        # compared against, which is the same answer.
+        # A title with no row and a title whose row carries a NULL vector are both
+        # simply absent -- never a key mapped to `None` and never one mapped to a zero
+        # vector.
         found: dict[uuid.UUID, tuple[float, ...]] = {}
         for title_id in title_ids:
             row = self.rows.get(title_id)
@@ -202,28 +149,7 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
         model_name: str = "fake:test-embedding",
         genome: Sequence[float] | None = None,
     ) -> Title:
-        """Seed one embedded title, its tag sets, and its vector.
-
-        A test-double writer, not a port method: the real population arrives
-        through `IndexService` writing `upsert_many` over titles the enrich
-        stage produced, and reproducing that chain to arrange a similarity case
-        would make every case a test of two other services.
-
-        `embedding=None` is the **written refusal** -- a row with a NULL vector,
-        the current model name and the fingerprint of the degenerate text. It
-        is what makes "neither a seed nor a candidate" arrangeable at all, and
-        calling `given` twice for one id replaces the row, which is how a case
-        turns a real title into a refused one.
-
-        `genome` is this title's `genome_scores` row, or `None` for the great
-        majority of the catalog that has none. **`has_genome` is derived from
-        it rather than passed separately**, mirroring the statement's own
-        `EXISTS (SELECT 1 FROM genome_scores ...)`. A fake that let a case
-        claim coverage it had not seeded could report a seed flag of `True`
-        alongside a pairwise `tags` of `None` for every pair -- which is the
-        half-covered state the port's `None` rule exists to *describe*, arrived
-        at by an arrangement error rather than by the data.
-        """
+        """Seed one embedded title, its tag sets, and its vector."""
         title = Title(
             id=title_id,
             kind=TitleKind.MOVIE,

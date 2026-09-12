@@ -1,35 +1,4 @@
-"""`OpenAICompatEmbedder` over `httpx.MockTransport`. No network, no model.
-
-**Why this adapter has a unit file at all when `EmbedderContract` exists.**
-That contract runs against `FakeEmbedder` and, marked and opt-in, against the
-real `FastEmbedEmbedder`; every case in it is a statement about a *correct*
-answer -- order, width, normalisation, determinism, not calling a model for
-nothing. Everything below is about an answer that is **wrong on the wire**, and
-a scripted fake can never produce one: the endpoint is a process this
-deployment does not control, reachable over a socket, and each of the six
-malformed shapes here is something a remote server is free to send at any
-moment without anything in this repository changing.
-
-The one that matters most is the reordering case, and it is the reason this
-file exists rather than four extra assertions elsewhere. `Embedder.embed`'s
-docstring calls a reordering *"the most damaging bug available in this
-milestone"*: title *n*'s vector lands on title *m*, every subsequent
-`title_neighbors` row is built from it, and no per-vector assertion -- norm,
-width, determinism, count -- can see it. The OpenAI response schema hands back
-objects carrying an `index` precisely because arrival order is not promised, so
-"the transport happened to preserve it" is the only thing standing between this
-project and that bug unless the sort is asserted. It is asserted here **on the
-bytes the mock really served**, not on the literal the fixture was built from:
-a shuffle case whose premise is a comment passes against an implementation that
-never sorts.
-
-Two things this file deliberately does not do. It does not subclass
-`EmbedderContract` -- that would be right, and the class it must be added to is
-`tests/unit/test_embedder_contract.py`, which this change does not own. And it
-never asserts *relevance*: the vectors here are arithmetic, so anything
-resembling a similarity claim would pass for a reason unrelated to the code,
-which is the vacuous pass this repository has already shipped once.
-"""
+"""`OpenAICompatEmbedder` over `httpx.MockTransport`. No network, no model."""
 
 import json
 import math

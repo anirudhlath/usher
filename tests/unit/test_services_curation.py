@@ -1,43 +1,5 @@
-"""`CurationService` -- assemble, call once, validate, replace, and record on
-every path.
-
-**The cases this file exists for are the ones where the call *worked*.** A
-completion that never arrived is an ordinary upstream failure with an ordinary
-retry story; the two failures that made ADR-0028 necessary are a call that
-answered perfectly and validated to nothing (`ok = false` with real tokens and
-a real cost) and a ledger write that fails on the path the ledger exists for.
-Both are here, and both are asserted on the *diagnostics* rather than on the
-verdict -- `test_services_curation_validate.py` learned that a rejection is the
-weakest assertion anybody writes, and a service that rejected everything for
-the wrong reason produces the identical `CurationRejected`.
-
-**What these fixtures deliberately do not hold constant:**
-
-- **Pool order is not id order.** Candidates are seeded with an *ascending*
-  `vote_count` and the pool ranks them descending, so the pool comes back in
-  the reverse of the order `new_id()` minted them in. A fixture seeded the
-  other way makes a 0-based map, a 1-based map and an "insertion order" map
-  agree on every card, which is exactly the property ADR-0028's handle scheme
-  rests on -- and it is the UUIDv7 trap that cost M7 five untested orderings.
-- **The household has history, and the history is not the pool.** `list_recent`
-  and `list_unwatched_candidates` read the same `watch_states` rows from
-  opposite sides, so a helper that wrote only one of them would let the prompt
-  recommend what the household just finished.
-- **`list_by_ids` is unordered on purpose** (`FakeTitleRepository` says so, and
-  the real one is one `IN (...)`), so a prompt rendering history straight from
-  that read is asserted against, not hoped for.
-
-**What is deliberately *not* here: the prompt's text.**
-`test_services_curation_prompt.py` calls `build_prompt`, `instructions` and
-`history_lines` directly, with a list of `Title`s and no household at all. What
-stayed is what needs an orchestrator to be true -- the two-port read behind the
-history and the order it restores, `HISTORY_SIZE` as the `limit` of that read,
-`min_cards` reaching the prompt **and** `validate_curation` from one place, the
-handle map agreeing with the numbering the model was sent, and the guarantee
-that no identifier survives the whole assembly. A case here that only greps
-`client.calls[0].prompt` for a substring is one seeding four fakes, a
-`CandidatePoolService`, a `TasteService` and a scripted client to test a pure
-function, and it belongs in the other file.
+"""`CurationService` -- assemble, call once, validate, replace, and record on every
+path.
 """
 
 import ast
@@ -236,14 +198,11 @@ class _Household:
         min_cards: int = DEFAULT_MIN_CARDS,
         elapsed: float = 0.25,
     ) -> CurationService:
-        # **A non-zero origin, because `time.monotonic()`'s epoch is
-        # arbitrary and a fixture starting at `0.0` makes two different
-        # implementations agree.** With the first tick at zero,
-        # `_ms(clock() - started)` and `_ms(clock())` compute the identical
-        # number, so an *absolute* clock read -- on the one field this service
-        # takes an injected clock in order to measure -- is invisible. At
-        # `_T0` the delta is still `elapsed` and the absolute read is a
-        # thousand seconds larger.
+        # **A non-zero origin, because `time.monotonic()`'s epoch is arbitrary and a
+        # fixture starting at `0.0` makes two different implementations agree.** With
+        # the first tick at zero, `_ms(clock() - started)` and `_ms(clock())` compute
+        # the identical number, so an *absolute* clock read -- on the one field this
+        # service takes an injected clock in order to measure -- is invisible.
         ticks = iter([_T0, _T0 + elapsed, _T0 + elapsed, _T0 + elapsed])
         return CurationService(
             pool=self.pool(),
@@ -410,12 +369,11 @@ async def test_a_generation_writes_one_screen_and_one_successful_ledger_row() ->
 
     stored = await household.rows.list_for_user(USER)
     assert [row.card_title_ids for row in stored] == [tuple(one.id for one in pool[:5])]
-    # **The model that *answered*, on the rows as well as on the ledger.**
-    # `self._model` is what this deployment asked for and is a perfectly
-    # plausible value here, which is why the fixture makes the two differ:
-    # `curated_rows.model_name` is how PRD 10's *"these rows were written by a
-    # model we no longer run"* stays a query, and the same fact on
-    # `llm_calls.model` is pinned twice while this one was pinned nowhere.
+    # **The model that *answered*, on the rows as well as on the ledger.** `self._model`
+    # is what this deployment asked for and is a perfectly plausible value here, which
+    # is why the fixture makes the two differ: `curated_rows.model_name` is how PRD 10's
+    # *"these rows were written by a model we no longer run"* stays a query, and the
+    # same fact on `llm_calls.model` is pinned twice while this one was pinned nowhere.
     assert {row.model_name for row in stored} == {"served/mixtral-1"}
     assert ASKED != "served/mixtral-1", "the premise: asked and served disagree"
     assert [call.ok for call in household.ledger.calls] == [True]
@@ -522,15 +480,9 @@ async def test_an_upstream_failure_is_recorded_and_leaves_last_nights_screen_up(
     assert await household.rows.list_for_user(USER) == yesterday
     assert [call.ok for call in household.ledger.calls] == [False]
     # **The message, because `assert ...error` cannot fail.**
-    # `LLMCall._ok_and_error_must_agree` refuses `ok=False` beside a falsy
-    # error -- `None`, `""` and `0` all raise -- so once the line above has
-    # pinned `ok`, a truthy check is unfalsifiable. What it leaves alive is the
-    # half of `str(exc) or type(exc).__name__` that carries the sentence an
-    # operator reads: `error=type(exc).__name__` reduces *"the endpoint refused
-    # the connection"* to `PortUnavailable` on the one row this ledger exists
-    # for, and does it to all four of these. The `or` fallback is the other
-    # half, pinned by
-    # `test_an_exception_with_no_arguments_still_writes_an_error_an_operator_can_read`.
+    # `LLMCall._ok_and_error_must_agree` refuses `ok=False` beside a falsy error --
+    # `None`, `""` and `0` all raise -- so once the line above has pinned `ok`, a truthy
+    # check is unfalsifiable.
     assert str(failure), "the premise: each of these four failures carries a message"
     assert str(failure) in (household.ledger.calls[0].error or "")
     assert household.ledger.calls[0].tokens_in == 0
@@ -1088,26 +1040,9 @@ async def test_the_prompt_asks_for_the_minimum_the_validator_enforces() -> None:
 
 @pytest.mark.parametrize("min_cards", [DEFAULT_MIN_CARDS, 7], ids=["default", "raised"])
 async def test_the_schema_names_the_keys_the_validator_reads(min_cards: int) -> None:
-    """A schema saying `ids` and a validator reading `item_ids` is a generation
-    that drops 100% of a correct answer. Both are written against the four
-    constants the validator exports, and this is what fails if one moves.
-
-    The schema is an **optimisation**: guided decoding guarantees shape and
-    says nothing about denotation, which is why the bound is *also* in the
-    schema and the validator checks it anyway.
-
-    **Both objects, not only the row.** `_schema`'s docstring says
-    `additionalProperties: false` and a `required` naming every property are
-    *"what `strict: true` demands"* -- and only the inner object was checked,
-    so relaxing either at the top level was invisible. Under a provider that
-    honours `strict`, a schema that fails its own strictness rules is not a
-    degraded response, it is a **400 on every request**, which is a curation
-    subsystem that never produces a row and never records a call.
-
-    The `description` too, because it is the item bound's only spelling: the
-    floor is deliberately **not** `minItems` (which forces a model with fewer
-    good answers to pad rather than to narrow -- measured), so this sentence is
-    the whole of what a guided decoder is told about how many to emit.
+    """A schema saying `ids` and a validator reading `item_ids` is a generation that drops
+    100% of a correct answer. Both are written against the four constants the validator
+    exports, and this is what fails if one moves.
     """
     household = _Household()
     pool = await _candidates(household, count=12)
@@ -1201,32 +1136,8 @@ async def test_the_shipped_now_is_the_real_clock_rather_than_a_fixed_one() -> No
 
 
 def test_the_shipped_clock_is_the_monotonic_one() -> None:
-    """**Asserted on the signature, because the behavioural version of this
-    check cannot fail, and that was measured rather than assumed.**
-
-    `latency_ms` is `_ms(clock() - started)`: both reads come from the same
-    callable, so substituting `time.time` for `time.monotonic` changes the
-    delta by nothing at all. Planted, it survives every case in this file --
-    correctly, because the two differ only across a wall-clock adjustment (an
-    NTP step, an operator setting the date), which cannot be induced against a
-    builtin used as a default. An assertion on the recorded number would be one
-    that no implementation can fail, which is the family of defect this round
-    exists to remove.
-
-    What is still worth pinning is *which* callable ships, because the
-    difference is real where it matters: `time.time()` going backwards mid-call
-    yields a negative delta that `_ms` clamps to `0`, and PRD 10 reads a
-    120-second timeout as instantaneous.
-
-    `OpenAICompatibleClient` pins the same default the same way and **not for
-    the same reason**, which this docstring used to elide: its clock is on the
-    *success* path -- `_ledger_row` prefers `usage.latency_ms` whenever a usage
-    came back -- so the number it measures is the one PRD 10 plots every
-    ordinary night, while this one is reached only when nothing came back at
-    all. It was left with a `latency_ms >= 0` bound and no injected clock in
-    any test until M8's final sweep;
-    `tests/unit/test_adapters_llm.py::test_the_latency_is_the_whole_send_and_not_what_was_left_after_it`
-    is its half.
+    """**Asserted on the signature, because the behavioural version of this check cannot
+    fail, and that was measured rather than assumed.**
     """
     default = inspect.signature(CurationService.__init__).parameters["clock"].default
 
@@ -1303,27 +1214,8 @@ async def test_another_households_history_and_screen_stay_out_of_this_generation
 async def test_exactly_one_completion_is_bought_per_generation(
     response: dict[str, Any] | BaseException,
 ) -> None:
-    """PRD 06's *"one modest completion per user per day"*, which is the
-    milestone's whole cost claim and which **the ledger cannot see**.
-
-    `record()` writes one row per generation, so a service that called
-    `complete_json` twice and recorded once bills twice and reports once --
-    the ledger-understates-spend defect the record rule exists to prevent,
-    arriving through the one door that rule does not cover.
-    `test_record_is_called_exactly_once_per_generation` is green under exactly
-    that service.
-
-    **Nothing else in this file pins the count.** `FakeLLMClient` repeats its
-    last scripted response forever -- deliberately, and its docstring says so
-    -- so every case reading `client.calls[0]` is satisfied by any number of
-    calls at all, as long as it is at least one.
-
-    **All three arms that reach the client, not only the happy path.** A retry
-    loop that fired twice before giving up is invisible in the same way, and on
-    the two failure arms it is worse: the row it writes reads one call's tokens
-    for two calls' spend, over an `ok = false` an operator is already reading
-    as the expensive case. The fourth path buys nothing at all and
-    `test_an_empty_pool_never_reaches_the_model` pins that end.
+    """PRD 06's *"one modest completion per user per day"*, which is the milestone's whole
+    cost claim and which **the ledger cannot see**.
     """
     household = _Household()
     await _candidates(household)

@@ -1,18 +1,5 @@
-"""`GET /browse` on the wire: the keyset walk, and the facet key the
-measurement decided.
-
-Driven through a real `create_app()` with one dependency overridden -- the
-title repository -- so the router, the DTOs, A3's cursor codec, V1's problem
-vocabulary and FastAPI's own query parsing all sit on the path a request
-takes. Only the Postgres read is stood in for;
-`tests/integration/test_browse_route.py` is what runs that.
-
-**The ordering cases seed a population whose name order is the reverse of its
-id order, and each asserts that premise for itself.** UUIDv7 makes `ORDER BY
-id` and `ORDER BY sort_name` agree by accident whenever rows are seeded in
-alphabetical order, so a walk over such a fixture is green against a route
-that ignores `sort` entirely. `assert far_id < near_id` is the assertion that
-makes the rest of the case mean something.
+"""`GET /browse` on the wire: the keyset walk, and the facet key the measurement
+decided.
 """
 
 import ast
@@ -156,31 +143,7 @@ async def test_an_empty_screen_is_a_two_hundred_and_never_a_404(
 async def test_the_walk_terminates_and_the_last_page_carries_a_null_cursor(
     client: httpx.AsyncClient, titles: FakeTitleRepository, seeded: int
 ) -> None:
-    """Walked to exhaustion, and the off-by-one is invisible outside
-    `count % limit == 0`.
-
-    At `limit=2`, **4 and 6 are both exact exhaustion and 5 is the partition
-    case** -- which is a correction the plant round made to this docstring
-    rather than a claim about arithmetic: it read *"at 5 and 6 the last page is
-    short"* until the mutation was measured and failed `[4]` and `[6]` while
-    leaving `[5]` green. 5 is in the parametrisation to show that a partition
-    walk *cannot* see the defect, not because it adds coverage.
-
-    The bound on the loop is not a timeout dressed up -- a cursor that never
-    nulls is an infinite client loop, and every finite test passes against one
-    unless the test says how many pages it was willing to fetch.
-
-    🔴 **`assert body["items"]` is the assertion the off-by-one dies on, and
-    without it this case could not see the defect it is named for.** Measured:
-    planted in full -- `over_fetch` dropped here *and* `paginate`'s
-    `len(fetched) <= limit` relaxed to `<` -- the walk still terminates, still
-    collects all four rows and still collects them once, because the surplus
-    cursor's page is simply **empty**. Termination and contents are both intact
-    and the only observable damage is one wasted round trip per exhausted
-    walk, which is exactly the promise the acceptance makes: *the last page
-    returns a null cursor rather than a cursor that yields an empty page*.
-    Those are two claims and the loop above only makes the first.
-    """
+    """Walked to exhaustion, and the off-by-one is invisible outside `count % limit == 0`."""
     for index in range(seeded):
         await _seed(titles, f"Title {index:02d}")
 

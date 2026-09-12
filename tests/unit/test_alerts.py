@@ -1,67 +1,5 @@
-"""An alert can be green, valid, loaded, and unable to fire, and this module is
-the checks that close the ways it gets there.
-
-[PRD 10](../../docs/prd/10-telemetry-and-dashboards.md)'s `## Alerts` table
-names seven and opens *"Kept few, so they mean something."* `dashboards/alerts/
-usher.yml` is that table as a Prometheus rule file, and it sits under
-`dashboards/` for `provisioning/dashboards.yml`'s reason: the rules are written
-against the instruments in `src/usher/` and version with them, while the
-Prometheus that evaluates them is in `~/code/observability/`. So nothing in the
-evaluation path is available to a unit test either, and what *is* checkable is
-the file.
-
-**A rule file has one failure mode a dashboard does not, and it is silent in
-the opposite direction.** A panel that names a metric nobody stores draws an
-empty rectangle, which somebody eventually looks at. A rule that names a metric
-nobody stores evaluates to an empty vector, which is indistinguishable from
-*healthy* -- it is not merely unhelpful, it is the alert saying "all clear"
-forever. So the checks here are weighted toward "can this expression ever select
-anything":
-
-1. **Every metric token is in PRD 10's catalogue**, reusing D6's normaliser
-   (`test_dashboards.normalise_metric`) rather than a second copy of it, so a
-   correction to the catalogue parse is a correction to both files.
-
-2. **Every metric token is written in the spelling Prometheus actually
-   stores**, which invariant 1 cannot see: `usher_jobs_queued` normalises into
-   the catalogue perfectly and selects nothing, because the collector appends
-   the instrument's *unit* -- the real name is `usher_jobs_queued_ratio`. This
-   is D8's finding turned on the rule file, and it is the check that matters
-   most here for the reason above. The stored spelling is **derived from the
-   declarations** (`create_observable_gauge(..., unit="1")`) rather than
-   retyped, and the derivation is pinned against the names this host's
-   Prometheus holds.
-
-3. **The name sets agree with PRD 10's table in both directions**, across
-   **both** rule files. A rule the PRD does not name falsifies *"kept few, so
-   they mean something"* as surely as an alert with no rule. That case is
-   `xfail(strict=True)` today and names which task owes which rule.
-
-4. **The two spellings that are a decision get a case each.** "Ingest stalled"
-   must reach a lane that has *never settled a job*, and "Push down" must fire
-   on a zero and not on an absence. Both are one PromQL operator wide and both
-   are invisible to every other check in this file.
-
-5. **The Postgres rule's own three ways of reading healthy forever.** PRD 10's
-   seventh alert is *Cost anomaly*, and it has no metric to name: the same
-   first principle that puts spend on `llm_calls` refuses a `usher.llm.*`
-   series, so the rule is SQL evaluated by Grafana and lives in
-   `dashboards/alerts/grafana/usher.yml`. Its analogue of invariant 1 is that
-   every `table.column` it names is one `Base.metadata` holds (D6's invariant
-   3, turned on a rule); its analogue of invariant 2 is the **file's
-   location** -- one directory below the Prometheus rule file, because
-   `rule_files: [/etc/prometheus/rules/*.yml]` is not recursive and a sibling
-   would take the other five rules down with it; and its own is that a
-   Grafana table frame yields **one** numeric column, since every numeric
-   column becomes a series the threshold judges.
-
-⚠️ **What this module cannot check, stated rather than implied.** It does not
-evaluate PromQL. Whether `increase()` over a gauge answers what the rule's
-comment says it answers, and whether a `for:` window is reachable, were measured
-with `promtool` and against this host's Prometheus; the measurements are written
-down in `dashboards/README.md` beside the firing each rule was put through, and
-nothing here re-derives them. What *is* here is the shape those measurements
-justify, so that a later edit which quietly changes the shape is red.
+"""An alert can be green, valid, loaded, and unable to fire, and this module is the
+checks that close the ways it gets there.
 """
 
 import ast
@@ -93,11 +31,6 @@ _DASHBOARD_THREE = _ROOT / "dashboards" / "03-pipeline.json"
 _DASHBOARD_FIVE = _ROOT / "dashboards" / "05-cost-and-compliance.json"
 
 # PRD 10's `## Alerts` section, scoped to the heading rather than to the file.
-# The table is the last thing in the document today, so the lookahead has to
-# accept the end of the file as well as the next `## ` -- a `(?=^## )` alone
-# matches nothing and hands back an empty section, which would make every
-# assertion below vacuous. `test_the_prd_alert_table_parse_is_falsifiable` is
-# what says so.
 _ALERTS_SECTION = re.compile(r"^## Alerts$(?P<body>.*?)(?=^## |\Z)", re.M | re.S)
 
 # A two-column table row. The header and the `|---|---|` separator are dropped
@@ -106,44 +39,16 @@ _ALERTS_SECTION = re.compile(r"^## Alerts$(?P<body>.*?)(?=^## |\Z)", re.M | re.S
 # filter is readable where a negative lookahead is not.
 _TABLE_ROW = re.compile(r"^\|(?P<alert>[^|]+)\|(?P<condition>[^|]+)\|\s*$", re.M)
 
-# 🔴 **The ledger, and it is empty because D13 was the last.** This map named
-# which task owed which alert, and the `xfail(strict=True)` that used to sit on
-# the bidirectional check below read its entries out in the failure message.
-# D12 landed two, D14 landed *Cost anomaly* -- in the *other* rule file, because
-# it has no metric to name -- and D13 landed *Disk projection*, which had no
-# series at all and therefore ships as three rules in two engines.
-#
-# **The marker is gone rather than emptied**, which is the point of `strict`: a
-# strict xfail that passes is a failure, so the last task had to come back and
-# turn the case into a plain assertion. It is kept as an empty dict rather than
-# deleted because it is the vocabulary a future debt would be written in, and
-# because the failure message below still reads it -- an alert PRD 10 names with
-# no rule now renders as `(no task)`, which is the honest answer once nobody is
-# assigned.
+# 🔴 **The ledger, and it is empty because D13 was the last.** This map named which task
+# owed which alert, and the `xfail(strict=True)` that used to sit on the bidirectional
+# check below read its entries out in the failure message.
 _OWED: dict[str, str] = {}
 
-# 🔴 **The one series in this file that Usher does not emit, and the only
-# exemption from the two catalogue checks below.**
-#
-# *Disk projection* is the single alert in PRD 10's table whose subject Usher
-# has no instrument for and cannot have one: `telemetry.py`'s own register
-# records why an observable callback cannot query Postgres, and a `du` over
-# `image_cache_dir` would be disk I/O on a lane for one consumer. The disk
-# facts come from the stack instead.
-#
-# **Measured, not assumed.** The OTel collector's `hostmetrics` receiver was
-# run against this host on 2026-09-11 -- the shared stack's own collector image
-# (`otel/opentelemetry-collector-contrib:0.158.0`) and its own
-# `prometheusremotewrite` exporter, pointed at a throwaway Prometheus -- and the
-# name it stores is `system_filesystem_usage_bytes`, carrying `mountpoint`,
-# `device`, `type`, `mode` and **`state` in {free, used, reserved}**. Free space
-# is a *label value*, not a name: `usher_disk_free_bytes` is a name nothing on
-# this host produces, and a rule naming it would be D11's failure exactly --
-# parsed, loaded, evaluated empty, healthy forever.
-#
-# The exemption is a frozenset of one and is asserted by name and by size in
-# `test_the_stack_series_exemption_is_one_measured_name_and_not_a_blanket`,
-# because an exemption nobody counts is how every later rule escapes the check.
+# 🔴 **The one series in this file that Usher does not emit, and the only exemption from
+# the two catalogue checks below.** *Disk projection* is the single alert in PRD 10's
+# table whose subject Usher has no instrument for and cannot have one: `telemetry.py`'s
+# own register records why an observable callback cannot query Postgres, and a `du` over
+# `image_cache_dir` would be disk I/O on a lane for one consumer.
 _MEASURED_STACK_SERIES = frozenset({"system_filesystem_usage_bytes"})
 
 # `### Resource envelope` in PRD 08 -- scoped to the heading, and with the same
@@ -170,23 +75,8 @@ _EXPLICIT = {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}
 # numbers somebody typed as numbers -- `14`, `86400`, `0` in the rules here.
 _INTEGER_LITERAL = re.compile(r"\b\d+\b")
 
-# The instrument factories `src/usher/` calls, mapped to how the OTel
-# collector's Prometheus translation renders the result. **Measured off this
-# host's Prometheus on 2026-09-11** (76 `usher_`/`http_` names under
-# `/api/v1/label/__name__/values`), not read out of a specification:
-#
-#   - a gauge's unit becomes a name segment -- `unit="1"` -> `_ratio`
-#     (`usher_jobs_queued_ratio`), `unit="s"` -> `_seconds`
-#     (`usher_scheduler_job_due_seconds`);
-#   - a counter's unit is **dropped** in favour of `_total`
-#     (`usher.source.push.reconnects`, `unit="1"` ->
-#     `usher_source_push_reconnects_total`, not `..._ratio_total`);
-#   - a histogram takes `_seconds` for `unit="s"` and **nothing** for
-#     `unit="1"` (`usher.search.results` -> `usher_search_results_bucket`),
-#     then one of `_bucket`/`_count`/`_sum`.
-#
-# So `unit="1"` renders as `_ratio` on a gauge and on nothing else, which is
-# the part no amount of reading the instrument name would tell you.
+# The instrument factories `src/usher/` calls, mapped to how the OTel collector's
+# Prometheus translation renders the result.
 _UNIT_SEGMENT = {"s": "_seconds", "ms": "_milliseconds", "By": "_bytes"}
 _GAUGE_FACTORIES = frozenset({"create_observable_gauge"})
 _COUNTER_FACTORIES = frozenset({"create_counter", "create_observable_counter"})
@@ -489,42 +379,7 @@ def _dashboard_three_panel_titles() -> set[str]:
 def test_every_alert_prd_10_names_exists_and_every_rule_names_a_series_the_catalogue_holds() -> (
     None
 ):
-    """The bidirectional name check, and the catalogue check over every rule.
-
-    **Both directions, because both are defects.** An alert PRD 10 names with
-    no rule is an operator staring at a condition nothing watches. A rule PRD 10
-    does not name falsifies the sentence the table opens with -- *"Kept few, so
-    they mean something"* is a claim a seventh, unnamed rule makes false, and
-    nothing else in this file would notice one.
-
-    **The positive controls are the case, not decoration.** A regex that matched
-    three of the seven rows would turn the equality assertion into a comparison
-    of two small wrong sets, which passes the day the file happens to hold those
-    three. So the row count is asserted against PRD 10's own number before the
-    sets are compared at all.
-
-    🔴 **The `xfail(strict=True)` is gone, and D13 is the task that removed
-    it.** D11 held this case as a strict xfail rather than a red, so that
-    `uv run pytest` stayed a trustworthy signal for every task between it and
-    the last one -- a red left in the tree reads exactly like a regression and
-    trains whoever sees it to ignore the suite. The `strict` half is what made
-    the debt collectable: a strict xfail that *passes* is a failure, so the task
-    that finally satisfied the assertion could not leave the marker behind.
-
-    D11 expected that task to be D14. It was not: measured on the milestone HEAD
-    D14 rebased onto -- `97d851a`, 2026-09-11 -- D12 had landed its two and
-    `m10/D13` still had nothing committed on it, so D14 shipped *Cost anomaly*,
-    took its own name out of `_OWED` and handed the marker on. D13 is where it
-    lands, `_OWED` is empty above, and this is a plain assertion again. **The
-    handover is the mechanism working, not a deferral** -- at no point did the
-    ledger claim a debt that was paid or hide one that was not.
-
-    **The names come from `alert_names()` and so span both files.** PRD 10's
-    table is one list that says nothing about which engine evaluates a row;
-    six of its seven are Prometheus rules and *Cost anomaly* is a Grafana
-    Postgres rule, so a check reading only `alerts/usher.yml` would report the
-    seventh missing forever while it sat one directory down.
-    """
+    """The bidirectional name check, and the catalogue check over every rule."""
     named = prd_alerts()
     assert named, "no alert rows parsed out of PRD 10"
     assert len(named) == 7, (
@@ -677,33 +532,8 @@ def test_the_stored_spelling_derivation_matches_this_hosts_prometheus() -> None:
 
 
 def test_the_ingest_stalled_rule_reaches_a_lane_that_has_never_settled_a_job() -> None:
-    """🔴 The headline: the rule must fire on a *zero* completions count and on
-    an *absent* one, and `and ... == 0` only does the first.
-
-    `and` is a set intersection -- a left-hand series survives only where a
-    right-hand series with the same labels exists. The two halves of this rule
-    have opposite shapes:
-
-    - **Depth is always nine series.** `PostgresJobQueue.depth` fills
-      `dict.fromkeys(JobKind, 0)` before returning, with the reason in its own
-      comment: *"a gauge that stops reporting a series is indistinguishable from
-      one reporting zero"*.
-    - **Completions are only the kinds that have settled something.**
-      `usher.jobs.duration` is a recorded histogram, so a lane that has never
-      run a job has no `kind` of its own on that side at all.
-
-    So `and` drops exactly the lanes that have never settled a job, which is the
-    *worst* case of "ingest stalled" rather than an edge of it: a deployment
-    where `USHER_LLM_ENABLED=false` leaves `curate` unclaimable
-    (`composition.worker_kinds`) queues curate jobs forever and this rule, spelled
-    with `and`, says nothing. Measured against this host's Prometheus on
-    2026-09-11: the `and` spelling reaches 5 kinds and the `unless` spelling
-    reaches 9, and the four it adds are bootstrap, curate, sync and
-    watch_writeback -- every lane that has never settled a job.
-
-    `unless` is the complement, so the completions half becomes a positive
-    filter (`> 0`, "this lane did settle something") and everything it does not
-    match -- zero *and* absent alike -- stays.
+    """🔴 The headline: the rule must fire on a *zero* completions count and on an *absent*
+    one, and `and ... == 0` only does the first.
     """
     expr = str(_rule("Ingest stalled")["expr"])
     assert "usher_jobs_queued_ratio" in expr and "usher_jobs_duration_seconds_count" in expr, (
@@ -727,17 +557,8 @@ def test_the_ingest_stalled_rule_reaches_a_lane_that_has_never_settled_a_job() -
     )
 
 
-# The range functions whose answer *decays out of its own window*: a step
-# change is inside `[W]` for exactly W and then gone. `min_over_time` and the
-# instant selectors are deliberately absent -- their answer persists, so a long
-# `for:` under them is patience rather than a knife edge.
-#
-# **`predict_linear` is on this list, added by D13**, and it belongs here on the
-# stated property rather than by family resemblance: it is a least-squares fit
-# over the samples in its range vector, so a one-off step -- the `VACUUM`-less
-# migration `08-operations.md` measures at +637 MB transient -- tilts the line
-# for exactly the window's length and then leaves it. A `for:` as long as the
-# window is the same knife edge `increase` has.
+# The range functions whose answer *decays out of its own window*: a step change is
+# inside `[W]` for exactly W and then gone.
 _DECAYING = re.compile(r"\b(?:increase|rate|irate|delta|idelta|deriv|predict_linear)\(")
 _WINDOW = re.compile(r"\[(\d+)([smhdwy])\]")
 _DURATION = re.compile(r"(\d+)([smhdwy])")
@@ -752,66 +573,7 @@ def _seconds(duration: str) -> int:
 
 
 def test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it() -> None:
-    """🔴 Two windows of thirty minutes is sixty, and the rule fires on neither.
-
-    `increase(depth[30m]) > 0` with `for: 30m` is **unsatisfiable for a queue
-    that rises once and then stops moving**, which is the commonest stall there
-    is. A step change sits inside a `[30m]` range vector for exactly thirty
-    minutes and then leaves it, so the condition is true for at most as long as
-    `for:` demands -- a knife edge that one evaluation loses. Measured live on
-    2026-09-11 with 25 `curate` jobs against a worker that could not claim them,
-    depth flat at 25 the whole time: the alert went `pending` at 17:09:58Z and
-    back to `inactive` at **17:39:34Z**, one evaluation before its own
-    `for: 30m` would have fired it. It is not a slow alert; it is a silent one.
-
-    `min_over_time(...) > 0` reads the same thirty minutes the other way and its
-    answer *persists*, so this case exempts the non-decaying functions by name
-    rather than banning long `for:` outright -- the patience has to live
-    somewhere, and under a decaying window it cannot live in both places.
-
-    🔴 **D11 stated this as a law about `increase()`/`rate()`; D12 measured it
-    and it is a law about the *instrument*.** The knife edge is not a property
-    of the function -- it is a property of whether the signal under the function
-    is *regenerated while the fault lasts*:
-
-    - A **gauge** is a level. It steps once and freezes, so the step leaves the
-      range vector exactly `[W]` later and the condition is true for at most W.
-      D11's queue depth is this, and its measurement stands.
-    - A **counter** (and a histogram's bucket/count series) is fed by *every
-      event*. Under a fault lasting D, `rate()` stays above the threshold for
-      about D + W, so a `for:` longer than W is patience and not a race.
-
-    Measured with `promtool test rules` on 2026-09-11, against D12's own rules,
-    both of which put a `for:` **longer** than their `[5m]` window:
-
-    - *Provider degraded* (`for: 10m` over `[5m]`, a sustained 10 % 429 rate):
-      silent at 9m, **firing at 16m**, still firing at 60m, resolved by 40m once
-      the 429s stopped.
-    - *Enrichment SLA missed* (`for: 15m` over `[5m]`, demand p99 ~6 s): silent
-      at 14m, **firing at 21m** with `trigger="demand"` and `$value` 7.475s,
-      still firing at 60m.
-
-    So the blanket rule would have forbidden two rules that demonstrably fire,
-    and forced their windows out to `[20m]`/`[15m]` -- which buys nothing and
-    makes both slow to resolve. The guard is narrowed to the case it was
-    measured on rather than deleted, and the exemption is **derived from the
-    declarations** (`create_observable_gauge`) rather than listed, so a new
-    gauge is covered the day it is declared.
-
-    ⚠️ **Still for D13-D14.** *Disk projection* and *Cost anomaly* are both
-    predicates over levels -- disk free is a gauge, a daily spend comparison is
-    a step -- so both land on the graded side of this split, not the exempt one.
-
-    ✅ **D13 landed on the graded side, as that paragraph said it would**, and
-    it took two changes to get there. `predict_linear` joined `_DECAYING` on the
-    stated property: a least-squares fit is tilted by a step for exactly the
-    window's length and then not at all. And `_MEASURED_STACK_SERIES` joined
-    `_gauge_stored_names()`, because the level set is derived from
-    `src/usher/`'s declarations and the disk series is produced by the
-    collector, not by Usher -- without it D13's rule would have been *exempt*
-    here, which is the opposite of what this docstring promised. `for: 7d`
-    planted against `predict_linear(...[7d], ...)` dies on the assertion below.
-    """
+    """🔴 Two windows of thirty minutes is sixty, and the rule fires on neither."""
     graded = 0
     exempt = 0
     for rule in committed_rules():
@@ -880,37 +642,7 @@ def test_the_push_down_rule_fires_on_a_zero_and_not_on_an_absence() -> None:
 
 
 def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_table() -> None:
-    """🔴 D13's headline, and it is two prohibitions that fail in opposite directions.
-
-    **The series half.** *Disk projection* is the one alert in PRD 10's table
-    with **no series at all** on this deployment -- measured 2026-09-11, the
-    shared Prometheus holds 93 metric names and not one of them is a disk,
-    filesystem or node series, because its `prometheus.yml` carries no
-    `scrape_configs` on purpose and the collector has no `hostmetrics`
-    receiver. So this rule is the one most able to commit D11's failure: a name
-    nothing stores parses, loads, evaluates to an empty vector and reads
-    *healthy* forever. The name in the file therefore has to be one that was
-    **watched arriving**, and the allow-list is the set of those names.
-
-    `usher_disk_free_bytes` -- the spelling this task was handed -- is the
-    planted control, because it is the mistake that was actually available:
-    plausible, prefixed like an Usher instrument, and produced by nothing.
-
-    **The threshold half, which fails the other way round.** A literal lifted
-    out of `08-operations.md`'s resource envelope would select plenty and fire;
-    the defect is that it would be *enforcing a number with no forcing
-    function*. That table's own header says nothing reads it, no host enforces
-    it and no policy derives from it, and M9's Track 2 derived a 2.0 GB ceiling
-    from one row, measured a design at 2.702 GB and **withdrew the design**
-    (ADR-0036). The figures are parsed out of the table rather than retyped, in
-    both the decimal and the binary reading, so the prohibition tracks the
-    document instead of a list somebody has to remember -- and it is applied to
-    **both** rule files, because the Postgres half could carry a byte ceiling
-    just as easily as the PromQL half.
-
-    **The parse is asserted before it is used**, because a scan for numbers that
-    finds none passes exactly like a file with no bad numbers in it.
-    """
+    """🔴 D13's headline, and it is two prohibitions that fail in opposite directions."""
     figures = resource_table_figures()
     assert figures, "no figures parsed out of the resource table"
     assert len(figures) >= 40, (
@@ -1091,26 +823,8 @@ def disk_growth_sql() -> str:
 
 
 def test_the_postgres_rule_is_not_in_the_directory_prometheus_globs() -> None:
-    """🔴 A Grafana provisioning file beside `usher.yml` disarms the other
-    five rules, and the directory layout is the whole of the defence.
-
-    `alerts/usher.yml`'s header tells an operator to mount `dashboards/alerts`
-    at `/etc/prometheus/rules` and set
-    `rule_files: [/etc/prometheus/rules/*.yml]`. That glob is not recursive,
-    Prometheus unmarshals rule files **strictly**, and a Grafana rule group
-    carries `apiVersion`, `folder`, `condition` and `data` -- none of which a
-    Prometheus rule group has. The result is not one ignored file: a server
-    started on such a directory **exits 2 before opening a port**, so every
-    rule in `usher.yml` stops existing as the price of adding the seventh
-    alert. Measured on `prom/prometheus:v3.13.2`, 2026-09-11, and recorded in
-    `dashboards/README.md` -- the same server on the committed layout serves
-    all five.
-
-    So this case pins two things at once: that the Prometheus directory holds
-    exactly the one file Prometheus can read, and that the Grafana rule is
-    somewhere that glob does not reach. The first assertion is what fails if
-    somebody adds `grafana.yml` beside `usher.yml`; the second is what fails
-    if the Grafana file is moved up rather than deleted.
+    """🔴 A Grafana provisioning file beside `usher.yml` disarms the other five rules, and
+    the directory layout is the whole of the defence.
     """
     prometheus_directory = _ALERTS.parent
     globbed = sorted(path.name for path in prometheus_directory.glob("*.yml"))
@@ -1171,35 +885,8 @@ def test_the_postgres_rule_names_only_tables_and_columns_this_schema_holds() -> 
 
 
 def test_the_cost_anomaly_statement_carries_its_floor_its_window_and_stays_in_numeric() -> None:
-    """🔴 The four decisions the task text calls "properties of that query",
-    each spelled so that deleting it is red here.
-
-    - **Eight calendar days, seven of them judged.** The trailing median
-      excludes today, so the window has to hold seven *complete* days plus the
-      partial one being judged -- a seven-day window including today compares
-      today against a median it is a member of.
-    - **A median, not a mean**, as PRD 10 specifies: one generation per
-      household per night means a single failed night at $0 and a single re-run
-      at 2x drag a mean far enough that 3x stops meaning anything.
-    - **The comparison stays in `numeric`.** `cost_usd` is `NUMERIC(12, 8)`
-      precisely so money is not a float, and a rule that casts to `float8` for
-      the ratio reintroduces the rounding that column exists to refuse.
-      ⚠️ **`percentile_cont` is that cast**: Postgres has no `numeric`
-      overload of it, so `percentile_cont(0.5) WITHIN GROUP (ORDER BY
-      <numeric>)` returns `double precision` -- measured with `pg_typeof` on
-      PostgreSQL 17.10, 2026-09-11. `percentile_disc` is
-      `anyelement -> anyelement` and over a seven-element set returns the same
-      element. That is why the statement the task text supplies is not the
-      statement that shipped.
-    - **An absolute floor**, because a `0` trailing median makes `3 x median`
-      zero and any spend at all an anomaly -- the default state of every
-      deployment that has not priced its model.
-
-    The scans are substrings, which `testing-discipline.md` warns is how a
-    rendered artefact becomes a change-detector. They are substrings *here*
-    because each is a claim another component honours: the floor literal is
-    compared against the number the description promises an operator, and the
-    window and the aggregate are the two the mutation sweep is aimed at.
+    """🔴 The four decisions the task text calls "properties of that query", each spelled so
+    that deleting it is red here.
     """
     sql = cost_anomaly_sql()
 
@@ -1330,27 +1017,8 @@ def test_the_cost_anomaly_summary_survives_an_undefined_ratio() -> None:
 def test_the_cost_anomaly_description_names_its_floor_the_two_price_settings_and_its_panel() -> (
     None
 ):
-    """A page has to land somewhere, and this one has two things to explain
-    that the Prometheus three do not.
-
-    **The floor**, because a constant that suppresses the alert is a constant
-    an operator will eventually need to raise, and a number in the SQL that
-    the description does not carry is a number nobody finds. It is asserted as
-    *the same string* the statement uses, so the two cannot drift.
-
-    **The two price settings**, because their defaults make this alert silent
-    by construction. `llm_price_in_per_mtok` and `llm_price_out_per_mtok` both
-    default to `Decimal(0)` (`src/usher/config.py`), which that file calls the
-    honest value for a local model and the wrong one for a hosted model an
-    operator forgot to price -- and this host's LLM is a local vLLM. With them
-    unset every `cost_usd` is `0.00000000` and no multiple of zero is an
-    anomaly. An operator who believes this rule is watching a hosted model has
-    to be told where to look, in the page itself.
-
-    The panel is on **Dashboard 5**, not 3, and is checked against
-    `05-cost-and-compliance.json` for the reason the Prometheus case checks
-    Dashboard 3's: renaming a panel should be red here rather than silently
-    pointing a page at a screen that no longer exists.
+    """A page has to land somewhere, and this one has two things to explain that the
+    Prometheus three do not.
     """
     rule = _grafana_rule("Cost anomaly")
     description = " ".join(str(rule["annotations"]["description"]).split())
@@ -1514,36 +1182,7 @@ def test_no_grafana_rule_carries_a_zero_width_relative_time_range() -> None:
 
 
 def test_no_rule_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults() -> None:
-    """D9's panel guard, turned on the rule file, and it is here for D12.
-
-    `configure_metrics` installs no `View`, so a seconds-unit histogram with no
-    `explicit_bucket_boundaries_advisory` takes the SDK's second-scale defaults
-    and every observation under five seconds lands in one bucket.
-    `histogram_quantile` over that does not fail and does not empty: D1 measured
-    a flat **2.5000 s** against a true p50 of **35.20 ms**.
-
-    On a panel that draws a plausible wrong line. **On an alert it decides
-    whether the rule can fire at all**, and it decides it wrongly in both
-    directions at once -- a `> 5s` threshold over such a histogram fires
-    permanently on the interpolated 2.5 s the moment the bucket has two
-    observations, or never fires whatever the real latency is. That is issue
-    #86, and it lands on D12: PRD 10's *"Enrichment SLA missed -- demand-triggered
-    p99 > 5 s"* is a quantile over `usher.enrichment.latency`, which carries no
-    advisory today.
-
-    ⚠️ **D12 landed the quantile rule this case was written for, and fixed the
-    instrument rather than the expression.** `usher.enrichment.latency` now
-    declares `explicit_bucket_boundaries_advisory` boundaries that bracket the
-    5 s threshold, so *Enrichment SLA missed* is graded here and passes on its
-    merits. The plant below therefore moved to `usher.jobs.duration`, which is
-    still on the SDK defaults -- a plant naming the one instrument D12 fixed
-    would have been a control that stopped controlling anything the moment it
-    was fixed, which is the failure this whole module is about.
-
-    #86 is **not** closed: thirteen seconds-unit histograms still carry no
-    advisory (measured 2026-09-11). What D12 closed is the one instrument an
-    alert takes a quantile of.
-    """
+    """D9's panel guard, turned on the rule file, and it is here for D12."""
     declared = _declared_histograms()
     seconds = {name for name, body in declared.items() if 'unit="s"' in body}
     with_advisory = {
@@ -1598,48 +1237,7 @@ def test_no_rule_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults() -
 def test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_series_and_panel() -> (
     None
 ):
-    """PRD 10's alerts are pages, and a page has to land somewhere.
-
-    D11's acceptance: each description names **the series, the label vocabulary
-    and the panel it corresponds to**, so an operator woken at 2 a.m. arrives at
-    a panel rather than at a PromQL prompt. All three are checked against
-    something the repository already holds -- the panel titles against the
-    dashboard JSON itself, so renaming a panel is red here rather than silently
-    pointing a page at a panel that no longer exists.
-
-    ⚠️ **The dashboard number is read out of the sentence rather than fixed at
-    3.** D11 wrote `" on dashboard 3"` because all three of its rules landed on
-    the Pipeline board and D12's two joined them there; D13's *Disk projection*
-    is drawn from Dashboard 5's disk panel, and a check that could only look at
-    3 would have had to be relaxed to let it through -- the shape that turns one
-    exemption into a check nobody runs. Two premises rather than one, so a scan
-    that has stopped reading dashboards is red before the loop grades anything.
-
-    🔴 **And an `absent()` rule is graded differently on its labels, because it
-    has none of its own.** Prometheus builds such a result's label set from the
-    selector's equality matchers alone -- there is no series to take labels
-    from, which is the condition -- so `{{ $labels.mountpoint }}` renders empty
-    and the page names no subject. That is the same defect `sum by (le)` causes
-    one paragraph down, arriving by a different route and invisible to the same
-    check.
-
-    The label half is two claims, and the second is the one with teeth. An
-    annotation that renders `{{ $labels.kind }}` has to (a) explain what `kind`
-    is, because a page reading *"enrich jobs are parking"* is only actionable if
-    the reader knows `enrich` is a lane, and (b) survive the expression's own
-    aggregations -- `sum by (le) (...)` drops `kind` and the page then says
-    *"jobs are parking"* with an empty lane, which is a rendered alert that
-    names no subject. The committed three aggregate nothing, so (b) grades zero
-    aggregations today and its teeth are proved on a planted rule instead.
-
-    ⚠️ **"Names the label vocabulary" is checked against the description's own
-    prose, not against the attribute keys `src/usher/` emits.** Linking an
-    instrument to its attributes needs dataflow -- `usher.jobs.queued` and
-    `usher.jobs.parked` share one `_observations` helper and neither names a
-    key at its own declaration -- and a check that guessed would be a check that
-    passed. So this is the weaker claim, stated as such: every label the page
-    interpolates is a label the page explains.
-    """
+    """PRD 10's alerts are pages, and a page has to land somewhere."""
     assert len(_dashboard_three_panel_titles()) == 10, (
         "Dashboard 3 has ten panels; this scan found "
         f"{len(_dashboard_three_panel_titles())}: {sorted(_dashboard_three_panel_titles())}"
@@ -1829,14 +1427,7 @@ class Meter:
     )
 
 
-# One range-vector selector, `name[5m]` or `name{matchers}[5m]`. Used to
-# compare a ratio's two sides matcher-for-matcher rather than by eyeball.
-#
-# **The matcher block is optional and the `[` lookahead is what makes that
-# safe.** `Provider degraded`'s denominator is a bare
-# `usher_provider_requests_total[5m]` -- which is the whole point of a
-# denominator -- and a pattern requiring `{...}` finds one selector in a
-# two-sided ratio and grades the rule against itself.
+# One range-vector selector, `name[5m]` or `name{matchers}[5m]`.
 _SELECTOR = re.compile(r"\b(?P<name>[a-z_][a-z0-9_]*)(?:\{(?P<matchers>[^}]*)\})?(?=\[)")
 _MATCHER = re.compile(r"(?P<label>\w+)\s*(?P<op>=~|!~|!=|=)\s*\"(?P<value>[^\"]*)\"")
 
@@ -1848,29 +1439,7 @@ def _matchers(block: str | None) -> dict[str, tuple[str, str]]:
 
 
 def test_every_quantile_rule_collapses_the_labels_it_is_not_a_quantile_of() -> None:
-    """🔴 A `histogram_quantile` without `by (le)` is a quantile *per label set*.
-
-    `usher.enrichment.latency` carries `outcome` as well as `trigger`, so
-    `histogram_quantile(0.99, rate(..._bucket[5m]))` -- no aggregation at all --
-    computes one p99 for `outcome="enriched"` and another for
-    `outcome="failed"`, and PRD 10's *"demand-triggered p99 > 5 s"* is neither
-    of them. The failure is quiet in the way this module is about: both numbers
-    are plausible, both draw a line, and the alert fires on whichever crosses
-    first -- most likely the failures, whose latency is a timeout rather than a
-    fetch.
-
-    **`le` must be in the grouping and every other label of the histogram must
-    not be**, except one the selector has already pinned to a single value.
-    That exception is why the committed rule groups `by (le, trigger)`: keeping
-    a pinned label changes no arithmetic and is what lets the page name its
-    subject, which
-    `test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_series_and_panel`
-    separately requires.
-
-    This is a static defect and needs no Prometheus, which is the point: the
-    live firing in `dashboards/README.md` proves the rule *can* fire, and a
-    firing cannot tell you it fired on the wrong population.
-    """
+    """🔴 A `histogram_quantile` without `by (le)` is a quantile *per label set*."""
     quantile_rules = [
         rule for rule in committed_rules() if "histogram_quantile" in str(rule["expr"])
     ]

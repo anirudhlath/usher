@@ -1,19 +1,4 @@
-"""`GenreNormalisationService` — the write-time half ADR-0039 deferred.
-
-**What this arm can and cannot say.** `FakeTitleRepository` is a dict, so it
-answers the sweep's *mechanics* — page size, cursor advance, the limit brake,
-what is counted rewritten against unchanged, and the idempotence that makes a
-re-run free. It cannot answer whether normalising the column really stales an
-embedding: `FakeTitleEmbeddingRepository`'s own docstring says *"any test that
-asserts staleness against this fake is asserting the fake's own arithmetic"*,
-because the real predicate evaluates `md5` over `titles`' columns in Postgres.
-That property is pinned in `tests/integration/test_genre_backfill.py`, against
-the fingerprint the shipped `_FINGERPRINT_SQL` computes.
-
-So the embedding half is tested *here* only as plumbing — that the service
-reads the stale count on both sides of its own writes and reports the
-difference rather than a number of its own invention.
-"""
+"""`GenreNormalisationService` — the write-time half ADR-0039 deferred."""
 
 import uuid
 from collections.abc import Sequence

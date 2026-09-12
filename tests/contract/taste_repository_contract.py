@@ -1,30 +1,4 @@
-"""Behaviour every `TasteRepository` implementation must satisfy.
-
-**This suite is almost entirely about one predicate**, because that is almost
-all this port does. `get()` is not a lookup: it is `STALE_TASTE` evaluated over
-two tables, and an implementation that stored and returned rows faithfully
-while getting any one of its three disjuncts wrong would pass every case about
-*storage* and serve a confidently wrong centroid forever.
-
-**Three of the cases exist to separate `IS DISTINCT FROM` from `<`**, and only
-the first of the three is the obvious one:
-
-- a **newer** watch state raises `max(updated_at)`. Both spellings catch it,
-  and a suite holding only this case is green against the bug.
-- a **deleted** watch state *lowers* it. `<` never looks backwards, so it goes
-  on serving a centroid computed over a row that no longer exists -- for a
-  household that unwatched something, forever.
-- a **cleared** history makes the subquery `NULL`, and `stored < NULL` is
-  `NULL`, which is not true. So `<` never recomputes for a household whose
-  history was wiped, which is the same failure with the same cause and a
-  different shape.
-
-Subclass and provide `repository`, `user_id` and `other_user_id` (which must
-name users that actually exist, for an implementation with foreign keys), plus
-the three history hooks below. `WatchStateRepository` has no delete method --
-deliberately, PRD 02 hard-deletes nothing through a port -- so the hooks reach
-past it, and each arm reaches past it in its own way.
-"""
+"""Behaviour every `TasteRepository` implementation must satisfy."""
 
 import uuid
 from datetime import UTC, datetime, timedelta

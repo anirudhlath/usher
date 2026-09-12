@@ -1,47 +1,4 @@
-"""In-memory `MetadataProvider`, for `EnrichService` to be unit-tested
-against.
-
-**Where this is more forgiving than the real TMDb, on purpose.** Seven places.
-The first three and the seventh are closed by `tests/unit/test_adapters_tmdb_*.py`,
-which drive `TmdbMetadataProvider` over `httpx.MockTransport`; the fourth
-through sixth are closed by nothing in this repository and are on Task 26's
-live-verification list.
-
-- **It never rate-limits, never times out, and answers instantly.** Nothing
-  here exercises the token-bucket throttle, the 429 path, or
-  `PortRateLimited.retry_after`. `test_adapters_tmdb_client.py` drives all
-  three against a fake clock and a mock transport.
-- **Its `to_result` is a hand-written stand-in, not TMDb's mapping.** It
-  reads a deliberately small subset of the same keys (`title`/`name`,
-  `release_date`/`first_air_date`, `genres`, `overview`, `seasons`) so the
-  seeded payloads read like the real thing — which means it *looks* like it
-  covers the movie/TV divergence and does not: a mapper bug in
-  `usher.adapters.tmdb.mapping` is invisible from here. Only
-  `test_adapters_tmdb_mapping.py` can see one.
-- **A miss is `PortDataMalformed`, unconditionally.** The real provider has
-  to decide that from an HTTP status, and getting it wrong (404 →
-  `PortUnavailable`) costs five retries and a wrong park reason rather than
-  an error. This fake cannot tell the two apart because it has no statuses.
-- **Its payloads are hand-written, not shape-recorded.** They carry the keys
-  this project believes TMDb sends. `tests/fixtures/tmdb/` at least records a
-  shape somebody transcribed from TMDb's published documentation; this file
-  does not even do that, so a payload here agreeing with the mapper proves
-  only that two guesses agree.
-- **`changed_since` pages a list this test seeded**, so it can never produce
-  the one behaviour that matters about a real change feed: entries appearing
-  *while* it is being walked. A resumable cursor over a moving feed can
-  revisit or skip, and nothing here will ever show it.
-- **`search` returns exactly what was seeded, in that order**, so "the
-  provider's own relevance ordering" is whatever a test wrote down. It
-  cannot show that TMDb's ordering puts the obvious answer first, which is
-  the assumption every "pick a confident candidate" rule rests on.
-- **Its `genre_vocabulary` is TMDb's set transcribed a second time, not
-  read off `TMDB_GENRE_NAMES`.** So an `EnrichService` case proves the rule —
-  a concept the provider cannot name survives enrichment — and proves nothing
-  about whether TMDb's real vocabulary is that set. ADR-0039 and the
-  `test_adapters_tmdb_provider.py` case named on the property close the other
-  half.
-"""
+"""In-memory `MetadataProvider`, for `EnrichService` to be unit-tested against."""
 
 import copy
 import uuid
@@ -325,35 +282,7 @@ class FakeMetadataProvider(MetadataProvider):
         )
 
     def to_derivation(self, payload: dict[str, Any], title_id: uuid.UUID) -> DerivationResult:
-        """People, credits and a collection out of a seeded payload.
-
-        **Deliberately a second, simpler reader than
-        `usher.adapters.tmdb.mapping`, and the module docstring's warning
-        applies with full force here**: agreeing with a payload this same
-        file wrote is not evidence about TMDb. What this exists for is the
-        service above it -- `DeriveService`'s resolution, scoping and
-        ordering -- and for that a reader that is honest about `cast`, `crew`
-        and `created_by` is enough.
-
-        Three things it does model, because a service case turns on each:
-        the per-kind divergence (`created_by` is top-level, not
-        `credits.crew`), one `Person` per distinct provider id however many
-        arrays name them, and `billing_order` read from `order` rather than
-        from the array index.
-
-        What it does **not** model: the crew job filter, the cast cutoff and
-        the per-kind image cap. All three are `mapping.py`'s and all three have
-        their own cases there; a fake that reimplemented them would be a second
-        copy of the rule, which is the thing a fake exists not to be.
-
-        **Images are modelled to the same depth**, because two things a service
-        case turns on live here rather than in the mapper: that the top-level
-        `poster_path`/`backdrop_path` pair is what carries `is_primary`, and
-        that a path named by both the pair and an array is **one** row. Without
-        the second, `DeriveService`'s own count would be right for the wrong
-        reason -- `ImageRepository.replace_for_titles` deduplicates on the same
-        key, so the fake would be measuring the repository.
-        """
+        """People, credits and a collection out of a seeded payload."""
         people: dict[int, Person] = {}
         credits: list[Credit] = []
         block = payload.get("credits") or {}

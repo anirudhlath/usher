@@ -1,10 +1,4 @@
-"""The tag-triggered release workflow.
-
-**Every assertion here is about a thing that fails the job before any step of
-yours runs**, which is the class of defect a workflow file is bad at showing:
-an action reference that resolves to nothing dies in about two seconds at
-"Set up job", and the error names the tag rather than the mistake.
-"""
+"""The tag-triggered release workflow."""
 
 import pathlib
 from typing import Any

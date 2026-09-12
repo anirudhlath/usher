@@ -1,38 +1,4 @@
-"""In-memory `TitleNeighborRepository`, for the similarity batch's plumbing.
-
-**Where this is more forgiving than the real thing, on purpose. Five.**
-
-1. **No foreign keys and no CHECKs.** `title_neighbors` carries
-   `CHECK (score >= 0 AND score <= 1)`, `CHECK (title_id <> neighbor_id)`,
-   `CHECK (rank >= 0)` and two `ON DELETE CASCADE` references to `titles`. A
-   negative score, a self-neighbour and a row naming a title that does not
-   exist are all accepted here and are three different failures there.
-2. **`replace` is a dict assignment.** The real one is a `DELETE` scoped to
-   `seed_ids` plus one set-based `INSERT`, so "replaced" and "merged" are
-   distinguishable there and not here -- which is why the seed-that-lost-every-
-   neighbour case is asserted against Postgres as well.
-3. **The clock is injectable and the real one is `now()`.** Postgres freezes
-   `now()` per transaction, so a real rebuild's pages genuinely carry different
-   instants; two `datetime.now(UTC)` calls microseconds apart would let
-   `computed_at`'s oldest-versus-newest rule pass either way. A case that cares
-   passes a stepping clock, which is the point of the parameter.
-4. **It cannot fail.** No connection, no lock, no transaction, so nothing here
-   exercises a single error path and a caught conflict cannot leave a session
-   poisoned.
-5. **`resume_cursor` reads the *other fake* where the statement reads a
-   join.** The real one is one statement over `title_embeddings` and
-   `title_neighbors`; here the embedded population arrives through
-   `FakeTitleEmbeddingRepository.embedded_ids()`, so a case that constructs
-   this fake without one gets an `AssertionError` rather than a cursor
-   computed from half the predicate. The *answer* is not weakened -- the
-   predecessor rule and both spellings of `None` are modelled exactly, because
-   an off-by-one here is the whole failure the cursor exists to avoid.
-
-One deliberate *non*-divergence: `list_for` orders by the stored `rank` and
-then by id, exactly as the statement does. Ordering by `score` here and by
-`rank` there would make the tiebreak that this milestone's determinism rests on
-a property of one implementation.
-"""
+"""In-memory `TitleNeighborRepository`, for the similarity batch's plumbing."""
 
 import uuid
 from collections.abc import Callable, Sequence

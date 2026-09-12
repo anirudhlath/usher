@@ -1,12 +1,5 @@
-"""MovieLens tag-genome parsing and assembly, over a synthetic zip built
-in this file. No network, no Docker, no real archive.
-
-Every value here is invented. The fixture is Python literals rather than a
-committed .csv or .zip because none of the four checks in
-tests/unit/test_no_third_party_data.py can recognise a MovieLens row by
-shape -- a genome row is three integers and a float, and links.csv is three
-integers, both indistinguishable from any CSV ever written. See that module
-and tests/fixtures/bulk/README.md.
+"""MovieLens tag-genome parsing and assembly, over a synthetic zip built in this file.
+No network, no Docker, no real archive.
 """
 
 import zipfile
@@ -28,16 +21,7 @@ from usher.ports.errors import PortDataMalformed
 
 _ROOT = "ml-latest/"
 
-# Four movies. 90000101 is in links and in the genome (the ordinary path).
-# 90000102 is in links with an imdb id the catalog will not hold (the
-# repository drops it; the dataset must still yield it). 90000103 is in the
-# genome and *absent from links* -- it advances `position` and not
-# `rows_seen`. 90000104 is in links and absent from the genome.
-#
-# The imdb ids are 8 digits beginning 99, which is the reserved synthetic
-# band `tests/unit/test_no_third_party_data.py` enforces once the `tt`
-# prefix is applied. A *padded* id cannot be written here at all -- see
-# `test_a_short_imdb_id_is_left_padded_to_seven_digits`.
+# Four movies.
 _LINKS = "\n".join(
     [
         "movieId,imdbId,tmdbId",

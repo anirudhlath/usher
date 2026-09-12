@@ -1,10 +1,4 @@
-"""`SeasonalProvider` -- the one provider whose content is a taste judgement.
-
-Two of the cases here assert a property of `_WINDOWS` rather than a behaviour
-of a build, which is unusual and deliberate: both failures they guard against
-produce a row that is **permanently absent with no error anywhere**, and
-nothing about a row's contents can detect a row that never appears.
-"""
+"""`SeasonalProvider` -- the one provider whose content is a taste judgement."""
 
 from datetime import UTC, datetime, timedelta
 

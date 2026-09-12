@@ -1,39 +1,4 @@
-"""`.env.example`, `compose.yml` and `Settings`, checked against each other.
-
-These three files are one deployment surface and nothing before M5 held them
-together. Two defects lived in the gap, both invisible to a suite that passes
-2,098 times, because both only appear *outside* a dev machine:
-
-1. **`.env` has two readers with different vocabularies.** Docker Compose
-   substitutes `${...}` out of it into `compose.yml`; pydantic-settings reads
-   the same file as a settings source with `extra="forbid"`. So a compose
-   variable is an *extra* input to `Settings`, and `USHER_HOST_PORT` -- the
-   host-side publish port, shipped in `.env.example` since M1 -- made
-   `cp .env.example .env`, the README's own first step, fail every entry
-   point with `ValidationError: usher_host_port`. `usher.config` now reserves
-   `USHER_COMPOSE_` for compose's half of the file, and the two cases below
-   named `..._is_a_setting_or_compose_reserved` are what fails if a future
-   compose variable is added outside that namespace.
-
-2. **A documented setting that never reaches the container is dead config
-   that looks like a control.** `compose.yml` used to forward five of the
-   thirty documented keys through `environment:`, so
-   `USHER_WORKER_ENABLED=false` in `.env` -- the only place the README points
-   an operator at -- was silently ignored, leaving `worker: true` on a server
-   that an operator had just told to stop working. It is `env_file:` now, and
-   the tests below pin both halves: the file is handed to the container
-   whole, and `environment:` overrides only what the compose topology
-   genuinely owns.
-
-Every case here deliberately opts out of `tests/conftest.py`'s
-`clean_environment` fixture for the *file* half of its isolation, by passing
-`_env_file=` explicitly. That fixture neutralises `Settings.model_config`'s
-`env_file` precisely so a developer's own `.env` cannot fail the suite -- and
-it is why the suite stayed green against a `.env.example` that broke every
-entry point. A case written without the explicit `_env_file` would prove
-nothing at all. The `USHER_*`/`OTEL_*` variables the same fixture strips from
-`os.environ` are still stripped, so each file below is the only source.
-"""
+"""`.env.example`, `compose.yml` and `Settings`, checked against each other."""
 
 import re
 from pathlib import Path
@@ -56,65 +21,9 @@ _COMPOSE = _REPO_ROOT / "compose.yml"
 _SECRET_KEY = "0" * 64
 _DATABASE_URL = "postgresql+asyncpg://usher:usher@localhost:5432/usher"
 
-# The only variables `compose.yml` may set through `environment:`, each
-# because the compose *topology* owns it rather than the operator:
-#
-#   USHER_DATABASE_URL  the service's hostname on the compose network.
-#                       `.env`'s `localhost` is right for a dev shell and
-#                       wrong inside the container.
-#   USHER_HOST          bind-all, or the published port reaches nothing.
-#   USHER_PORT          8000 -- what `ports:`, the Dockerfile's `EXPOSE` and
-#                       usher's own healthcheck all assume.
-#   USHER_SECRET_KEY    passed as `${...:?}` so a missing key fails at
-#                       `docker compose up` with a sentence, rather than as a
-#                       container that starts and crashes on validation.
-#
-# **The fifth entry arrived in M9 and this list grew deliberately rather than
-# silently**, which is the whole reason `test_compose_overrides_only_what_the_
-# topology_owns` is written to fail when it changes:
-#
-#   USHER_IMAGE_CACHE_DIR  the container side of `volumes:`'s
-#                          `./data/images:/data/images`. A bind-mount path is
-#                          a topology fact in exactly the way the four above
-#                          are -- `.env`'s `data/images` is right for a dev
-#                          shell and inside a container whose WORKDIR is
-#                          `/app` it would put the image cache in the image's
-#                          own writable layer, where it survives no rebuild
-#                          and appears in no `du` against the mount. The other
-#                          three `USHER_IMAGE_*` settings (the byte ceiling,
-#                          the fetch timeout and the CDN base URL) are the
-#                          operator's and are deliberately not here.
-#
-# **The sixth arrived on 2026-08-26, and it arrived as a production incident
-# rather than as a design**, which is the part worth keeping:
-#
-#   USHER_BULK_DATA_DIR    the container side of `volumes:`'s
-#                          `./data/bulk:/data/bulk`, and the same fact as the
-#                          fifth -- except that this one was *missing* for
-#                          five milestones. `.env`'s `data/bulk` resolves
-#                          against WORKDIR `/app`, and `/app` is root-owned
-#                          while the process is uid 1000, so `bootstrap` did
-#                          not merely cache in the wrong place: it died on
-#                          `mkdir` with `PermissionError(13)` before reading a
-#                          byte. Nothing caught it because every bootstrap
-#                          this project has ever run was `uv run usher
-#                          bootstrap` from a dev shell, where the relative
-#                          path is correct -- the defect needed
-#                          `USHER_WORKER_ENABLED=true` *and* a queued
-#                          `bootstrap` job to appear at all. The other two
-#                          `USHER_BULK_*` settings (the batch size and the
-#                          user agent) are the operator's and are not here.
-#
-# **The two entries are the same shape and only one of them was ever
-# checked**, which is the finding this list should carry: `test_every_
-# variable_compose_substitutes_is_a_setting_or_compose_reserved` scans
-# `compose.yml` for `${...}`, and neither of these is written that way, so
-# nothing here relates a *relative* default in `.env.example` to a WORKDIR the
-# container actually has. `test_a_relative_path_setting_is_overridden_for_the_
-# container` below is that check, derived from the settings rather than from a
-# list, so a seventh path setting is a red rather than a silent repeat.
-#
-# Anything else an operator sets in `.env` must reach the container unaltered.
+# The only variables `compose.yml` may set through `environment:`, each because the
+# compose *topology* owns it rather than the operator: USHER_DATABASE_URL the service's
+# hostname on the compose network.
 _TOPOLOGY_OWNED = frozenset(
     {
         "USHER_DATABASE_URL",
@@ -377,16 +286,8 @@ def test_compose_overrides_only_what_the_topology_owns() -> None:
     assert declared == set(_TOPOLOGY_OWNED)
 
 
-# A relative `Path` default that the image ships at the same place under
-# `/app`, so the container agrees with a dev shell and no override is wanted.
-# `console_dist_dir` is the only one: the Dockerfile copies the console
-# stage's output to `/app/web/dist`, and `config.py` names `image_cache_dir`
-# as its counterexample in the same comment.
-#
-# A *writable* directory can never be on this list -- `/app` is root-owned and
-# the process is uid 1000, so anything the container has to create under it
-# fails with `PermissionError(13)`, which is what `bulk_data_dir` did in
-# production on 2026-08-26.
+# A relative `Path` default that the image ships at the same place under `/app`, so the
+# container agrees with a dev shell and no override is wanted.
 _SHIPPED_IN_THE_IMAGE = frozenset({"console_dist_dir"})
 
 

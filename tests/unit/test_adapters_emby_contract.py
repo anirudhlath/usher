@@ -1,13 +1,4 @@
-"""The source-adapter contract, against the real EmbyAdapter.
-
-The same file of assertions that `tests/unit/test_source_adapter_contract.py`
-runs against an adapter with no wire format at all. Both runs are needed:
-that one proves the assertions are not secretly Emby-shaped, this one proves
-they survive a serialisation. Neither alone is evidence.
-
-No Docker and no network -- the whole thing rides on an in-memory transport,
-which is why the load-bearing suite stays in the fast lane.
-"""
+"""The source-adapter contract, against the real EmbyAdapter."""
 
 from collections.abc import AsyncIterator
 

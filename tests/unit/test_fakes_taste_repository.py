@@ -1,11 +1,4 @@
-"""`TasteRepositoryContract` against `FakeTasteRepository`.
-
-The fake arm of the pair. It has real teeth on the staleness predicate --
-`FakeTasteRepository.get` re-evaluates all three disjuncts rather than looking
-a row up -- and none at all on the two things only a database has: `halfvec`
-quantisation, and a `BEFORE UPDATE` trigger owning `updated_at`. Both are
-listed on the fake itself and both are the integration arm's.
-"""
+"""`TasteRepositoryContract` against `FakeTasteRepository`."""
 
 import uuid
 from datetime import UTC, datetime

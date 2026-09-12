@@ -1,30 +1,4 @@
-"""Behaviour every `LLMCallRepository` implementation must satisfy.
-
-The port is **an append and nothing else**, and `record()` is called on both
-the path where a generation worked and the path where it did not -- a ledger
-holding only the successes understates spend by exactly the failures, which
-are the rows an operator most wants to see -- and `ok` is the discriminator
-rather than "the HTTP call returned 200".
-
-**A write is observed through an abstract `LLMCallLedger`**, because the port
-offers no read to observe it with and a read added for that purpose could not
-fail: a `record()` that dropped `generation_id` and a read that never selected
-it agree perfectly.
-
-Its `ABC` shape is ADR-0001's argument applied to a test double -- a
-`Protocol` would let one arm drift out of the suite silently.
-
-**Every case names the wrong implementation it rules out.** A test whose
-docstring cannot name what it kills is a test that kills nothing.
-
-**Almost every assertion here is structural against a dict-backed fake and
-load-bearing against Postgres**, because the fake stores the very `LLMCall` it
-was handed: no column mapping exists there to get wrong. That is the first
-entry in `tests/fakes/llm_call_repository.py`'s divergence list, and it is why
-this suite is run against both arms rather than against the fake alone --
-`TitleNeighborRepository` is the one repository port that skipped that, and
-the gap hid a live defect for a milestone.
-"""
+"""Behaviour every `LLMCallRepository` implementation must satisfy."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -47,13 +21,10 @@ MODEL = "fake:test-model"
 #: it would be testing a column this schema does not have.
 AT = datetime(2026, 8, 5, 3, 0, tzinfo=UTC)
 
-#: **PRD 10's own worked example, and the three numbers are pairwise distinct
-#: on purpose.** 1,200 tokens in at $3/Mtok plus 340 out at $15/Mtok is exactly
-#: $0.0087 -- a value binary floating point cannot represent, which is why
-#: `cost_usd` is a `Decimal` and the column is `NUMERIC(12, 8)`. The distinctness
-#: is what makes a write that fills `tokens_out` from `tokens_in`, or
-#: `latency_ms` from either, visible at all; the premise is asserted in the case
-#: rather than trusted here.
+# : **PRD 10's own worked example, and the three numbers are pairwise distinct : on
+# purpose.** 1,200 tokens in at $3/Mtok plus 340 out at $15/Mtok is exactly : $0.0087 --
+# a value binary floating point cannot represent, which is why : `cost_usd` is a
+# `Decimal` and the column is `NUMERIC(12, 8)`.
 TOKENS_IN = 1200
 TOKENS_OUT = 340
 LATENCY_MS = 4310
@@ -114,28 +85,7 @@ def llm_call(
 
 
 class LLMCallLedger(ABC):
-    """The stored ledger, read without going through the port.
-
-    An independent observer, so a write case cannot be satisfied by a read
-    with the mirrored defect. The port has no read of its own either, which is
-    why the ledger is the only way to see a stored row at all.
-
-    **No `user()`, unlike `CuratedRowSeeder`.** That one exists because
-    `curated_rows.user_id` is a foreign key on one arm and nothing on the
-    other, so a bare UUID would exercise the conflict path against Postgres
-    and the happy path against the fake. `llm_calls` has **no foreign key at
-    all** -- not to `users`, and deliberately not to any generation either
-    (`m08a`: the column that would be referenced is not unique, must not
-    become unique, and any foreign key would let a cascade delete a cost row
-    from the thing whose cost it records) -- so an invented `generation_id` is
-    storable on both arms and there is nothing to seed.
-
-    **And no `record()`-bypassing writer either**, which is the other half of
-    the asymmetry with `CuratedRowSeeder`. That seeder exists because
-    `replace_for_user` deletes, so no sequence of port calls can leave two
-    generations stored. `record()` deletes nothing, so every state this suite
-    needs is reachable through the port itself.
-    """
+    """The stored ledger, read without going through the port."""
 
     @abstractmethod
     async def get(self, call_id: uuid.UUID) -> LLMCall | None:
@@ -204,16 +154,11 @@ class LLMCallRepositoryContract:
         await repository.record(call)
 
         stored = await ledger.get(call.id)
-        # **Narrowest first, named columns next, whole-model compare last, and
-        # the order is the whole difference between eleven live assertions and
-        # eleven dead ones.** `LLMCall.__eq__` is total, so a leading
-        # `stored == call` fails first for *any* difference -- `stored is None`
-        # included -- and every line under it is unreachable. This suite
-        # shipped that way: 24 lines across three cases that no defect could
-        # ever reach, `generation_id` among them, which this case's docstring
-        # calls the one that costs the most. Each of these now fails on its own
-        # column name, and the `== call` at the end keeps its job, which is to
-        # catch a column nobody thought to name.
+        # **Narrowest first, named columns next, whole-model compare last, and the order
+        # is the whole difference between eleven live assertions and eleven dead ones.**
+        # `LLMCall.__eq__` is total, so a leading `stored == call` fails first for *any*
+        # difference -- `stored is None` included -- and every line under it is
+        # unreachable.
         assert stored is not None, "the call was recorded and then could not be read back"
         assert stored.at == AT
         assert stored.model == MODEL
@@ -296,14 +241,11 @@ class LLMCallRepositoryContract:
         await repository.record(worked)
         await repository.record(failed)
 
-        # **The two reads come first and the count last, which is the
-        # ordering this case's third paragraph depends on.** Both wrong
-        # implementations it names leave a count of one, so a leading
-        # `count() == 2` fails before either read runs -- the case would be
-        # red and the lines that say *which* row survived would never
-        # execute. Measured by planting a `record()` that returns without
-        # appending. The count still earns its place last, where it is the
-        # only assertion that can see a third row written by mistake.
+        # **The two reads come first and the count last, which is the ordering this
+        # case's third paragraph depends on.** Both wrong implementations it names leave
+        # a count of one, so a leading `count() == 2` fails before either read runs --
+        # the case would be red and the lines that say *which* row survived would never
+        # execute.
         assert await ledger.get(worked.id) == worked
         assert await ledger.get(failed.id) == failed
         assert await ledger.count() == 2
@@ -388,28 +330,8 @@ class LLMCallRepositoryContract:
     async def test_a_cost_is_stored_exactly(
         self, repository: LLMCallRepository, ledger: LLMCallLedger, cost: Decimal
     ) -> None:
-        """The wrong implementation this kills: a write that rounds or
-        re-scales `cost_usd` on the way in.
-
-        The values are `m08a`'s own measured table, which is where the
-        column's scale came from. `0.00000002` is the one that matters:
-        `$0.02/Mtok x 1 token` stores as `0.000000` at scale 6 and `0.0000` at
-        scale 4, so a ledger that quantised on the way in would report a
-        hosted model as **free** -- and it would do it for the cheapest calls
-        while the expensive ones looked right, which makes the monthly total
-        wrong by an amount nobody can see. Same failure class as this
-        repository's `1 / (60 + rank)` integer division.
-
-        `Decimal("0")` is in the list because both prices default to `0`: an
-        operator who never priced their model produces that row on every
-        single call, and it must read back as a zero rather than as a NULL.
-
-        **Every value here is at or under scale 8, and that is a constraint
-        the fake imposes on this case rather than Postgres.** The column
-        rounds a ninth decimal place (bounded by 5e-9 USD per call, measured
-        in `m08a`) and the fake does not, so a value with nine places would
-        make a correct implementation fail on one arm -- see the fake's
-        divergence list, where this is the entry pointing the other way.
+        """The wrong implementation this kills: a write that rounds or re-scales `cost_usd`
+        on the way in.
         """
         call = llm_call(generation_id=new_id(), cost_usd=cost)
 

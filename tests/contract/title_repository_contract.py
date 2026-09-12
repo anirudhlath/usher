@@ -1,33 +1,6 @@
-"""Shared behavioural contract every `TitleRepository` implementation must
-satisfy — the technique PRD 08 calls out for `SourceAdapter` ("One
-parametrised test class every SourceAdapter must pass... it either passes
-the same tests the [other] adapter passes, or the port was wrong"), applied
-here to the port M1 actually ships: `FakeTitleRepository`
-(tests/fakes/title_repository.py, used to unit-test services with no
-network or database) and `PostgresTitleRepository`
-(usher.db.repositories.title, the real, SQLAlchemy-backed implementation).
-
-A fake and a real implementation that merely have matching method
-signatures are not interchangeable — only running the *same* assertions
-against both proves it. Two hand-maintained copies of these assertions
-(one in tests/unit against the fake, one in tests/integration against
-Postgres) would drift the moment someone updated one and not the other;
-this module exists so there is exactly one copy to update.
-
-Not a test module itself: `TitleRepositoryContract` deliberately doesn't
-start with `Test`, so pytest's default collection (`python_classes =
-Test*`) never tries to instantiate it directly -- which would fail anyway,
-since it has no `repo` fixture of its own. Subclass it and provide `repo`:
-
-    class TestFakeTitleRepository(TitleRepositoryContract):
-        @pytest.fixture
-        def repo(self) -> FakeTitleRepository:
-            return FakeTitleRepository()
-
-See tests/unit/test_title_repository_contract.py (no Docker) and
-tests/integration/test_title_repository.py's
-`TestPostgresTitleRepositoryContract` (real Postgres) for the two
-concrete subclasses.
+"""Shared behavioural contract every `TitleRepository` implementation must satisfy —
+the technique PRD 08 calls out for `SourceAdapter` ("One parametrised test class
+every SourceAdapter must pass...
 """
 
 import uuid
@@ -70,23 +43,10 @@ class TitleRepositoryContract:
         self, repo: TitleRepository, collection_id: uuid.UUID
     ) -> None:
         # Not `assert fetched == title`: an earlier version of this test (in
-        # tests/unit/test_ports.py, before the contract suite existed) did
-        # exactly that, and it only worked by accident, against the fake
-        # alone -- the fake used to preserve created_at/updated_at verbatim,
-        # so a freshly-constructed Title round-tripped byte-for-byte. Neither
-        # implementation does that (deliberately -- see
-        # test_created_at_is_not_taken_from_the_caller below): Postgres is
-        # the authoritative clock for both columns, and the fake now stamps
-        # them itself to match. A full-equality assertion here would fail
-        # against both, for a reason that has nothing to do with what this
-        # test checks -- excluded from the comparison below, not from the
-        # round trip: both are still set on the constructed Title, just not
-        # compared.
-        #
-        # Every other field of the 31 is set to a non-default value and
-        # compared -- the original version of this test only checked 3
-        # (name, tmdb_id, enrichment_state), which would miss a broken
-        # mapping in any of the other 28.
+        # tests/unit/test_ports.py, before the contract suite existed) did exactly that,
+        # and it only worked by accident, against the fake alone -- the fake used to
+        # preserve created_at/updated_at verbatim, so a freshly-constructed Title round-
+        # tripped byte-for-byte.
         title = Title(
             kind=TitleKind.SERIES,
             tmdb_id=90001399,
@@ -671,40 +631,7 @@ EpisodeOf = Callable[[uuid.UUID], Awaitable[uuid.UUID]]
 
 
 class TitleRepositoryCandidateContract:
-    """`list_unwatched_candidates`, the read `CandidatePoolService` is built on.
-
-    A separate mixin for `TitleRepositoryOwnedContract`'s reason and one more:
-    this read's answer depends on **three** tables `titles` does not contain --
-    `media_items` for ownership, `watch_states` for the exclusion, and
-    `episodes` for the roll-up that exclusion goes through -- so a subclass
-    supplies `own`, `watch`, `episode_of` and two households.
-
-    **What the wrong implementations look like, because every one of them is
-    populated.** The pool is 200 titles handed to a model that will write a
-    confident sentence about whichever ones it is given, so none of these
-    fails visibly:
-
-    - **The exclusion dropped or inverted.** A shelf of things the household
-      already finished, under a heading implying they are new.
-    - **The exclusion spelled on `watch_states.title_id` alone.** Trap 7: the
-      series a household is halfway through comes back forever on a library
-      that is 89% episodes.
-    - **The exclusion spelled as "has a watch state" rather than `played`.** A
-      sync writes a row per item it observed, so that predicate is the owned
-      library and the pool is then everything the household does *not* own.
-    - **The ordering's ownership key dropped.** A pool of things to seek out
-      and nothing to play tonight, on a household with a library.
-    - **The genre-affinity key dropped, or spelled as a filter.** Dropped, the
-      pool is the catalog's most-voted 200 on every household in the
-      deployment; as a filter, a household whose affinities are empty --
-      which is every household with no watch history -- gets nothing at all.
-    - **The `id` tiebreak dropped.** ADR-0028 addresses candidates by small
-      integer index, so index 7 naming a different film on a re-read is the
-      substrate moving under the prompt.
-
-    Every case therefore asserts on **position** and seeds a distractor a
-    broken implementation ranks first.
-    """
+    """`list_unwatched_candidates`, the read `CandidatePoolService` is built on."""
 
     @pytest.fixture
     def repo(self) -> TitleRepository:  # pragma: no cover - supplied by subclasses
@@ -740,32 +667,7 @@ class TitleRepositoryCandidateContract:
         title_id: uuid.UUID | None = None,
         enrichment_state: EnrichmentState = EnrichmentState.ENRICHED,
     ) -> Title:
-        """One catalog row, with an id nameable for the tiebreak case.
-
-        `title_id` is a parameter for `curated_row`'s reason: `new_id()` is
-        monotonic, so a fixture that mints in insertion order makes
-        `ORDER BY id` and "no ordering at all" the same answer, and the
-        tiebreak is then unobservable.
-
-        **`enrichment_state` defaults to `ENRICHED` and exactly one case
-        passes something else, which is what makes the default a statement
-        about the read rather than about the fixture.**
-        `list_unwatched_candidates` has no `enrichment_state` predicate and no
-        `enrichment_state` key: a skeleton is as eligible as an enriched
-        title, deliberately, because the pool spans the whole catalog and the
-        skeleton tier is most of it. That was argued in prose here and seeded
-        by nothing -- and "has any fixture, anywhere, ever set this to the
-        other value?" is the question this milestone has already answered
-        "no" to three times, once per surviving mutant. So
-        `test_a_skeleton_is_as_eligible_a_candidate_as_an_enriched_title`
-        seeds the other value, and a predicate added on this column fails a
-        case instead of passing every one of them.
-
-        Whether a prompt should be handed a candidate with no overview and no
-        genres is a real question and it is the *prompt's*, which is Task 12's
-        -- if the answer ever becomes "no", it lands as a predicate here with
-        its own case, not as a fixture that quietly stopped seeding one tier.
-        """
+        """One catalog row, with an id nameable for the tiebreak case."""
         return Title(
             id=title_id if title_id is not None else new_id(),
             kind=kind,
@@ -1088,33 +990,7 @@ class TitleRepositoryCandidateContract:
     async def test_a_skeleton_is_as_eligible_a_candidate_as_an_enriched_title(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """**The tier the pool is mostly made of, seeded for the first time.**
-
-        `list_unwatched_candidates` has no `enrichment_state` predicate on
-        purpose -- the port says the pool *"spans the whole catalog"* and that
-        the skeleton tier is most of it -- and until this case every fixture
-        in both arms wrote `ENRICHED`, so a predicate narrowing the read to
-        the enriched tier would have passed every case in the suite. That is
-        the same shape as `media_items.available`, whose mutation survived
-        everything until a fixture wrote the other value, and as
-        `titles.tmdb_popularity` before it: **a predicate on a column no fixture
-        ever writes falsely is unobservable.**
-
-        The defect is not hypothetical and it is quiet. M6 measured the
-        enriched tier at single-digit thousands against a 1.27M-title catalog,
-        so a narrowed read still answers with a full-looking, plausible,
-        well-ordered pool -- of the couple of thousand titles TMDb enrichment
-        happened to reach -- and the household's own recently-imported library
-        is absent from it forever, with nothing counting the absence. PRD 08's
-        operator rule is sharper still: a fresh install that has bootstrapped
-        but not yet enriched has *no* enriched titles at all, so the pool is
-        empty and curation never fires.
-
-        The skeleton is the **most-voted** row and is seeded **second**, so it
-        is neither first in id order nor reachable by accident: a read that
-        dropped it answers with one row, and a read that kept it but lost the
-        `vote_count` key answers in the other order.
-        """
+        """**The tier the pool is mostly made of, seeded for the first time.**"""
         enriched = self._candidate("Enriched And Quiet", vote_count=5)
         skeleton = self._candidate(
             "A Skeleton Everybody Voted For",
@@ -1155,13 +1031,7 @@ _BROWSE_POPULATION: tuple[tuple[str, int | None, float | None, int | None], ...]
     ("Charlie", 2010, None, None),
 )
 
-#: What each sort makes of `_BROWSE_POPULATION`, by name. Hard-coded rather
-#: than recomputed from the fixture: an expectation derived by re-implementing
-#: the sort is an assertion that the test agrees with itself.
-#:
-#: Every row of this table is a mutation the suite would otherwise miss --
-#: reverse the direction, default to NULLS FIRST, drop the `id` tail, or read
-#: the neighbouring column, and exactly one of these four lists changes.
+# : What each sort makes of `_BROWSE_POPULATION`, by name.
 _BROWSE_EXPECTED: dict[str, tuple[str, ...]] = {
     "name": ("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"),
     "year": ("Foxtrot", "Charlie", "Delta", "Echo", "Alpha", "Bravo"),
@@ -1171,36 +1041,7 @@ _BROWSE_EXPECTED: dict[str, tuple[str, ...]] = {
 
 
 class TitleRepositoryBrowseContract:
-    """`browse` and `browse_facets` -- the read `GET /browse` is built on.
-
-    A separate mixin for `TitleRepositoryOwnedContract`'s reason: the `owned`
-    filter depends on `media_items`, which `titles` does not contain, so a
-    subclass supplies `own`.
-
-    **What the wrong implementations look like, because every one of them is
-    populated and correctly shaped.** A browse screen renders whatever it is
-    handed, in order, with a working "next page" button:
-
-    - **`OFFSET` instead of a keyset.** Correct on a static table and wrong
-      the moment anything is written: a row inserted ahead of the client's
-      position pushes a row it has already seen onto the next page.
-    - **The `IS NOT NULL` leg dropped.** Three of the four sort keys are
-      nullable, and a comparison against a NULL is NULL rather than false --
-      so the walk drops every unkeyed row after an unkeyed boundary and each
-      page it serves is still full.
-    - **`>=` instead of `>`.** One duplicate at every page break, invisible to
-      any test whose pages do not abut.
-    - **The `id` tail dropped.** Ties resolve to whatever the storage
-      returned, so a row can appear on two pages or on none.
-    - **A facet folded back onto its own predicate.** The genre facet then
-      counts the page the client is already looking at, and it looks exactly
-      right on every request that does not use that facet.
-    - **A facet the request named but nothing matched, absent rather than
-      zero.** Indistinguishable from a filter the client never sent.
-
-    Every case therefore asserts on **position** or on a whole map, never on
-    membership.
-    """
+    """`browse` and `browse_facets` -- the read `GET /browse` is built on."""
 
     @pytest.fixture
     def repo(self) -> TitleRepository:  # pragma: no cover - supplied by subclasses
@@ -1394,27 +1235,7 @@ class TitleRepositoryBrowseContract:
     async def test_a_page_boundary_inside_the_unkeyed_group_does_not_drop_the_rest_of_it(
         self, repo: TitleRepository, sort: BrowseSort
     ) -> None:
-        """**The NULL trap, and it is the quietest defect in this port.**
-
-        `titles.year`, `titles.tmdb_popularity` and `titles.tmdb_vote_count`
-        are all nullable, and the popularity column was measured NULL on all
-        1,271,138 rows of a
-        bootstrap-only catalog -- so the unkeyed group is not an edge case,
-        it is most of the catalog on a fresh install. A keyset that compares a
-        NULL evaluates to NULL rather than to false, so once the cursor lands
-        inside that group **every remaining unkeyed row is dropped** and each
-        page the client was served was full.
-
-        Measured on `pgvector/pgvector:pg17` over five rows of which three are
-        unkeyed: resuming from the first unkeyed row, the natural
-        `ROW(...) > ROW(...)` spelling ADR-0034 first carried returns the two
-        *keyed* rows and neither remaining unkeyed one. That table is now in
-        the ADR.
-
-        The premise is the case: it asserts the boundary really is inside the
-        unkeyed group, because a fixture whose last page break happens to land
-        on a keyed row tests nothing at all.
-        """
+        """**The NULL trap, and it is the quietest defect in this port.**"""
         keys: dict[str, tuple[int | None, float | None, int | None]] = {
             "year": (2001, None, None),
             "popularity": (None, 9.0, None),
@@ -1525,12 +1346,11 @@ class TitleRepositoryBrowseContract:
         concept* and not simply a widened filter: it must be absent from both
         answers.
         """
-        # Single-word-distinct names, because the two arms of this contract do
-        # not agree about spaces: Python compares `"a "` before `"an"` and
-        # Postgres's default collation ignores the space at the primary level,
-        # so "A Fused…"/"A Skeleton…"/"An Enriched…" is a *different* order on
-        # the two implementations and the difference is about the collation
-        # rather than about anything this case is testing.
+        # Single-word-distinct names, because the two arms of this contract do not agree
+        # about spaces: Python compares `"a "` before `"an"` and Postgres's default
+        # collation ignores the space at the primary level, so "A Fused…"/"A
+        # Skeleton…"/"An Enriched…" is a *different* order on the two implementations
+        # and the difference is about the collation rather than about anything this case
         imdb_spelling = self._browsable("Alpha Skeleton Space Opera", genres=("Sci-Fi",))
         tmdb_spelling = self._browsable("Bravo Enriched Space Opera", genres=("Science Fiction",))
         fused = self._browsable("Charlie Fused Series Label", genres=("Sci-Fi & Fantasy",))
@@ -1808,30 +1628,8 @@ class TitleRepositoryBrowseContract:
 
 
 class TitleRepositoryGenreSweepContract:
-    """`list_genres_page` and `replace_genres` — the narrow projection the
-    write-time genre backfill walks and the batched write it lands.
-
-    **Separate from `TitleRepositoryContract` for the reason the browse and
-    owned mixins are separate**: these two methods exist for one command
-    (`usher genres --backfill`) and are the only pair on this port that reads
-    a projection rather than an entity. Grouping them keeps that visible.
-
-    **What the wrong implementations look like, and all of them return rows.**
-
-    - **A page walk that re-asks its own predicate.** A sweep resuming on
-      "what is still unnormalised" cannot terminate against a row the
-      predicate will not clear; this port therefore pages over *every* title
-      by id and lets the caller decide what changed.
-    - **`>=` instead of `>` on the cursor.** One title normalised twice per
-      page break — free, because the write is idempotent, and therefore
-      invisible to any case whose pages do not abut.
-    - **A write with no `IS DISTINCT FROM` guard.** Every row in the batch is
-      rewritten, the rowcount is the batch size rather than the change count,
-      and 1.15M dead row versions are produced by a re-run that changed
-      nothing. The report then says the backfill did work it did not do.
-    - **A write that takes the whole sweep in one transaction.** Correct, and
-      it holds row locks over 1.27M rows and loses everything on an interrupt.
-      Not expressible as a case here; it is why `batch_size` is an argument.
+    """`list_genres_page` and `replace_genres` — the narrow projection the write-time genre
+    backfill walks and the batched write it lands.
     """
 
     @pytest.fixture

@@ -1,13 +1,4 @@
-"""`BecauseYouWatchedProvider` -- the provider that emits one row per seed.
-
-**The front matter's second named failure, and it is this provider's:** *"A
-`BecauseYouWatchedProvider` seeded from the oldest watch state rather than the
-most recent returns a beautifully constructed row about a film watched in
-2019."* Every case here asserts on the *order* of the proposed rows, because
-the oldest-seeded implementation returns three real, similar, hydrated rows
-with correct reasons attached and the only thing wrong with it is which films
-they are about.
-"""
+"""`BecauseYouWatchedProvider` -- the provider that emits one row per seed."""
 
 import uuid
 from collections.abc import Sequence

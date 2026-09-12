@@ -1,51 +1,5 @@
-"""`/admin/rows/*` through real requests against real Postgres:
-`POST .../regenerate` (M8) and `GET`/`PUT .../providers` (M9).
-
-**The provider half is here because the claim it has to make is not about a
-response.** M7's boundary call 9 refused `row_provider_settings` on the ground
-that a toggle nothing reads is worse than no toggle, so what this file proves
-for those two routes is that **disabling a provider removes its shelf from the
-next `GET /home`** -- across a session boundary, across a process that never
-saw the request, and without the ~30 s screen cache hiding either. None of that
-is expressible against a fake: `FakeRowProviderSettingsRepository` is a dict
-with no transaction, and a unit app's `GET /home` composes over a `Library`
-rather than over the table the write went to.
-
-## `POST /admin/rows/regenerate`
-
-**What only this level can see.** `tests/unit/test_api_rows.py` drives the
-route over `FakeJobQueue`, whose seventh documented divergence is that it
-counts a no-op re-enqueue as a row written -- so *every* statement about what
-a repeat costs is untestable there, and every statement in the route's own
-docstring about what a 202 does and does not promise is one of those. Three
-things are only true here:
-
-1. **The write is committed.** `get_session` is the request's commit boundary;
-   a handler that enqueued and never committed passes every unit case (a fake
-   queue is a dict). The row has to still be there afterwards, from another
-   connection.
-2. **The real `_ENQUEUE` predicate runs.** `WHERE jobs.status <> 'parked' AND
-   jobs.priority < excluded.priority` is what makes a repeat free, and
-   `updated_at = clock_timestamp()` sits *inside* that `DO UPDATE`, so an
-   unchanged `updated_at` is a direct observation of "zero rows written" from
-   a route that discards `enqueue`'s return value.
-3. **The un-overridden dependency graph resolves**, so the key really is the
-   stored household's id rather than a fresh `User.id` a constructor default
-   minted -- M7's headline failure arriving one route over.
-
-**This module commits for real, so it cleans up after itself**, and its
-footprint is deliberately narrow: `DELETE FROM jobs WHERE kind = 'curate'` and
-`DELETE FROM row_provider_settings` (which ships empty, so emptying it *is* the
-shipped state), plus the two titles and one source the `screen` fixture plants
-and deletes by id -- and, since issue #73, the `enrich` jobs the `GET /home`
-reads below promote for those same two titles. Nothing else in the suite writes
-that job kind or that
-table, and the alternative a sibling file uses (`DELETE FROM jobs` plus the
-default `users` row) would cascade into `watch_states` another committing file
-may have left. The `users` row `DefaultUserIdDep` creates is left standing: it
-is a singleton reached by `ON CONFLICT (name) DO NOTHING`, every file that
-needs it creates it the same way, and the two files that assert about it delete
-it themselves afterwards.
+"""`/admin/rows/*` through real requests against real Postgres: `POST .../regenerate`
+(M8) and `GET`/`PUT .../providers` (M9).
 """
 
 import uuid
@@ -207,32 +161,8 @@ async def test_a_regeneration_commits_a_job_for_the_stored_household(
 async def test_asking_twice_writes_nothing_the_second_time(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """PRD 06's *"one modest completion per user per day"*, measured rather
-    than asserted about a count the route never sees.
-
-    `updated_at = clock_timestamp()` lives inside `_ENQUEUE`'s `DO UPDATE`,
-    which is gated on `jobs.priority < excluded.priority` -- so a repeat at the
-    same rung takes no branch that could move it. An unchanged `updated_at` is
-    therefore the row saying zero rows were written, which is the number
-    `FakeJobQueue` gets wrong (it answers 1) and the reason this case cannot
-    live in the unit file.
-
-    The 202 is unconditional on all of that, which is the other half: an
-    operator pressing the button twice has not made a mistake, and `enqueue`
-    cannot tell this request from the first anyway.
-
-    **`traceparent` is asserted unchanged for the same reason, and it is the
-    consequence this route's docstring had to grow a fourth bullet for.**
-    `traceparent = COALESCE(excluded.traceparent, jobs.traceparent)` sits
-    inside that same `DO UPDATE`, and `_ENQUEUE`'s own comment names the one
-    escape from it -- *"a demand promotion (M5) raises the priority and
-    therefore does write"*. This route always enqueues at `DEMAND`, the top of
-    the scale, so that escape is unreachable here and no repeat can ever
-    repoint the link: the worker's span links back to whichever press created
-    the row, not to the one an operator just made. That is not a defect --
-    the run that happens *is* the first press's -- but it is a property the
-    `updated_at` assertion above already forces and nothing stated, which is
-    the shape of thing that gets rediscovered as a surprise.
+    """PRD 06's *"one modest completion per user per day"*, measured rather than asserted
+    about a count the route never sees.
     """
     first = await client.post(ROUTE)
     before = await _curate_rows(sessions)
@@ -325,19 +255,8 @@ async def test_a_parked_generation_is_accepted_and_left_exactly_as_it_was(
     assert before[0].last_error == "no candidate survived the pool"
 
 
-# ---------------------------------------------------------------------------
-# `GET`/`PUT /admin/rows/providers` (E2) -- the toggle, and the screen it has
-# to reach.
-#
-# **The routes are the easy part.** M7's boundary call 9 refused
-# `row_provider_settings` on the ground that *"a table with ten rows all
-# reading `enabled = true` is indistinguishable from no table, right up until
-# an operator finds it and expects toggling it to do something"*, so a route
-# that writes a row nothing reads discharges the refusal in form and not in
-# substance. What only this level can see is the substance: the filter reads
-# the table on the **next request's** session, and the ~30 s screen cache does
-# not hide the change.
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- `GET`/`PUT
+# /admin/rows/providers` (E2) -- the toggle, and the screen it has to reach.
 
 PROVIDERS = "/admin/rows/providers"
 
@@ -479,30 +398,8 @@ async def _stored_overrides(sessions: async_sessionmaker[AsyncSession]) -> dict[
 async def test_a_disabled_provider_stops_appearing_on_the_home_screen(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession], screen: _Screen
 ) -> None:
-    """**The centre of this task**, and the reason M7 refused the table at all:
-    a toggle nothing reads is worse than no toggle.
-
-    Three reds, in order, and each names a different wrong implementation:
-
-    1. **No route.** `PUT` answers 404 from the router itself.
-    2. **An unfiltered provider list.** `get_home_service` returns
-       `HomeService(cache=cache)` and `HomeService`'s own default is
-       `ROW_PROVIDERS`, so the write lands, the read never happens, and the
-       shelf is still there. This is the state the whole task exists to leave
-       behind.
-    3. **A stale screen.** With the `RowCache.clear()` deleted, the second
-       `GET /home` answers out of the ~30 s screen the first one cached and the
-       shelf survives for half a minute -- which is the shape of "it works when
-       I try it by hand and not in the test", and vice versa.
-
-    **The first assertion is the positive control and it is not decoration.**
-    An absent `continue-watching` is also what an empty household produces, so
-    without it every later assertion is satisfied by a fixture that seeded
-    nothing -- a false green this repository has shipped before
-    (`ContinueWatchingProvider`'s fourth named wrong implementation is its
-    sibling). `recently-added` is the second control, in the other direction:
-    it says the screen still composes, so "the slug is gone" is a statement
-    about one provider rather than about the composer having stopped.
+    """**The centre of this task**, and the reason M7 refused the table at all: a toggle
+    nothing reads is worse than no toggle.
     """
     before = await _slugs(client)
     assert "continue-watching" in before, (
@@ -527,31 +424,8 @@ async def test_a_toggle_committed_by_another_process_reaches_the_next_screen(
     sessions: async_sessionmaker[AsyncSession],
     screen: _Screen,
 ) -> None:
-    """**The filter reads the table, not something the `PUT` left in memory --
-    and the ~30 s window in between is asserted rather than hidden.**
-
-    The headline case writes and reads through one process, so it is satisfied
-    by a route that stashed the disabled slug on `app.state` beside the cache:
-    that would work perfectly until a restart, and then silently re-enable
-    every provider anybody had switched off. Here the row is committed by
-    `PostgresRowProviderSettingsRepository` on a session of its own, exactly as
-    a second replica or an operator's `psql` would, and no request has ever
-    named this slug.
-
-    **The middle assertion is the cost this task restates rather than widens.**
-    A write that did not go through this process cannot clear this process's
-    `RowCache`, so the shelf survives for up to `_SCREEN_TTL` -- the
-    cross-process gap `services/rows/cache.py` records in full, and the same
-    bound a push-lane invalidation already has. Asserting it is what stops the
-    next reader mistaking the gap for this case being flaky, and what makes the
-    final assertion a statement about the *filter* rather than about a cache
-    that happened to be empty.
-
-    `cache.clear()` stands in for those 30 s passing: `create_app` builds its
-    cache over `datetime.now(UTC)` and a real wall clock cannot be advanced.
-    `usher home` reads the same table through the same join
-    (`tests/integration/test_cli_pipeline.py`), which is the third process this
-    argument is really about.
+    """**The filter reads the table, not something the `PUT` left in memory -- and the ~30
+    s window in between is asserted rather than hidden.**
     """
     assert "continue-watching" in await _slugs(client), "the fixture seeded no shelf to remove"
 

@@ -1,28 +1,5 @@
-"""BootstrapService against real Postgres, racing two processes for the same
-dataset's checkpoint row.
-
-The unit-level fakes (tests/unit/test_services_bootstrap.py) have no real
-transactional semantics, which is exactly why this class of bug hid for as
-long as it did: PostgresImportRunRepository.save() originally left the
-*session* poisoned after a caught RepositoryConflict, so
-BootstrapService.import_dataset's except handler's own re-fetch
-(self._runs.get(dataset.name)) raised sqlalchemy.exc.PendingRollbackError
-instead of returning -- a fake session has no such state to poison. Group G
-fixed that with the missing `await self._session.rollback()`
-(PostgresImportRunRepository.save()), pinned by
-tests/integration/test_import_run_repository.py::
-test_the_session_survives_a_conflict_for_the_callers_next_statement.
-
-Fixing *that* surfaced a second bug, one layer up, in this module's own
-territory: once self._runs.get() after a conflict stopped raising and
-started actually returning a row, it returns the *other*, winning process's
-row -- the loser never got one of its own. import_dataset's except handler
-used to re-fetch by dataset name unconditionally and evolve+save FAILED onto
-whatever it found, which is correct when that row is the caller's own (a
-`_drain` failure) but silently corrupts a legitimately RUNNING or
-already-COMPLETED import when it belongs to someone else (a `start()`
-conflict). This file proves the fix -- BootstrapService.import_dataset now
-distinguishes the two -- against a real two-process race, not a mocked one.
+"""BootstrapService against real Postgres, racing two processes for the same dataset's
+checkpoint row.
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -130,12 +107,11 @@ async def test_a_conflicting_start_leaves_the_winners_run_untouched(postgres_url
             winner_run = await PostgresImportRunRepository(winner_session).start(_DATASET, "etag-1")
             await winner_session.commit()
 
-            # The loser: BootstrapService.import_dataset, driven for real,
-            # racing the same dataset via _AlwaysFreshStart -- see its own
-            # docstring for why forcing the race's precondition is
-            # necessary here (a real race needs both sides' get() to return
-            # None before either commits, which two sequential awaits on
-            # one event loop can't reproduce on their own).
+            # The loser: BootstrapService.import_dataset, driven for real, racing the
+            # same dataset via _AlwaysFreshStart -- see its own docstring for why
+            # forcing the race's precondition is necessary here (a real race needs both
+            # sides' get() to return None before either commits, which two sequential
+            # awaits on one event loop can't reproduce on their own).
             loser_catalog = FakeBulkCatalogRepository()
             loser_service = BootstrapService(
                 _AlwaysFreshStart(loser_session),
@@ -153,12 +129,9 @@ async def test_a_conflicting_start_leaves_the_winners_run_untouched(postgres_url
             assert result.status is ImportRunStatus.RUNNING
             assert result.error is None
 
-            # The stronger assertion the coordinator asked for: not just
-            # "the loser didn't crash", but that the winner's row, read back
-            # from the *winner's own* session, is byte-for-byte unchanged.
-            # A naive re-fetch-and-overwrite fix would still pass the
-            # weaker assertion above (it evolves a copy) right up until this
-            # read proves the persisted row itself was corrupted.
+            # The stronger assertion the coordinator asked for: not just "the loser
+            # didn't crash", but that the winner's row, read back from the *winner's
+            # own* session, is byte-for-byte unchanged.
             reread = await PostgresImportRunRepository(winner_session).get(_DATASET)
             assert reread is not None
             assert reread.id == winner_run.id

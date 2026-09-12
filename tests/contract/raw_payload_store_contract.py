@@ -1,13 +1,4 @@
-"""Behaviour every `RawPayloadStore` implementation must satisfy.
-
-PRD 02's `raw_payloads`, narrowed by ADR-0016 to provider responses only.
-Two properties carry real weight: the key is the whole triple, and
-`fetched_at` moves when the payload does -- the second because it is the only
-answer this system has to TMDb's <=6-month caching term, and a stale
-timestamp on fresh data is a compliance answer that is wrong and silent.
-
-Subclass and provide `store`.
-"""
+"""Behaviour every `RawPayloadStore` implementation must satisfy."""
 
 import uuid
 from typing import Any
@@ -104,29 +95,8 @@ class RawPayloadStoreContract:
     async def test_iterate_visits_every_cached_payload_exactly_once_across_pages(
         self, store: RawPayloadStore
     ) -> None:
-        """The first of the two wrong implementations the front matter names:
-        *loses rows across a page boundary*.
-
-        Seven rows and a page of two, so there are three interior boundaries
-        and a short final page. A cursor spelled `id >= after` repeats the
-        boundary row; one spelled `id > after` against a **non-total** sort key
-        (`fetched_at`, which a bootstrap transaction hands out identically to
-        every row it writes) drops every row after the first of a tied group.
-        Both are silent: the walk completes, the numbers look plausible, and
-        some fraction of the catalog simply never gets derived.
-
-        Asserted as set equality *and* as a length, because equality alone is
-        satisfied by an implementation that returns duplicates.
-
-        **The walk is bounded and the bound is an assertion**, which the plan's
-        own draft of this case was not. Two of the wrong implementations this
-        file exists to kill -- `id >= after`, and an `after` clause dropped
-        altogether -- make a `while True` walk *non-terminating* rather than
-        wrong, so an unbounded loop turns a KILLED mutation into a HUNG one,
-        which in a sweep log reads like a mutation nothing observed. Measured:
-        the unbounded spelling hung this suite for fifteen minutes under the
-        `id >=` mutation instead of failing in eight seconds. Same rule
-        `tests/contract/event_publisher_contract.publish_all` already carries.
+        """The first of the two wrong implementations the front matter names: *loses rows
+        across a page boundary*.
         """
         for index in range(7):
             await store.put("tmdb", "movie", f"9000055{index}", {"n": index})
@@ -180,39 +150,14 @@ class RawPayloadStoreContract:
     async def test_iterate_stays_scoped_to_one_provider_on_every_page_not_only_the_first(
         self, store: RawPayloadStore
     ) -> None:
-        """The parenthesis failure, which this repository has already written
-        down once and which is invisible to a cursor test whose rows all match.
-
-        `db/repositories/search.py`'s `list_stale` carries the note: `where()`
-        joins its fragments with `AND`, `AND` binds tighter than `OR`, so a
-        predicate written without the outer parentheses parses as
-        `(provider = <p> AND after IS NULL) OR (id > after)`.
-        On the **first** page `after` is NULL, the left arm is the real
-        predicate and the right arm is NULL, so it is exactly right. On every
-        page after it the left arm is false and the predicate collapses to
-        `id > after` -- every remaining row in `raw_payloads`, whatever provider
-        wrote it. The derivation then hands an IMDb or Emby-shaped body to a
-        mapper expecting TMDb's, and gets a title with no cast rather than an
-        error.
-
-        So this case **must** page past the first page, which is why the limit
-        is 1 and why the `tmdb` rows are seeded first: the `imdb` row sorts
-        after them under a UUIDv7 id, which is precisely where the broken
-        spelling picks it up.
-
-        Bounded for the reason
-        `test_iterate_visits_every_cached_payload_exactly_once_across_pages`
-        gives: at a page of one, an `id >= after` cursor returns the boundary
-        row forever and an unbounded walk hangs instead of failing.
+        """The parenthesis failure, which this repository has already written down once and
+        which is invisible to a cursor test whose rows all match.
         """
         await store.put("tmdb", "movie", "90000550", {"provider": "tmdb"})
         await store.put("tmdb", "movie", "90000551", {"provider": "tmdb"})
-        # The tconst is in the reserved `tt99`/`nm99` band, not in TMDb's
-        # >= 90,000,000 one -- the two synthetic-data rules are different and
-        # `test_every_imdb_id_is_in_the_reserved_synthetic_band` enforces this
-        # one. Note the guard scans *comment* text as well as code, so a
-        # comment quoting a non-conforming id fails it exactly as a literal
-        # would; same family as the `:name`-in-a-SQL-comment trap.
+        # The tconst is in the reserved `tt99`/`nm99` band, not in TMDb's >= 90,000,000
+        # one -- the two synthetic-data rules are different and
+        # `test_every_imdb_id_is_in_the_reserved_synthetic_band` enforces this one.
         await store.put("imdb", "global", "tt99000550", {"provider": "imdb"})
 
         seen: list[CachedPayload] = []
@@ -283,27 +228,9 @@ class RawPayloadStoreContract:
     async def test_iterate_orders_by_the_primary_key_and_not_by_fetched_at(
         self, store: RawPayloadStore
     ) -> None:
-        """The wrong implementation is `ORDER BY fetched_at`, and it survived
-        the rest of this suite in **both** drivers -- which the plan predicted
-        would fire against Postgres and it does not.
-
-        Why the other cases cannot see it: every one of them writes its rows
-        once, in ascending order, so `id` order and `fetched_at` order agree
-        and the two `ORDER BY`s are indistinguishable. The port's own docstring
-        argues `fetched_at` is unusable because a bootstrap transaction's
-        `server_default` ties it across every row -- but `_PUT` stamps
-        `clock_timestamp()`, so the store can never *produce* a tie through its
-        own API and a tie-based case would need a raw INSERT the fake has no
-        way to express.
-
-        A **refresh** produces the same defect deterministically and through
-        the port alone. Refreshing the older row keeps its `id` (the case above
-        pins that) and moves its `fetched_at` past the newer row's, so `id`
-        order and `fetched_at` order now disagree. Under `ORDER BY fetched_at`
-        the first page hands back the *larger* id, the cursor advances past it,
-        and the smaller-id row is unreachable for the rest of the walk -- one
-        payload silently never derived, permanently, until something touches it
-        again.
+        """The wrong implementation is `ORDER BY fetched_at`, and it survived the rest of
+        this suite in **both** drivers -- which the plan predicted would fire against
+        Postgres and it does not.
         """
         await store.put("tmdb", "movie", "90000550", {"v": 1})
         await store.put("tmdb", "movie", "90000551", {"v": 1})

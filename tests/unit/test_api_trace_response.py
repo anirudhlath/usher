@@ -1,28 +1,4 @@
-"""`traceresponse` — the header that makes `Problem`'s "Open trace" possible.
-
-Two halves, and only the second one has teeth.
-
-The first is the **shape**: a well-formed header on a 200, on a 404 problem
-document and on a 422, driven through a real `create_app()` so both exception
-handlers are on the path. Every assertion in that half is satisfied by a
-middleware that emits a hard-coded constant, which is why it is not the half
-this file rests on.
-
-The second is the **identity**: the trace id and span id in the header are read
-back off the span the tracer really produced for that request, through a span
-processor attached to the live `TracerProvider`, and the span they name is
-asserted to be the `SERVER` span rather than one of the `http send` spans the
-ASGI instrumentation opens inside its own `send`. `CLAUDE.md`'s standing rule —
-*a membership assertion is not an ordering test* — has a spelling here: **a
-regex is not an identity test**, and a constant passes one.
-
-The third case is the absence: `INVALID_SPAN`'s all-zero ids are a
-well-formed-looking header that names nothing, and the W3C grammar forbids them
-in as many words (*"All zeroes forbidden"*, for both ids). No header at all is
-the only honest answer, and it is the same rule `_observations` applies to a
-gauge with no reader and `current_traceparent` applies to a job enqueued
-outside a span.
-"""
+"""`traceresponse` — the header that makes `Problem`'s "Open trace" possible."""
 
 import re
 import uuid
@@ -52,13 +28,9 @@ from usher.telemetry import TRACERESPONSE_HEADER, traceresponse
 
 USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
 
-#: The W3C grammar, transcribed from `w3c/trace-context`'s
-#: `spec/21-http_response_header_format.md`: `version "-" trace-id "-"
-#: child-id "-" trace-flags`, every field **lowercase** hex, 2/32/16/2
-#: characters. Deliberately not `[0-9a-fA-F]`: the spec says *"Tracing systems
-#: MUST ignore the trace context metric when the span id is invalid (for
-#: example, if it contains non-lowercase hex characters)"*, so a header this
-#: pattern would have to widen for is a header a conformant reader drops.
+# : The W3C grammar, transcribed from `w3c/trace-context`'s :
+# `spec/21-http_response_header_format.md`: `version "-" trace-id "-" : child-id "-"
+# trace-flags`, every field **lowercase** hex, 2/32/16/2 : characters.
 _TRACERESPONSE = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 
 _ALL_ZERO_TRACE = "0" * 32

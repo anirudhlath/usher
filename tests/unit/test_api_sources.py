@@ -1,19 +1,4 @@
-"""`POST /admin/sources/{id}/sync` -- the M4 boundary call, as an enqueue.
-
-Unit-level: the route's own two refusals, the enqueued row, and the
-structural shape (no `ReconcileService`, no `SourceAdapter` reachable from
-the handler). Driven through a real `create_app()` with `get_source_
-repository` and `get_job_queue` overridden, exactly as `test_api_rows.py`
-does for `POST /admin/rows/regenerate` -- the identical shape, one router
-over.
-
-The end-to-end walk -- a claimed `sync` job producing two `sync_runs` rows
-against a real `FakeEmbyServer`, and the adapter closing when it does --
-lives in `tests/integration/test_admin_sources.py`; this file is what a
-route that merely *looked* like an enqueue could still fail. "It did not
-walk" is also what a walk against an empty source produces, so the
-structural half below is the one with teeth.
-"""
+"""`POST /admin/sources/{id}/sync` -- the M4 boundary call, as an enqueue."""
 
 import ast
 import inspect

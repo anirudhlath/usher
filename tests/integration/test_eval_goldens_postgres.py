@@ -1,15 +1,4 @@
-"""The catalog reads the pure generator is handed, against a real Postgres.
-
-**The integration catalog is empty** -- the fixture applies the migrations but
-seeds no titles -- so these are structural smoke tests: that `read_pools` and
-`read_frame` run, that they agree with each other, and that every band is
-present even when it drew nothing. What empty data cannot exercise is the
-*ordering* within a populated band -- so `test_the_pools_are_ordered_by_id`
-is vacuous here (`[] == sorted([])`) and the frame/pool agreement is trivial
-(0 == 0). Both are load-bearing only over real rows, and that is what the
-baseline run (`usher eval suggest --full`) exercises against the live
-1.27M-title catalog, where the read order *is* the seed's reproducibility.
-"""
+"""The catalog reads the pure generator is handed, against a real Postgres."""
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession

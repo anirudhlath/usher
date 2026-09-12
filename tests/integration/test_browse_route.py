@@ -1,25 +1,4 @@
-"""`GET /browse` through real requests against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_browse.py` drives the
-route over `FakeTitleRepository`, whose ordering is Python's `sorted` and whose
-keyset is a tuple comparison -- so B6's statement, its three-arm `WHERE`, its
-`(key IS NOT NULL) DESC` sort key and the two facet aggregates are never
-executed there. Here they are, against `pgvector/pgvector:pg17`.
-
-**The unkeyed tail is the case this file exists for.** ADR-0034's original row
-comparison is wrong for a nullable key because Postgres evaluates
-`ROW(...) > ROW(...)` to **NULL, not false**, when the first differing pair
-involves one -- and that is a fact about *Postgres*, not about a tuple
-comparison in Python. `FakeTitleRepository` cannot express the defect at all
-(a Python tuple compares `None` by raising, or not at all), so the unit arm's
-version of this walk is an echo and this one is the assertion. Three of the
-four sorts are nullable and `tmdb_popularity` was measured NULL on **980,523 of
-1,272,367** rows of a real catalog, so the unkeyed group is most of the screen
-rather than an edge.
-
-**This module commits for real, so it cleans up after itself**, bound to its
-own marker rather than emptying a table another committing file is using.
-"""
+"""`GET /browse` through real requests against a real schema."""
 
 from collections.abc import AsyncIterator, Iterator
 

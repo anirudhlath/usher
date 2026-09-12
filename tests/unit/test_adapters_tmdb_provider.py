@@ -1,12 +1,4 @@
-"""`TmdbMetadataProvider` over `httpx.MockTransport`. No network.
-
-Every case here is about **which requests are issued**, which is the half
-`test_adapters_tmdb_mapping.py` cannot see. TMDb's movie/TV divergence is not
-only a field-name divergence: the two spaces have different endpoints and
-different `append_to_response` vocabularies, so a provider that treated them
-as one shape would ask for a namespace that does not exist rather than
-producing an obviously wrong answer.
-"""
+"""`TmdbMetadataProvider` over `httpx.MockTransport`. No network."""
 
 import datetime as dt
 import uuid
@@ -128,12 +120,9 @@ class _Server:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.status_for: dict[str, int] = {}
-        # TMDb's `primary_release_year`/`first_air_date_year` are *exact*
-        # filters -- measured live 2026-08-01, where all 294 candidates
-        # returned across 320 probes carried the year that was asked for and
-        # 26 probes came back completely empty. Setting this reproduces that
-        # one behaviour: a year one off the provider's own date is not a
-        # lower-ranked result, it is no result.
+        # TMDb's `primary_release_year`/`first_air_date_year` are *exact* filters --
+        # measured live 2026-08-01, where all 294 candidates returned across 320 probes
+        # carried the year that was asked for and 26 probes came back completely empty.
         self.year_filter_is_exact = False
         # And this one is the same endpoint simply knowing nothing, with or
         # without a year.

@@ -1,12 +1,4 @@
-"""`FakeCollectionRepository` against the shared `CollectionRepository`
-contract.
-
-No Docker, no database. See tests/fakes/collection_repository.py for the five
-places this half is more forgiving -- the first of which is that the
-`kind = 'movie'` filter is an `if` here and a `WHERE` clause there, which is
-the one place these two implementations fail identically under the same
-mutation.
-"""
+"""`FakeCollectionRepository` against the shared `CollectionRepository` contract."""
 
 import uuid
 

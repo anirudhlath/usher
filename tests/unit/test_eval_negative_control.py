@@ -1,8 +1,4 @@
-"""Proof the harness can fail. Without this, every green run is unfalsifiable.
-
-Two controls, and the positive one fires first: a harness where *everything*
-collapses is as broken as one where nothing does.
-"""
+"""Proof the harness can fail. Without this, every green run is unfalsifiable."""
 
 import uuid
 

@@ -1,63 +1,4 @@
-"""Behaviour every `SourceAdapter` implementation must satisfy.
-
-PRD 08: "when a Jellyfin adapter is written, it either passes the same
-tests the Emby adapter passes, or the port was wrong."
-
-Nothing in this module knows what a media server is. State is arranged
-through `SourceHarness` (tests/contract/source_harness.py) in the port's
-own DTOs, so the same file runs against a pure in-memory adapter with no
-HTTP at all and against a real `EmbyAdapter` speaking Emby's JSON. Both
-runs matter: the first proves the assertions are not secretly Emby-shaped,
-the second proves they survive a wire format.
-
-Subclass and provide a `harness` fixture:
-
-    class TestFakeSourceAdapter(SourceAdapterContract):
-        @pytest_asyncio.fixture
-        async def harness(self) -> AsyncIterator[SourceHarness]:
-            harness = FakeSourceHarness()
-            try:
-                yield harness
-            finally:
-                await harness.aclose()
-
-**What this suite can and cannot express, stated so a green run is not
-over-read.** Every case here drives the adapter through the harness's own
-transport, so what a case is evidence *about* depends on what that
-transport does. Two consequences:
-
-- **Concurrency is a per-harness property, not a suite-wide one.**
-  `test_operations_recover_from_an_expired_credential` reads like a
-  single-flight assertion and is only one against a harness whose transport
-  really awaits. `SourceHarness.observed_overlap` is how a harness says it
-  does, and that case then asserts on the overlap too.
-  `FakeSourceHarness` returns `None` there and its run claims nothing about
-  locks; `EmbyHarness` runs on `tests/fakes/slow_transport.py` and returns
-  a real number, so the Emby run does. Measured both ways -- see that
-  case's own docstring.
-- **A failing *status* is not something a harness can arrange.**
-  `go_offline` is a transport failure by design, so nothing here
-  distinguishes "a 500 is not a deletion" from "a 404 is". Verified by
-  mutation, and re-verified at **49** cases in M5: making
-  `EmbyAdapter._fetch` report every `>= 400` as `None` still passes every
-  case here (98 passed, 1 skipped across both runs) and is caught only by
-  the two per-implementation tests written for it,
-  `tests/unit/test_adapters_emby_adapter.py::test_get_item_raises_rather_
-  than_returning_none_on_a_server_error` and its `get_watch_state`
-  counterpart. Status-level behaviour stays a per-implementation test.
-
-- **The six push cases are the third thing this suite cannot see on its
-  own.** They run against `FakeSourceAdapter`'s hand-driven channel and
-  against a real `EmbyPushChannel` over `tests/fakes/push_connection.py`,
-  which performs no handshake and has no close code -- and the Emby side's
-  *messages* come from `FakeEmbyServer`, which renders them from committed
-  fixtures no run has ever compared to a real Emby frame (ADR-0004's live
-  run recorded which message types arrived and not one byte of any
-  payload). So a green run here is evidence that the port's health rule is
-  statable and satisfiable by two independent implementations, and it is
-  **not** evidence about Emby's envelope. `tests/fixtures/emby/README.md`
-  lists what is still a guess; M5's live capture is what settles it.
-"""
+"""Behaviour every `SourceAdapter` implementation must satisfy."""
 
 import asyncio
 from datetime import UTC, datetime, timedelta
@@ -331,65 +272,9 @@ class SourceAdapterContract:
     async def test_operations_recover_from_an_expired_credential(
         self, harness: SourceHarness
     ) -> None:
-        """The failure that motivated this whole project, and its fix: a
-        session that silently dies is re-minted from stored credentials with
-        no human pasting a token.
-
-        **What a green run proves.** Recovery happens -- an adapter that
-        does not re-authenticate at all raises here -- and one expiry does
-        not become one authentication per call. `<= 1` rather than `== 1`
-        so a source with no expiring session (whose `expire_credentials` is
-        a no-op) is not forced to invent one.
-
-        **Whether a green run proves single flight depends on the
-        harness.** Firing four calls through `asyncio.gather` and counting
-        authentications reads like a concurrency assertion, and is only one
-        if the harness's transport really overlaps -- which is what
-        `SourceHarness.observed_overlap` reports and the assertion below
-        checks. A harness answering `None` there claims nothing about locks
-        and this case proves only the two things above for it.
-
-        Measured against a real `EmbyAdapter`, both ways:
-
-        - Over `httpx.MockTransport`, `<= 1` never discriminates. With
-          *both* of `EmbySession`'s locks deleted *and* the generation
-          short-circuit removed, four concurrent expired sessions still
-          produce exactly one authentication and the whole Emby run stays
-          green (**re-measured in M5 at 49 cases: 49 passed, 1 skipped**,
-          rather than renumbered from the 41 this said -- a count inside a
-          mutation result is part of the measurement). `MockTransport`
-          never actually awaits on the way to its handler, so the event
-          loop tends to run one gathered call all the way through its own
-          re-auth before starting the next; every other call then reads an
-          already-fresh token without racing for it.
-        - Over `tests/fakes/slow_transport.py`, which is what `EmbyHarness`
-          uses, it discriminates. Each of those three mutations fails this
-          case -- deleting `_refresh`'s lock raises `PortAuthFailed`,
-          deleting both locks and the short-circuit raises `PortAuthFailed`
-          (re-confirmed in M5 alongside the `MockTransport` run above: same
-          mutation, same suite, `1 failed, 48 passed, 1 skipped`), and
-          deleting the short-circuit alone trips the `<= 1` assertion with
-          four authentications.
-
-        **What this case still does not reach, on any harness:**
-        `EmbySession.user_id()`'s own `_raise_if_closed`. Removing it leaves
-        every case here green -- `EmbyAdapter._fetch` calls `user_id()`
-        first, that call authenticates successfully against the still-open
-        injected transport, and `request()`'s own check then raises the
-        `PortUnavailable` `test_operations_after_aclose_raise_port_
-        unavailable` is waiting for. Verified: the closed adapter emits
-        `POST /Users/AuthenticateByName` and mints a live session before the
-        expected error surfaces. That one is pinned by
-        `tests/unit/test_adapters_emby_session.py::test_the_other_entry_
-        points_also_refuse_to_run_after_aclose`, which asserts the
-        authentication count is zero.
-
-        **The dedicated single-flight tests**, both over `SlowTransport` and
-        both asserting on observed overlap so they cannot quietly stop being
-        concurrent: `tests/unit/test_adapters_emby_session.py::test_
-        concurrent_401s_are_provably_simultaneous_and_produce_one_
-        authentication` and `tests/unit/test_adapters_emby_adapter.py::test_
-        concurrent_expired_sessions_produce_one_authentication`.
+        """The failure that motivated this whole project, and its fix: a session that
+        silently dies is re-minted from stored credentials with no human pasting a
+        token.
         """
         await harness.given_item(MOVIE, changed_at=T0)
         assert await harness.adapter.get_item("movie-1") is not None
@@ -567,30 +452,9 @@ class SourceAdapterContract:
     async def test_watch_state_start_index_offsets_the_filtered_stream(
         self, harness: SourceHarness
     ) -> None:
-        """**`start_index` counts what this walk *yields*, never rows of the
-        source's unfiltered set** -- the port's own words, and until this case
-        existed nothing in the suite said so.
-
-        The two spellings differ only when a `since` is present *and* the
-        offset is non-zero, which is precisely a resumed **delta** walk. Every
-        other resume case in this repository reclaims a run whose `cursor_at`
-        is `None`, so `filter-then-skip` and `skip-then-filter` are the same
-        program in all of them: measured by reverting
-        `FakeSourceAdapter._walk_states` to a bare
-        `list(self._items)[start_index:]`, which left the whole suite green.
-
-        Two items outside the window and two inside, and the walk is resumed
-        past the whole filtered stream. A skip applied to the *raw* set
-        consumes the two excluded items instead and then re-serves both
-        records the first attempt already merged -- which on a real resume
-        is a checkpoint that never advances.
-
-        **Exactness is a property of this harness rather than of the port.**
-        `SourceAdapter.watch_state` promises only at-or-before -- an
-        implementation may re-yield, never skip -- because a client-side drop
-        is invisible to an upstream offset
-        (`test_a_resumed_watch_state_walk_re_yields_what_it_dropped`). No
-        harness seeds a droppable payload, so both arms land exactly here.
+        """**`start_index` counts what this walk *yields*, never rows of the source's
+        unfiltered set** -- the port's own words, and until this case existed nothing in
+        the suite said so.
         """
         await harness.given_item(_filler(0), changed_at=T0)
         await harness.given_item(_filler(1), changed_at=T0)
@@ -701,17 +565,11 @@ class SourceAdapterContract:
                 "movie-1", WatchStateUpdate(position_seconds=600, played=False)
             )
 
-    # --- push ----------------------------------------------------------
-    #
-    # **The asymmetry these six are written around.** `supports_push` is a
-    # *health* signal and `SourceNotSupported` is a *capability* one, and
-    # the implication between them runs one way only: an adapter with a
-    # perfectly good channel reports `False` from the moment it opens until
-    # the first message arrives on it. So no case here asserts
-    # "`events()` was offered ⟹ `supports_push`". The two directions that
-    # do hold are asserted, one each: a channel that has delivered reads
-    # `True` (and a silent one reads `False`), and an adapter that refuses
-    # to offer a channel at all reads `False`.
+    # --- push ---------------------------------------------------------- **The
+    # asymmetry these six are written around.** `supports_push` is a *health* signal and
+    # `SourceNotSupported` is a *capability* one, and the implication between them runs
+    # one way only: an adapter with a perfectly good channel reports `False` from the
+    # moment it opens until the first message arrives on it.
 
     async def test_events_yields_what_the_source_pushed(self, harness: SourceHarness) -> None:
         """PRD 03's fast path, at its narrowest: something changed on the
@@ -800,27 +658,9 @@ class SourceAdapterContract:
     async def test_a_stalled_channel_raises_rather_than_hanging(
         self, harness: SourceHarness
     ) -> None:
-        """The enforcement half. Reporting unhealthy is not enough: a lane
-        holding a socket that will never deliver again has to be told to let
-        go of it, or the reconnect that closes the gap never happens.
-
-        **An event is pushed first and then silenced**, without ever being
-        consumed. Without that, `push_silence` has nothing to suppress on a
-        channel nobody has pushed to, so a harness could implement it as
-        `pass` and both cases that call it would still pass -- and the
-        arrangement this case is named for would never actually be
-        arranged. Nothing is *received*, so the watchdog still measures
-        silence from the open, which is the branch that catches a channel
-        that has never delivered at all.
-
-        Bounded by `asyncio.wait_for` rather than by `pytest-timeout`, which
-        is deliberately not a dependency -- the bound belongs to the two
-        cases that need it. The assertion is `PortUnavailable` and not
-        `TimeoutError`, so the bound cannot satisfy the thing it protects: a
-        hanging implementation fails this case rather than passing it. The
-        elapsed check is the other half -- an adapter whose watchdog ran on
-        wall time rather than on the injected clock would raise the right
-        error after ninety real seconds, and only the interval says so.
+        """The enforcement half. Reporting unhealthy is not enough: a lane holding a socket
+        that will never deliver again has to be told to let go of it, or the reconnect
+        that closes the gap never happens.
         """
         if not harness.can_advance_push_clock():
             pytest.skip("this harness cannot advance its adapter's push clock")

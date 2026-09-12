@@ -1,41 +1,5 @@
-"""`search_queries.surface` and `.tier` written by the shipped requests, and
-every place a row deliberately does **not** appear.
-
-`m10c` (J1) landed the two columns and left `surface` as the literal `'search'`
-in `PostgresSearchQueryRepository`'s INSERT, because the column is `NOT NULL`
-with no `server_default` and the shipped writer could not omit it. This file is
-what says the suggest writer landed: a `search` row and a `suggest` row are now
-told apart by the table itself, and the tier that answered is on the row rather
-than only on the wire.
-
-**Why a file of its own rather than more cases in
-`tests/integration/test_search_route.py`.** That file is about `GET /search`'s
-*answer* -- ranking, weight classes, the DTO -- and carries a three-title
-catalog shaped for an ordering premise. This one is about a **write**, needs
-one title and two households' worth of nothing, and has to drive three roots
-(the two routes, `usher suggest`, and the eval harness) that file has no
-business knowing about. Its analytics case stays where it is and is the control
-that `GET /search` still writes exactly one row.
-
-**Every absence here is a decision with an argument, and each is asserted with
-a positive control beside it**, because "no rows" is also what an unwired
-fixture, a broken seed and a 500 all produce:
-
-- a `q` below its tier's `min_query_length` -- the route returns before the
-  service, so there is no answered query to record (PRD 10's *"A blank or
-  whitespace-only query"* exclusion, extended to the length bound);
-- a `suggest` call carrying **no household** -- `search_queries.user_id` is
-  `NOT NULL` behind `ON DELETE RESTRICT`, so PRD 10's *"A search with no
-  household"* exclusion applies unchanged. This is the eval harness's whole
-  path: `usher.eval.surfaces.suggest` drives `pipeline.search.suggest` once per
-  probe and `usher eval suggest --full` drives thousands, so an analytics
-  writer that fired for it would write evaluation traffic into the table as
-  though a household had typed it;
-- the whole writer switched off by `USHER_SEARCH_SUGGEST_ANALYTICS=false`,
-  which is **whole or nothing** and deliberately not a sample rate.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
+"""`search_queries.surface` and `.tier` written by the shipped requests, and every
+place a row deliberately does **not** appear.
 """
 
 import uuid
@@ -128,26 +92,15 @@ def settings_without_the_writer(postgres_url: str) -> Settings:
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
-        # **Before the titles, and unscoped.** `search_queries.user_id` is
-        # `ON DELETE RESTRICT` on purpose -- a household's search history is
-        # user state -- so a row left behind here turns a neighbouring file's
-        # `DELETE FROM users WHERE name = 'default'` into a foreign-key
-        # violation rather than into a slow test. This table has no column
-        # this file could mark.
+        # **Before the titles, and unscoped.** `search_queries.user_id` is `ON DELETE
+        # RESTRICT` on purpose -- a household's search history is user state -- so a row
+        # left behind here turns a neighbouring file's `DELETE FROM users WHERE name =
+        # 'default'` into a foreign-key violation rather than into a slow test.
         await session.execute(text("DELETE FROM search_queries"))
-        # **Before the titles, because it resolves through them.** Every root
-        # here drives the real app, so a suggest that returns a hit runs
-        # `VisibilityService.seen_ids` on the way out and commits one
-        # `enrich` job per skeleton -- and the `catalog` fixture's title is a
-        # skeleton by construction. `jobs` has no foreign key to `titles`
-        # (`key` is `str(title_id)`, a text column), so nothing cascades and
-        # the rows outlive the titles that caused them. Three of the six
-        # roots here leave one each, and `test_services_ingest.py::
-        # test_a_walk_enqueues_enrichment_only_for_what_needs_it` reads
-        # `depth()` unscoped, so it saw `3 == 0`.
-        #
-        # Scoped to this file's own titles rather than `DELETE FROM jobs`:
-        # a neighbouring file's committed queue is not this file's to empty.
+        # **Before the titles, because it resolves through them.** Every root here
+        # drives the real app, so a suggest that returns a hit runs
+        # `VisibilityService.seen_ids` on the way out and commits one `enrich` job per
+        # skeleton -- and the `catalog` fixture's title is a skeleton by construction.
         await session.execute(
             text(
                 "DELETE FROM jobs WHERE key IN ("
@@ -241,29 +194,8 @@ async def test_a_suggest_records_its_surface_and_the_tier_that_answered(
     keystrokes: SearchQueryBuffer,
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """PRD 10's amendment 2, through the shipped routes and read back from a
-    session no request touched.
-
-    **The positive control fires first and is not decoration.** The same case
-    drives `GET /search` and asserts the row it writes carries
-    `surface = 'search'` with `tier IS NULL` -- which is `m10c`'s backfill
-    semantics arriving on a *new* row rather than an old one, and which is the
-    only thing that distinguishes "the suggest writer works" from "every row
-    this deployment writes says `suggest`".
-
-    **Both tiers, because one tier passing is also what a writer hard-coding
-    `'fuzzy'` produces.** The two arms use different probes for a reason that
-    is not symmetry: tier 1 cannot match `TYPED_TYPO` and tier 2 answers a
-    plain prefix too, so a single probe across both would not tell a route that
-    honours `?tier=` from one that does not.
-
-    `mode` is `full_text` on a suggest row: both tiers are btree/GIN reads with
-    no embed and no fusion, which is what that member already means. **Every
-    mode-split panel now has to filter on `surface`**, which is why the row
-    carries one.
-
-    Fails at `m10c`: the route wrote nothing at all, stated in its own
-    docstring.
+    """PRD 10's amendment 2, through the shipped routes and read back from a session no
+    request touched.
     """
     search = await client.get("/search", params={"q": "marrowlight"})
     assert search.status_code == 200, search.text
@@ -377,28 +309,7 @@ async def test_the_switch_is_whole_or_nothing_and_leaves_the_search_row_alone(
     catalog: uuid.UUID,
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """`USHER_SEARCH_SUGGEST_ANALYTICS=false`, and what it does not switch off.
-
-    **Sampling is refused and this is the shape of the refusal.** PRD 10's
-    *"which absence means what"* table holds **seven** rows and every one reads
-    a **count**; a sample rate makes every count an estimate and adds an
-    **eighth** meaning *"the row that was not written"*, indistinguishable in
-    the data from every other absence. So the setting is a `bool` and both tiers
-    obey it together -- asserted by driving *both*, because a switch honoured on
-    one tier is the defect a single-tier case cannot see.
-
-    ⚠️ **This paragraph said "five rows" and "a sixth", and it was born stale in
-    the very commit that took the table from five to six.** A cardinality
-    transcribed into a docstring is a copy of a fact with nothing checking it,
-    and this one went stale by two before anybody counted: the table gained the
-    `min_query_length` row and the `latency_ms = 0` row in the same milestone.
-    The *argument* is what survives -- every row is a count, so a sample rate
-    adds one more absence nobody can name -- and it does not depend on the
-    number, which is why the number is the part that rotted.
-
-    The control is `GET /search` through the same app: this switch is about the
-    suggest surface and must not reach the search one.
-    """
+    """`USHER_SEARCH_SUGGEST_ANALYTICS=false`, and what it does not switch off."""
     async for deployment in _client(settings_without_the_writer):
         client = deployment.client
         for tier, probe in (("prefix", TYPED_PREFIX), ("fuzzy", TYPED_TYPO)):
@@ -419,40 +330,8 @@ async def test_the_switch_is_whole_or_nothing_and_leaves_the_search_row_alone(
 async def test_a_suggest_with_no_household_writes_no_row_and_the_eval_harness_is_that_caller(
     settings: Settings, catalog: uuid.UUID, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """PRD 10's *"a search with no household"* exclusion, and the caller it is
-    now load-bearing for.
-
-    `usher.eval.surfaces.suggest.tier_suggester` builds the **real** pipeline
-    through the **real** composition root -- so it holds a real
-    `SearchAnalytics` over a real `PostgresSearchQueryRepository` -- and calls
-    `pipeline.search.suggest(probe, limit=…, tier=…)` resolving no household at
-    all. `usher eval suggest --full` drives that thousands of times. A writer
-    that did not carry `_record_search`'s `user_id is None` guard would fill
-    `search_queries` with evaluation traffic wearing a household's clothes, and
-    every rate PRD 10 computes off this table would be measuring the harness.
-
-    **The absence is tested rather than left to be discovered**, and its
-    control is the same session writing a row for a call that *does* name a
-    household -- so "no rows" is not merely what a pipeline nobody wired
-    produces.
-
-    🔴 **"No row" is the weaker half here, and this case's own sweep is what
-    said so.** Planting the guard away -- `_record_suggest` recording whatever
-    `user_id` it was handed -- left this case **green** in its first spelling,
-    because a `NULL` `user_id` is refused by `search_queries`' own `NOT NULL`,
-    the refusal becomes a `RepositoryConflict`, and `_write_row` absorbs it by
-    design. So on the Postgres arm the *database* produces the absence the
-    guard is supposed to produce, and the plant is visible only as an error log
-    line per probe -- thousands of them under `usher eval suggest --full`. Only
-    `tests/unit/test_services_search.py`'s pair killed it, and only because
-    `FakeSearchQueryRepository` has no foreign keys to refuse with. **The
-    inversion is the finding**: the fake being *more forgiving* is what gave
-    the unit case teeth, and the arm with the real constraint is the one that
-    could not see the defect. So this case asserts the sink as well as the
-    table: **nothing was attempted**, not merely nothing landed.
-
-    Fails: `SearchService.suggest` recording unconditionally, or with
-    `user_id` defaulted to anything but `None`.
+    """PRD 10's *"a search with no household"* exclusion, and the caller it is now load-
+    bearing for.
     """
     engine = build_engine(settings.database_url.get_secret_value())
     lines: list[str] = []
@@ -477,13 +356,10 @@ async def test_a_suggest_with_no_household_writes_no_row_and_the_eval_harness_is
             await control.search.suggest(TYPED_TYPO, tier=SuggestTier.FUZZY, user_id=household)
             await session.commit()
 
-        # **The sink's own positive control, and it is why the two assertions
-        # above are evidence rather than an empty list.** A household id naming
-        # no `users` row is refused by `fk_search_queries_user_id_users`,
-        # absorbed by `_write_row`, and logged -- which is *exactly* what the
-        # planted guard produces per eval probe. If this line does not appear,
-        # the two "no refusals" assertions were passing because nothing could
-        # ever have reached the sink.
+        # **The sink's own positive control, and it is why the two assertions above are
+        # evidence rather than an empty list.** A household id naming no `users` row is
+        # refused by `fk_search_queries_user_id_users`, absorbed by `_write_row`, and
+        # logged -- which is *exactly* what the planted guard produces per eval probe.
         async with factory() as session:
             stranger = build_pipeline(session, settings)
             await stranger.search.suggest(TYPED_TYPO, tier=SuggestTier.FUZZY, user_id=new_id())

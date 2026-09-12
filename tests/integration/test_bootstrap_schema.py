@@ -1,11 +1,4 @@
-"""The migration actually builds what the models describe.
-
-tests/integration/test_migrations.py already diffs the whole migrated
-schema against Base.metadata, which covers drift. These two cover the
-things a diff cannot: that no new trigger appeared, and that the
-(tmdb_id, kind) index really lets both TMDb namespaces coexist in one
-table.
-"""
+"""The migration actually builds what the models describe."""
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession

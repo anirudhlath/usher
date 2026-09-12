@@ -1,9 +1,4 @@
-"""The client event channel's vocabulary.
-
-Brought forward from the SSE task, because `PushApplyService` publishes and
-`services/` may depend only on `domain/` and `ports/` -- so the port has to
-exist before the first service that calls it, not after.
-"""
+"""The client event channel's vocabulary."""
 
 import uuid
 
@@ -11,30 +6,10 @@ from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher, Nul
 
 
 def test_every_event_kind_is_something_this_process_emits() -> None:
-    """PRD 10's rule for metrics, applied to a client contract: "A documented
-    metric nothing emits is a dashboard panel that is permanently empty, and
-    nothing distinguishes that from a healthy zero." An SSE event type nothing
-    emits is worse -- a client writes a handler for it and waits forever.
-
-    **M7 added the fifth, `row.invalidated`, in the same commit as its
-    publisher** (`PushApplyService`), which is this rule pointed the other way:
-    a member with no publisher is the handler that waits forever, and a
-    publisher with no member is a `KeyError` inside a response that has already
-    answered 200.
-
-    **M9's E7 added the sixth, `bootstrap.progress`, on the same terms.** Its
-    absence was justified by a premise E5 removed: bootstrap ran only in the
-    CLI process while the bus is in-process, so there was no channel from one
-    to the other. `JobKind.BOOTSTRAP` put the work on the worker lane, which
-    in the shipped default is the API process holding this bus, and the member
-    lands in the same commit as `BootstrapService`'s publisher. What has not
-    changed is the split deployment: with `usher work` in its own container
-    the frames reach a `NullEventPublisher`, which is the degradation
-    `title.updated` has had since M5 rather than a new one.
-
-    Renamed from `..._is_something_m5_emits`: the rule is about *this process*,
-    not about one milestone, and a guard whose name pins a milestone is one the
-    next milestone edits without reading.
+    """PRD 10's rule for metrics, applied to a client contract: "A documented metric
+    nothing emits is a dashboard panel that is permanently empty, and nothing
+    distinguishes that from a healthy zero." An SSE event type nothing emits is worse --
+    a client writes a handler for it and waits forever.
     """
     assert {kind.value for kind in ClientEventKind} == {
         "title.updated",

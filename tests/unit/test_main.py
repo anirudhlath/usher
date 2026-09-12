@@ -1,8 +1,6 @@
-"""`usher.__main__` is the container entrypoint (`python -m usher`) -- see
-its own module docstring for why it exists instead of the plain `uvicorn`
-CLI invocation Task 13's plan text originally showed: it is what makes
-`Settings.host`/`Settings.port` actually control where the server binds,
-rather than the settings validating and then being read by nothing.
+"""`usher.__main__` is the container entrypoint (`python -m usher`) -- see its own
+module docstring for why it exists instead of the plain `uvicorn` CLI invocation
+Task 13's plan text originally showed: it is what makes
 """
 
 import sys

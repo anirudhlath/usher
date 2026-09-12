@@ -1,24 +1,4 @@
-"""`SearchService`'s ranking, its degradation, and who embeds.
-
-**Retrieval is held fixed here and only ranking varies**, which is why these
-cases drive a scripted `SearchIndex` rather than `FakeSearchIndex`. That fake
-is the contract-tested double for the *port* and its own docstring says it has
-no text analysis at all -- no stemming, no `tsquery`, no weight classes -- so
-a ranking assertion driven through its matching would be an assertion about a
-tokenizer nobody shipped. `SearchIndexContract` covers the port; this file
-covers what the service does with what the port returned.
-
-**Every id below is a fixed `uuid.UUID(int=...)` rather than a `new_id()`, and
-that is load-bearing rather than tidy.** Several of the mutations this file
-exists to kill collapse two rows onto the same blended score, at which point
-the deterministic tiebreak decides the order -- so a case can only *see* the
-mutation if it knows which of its two rows the tiebreak would pick. With
-random UUIDv7s the same mutation would pass or fail depending on the minute
-the suite ran.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""`SearchService`'s ranking, its degradation, and who embeds."""
 
 import ast
 import asyncio
@@ -111,24 +91,14 @@ _SOURCE = uuid.UUID(int=0xFF)
 _HOUSEHOLD = uuid.UUID(int=0xA1)
 _OTHER_HOUSEHOLD = uuid.UUID(int=0xA2)
 
-# A `ts_rank` lands around 0.06 and an RRF score around 0.016-0.033. The two
-# scores below are on that scale rather than on [0, 1], and the difference is
-# not cosmetic: the mutation `relevance=hit.score` **survives** a case whose
-# raw scores are 0.9 against 0.1, because at that magnitude the raw score is
-# already larger than any popularity term and the wrong implementation still
-# orders correctly. Realistic magnitudes are what make the incompatible-scale
-# failure visible at all.
+# A `ts_rank` lands around 0.06 and an RRF score around 0.016-0.033.
 _STRONG = 0.06
 _WEAK = 0.02
 
 _SEEN_AT = datetime(2026, 8, 2, tzinfo=UTC)
 
-# The instant the recency term is measured against, injected rather than read
-# off the wall clock. A case that asserted an age against `datetime.now(UTC)`
-# would assert something slightly different every day and something quite
-# different in five years -- and the ordering it is really about (an undated
-# title against a dated old one) would go on passing while the arithmetic
-# under it drifted.
+# The instant the recency term is measured against, injected rather than read off the
+# wall clock.
 _NOW = datetime(2026, 8, 11, tzinfo=UTC)
 
 #: The origin of every injected `clock` below, and it is deliberately not zero
@@ -160,12 +130,8 @@ _CATALOG: dict[uuid.UUID, tuple[str, float | None]] = {
     _NAMED: ("Vacuum", 42.0757),
 }
 
-# The model the household's stored centroid and the stored vectors were both
-# written under. A *second* name is what the cross-model case varies, because
-# comparing a centroid computed under one checkpoint against vectors stored
-# under another is the ST<->fastembed divergence -- max pairwise-similarity
-# delta 1.41e-03, 6x the halfvec quantisation error -- arriving as a confident
-# cosine rather than as an error.
+# The model the household's stored centroid and the stored vectors were both written
+# under.
 _TASTE_MODEL = "fake:test-embedding"
 _OTHER_MODEL = "fake:other-checkpoint-384"
 
@@ -677,12 +643,9 @@ async def test_a_blank_prefix_never_reaches_the_suggest_index(tier: SuggestTier)
     assert suggestions.calls == []
 
 
-# --- query expansion -------------------------------------------------------
-#
-# **The cost claim is half of what these cases are for**, so most of them are
-# about the searches that buy *no* completion. `usher suggest` is the one that
-# would hurt: a client sends it per keystroke, and an expansion there would
-# invert this milestone's whole "one completion per unit of work" argument.
+# --- query expansion ------------------------------------------------------- **The cost
+# claim is half of what these cases are for**, so most of them are about the searches
+# that buy *no* completion.
 
 
 async def test_the_expansion_is_what_gets_embedded_and_the_answer_reports_it() -> None:
@@ -1365,27 +1328,8 @@ async def test_a_newer_title_outranks_an_older_one_at_equal_relevance() -> None:
 
 
 async def test_a_title_near_the_household_centroid_outranks_a_far_one_at_equal_relevance() -> None:
-    """PRD 05's sixth ranking term, and **the angle is planted rather than
-    hoped for out of the hashing fake**.
-
-    `FakeEmbedder` is `blake2b -> Box-Muller -> L2-normalise`, whose measured
-    off-diagonal cosine is mean -0.00001 / sd 0.05102 with **zero pairs above
-    0.5** -- so "these two titles are similar" is not a thing a hash can be
-    asked for, and a case built on one asserts nothing about the term.
-    `planted_pair` gives `dot(a, cos(t)*a + sin(t)*b) == cos(t)` exactly, to
-    2.22e-16.
-
-    Fails: no taste term at all (the two rows tie exactly and the tiebreak puts
-    `_FAR` first, because `_FAR < _NEAR`), a term whose weight is zero, a term
-    read off `TasteService.centroid` (which is structurally `None` on any
-    process holding no embedder, so it would tie too), and a term with the sign
-    the other way round.
-
-    **Its premise is asserted first and read back through the ports**, not
-    recomputed from the literals the fixture was handed: equal index scores, so
-    `_dense_ranks` gives the two hits one rank and the relevance term cancels
-    exactly; and the stored centroid really is nearer the one row than the
-    other.
+    """PRD 05's sixth ranking term, and **the angle is planted rather than hoped for out of
+    the hashing fake**.
     """
     axis, near_vector = planted_pair(math.pi / 3)
     _, far_vector = planted_pair(math.pi / 2)
@@ -1657,27 +1601,7 @@ def test_an_exact_name_match_takes_dense_rank_zero_alone_even_at_an_equal_index_
 
 
 async def test_a_title_named_exactly_the_query_is_not_displaced_by_a_longer_document() -> None:
-    """**Issue #25 end to end, through the blend that produced it.**
-
-    `GET /search?q=The Matrix` put the 1999 film **5th**, behind three 2018
-    video essays repeating the phrase in their own names -- 0.8032 against
-    0.3501 -- and *popularity was applied and helped*: without it the film
-    scores 0.2729. The defect is not a missing term, it is that no combination
-    of the other five can overturn what the lexical lane put at dense rank 0
-    (margin `0.005 / 1.045` = 0.004785 with all six present; 0.009615, carried
-    here until 2026-09-02, is the bound with taste absent), and the lexical
-    lane had the wrong row there.
-
-    Arranged at the hardest configuration rather than the observed one: the two
-    hits carry **equal** index scores, so the relevance term cancels unless the
-    exact-name key separates them, and at one shared rank the essay is the row
-    `_blend` prefers -- it has no popularity at all, so an absent signal leaves
-    the denominator and it scores **0.82223** against the named title's
-    **0.81994** (2019 on both, `_NOW`'s clock, computed before this case was
-    written). Both wrong implementations therefore fail: no exact-name key at
-    all, and a key set on every hit alike -- which ties them, and `_ESSAY <
-    _NAMED` puts the essay first.
-    """
+    """**Issue #25 end to end, through the blend that produced it.**"""
     hits = (
         SearchHit(title_id=_NAMED, score=_STRONG, exact_name=True),
         SearchHit(title_id=_ESSAY, score=_STRONG),
@@ -2173,35 +2097,8 @@ async def test_type_ahead_records_the_surface_and_the_tier_that_answered(
 async def test_the_keystrokes_latency_covers_the_index_probe_and_the_hydration(
     tier: SuggestTier,
 ) -> None:
-    """What `latency_ms` is a measurement *of*, on the one surface where the
-    number it reads carries no information at all.
-
-    🔴 **On tier 1 this column is almost always literally zero, so no
-    assertion on its value can see what the window covers.** Measured
-    read-only on J2's own disposable clone (`usher_j2`, 2026-08-27):
-    **14,181 of 14,898** tier-1 suggest rows record `latency_ms = 0`, p50
-    **0**, max 18. `_ms` truncates to whole milliseconds and tier 1's
-    service-side window is sub-millisecond (0.664 ms p50 / 0.947 ms p95 at
-    catalog scale, `.claude/rules/search-and-embeddings.md`), and
-    `ck_search_queries_latency_ms_non_negative` permits 0 -- so a window that
-    had silently stopped covering the statement it is about renders **exactly
-    as the shipped code does**, in the column that would otherwise show
-    ADR-0031's tier-1 win.
-
-    **So the window is pinned by moving the clock from inside the
-    collaborators rather than by reading the number**, in two distinguishable
-    amounts, and the failure value names which half was lost: **125** is the
-    probe alone, **62** the hydration alone, **187** both. The plant this
-    exists for is `started = self._clock()` moved *below* the tier's `suggest`
-    call -- which leaves `latency_ms` measuring everything except the index
-    read, survived the whole suite at exit 0 when a review planted it, and is
-    invisible to `test_the_latency_is_the_measured_interval_…` one surface
-    over because that case drives `search`.
-
-    Both advances are dyadic, so `int(seconds * 1000)` is exact at every step
-    rather than an off-by-one waiting to be read as a defect -- the rule
-    `.claude/rules/testing-discipline.md` records for
-    `OpenAICompatibleClient`'s 1,420 ms.
+    """What `latency_ms` is a measurement *of*, on the one surface where the number it
+    reads carries no information at all.
     """
     clock = _Clock()
     recorder = _Recorder()

@@ -1,10 +1,5 @@
-"""`ConfiguredSourceAdapterFactory` -- the registry, and the only module in
-`src/` outside `usher.adapters.emby` that may name `EmbyAdapter`.
-
-That last part is enforced, not asserted here: `pyproject.toml`'s sixth
-import-linter contract forbids `usher.domain`, `usher.ports`,
-`usher.services`, `usher.api`, and `usher.db` from reaching
-`usher.adapters.emby` at all.
+"""`ConfiguredSourceAdapterFactory` -- the registry, and the only module in `src/`
+outside `usher.adapters.emby` that may name `EmbyAdapter`.
 """
 
 from enum import StrEnum
@@ -78,23 +73,14 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
         assert adapter._page_size == 17
         assert adapter._client.timeout.read == 3.5
         assert adapter._session._reauth_cooldown == 7.25
-        # The outbound gate reaches the session that sends through it
-        # (ADR-0043). A factory that dropped it would build an adapter that
-        # never paces a call, and the `usher.source.throttle.wait` panel would
-        # be empty not because the limiter never binds but because it was never
-        # wired. **The registry's gate, not a gate built from a rate**: that is
-        # M10's S3, and it is asserted by identity below rather than by reading
-        # `_rate` alone, because a session that minted its own gate at the same
-        # rate is indistinguishable from one that shares the registry's by
-        # every value assertion available.
+        # The outbound gate reaches the session that sends through it (ADR-0043).
         assert adapter._session._limiter is gates.gate(SOURCE.id, SOURCE.name)
         assert adapter._session._limiter._rate == 1.25
         # The two push knobs, and this is the whole of what makes
-        # `USHER_PUSH_STALE_AFTER_SECONDS` a setting rather than a field
-        # that validates and then influences nothing: the registry is the
-        # only thing between `Settings` and the adapter that owns the
-        # ledger, so a factory that dropped them would leave an operator
-        # who widened the staleness window still reconnecting at 90 s.
+        # `USHER_PUSH_STALE_AFTER_SECONDS` a setting rather than a field that validates
+        # and then influences nothing: the registry is the only thing between `Settings`
+        # and the adapter that owns the ledger, so a factory that dropped them would
+        # leave an operator who widened the staleness window still reconnecting at 90 s.
         assert adapter._health.stale_after == 11.5
         assert adapter._push_poll_seconds == 0.75
     finally:

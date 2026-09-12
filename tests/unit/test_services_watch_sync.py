@@ -1,26 +1,5 @@
-"""Inbound watch state, against port fakes and a source adapter that lies
-the way Emby's listing route does.
-
-**Every case here that matters is about a number the walk does not know.**
-`_LossySourceAdapter` is the measured behaviour of Emby 4.9.5.0 reduced to
-six lines: its walk reports `play_count=None`/`last_played_at=None` and its
-single-item route reports the truth. `FakeSourceAdapter` on its own cannot
-model that -- it hands back whatever the test seeded, so a service that
-wrote `state.play_count or 0` would look correct against it for the walk
-*and* the backfill.
-
-**Two properties here can only be checked against real Postgres**, and
-`tests/integration/test_services_watch_sync.py` is where:
-
-- the merge preserving a stored count across a *batch* -- the fake's
-  `value if value is not None else stored` is naturally `COALESCE`-shaped
-  and cannot fail, and the natural SQL spelling of the same thing reads
-  back `0`; and
-- `backfill_one`'s `observed_at`. `FakeWatchStateRepository` stores
-  `observed_at` as `updated_at`, while Postgres has a `BEFORE UPDATE`
-  trigger that overwrites it with the *write* instant -- so a backfill
-  carrying anything but a fresh instant is accepted here and silently
-  refused there by the conflict rule, and the play count never lands.
+"""Inbound watch state, against port fakes and a source adapter that lies the way
+Emby's listing route does.
 """
 
 import dataclasses
@@ -121,15 +100,11 @@ class _Fixture:
         saved = self.runs.save
 
         async def _record(run: SyncRun) -> None:
-            # **`positions` is the per-batch checkpoints, and "per batch" is
-            # spelled as "this save carried states" rather than as "the
-            # status is RUNNING".** `sync`'s reclaim save is `RUNNING` too,
-            # so the status test would report the position an attempt
-            # *started* from as though a batch had committed it -- reading
-            # `[3, 5, 6]` where two batches committed. Every `_flush` save
-            # adds at least one to `items_seen`; nothing else in this
-            # service does. The closing save carries the terminal status and
-            # no new states, so it is out either way.
+            # **`positions` is the per-batch checkpoints, and "per batch" is spelled as
+            # "this save carried states" rather than as "the status is RUNNING".**
+            # `sync`'s reclaim save is `RUNNING` too, so the status test would report
+            # the position an attempt *started* from as though a batch had committed it
+            # -- reading `[3, 5, 6]` where two batches committed.
             previous = await self.runs.get(run.id)
             if previous is not None and run.items_seen > previous.items_seen:
                 self.positions.append(run.position)
@@ -406,26 +381,8 @@ async def test_states_are_resolved_once_per_batch_rather_than_once_per_state(
 async def test_every_merge_in_one_walk_carries_one_instant_not_a_per_batch_now(
     fixture: _Fixture,
 ) -> None:
-    """**One instant for the whole walk, never `now()` per batch**, and the
-    difference is PRD 03's conflict rule rather than tidiness. A walk of
-    1,126,674 items takes hours; a client that sets a resume position while
-    it is running knows more than the walk does, and `observed_at` is the
-    only thing that says so. A per-batch `now()` creeps forward as the walk
-    goes and silently starts winning those races -- and every stored value
-    still looks plausible afterwards.
-
-    ⚠️ **Renamed 2026-08-26, because the rule it was named for is one this
-    branch reversed.** It was
-    `test_every_merge_carries_the_runs_own_start_instant`, and it argued
-    `observed_at = run.started_at`. ADR-0042 made those two different
-    quantities: a reclaimed run's `started_at` can be days old and is the
-    *cursor's* business, while a merge carries the instant **this attempt**
-    began. This case still passes and still has teeth because a fresh run's
-    `attempt_started` *is* its `started_at` -- which is exactly why the old
-    name was dangerous, being the thing a future author greps for and finds
-    apparently-passing evidence of a retracted rule. The half it does not
-    cover, the resumed one, is
-    `test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs`.
+    """**One instant for the whole walk, never `now()` per batch**, and the difference is
+    PRD 03's conflict rule rather than tidiness.
     """
     seen: list[datetime] = []
     original = fixture.watch_states.merge_from_source
@@ -1269,12 +1226,8 @@ async def test_a_failed_walk_keeps_the_position_it_reached(
     )
 
     assert run.status is SyncRunStatus.FAILED
-    # **This is the line that catches the regression**, and the durable read
-    # below no longer is. `SyncRunRepository.save` became non-destructive
-    # while this branch was in review -- `position` merges as
-    # `GREATEST(stored, incoming)` on both arms -- so a failure handler
-    # writing 0 over a checkpoint of 2 is refused by the repository and the
-    # row still reads 2. The in-memory run is where the defect is visible.
+    # **This is the line that catches the regression**, and the durable read below no
+    # longer is.
     assert run.position == 2, (
         "the failure handler evolved its pre-walk binding, so the run this attempt "
         "reports has lost the page it committed"
@@ -1287,34 +1240,7 @@ async def test_a_failed_walk_keeps_the_position_it_reached(
 
 
 class _DuplicatingSourceAdapter(_LossySourceAdapter):
-    """A source whose walk yields every record twice.
-
-    The port permits it -- `SourceAdapter.watch_state` promises no ordering
-    and no uniqueness, and ADR-0042 declines to defend against a divergence
-    no source it has measured produces.
-
-    **What it buys the case below is not the divergence, and saying so is
-    the correction (2026-08-25).** A duplicated yield moves `items_seen` and
-    `position` by exactly one step each -- `_walk` seeds its counter at the
-    resume point and `_flush` advances both from the same batch -- so on a
-    fresh run the two stay equal however many times a source repeats itself,
-    and this adapter cannot separate them on its own. The gap of five below
-    is the *reclaimed row's*, seeded to match what `m10b` backfills onto a
-    row #41 left `RUNNING`.
-
-    What the duplication does buy is the **unit**: with six yields over
-    three items, `position == 6` says the checkpoint is an offset into the
-    stream this walk yielded rather than a count of distinct items, which is
-    the reading `start_index` is honoured under one layer down and is
-    unobservable on any adapter that yields each record once.
-
-    **`start_index` counts yields here, which is what the port says and what
-    a resumed walk checkpoints.** The base walk is therefore asked for the
-    whole stream and the skip is applied to the *doubled* one: skipping first
-    would make this adapter's offset a raw-item offset, i.e. a resume point
-    it cannot honour, which is the same mistake `FakeSourceAdapter._walk_states`
-    carries a comment against one layer down.
-    """
+    """A source whose walk yields every record twice."""
 
     async def _walk_states(
         self, since: AwareDatetime | None, start_index: int
@@ -1330,39 +1256,8 @@ class _DuplicatingSourceAdapter(_LossySourceAdapter):
 async def test_the_resume_point_is_the_position_and_not_the_counter(
     fixture_batched: _Fixture,
 ) -> None:
-    """**`position` and `items_seen` are two statements, and the migration
-    that added the first is what makes a row carrying both reachable.**
-
-    `m10b` backfills `position = 0` onto every row that predates it --
-    including the three `RUNNING` rows aged 7-11 h that issue #41 observed,
-    each of them carrying a real six-figure `items_seen`. So the very first
-    walk after this lands reclaims a row whose counter says five and whose
-    checkpoint says zero, and it has to believe the checkpoint: `items_seen`
-    is a running total of states *yielded* over the life of the run
-    (`items_matched` is the merged half), and nothing promises a total
-    accumulated across attempts is a page offset into this one. A `_flush`
-    spelling `position = items_seen + len(batch)` reads identically on every
-    fresh walk in this file and sends the next attempt eight pages past
-    anything this one reached.
-
-    The duplicate is the same distinction arriving from the source instead
-    of from the migration: six yields over three items, counted six times,
-    over a page position that a count of yields is only accidentally equal
-    to. Re-walking them costs nothing -- every write on this lane is an
-    idempotent upsert and it retracts nothing -- which is exactly why the
-    cheap number is the wrong one to resume from.
-
-    **What this case does *not* cover, measured rather than assumed
-    (2026-08-25).** It reads as an argument about `_walk`'s `seen =
-    start_index`, and it is blind to that spelling: the row it seeds carries
-    `position = 0`, so `seen = 0` and `seen = start_index` are the same
-    statement here and the `seen = 0` plant passes this case untouched. What
-    it holds is the pair either side of that -- the resume point is read off
-    `position` and not off `items_seen`, and `_flush` checkpoints the page
-    it was handed rather than one derived from the counter. The counter's
-    *origin* is covered by
-    `test_each_failed_attempt_resumes_further_in_than_the_last`, which needs
-    a third attempt to see it at all.
+    """**`position` and `items_seen` are two statements, and the migration that added the
+    first is what makes a row carrying both reachable.**
     """
     dupes = _DuplicatingSourceAdapter(fixture_batched.source)
     for index in range(3):
@@ -1393,30 +1288,7 @@ async def test_the_resume_point_is_the_position_and_not_the_counter(
 async def test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned(
     fixture_batched: _Fixture,
 ) -> None:
-    """**`RUNNING` is the designed trace of a hard kill, not an anomaly.**
-
-    `sync` commits `RUNNING` before it walks precisely so a process that
-    dies mid-walk leaves a row behind rather than nothing -- and issue #41's
-    deployment has three of them, aged 7-11 h, which is what a worker
-    killed during an eleven-hour walk looks like. A resume that recognised
-    only `FAILED` would mint a fresh run beside each one and start at page
-    one: #41 again, with the stuck rows still on the operator's dashboard
-    and nothing to say they were ever superseded.
-
-    `latest_incomplete_run` is the read that makes the distinction
-    unnecessary -- newest, then "not completed" -- and this is the case that
-    holds it to that, because "only a `FAILED` run resumes" survives its
-    entire contract suite.
-
-    **The reclaim also has to clear the last attempt's verdict**, which is
-    why the row seeded below carries one. `usher sync-status` renders
-    `error=...` for any truthy value whatever status sits beside it, so a
-    `RUNNING` row still holding "source went away mid-walk" reports a fault
-    as happening *now* -- on the one command an operator runs to diagnose
-    this lane, about the walk that is currently repairing it. A
-    `finished_at` on a running row is the same lie about the other end of
-    the interval, and it is what PRD 10's duration panel subtracts.
-    """
+    """**`RUNNING` is the designed trace of a hard kill, not an anomaly.**"""
     for index in range(6):
         await fixture_batched.given_matched(f"movie-{index}")
     abandoned = SyncRun(
@@ -1460,29 +1332,10 @@ async def test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned(
 async def test_each_failed_attempt_resumes_further_in_than_the_last(
     fixture_batched: _Fixture,
 ) -> None:
-    """**Three attempts, because two cannot tell a walk that converges from
-    one that is stuck.** Every other case in this file either completes or
-    fails exactly once, and a walk that resumes at the right page *once* and
-    then never advances again satisfies all of them: its `items_seen` still
-    climbs attempt after attempt, so every counter an operator watches reads
-    healthy while the checkpoint sits on the same page forever. That is
-    #41's symptom exactly, with a `position` column added.
-
-    Measured against the shape that produces it -- a `_walk` counting only
-    the states *this attempt* yielded rather than starting the count at the
-    page it resumed from (`seen = 0` in place of `seen = start_index`) --
-    which walks `[0, 2, 4]` on the shipped code and `[0, 2, 2]` under the
-    defect, and passes everything else in this file.
-
-    **"Everything else" includes the case whose name reads as if it owned
-    this defect**, and that is worth naming rather than leaving to be
-    rediscovered: `test_the_resume_point_is_the_position_and_not_the_counter`
-    seeds `position = 0`, where the two spellings are one statement, so it
-    cannot distinguish them. This is the only case in the file that can, and
-    the mechanism is why three attempts are needed: the mutant's *second*
-    attempt saves the page it started from, `GREATEST` correctly refuses to
-    pull the stored checkpoint back, and the third therefore resumes exactly
-    where the second did.
+    """**Three attempts, because two cannot tell a walk that converges from one that is
+    stuck.** Every other case in this file either completes or fails exactly once, and a
+    walk that resumes at the right page *once* and then never advances again satisfies
+    all of them: its `items_seen` still climbs attempt after attempt, so every counter
     """
     for index in range(8):
         await fixture_batched.given_matched(f"movie-{index}")

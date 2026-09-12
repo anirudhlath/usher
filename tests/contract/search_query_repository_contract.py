@@ -1,70 +1,4 @@
-"""Behaviour every `SearchQueryRepository` implementation must satisfy.
-
-**A write is observed through an abstract `SearchQueryLedger`, not through a
-read method on the port** -- the port has none, by design, and
-`SearchQueryRepository`'s own docstring carries the argument: this table's
-readers are PRD 10's dashboards, which do not exist yet, and adding a method
-so this suite could read through the port would be adding the very surface
-`genome_tags`' precedent (and `llm_calls`' before it) declined. It reads the
-table out of band, exactly as `LLMCallLedger` and `CuratedRowSeeder` do, and
-for the identical reason.
-
-**Every case names the wrong implementation it rules out.** A test whose
-docstring cannot name what it kills is a test that kills nothing.
-
-**`record_outcome`'s two columns are two different facts under two different
-conditions, and conflating them into one guard is a real defect a review
-caught by reading rather than by running anything -- see the module docstring
-on the port for the corrected argument.** `clicked_title_id` is genuine
-attribution: first write wins, because a later, different click must not
-steal credit from the result the household actually opened.  `played` is
-whether *anything* happened after that click, and F3's own funnel
-(`GET /titles/{id}?search_id=…` for the click, `POST /titles/{id}/play` for
-the play, at two different times) means the ordinary path is **a second call
-on the same row that only means to flip `played`** -- not a duplicate
-delivery of the first call, and not a second, different click. A guard keyed
-on `clicked_title_id IS NULL` cannot tell that call apart from either of
-those and silently drops it, which is the shape this suite now has four
-cases for rather than one: a later click does not steal an earlier one's
-attribution; a later play reaches a row a click already attributed; a play
-that had no click before it is a legal row with `played` true and the click
-still `NULL`; and `played` never reverts once it is true.
-
-**The play writer passes no title, and every case below spells it that
-way.** `clicked_title_id=None` is what stops the second call from being one
-writer that sets both columns -- see the port. The one case that passes a
-title *and* `played=True` in a single call is the storage control, and says
-so.
-
-**The household scope is the one predicate here that is a security
-boundary**, so it is in the shared contract rather than only in the
-Postgres arm: a `query_id` arrives from a client and must not let one
-household write attribution onto another's row.
-`test_a_search_belonging_to_another_household_is_not_attributed` carries its
-own positive control, because a repository that stopped writing at all
-passes the negative half.
-
-**`oldest()` and `prune()` are M10's J5 and are contract rather than
-storage.** `SearchQueryRetention.last_done()` is built on `min(at)` --
-ADR-0046's no-state design makes every registration read a completion time
-off the artefact it maintains -- so `max` in place of `min`, an empty table
-inventing an age, and a naive datetime are all failures of the *scheduler*
-one layer up rather than of this table. `prune`'s `<`-not-`<=` boundary and
-its exact return value are contract for the same reason: the boundary is one
-character and the count is the chunk loop's only terminator.
-
-Everything else here is storage -- did the row land, did it land once, did
-it land with every column distinct from every other.
-
-Subclass and provide `repository`, `ledger`, `counts` (the two tables a row
-points *at*, for the leaf-delete case), `user_id` (naming a household
-that actually exists, for an implementation with a foreign key), `add_user`
-(a *second* household, for the scope case) and `add_title` (for
-`record_outcome`'s attribution target, same reason).
-
-Its `ABC` shape is ADR-0001's argument applied to a test double -- a
-`Protocol` would let one arm drift out of the suite silently.
-"""
+"""Behaviour every `SearchQueryRepository` implementation must satisfy."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -573,29 +507,8 @@ class SearchQueryRepositoryContract:
     async def test_the_oldest_row_is_what_min_at_answers_and_an_empty_table_is_none(
         self, repository: SearchQueryRepository, user_id: uuid.UUID
     ) -> None:
-        """`SearchQueryRetention.last_done()` is built on this, so both
-        halves are contract rather than storage.
-
-        The wrong implementations this kills: `max(at)` in place of `min(at)`,
-        which is the identical mistake `SimilarityService.computed_at()`
-        refuses one artefact over (*"the newest row would report a whole-table
-        rebuild as fresh the moment its first page committed"*) -- here it
-        would report a table that has *just been written to* as needing no
-        prune, forever. And an empty table answering *some* timestamp rather
-        than `None`, which is the difference between "nothing to prune" and a
-        fabricated age.
-
-        The three rows are seeded **out of order** (middle, oldest, newest),
-        so an implementation answering "the first row written" rather than the
-        smallest `at` is a failure rather than a coincidence.
-
-        ⚠️ **Aware, and asserted here rather than only on the Postgres arm.**
-        `Scheduler._due_now` subtracts this from an aware `now`; a naive
-        answer is a `TypeError` at the tick, not a wrong number. The Postgres
-        arm is the one where this is a real round trip through a column type
-        and it is the reason the assertion is in the shared suite: a fake that
-        hands back what it was given would pass it for the wrong reason if
-        nothing else asked.
+        """`SearchQueryRetention.last_done()` is built on this, so both halves are contract
+        rather than storage.
         """
         assert await repository.oldest() is None, (
             "an empty table has no oldest row and must not invent one"

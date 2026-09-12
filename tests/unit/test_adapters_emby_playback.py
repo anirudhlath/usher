@@ -1,17 +1,5 @@
 # tests/unit/test_adapters_emby_playback.py
-"""StreamTarget construction, against the committed fixtures.
-
-No HTTP: `build_stream_targets` is a pure function of one item payload, and
-keeping it that way is what makes "the deep-link construction moves here,
-where it is testable" (PRD 07) actually true.
-
-The last three cases are about ADR-0012's handling rules rather than about
-the URL's shape. The token in that URL is the one credential Usher hands a
-client on purpose, so "it never reaches a log line" has to be a property of
-the DTO's shape, not of every future caller remembering -- see
-`tests/unit/test_ports_source.py`'s repr cases for the DTO-level statement
-of the same guarantee.
-"""
+"""StreamTarget construction, against the committed fixtures."""
 
 import ast
 import inspect

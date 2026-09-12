@@ -1,27 +1,5 @@
-"""`JobWorker` against real Postgres, for the two things `FakeJobQueue`
-cannot model at all.
-
-Its own module docstring puts `SKIP LOCKED` first among them, and the worker
-is the code that depends on it most: `test_two_workers_never_claim_the_same_job`
-is *skipped* for the fake rather than passed, so every unit case about
-claiming runs against a store where contention is structurally impossible.
-
-1. **The claim is durable, not merely ordered.** The unit suite asserts that
-   a commit happened before the first handler; nothing there can tell that
-   from a no-op, because a dict has no transaction. Here a second Postgres
-   backend reads the row *while the handler is still running* and has to see
-   `running`. Move the worker's commit after the loop and it reads `pending`
-   -- which is what a restart's `requeue_running` would find, and what makes
-   "a killed worker's claims are recoverable" false.
-2. **Two workers split a batch.** Released through an `asyncio.Barrier` and
-   asserted on measured overlap rather than on a count -- "each worker ran
-   two jobs" is also what a serialised pair produces, which is the M3 failure
-   this project already had once.
-
-Every claim is bounded by `asyncio.wait_for`, for the reason
-`tests/integration/test_job_queue.py` states: the wrong spellings of the
-claim do not answer wrongly, they block forever, and a test that hangs
-reports nothing.
+"""`JobWorker` against real Postgres, for the two things `FakeJobQueue` cannot model at
+all.
 """
 
 import asyncio
@@ -249,13 +227,9 @@ async def test_recover_takes_back_a_claim_a_killed_worker_committed(
     assert await _status_of(factory, "t1") == "running"
 
     handled: list[str] = []
-    # `lease_seconds=0.0` because the claim above was made milliseconds ago and
-    # the shipped 300 s lease is what stops a worker recovering work somebody
-    # is still doing. The *other* arm -- that a claim inside its lease is left
-    # alone -- is
-    # `test_a_live_workers_claim_survives_another_workers_recovery` below, and
-    # it is the one with teeth: "an abandoned claim comes back" is satisfied by
-    # requeueing everything, which is exactly what this replaced.
+    # `lease_seconds=0.0` because the claim above was made milliseconds ago and the
+    # shipped 300 s lease is what stops a worker recovering work somebody is still
+    # doing.
     restarted = _worker(factory, {JobKind.ENRICH: _recorder(handled)}, lease_seconds=0.0)
     assert await restarted.recover() == 1
     assert await restarted.run_once() == 1

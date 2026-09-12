@@ -1,9 +1,4 @@
-"""PostgresRowProviderSettingsRepository against real Postgres.
-
-The contract suite runs here unchanged; the two cases below are the ones the
-in-memory fake cannot express by construction -- a real primary-key row count,
-and durable persistence across a real commit boundary.
-"""
+"""PostgresRowProviderSettingsRepository against real Postgres."""
 
 import pytest
 from sqlalchemy import text

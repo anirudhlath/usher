@@ -1,42 +1,4 @@
-"""An httpx transport that streams an ASGI response instead of buffering it.
-
-**`httpx.ASGITransport` cannot test SSE, and the failure mode is a hang
-rather than an error.** Read its `handle_async_request`: it runs
-`await self.app(scope, receive, send)` *to completion*, collects every
-`http.response.body` message into a list, and only then builds a `Response`
-whose stream yields `b"".join(body_parts)`. `GET /events` never completes --
-that is what a stream is -- so `client.stream("GET", "/events")` against it
-blocks forever inside the transport and no case in this file would ever run.
-The M5 plan's own draft of `tests/unit/test_api_events.py` was written
-against it; this module is what makes those cases runnable.
-
-So: the app runs in a task, `http.response.start` resolves a future the
-request waits on, and each `http.response.body` goes onto a queue the
-response's stream drains. Closing the response sends `http.disconnect`,
-which is what Starlette's `StreamingResponse` cancels its body iterator on --
-so the route's `finally` really runs and the bus really loses its subscriber.
-
-**Where this is more forgiving than a real server**, in the shape every fake
-in this repository owes:
-
-- **No HTTP at all.** No chunked framing, no `Content-Length` negotiation, no
-  header validation. `Connection: keep-alive` is a hop-by-hop header a real
-  server may rewrite or reject, and nothing here would notice.
-- **No socket, so no backpressure.** The chunk queue is unbounded, where a
-  real client that stops reading eventually fills a kernel buffer and stalls
-  `send`. A route that produced faster than a browser consumed looks fine
-  here.
-- **No proxy.** `X-Accel-Buffering: no` is asserted as a *string* because
-  only a real nginx can act on it, which is the whole reason that header is
-  asserted rather than trusted.
-- **`aclose()` disconnects politely.** A real client vanishing gives the
-  server an abrupt reset, and the difference is visible to anything that
-  distinguishes them.
-
-`tests/integration/test_sse_end_to_end.py` drives a real app through a real
-request and is what closes the first two; only a deployment behind a real
-nginx closes the third.
-"""
+"""An httpx transport that streams an ASGI response instead of buffering it."""
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
@@ -149,12 +111,8 @@ class StreamingASGITransport(httpx.AsyncBaseTransport):
     def _scope(self, request: httpx.Request) -> MutableMapping[str, Any]:
         return {
             "type": "http",
-            # `spec_version` matches uvicorn 0.51's own (`2.3`) rather than
-            # being omitted. It is load-bearing: `StreamingResponse.__call__`
-            # takes the task-group-plus-`listen_for_disconnect` path below
-            # 2.4 and a bare `stream_response` at or above it, and only the
-            # first cancels the body iterator when a client goes away --
-            # which is the whole of `test_a_disconnect_unsubscribes`.
+            # `spec_version` matches uvicorn 0.51's own (`2.3`) rather than being
+            # omitted.
             "asgi": {"version": "3.0", "spec_version": "2.3"},
             "http_version": "1.1",
             "method": request.method,

@@ -1,8 +1,4 @@
-"""The source-repository contract against the in-memory double. No Docker.
-
-tests/integration/test_source_repository.py runs the identical assertions
-against Postgres.
-"""
+"""The source-repository contract against the in-memory double. No Docker."""
 
 import pytest
 

@@ -1,31 +1,4 @@
-"""The invariants of `usher.db.backup_manifest` that need no container.
-
-The integration arm
-(`tests/integration/test_backup_manifest_covers_the_live_schema.py`) reads
-`information_schema` and is the only thing that can see `alembic_version`.
-Everything here is a fact about the mapping itself or about
-`Base.metadata`, so it runs on the fast path -- which is what makes an M11
-model that adds a table a red before anyone starts Docker.
-
-**The two arms overlap on coverage and that overlap is deliberate**, but
-they are not the same assertion: the integration arm compares the manifest
-to a *database*, this one compares it to the *ORM metadata*. A migration
-that creates a table no model declares fails only the first; a model added
-without a migration fails only the second.
-
-⚠️ **Three of this file's cases were measured green with the defect
-planted and are rewritten because of it.** The set-equality named
-`ALEMBIC_VERSION_TABLE` on both sides, so the constant cancelled and could
-be set to anything; the CLI check had a positive control on the parser and
-none on its own subject, so an empty `rebuild_commands` skipped the loop
-for all 29 entries; and the `PARTIAL` columns were asserted as a *subset*,
-so dropping `episode_id` -- halving what K4's merge carries -- passed.
-The shape-level invariants they used to assert are now enforced in
-`BackupEntry.__post_init__`, which holds for the entries K3 and future
-fixtures construct and this file never sees; what remains here is
-behavioural: that the constructor really does refuse, and that the mapping
-really does say what this task argued.
-"""
+"""The invariants of `usher.db.backup_manifest` that need no container."""
 
 import shlex
 from collections import Counter

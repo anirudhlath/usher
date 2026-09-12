@@ -1,10 +1,4 @@
-"""PostgresBulkCatalogRepository against real Postgres.
-
-Runs the shared contract, plus the cases that only mean anything against a
-real database: that the COPY path reaches asyncpg at all, that
-bulk_load_window really drops and rebuilds indexes, and that it declines to
-when the catalog is non-empty.
-"""
+"""PostgresBulkCatalogRepository against real Postgres."""
 
 import dataclasses
 import uuid
@@ -96,11 +90,6 @@ class TestPostgresBulkCatalogRepositoryContract(BulkCatalogRepositoryContract):
 
     async def popularity_of(self, repo: BulkCatalogRepository, imdb_id: str) -> float | None:
         # repo._session reaches state the port deliberately does not expose.
-        # No suppression comment for the private-member access: that ruff
-        # code is not in this project's `select` list, and a directive
-        # naming a non-selected code trips RUF100 ("unused directive")
-        # instead, which *is* selected. Verified against this project's
-        # ruff config.
         assert isinstance(repo, PostgresBulkCatalogRepository)
         result = await repo._session.execute(
             text("SELECT tmdb_popularity FROM titles WHERE imdb_id = :imdb_id"),
@@ -250,34 +239,9 @@ async def test_apply_ratings_upsert_tmdb_ids_upsert_crosswalk_accept_empty_batch
 
 
 async def test_apply_ratings_writes_only_the_imdb_columns(session: AsyncSession) -> None:
-    """**The whole of ADR-0040 in one assertion.** Before it, this same call
-    wrote `vote_count`/`community_rating` -- the columns TMDb enrichment also
-    writes -- so an IMDb import silently overwrote a TMDb figure and nothing
-    recorded which had won. **The gap is ~38x, over one identified population
-    counted both ways**: of the frozen tier's 130,647 enriched rows, median
-    TMDb `vote_count` **15** against a median frozen IMDb `numVotes` of
-    **576** (`.claude/rules/tmdb-and-enrichment.md`, group S3) -- a
-    before-and-after over one frozen set of ids rather than two columns read
-    off one row, because no row could hold both until `m10a` and the redirect
-    this case pins, which is the entire defect.
-
-    The `tmdb_*` half of this assertion is the load-bearing half: a writer
-    that filled the IMDb columns *and* left its old write in place would
-    satisfy every assertion about `imdb_*` and change nothing at all.
-
-    Seeded through raw SQL rather than `upsert_titles`, because the only
-    column set that can state the premise -- a title already carrying TMDb's
-    own figures -- is one the IMDb loader deliberately never writes (see
-    `upsert_titles`' `DO UPDATE` omissions).
-
-    ⚠️ **All four numbers here are invented, and that is the licence rule
-    rather than a style choice.** `tests/fixtures/README.md` requires every
-    rating and vote count in this repository to be made up, and ratings and
-    vote counts are the most licence-restricted part of IMDb's dataset. A
-    real title's real pair would pass `test_no_third_party_data.py`, which is
-    scoped to identifiers and TSV shapes -- so this one is on the author. The
-    only property the case needs is that the two counts differ by a lot, in
-    the direction the medians above record.
+    """**The whole of ADR-0040 in one assertion.** Before it, this same call wrote
+    `vote_count`/`community_rating` -- the columns TMDb enrichment also writes -- so an
+    IMDb import silently overwrote a TMDb figure and nothing recorded which had won.
     """
     title_id = new_id()
     await session.execute(
@@ -368,33 +332,10 @@ async def test_an_over_long_alias_is_refused_for_the_whole_call_and_names_the_co
 async def test_the_canonical_comparison_is_the_databases_own_lower_and_not_pythons(
     session: AsyncSession,
 ) -> None:
-    """**Three case-folding functions disagree on real IMDb names, and only
-    one of them is the right answer here.** Measured 2026-08-11 over the whole
-    pinned `title.akas.tsv.gz` (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`):
-    **32,223 of 46,202,631 retained rows (0.070%) have `str.lower()` !=
-    `str.casefold()`**, in two families — German `ß` and Greek final sigma.
-
-    | pair | Postgres `lower()` | Python `str.lower()` | Python `casefold()` |
-    |---|---|---|---|
-    | `ΟΔΟΣ` / `Οδος` | **not equal** | equal | equal |
-    | `STRASSE` / `Straße` | not equal | not equal | **equal** |
-
-    Python's `str.lower()` applies Unicode's *contextual* final-sigma rule and
-    the database's `lower()` does not, so the fake's answer and this one
-    genuinely differ on the first row — recorded in
-    `tests/fakes/bulk_catalog_repository.py`'s divergence list rather than
-    fixed, because reimplementing a collation in Python is a second
-    implementation and not a stand-in. **This case is integration-only for
-    exactly that reason**, and it is the only thing in the suite that can tell
-    the three functions apart.
-
-    Postgres's answer is not merely the one that ships — it is the *correct*
-    one, and by construction: the whole test for keeping an alias is whether it
-    reaches anything `ix_titles_name_lower_prefix` does not already answer, and
-    that index is a btree over the database's own `lower(name)`. Under it
-    `Οδος` really is a distinct entry, so the row really does add reachability.
-    A `casefold()` comparison would drop it and lose recall for a rule about an
-    index it does not describe.
+    """**Three case-folding functions disagree on real IMDb names, and only one of them is
+    the right answer here.** Measured 2026-08-11 over the whole pinned
+    `title.akas.tsv.gz` (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`): **32,223 of
+    46,202,631 retained rows (0.070%) have `str.lower()` != `str.casefold()`**, in two
     """
     greek = ImdbTitle(
         imdb_id="tt99000150",
@@ -535,32 +476,10 @@ async def test_bulk_load_window_declines_on_a_populated_catalog(
 async def test_bulk_load_window_commits_the_callers_own_pending_work(
     postgres_url: str,
 ) -> None:
-    """Pins the documented, deliberate exception to "these flush and return
-    counts; they never commit" -- see BulkCatalogRepository.bulk_load_window
-    and PostgresBulkCatalogRepository's own docstrings for the full
-    rationale and the (rejected) alternatives.
-
-    Deliberately does NOT use the shared `session` fixture every other test
-    in this file uses. That fixture binds its session to a connection with
-    an externally-managed outer transaction (`conn.begin()`, see
-    tests/integration/conftest.py), and SQLAlchemy's own
-    `join_transaction_mode` resolves to "rollback_only" for exactly that
-    shape: `session.commit()` there ends the session's *logical* transaction
-    scope, but the real DBAPI transaction stays open until the fixture's own
-    `conn.rollback()` at teardown. That is exactly why this was invisible
-    before -- no test written against `session` can observe a real commit
-    here, no matter how carefully it's written, which is the coordinator's
-    own diagnosis and this test is built to not repeat it. Building a
-    session bound directly to the engine instead (the same shape
-    production's `deps.get_session` uses) makes `commit()` a real commit,
-    the same way tests/integration/test_migrations.py already does when it
-    needs to see real, cross-connection state.
-
-    Because this genuinely commits against the same session-scoped Postgres
-    container every other integration test shares, it cleans up after
-    itself in a `finally` -- the same discipline test_health.py's
-    `test_check_migrations_detects_a_mismatch` docstring calls out for this
-    exact fixture.
+    """Pins the documented, deliberate exception to "these flush and return counts; they
+    never commit" -- see BulkCatalogRepository.bulk_load_window and
+    PostgresBulkCatalogRepository's own docstrings for the full rationale and the
+    (rejected) alternatives.
     """
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
@@ -569,14 +488,10 @@ async def test_bulk_load_window_commits_the_callers_own_pending_work(
         async with factory() as session:
             bulk_repo = PostgresBulkCatalogRepository(session)
 
-            # Unrelated pending work on a table bulk_load_window has no
-            # business touching: a different repository's write, sent to
-            # Postgres (a Core `insert()` takes effect immediately, no ORM
-            # flush needed) but never committed by *this* caller. Stands in
-            # for "some other repository call earlier on the same session"
-            # -- the exact precondition TitleRepository's own docstring
-            # already documents as real, not hypothetical, once a session is
-            # shared across repositories.
+            # Unrelated pending work on a table bulk_load_window has no business
+            # touching: a different repository's write, sent to Postgres (a Core
+            # `insert()` takes effect immediately, no ORM flush needed) but never
+            # committed by *this* caller.
             await session.execute(
                 insert(SourceRow).values(
                     id=source_id,
@@ -634,43 +549,10 @@ async def _indexdef(session: AsyncSession, name: str) -> str | None:
 async def test_every_suspendable_index_rebuilds_to_what_the_migration_built(
     session: AsyncSession,
 ) -> None:
-    """`_SUSPENDABLE_INDEXES` holds literal `CREATE INDEX` strings that
-    `bulk_load_window` executes verbatim in its `finally`. Nothing has ever
-    checked that those strings reproduce the index the migration created, and
-    until M6 the hazard was mild -- both entries were plain btrees whose only
-    degree of freedom is the column list.
-
-    It stops being mild the moment a GIN index joins. An entry that drops
-    `WITH (fastupdate = off)` rebuilds an index that is functionally
-    identical until somebody searches during a bootstrap, at which point
-    every query linearly scans a pending list. An entry that drops
-    `gin_trgm_ops` rebuilds an index that is not an error and simply cannot
-    serve `%` -- so the type-ahead path silently seq-scans forever after the
-    first bootstrap, and only after it.
-
-    This is also the only thing covering the GIN index's `fastupdate = off`
-    at all: `compare_metadata` is blind to index storage options, measured --
-    flipping the model's `postgresql_with` to `{"fastupdate": "on"}` while
-    the migration keeps `off` survives `test_migration_matches_the_orm_metadata`
-    untouched.
-
-    Comparing the dict's string to `pg_indexes.indexdef` textually does not
-    work (Postgres re-prints `ON public.titles USING btree (...)`), so both
-    sides are *built* under probe names and their `indexdef`s compared modulo
-    the name. Both probes are created inside the suite's rolled-back
-    transaction, so neither outlives the case.
-
-    **The ground truth is `Base.metadata`, deliberately not the live index,
-    and that is a correction rather than a preference.** Reading the live
-    `ix_titles_search_document` looks like the obvious comparison and is
-    self-confirming: `bulk_load_window` *commits*, this suite's schema is
-    session-scoped, and three cases in this very file run a window -- so by
-    the time this one executes, the live index has already been rebuilt **by
-    the dict under test**. Measured: with `WITH (fastupdate = off)` deleted
-    from the dict, the against-the-live-index spelling passed the whole file
-    and failed only when run alone. Against `Base.metadata` it fails either
-    way, and the model-to-migration link is `test_migration_matches_the_orm_metadata`'s
-    job one file over.
+    """`_SUSPENDABLE_INDEXES` holds literal `CREATE INDEX` strings that `bulk_load_window`
+    executes verbatim in its `finally`. Nothing has ever checked that those strings
+    reproduce the index the migration created, and until M6 the hazard was mild -- both
+    entries were plain btrees whose only degree of freedom is the column list.
     """
     from usher.db.repositories.bulk import _SUSPENDABLE_INDEXES
 
@@ -695,34 +577,9 @@ async def test_every_suspendable_index_rebuilds_to_what_the_migration_built(
         )
 
 
-# --------------------------------------------------------------------------
-# ADR-0044's ledger, driven: a value a domain model accepts must not reach an
-# operator as a raw driver exception.
-# --------------------------------------------------------------------------
-#
-# [ADR-0044](../../docs/prd/decisions/0044-a-bounded-column-is-a-declared-type-that-refuses.md)
-# classifies every bounded column in this schema, and F9 fixes the two buckets
-# below. This is the case that decides whether it did, and it is deliberately
-# written so that it cannot know the answer: **a value a domain model accepts
-# must not reach an operator as a raw driver exception** is ADR-0009's rule and
-# is what `db/repositories/_errors.py` exists for, so every arm asserts
-# `UsherPortError` and nothing about which `except` clause produced it.
-#
-# **The arms are collected from the generator, not from a list written here.**
-# `_BOUNDED_ARMS` names the driver per column; `test_every_ledger_column_...`
-# below asserts that its keys plus the named exclusions are *exactly* the
-# ledger's `exposed-sqlalchemy` and `translated` buckets, so a column that
-# lands in either without an arm fails collection-adjacent rather than passing
-# silently. That check is what stops this file from being the third place in
-# this milestone where a scan that globs nothing reads like a scan that passed.
-#
-# **The positive control is the `translated` bucket.** Those columns answered
-# `RepositoryConflict` before F9 touched anything, so a parametrisation that
-# collected nothing -- or one whose values were all in range -- cannot read as
-# coverage: the run is only green if those arms pass *and* the
-# `exposed-sqlalchemy` arms, which failed at `3972c2e` with `builtins.
-# OverflowError` and `asyncpg.exceptions.StringDataRightTruncationError`, pass
-# too.
+# -------------------------------------------------------------------------- ADR-0044's
+# ledger, driven: a value a domain model accepts must not reach an operator as a raw
+# driver exception.
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -906,13 +763,7 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     ("import_runs", "position"): lambda bed: _refused_import_run(bed, position=_OVER_INT32),
     ("import_runs", "rows_seen"): lambda bed: _refused_import_run(bed, rows_seen=_OVER_INT32),
     ("import_runs", "rows_written"): lambda bed: _refused_import_run(bed, rows_written=_OVER_INT32),
-    # `m10b`'s resume checkpoint, in the ledger since issue #41. `ge=0` with no
-    # ceiling against `integer`, this file's standing shape -- and the arm
-    # drives `add` rather than `save` for the reason the header states: the
-    # bucket is worst-case over writers, so one arm per column is what this
-    # parametrisation is, and `add` is the writer that binds the value
-    # unconditionally (`save` binds it through `GREATEST`, which refuses just
-    # the same but says less about why).
+    # `m10b`'s resume checkpoint, in the ledger since issue #41.
     ("sync_runs", "error_code"): lambda bed: _refused_sync_run(bed, error_code="e" * 33),
     ("sync_runs", "position"): lambda bed: _refused_sync_run(bed, position=_OVER_INT32),
     ("sync_runs", "items_seen"): lambda bed: _refused_sync_run(bed, items_seen=_OVER_INT32),
@@ -948,12 +799,8 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
         blend_fingerprint="an-invented-fingerprint",
     ),
     ("titles", "tmdb_id"): lambda bed: _refused_title_update(bed, tmdb_id=_OVER_INT32),
-    # Not through `TitleRepository.update`: `Title.imdb_id` carries
-    # `^tt\d{7,8}$`, so the over-long value cannot be constructed there. The
-    # bulk loader takes `ports.bulk.ImdbTitle`, whose `imdb_id` is a bare
-    # `str`, stages it into `stg_titles.imdb_id text` and meets `varchar(16)`
-    # at the `INSERT ... SELECT`. That gap is ADR-0044's own reason for moving
-    # this column out of the `safe` bucket.
+    # Not through `TitleRepository.update`: `Title.imdb_id` carries `^tt\d{7,8}$`, so
+    # the over-long value cannot be constructed there.
     ("titles", "imdb_id"): lambda bed: PostgresBulkCatalogRepository(bed.session).upsert_titles(
         [
             ImdbTitle(
@@ -970,16 +817,9 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     ),
     ("titles", "tvdb_id"): lambda bed: _refused_title_update(bed, tvdb_id=_OVER_INT32),
     # **New coverage created by `m10a`/ADR-0040, not a gap this file had.**
-    # `titles.vote_count` was one column with two writers, one of them the
-    # staged `COPY` in `apply_ratings` -- so the ledger scored it `exposed-copy`
-    # (worst case over its writers) and it was outside the two scored buckets
-    # this parametrisation covers. The split sends IMDb's half to
-    # `imdb_num_votes`, still COPY-fed and still unscored, and leaves
-    # `tmdb_vote_count` reached only through the ORM, which makes it
-    # `translated` and brings it in scope. `Title.tmdb_vote_count` is
-    # `Field(ge=0)` with no ceiling against an `integer` column -- the shape
-    # `.claude/rules/db-and-sql.md` calls "the common shape here" -- so a
-    # validly constructed domain model overflows it.
+    # `titles.vote_count` was one column with two writers, one of them the staged `COPY`
+    # in `apply_ratings` -- so the ledger scored it `exposed-copy` (worst case over its
+    # writers) and it was outside the two scored buckets this parametrisation covers.
     ("titles", "tmdb_vote_count"): lambda bed: _refused_title_update(
         bed, tmdb_vote_count=_OVER_INT32
     ),
@@ -1033,12 +873,8 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     ),
 }
 
-#: Bounded columns in the two scored buckets that **no repository method
-#: accepts a value for**, so no arm above can drive one. Each is an exclusion
-#: with a measurement rather than a gap: their writers still gain the wider
-#: translation in F9, because the ledger's buckets are worst-case over every
-#: writer and a column nothing can currently overflow is one refactor away
-#: from being one.
+# : Bounded columns in the two scored buckets that **no repository method : accepts a
+# value for**, so no arm above can drive one.
 _NO_CALLER_SUPPLIED_VALUE = {
     # Written only as the server-side expression `attempts = attempts + 1`
     # (`db/repositories/jobs.py`'s `_FAIL`). `JobRequest` carries no
@@ -1052,23 +888,7 @@ _NO_CALLER_SUPPLIED_VALUE = {
     # `SearchQueryRecord.mode` is a `SearchMode`, so the longest value that can
     # reach `varchar(16)` is `'full_text'` at nine characters.
     ("search_queries", "mode"): "enum-typed on the port DTO; longest member is 9 of 16",
-    # `m10c`'s two. ⚠️ **This entry read *"neither is caller-supplied yet"*
-    # and instructed the next author to delete it "the day the writer binds
-    # them"; J2 bound them and the entry stayed.** `SearchQueryRecord` now
-    # carries both fields and `_parameters()` binds both off the record, so
-    # the *reason* moved even though the exclusion did not.
-    #
-    # The exclusion that replaces it is `mode`'s, one entry up and measured
-    # rather than transcribed: both are enum-typed on the port DTO, so the
-    # longest value any caller can reach is `'suggest'` at **7 of 8** and
-    # `'prefix'` at **6 of 6**. No member overflows either column, so no arm
-    # can drive one -- unlike `curated_rows."position"`, where the field is
-    # `ge=0` with no ceiling and `2**31` is a validly constructed model.
-    # `tier`'s exact fit is the one to watch: a third `SuggestTier` member
-    # with a longer value is a `22001` at the driver rather than a silent
-    # truncation, which `refusals_as_conflict` translates like every other
-    # refusal on this table -- so *that* is the day an arm becomes drivable,
-    # and it is DDL rather than a code change.
+    # `m10c`'s two.
     ("search_queries", "surface"): "enum-typed on the port DTO; longest member is 7 of 8",
     ("search_queries", "tier"): "enum-typed on the port DTO; longest member is 6 of 6",
 }
@@ -1104,32 +924,7 @@ def test_every_ledger_column_in_the_two_scored_buckets_has_an_arm_or_a_reason() 
 async def test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_never_as_an_encoder_crash(  # noqa: E501
     bed: _Bed, table: str, column: str
 ) -> None:
-    """One arm per column, and the assertion names no exception this project
-    does not own.
-
-    `UsherPortError` rather than `RepositoryConflict`: the rule under test is
-    ADR-0009's -- nothing above a repository imports `sqlalchemy.exc` -- and a
-    case that named the narrower type would be asserting *which* port error a
-    site chose, which is the site's decision rather than this rule's.
-
-    At `3972c2e` the `exposed-sqlalchemy` arms fail here with `builtins.
-    OverflowError` (the `integer` columns, refused client-side by asyncpg's own
-    binary encoder) and with `asyncpg.exceptions.StringDataRightTruncationError`
-    or `sqlalchemy.exc.DBAPIError` (the `varchar(N)` and `halfvec(N)` ones,
-    refused server-side); none of those is a `UsherPortError`.
-
-    **The SQLSTATE assertion is not decoration**, and `testing-discipline.md`
-    is why it is here: *a rejection is not an assertion — assert the
-    diagnostics.* `pytest.raises(UsherPortError)` alone passes when the arm
-    fails for a reason it was not written for, and the likeliest such reason is
-    a bed row this file forgot to seed: a foreign key naming nothing is a
-    `RepositoryConflict` too. Class **22** is *"this value is not storable"* and
-    class **23** is *"this row violates a constraint"* — the two halves of
-    `ROW_REFUSED_SQLSTATE_CLASSES`, and the whole point of these arms is the
-    first. So the cause chain is read the same way `_errors.py:constraint_name`
-    documents, and an arm that starts passing because of a missing row goes red
-    on `23503`.
-    """
+    """One arm per column, and the assertion names no exception this project does not own."""
     with pytest.raises(UsherPortError) as caught:
         await _BOUNDED_ARMS[(table, column)](bed)
 

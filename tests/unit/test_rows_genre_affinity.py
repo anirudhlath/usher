@@ -1,22 +1,4 @@
-"""`GenreAffinityProvider` -- the row that must work with no embedder.
-
-**The wrong implementation these cases rule out is a sentence that is false
-out loud.** *"You watch a lot more Drama than your library would suggest"* is
-a claim about **lift**, and it is true exactly when lift is what was ranked.
-An implementation that ranks by raw watched volume says the same sentence
-about the household's most common genre -- which is the *library's* most
-common genre -- on every household in the deployment, in a correctly-shaped
-row, spoken aloud by Alfred.
-
-Task 23 owns the two distractors the front matter names for this provider
-(the household's most common genre, whose lift is ~1.0, and a genre watched
-once, whose support is 1): both are filtered by `_MIN_LIFT` and `_MIN_SUPPORT`
-before a `GenreAffinity` exists at all, and
-`tests/unit/test_services_taste.py` seeds them together. What is left for
-*this* file is everything downstream of that list, and the volume-ranking
-failure survives into it: the provider is handed a lift-ordered sequence and
-can still re-rank it by support.
-"""
+"""`GenreAffinityProvider` -- the row that must work with no embedder."""
 
 import inspect
 
@@ -278,15 +260,9 @@ async def test_the_provider_returns_the_same_rows_with_and_without_a_centroid() 
     assert [row.row.slug for row in proposed] == ["genre-affinity-western"]
     assert built.cards
 
-    # **The structural half, which is now the whole of it.** This case used to
-    # compose twice -- once with a real `Centroid` on the context and once with
-    # `None` -- and assert the two agreed. M7's Task 35 group removed
-    # `RowContext.taste` outright, because no provider read it and on the
-    # request path it was structurally `None` anyway. So "this provider does
-    # not read the centroid" is no longer a behavioural claim two compositions
-    # can agree on; it is a property of the context's shape, and asserting it
-    # directly is what kills the "improvement" that reaches for
-    # `TasteService.centroid()` here.
+    # **The structural half, which is now the whole of it.** This case used to compose
+    # twice -- once with a real `Centroid` on the context and once with `None` -- and
+    # assert the two agreed.
     annotations = inspect.get_annotations(RowContext)
     assert annotations, "the annotation scan found nothing, so it proves nothing"
     assert "taste" not in annotations

@@ -1,25 +1,4 @@
-"""The console's Configuration screen lists every setting, and only real ones.
-
-`web/src/features/operator/Config.settings.ts` is a **catalogue**: a row per
-`Settings` field carrying its name, subsystem, default and what it controls.
-None of that needs a request — they are properties of the software — which is
-why the screen can exist at all when no route returns the running configuration.
-
-The cost of that design is drift, and it is one-directional and silent. Adding a
-field to `Settings` does not fail anything on the TypeScript side; the screen
-just quietly stops listing it, and an operator reading a page headed "every
-setting" is reading a page that is not. **This has already happened once**: four
-console settings landed in `Settings` on 2026-08-19 and the screen went on
-saying `69` in six places, every one of them wrong.
-
-So the catalogue is pinned here rather than there. This test lives on the Python
-side because that is where the fact it checks lives — `Settings.model_fields` is
-the authority, and a TypeScript test asserting a number would be the same
-written-down constant one language over.
-
-Its sibling is `test_console.py::test_the_client_knows_every_root_segment_the_api_owns`,
-which pins the same kind of cross-language vocabulary for routers.
-"""
+"""The console's Configuration screen lists every setting, and only real ones."""
 
 import re
 from pathlib import Path
@@ -176,27 +155,8 @@ def _printed_default(field: FieldInfo) -> str:
 def test_every_catalogued_default_is_the_default_usher_actually_ships(
     catalogued: set[str],
 ) -> None:
-    """🔴 **`def:` was an unverified copy of the Python default until
-    2026-09-07**, and it is the field on this screen an operator acts on.
-
-    The three cases above pin the *set* of keys and the `secret:` flag; the
-    number beside each key was checked by nobody. So `USHER_SEARCH_QUERY_
-    RETENTION_DAYS` could read `def: '90'` while `Settings` shipped 30, and an
-    operator reading a page headed "every setting" would be reading a page
-    that is wrong in the one column they came for -- the same one-directional,
-    silent drift this module's docstring records for the key set, one column
-    over. J5 added two more rows to the unchecked shape, which is what made it
-    worth closing.
-
-    **The comparison is exact, not fuzzy.** Everything with a literal default
-    is compared as the string an operator would type; the three spellings that
-    have no literal (`required`, `unset`, `empty`) are mapped by name in
-    `_printed_default`, so a field whose default *changes* to `None` fails
-    here rather than being normalised into agreement.
-
-    The pairing regex's own premise is asserted first: it has to find a `def:`
-    for every key the sibling cases found, or a row that lost its default
-    would silently drop out of the comparison instead of failing it.
+    """🔴 **`def:` was an unverified copy of the Python default until 2026-09-07**, and it
+    is the field on this screen an operator acts on.
     """
     paired = dict(_ROW_DEFAULT.findall(_CATALOGUE.read_text()))
     assert set(paired) == catalogued, (

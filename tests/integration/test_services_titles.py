@@ -1,45 +1,5 @@
-"""`TitleReadService` against real Postgres, for the things its port fakes
-structurally cannot express.
-
-**`FakeJobQueue.enqueue` reports a re-enqueue as a row written, and Postgres
-does not.** The fake takes the update branch and adds one to its count
-whatever it wrote; the real `_ENQUEUE`'s conflict clause carries
-`AND jobs.priority < excluded.priority`, so re-enqueueing an already-promoted
-job matches nothing and answers **0**. That is the divergence, and it is the
-one the read path stands on: `_promote` returns whether an enqueue was
-*attempted*, and a version that returned "a row changed" passes every unit
-case in `tests/unit/test_services_titles.py` and then reports `promoted =
-False` for every second open of the same stub in production. Measured both
-ways -- the mutation survives the unit file and fails here.
-
-**And the promotion clause itself is SQL.** "Opening a stub raises `NEW` to
-`DEMAND`" and "opening a parked title leaves it parked and at its old
-priority" are one `ON CONFLICT ... WHERE` against the real queue and two
-Python branches in the fake, so only this run says anything about the
-statement M4 wrote.
-
-Foreign keys are the third: `media_items.title_id`, `media_items.source_id`
-and `watch_states.user_id` are all real here and are dict entries there.
-
-**And the cast/crew reads are the fourth, which is a divergence running the
-other way.** `FakeCreditRepository.list_for_title` reproduces the ordering in
-Python as `(billing_order is None, billing_order or 0, person_id)`; the
-shipped one is `ORDER BY c.billing_order ASC NULLS LAST, c.person_id` over a
-real join to `people`. Two consequences worth stating rather than assuming.
-The `NULLS LAST` is **free in Postgres** -- an ASC sort defaults to it -- so
-that clause is an equivalent mutant against this arm and is load-bearing only
-against the fake, where the tempting `or 0` repair sorts an unbilled credit
-above the lead. What only this arm can see is the statement: the `kind`
-predicate, the `title_id` scope and the join that supplies the name are one
-`SELECT` here and three Python comprehensions there.
-
-**And the images read is the fifth, in the same direction.**
-`FakeImageRepository` sorts with a Python key function, so its ordering case
-passes because the key function *is* the answer; here a deleted `ORDER BY
-is_primary DESC, id` leaves heap order, which a small fixture is frequently
-already in. The servability filter is the other half: it is a *read-side*
-drop, so only an arm that can hold the stored row and the answered row apart
-can say the catalog is still a faithful record of what the provider published.
+"""`TitleReadService` against real Postgres, for the things its port fakes structurally
+cannot express.
 """
 
 import uuid

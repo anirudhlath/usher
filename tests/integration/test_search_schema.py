@@ -1,11 +1,5 @@
-"""The two tables the semantic half writes, and the four schema decisions
-that are not obvious from their column lists.
-
-Everything here is asserted off the catalog (`pg_constraint`, `pg_indexes`)
-or off real DDL behaviour, never off `Base.metadata` -- `confdeltype` is
-what Postgres will actually do, and it is the whole content of a foreign-key
-choice. Same discipline `tests/integration/test_migrations.py` already
-applies to M4's two episode FKs.
+"""The two tables the semantic half writes, and the four schema decisions that are not
+obvious from their column lists.
 """
 
 import uuid
@@ -265,32 +259,7 @@ async def test_the_new_foreign_keys_carry_the_delete_rules_they_were_given(
 
 
 async def test_every_halfvec_column_stores_inline(session: AsyncSession) -> None:
-    """No vector in this schema may live in a TOAST relation.
-
-    **This is a performance property asserted as a schema property, because it
-    is invisible as either one on its own.** A `halfvec` is `8 + 2 * dim`
-    bytes; pgvector declares the type `EXTERNAL`, so a value moves out-of-line
-    once the tuple passes `TOAST_TUPLE_THRESHOLD` (2,032 bytes). That is 384
-    lanes inline and 1024 lanes out, which is a **threshold** the width crossed
-    in `m09e` and not a slope anybody would have projected.
-
-    Measured before `m09f` fixed it, on 130,720 real rows: `title_embeddings`
-    was 17 MB of heap pointing at 340 MB of TOAST, an exact-scan neighbour
-    query read **11x** the table's pages per seed, and
-    `SimilarityService.rebuild` went from 80 minutes to 21.6 hours -- of which
-    only 2.67x is the width. With the vectors inline the same query is
-    **110 ms/seed against 598**.
-
-    **The case is written over `pg_type` rather than over a list of columns**,
-    so a fourth vector column added without a `SET STORAGE` fails here rather
-    than silently costing 5x on a walk nobody re-times. That is the shape
-    `ports-and-error-taxonomy.md` records for two constants that must move
-    together: the migration's `_VECTOR_COLUMNS` is one of them and this scan is
-    the other, and only the scan can notice an omission.
-
-    `p` is PLAIN. `e` (EXTERNAL) is what pgvector declares and what
-    `m09f.downgrade()` restores.
-    """
+    """No vector in this schema may live in a TOAST relation."""
     result = await session.execute(
         text(
             "SELECT c.relname, a.attname, CAST(a.attstorage AS text) "

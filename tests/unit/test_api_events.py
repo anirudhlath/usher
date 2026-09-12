@@ -1,16 +1,4 @@
-"""`GET /events`.
-
-Driven through a **streaming** transport (`tests/fakes/
-streaming_asgi_transport.py`), not `httpx.ASGITransport`, which runs the ASGI
-app to completion before returning a response and therefore hangs forever on
-a route whose whole purpose is not to complete. That is the one piece of
-infrastructure these cases needed that did not exist.
-
-The bus is set on `app.state.events` by the fixture rather than by the
-lifespan: wiring `create_app` to build one is the composition-root task, and
-a route that could not be tested before its process grew a lane would be a
-route tested only end to end.
-"""
+"""`GET /events`."""
 
 import asyncio
 import uuid
@@ -173,28 +161,7 @@ async def test_a_partly_malformed_titles_filter_is_also_a_422(
 async def test_a_stream_that_has_heartbeat_still_delivers_events(
     client: httpx.AsyncClient, bus: InMemoryEventBus
 ) -> None:
-    """**The heartbeat must not kill the subscription it is keeping alive.**
-
-    `asyncio.wait_for(anext(iterator), timeout)` cancels the `__anext__` it
-    is waiting on, and cancelling `__anext__` **closes the async generator**
-    -- so the *next* `anext` raises `StopAsyncIteration` and this route
-    returns. Six lines with no Usher code in them reproduce it:
-
-        it = aiter(gen())
-        await asyncio.wait_for(anext(it), 0.05)   # TimeoutError
-        await asyncio.wait_for(anext(it), 0.05)   # StopAsyncIteration
-
-    The consequence in production is that every SSE client is disconnected
-    one `sse_heartbeat_seconds` (20 s by default) after the last event it
-    received, forever -- an `EventSource` reconnects, so the symptom is a
-    reconnect storm and a replay per client per 20 s rather than a dead
-    channel, which is exactly the kind of failure that hides.
-
-    **The case beside this one passed against it**, and that is the reason
-    this one is written the way it is: reading three heartbeat *lines* is
-    satisfied by a route that greets, heartbeats once and then ends. What
-    cannot be satisfied is delivering an event **after** the heartbeats.
-    """
+    """**The heartbeat must not kill the subscription it is keeping alive.**"""
     await _wait_for_no_subscribers(bus)
     async with client.stream("GET", "/events") as response:
         lines = aiter(response.aiter_lines())

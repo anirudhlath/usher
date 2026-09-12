@@ -1,27 +1,4 @@
-"""`GET /search` through a real request against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_search.py` drives the
-router over a scripted `SearchIndex`, and `tests/integration/
-test_services_search.py` drives the real service over real Postgres -- so what
-is left for this file is the *request*: the shipped `get_search_service`
-resolving through `usher.composition.build_search_service` into a real
-`PostgresSearchIndex` on the request's session, and the answer that produces
-travelling back through the DTO.
-
-**The unit file's fake has no text analysis at all** -- substring matching over
-casefolded fields, no stemming, no `tsquery` parsing, no `ts_rank`, no weight
-classes -- so *every* claim about what a query actually matches is only true
-here. That is why the ranking case below asks a question the fake could not be
-asked: a name match must outrank an overview match, which is `setweight` plus
-`ts_rank` rather than a hand-coded constant.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request; CLAUDE.md records what leaving `titles` behind did to
-four tests in three other files, each of which passed in isolation.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""`GET /search` through a real request against a real schema."""
 
 import uuid
 from collections.abc import AsyncIterator
@@ -57,12 +34,8 @@ SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
 # committing file is also using.
 MARK = "Search Route Case"
 
-# A word invented for this file and shared by both seeded titles, so a query
-# for it matches two rows and the *order* is assertable. One holds it in its
-# name and the other only in its overview: under `setweight`'s A/D split the
-# name match must win, and under any implementation that lost the weighting
-# they tie and the `id` tiebreak decides -- which is why the ids are ordered
-# deliberately below.
+# A word invented for this file and shared by both seeded titles, so a query for it
+# matches two rows and the *order* is assertable.
 TERM = "kestrelbound"
 
 # The suggest cases' title, invented for this file. Long enough that a
@@ -103,22 +76,12 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
         # `TRUNCATE sources CASCADE` takes `media_items` with it, which is what
         # leaves this file's titles with no referents.
         await session.execute(text("TRUNCATE sources CASCADE"))
-        # PRD 10's analytics rows, since M9's F2: every `GET /search` through
-        # this file writes one and commits it. **They have to go before any
-        # other file deletes the default user** -- `search_queries.user_id` is
-        # `ON DELETE RESTRICT` on purpose (a household's search history is user
-        # state), so a row left behind here turns a neighbouring file's
-        # `DELETE FROM users WHERE name = 'default'` into a foreign-key
-        # violation rather than into a slow test. Unscoped rather than marked,
-        # because this table has no column this file could mark.
+        # PRD 10's analytics rows, since M9's F2: every `GET /search` through this file
+        # writes one and commits it.
         await session.execute(text("DELETE FROM search_queries"))
-        # PRD 03's demand lane, since issue #73: `GET /search` and
-        # `GET /search/suggest` promote the skeletons they answered with, and
-        # `get_session` commits at the end of a successful request -- so a read
-        # route in this file writes `jobs` rows. Scoped to this file's marker,
-        # like the titles below, and run **before** them: the job's `key` is
-        # the title's id as text, so once the title row is gone there is
-        # nothing left to identify this file's jobs by.
+        # PRD 03's demand lane, since issue #73: `GET /search` and `GET /search/suggest`
+        # promote the skeletons they answered with, and `get_session` commits at the end
+        # of a successful request -- so a read route in this file writes `jobs` rows.
         await session.execute(
             text(
                 "DELETE FROM jobs WHERE kind = 'enrich' AND key IN "
@@ -526,26 +489,8 @@ async def test_a_keystroke_writes_a_row_only_when_it_clears_its_tiers_minimum(
     sessions: async_sessionmaker[AsyncSession],
     catalog: _Catalog,
 ) -> None:
-    """`GET /search/suggest` records one row per **answered** request since
-    M10's J2, and none for the two arms that never reach the service.
-
-    `m10c` took PRD 10's amendment 2 -- `surface` and `tier`, two columns
-    rather than a fourth `SearchMode` member -- so a keystroke and a search no
-    longer collapse into one vocabulary, and every mode-split panel now filters
-    on `surface`. The volume argument that stood beside the vocabulary one is
-    answered by `USHER_SEARCH_SUGGEST_ANALYTICS` and by a measurement, not by
-    an absence.
-
-    Four requests, because the route has three arms and a writer placed on any
-    one of them is a different defect: answered on each tier, below
-    `min_query_length`, and blank. The control is a `/search` request through
-    the same client, which must land under `surface = 'search'` with **no**
-    tier -- so "the suggest rows are right" is not satisfied by a deployment
-    writing `suggest` onto everything.
-
-    Detail semantics live in `tests/integration/test_search_analytics.py`;
-    what this adds is that *this* file's fixture and its neighbouring
-    row-counting case agree about what a keystroke costs.
+    """`GET /search/suggest` records one row per **answered** request since M10's J2, and
+    none for the two arms that never reach the service.
     """
     answered = ({"q": TYPED_PREFIX}, {"q": TYPED_TYPO, "tier": "fuzzy"})
     unanswered = ({"q": TYPED_PREFIX[:3]}, {"q": "   "})

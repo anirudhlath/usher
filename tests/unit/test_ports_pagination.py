@@ -1,27 +1,4 @@
-"""**No port takes a cursor**, as a test rather than as a convention.
-
-The cursor is `usher.api`'s artefact and the decode stays at the edge. A port
-that accepted one would have to decode it, which means knowing the sort
-vocabulary of the layer above it -- and a cursor a port accepts is a cursor
-that has leaked into the domain, which is the thing ADR-0034's design exists
-to prevent. Repositories keep taking typed keyset values, exactly as
-`RawPayloadStore.iterate` and `TitleEmbeddingRepository.list_stale` already
-do with `after: uuid.UUID`.
-
-**Half of that is already structural and this file is the other half.**
-import-linter's "hexagonal layering" contract puts `usher.api` above
-`usher.ports`, so a port cannot *import* the codec at all. What it cannot see
-is the spelling that needs no import: a string annotation, or a parameter
-called `cursor` typed `str`. Three groups add paged routes this milestone and
-each will be holding a cursor when it writes its port method; the cheap
-mistake is passing it straight through.
-
-So the walk reads annotations as **text**, not as resolved objects. That is
-not fastidiousness: `usher.ports.repository.sync` carries `from __future__
-import annotations`, so its signatures already hand back strings while every
-other module hands back types, and a walk that only understood one of those
-would silently cover part of the package.
-"""
+"""**No port takes a cursor**, as a test rather than as a convention."""
 
 import importlib
 import inspect

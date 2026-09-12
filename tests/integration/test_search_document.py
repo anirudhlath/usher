@@ -1,14 +1,4 @@
-"""The generated search document, and the three call sites it collides with.
-
-Integration, not unit: a stored generated column is a property of
-PostgreSQL, and every claim here is about what the database does with a
-write. `FakeTitleRepository` is a dict and cannot express any of it.
-
-The order of the two repository cases is deliberate and is the whole lesson
-of this task. `test_updating_a_title_recomputes_its_search_document` comes
-first because `update()`'s mutation loop fails on *writes*, and a task that
-only tested reading a seeded row would ship that break.
-"""
+"""The generated search document, and the three call sites it collides with."""
 
 import uuid
 

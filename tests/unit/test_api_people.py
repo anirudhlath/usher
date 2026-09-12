@@ -1,18 +1,4 @@
-"""`GET /people/{id}` -- PRD 07's filmography, grouped by role.
-
-Driven through a real `create_app()` with three dependencies overridden -- the
-person repository, the credit repository and the title repository -- so the
-router, the DTO, the grouping, the 404 handler registered app-wide and
-FastAPI's own path-parameter parsing all sit on the path a request takes. The
-fakes behind those three are the same ones the contract suites run against, so
-what this file adds is the layer above them: which credits become which
-groups, in which order, and what happens to a credit whose title is gone.
-
-**No service module.** The grouping is a pure function over three port answers
-and lives in `api/dto/people.py`, which is where `TitleResponse.of` already
-puts the equivalent for `GET /titles/{id}` -- a service here would hold no
-state, make no second decision, and exist only to be injected.
-"""
+"""`GET /people/{id}` -- PRD 07's filmography, grouped by role."""
 
 import ast
 import inspect

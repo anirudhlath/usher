@@ -1,16 +1,4 @@
-"""`NextUpProvider`, and the row the milestone opens by describing.
-
-*"A `NextUpProvider` that returns a series' **first** episode instead of its
-**next** one returns a valid, populated, correctly-shaped row -- forever,
-silently, for every series in the library."* Every case here asserts on the
-**card's chapter**, never on membership: the right and the wrong answers name
-the same series, carry the same title, and differ only in which episode they
-point at.
-
-The distractor every ordering case seeds is **S01E01 of a series whose S02E04
-was the last played**. It is unplayed, it is the first row of the episode table
-under every naive ordering, and it is a completely plausible card.
-"""
+"""`NextUpProvider`, and the row the milestone opens by describing."""
 
 import uuid
 from datetime import timedelta

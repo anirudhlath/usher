@@ -1,11 +1,4 @@
-"""Read-through: the local answer, and the promotion it triggers.
-
-Against port fakes. No database, no network, and -- structurally -- no source:
-the assertions below that matter most are about a call this service does not
-make, because PRD 08's "a degraded subsystem narrows functionality; it never
-fails a request local state can answer" is only a property of the code if the
-failing call is absent rather than caught.
-"""
+"""Read-through: the local answer, and the promotion it triggers."""
 
 import ast
 import inspect

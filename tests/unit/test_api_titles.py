@@ -1,17 +1,4 @@
-"""`GET /titles/{id}` -- PRD 07's title detail, narrowed to what M4 fills.
-
-Driven through a real `create_app()` with two dependencies overridden: the
-read service (so the fakes behind it stand in for Postgres) and the default
-user id (whose real provider writes a `users` row). Everything else is the
-shipped graph -- the router, the DTO, the 422 handler registered app-wide,
-and FastAPI's own path-parameter parsing. `tests/integration/
-test_pipeline_deps.py` is what proves the *un*-overridden graph resolves;
-this file is what proves the response is right.
-
-`httpx.ASGITransport` is correct here and would not be on `/events`: it runs
-the app to completion before returning, which is exactly what a
-non-streaming route does.
-"""
+"""`GET /titles/{id}` -- PRD 07's title detail, narrowed to what M4 fills."""
 
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -65,12 +52,8 @@ SEARCHED_AT = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 # elsewhere in the response proves nothing. This is what an Emby item id
 # looks like on the wire, and no client has any use for one.
 EXTERNAL_ID = "emby-item-9f31a2"
-# The CDN base `Settings.image_cdn_base_url` defaults to, and the provider path
-# on the poster every images case seeds. Both are asserted *absent* from the
-# body: PRD 07's "clients never see provider image URLs and never need a
-# provider key" is a property of this response, not only of the proxy. The
-# host is what a client would need to build one itself; the path is the half
-# of it this row actually stores.
+# The CDN base `Settings.image_cdn_base_url` defaults to, and the provider path on the
+# poster every images case seeds.
 CDN_HOST = "image.tmdb.org"
 POSTER_PATH = "/9f31a2-poster.jpg"
 
@@ -659,30 +642,7 @@ async def test_the_images_are_in_the_stored_order_and_not_id_order(
 async def test_an_unservable_logo_is_dropped_rather_than_rendered_as_a_broken_link(
     client: httpx.AsyncClient, images: FakeImageRepository, seeded: Seeded
 ) -> None:
-    """The SVG filter, at the surface it exists for.
-
-    The provider publishes some logos as `.svg`, the proxy declines them
-    (`DECLINED_MEDIA_TYPES`), and `GET /images/{id}` for one can therefore
-    never answer. **Filter rather than annotate**: an entry whose fetch always
-    fails is not a reference, it is a broken link this API would be minting
-    deliberately, and a client renders a broken image with nothing anywhere
-    reporting the cause.
-
-    **The three other paths are the adversarial ones, and they are here rather
-    than only in `is_servable_path`'s own parameter table.** `/A-LOGO.SVG`
-    kills a spelling that does not lower-case first, `/svg-poster.jpg` kills a
-    `"svg" in path` spelling, and `/.svg.jpg` kills a `".svg" in path` one --
-    C4 measured that each wrong implementation dies on exactly one parameter
-    out of 325. Seeded here so a future author who inlines the predicate into
-    this layer is caught at this layer too.
-
-    🔴 **`/.svg.jpg` was missing from the first version of this case and the
-    plant list is what found it.** With only the first two seeded, the
-    `".svg" in one.provider_path.lower()` spelling **survived** the whole
-    selection -- `/svg-poster.jpg` contains no `.svg` at all, so it discriminates
-    a different wrong implementation from the one it was seeded for. Choosing a
-    predicate's negatives against "an ordinary path" is what leaves a
-    complete-looking table both mutants pass."""
+    """The SVG filter, at the surface it exists for."""
     logo = _image(seeded.title_id, kind=ImageKind.LOGO, path="/a-logo.svg", is_primary=False)
     shouty = _image(seeded.title_id, kind=ImageKind.LOGO, path="/A-LOGO.SVG", is_primary=False)
     contains = _image(
@@ -798,28 +758,8 @@ async def test_a_credit_carries_the_role_and_no_provider_identifier(
 
 
 def test_every_wire_field_name_is_a_field_some_response_actually_carries() -> None:
-    """**The half of ADR-0040's boundary that `WIRE_FIELD_NAMES` itself does
-    not check: its *values*.**
-
-    `test_no_domain_only_field_name_reaches_the_wire` proves no domain-only
-    attribute reaches `title.updated`. It cannot prove the name that *does*
-    reach it is one a client can act on -- both sides of that mapping are
-    `str`, so mypy sees nothing, and changing `"community_rating"` to
-    `"communityRating"` is a plausible transcription slip that names no field
-    in any response body and passes every other case in this suite. Measured:
-    that edit survives the whole unit run.
-
-    So the values are checked against the union of the three response models
-    that actually carry these fields. A union rather than `TitleResponse`
-    alone, because the three are genuinely spread: `community_rating` is
-    `GET /titles/{id}`'s, while `popularity` and `vote_count` reach a client
-    only through browse and search. That was true before the rename too --
-    the payload has always named fields no single body carries.
-
-    Lives here, in a test module that already imports the DTO layer, and not
-    beside the constant: `usher.domain` importing `usher.api` is
-    `lint-imports` BROKEN, which is the whole reason the mapping is in
-    `domain/` rather than in `api/dto/`.
+    """**The half of ADR-0040's boundary that `WIRE_FIELD_NAMES` itself does not check: its
+    *values*.**
     """
     carried = (
         set(TitleResponse.model_fields)

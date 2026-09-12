@@ -1,34 +1,4 @@
-"""The whole pipeline: a registered source in, canonical catalog out.
-
-Real PostgreSQL, real repositories, real `MatchService`/`IngestService`/
-`ReconcileService`/`WatchStateSyncService`, and the **real `EmbyAdapter`**
-over `FakeEmbyServer` -- so the walk really pages, really parses Emby's own
-JSON shapes, and really omits play history from a listing the way Emby
-4.9.5.0 does. Every other file in this suite exercises one seam; this one
-exists for the failures that only appear when all of them run together.
-
-Three properties are only visible at this level:
-
-1. **Watch history survives a nightly walk.** ADR-0014 runs through a port
-   DTO, an adapter, a service, a merge DTO and two SQL statements, and each
-   of those has its own test. This is the one that fails if any of them
-   regresses at the same time as another.
-2. **A second walk changes nothing.** Idempotence is a property of the
-   *composition* -- `resolve_seasons`/`resolve_episodes` exist only to make
-   a second walk find the ids the first one stored, and a dict has no
-   foreign keys to notice when they do not.
-3. **Statement count does not grow with the page.** Measured with
-   `before_cursor_execute` against the statements the repositories actually
-   issue. `EXPLAIN`-ing a hand-copied lookalike of the SQL proves nothing
-   about the repository; counting what it sent proves exactly one thing, and
-   it is the thing that separates a walk that finishes overnight from one
-   that does not.
-
-This file commits nothing -- it runs inside the integration fixture's
-rolled-back transaction, so the staging tables `usher.db.staging` creates
-are rolled back with it and no `stg_*` table leaks into
-`test_migrations.py`'s schema-drift check.
-"""
+"""The whole pipeline: a registered source in, canonical catalog out."""
 
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -807,34 +777,7 @@ async def test_statements_do_not_grow_with_the_page(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """**The measurement, at the library's own shape.**
-
-    Nine batches of five items and nine batches of fifty must cost the
-    *same* number of statements. Anything per-item is the difference between
-    a walk that finishes overnight and one that does not: at 1,126,674
-    items, one extra round trip apiece is more than a million of them.
-
-    **The batch count is held fixed and the page is varied, not the other
-    way round.** Holding the *page* fixed and growing the library only
-    grows the number of batches, which is supposed to grow -- and a batch
-    big enough to hold a whole library also puts every series in the same
-    page as its own episodes, which makes `_series_titles`' stored lookup
-    an empty list and its per-item spelling indistinguishable from its
-    batched one. Measured: the `resolve_series_titles`-per-episode mutation
-    survived exactly that shape, because `wanted` was never non-empty.
-    Five items per batch is what makes an episode's series arrive in an
-    earlier page, which is the normal case at 32,409 series among 1,126,674
-    items.
-
-    Both walks measured are *warm* -- the population was already ingested by
-    a preceding run -- so `MatchService._create_stub`, the pipeline's one
-    genuinely per-item write, contributes nothing to either count and the
-    next case measures it on its own.
-
-    Not an exact number: the staged `COPY` path issues DDL plus a
-    `SAVEPOINT` per upsert, and pinning a total would break on any unrelated
-    change to `usher.db.staging`. The property is the flatness.
-    """
+    """**The measurement, at the library's own shape.**"""
 
     def _walker(batch_size: int) -> ReconcileService:
         matching = PostgresTitleMatchRepository(session)
@@ -980,32 +923,8 @@ async def test_the_availability_sweeps_update_uses_its_index(
     source: Source,
     analyze: Analyze,
 ) -> None:
-    """`ix_media_items_sweep` exists for the sweep's `UPDATE`, and the
-    numbers say exactly that.
-
-    Measured against `pgvector/pgvector:pg17` at 1,126,674 rows on one
-    source with 200 of them stale -- the realistic nightly shape -- via
-    `scripts/measure_ingest.py --scale 1126674`:
-
-    - the `UPDATE` goes from `Seq Scan` (`Rows Removed by Filter:
-      1,126,474`, 173 ms) to `Index Scan using ix_media_items_sweep` with
-      an `Index Cond` on all three columns, 102 ms;
-    - the *guard*'s `count(*)` is a `Parallel Seq Scan` either way (87 ms
-      with the index, 86 ms without), because ADR-0015's ceiling is a
-      fraction and a total over a source that *is* the whole table has to
-      touch every row however it is planned.
-
-    So the claim is the narrow one and this case asserts the narrow one.
-
-    **`enable_seqscan = off` is necessary and it is not sufficient, which is
-    what this case had wrong.** It settles *index or scan*; it says nothing
-    about *which index*, because a full walk of any index is also available
-    once a sequential one is priced at the disabled penalty -- and on a table
-    `pg_class` describes as empty every candidate costs the same. That is why
-    the fixture now seeds a population and `analyze`s it, and why the margin
-    is asserted below rather than assumed: the runner-up has to be *worse*,
-    or "the planner chose the index I meant" is a fact about tie-breaking
-    order rather than about the schema.
+    """`ix_media_items_sweep` exists for the sweep's `UPDATE`, and the numbers say exactly
+    that.
     """
     seen_since = CHANGED_AT + timedelta(days=1)
     await media_items.upsert_many(

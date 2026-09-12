@@ -1,26 +1,4 @@
-"""PRD 07's RFC 9457 envelope -- the *shape*, over the failures already shipped.
-
-Deferred four times (M3, M5, M7, M8), each time on a structural argument
-rather than on inertia, and paid here in two passes. This file is the first
-pass: the six members, the media type, the derivation of `type` from `code`,
-and the composition with the 422 handler that must not echo a credential. The
-`code` *vocabulary* is group V's ADR-0030 -- so nothing here asserts what a
-future route's code should be, only that whatever it is renders in this shape.
-
-**The 422 half is a security control and the cases for it carry their own
-positive control.** A body that never contained a password is also what a
-handler that never ran produces, so every "the credential is absent" case
-first asserts the request really carried it and the route really rejected it.
-
-Driven through a real `create_app()` with three dependencies overridden --
-the title read service, the default user id, and the source service -- so the
-router, the DTO, both exception handlers and FastAPI's own path-parameter
-parsing are all on the path a request takes. `httpx.ASGITransport` is correct
-for every case except the one that asserts `GET /events` still streams, which
-uses `tests/fakes/streaming_asgi_transport.py` for the reason that fake
-exists: `ASGITransport` runs the app to completion and would hang rather than
-fail.
-"""
+"""PRD 07's RFC 9457 envelope -- the *shape*, over the failures already shipped."""
 
 import ast
 import inspect

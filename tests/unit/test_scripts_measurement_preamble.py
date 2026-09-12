@@ -1,7 +1,4 @@
-"""The bar/secrets/redaction preamble, across every arm that measures a live source.
-
-Loaded by path for `tests/bounded_ledger.py`'s reasons: `scripts/` is not a package.
-"""
+"""The bar/secrets/redaction preamble, across every arm that measures a live source."""
 
 import importlib.util
 import sys

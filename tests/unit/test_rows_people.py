@@ -1,9 +1,5 @@
 """`PeopleProvider` -- the row about somebody, and the ways it names the wrong
 somebody.
-
-Every wrong implementation here returns **a real person the household really
-has watched**. That is what makes the row indistinguishable from a correct one
-by anything but its ordering, and it is why every case asserts on position.
 """
 
 import pytest

@@ -1,24 +1,4 @@
-"""`GET /titles/{id}` through a real request against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_titles.py` drives the
-route over a fake service, and `tests/integration/test_services_titles.py`
-drives the real service over real Postgres -- so what is left is the request
-itself: `get_session` as the commit boundary (the promotion this route makes
-is durable, not a flush the response outlives), the DTO rendering rows a
-real schema produced, and the cost of one read measured off the statements
-the repositories actually issued.
-
-Two divergences the port fakes carry are on this route's read path and both
-are real here: `FakeMediaItemRepository` has no foreign keys, and
-`FakeWatchStateRepository` stores `observed_at` as `updated_at`.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request, and CLAUDE.md records what leaving `titles` and `jobs`
-behind did to four tests in three other files, each of which passed in
-isolation. `media_items` cascades from `sources`; `titles` and `jobs` do not,
-`watch_states.title_id` is `ON DELETE RESTRICT`, and `seasons`/`episodes`
-cascade from `titles`.
-"""
+"""`GET /titles/{id}` through a real request against a real schema."""
 
 import json
 import uuid
@@ -82,12 +62,10 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
         for statement in (
             # **Before `users`, and it is an ordering rather than a tidy-up.**
-            # `search_queries.user_id` is `ON DELETE RESTRICT` -- a
-            # household's search history is user state and outlives nothing
-            # but the household -- so a committed row from the attribution
-            # cases below turns the next statement into a foreign-key
-            # violation. F2 owed the same three fixtures the same line; this
-            # file joined them the moment it started seeding rows of its own.
+            # `search_queries.user_id` is `ON DELETE RESTRICT` -- a household's search
+            # history is user state and outlives nothing but the household -- so a
+            # committed row from the attribution cases below turns the next statement
+            # into a foreign-key violation.
             "DELETE FROM search_queries",
             # `users` next: `watch_states.user_id` is `ON DELETE CASCADE`
             # while `watch_states.title_id` is `ON DELETE RESTRICT`, so
@@ -97,22 +75,8 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
             # Takes `media_items` with it (`ON DELETE CASCADE`), which is
             # what leaves `titles` with no `media_items.title_id` referents.
             "TRUNCATE sources CASCADE",
-            # Three `DROP TABLE IF EXISTS stg_*` statements were here until
-            # M6, and the reason outlives them. Every write in this file goes
-            # through `usher.db.staging`, which created an `UNLOGGED` table
-            # with DDL -- `stg_jobs` from the demand promotion the *route*
-            # makes, `stg_media_items` from the seeded copies,
-            # `stg_watch_states` from the seeded progress. Postgres DDL is
-            # transactional, so only a **committing** test leaked one, and it
-            # surfaced as
-            # `test_migrations.py::test_migration_matches_the_orm_metadata`
-            # reporting schema drift in a *different file*: this module passed
-            # alone and took that one down in a full run. Measured then in
-            # both directions -- and the first sweep of it scored a kill for
-            # the wrong reason, because two of the three were still leaking
-            # while only `stg_jobs` was under test. M6 made all three
-            # `CREATE TEMP TABLE ... ON COMMIT DROP`, which deletes the leak
-            # rather than cleaning up after it.
+            # Three `DROP TABLE IF EXISTS stg_*` statements were here until M6, and the
+            # reason outlives them.
         ):
             await session.execute(text(statement))
         # Last two, and bound rather than interpolated: only this file's own
@@ -521,30 +485,11 @@ async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has
         f"{small} statements for one copy on one source, {large} for five copies on "
         "three -- something on this read costs a statement per copy or per source"
     )
-    # **And the absolute level, because flatness alone would not have shown
-    # what this measurement found.** Thirteen, not the service's seven: one
-    # `ensure_default_user` read, the seven reads `detail` documents, and
-    # **five for the promotion** -- `SAVEPOINT`, `DROP TABLE IF EXISTS
-    # pg_temp.stg_jobs`, `CREATE TEMP TABLE stg_jobs`, the `INSERT ...
-    # SELECT`, `RELEASE SAVEPOINT` -- plus a `COPY` on the raw asyncpg
-    # connection that this counter cannot see at all.
-    #
-    # It was ten against four service reads until M9's `credits` key, which
-    # adds one `list_for_title` per `CreditKind`, and twelve against six until
-    # its `images` key. **Each time both numbers moved by the same amount and
-    # the flatness assertion above is untouched**, which is the distinction
-    # this bound exists to draw: one more statement *per request* is a cost,
-    # and one more *per copy* would be a defect.
-    # `PostgresJobQueue.enqueue` is M4's bulk path, and PRD 03's demand
-    # promotion is the first caller that invokes it **once per client
-    # request** rather than once per batch of a walk. The count is unchanged
-    # by M6 and the *contention* is not: this used to be `CREATE UNLOGGED
-    # TABLE` on a fixed, shared name, so a detail-screen open and a nightly
-    # walk's batch serialised against each other for the length of the
-    # other's whole transaction (measured at 819 ms). A temporary table has
-    # nothing shared to lock, which is why five statements per request is now
-    # a cost rather than a contention point --
-    # `tests/integration/test_staging_lock.py` is where that is asserted.
+    # **And the absolute level, because flatness alone would not have shown what this
+    # measurement found.** Thirteen, not the service's seven: one `ensure_default_user`
+    # read, the seven reads `detail` documents, and **five for the promotion** --
+    # `SAVEPOINT`, `DROP TABLE IF EXISTS pg_temp.stg_jobs`, `CREATE TEMP TABLE
+    # stg_jobs`, the `INSERT ...
     assert small <= 13, f"one title read issued {small} statements: {statement_counter}"
 
 

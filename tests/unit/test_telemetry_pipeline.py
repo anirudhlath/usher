@@ -1,24 +1,4 @@
-"""PRD 10's metric catalogue and span tree, for the pipeline M4 built.
-
-**A metric that is documented and never emitted is a dashboard panel that
-is permanently empty, and nothing distinguishes that from a healthy zero.**
-So every case below drives the code that owns the instrument and reads the
-value back out of an `InMemoryMetricReader` -- asserting the instrument
-*exists* would pass against a `create_histogram` nobody ever calls, which
-is precisely the failure mode ("replace `.record(...)` with `pass`") the
-mutation sweep looks for.
-
-The span cases are here rather than in `tests/integration/` because they
-need no database. What they cannot say is whether a pipeline span nests
-under a *request*; that is `tests/integration/test_pipeline_spans.py`, and
-it needs a real app.
-
-**The composer's `propose` span is the one subject here that M4 did not
-build.** It lives with the rest of PRD 10's span tree rather than with the
-composer's own cases because the claim is the document's -- one span per
-*registered* provider, two attributes, and a parent that differs by lane --
-and because both of its roots are reachable with no database at all.
-"""
+"""PRD 10's metric catalogue and span tree, for the pipeline M4 built."""
 
 import sys
 from collections.abc import Iterator, Sequence
@@ -225,29 +205,7 @@ async def test_enrichment_records_prd_10s_latency_metric(
 async def test_a_demand_enrichment_and_a_background_one_are_two_series_on_the_latency_histogram(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """🔴 D12's headline: `usher.enrichment.latency` has to carry `trigger`.
-
-    PRD 10's alert table asks for *"Demand-triggered p99 > 5 s for 15 min"*, and
-    at M4 the series carried `outcome` alone -- so the alert named a dimension
-    the shipped series did not have and could not be written at all. The
-    withholding was deliberate and **conditional**: *"nothing in M4 enriches on
-    demand (`JobPriority.DEMAND` is defined and unused until M5), so a `trigger`
-    label would carry one constant value"*. M5 spent that condition --
-    `services/titles.py` and three routers now enqueue `enrich` at
-    `JobPriority.DEMAND` -- so the label is a real series and the alert is
-    expressible.
-
-    **Two drives, not one, and that is the positive control.** A case that
-    recorded a single point and asserted `"trigger" in attributes` would pass
-    against a hard-coded constant, which is exactly the state M4 declined to
-    ship. Two points whose attribute sets *differ on `trigger`* and *agree on
-    `outcome`* is the claim that cannot be satisfied by a constant, and it is
-    also the claim the alert's `{trigger="demand"}` selector depends on.
-
-    ⚠️ **OTel aggregates on the attribute *set*.** Swapping the two keys in the
-    record call's dict literal produces an identical stream, so this case
-    deliberately asserts on values by key rather than on any ordering.
-    """
+    """🔴 D12's headline: `usher.enrichment.latency` has to carry `trigger`."""
     titles = FakeTitleRepository()
     provider = FakeMetadataProvider()
     made: list[Title] = []
@@ -302,30 +260,8 @@ async def test_a_demand_enrichment_and_a_background_one_are_two_series_on_the_la
 async def test_the_rung_the_visible_lane_promotes_at_is_recorded_as_a_demand_enrichment(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """🔴 The boundary the `trigger` label is drawn on, exercised at the rung
-    the largest population actually arrives at.
-
-    The case above drives `DEMAND` (100) and `BACKFILL` (20), which classify
-    the same whether `_trigger_for` is spelled `>=` or `>`. `VISIBLE` (80) is
-    the threshold itself and no case reached it, so `priority >= VISIBLE` →
-    `priority > VISIBLE` was a behavioural mutation the whole suite missed --
-    and it is not a small one. `services/visibility.py` enqueues **every
-    unfinished title on every browse, search, suggest and home response** at
-    `VISIBLE`; `services/titles.py` and three routers enqueue at `DEMAND` one
-    title at a time. So `>` moves the plural lane -- the larger population by
-    orders of magnitude -- onto `background`, and `trigger` is the label
-    `dashboards/alerts/usher.yml`'s *"Enrichment SLA missed"* scopes on with
-    `{trigger="demand"}`. The alert keeps firing, keeps looking healthy, and
-    silently measures single-title opens only.
-
-    **The rung is read out of the queue rather than written down here.** A
-    case asserting `_trigger_for(JobPriority.VISIBLE) == "demand"` pins a
-    constant against itself: if the promotion lane moved to `NEW` tomorrow the
-    case would still pass and still say nothing about the shipped population.
-    Taking the priority off the `JobRequest` the visibility service actually
-    enqueued makes the two halves one claim -- *the rung a screen promotes at
-    is the rung the histogram calls demand* -- which is the claim the alert
-    depends on.
+    """🔴 The boundary the `trigger` label is drawn on, exercised at the rung the largest
+    population actually arrives at.
     """
     queue = FakeJobQueue()
     titles = FakeTitleRepository()
@@ -570,27 +506,7 @@ def _card() -> RowCard:
 
 
 class _TracingRowProvider(FakeRowProvider):
-    """A `FakeRowProvider` that opens a span of its own inside `propose`.
-
-    **This is the arm `start_span` fails, and the parent-of-`propose` arm is
-    not it.** Measured rather than assumed, on 2026-09-07 with this class not
-    yet written: planting `start_as_current_span` -> `start_span` and scoring
-    it over `tests/unit` plus all three span-observing integration files
-    killed nothing (4,811 passed, 4 skipped). `Tracer.start_span` with no
-    explicit `context` still parents to the *current* span, so a `propose`
-    minted that way is still `home.compose`'s child and every assertion about
-    its own parent stays green.
-
-    What it does break is the half `_build`'s docstring gives as its *reason*
-    rather than as its mechanism: `start_span` never makes the span current,
-    so the work done while proposing -- for a real provider, every SQLAlchemy
-    statement span it issues -- reparents up to the composition. That is the
-    difference between a trace that answers "what did this request do" and one
-    that answers "what happened around then", and only a span emitted *inside*
-    `propose` can see it. (`_build`'s "rather than a second root" is the same
-    over-claim one phase later, and `row.build` has no arm for it either --
-    left alone here because D2 owns `_compose` and nothing else.)
-    """
+    """A `FakeRowProvider` that opens a span of its own inside `propose`."""
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         with trace.get_tracer("test").start_as_current_span(_INSIDE):
@@ -618,28 +534,7 @@ def _named(spans: Sequence[ReadableSpan], name: str) -> list[ReadableSpan]:
 async def test_every_provider_that_proposes_opens_a_propose_span_under_the_composition(
     span_exporter: InMemorySpanExporter,
 ) -> None:
-    """PRD 10's `propose`, and the four properties that make it worth having.
-
-    Proposal ran inside `home.compose` and was untraced individually until
-    M10, so a provider slow to *propose* and cheap to *build* was visible
-    only in the parent's duration -- and at the scale ceiling that is 302.9
-    ms of a 710.3 ms p50 for `next-up` alone (ADR-0025, re-measured there
-    against 1,277,878 owned items; the 23.9 ms figure belongs to a
-    5,200-copy household and means nothing here).
-
-    **One span per *registered* provider**, not one per provider that
-    returned something: `ProviderReport` keeps a line for the silent ones
-    for the same reason, since an absent provider and a silent one are the
-    two states the breakdown exists to tell apart. **`usher.row.provider` is
-    the `slug_prefix`**, the same attribute `row.build` carries, so one
-    group-by spans both phases. And **parentage, not existence** -- a
-    composer emitting `propose` as a second root has valid ids, exports
-    traces, and carries the name the document asks for.
-
-    The fourth is **currentness**, which parentage does not imply and which
-    only a span opened *inside* `propose` can see: see `_TracingRowProvider`
-    for the plant that proved the difference.
-    """
+    """PRD 10's `propose`, and the four properties that make it worth having."""
     providers = _registry()
 
     await HomeService(providers=providers).compose(Library().context())

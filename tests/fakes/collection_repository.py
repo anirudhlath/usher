@@ -1,38 +1,4 @@
-"""In-memory `CollectionRepository`.
-
-**Where this is more forgiving than Postgres, on purpose.** Six places, each
-of which the paired `tests/integration/test_collection_repository.py` run is
-what actually closes:
-
-- **`titles` is a mapping this fake is handed**, so `attach_titles` can apply
-  the `kind = 'movie'` filter at all. In SQL that is a `WHERE` clause a
-  mutation deletes; here it is an `if` a mutation deletes; the case kills
-  both, which is the one place these two implementations fail identically.
-  Named first because it is the divergence a reader would otherwise assume
-  cuts the other way.
-- **No foreign keys**, so `attach_titles` here cannot raise
-  `RepositoryConflict` for a `collection_id` naming no collection.
-  `test_a_link_to_no_collection_is_a_port_error` is Postgres-only.
-- **`IS DISTINCT FROM` is Python's `!=`**, which already treats `None`
-  correctly. In SQL `<>` does not -- `NULL <> :x` is NULL, so a first attach
-  writes nothing at all -- which is why the contract asserts the *first*
-  call's count as well as the second's.
-- **No stored generated column and no GIN index**, so the whole cost the
-  `IS DISTINCT FROM` guard exists to avoid is invisible here. The guard is
-  observable only through the returned count, which is why the port promises
-  *changed* rather than *touched*.
-- **`xmax = 0` has no analogue.** `inserted`/`updated` are dict membership,
-  which *is* the answer rather than a measurement of it.
-- **No release date, so `get`'s members come back in insertion order.** The
-  real one orders them `release_date NULLS LAST, year NULLS LAST, title_id`,
-  which is the order a franchise page renders in -- so the shared contract
-  asserts on the member *set* and only
-  `tests/integration/test_collection_repository.py` can assert the sequence.
-  Same divergence `list_owned` already carries, at a second read.
-
-`titles` and `media_items` are test-double affordances written only by
-`FakeCollectionSeeder`; the port never writes either.
-"""
+"""In-memory `CollectionRepository`."""
 
 import uuid
 from collections.abc import Sequence

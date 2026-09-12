@@ -1,53 +1,5 @@
-"""The 429 path end to end, against a stub -- because provoking a real one is
-refused, and the refusal is the point rather than a shortcut.
-
-`PortRateLimited.retry_after` reaches `jobs.run_after` through four layers:
-`EmbySession.request` translating a status into a port error,
-`usher.adapters.http.retry_after_seconds` parsing the header,
-`JobWorker._fail` reading the hint off the exception through an `isinstance`,
-and `_FAIL`'s `GREATEST(:retry_after_seconds, 0)` adding it as a floor inside
-`make_interval`. M9's D9 built that chain and pinned it with **one** case, at
-the queue's own boundary (`tests/contract/job_queue_contract.py`), where the
-hint is a float a test passes to `fail()`. This file is the second case and it
-is the one that starts at an HTTP response: nothing here hands the queue a
-number, and the only way `run_after` moves is if every layer above it worked.
-
-**No request in this file leaves the process, and that is a decision rather
-than a limitation of the harness.** The only servers this project talks to are
-a household's own Emby and the live TMDb API, and hammering either until it
-rate-limits is precisely the behaviour M10's outbound gate exists to prevent --
-ADR-0005 chose ~25 rps as courtesy against a *stated* ~40 rather than
-discovering the ceiling by hitting it. So the 429 comes from `FakeEmbyServer`,
-and what this file can honestly claim is exactly half of what PRD 09's
-carried-debt entry invites: **the mechanism is verified, the upstream
-behaviour is not.** Three live runs corroborate the second half and none of
-them is weak -- M9's T2 (393 TMDb requests, no 429, and no `Retry-After` on the
-one 400), M9's S3 (130,334 TMDb requests, zero 429s, and no `Retry-After` on
-any of 193 non-200s) and M9's H4/H5 (23 Emby requests, no 429, `run_after` NULL
-on the only queued row). The missing half cannot be obtained without a server
-that rate-limits Usher, which would be evidence that the gate failed.
-
-**Real Postgres, deliberately.** The property under test is interval arithmetic
-inside `_FAIL` -- `clock_timestamp() + make_interval(secs => GREATEST(hint, 0)
-+ <the jittered term>)` -- and `FakeJobQueue` computes a Python transcription
-of it, so a dict arm would be asserting a second implementation of the thing
-under test. It is also the only arm on which `run_after` is a *timestamp*
-rather than a number a fake chose.
-
-**Both arms in every case, because "it backed off" is satisfied by any
-backoff** -- including the ordinary jittered one the queue would have produced
-with the hint dropped on the floor, which is exactly the state D9 closed. So
-each case fails two jobs: one under a 429 carrying the hint and one under a 429
-carrying no header at all, and asserts the second lands strictly sooner. The
-whole content of D9 is *which* backoff.
-
-**Two `Retry-After` forms, because RFC 9110 permits two** and
-`retry_after_seconds` reaches the HTTP-date one only after `float(value)` has
-raised -- the bug that existed in two separate copies of this code before that
-helper was shared, and the form that would otherwise turn the one moment an
-upstream is explicitly asking for backoff into a `ValueError`. Each case
-asserts its own header really is the form it is filed under, because two arms
-that are one form spelled twice would run green and cover one path.
+"""The 429 path end to end, against a stub -- because provoking a real one is refused,
+and the refusal is the point rather than a shortcut.
 """
 
 from collections.abc import AsyncIterator
@@ -89,15 +41,8 @@ from usher.services.matching import MatchService
 #: wrong about.
 RETRY_AFTER_SECONDS = 120.0
 
-#: The queue's own parameters, named here because every bound below is derived
-#: from them rather than written as a literal. The jittered term for a job on
-#: its first failure is `BACKOFF_SECONDS * power(2, 0) * (0.5 + random() / 2)`,
-#: i.e. a uniform draw from **[15, 30) s** -- so a hinted backoff lands in
-#: [135, 150) and an unhinted one in [15, 30), and the two populations cannot
-#: overlap. The unhinted half of that is **asserted** rather than merely
-#: stated here, on `_Row.drawn`: until it was, a queue giving an unhinted
-#: failure no backoff at all satisfied every assertion in this file, because
-#: "sooner than the hinted one" is also what zero is.
+# : The queue's own parameters, named here because every bound below is derived : from
+# them rather than written as a literal.
 BACKOFF_SECONDS = 30.0
 MAX_ATTEMPTS = 5
 
@@ -164,37 +109,9 @@ def _retry_after(form: str) -> tuple[str, float, float]:
 
 @dataclass(frozen=True, slots=True)
 class _Row:
-    """One `jobs` row as this file reads it, with `run_after` already resolved
-    against the database's own clock -- twice, because the two resolutions
-    answer two different questions.
-
-    The interval is computed in SQL rather than in Python: `run_after` is a
-    `timestamptz` Postgres wrote from `clock_timestamp()`, and subtracting it
-    from a Python `datetime.now()` would compare two clocks -- one of which is
-    inside a container -- instead of measuring the interval the statement
-    actually chose.
-
-    `seconds` is `run_after - clock_timestamp()`, i.e. **what is left** of the
-    backoff when this file reads the row: the same comparison `_CLAIM` makes,
-    so it is the number that decides when the job is re-claimable. `drawn` is
-    `run_after - updated_at`, i.e. **what `_FAIL` chose**, and it is readable
-    only because that statement writes both columns from `clock_timestamp()`
-    in one pass and `jobs` is deliberately **not** one of the seven tables
-    carrying a `set_updated_at` trigger -- a fact
-    `test_migrations.py::test_migration_creates_the_updated_at_triggers`
-    pins by name, and one that would otherwise put an unrelated `now()` on
-    the second column.
-
-    Two fields rather than one because a bound on the *draw* cannot be spelled
-    against `seconds` without going intermittent. The jittered draw's own
-    minimum **is** `BACKOFF_SECONDS / 2`, so `BACKOFF_SECONDS / 2 <=
-    row.seconds` is falsified by *any* elapsed time at all: the gap between
-    `_FAIL` and this read measured **4.0 ms** directly (`drawn - seconds` on
-    one run) and is bounded at **< 0.42 s** by six earlier ones, which is the
-    most those six can say -- and 0.42 s is the bottom 2.8% of [15, 30), i.e.
-    that share of correct queues failing. `drawn` subtracts two instants
-    Postgres wrote microseconds apart inside one statement and has no such
-    slack.
+    """One `jobs` row as this file reads it, with `run_after` already resolved against the
+    database's own clock -- twice, because the two resolutions answer two different
+    questions.
     """
 
     status: str
@@ -444,23 +361,14 @@ async def test_a_429_from_a_source_defers_the_job_by_the_interval_the_upstream_a
     # The probes consumed both arms; re-arm for the run under test.
     emby.rate_limit(hinted_path, retry_after=header)
     emby.rate_limit(plain_path)
-    # Everything appended to `emby.requests` from here on is the worker's. The
-    # slice is what makes the assertion below a statement about the worker at
-    # all: `handle` records `f"{method} {path}"` for every request including
-    # the two probes above, which sent those exact two lines -- so the same
-    # assertion spelled over the whole list is satisfied before the worker
-    # exists.
+    # Everything appended to `emby.requests` from here on is the worker's.
     before = len(emby.requests)
 
     await _enqueue(sessions, (HINTED_KEY, PLAIN_KEY))
     assert await _worker(sessions, _resolver(source, adapter), batch_size=2).run_once() == 2
 
-    # The worker's own reads were the ones rate-limited, not the handshake in
-    # front of them. A limit armed on `/Users/AuthenticateByName` instead
-    # satisfies every other assertion in this case: `_authenticate_locked`
-    # translates a 429 through the same `retry_after_seconds`, so both jobs
-    # fail with the same hint and the same `run_after` -- and never reach the
-    # read the case is about.
+    # The worker's own reads were the ones rate-limited, not the handshake in front of
+    # them.
     worker_requests = emby.requests[before:]
     assert f"GET {hinted_path}" in worker_requests, worker_requests
     assert f"GET {plain_path}" in worker_requests, worker_requests
@@ -496,15 +404,7 @@ async def test_a_429_from_a_source_defers_the_job_by_the_interval_the_upstream_a
         "the 429 that carried no hint has to land strictly sooner, or the hint is not what "
         f"moved run_after: hinted={hinted.seconds}s plain={plain.seconds}s"
     )
-    # The control arm's *own* schedule, not merely "sooner than the hinted
-    # one". Without a lower bound the whole file is green against a queue that
-    # gives an unhinted failure no backoff at all -- measured: dividing
-    # `_FAIL`'s jitter term by ten puts a job retrying a broken upstream at
-    # ~2 s instead of ~20 s, the rationed hot loop the jitter exists to
-    # prevent, and every other assertion above passes. This is the module
-    # comment on `BACKOFF_SECONDS` spelled as a check rather than as prose,
-    # and it is asserted on `drawn` rather than on `seconds` for the reason
-    # `_Row` gives.
+    # The control arm's *own* schedule, not merely "sooner than the hinted one".
     assert BACKOFF_SECONDS / 2 <= plain.drawn < BACKOFF_SECONDS, (
         f"the unhinted 429 has to land on the ordinary [15, 30) draw: {plain.drawn}s"
     )

@@ -1,11 +1,4 @@
-"""`ImageProxyService` — resolve, clamp, ask the store, fetch on a miss.
-
-The one thing this file exists to hold is that **the second request for a rung
-already on disk makes no network call**, which is what makes `GET /images/{id}`
-a proxy rather than a redirect with extra steps. Everything else here is the
-supporting cast: the clamp, the 404-shaped `None`, and the fact that the cache
-key carries the row's `provider` as well as its path.
-"""
+"""`ImageProxyService` — resolve, clamp, ask the store, fetch on a miss."""
 
 import uuid
 from collections.abc import AsyncIterator

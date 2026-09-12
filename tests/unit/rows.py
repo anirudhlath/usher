@@ -1,24 +1,4 @@
-"""The seeding every provider case shares, and the discipline it enforces.
-
-**A wrong row renders identically to a right one**, so every case in every
-`test_rows_*.py` file asserts on **position** and seeds a distractor a broken
-implementation would rank first. `assert title_id in {c.title_id for c in
-row.cards}` is satisfied by returning the library in physical order, and so is
-`assert len(row.cards) > 0`.
-
-**A distractor that varies two things at once is not a distractor**, and this
-milestone's own plan wrote one into its headline table -- the ContinueWatching
-distractor it specifies sets `played` *and* `position_seconds = 0`, so it
-isolates neither half of the `NOT played AND position_seconds > 0` predicate.
-`Library.finished` therefore keeps its resume position, and
-`Library.never_started` is the separate seed for the other half.
-
-`Library` seeds through the real fakes rather than through dicts, so a case
-reads as a household rather than as a fixture, and every id is minted per call
-and never sorted on: `watch_states.id` is a UUIDv7, so id order is insertion
-order, and a fixture whose insertion order matches its intended answer order is
-satisfied by `ORDER BY id`. Group E found six vacuous fixtures that way.
-"""
+"""The seeding every provider case shares, and the discipline it enforces."""
 
 import uuid
 from collections.abc import Sequence
@@ -96,12 +76,7 @@ class Library:
         self.credits = FakeCreditRepository(self.people, self.titles)
         self.collections = FakeCollectionRepository()
         self.curated_rows = FakeCuratedRowRepository()
-        # Artwork, seeded through `poster()`/`backdrop()` below. Empty by
-        # default and deliberately so: **most cards in this suite carry no
-        # artwork**, which is the state a real catalog is in before its first
-        # `usher derive` and the state every pre-C6 case in these files was
-        # written against. A `Library` that minted a poster per title would
-        # make `artwork is None` unreachable and hide the ADR-0014 arm.
+        # Artwork, seeded through `poster()`/`backdrop()` below.
         self.images = FakeImageRepository()
         # `replace_for_titles` is a replace, so incremental seeding has to hold
         # the accumulated set per title and re-send it. Keeping the accumulator
@@ -151,12 +126,10 @@ class Library:
             enrichment_state=EnrichmentState.ENRICHED,
         )
         await self.titles.add(title)
-        # `FakeCollectionRepository` models `titles.kind` and the catalog's own
-        # order because `attach_titles` refuses a series and `list_owned`
-        # returns members "in release order" -- both are facts about `titles`
-        # that a collection fake cannot invent. Registered here so no case has
-        # to remember to, which is how the four vacuous fixtures Group G found
-        # were written.
+        # `FakeCollectionRepository` models `titles.kind` and the catalog's own order
+        # because `attach_titles` refuses a series and `list_owned` returns members "in
+        # release order" -- both are facts about `titles` that a collection fake cannot
+        # invent.
         self.collections.catalog.kinds[title.id] = kind
         self.collections.catalog.order.append(title.id)
         if owned:

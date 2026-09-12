@@ -1,14 +1,6 @@
-"""The degraded-readiness path -- deliberately not in tests/integration/:
-it needs no real Postgres (a connection refused on a port nothing listens
-on fails the same way an actually-down database would, from the app's
-perspective), so it belongs where the rest of this suite's Docker-free
-tests live rather than paying for a container it doesn't need.
-
-Neither the plan nor the originally-shipped tests asserted this path at
-all -- the happy-path test in tests/integration/test_health.py only
-proves readiness works when Postgres is reachable, which is exactly why
-a 200-with-degraded-body response (rather than the 503 below) went
-undebated for as long as it did.
+"""The degraded-readiness path -- deliberately not in tests/integration/: it needs no
+real Postgres (a connection refused on a port nothing listens on fails the same way
+an actually-down database would, from the app's perspective), so it belongs where
 """
 
 import uuid
@@ -222,12 +214,9 @@ async def test_a_process_that_runs_no_worker_reports_no_orphan_count_rather_than
     assert body["lanes"]["recovered_claims"] is None
     assert body["lanes"]["recovered_at"] is None
 
-    # **The control, and it is the assertion with teeth.** `is None` is
-    # satisfied by a field that can only ever be `null` -- a `bool` reported
-    # as `None`, a serialiser dropping a zero. The same route, one stub over,
-    # has to answer `0` for a process that asked and found nothing, because
-    # "asked and found none" and "never asked" are the two answers this field
-    # exists to distinguish.
+    # **The control, and it is the assertion with teeth.** `is None` is satisfied by a
+    # field that can only ever be `null` -- a `bool` reported as `None`, a serialiser
+    # dropping a zero.
     async with _client_with_lanes(_Lanes(worker=True, recovered=0)) as client:
         asked = (await client.get("/health/ready")).json()
     assert asked["lanes"]["recovered_claims"] == 0
@@ -270,28 +259,7 @@ async def test_no_lane_state_can_change_the_readiness_verdict(
     recovered: int | None,
     recovered_when: datetime | None,
 ) -> None:
-    """Every combination of lane state, one verdict.
-
-    This is the case the mutations in the plan's table land on: putting any
-    one of the **five** lane fields inside `ReadinessChecks` makes
-    `all(checks.model_dump().values())` pick it up automatically, and
-    `... and lanes.running_sources()` does it by hand. The database is
-    unreachable throughout, so `checks` is constant and the lanes are the only
-    thing varying.
-
-    **The `checks` assertion is what has teeth here, not the status code**,
-    and saying so is the point: this app is already 503, so a folded field
-    cannot move the verdict in *this* file at all -- what it does move is the
-    contents of `checks`, which the exact-equality below refuses to grow.
-    `tests/integration/test_health.py::
-    test_a_process_with_no_lanes_running_is_still_ready` is the other half,
-    where a reachable database means a folded `crashed_sources: []`,
-    `recovered_claims: null` or `recovered_at: null` is a **falsy** member of
-    `all(...)` and turns a 200 into a 503.
-
-    M10's F2 added the last three parameters. Each varies over both a falsy
-    and a truthy value, so a fold is caught wherever it happens to land.
-    """
+    """Every combination of lane state, one verdict."""
     lanes = _Lanes(
         push=push,
         worker=worker,

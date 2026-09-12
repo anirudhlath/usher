@@ -1,11 +1,4 @@
-"""`GET /home` -- ADR-0006's route.
-
-**The real composer, over the repository fakes**, following M5's correction:
-the router, the DTO and `HomeService`'s own ordering all stay on the path a
-request takes. A stubbed service would make every case below a test of
-`HomeResponse.of` alone -- which would pass against a composer that returned its
-rows in registry order.
-"""
+"""`GET /home` -- ADR-0006's route."""
 
 import ast
 import dataclasses
@@ -107,26 +100,8 @@ class _Seeded:
 
 
 async def _household() -> _Seeded:
-    """A household that fires three rows, chosen so **score order and
-    alphabetical order disagree**.
-
-    That is not decoration. Seeded with `continue-watching` and
-    `recently-added` alone, the screen is `["continue-watching",
-    "recently-added"]` -- which is *also* what a response sorted by slug
-    produces, so the ordering case below passes against a composer whose
-    ordering is a `sorted()` call. Measured: that mutation survived until this
-    household grew a franchise row.
-
-    `FranchiseProvider` scores 0.55 against `RecentlyAddedProvider`'s 0.75, and
-    `franchise-<id>` sorts *before* `recently-added`. The screen is therefore
-    `[continue-watching, recently-added, franchise-<id>]` by score and
-    `[continue-watching, franchise-<id>, recently-added]` by slug.
-
-    **The resuming title carries both kinds of artwork**, deliberately. It is
-    the only title on this screen that appears on a `landscape` row, so it is
-    the only one whose card can tell a poster from a backdrop -- and a fixture
-    seeding one kind would make the swap invisible, because a single kind
-    answers whichever question is asked.
+    """A household that fires three rows, chosen so **score order and alphabetical order
+    disagree**.
     """
     library = Library()
     seeded = _Seeded(library)
@@ -221,74 +196,10 @@ async def library_only() -> AsyncIterator[httpx.AsyncClient]:
 
 
 async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -> None:
-    """**The one thing every other case in this file overrides away**, and the
-    gap M8 Task 15's mutation sweep found: `_app` replaces `get_row_context`
-    with a `Library`'s, so nothing in the unit suite has ever built the real
-    one -- and `curated=None` in it survived all 2,743 cases while being
-    perfectly type-annotated at the call site.
-
-    `RowContext` is a frozen dataclass with no runtime validation, so a field
-    the route wires to `None` constructs happily and fails as an
-    `AttributeError` inside whichever provider reads it, on the first request,
-    in production. `mypy` catches the spelling in this plant; it does not catch
-    an `Optional` widened by a later change, and a type checker is not the
-    thing this file is for.
-
-    **`mypy` is not the only thing in the gate that catches it, and saying so
-    was wrong** (corrected 2026-08-07).
-    `tests/integration/test_pipeline_spans.py` has driven a real `GET /home`
-    against `create_app()` with no dependency overrides since M7's own
-    `342e476`, and it kills 9 of these 10 plants;
-    `test_pipeline_deps.py::test_the_row_context_carries_the_stored_user_and_
-    not_a_fresh_one` kills `user`. What this case buys is **speed and
-    locality**, not exclusivity: it needs no Docker and it fails naming the
-    context rather than naming a span tree. The one plant nothing anywhere
-    catches is `episodes=None` -- 2,759 unit and 866 integration cases, all
-    green -- because `NextUpProvider` reads it at hydration time and no case
-    composes a real context over a household with an unfinished series.
-
-    **M9's C6 makes it eleven**, and the new one behaves like `titles` rather
-    than like the eight: `images=None` is read by `BaseRow.hydrate`, so it needs
-    a household that gets as far as *building* a row, which `propose()` against
-    an empty one never does. Measured 2026-08-11 -- the plant survives the
-    behavioural assertion and dies on the scan below, and dies again in
-    `tests/integration/test_home_artwork.py`, which drives a real `GET /home`
-    over real Postgres with no overrides at all.
-
-    **Two assertions, because the behavioural one alone does not generalise.**
-    Measured 2026-08-07 at `786c5b4`, planting `None` into each of
-    `get_row_context`'s ten repository/user arguments *of that day* in turn and
-    running the whole unit suite against
-    the behavioural assertion by itself: **8 killed, 2 survived** --
-    `titles=None` and `episodes=None` both passed all 2,759 cases. The
-    behavioural half only asks every provider to `propose()` against an
-    **empty** household, and `titles`/`media_items` are read mostly at
-    *hydration* time (`Row.build`), which no empty household reaches. Pairing
-    it with `test_every_row_context_field_is_read_by_at_least_one_provider`
-    does not close that: **that case scans `services/rows/` for the string
-    `ctx.<name>`, which says a reader exists, not that this case reaches it.**
-
-    So the `None` scan below is kept, and it is **not** the "second list" the
-    first draft of this docstring dismissed -- it is derived from
-    `dataclasses.fields(ctx)`, so it grows with the dataclass and there is
-    nothing to keep in step. Nothing on the real context is legitimately
-    `None`: `now` is a callable, and so is `affinities` since the screen-cache
-    finding deferred it -- **which is the shape this scan has to keep working
-    against**, because "a field that is a callable" and "a field wired to
-    nothing" are one keystroke apart and only one of them is legal. A callable
-    is not `None`, so a plant there still dies here; what this scan cannot see
-    is a callable that answers `[]` forever, which is why
-    `test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_it`
-    asserts a *genre* off the real one. It killed all ten of that day's plants,
-    including the two the behavioural half cannot see -- and because it is
-    derived rather than listed, it covers the **eleventh** (M9's `images`) by
-    construction, which is the one argument that round never measured
-    behaviourally.
-
-    The behavioural half is kept anyway, and it is the half with the *reason*
-    in it: a scan proves the field is populated, and `propose()` proves it is
-    populated with something a provider can actually call. Between them, the
-    thirteenth field is covered the day it is added.
+    """**The one thing every other case in this file overrides away**, and the gap M8 Task
+    15's mutation sweep found: `_app` replaces `get_row_context` with a `Library`'s, so
+    nothing in the unit suite has ever built the real one -- and `curated=None` in it
+    survived all 2,743 cases while being perfectly type-annotated at the call site.
     """
     library = Library()
     taste = TasteService(
@@ -329,33 +240,9 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
 
 
 async def test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_it() -> None:
-    """**The genre-affinity read used to happen before the screen cache could
-    answer**, because `RowContext.affinities` was a value this dependency
-    computed rather than a callable a provider awaits.
-
-    FastAPI resolves the whole dependency graph before the handler runs, and
-    `HomeService.compose_report` only looks in the cache once it has a context
-    -- so every `GET /home`, hit or miss, paid `list_recent(50)` +
-    `list_by_ids(50)` + the library-wide `unnest(genres) GROUP BY` for a value
-    exactly one of the ten providers reads. On the measured 1,271,570-title
-    catalog those are the three most expensive statements a *cached* screen
-    could possibly issue.
-
-    Three assertions, and each rules out a different wrong shape:
-
-    - **nothing is read while the context is assembled** -- the finding;
-    - **the first await returns the real answer** -- which is what stops the
-      repair being the failure `.claude/rules/testing-discipline.md` records
-      for this exact dependency, a field wired to something that reads as
-      populated and delivers nothing (`affinities=lambda: []` would satisfy the
-      count assertion alone, so the *genre* is asserted);
-    - **the second await costs nothing more**, because two providers reading it
-      one day must not be two reads.
-
-    The other half of the finding -- that a screen the cache answers never
-    awaits it at all -- is
-    `test_services_home.py::test_a_screen_the_cache_can_answer_reads_no_taste_
-    at_all`, because it is the composer that decides.
+    """**The genre-affinity read used to happen before the screen cache could answer**,
+    because `RowContext.affinities` was a value this dependency computed rather than a
+    callable a provider awaits.
     """
     library = Library()
     # Four owned-and-finished westerns against twenty owned dramas: support
@@ -450,27 +337,10 @@ async def test_a_row_carries_a_slug_a_title_a_reason_and_a_display_hint(
 
 
 def test_a_row_with_nothing_to_explain_carries_a_null_reason_and_not_an_empty_string() -> None:
-    """PRD 06: the `reason` "is already written to be spoken aloud, not just
-    displayed" -- so it is a sentence, and `null` rather than `""` when a row
-    has none. An empty string is a subtitle a client renders as a blank line,
-    and it cannot be told from a row that had something to say and said
-    nothing. Kills `reason: str = ""` on the DTO.
-
-    **Asserted at the DTO rather than through the route, and the reason it was
-    a finding has now expired.** All nine of M7's providers return a sentence,
-    so `BuiltRow.reason`'s null arm was a shape the wire promised and *nothing
-    in `src/` reached* -- written through the route the case could only ever
-    have asserted the positive arm, which is the vacuous-pass failure M7 is
-    named for. It stays at the DTO because that is what holds the contract
-    `/openapi.json` publishes.
-
-    ✅ **M8 supplied the reader M7 recorded this waiting for.** `LLMRow` passes
-    the stored `reason` through, `None` included -- `curation_validate` turns a
-    blank one into `None` rather than `""` for this case's own argument -- and
-    `CuratedProvider` is what puts such a row on a screen.
-    `test_rows_curated.py::test_a_row_the_model_gave_no_reason_for_has_no_
-    subtitle_not_an_empty_one` is the behavioural half, so the wire's null arm
-    now has a producer as well as a promise.
+    """PRD 06: the `reason` "is already written to be spoken aloud, not just displayed" --
+    so it is a sentence, and `null` rather than `""` when a row has none. An empty
+    string is a subtitle a client renders as a blank line, and it cannot be told from a
+    row that had something to say and said nothing. Kills `reason: str = ""` on the DTO.
     """
     row = BuiltRow(
         slug="a-row-with-nothing-to-say",
@@ -630,29 +500,10 @@ async def test_the_route_never_loads_an_embedding_model(client: httpx.AsyncClien
 
 
 def test_the_home_service_and_every_provider_hold_no_source_adapter() -> None:
-    """PRD 08's "never fails a request local state can answer" as a
-    *structural* property: with no adapter reachable there is no call to fail,
-    so there is no 503 and nothing for an RFC 9457 `code` to name. "It did not
-    raise" is also what a service that swallowed everything would produce.
-
-    Two misses this repository has already measured, both handled here: a
-    signature check spelled `annotation in (SourceAdapter, ...)` does not see a
-    **string** annotation, which is the one form needing no import at all; and
-    an `ast.ImportFrom`-only scan does not see `import usher.ports.source`.
-
-    Scans **every** registered provider, not just the composer: ten providers
-    is ten chances, and a guard scoped to one of them reads as coverage. Same
-    lesson M6's sweep recorded when a docstring guard scoped to the class missed
-    the method.
-
-    **The count moves with the registry and the claim does not**, which is why
-    this update is mechanical where `test_rows_invariants.py`'s is not: it is a
-    guard on the guard ("the sweep lost providers"), and nothing about a tenth
-    provider makes a source adapter more or less reachable. What *is* new about
-    `CuratedProvider` is the port it must not hold, and `usher.ports.source` is
-    not it -- `test_rows_curated.py::test_the_curated_module_holds_no_llm_
-    client_and_cannot_complete_anything` is this case's sibling for the one
-    that matters.
+    """PRD 08's "never fails a request local state can answer" as a *structural* property:
+    with no adapter reachable there is no call to fail, so there is no 503 and nothing
+    for an RFC 9457 `code` to name. "It did not raise" is also what a service that
+    swallowed everything would produce.
     """
     modules: list[type] = [HomeService, *(type(provider) for provider in ROW_PROVIDERS)]
     assert len(modules) == 11, "the sweep lost providers, so it proves nothing"

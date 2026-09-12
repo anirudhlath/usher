@@ -552,16 +552,8 @@ def _raising_client(failure: BaseException, *, timeout: float = 30.0) -> httpx.A
 @pytest.mark.parametrize(
     "failure",
     [
-        # Constructed the way httpcore and httpx actually raise them, which
-        # is the whole of this defect. `httpcore.map_exceptions` calls
-        # `to_exc(exc)` with the *object* it caught -- a bare
-        # `TimeoutError()` or an `anyio.EndOfStream()`, both of which
-        # stringify to `""` -- and httpx's `map_httpcore_exceptions` then
-        # re-raises with `message = str(exc)`. Measured on httpx 0.28.1
-        # against real sockets: a server that accepts and never answers
-        # gives `ReadTimeout` with `str(exc) == ""`; a blackholed address
-        # gives `ConnectTimeout` with `str(exc) == ""`; an exhausted pool
-        # gives `PoolTimeout` with `str(exc) == ""`.
+        # Constructed the way httpcore and httpx actually raise them, which is the whole
+        # of this defect.
         httpx.ReadTimeout(""),
         httpx.ConnectTimeout(""),
         httpx.PoolTimeout(""),
@@ -966,27 +958,9 @@ async def test_no_error_message_ever_contains_the_password() -> None:
 
 
 async def test_no_credential_leaks_even_under_diagnose_true() -> None:
-    """A stronger version of the test above, modelled on the real
-    diagnose=True leak Group A found in usher.telemetry: that finding was
-    a plaintext password rendered by loguru's frame-locals dump, not by
-    any exception *message*. `configure_logging` hardcodes
-    `diagnose=False` for exactly this reason, but this class must not
-    depend on that global holding forever in every process that ever logs
-    one of its exceptions -- so this asserts the stronger, local property
-    directly: even with diagnose=True switched back on here, nothing
-    _authenticate_locked touches (its `payload` dict holds the plaintext
-    password as a local variable while `_send` is awaiting the network
-    call) is rendered.
-
-    This is a real property of `_send`'s shape, not a tautology: verified
-    while writing this test that a version of `_send` calling
-    `self._client.request(method, path, ..., json=payload, ...)` as one
-    reference on the line that raises *does* leak under this exact probe
-    -- loguru's diagnose renders the value of every name referenced on the
-    exact source line an exception's frame reports, and `payload` was such
-    a name. Splitting it into `build_request(...)` then `send(request)`
-    means only `request` -- whose `__repr__` is method+URL, never a body
-    -- is in scope on the line that can actually raise.
+    """A stronger version of the test above, modelled on the real diagnose=True leak Group
+    A found in usher.telemetry: that finding was a plaintext password rendered by
+    loguru's frame-locals dump, not by any exception *message*.
     """
     server = FakeEmbyServer()
     server.offline = True

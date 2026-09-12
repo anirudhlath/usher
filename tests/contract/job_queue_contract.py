@@ -1,35 +1,4 @@
-"""Behaviour every `JobQueue` implementation must satisfy.
-
-One case -- `test_two_workers_never_claim_the_same_job` -- needs two
-genuinely concurrent sessions and is **skipped** unless the subclass sets
-`requires_concurrency = True` and supplies a `concurrent_claims` harness.
-`FakeJobQueue` leaves it `False` and its run claims nothing about locking,
-which is honest: a single-threaded dict cannot express `SKIP LOCKED`, and a
-case that "passed" for it would ratify a plain `SELECT` in the real
-implementation.
-
-**The harness asserts on *observed* overlap, not on a count.** A count a
-serialised run would also produce proves nothing -- M3 deleted a
-single-flight lock and watched the concurrency test pass five runs in a row,
-because nothing in it ever truly awaited and the event loop ran each task
-through its whole cycle before starting the next. So `ClaimWindow` carries
-the wall-clock interval each claim actually occupied, and the case fails if
-those intervals do not overlap, whatever the claim counts say.
-
-Three test-only hooks the port deliberately does not carry:
-
-- `clear_backoff`, because advancing past a backoff by sleeping would make
-  this suite take the backoff schedule in real time, and because nothing in
-  `src/` would ever call it.
-- `concurrent_claims`, for the reason above.
-- `staging_locks`, which reads the relation locks the enqueue just took. A
-  dict has no locks, so the case is *skipped* by the fake rather than passed
-  -- an assertion that trivially holds against an in-memory implementation is
-  the vacuous-pass failure mode this file already refuses once.
-
-All three are fixtures the subclass supplies, so the port stays free of
-methods that exist only for tests.
-"""
+"""Behaviour every `JobQueue` implementation must satisfy."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -104,12 +73,7 @@ def overlapping(windows: Sequence[ClaimWindow]) -> bool:
 
 class JobQueueContract:
     requires_concurrency: bool = False
-    # What both subclasses construct their queue with. Named here so the
-    # ceiling case can assert on the exact attempt count at park time rather
-    # than only on "it parked eventually" -- an off-by-one in the ceiling
-    # (`>` where `>=` belongs) parks on the sixth attempt instead of the
-    # fifth, which a loop that keeps failing until something parks cannot
-    # see at all.
+    # What both subclasses construct their queue with.
     max_attempts: int = 5
 
     @pytest.fixture
@@ -130,29 +94,9 @@ class JobQueueContract:
     async def test_an_enqueue_locks_nothing_another_session_can_reach(
         self, queue: JobQueue, staging_locks: StagingLockReader | None
     ) -> None:
-        """The wrong implementation: `enqueue` before M6 -- `DROP TABLE IF
-        EXISTS stg_jobs` plus `CREATE UNLOGGED TABLE stg_jobs`, two `ACCESS
-        EXCLUSIVE` locks on a fixed, shared name, held to commit. M6 put a
-        one-row enqueue on the pipeline's hot path (one `index` job per
-        enriched title, one demand promotion per title read), so that name is
-        contended by a detail-screen open and a nightly walk's batch at once.
-
-        **On the lock rather than on wall-clock contention, on purpose:** a
-        timing case passes whenever the machine is idle, and the failure it
-        exists to catch only appears when it is not.
-        `tests/integration/test_staging_lock.py` carries the timing half as
-        well, where two real backends make it observable.
-
-        **On the *schema*, not on the relation name.** A temporary table is
-        still locked -- `CREATE TEMP TABLE` takes `ACCESS EXCLUSIVE` on its
-        own relation -- so "no lock on anything called `stg_jobs`" is a
-        property the fix does not have and never will. What the fix has is
-        that the locked relation lives in this backend's own `pg_temp`
-        schema, where no other session can name it.
-
-        The non-empty assertion is the vacuity guard: a reader wired to the
-        wrong pid, or scoped to a filter that matches nothing, would pass this
-        case exactly as a correct implementation does.
+        """The wrong implementation: `enqueue` before M6 -- `DROP TABLE IF EXISTS stg_jobs`
+        plus `CREATE UNLOGGED TABLE stg_jobs`, two `ACCESS EXCLUSIVE` locks on a fixed,
+        shared name, held to commit.
         """
         if staging_locks is None:
             pytest.skip("this implementation has no table locks to observe")

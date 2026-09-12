@@ -1,27 +1,4 @@
-"""`usher.db.repositories._errors`, the module three repositories now share.
-
-`is_row_refusal` and `constraint_name` are exercised end to end by every
-repository that catches with them, against a real driver, in
-`tests/integration/`. What is pinned *here* is `refusals_as_conflict` — the
-context manager M8 factored out of `PostgresCuratedRowRepository.
-replace_for_user`, `PostgresLLMCallRepository.record` and
-`BulkCatalogRepository.replace_genome_tags`, which had shipped the same
-five-line pyramid three times.
-
-**The session is a stub, deliberately, and that is a claim about what this file
-can and cannot say.** What a stub can show is the part that was copied: that
-the body runs inside a SAVEPOINT with autoflush suppressed, in that order; that
-a refusal is translated and everything else is not; and that the SAVEPOINT is
-unwound *before* the port error is raised, which is what leaves the caller a
-usable session. What it cannot show is that a real `AsyncSession`'s SAVEPOINT
-actually restores the transaction -- that needs Postgres, and
-`tests/integration/test_curated_row_repository.py::
-test_a_generation_that_fails_part_way_leaves_the_previous_screen_whole` and
-`tests/integration/test_llm_call_repository.py::
-test_a_refused_call_leaves_the_earlier_rows_and_the_session_usable` are where
-it is said. Neither file is replaced by this one; this one is why they now
-describe one implementation instead of three.
-"""
+"""`usher.db.repositories._errors`, the module three repositories now share."""
 
 import ast
 import pathlib
@@ -261,22 +238,8 @@ def _dbapi_handlers() -> list[tuple[str, str, ast.ExceptHandler]]:
     return found
 
 
-#: Every `except DBAPIError` in the two packages that translate, named rather
-#: than counted.
-#:
-#: 🔴 **This was `assert len(handlers) >= 11` and a floor one below the true
-#: count is a dead-scan guard wearing a narrowing guard's clothes.** There are
-#: twelve; narrowing any one site left eleven and passed. At eleven of the
-#: twelve the ledger's own drift check backstops it -- but at
-#: `jobs.py:enqueue` the two limits **compose**, because that site's widening
-#: is unpinned by the ledger for a reachability reason recorded in
-#: `.claude/rules/mutation-sweeps.md` (nothing it writes can produce a class-22
-#: refusal). Narrowing it moved neither: zero drift complaints, twelve handlers
-#: down to eleven, `>= 11` green. Each limit was declared; their composition
-#: was not, and a census is what closes it.
-#:
-#: A named set rather than `== 12`, so a site that is narrowed *and* a new one
-#: that is widened cannot cancel out.
+# : Every `except DBAPIError` in the two packages that translate, named rather : than
+# counted.
 WIDENED_SITES = frozenset(
     {
         ("_errors.py", "refusals_as_conflict"),
@@ -311,27 +274,8 @@ def test_the_set_of_widened_sites_is_exactly_what_this_file_names() -> None:
 
 
 def test_every_widened_except_re_raises_what_is_not_a_row_refusal() -> None:
-    """The invariant `except DBAPIError` buys its width with, checked once
-    across every site instead of once per site.
-
-    🔴 **It was covered by exactly one behavioural case out of eleven sites**,
-    and the ledger cannot see it at all: `_translation_of` reads the `except`
-    clause's *type* and never the handler body, so deleting `if not
-    is_row_refusal(exc): raise` from `import_run.py:save` left
-    `audit_bounded_columns.py --check` reporting no drift and the whole suite
-    green. What is lost when it goes is not a missed refusal but the opposite —
-    a dropped connection, a statement timeout or an undefined table reported to
-    a caller as *its row being wrong*, which is the one distinction
-    `ROW_REFUSED_SQLSTATE_CLASSES` exists to preserve and the one a caller
-    needs to decide whether a retry can help.
-
-    A structural case rather than eleven integration cases because the
-    behaviour needs a transport fault, and no fixture in this project can
-    manufacture one against a live database.
-
-    `refusals_as_conflict` is excluded by construction: it *is* the guard, and
-    `test_a_failure_that_is_not_the_rows_fault_is_not_translated` above is the
-    behavioural case for it.
+    """The invariant `except DBAPIError` buys its width with, checked once across every
+    site instead of once per site.
     """
     handlers = _dbapi_handlers()
     assert {(module, method) for module, method, _ in handlers} == set(WIDENED_SITES), (

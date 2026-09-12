@@ -1,32 +1,4 @@
-"""What every `SearchIndex` implementation owes its callers.
-
-Runs against `FakeSearchIndex` (tests/unit/test_search_index_contract.py,
-no Docker) and `PostgresSearchIndex` (tests/integration/
-test_adapters_search_postgres.py, real Postgres, real `tsquery`, real
-`ts_rank`, real HNSW). One copy of the assertions, two implementations --
-the pattern PRD 08 names for `SourceAdapter`, applied to the port M6 ships.
-
-**Every case here asserts on position, not membership, with exactly one
-named exception.** `assert expected in {hit.title_id for hit in hits}`
-passes against an implementation that returns the whole table in physical
-order, and so does `assert hits`. Each case seeds a distractor a broken
-implementation would rank *first*, and each docstring names the wrong
-implementation it fails -- a ranking case that cannot say what it rules out
-is a case that gets loosened the first time it goes red.
-
-Subclass and provide an `index` fixture plus the `given_title_row` hook:
-
-    class TestFakeSearchIndex(SearchIndexContract):
-        supports_semantic = True
-        unsupported_filter = "owned_only"
-
-        @pytest.fixture
-        def index(self) -> FakeSearchIndex:
-            return FakeSearchIndex()
-
-        async def given_title_row(self, document: SearchDocument) -> None:
-            return None
-"""
+"""What every `SearchIndex` implementation owes its callers."""
 
 from collections.abc import Sequence
 from typing import Any
@@ -45,21 +17,8 @@ from usher.ports.search import (
     SearchRequest,
 )
 
-# Every vector in this file is this wide, and the reason is that a shared
-# contract has to be storable by every implementation running it.
-# `SearchDocument.vector` is `tuple[float, ...]` -- the port declares no
-# width, deliberately, because a width is a property of a model -- but
-# `title_embeddings.embedding` is `halfvec(384)` and pgvector rejects
-# anything else with `expected 384 dimensions, not 2`. So the two-component
-# vectors these cases are *arranged* around are zero-padded to the shipped
-# width, which changes no assertion in this file: padding both a document
-# and a query with zeros leaves every dot product, every norm and therefore
-# every cosine exactly as it was.
-#
-# The number lives here rather than being imported from
-# `usher.db.models.search`: a port-level contract that reached into `db/` to
-# learn how wide a vector is would be the contract knowing about one
-# backend, which is the thing this file exists not to do.
+# Every vector in this file is this wide, and the reason is that a shared contract has
+# to be storable by every implementation running it.
 _VECTOR_DIMENSIONS = EMBEDDING_DIMENSIONS
 
 
@@ -109,19 +68,7 @@ class SearchIndexContract:
     # keeps the skip honest about which one.
     unsupported_filter: str | None = None
 
-    # Whether this backend owns the *document's* lifecycle as well as the
-    # vector's. `FakeSearchIndex` and any document store do: the document is
-    # a row they wrote and can delete. `PostgresSearchIndex` does not --
-    # `titles.search_document` is a generated column of a table the catalog
-    # owns, so a title that exists is full-text indexed by construction, and
-    # an index that deleted `titles` rows to satisfy `remove` would turn a
-    # reindex bug into data loss.
-    #
-    # Declared `True` by default so the *stronger* assertion is what a new
-    # driver gets for free and weakening it is a visible line in a subclass.
-    # The Postgres driver pays for the exemption with
-    # `test_deleting_the_title_removes_it_from_full_text`, which asserts the
-    # same property through the mechanism that really owns it.
+    # Whether this backend owns the *document's* lifecycle as well as the vector's.
     owns_document_lifecycle: bool = True
 
     async def given_title_row(self, document: SearchDocument) -> None:
@@ -170,40 +117,12 @@ class SearchIndexContract:
     async def test_a_cast_match_ranks_below_a_name_match_and_above_an_overview_match(
         self, index: SearchIndex
     ) -> None:
-        """Weight class B, and **`test_a_name_match_outranks_an_overview_match`
-        is not enough to pin it.**
-
-        That case compares A against C, and B sits between them without
-        touching either -- so a milestone that filled B with the wrong weight
-        passes it. Two wrong implementations this kills, and both are one
-        character in a migration: class B filled at `'A'` (the cast match ties
-        the name match, and this is an *ordering* assertion rather than a
-        membership one) and class B filled at `'D'` (it falls below the
-        overview match).
-
-        Measured on pg17.10 before this case was written, three rows carrying
-        `Marlow Vance` in three different classes, scored with
-        `ts_rank(search_document, websearch_to_tsquery('english', 'marlow
-        vance'))`: name **0.9910322**, credit_names **0.39641288**, overview
-        **0.19820644**. A is 2.5x B and B is 2x C, with no ties and no tuning
-        -- those are `ts_rank`'s default weights `{0.1, 0.2, 0.4, 1.0}` doing
-        exactly what the class assignment says.
-
-        All three rows are in one index and the assertion is on **position**,
-        which is the front matter's rule 1 and is what distinguishes "B is
-        between A and C" from "B exists".
+        """Weight class B, and **`test_a_name_match_outranks_an_overview_match` is not
+        enough to pin it.**
         """
-        # **Creation order is the load-bearing half, and it is the id order
-        # rather than the list order that matters** -- `_document` mints a
-        # UUIDv7 when it is *called*. Measured on pg17.10: class B filled at
-        # `'A'` makes the cast row and the name row tie *exactly*, at
-        # 0.9910322 both, so which one comes back first is decided entirely by
-        # the tiebreak -- `ORDER BY score DESC, t.id` in the shipped statement
-        # and `title_id.bytes` in the fake, both ascending. So `named` is
-        # minted **last**: on a tie it sorts behind `credited` and the case
-        # fails. Minted first, the tie resolves to the expected answer and the
-        # `'A'` mutation survives -- verified, it did, before this ordering
-        # was fixed.
+        # **Creation order is the load-bearing half, and it is the id order rather than
+        # the list order that matters** -- `_document` mints a UUIDv7 when it is
+        # *called*.
         mentioned = _document("Ten Harbour", overview="Marlow Vance walks at dusk.")
         credited = _document(
             "Nine Harbour", overview="A harbour at dusk.", credits=("Marlow Vance",)
@@ -220,27 +139,8 @@ class SearchIndexContract:
         ]
 
     async def test_a_name_match_outranks_an_overview_match(self, index: SearchIndex) -> None:
-        """**The milestone's central retrieval claim**, and the one no
-        membership assertion can see.
-
-        Fails an implementation that concatenates every field into one
-        unweighted document -- which is exactly what you get by forgetting
-        `setweight`, and which returns both of these titles with identical
-        scores. The distractor is deliberately the *more popular* of the two,
-        so an unweighted implementation breaking its tie on popularity
-        ranks the wrong one first rather than coin-flipping into a pass.
-
-        **And it is minted first, which is the half a Postgres backend
-        needs.** Every id here is a UUIDv7, so creation order *is* id order,
-        and both drivers break a score tie on the id -- the fake in `_rank`,
-        the shipped statement in `ORDER BY score DESC, t.id`. With the
-        distractor created second, `mentioned.title_id` sorts after
-        `named.title_id` and the expected answer is also what a pure
-        `ORDER BY t.id` produces: measured, both `_WEIGHTS = (1, 1, 1, 1)`
-        and deleting `ORDER BY score DESC` outright *survived* this case in
-        that arrangement. Creating the distractor first is what makes id
-        order disagree with the right answer, which is the whole of "a
-        relevance assertion any ordering satisfies is not a relevance test".
+        """**The milestone's central retrieval claim**, and the one no membership assertion
+        can see.
         """
         mentioned = _document(
             "Harbour Lights",
@@ -260,31 +160,7 @@ class SearchIndexContract:
     async def test_a_title_named_exactly_the_query_leads_a_longer_document_repeating_it(
         self, index: SearchIndex
     ) -> None:
-        """**Issue #25, in the lane that decides it.**
-
-        `GET /search?q=The Matrix` returned the 1999 film 5th behind three 2018
-        video essays repeating the phrase in their own names, and the blend
-        could not rescue it: no combination of popularity, ownership, watch
-        state, recency and taste can overturn dense rank 0 (margin
-        `0.005 / 1.045` = 0.004785 with all six present, deliberate, and the
-        bound F5's taste weight is derived from -- 0.009615, which this
-        docstring carried until 2026-09-02, is the same bound with taste
-        *absent*). So the lane has to put the right row there.
-
-        **The premise is asserted from the hits themselves and it is what makes
-        this a relevance test**: the essay's own index score is strictly
-        *higher* -- it repeats the query and carries the words twice more in
-        its overview -- so an implementation that orders by score alone puts it
-        first, which is the shipped behaviour this case exists to fail. Both
-        drivers reproduce that ordering for their own reasons (real
-        `ts_rank_cd` on Postgres; the name plus prose weight classes in the
-        fake), and neither is asked to agree on the *value*.
-
-        The essay is created first and is 900x the more popular, so the two
-        tiebreaks a wrong implementation falls back on -- id ascending, then
-        popularity -- both point at the wrong answer rather than coin-flipping
-        into a pass.
-        """
+        """**Issue #25, in the lane that decides it.**"""
         essay = _document(
             "Vacuum for Realists (aka Reviewing Vacuum in Terms of One Cypher)",
             overview="A vacuum, reviewed at length, in a vacuum.",
@@ -586,28 +462,7 @@ class SearchIndexContract:
     async def test_fusion_puts_an_exact_name_match_first_even_when_it_fuses_lower(
         self, index: SearchIndex
     ) -> None:
-        """**The exact-name key survives fusion, and RRF is exactly what would
-        lose it.**
-
-        A title in *both* lanes beats a title in one, arithmetically and
-        always: `1/62 + 1/61` against `1/61`, whatever either lane thought of
-        either row. So the row whose name **is** the query -- and which has no
-        vector, like nine titles in ten on this catalog -- fuses **below** a
-        near-match that placed in both, and `_dense_ranks` would hand it dense
-        rank 1 where the other five signals can bury it again (issue #25).
-
-        The premise is the fused scores themselves, asserted from the hits: the
-        distractor's is strictly higher, so this is not satisfied by any
-        ordering by score. It is also 900x the more popular and is created
-        second, so neither tiebreak rescues a wrong implementation.
-
-        Kills three mutants the full-text cases cannot see: the exact-name
-        column dropped from the fused projection, the outer `ORDER BY` left on
-        `score DESC` alone, and `COALESCE(lexical.exact_name, false)` written
-        without its `COALESCE` -- a NULL from the vector-only arm sorts
-        **first** under `DESC`, which is trap 1 of this statement's own list
-        arriving through a new column.
-        """
+        """**The exact-name key survives fusion, and RRF is exactly what would lose it.**"""
         if not self.supports_semantic:
             pytest.skip("this implementation cannot express a supplied query vector")
         named = _document("Vacuum", popularity=1.0)

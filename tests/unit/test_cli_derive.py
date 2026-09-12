@@ -1,12 +1,4 @@
-"""`usher derive` -- its argument surface, and the two decisions nothing else
-asserts.
-
-The command is driven against fakes rather than against `main`, because both
-properties this file exists for are about *what the writing form does*, and a
-parser case cannot see either: that the bare form answers zeroes on an empty
-database, and that `--backfill` walks the cache **inline** rather than
-enqueueing.
-"""
+"""`usher derive` -- its argument surface, and the two decisions nothing else asserts."""
 
 import contextlib
 import uuid

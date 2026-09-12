@@ -1,30 +1,4 @@
-"""`RestoreService` against a fake repository: the file, the stamp, the report.
-
-The integration file next door is where the merge rules meet a real schema.
-What is here is what the *service* decides and a database cannot make wrong:
-what a damaged artifact is, which of the two revisions the mismatch is
-against, how a reference is read back out of JSON, and when the transaction
-is committed.
-
-🔴 **The fake is handed JSON and asked what it received, which is the
-opposite of K3's mistake and the reason these cases exist at all.** K3's unit
-cases handed their fake pre-built `TitleReference` objects, so they pinned
-the artifact's JSON spelling and nothing whatever about construction -- three
-separate corruptions of the natural key survived all 5,891 cases and were
-found only by an integration case that compared a carried reference to the
-row it came from. Decoding is *this* module's construction step, so
-`test_a_decoded_reference_holds_the_values_the_line_carried` compares the
-object the repository was handed against the line it was built from, field by
-field, over a fixture in which every field is distinguishable from every
-other.
-
-**One case crosses into `usher.db` on purpose.**
-`test_the_fake_declares_the_columns_the_real_repository_does` is what stops
-every case below being a test of the fake: `restored_columns` is derived from
-`Base.metadata` and `REWRITTEN` and needs no session, so a fake declaring a
-column set nobody checked would be the whole file's foundation resting on a
-transcription.
-"""
+"""`RestoreService` against a fake repository: the file, the stamp, the report."""
 
 import base64
 import gzip

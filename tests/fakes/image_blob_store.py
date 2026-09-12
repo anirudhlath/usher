@@ -1,30 +1,4 @@
-"""In-memory `ImageBlobStore`, with no filesystem anywhere in it.
-
-`ImageCacheKey` is frozen and hashable, so the whole store is a dict keyed on
-it — which is also the statement that the key is the entry's identity and the
-on-disk name is one rendering of it.
-
-**Where this is more forgiving than `DiskImageBlobStore`**, each closed by the
-paired arm of `ImageBlobStoreContract` running on `tmp_path`:
-
-- **A dict write is atomic for free.** There is no scratch file, no rename and
-  no `fsync`, so the entire failure this store's real sibling is shaped around
-  cannot arise here. What *is* shared, and is in the contract, is that a stream
-  which dies part-way leaves no entry — the shape below assembles the whole
-  body before it writes anything, which is a different mechanism reaching the
-  same promise.
-- **No `errno`.** A full disk, a read-only mount and a directory owned by root
-  are three real failures of the other arm and none is expressible here.
-- **No sharding and no filename**, so nothing here can catch a path built from
-  something a client sent. That property is asserted directly against
-  `DiskImageBlobStore._path`.
-- **No extension set**, so a media type this proxy will not cache is refused
-  here by the same `extension_for` call and for a reason that is checked rather
-  than needed — the dict would have taken it happily.
-
-`puts` and `gets` count method entries, which is what lets a case say "the
-second request asked the store and not the network".
-"""
+"""In-memory `ImageBlobStore`, with no filesystem anywhere in it."""
 
 from usher.ports.images import (
     FetchedImage,

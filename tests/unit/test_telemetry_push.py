@@ -1,16 +1,4 @@
-"""PRD 10's metric catalogue for M5's push lane.
-
-**A metric that is documented and never emitted is a dashboard panel that
-is permanently empty, and nothing distinguishes that from a healthy zero.**
-M4 found three of PRD 10's rows in that state -- two gauges that did not
-exist, one emitted under a different name than documented -- so every case
-here drives the code that owns the instrument and reads the value back out
-of an `InMemoryMetricReader`. Asserting an instrument *exists* would pass
-against a `create_counter` nobody ever calls.
-
-The last case reads the names off the instruments themselves, so a rename in
-`src/` fails even if whoever renamed it also updated the case that drives it.
-"""
+"""PRD 10's metric catalogue for M5's push lane."""
 
 import sys
 import uuid

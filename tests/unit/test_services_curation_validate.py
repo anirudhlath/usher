@@ -1,41 +1,5 @@
-"""The validator -- everything standing between a model's output and a
-household's screen.
-
-[ADR-0028](../../docs/prd/decisions/0028-the-pool-is-the-contract.md) is the
-specification and this file is its case list. Three rules, and the middle one
-is the only defect this milestone found in production shape rather than by
-argument:
-
-1. Candidates are addressed by a **small integer index**, and the caller owns
-   the index -> UUID map. An index is bounds-checkable; a UUID or a `tt` id
-   merely denotes nothing, or worse, denotes a real film the household does
-   not own.
-2. The validator **coerces before it compares**.
-3. A generation that validates to **zero rows is a failure**, not an empty
-   success.
-
-**Why rule 2 is not a nicety:** measured against a local vLLM under
-`response_format: {"type": "json_object"}`, a model returned the *correct*
-identifiers as JSON **integers** where the schema asked for strings, on every
-one of 108. `id in set[str]` -- the obvious spelling -- drops 108 of 108.
-`str(id).strip() in set[str]` drops 0 of 108. What that ships as is a
-generation that called the model, got a good answer, wrote `llm_calls(ok =
-true)` with real tokens and a real cost, and left the household with no rows --
-byte-for-byte the state of a household whose model had nothing to say, because
-PRD 08's degradation table reads *"previous curated rows persist"*.
-`test_one_hundred_and_eight_integer_ids_all_survive_the_comparison` is that run,
-and it asserts the naive comparison's failure as its own premise so it cannot
-pass for the wrong reason.
-
-**What this file's fixtures deliberately refuse to hold constant.** Task 9
-found a real cross-household leak because every fixture minted a fresh
-`generation_id` per household, which made two different predicates equally
-selective. The analogue here is the handle map: if every fixture's pool were
-`{0: a, 1: b, 2: c}` then an off-by-one, an identity map and a positional
-`pool[i]` would all be invisible. So `HANDLES` is **sparse, shuffled, and does
-not start at zero**, its UUIDs sort in an order unrelated to its indices, and
-`test_the_handle_map_is_not_an_identity_map` fails if a later edit trivialises
-it.
+"""The validator -- everything standing between a model's output and a household's
+screen.
 """
 
 import uuid
@@ -81,13 +45,7 @@ def _title_id(tag: int) -> uuid.UUID:
     return uuid.UUID(f"00000000-0000-7000-8000-{tag:012x}")
 
 
-#: The pool one generation offered, as the index -> UUID map the caller owns.
-#:
-#: Sparse (no candidate at 0, 1, 2, 5, ...), not starting at zero, in an
-#: insertion order that is not its sorted order, and with UUIDs whose own
-#: ordering agrees with neither. Every one of those four properties kills a
-#: different wrong implementation, and
-#: `test_the_handle_map_is_not_an_identity_map` is what fails if one is lost.
+# : The pool one generation offered, as the index -> UUID map the caller owns.
 HANDLES: Mapping[int, uuid.UUID] = {
     11: _title_id(0x9C),
     4: _title_id(0x22),
@@ -641,36 +599,9 @@ def test_the_rejection_message_names_the_counts_it_is_written_for() -> None:
 def test_a_response_without_a_list_of_rows_is_rejected_and_counts_nothing(
     payload: dict[str, Any], expected: str
 ) -> None:
-    """`id="string"` is the one that is not obvious: a `str` is a `Sequence`,
-    so a validator that checked `isinstance(raw, Sequence)` would iterate
-    `"11"` one character at a time.
-
-    **The empty tally is the assertion with teeth, and the sweep is what
-    found that out.** Rejecting is *not* enough: the looser check still ends
-    in a `CurationRejected`, because each character fails to be an object and
-    the row count reaches zero anyway. What it also does is invent two
-    `row_unusable` drops out of a scalar and report *"no row survived
-    validation of 2 returned"* about a response that returned none. A
-    validator whose tally counts rows that never existed is one telling an
-    operator a number nobody can act on -- which is this file's whole subject
-    with the sign flipped. So: a response that carried no rows dropped
-    nothing.
-
-    **The message is pinned whole, not merely asserted truthy** -- `assert
-    outcome.error` cannot fail, because `CurationRejected.__post_init__`
-    refuses a falsy one, so planting `error=""` fails at the *construction*
-    line rather than at the assertion written to catch it. Whole rather than
-    by fragment because this string is `llm_calls.error` verbatim: the type
-    name is the diagnosis (a `dict` says the schema moved; a `str` says the
-    provider serialised twice), and `(NoneType)` twice over is the missing key
-    and the null being the same finding.
-
-    `id="empty"` is the **one** response for which *"nothing dropped"* is
-    true, and it is the only arm that reaches the second rejection at all --
-    `[]` is a list, so it passes the shape check and fails rule 3 instead.
-    Every other generation that reaches that sentence dropped something, which
-    is what `test_the_rejection_message_names_the_counts_it_is_written_for`
-    holds the other end of.
+    """`id="string"` is the one that is not obvious: a `str` is a `Sequence`, so a
+    validator that checked `isinstance(raw, Sequence)` would iterate `"11"` one
+    character at a time.
     """
     outcome = rejected(payload)
     assert outcome.error == expected

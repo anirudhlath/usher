@@ -1,10 +1,5 @@
-"""The shared contract against real Postgres, plus what a Python dict cannot
-express: JSONB.
-
-`FakeRawPayloadStore` hands back exactly the object it was given, so
-`test_a_payload_survives_nesting_and_nulls` proves the assertion is
-expressible and this run proves it survives a real serialise/deserialise
-round trip through a normalising column type.
+"""The shared contract against real Postgres, plus what a Python dict cannot express:
+JSONB.
 """
 
 import pytest

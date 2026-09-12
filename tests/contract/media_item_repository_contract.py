@@ -1,19 +1,4 @@
-"""Behaviour every `MediaItemRepository` implementation must satisfy.
-
-The same file runs against `FakeMediaItemRepository` (tests/unit, no Docker)
-and `PostgresMediaItemRepository` (tests/integration, real Postgres). The
-pair matters: the fake is dict-keyed on `(source_id, external_id)`, so a
-duplicate inside one batch is silently last-wins for it and raises
-`CardinalityViolationError` for the real one -- the case below is the only
-thing that catches an implementation missing its `DISTINCT ON`.
-
-Not a test module itself: `MediaItemRepositoryContract` deliberately does
-not start with `Test`, so pytest's default collection never instantiates it
-directly. Subclass it and provide five fixtures -- `repository`,
-`source_id`, `other_source_id`, `title_id`, and `episode_id` -- where all
-but the first must name rows that actually exist for an implementation with
-foreign keys.
-"""
+"""Behaviour every `MediaItemRepository` implementation must satisfy."""
 
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -796,26 +781,9 @@ class MediaItemRepositoryContract:
     async def test_list_for_title_puts_a_retracted_copy_last(
         self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
     ) -> None:
-        """An unordered read makes a detail screen shuffle its badges between
-        refreshes for no reason a user can see, and a bare `SELECT` promises
-        nothing about row order -- M4 measured exactly that against real
-        Postgres at three queue depths.
-
-        **The seeding is what gives this case teeth**, in three deliberate
-        ways, each of which a plainer version was measured to lack.
-
-        The retracted copy is the *fresher* of the two, so `available DESC`
-        is the only key that can put the available one first: with
-        `last_seen_at DESC` alone the answer reverses.
-
-        `stale` is stored **first**, so the answer disagrees with insertion
-        order -- which is what the fake returns with its sort deleted, and
-        what Postgres returns from a seq scan of a two-row table. Seeded the
-        other way round, a deleted `ORDER BY` is invisible to both.
-
-        And the surviving copy is re-upserted *after* the sweep, so its
-        `UPDATE` writes a new tuple past the retracted one's: physical order
-        and the answer disagree against Postgres too, not just in a dict.
+        """An unordered read makes a detail screen shuffle its badges between refreshes for
+        no reason a user can see, and a bare `SELECT` promises nothing about row order
+        -- M4 measured exactly that against real Postgres at three queue depths.
         """
         await repository.upsert_many(
             [item(source_id, "stale", title_id=title_id, last_seen_at=RUN_AT)]
@@ -857,32 +825,10 @@ class MediaItemRepositoryContract:
     async def test_list_for_title_breaks_ties_on_id(
         self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
     ) -> None:
-        """One walk stamps every row it sees with the run's own start instant,
-        so two copies of one film tie on `last_seen_at` in the common case
-        rather than the rare one, and the tiebreak is then the only thing
-        making the answer stable between two refreshes of one screen.
-
-        **`copy-a` is re-upserted last, and its `last_seen_at` has to
-        *change*.** Every id here is a UUIDv7 minted at insert time, so id
-        order and storage order agree for a run of plain inserts and a
-        missing tiebreak is unobservable. A trailing `UPDATE` is what
-        separates them -- but only a **non-HOT** one: Postgres keeps the
-        original index entry for an update that touches no indexed column, so
-        the read still arrives in the old order and the mutation survives.
-        Measured: re-upserting `copy-a` unchanged left `ORDER BY available
-        DESC, last_seen_at DESC` (no `id`) answering `[a, b, c]` -- already
-        sorted, already passing. Moving `last_seen_at` off `EARLIER` puts the
-        row in `ix_media_items_sweep`'s key, forces a new index entry, and
-        the same read answers `[b, c, a]`, which is heap order and is not id
-        order. Same family as
-        `test_two_copies_seen_in_the_same_walk_break_their_tie_on_the_external_id`,
-        one level deeper.
-
-        **It is unobservable for the fake either way**, which is a divergence
-        rather than an oversight: that fake mints its ids in insertion order
-        and its dict preserves that order across an update, so its id order
-        and its storage order are the same sequence and no seeding can
-        separate them. Only the Postgres run can fail this.
+        """One walk stamps every row it sees with the run's own start instant, so two
+        copies of one film tie on `last_seen_at` in the common case rather than the rare
+        one, and the tiebreak is then the only thing making the answer stable between
+        two refreshes of one screen.
         """
         await repository.upsert_many(
             [item(source_id, "copy-a", title_id=title_id, last_seen_at=EARLIER)]
@@ -942,26 +888,8 @@ class MediaItemRepositoryContract:
         episode_id: uuid.UUID,
     ) -> None:
         """`list_for_title`'s counterpart, for `POST /episodes/{id}/play` --
-        `list_for_title` carries `AND episode_id IS NULL`, which is exactly
-        what makes it useless for an episode's own copies.
-
-        **The episode row's own `title_id` deliberately names a *different*
-        series (`other_title_id`) than the one under test (`title_id`)
-        here.** An implementation that resolved the row by reading
-        `title_id` instead of `episode_id` -- whether by copying
-        `list_for_title`'s statement and renaming the bind parameter without
-        changing the column, or by re-deriving the episode's series and
-        filtering on that -- finds nothing for `other_title_id`, or finds
-        the wrong series' rows for `title_id`, rather than happening to pass
-        because both point at the same title.
-
-        **The sibling premise -- `list_for_title` on the series under test
-        still returns its own row and not the episode's -- is asserted in
-        the same case**, because each half alone is satisfied by a wrong
-        implementation: a version that filtered `list_for_episode` on
-        `episode_id` alone with the `episode_id IS NULL` exclusion missing
-        from `list_for_title` would pass the first assertion and fail only
-        the second.
+        `list_for_title` carries `AND episode_id IS NULL`, which is exactly what makes
+        it useless for an episode's own copies.
         """
         await repository.upsert_many(
             [
@@ -1273,28 +1201,7 @@ class MediaItemRepositoryRecentlyAddedContract:
         title_id: uuid.UUID,
         other_title_id: uuid.UUID,
     ) -> None:
-        """Two predicates, two failure shapes.
-
-        Without `title_id IS NOT NULL` the row carries items with nothing to
-        hydrate -- a card with no title, which the composer drops, so the row
-        silently arrives short rather than wrong.
-
-        Without `available` the row advertises files the nightly sweep
-        retracted. That is the opposite call from `owned_title_ids`, whose
-        comment argues *against* an availability predicate because "a copy
-        the nightly sweep retracted is still a copy you have" -- true of
-        *ownership*, false of *what arrived this week*. Two statements, two
-        answers, and the divergence is deliberate.
-
-        **Each predicate gets its own row, and that is what makes this case
-        two cases rather than one.** An earlier seeding retracted the
-        unmatched item along with everything else, so `available` excluded it
-        first and dropping `title_id IS NOT NULL` survived the whole suite --
-        measured. `DISTINCT ON (title_id)` groups every unmatched row under
-        one NULL key, so what the mutation produces is a single card with no
-        title, which the composer drops: the row arrives *short*, not wrong,
-        and only an assertion on the exact id list can see it.
-        """
+        """Two predicates, two failure shapes."""
         await repository.upsert_many(
             [
                 item(source_id, "kept", title_id=title_id, added_at=YESTERDAY),

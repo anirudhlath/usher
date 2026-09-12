@@ -1,9 +1,4 @@
-"""The suggest surface, against a stub index rather than a database.
-
-What is asserted here is the *shape*: one ranking per case in case order,
-empty rankings preserved, strata derived from the case and not re-joined.
-Driving the real `SearchService` is `tests/integration/`'s.
-"""
+"""The suggest surface, against a stub index rather than a database."""
 
 import uuid
 

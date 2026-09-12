@@ -1,26 +1,4 @@
-"""`usher schedule` and `usher schedule --once` (ADR-0046, M10's J4).
-
-**The `_dispatch` arm is the case this file exists for.** `_dispatch`'s `else`
-is `serve`, so a subcommand that parses and has no arm of its own does not
-fail -- it silently starts the HTTP server, and looks like it worked because
-the server does start. `tests/unit/test_cli_errors.py`'s CLI-wide boundary
-sweep cannot see that: it makes every dispatch coroutine *and* `uvicorn.run`
-raise the identical exception on purpose, which is exactly what makes the two
-arms indistinguishable there. `.claude/rules/config-cli-and-deployment.md`
-records it as a standing debt a new command owes.
-
-**Nothing here opens a connection, and since J5 that is a property rather than
-an accident.** `_schedule` now builds an engine -- the retention registration
-needs a session factory -- and `build_engine` connects to nothing, so every
-case below runs against an unreachable DSN and returns. A `_schedule` that
-opened a connection eagerly would fail all of them, which is what makes
-`create_app`'s own *"a lane connects to nothing at start"* property assertable
-for this command too.
-
-The registry these cases drive is a **substituted** one, because what they are
-about is `--once`'s arithmetic rather than which jobs a deployment runs; the
-real registry is `tests/unit/test_services_scheduler.py`'s subject.
-"""
+"""`usher schedule` and `usher schedule --once` (ADR-0046, M10's J4)."""
 
 from datetime import UTC, datetime, timedelta
 

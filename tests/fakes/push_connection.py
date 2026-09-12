@@ -1,40 +1,4 @@
-"""A push connection that really awaits, and a connector that hands them out.
-
-**Where this is more forgiving than the real thing, stated because M3's live
-run found 40 contract assertions passing against a write-back that had never
-once worked.** This fake performs *no handshake at all*: a wrong path, a
-missing `Upgrade` header, a proxy answering 404, a TLS failure and a
-subprotocol mismatch are every one of them invisible here. It never
-fragments a message, never sends a binary frame, never applies backpressure
-at `max_queue`, and its `aclose()` cannot fail. It has no notion of a close
-code, so "the peer went away cleanly" and "the peer went away abruptly" are
-the same event. And its `recv(timeout)` **ignores `timeout`'s effect
-entirely**: it raises `TimeoutError` the instant a test asks it to, where
-the real one raises only after that many seconds of real wall time. That
-last one is the load-bearing forgiveness -- it is what lets a staleness
-watchdog be tested on an injected clock in under a millisecond rather than
-in a minute and a half -- and it is why the *value* is recorded even though
-it is not honoured. Without `recv_timeouts` nothing here could catch a
-channel that passed the wrong timeout, or none at all, and the whole
-watchdog rests on `recv` returning control on a cadence the channel chose;
-`test_the_channel_polls_with_its_own_timeout` is the case that reads it.
-The real connection hands the same value to `asyncio.wait_for`, so a wrong
-one there is a lane that either spins or never runs its watchdog.
-
-What closes those gaps is a loopback test driving the real `websockets`
-client against a real `websockets` server on `127.0.0.1` -- a real
-handshake, a real ping/pong keepalive, a real abrupt close. The residual gap
-after that is Emby's own listener, and only M5's live verification closes
-it.
-
-**It does really await**, which is not decoration. A bare mock never
-suspends, so the event loop runs each task through its whole cycle before
-starting the next -- the same reason `tests/fakes/slow_transport.py` exists,
-where a deleted single-flight lock passed five runs in a row. `recv` awaits
-`asyncio.sleep(0)` before it inspects anything, so a consumer parked in the
-channel's own loop genuinely yields to a producer between frames, and a test
-can measure that the two overlapped rather than ran one after the other.
-"""
+"""A push connection that really awaits, and a connector that hands them out."""
 
 import asyncio
 from collections.abc import Sequence

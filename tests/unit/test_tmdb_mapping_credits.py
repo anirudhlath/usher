@@ -1,18 +1,4 @@
-"""`credits`, `created_by` and `belongs_to_collection` -> canonical state.
-
-The half of Task 10 that is pure: no database, no service, no clock. Every
-case is named for the wrong implementation it kills, and the two that matter
-most are the per-kind divergences -- a mapper that reads creators out of
-`credits.crew` returns nothing for **every series in the catalog**, silently,
-and a mapper that numbers cast by array index puts the whole crew above the
-star of the film in every "top billed" read.
-
-**Every payload here is invented and every id is in the reserved synthetic
-band** (>= 90,000,000 for TMDb, zero-filled ObjectIds for `credit_id`) --
-`tests/unit/test_no_third_party_data.py` scans this file, and a credits entry
-is a flat JSON object carrying `original_name`, which is exactly the shape
-`_TMDB_EXPORT_RECORD` matches.
-"""
+"""`credits`, `created_by` and `belongs_to_collection` -> canonical state."""
 
 import uuid
 from typing import Any

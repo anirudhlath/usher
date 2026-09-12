@@ -1,25 +1,4 @@
-"""The build is sequential, and that is a property of the session.
-
-**Why this file does not measure wall-clock overlap.** The repository's
-established instrument for "did these run concurrently" is measured
-intersection-over-union of the wall-clock windows -- `JobQueueContract` 76.2%,
-M5 group D 62.6%, group G 99.3-99.4%. Run the other way ("the windows must not
-overlap") it is stable rather than flaky, and it is still the weaker case:
-**`asyncio.gather` over coroutines that never suspend produces N disjoint
-windows**, so the assertion passes against the exact mutation it exists to kill
-unless every fake is forced to sleep -- at which point the case tests the
-fakes' sleeps.
-
-So the assertion is on the shared handle's **in-flight depth**, which is
-`AsyncSession`'s actual contract: one statement in flight at a time. No clock,
-no scheduler, no timeout, and `asyncio.gather` drives it to nine on the first
-pass.
-
-**And the recorder has its own control**, because a recorder whose `read` never
-suspends makes *every* implementation look sequential --
-`test_the_depth_recorder_can_see_a_gather_at_all` is what stops this whole file
-becoming a guard that cannot fail.
-"""
+"""The build is sequential, and that is a property of the session."""
 
 import ast
 import asyncio

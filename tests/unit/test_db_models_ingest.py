@@ -1,11 +1,4 @@
-"""M4's tables, checked against their domain models field-for-field.
-
-`Model.model_validate({c.name: getattr(row, c.name) ...})` under
-`extra="forbid"` is how every repository in this project converts a row, so
-a column with no field -- or a field with no column -- is a runtime failure
-in a repository rather than a type error anywhere. These tests are what
-turn that into a collection-time one.
-"""
+"""M4's tables, checked against their domain models field-for-field."""
 
 from typing import cast
 
@@ -195,12 +188,8 @@ def test_every_not_null_column_a_raw_insert_may_omit_has_a_server_default() -> N
         JobRow.__table__.c.created_at,
         JobRow.__table__.c.updated_at,
         SyncRunRow.__table__.c.status,
-        # This pins the **model's** default, which is the bulk-path rule
-        # above and nothing more. `m10b` needs the same default on its own
-        # `sa.Column` to add the column to a populated `sync_runs` at all,
-        # and that is a different object this case cannot reach --
-        # `test_m10b_gives_an_existing_sync_run_a_zero_position` is what
-        # covers it.
+        # This pins the **model's** default, which is the bulk-path rule above and
+        # nothing more.
         SyncRunRow.__table__.c.position,
         SyncRunRow.__table__.c.items_seen,
         SyncRunRow.__table__.c.items_matched,

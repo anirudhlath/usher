@@ -1,36 +1,6 @@
-"""D5 -- the leak pins ADR-0012 names and says nothing tests: an RFC 9457
-`detail`, `RowCache`, and the success body itself now that D3 has substituted
-a ticket for every source URL.
-
-**Every pin asserts the serializer ran before asserting the token is
-absent.** A response nothing built also carries no token, so each case below
-proves the surface under test actually produced output -- a 503 with a real
-`code` and a non-empty `detail`, a screen the cache actually cached, a body
-whose targets are real ticket URLs -- before it asks whether the token is in
-it. That ordering is the whole method (D5's own title), not decoration:
-`.claude/rules/mutation-sweeps.md:561`'s finding is *"a `sink == []` assertion
-is a false green wherever the fixture makes the logging impossible"*, and the
-same shape applies to every absence assertion in this file.
-
-**Every case uses a deliberately tiny URL, `https://e/a.mkv?api_key=tok-Zq7`.**
-ADR-0012 measured that loguru truncates a rendered value at ~128 characters,
-so a leak probe built on a realistic Emby URL passes whether or not the
-redaction or the substitution exists -- `tests/unit/test_ports_source.py`
-already keeps this discipline one layer down, over `StreamTarget.__repr__`
-directly; this file keeps it one layer up, over the whole response the API
-builds from one.
-
-**D1 measured that a ticket's plaintext *is* the URL**, so "the token is
-absent" here always means the *source* token (`TOKEN`, or the whole
-`DIRECT_URL`) -- never the ticket, which legitimately appears in the body and
-is the artifact the client is meant to hold.
-
-Two of ADR-0012's three named leak surfaces -- the telemetry attribute
-(including `HTTPXClientInstrumentor`'s `url.full`) and the log sink -- need a
-*real* outbound call to be a meaningful pin rather than a vacuous one (no fake
-adapter ever makes one), so they live in
-`tests/integration/test_playback_leaks.py` against the real `EmbyAdapter`
-instead of here.
+"""D5 -- the leak pins ADR-0012 names and says nothing tests: an RFC 9457 `detail`,
+`RowCache`, and the success body itself now that D3 has substituted a ticket for
+every source URL.
 """
 
 import ast
@@ -223,12 +193,9 @@ def app(household: _Household, settings: Settings) -> FastAPI:
     built.dependency_overrides[get_row_provider_settings_repository] = (
         FakeRowProviderSettingsRepository
     )
-    # M9 F3: the two `/play` routes attribute PRD 10's `played` to the search
-    # a client came from, so both routes now resolve a household and a
-    # `search_queries` repository. Faked here for this file's reason -- there
-    # is no database -- and neither is a subject of the leak sweep: nothing
-    # this file drives sends a `?search_id=` at all, so the writes never fire
-    # and the overrides exist only to keep the dependency graph resolvable.
+    # M9 F3: the two `/play` routes attribute PRD 10's `played` to the search a client
+    # came from, so both routes now resolve a household and a `search_queries`
+    # repository.
     built.dependency_overrides[get_default_user_id] = lambda: USER.id
     built.dependency_overrides[get_search_query_repository] = FakeSearchQueryRepository
     return built

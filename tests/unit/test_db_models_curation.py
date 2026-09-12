@@ -1,25 +1,5 @@
-"""The 1:1 correspondence rule for M8's two tables, and the five schema
-decisions their column lists do not show.
-
-Unit, no Postgres. STANDING CONSTRAINT (`db/models/title.py`, point 1;
-restated in `domain/episode.py` and `domain/people.py`): each model's field
-set and its row's column set stay in exact 1:1 correspondence by name. Every
-repository in this project reads through a `SELECT *` into an
-`extra="forbid"` model, so this is the *precondition* for that read shape
-rather than a style rule.
-
-Spelled as a plain `columns == fields` rather than `titles`'
-`columns - DERIVED_COLUMNS == fields`, because neither of these tables has a
-derived column — and for `curated_rows` that is a *consequence of the
-`card_title_ids` shape decision* rather than a coincidence. A child table
-would have taken the ordering off the row, left `curated_rows` with nine
-columns against ten fields, and made this assertion unspellable in the house
-form. See `db/models/curation.py`'s module docstring.
-
-The rest of this file pins the declarations, which is the layer where
-`compare_metadata` is blind: it does not diff a CHECK body, a partial index
-predicate, or a btree's key direction, so a "tidying" edit to any of them is
-a code change with no migration and nothing else in the suite to see it.
+"""The 1:1 correspondence rule for M8's two tables, and the five schema decisions their
+column lists do not show.
 """
 
 from typing import cast
@@ -107,28 +87,8 @@ def test_card_title_ids_is_an_ordered_uuid_array_and_not_text() -> None:
 
 
 def test_cost_usd_is_numeric_with_a_scale_that_cannot_round_a_cheap_call_away() -> None:
-    """`Float` is the wrong implementation this kills, and a too-small scale
-    is the subtler one.
-
-    Measured on `pgvector/pgvector:pg17` against the exact values this column
-    receives: at scale 4, `$0.02/Mtok x 200 tokens` stores as `0.0000` — a
-    whole class of cheap calls reads as free, which is the
-    `1 / (60 + rank)` integer-division failure wearing a currency. At scale 8
-    the same value is `0.00000400` and PRD 10's own worked example
-    (`$3/Mtok x 1,200 in` + `$15/Mtok x 340 out`) round-trips as exactly
-    `0.0087`. The full argument, including what the eighth place still costs,
-    is in `db/models/curation.py`.
-
-    **Why the eighth place specifically**, since `0.0036` and `0.0087` both
-    stop at the fourth and exhibit nothing about it: a price quoted in cents
-    per million tokens, times an integer token count, divided by 1e6, reaches
-    `decimals(price) + 6`. The extreme this column must hold is
-    `Decimal("0.02") * 1 / 1_000_000`, which is exactly `0.00000002` — eight
-    places, and `0.000000` at scale 6. That is stated here rather than
-    asserted because it is a property of stdlib `decimal` and touches no
-    usher code; where it is genuinely exercised is the round trip through
-    Postgres in `tests/integration/test_curation_schema.py::
-    test_a_sub_cent_cost_round_trips_exactly_as_a_decimal`.
+    """`Float` is the wrong implementation this kills, and a too-small scale is the subtler
+    one.
     """
     column_type = LLMCallRow.__table__.c.cost_usd.type
     assert isinstance(column_type, Numeric)
@@ -242,28 +202,7 @@ def test_the_curated_read_index_leads_with_user_id_and_descends_generated_at() -
 
 
 def test_llm_calls_ships_the_two_indexes_m08a_wrote_down_and_no_others() -> None:
-    """A refusal discharged, asserted so it stays a decision.
-
-    `m08a` shipped this table with its primary key and nothing else, wrote the
-    two indexes that would be right into its own docstring, and asked that
-    they arrive *"with a measurement against a real ledger rather than against
-    this paragraph"*. `m10c` lands exactly those two, and the measurement is
-    **0 rows / 16 kB** on the deployment (read-only, 2026-08-26) plus one row
-    per generation per household per night — a write cost bounded by the
-    curation cadence.
-
-    **And their reader is Grafana rather than `src/`**: the cost-anomaly
-    alert's own `WHERE at >= :since` is what `ix_llm_calls_at` serves, which
-    `tests/integration/test_cost_anomaly_query.py` asserts against a real
-    plan. The port carries an append and no read, pinned as an exact set by
-    `tests/unit/test_ports.py`'s parametrised entry.
-
-    A whole-set comparison, not "the two named ones are present": what this
-    guards is a *third* index added on the strength of a sentence, and such an
-    index has no name to check for. `purpose` and `model` are the two most
-    likely, and both are refused in the model's own comment -- a deployment
-    holds one or two values of each.
-    """
+    """A refusal discharged, asserted so it stays a decision."""
     assert {index.name for index in cast(Table, LLMCallRow.__table__).indexes} == {
         "ix_llm_calls_at",
         "ix_llm_calls_generation_id",

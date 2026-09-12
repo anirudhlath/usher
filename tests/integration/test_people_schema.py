@@ -1,10 +1,4 @@
-"""Everything about these three tables that only real Postgres can answer.
-
-Asserted off the catalog (`pg_constraint`, `pg_indexes`) rather than off
-`Base.metadata`, following tests/integration/test_search_schema.py: metadata
-is what we asked for and the catalog is what we got, and the two are exactly
-what a migration can disagree about.
-"""
+"""Everything about these three tables that only real Postgres can answer."""
 
 import uuid
 

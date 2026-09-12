@@ -1,29 +1,5 @@
-"""`WatchStateSyncService` against real Postgres, for the three things its
-port fakes structurally cannot express.
-
-1. **The `COALESCE`, one batch wide.** `FakeWatchStateRepository` spells the
-   rule as `value if value is not None else stored`, which is naturally
-   right and cannot fail. In SQL it is not: `watch_states.play_count` is
-   `NOT NULL`, so the natural one-statement merge collapses the absent count
-   to `0` *before* the conflict clause can read it and writes that zero over
-   real history -- measured at 7 -> 0. The unit suite would ratify it. Here a
-   batch carries four absent counts and one reported zero through one
-   `merge_from_source`, which is the shape a walk actually produces and the
-   only shape that shows the distinction is per row rather than per
-   statement.
-2. **`backfill_one`'s `observed_at`.** The fake stores `observed_at` as
-   `updated_at`; Postgres has a `BEFORE UPDATE` trigger that overwrites it
-   with the write instant. So against the fake a backfill carrying a stale
-   instant is accepted and the case passes; against Postgres the conflict
-   rule refuses it, the play count never lands, and the row keeps matching
-   `played AND play_count = 0` forever. The row below is inserted with
-   `clock_timestamp()` -- through raw SQL, because the trigger is `BEFORE
-   UPDATE` and an `INSERT` is the only way to give the column a value of
-   one's own -- which is exactly the state a production walk leaves behind.
-3. **Foreign keys.** An episode's watch state has to name a real `episodes`
-   row, and `watch_states` has a `num_nonnulls(title_id, episode_id) = 1`
-   CHECK. A dict has neither, so "the episode wins over its series' title"
-   is a preference there and a constraint here.
+"""`WatchStateSyncService` against real Postgres, for the three things its port fakes
+structurally cannot express.
 """
 
 import dataclasses
@@ -55,13 +31,7 @@ from usher.services.watch_sync import WatchStateSyncService
 
 RUN_AT = datetime(2026, 7, 31, 3, 0, tzinfo=UTC)
 LAST_PLAYED = datetime(2026, 6, 30, 21, 14, tzinfo=UTC)
-# What the fake adapter records as an item's change instant, and why it is
-# absurd. A second `sync` resumes from the first's `started_at`, which is a
-# wall-clock instant taken during the test -- so anything seeded with a
-# plausible date is filtered out of the second walk by the adapter's own
-# `changed_at < since` rule, exactly as `MinDateLastSavedForUser` would.
-# Same device `tests/unit/test_services_reconcile.py` uses, for the same
-# reason.
+# What the fake adapter records as an item's change instant, and why it is absurd.
 CHANGED_AT = datetime(2099, 1, 1, tzinfo=UTC)
 
 

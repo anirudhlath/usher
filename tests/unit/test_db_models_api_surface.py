@@ -1,18 +1,4 @@
-"""`m09a`'s four rows, as declarations.
-
-`tests/integration/test_api_surface_schema.py` owns what Postgres does with
-them; this file owns what the models say, which is the half that needs no
-Docker and where a later reader "tidying" a nullable column or a column type
-is a code change rather than a migration. Same split
-`test_db_models.py`/`test_search_schema.py` already make.
-
-Three of these four still have no domain twin, and the fourth stopped being an
-exception when `m09c` landed: `Image` exists, and its 1:1 correspondence with
-`ImageRow` is asserted in `tests/unit/test_domain_image.py` rather than here,
-because `test_title_and_title_row_have_matching_field_sets` is scoped to
-`TitleRow`/`Title` only. `SearchQuery`, `RowProviderSetting` and
-`TitleSearchName` are still deliberately absent.
-"""
+"""`m09a`'s four rows, as declarations."""
 
 from typing import cast
 

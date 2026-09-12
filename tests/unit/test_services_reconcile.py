@@ -1,33 +1,4 @@
-"""The reconcile lane, against port fakes and `FakeSourceAdapter`.
-
-The three cases that matter are the three failure paths. A reconciler that
-sweeps after a failed walk is the one bug the whole `list_items` contract
-exists to prevent, restored one layer up.
-
-**`test_a_walk_that_raises_sweeps_nothing` is built so the sweep guard cannot
-rescue it, and that is the whole point of its shape.** Both shapes were run
-against the mutation (the sweep moved into a `finally:`) and both fail, but
-for different reasons, and only one of them is about the hazard:
-
-- *The plan's shape* -- seven items, fail the second walk after three, one
-  batch -- writes **nothing** before the failure, so the sweep would retract
-  7 of 7. That is 100%, the ADR-0015 ceiling refuses it, and
-  `AvailabilitySweepRefused` then escapes the `finally:` and propagates out
-  of `reconcile` entirely. The case fails on an uncaught exception rather
-  than on its own assertion, and it fails only because the guard's arithmetic
-  happened to fire. It never exercises a sweep that *succeeds* after a failed
-  walk.
-- *The shape below* flushes eight of ten items first, so a `finally:` sweep
-  retracts exactly two healthy rows -- 20%, under the ceiling, no refusal, no
-  exception, a run that merely reports `FAILED` while two available items
-  quietly became unavailable. That is what a real mid-walk network failure
-  looks like against a library big enough to need batching, and the case
-  fails on `m8 was retracted by a walk that failed`, which is the assertion
-  it was written to make.
-
-The guard is not a second line of defence for this. It fires on a *fraction*,
-so it catches the catastrophe and misses the quiet one.
-"""
+"""The reconcile lane, against port fakes and `FakeSourceAdapter`."""
 
 import uuid
 from collections.abc import Iterator
@@ -69,12 +40,7 @@ from usher.services.reconcile import (
 )
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
-# After every run's `started_at`, which defaults to `now()`. A "changed
-# since the last completed run" fixture has to be later than a wall-clock
-# instant taken during the test, so it is a date rather than a plausible
-# one -- `FakeSourceAdapter` filters `changed_at < since` exactly as Emby's
-# `MinDateLastSaved` does, and a nominally-recent 2026-07-30 is *before* the
-# run that just started and would be filtered out of every delta below.
+# After every run's `started_at`, which defaults to `now()`.
 LATER = datetime(2099, 1, 1, tzinfo=UTC)
 
 
@@ -480,12 +446,10 @@ async def test_a_delta_walk_under_the_ceiling_still_never_sweeps() -> None:
         assert stored.available is True, f"m{index} was retracted by a delta walk"
 
 
-# -- the gap-closer's ceiling (M10 S6) --------------------------------------
-#
-# "Ceiling" is overloaded in this file and the two are unrelated: ADR-0015's
-# is a *fraction* of a source's rows and gates the availability sweep; this
-# one is a count of *items* and gates the walk. Every name below says "gap
-# ceiling" for that reason.
+# -- the gap-closer's ceiling (M10 S6) -------------------------------------- "Ceiling"
+# is overloaded in this file and the two are unrelated: ADR-0015's is a *fraction* of a
+# source's rows and gates the availability sweep; this one is a count of *items* and
+# gates the walk.
 
 
 async def test_a_delta_an_operator_asked_for_is_not_bounded_by_the_gap_closers_ceiling() -> None:
@@ -589,28 +553,8 @@ async def test_a_walk_stopped_at_the_gap_ceiling_keeps_every_batch_it_committed(
 
 
 async def test_a_walk_stopped_at_the_gap_ceiling_sweeps_nothing() -> None:
-    """A truncated walk must not reach the availability sweep: it has rows it
-    never looked at, and the sweep retracts exactly those.
-
-    Reachable only by passing `max_items` alongside `FULL`, which nothing in
-    `src/` does -- the argument is the lane's opt-in and the lane only ever
-    asks for a delta. Pinned anyway, because "the caller happens not to" is
-    not a property, and the same branch is what makes the ceiling's `FAILED`
-    row honest.
-
-    🔴 **The arithmetic is chosen so ADR-0015's guard cannot rescue the
-    case, and the first version of it was rescued.** This is the trap this
-    module's own docstring records for `test_a_walk_that_raises_sweeps_nothing`,
-    arriving one branch over and caught by the sweep rather than by review:
-    written as 20 items bounded at **7**, the sweep would retract 13 of 20 --
-    65%, over `max_retract_fraction`'s 0.25 -- so `AvailabilitySweepRefused`
-    fires, `reconcile`'s own handler records *that* as the run's failure,
-    nothing is retracted, and every assertion below passes against a
-    reconciler that sweeps after a bounded walk. Measured: the plant
-    (`_sweep` called in the truncated branch) **SURVIVED the whole suite** in
-    that shape. At a ceiling of **16** the unseen four are 20% -- under the
-    ceiling -- so the sweep succeeds, retracts four healthy rows, and the
-    case fails on the assertion it was written to make.
+    """A truncated walk must not reach the availability sweep: it has rows it never looked
+    at, and the sweep retracts exactly those.
     """
     fixture = _Fixture(batch_size=3)
     for index in range(20):
@@ -983,37 +927,7 @@ async def test_a_transport_failure_carries_no_error_code() -> None:
 
 
 def test_the_two_error_codes_are_pinned_by_value_because_they_are_wire_artefacts() -> None:
-    """These strings leave the process, so no in-repo reader can guard them.
-
-    🔴 **Found 2026-08-19 by S9's own positive control failing to be one.** The
-    control changed `RETRACTION_ERROR_CODE`'s value and expected a kill; it
-    survived, because *every* reader imports the constant -- the service that
-    writes it, the CLI that matches it, and the case that asserts it all moved
-    together. Re-measured against `CEILING_ERROR_CODE`, shipped one token
-    earlier by S6: `grep gap_delta_ceiling` over `src/`, `tests/`, `docs/` and
-    `.claude/` returns **exactly one line**, its own definition. So neither
-    value was pinned by anything, and S9 inherited the hole by copying the
-    precedent.
-
-    **They are not internal names.** Both are values of `sync_runs.error_code`,
-    a durable column that outlives this process, and `CEILING_ERROR_CODE`'s own
-    comment states the purpose: *"a dashboard, an alert rule, or the next
-    reader of this file has to be able to tell the two apart without parsing
-    English"*. A consumer keying on one is outside this repository by
-    construction, exactly like a metric name in PRD 10's catalogue -- which is
-    pinned by literal for the same reason.
-
-    So the literal is the assertion, and this is the one place in the project
-    where changing one of these strings is supposed to be inconvenient: a
-    rename is a breaking change to an artefact somebody may be alerting on, and
-    it should cost a deliberate edit here rather than passing silently.
-
-    They must also be **distinct**, which is the whole point of having two: a
-    bounded walk and a refused sweep both land in this column and an operator
-    acts on them differently. Compared by equality, not by prefix -- the kind
-    is its own column now, so there is no sentence for one value to shadow the
-    other in.
-    """
+    """These strings leave the process, so no in-repo reader can guard them."""
     assert CEILING_ERROR_CODE == "gap_delta_ceiling"
     assert RETRACTION_ERROR_CODE == "availability_ceiling"
     assert CEILING_ERROR_CODE != RETRACTION_ERROR_CODE

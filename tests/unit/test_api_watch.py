@@ -1,19 +1,4 @@
-"""PRD 07's four watch actions, over the shipped wiring and port fakes.
-
-**`get_watch_write_service` is deliberately *not* overridden.** What is
-replaced is the five ports underneath it and the request's session; the
-service, its ordering, the cache it reaches and the queue it writes to are the
-shipped ones. A stubbed service would replace the whole of what this task
-built with a lambda, and the two routes that share `_set_played` would then be
-tested against a double that cannot tell them apart.
-
-**The session is a recorder rather than a database.** `get_session` is the
-request's commit boundary and `get_watch_write_service` passes `session.commit`
-to the service, so a case here can watch the commit happen *before* the frames
-are published -- the ADR-0033 ordering -- without a container.
-`tests/integration/test_watch_routes.py` is what runs the same claims against
-real Postgres, where the commit is the thing a second connection can see.
-"""
+"""PRD 07's four watch actions, over the shipped wiring and port fakes."""
 
 import ast
 import inspect
@@ -479,17 +464,8 @@ async def test_all_four_routes_are_in_the_openapi_document_with_real_shapes(
     ):
         operation = paths[path][method]
         assert set(operation["responses"]) >= {"200", "404", "422"}, (path, method)
-        # The two media types differ on purpose and that is the assertion:
-        # **one operation, two media types**. The 404 is `PROBLEM_MEDIA_TYPE`
-        # and the 200 is this route's own body at `application/json`, which is
-        # the branch a generated client makes before it parses anything -- and
-        # it is the one thing about a problem document that cannot be recovered
-        # from the `type` member, since reaching `type` means having already
-        # decided. It was `application/json` on both until issue #6 was taken
-        # -- FastAPI renders a `{"model": ProblemResponse}` declaration under
-        # the *route's* response media type -- and `api/app.py`'s
-        # `UsherAPI.openapi` corrects it in a post-pass. This assertion and its
-        # twin in `test_api_playback.py` are the fork M9's H2 named as the cost.
+        # The two media types differ on purpose and that is the assertion: **one
+        # operation, two media types**.
         schema = operation["responses"]["404"]["content"][PROBLEM_MEDIA_TYPE]["schema"]
         assert schema["$ref"].endswith("ProblemResponse"), (path, method)
         assert "application/json" not in operation["responses"]["404"]["content"], (path, method)

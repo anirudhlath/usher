@@ -1,40 +1,4 @@
-"""K5's arm 1, compressed into one case: back it up, lose it, rebuild, restore.
-
-`test_restore.py` next door owns the *refusals* -- a stale stamp, an unknown
-table, a truncated row, a reference the target does not hold -- and each of
-those hand-builds the artifact so it can plant something a writer never emits.
-This file owns the other half: **the whole loop, end to end, with the real
-writer and the real reader, across a bootstrap boundary.** It is the drill
-K5 runs against a scratch container, reduced to what fits inside the suite's
-own `postgres_url` fixture.
-
-**Deliberately a truncate-and-rebuild rather than a drop-and-rebuild.** The
-`session` fixture is a connection-bound transaction that is rolled back, so a
-case that re-ran `alembic upgrade head` inside it would be testing the fixture
-rather than the restore -- and the real drop/`upgrade head`/rebuild shape is
-what the scratch-container run in `/var/tmp/m10-K5/` does, where a mistake
-costs a container rather than a session. What survives the compression is the
-thing the drill exists to prove: **no title id survives the rebuild, and the
-precious rows land anyway.**
-
-## The two orderings this case pins, because both were found by running it
-
-1. **Restore, then walk, then restore.** `media_items` is the manifest's one
-   `PARTIAL` entry and its merge writes links onto rows that must already be
-   there -- but those rows need a `sources` row, and `sources` is *precious*,
-   so the artifact is what brings it. A single restore into a freshly rebuilt
-   deployment therefore reports every `media_items` link **skipped**, which
-   `_merge_media_item_links` already calls *"an artifact that is ahead of the
-   walk"*. The links land on the second run, after `usher sync` has recreated
-   the rows.
-2. **Do not re-add the source by hand first.** `_merge_sources` refuses a name
-   a *different* source id already holds, so an operator who recreates their
-   Emby source through the admin route before restoring gets a refused file --
-   the source id is minted fresh and the name collides. That is asserted in
-   `test_restore.py::test_a_second_source_under_the_same_name_is_refused_rather_than_inserted`;
-   what this file adds is that the *ordinary recovery sequence* walks into it,
-   which is why the runbook says restore first.
-"""
+"""K5's arm 1, compressed into one case: back it up, lose it, rebuild, restore."""
 
 import uuid
 from collections.abc import Mapping
@@ -85,28 +49,7 @@ STAMP = datetime(2026, 8, 25, 14, 30, tzinfo=UTC)
 async def test_a_backup_of_a_seeded_household_restores_into_a_rebuilt_catalog(
     session: AsyncSession, tmp_path: Path
 ) -> None:
-    """🔴 **Every title id moves and every precious row comes back.**
-
-    The premise is asserted before the conclusion: after the rebuild the
-    catalog holds the same `imdb_id`s under **different** ids, so a restore
-    that copied raw ids would resolve nothing and the natural-key ladder is the
-    only thing that can put the watch states back on the right rows.
-
-    **The positive control is not optional here**, because the headline
-    assertion -- *the ids differ from the ones backed up* -- is also satisfied
-    by a restore that wrote nothing at all: an empty set differs from a
-    non-empty one. So the case asserts the restored targets are *exactly* the
-    re-minted ids, that the report committed, and that it wrote more than the
-    four rows the plan named as the floor. Any one of those alone would pass
-    for the wrong reason; together they cannot.
-
-    The unkeyed title is the interesting fixture. It carries no `imdb_id` and
-    no `tmdb_id`, so K2's ladder has only its raw UUID to offer -- and this
-    case **keeps that title's id across the rebuild**, which is what a
-    same-database recovery looks like and is the only state in which that rung
-    can resolve at all. A rebuild that re-minted it too would refuse the whole
-    file, and K5's arm 2 measures exactly that happening on the real artifact.
-    """
+    """🔴 **Every title id moves and every precious row comes back.**"""
     await _truncate_the_precious_tables(session)
     catalog = await _seed_the_catalog(session)
     await _seed_the_precious_rows(session, catalog)
@@ -147,12 +90,9 @@ async def test_a_backup_of_a_seeded_household_restores_into_a_rebuilt_catalog(
         row_provider_settings=1,
         search_queries=1,
     ), report.written
-    # `media_items` is 0 written and 2 **absent**, not 2 "already present":
-    # the links are carried, the rows they belong to were truncated with the
-    # source, and `usher sync` has not run yet. Ordering 1 in this module's
-    # docstring -- and the reason `absent` exists as a bucket of its own since
-    # 2026-08-25, because this run is the one that printed
-    # `10,515 already present` against a table holding zero rows.
+    # `media_items` is 0 written and 2 **absent**, not 2 "already present": the links
+    # are carried, the rows they belong to were truncated with the source, and `usher
+    # sync` has not run yet.
     assert report.absent == _tally(media_items=2), report.absent
     assert report.present == _tally(), report.present
 

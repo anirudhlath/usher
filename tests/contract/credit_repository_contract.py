@@ -1,34 +1,4 @@
-"""Behaviour every `CreditRepository` implementation must satisfy.
-
-The port's central decision is that a title's credit set is **replaced**, not
-merged: a credit removed upstream is the one change an upsert cannot express,
-and it is the one that leaves a permanently wrong row. Five of the eleven
-cases below are about that, from five directions.
-
-**Every case names the wrong implementation it rules out.** A test whose
-docstring cannot name what it kills is a test that kills nothing.
-
-Subclass and provide `repository`, `titles`, `lead_person`, `second_person`,
-`third_person`, `other_person`, `title_id` and `other_title_id`. Every id must
-name a row that exists, for an implementation with foreign keys.
-
-`titles` is a `TitleRepository` over the *same* store, because
-`replace_for_titles` writes `titles.credit_names` as well as `credits` and
-`credit_names_for` is the only port-level read of it. Without that fixture the
-property that the two never disagree is assertable only against raw SQL on one
-side and a fake's private dict on the other -- two assertions about two
-implementations rather than one about the contract.
-
-`search_names` is a `SearchNameProbe`, and it is a *test-side* surface rather
-than a third repository fixture on purpose. `replace_for_titles` writes the
-`person` half of `title_search_names` as its third destination, and **no port
-reads that table**: the two-tier suggest reads it through `SuggestIndex`, and a
-`CreditRepository` read added here for the contract's benefit would be exactly
-the *"port method whose only test is its own test"* `PersonRepository`'s
-docstring refuses. So each arm supplies the read its own storage allows -- raw
-SQL against the real table, a dict for the fake -- and the contract states the
-property once over both.
-"""
+"""Behaviour every `CreditRepository` implementation must satisfy."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -37,12 +7,8 @@ from usher.domain.ids import new_id
 from usher.domain.people import Credit, CreditKind, CreditSource
 from usher.ports.repository import CreditRepository, TitleRepository
 
-# A sentinel, because `None` is a **meaningful** value for `tmdb_credit_id`
-# and the obvious `changes.pop("tmdb_credit_id", None) or <fresh>` collapses
-# the two. Measured: written that way,
-# `test_two_credits_with_no_provider_id_both_survive_one_batch` silently
-# seeded two *generated* ids and was vacuous -- it passed against the
-# `DISTINCT ON (tmdb_credit_id)`-with-no-COALESCE defect it exists to kill.
+# A sentinel, because `None` is a **meaningful** value for `tmdb_credit_id` and the
+# obvious `changes.pop("tmdb_credit_id", None) or <fresh>` collapses the two.
 _UNSET = object()
 
 

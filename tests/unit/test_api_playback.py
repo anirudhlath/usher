@@ -1,28 +1,4 @@
-"""The two `/play` routes and `GET /stream/{ticket}`, over port fakes.
-
-**Six providers are overridden and `get_playback_service` is not**, which is
-the whole design of this file. The service, the mint closure, the ticket
-cipher, `request.url_for`, `quote(ticket, safe="=")` and the redeem route's
-own path are all the shipped ones -- what is replaced is only the five ports
-underneath (`media_items`, `sources`, `credentials`, the adapter factory, and
-the two existence reads). So a case that mints a ticket and then follows it is
-exercising the real round trip rather than a stub of one, without a database
-or a socket anywhere.
-
-Three things here are load-bearing rather than incidental:
-
-- **The token is short and distinctive.** `TOKEN` is seven characters, for the
-  reason ADR-0012 records: loguru and pytest both truncate a rendered value
-  at ~128 characters, and a realistic Emby direct URL is long enough that its
-  trailing `api_key` falls off the end -- so a leak assertion built on a real
-  URL passes whether or not the leak exists.
-- **Every absence assertion has a positive control beside it.** A route that
-  returned nothing at all also has no token in its output; the cases below
-  assert what *is* there first.
-- **The expiry case asserts the header is absent**, not that it holds some
-  other value. A `Location` carrying the empty string is a redirect a client
-  follows to the current path.
-"""
+"""The two `/play` routes and `GET /stream/{ticket}`, over port fakes."""
 
 import re
 import uuid
@@ -1017,21 +993,10 @@ async def test_all_three_routes_are_in_the_openapi_document_with_real_shapes(
         schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
         assert schema["$ref"].endswith("/PlayResponse"), path
         assert set(operation["responses"]) >= {"200", "404", "409", "422", "503"}, path
-        # `PROBLEM_MEDIA_TYPE`, and it was `application/json` until issue #6
-        # was taken: FastAPI renders a `{"model": ProblemResponse}` declaration
-        # under the *route's* response media type and offers no per-response
-        # override, so the document described a right shape under a wrong name.
-        # `api/app.py`'s `UsherAPI.openapi` corrects it in a post-pass, keyed
-        # off the schema rather than the status -- so a status added to
-        # `_PLAY_FAILURES` later needs no edit here.
-        #
-        # This assertion -- with its twin in `test_api_watch.py` -- is the fork
-        # M9's H2 named as the cost of the fix, and one operation carrying two
-        # media types is the whole point of paying it: the 200 is this route's
-        # own body at `application/json`, every failure is a problem document.
-        # Kept spelled out here rather than deferred to
-        # `tests/unit/test_api_openapi.py`'s enumeration, because a route's own
-        # file is where a client's generator would be read from.
+        # `PROBLEM_MEDIA_TYPE`, and it was `application/json` until issue #6 was taken:
+        # FastAPI renders a `{"model": ProblemResponse}` declaration under the *route's*
+        # response media type and offers no per-response override, so the document
+        # described a right shape under a wrong name.
         for failure in ("404", "409", "503"):
             failed = operation["responses"][failure]["content"][PROBLEM_MEDIA_TYPE]["schema"]
             assert failed["$ref"].endswith("/ProblemResponse"), (path, failure)

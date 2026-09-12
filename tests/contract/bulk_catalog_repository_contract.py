@@ -1,28 +1,4 @@
-"""Behaviour every `BulkCatalogRepository` implementation must satisfy.
-
-Run against `FakeBulkCatalogRepository` (tests/unit, no Docker) and
-`PostgresBulkCatalogRepository` (tests/integration, real Postgres) — the same
-technique tests/contract/title_repository_contract.py uses, and for the same
-reason: two implementations with matching signatures are not interchangeable
-until the same assertions pass against both.
-
-Not a test module itself: the class deliberately does not start with `Test`,
-so pytest never tries to collect it without a `repo` fixture.
-
-**Transaction/commit ownership is out of scope here, deliberately.** The
-port's docstring promises these methods flush and never commit, and that a
-batch and its checkpoint commit together (`usher.ports.repository
-.BulkCatalogRepository`) — this suite cannot observe either, because the
-in-memory fake has no transaction concept at all to get right or wrong, and
-asserting real commit/rollback behaviour needs a live Postgres session
-outside this shared module's fixture (`repo: BulkCatalogRepository`, not
-`session: AsyncSession`). That is a `tests/integration`-only concern for
-whichever suite constructs `PostgresBulkCatalogRepository` directly. Treat
-this suite's silence on transaction boundaries as "unverified", not as
-"verified fine" — a real, shipped divergence here (a `bulk_load_window`
-that commits the caller's own pending batch) passed all 15 tests that
-existed before this docstring paragraph was added.
-"""
+"""Behaviour every `BulkCatalogRepository` implementation must satisfy."""
 
 import dataclasses
 import uuid
@@ -533,12 +509,6 @@ class BulkCatalogRepositoryContract:
         assert await self.tvdb_id_of(repo, "tt99000130") is None
 
     # Inert on the fake arm, which has no `pg_class` to describe anything.
-    # On the Postgres arm `bulk_load_window` really does `DROP INDEX` and
-    # `CREATE INDEX`, and **`CREATE INDEX` writes the heap's `reltuples`
-    # in place exactly as `ANALYZE` does** -- so the rebuild leaves `titles`
-    # described as holding the rows this transaction is about to roll back.
-    # Measured: 5 rows / 1 page against a `count(*)` of 0. A grep for
-    # `ANALYZE` could never have found this one (#79).
     @pytest.mark.leaks_statistics("titles")
     async def test_bulk_load_window_is_reentrant_and_transparent(
         self, repo: BulkCatalogRepository
@@ -553,12 +523,6 @@ class BulkCatalogRepositoryContract:
         assert await repo.count_titles() == 2
 
     # Inert on the fake arm, which has no `pg_class` to describe anything.
-    # On the Postgres arm `bulk_load_window` really does `DROP INDEX` and
-    # `CREATE INDEX`, and **`CREATE INDEX` writes the heap's `reltuples`
-    # in place exactly as `ANALYZE` does** -- so the rebuild leaves `titles`
-    # described as holding the rows this transaction is about to roll back.
-    # Measured: 5 rows / 1 page against a `count(*)` of 0. A grep for
-    # `ANALYZE` could never have found this one (#79).
     @pytest.mark.leaks_statistics("titles")
     async def test_bulk_load_window_restores_on_an_exception(
         self, repo: BulkCatalogRepository
@@ -1233,31 +1197,10 @@ class BulkCatalogRepositoryContract:
         assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == ()
 
     async def test_the_fold_is_lower_and_not_casefold(self, repo: BulkCatalogRepository) -> None:
-        """**The measurement this write was taken with is not the rule this
-        write applies, and one character in the dump can tell them apart.**
-        T3 and T5 measured the alias population with Python `str.casefold()`;
-        `replace_aliases` compares under `lower()`, because that is the
-        function `ix_titles_name_lower_prefix` is built over and therefore the
-        only one that answers *"does this alias reach anything `titles` does
-        not"*.
-
-        `casefold()` folds `ß` to `ss` and neither `lower()` does, so
-        `Eine Synthetische STRASSE` restates `Eine Synthetische Straße` under
-        the measured rule and is a genuine, separately-reachable index entry
-        under the shipped one.
-        Measured over the whole pinned `title.akas.tsv.gz`
-        (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`), **32,223 of 46,202,631
-        retained rows (0.070%) fold differently under the two** — this family
-        and Greek final sigma — so the direction is what settles bar (B): the
-        shipped rule stores *more* than the 1,663,364 that was measured.
-
-        This case is in the shared contract because Python's `str.lower()` and
-        Postgres's `lower()` **agree** on `ß`. They disagree on Greek final
-        sigma, which is why that half is integration-only and is enumerated in
-        the fake's divergence list rather than asserted here.
-
-        The premise is carried: the two names must fold together under
-        `casefold()` and apart under `lower()`, or the case is about nothing.
+        """**The measurement this write was taken with is not the rule this write applies,
+        and one character in the dump can tell them apart.** T3 and T5 measured the
+        alias population with Python `str.casefold()`; `replace_aliases` compares under
+        `lower()`, because that is the function `ix_titles_name_lower_prefix` is built
         """
         shouted = "Eine Synthetische STRASSE"
         assert shouted.casefold() == SHARP_S.name.casefold(), "the premise: casefold folds these"

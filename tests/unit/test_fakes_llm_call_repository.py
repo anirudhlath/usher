@@ -1,13 +1,4 @@
-"""`FakeLLMCallRepository` against the shared `LLMCallRepository` contract.
-
-No Docker, no database. See `tests/fakes/llm_call_repository.py` for the six
-places this half is more forgiving than
-`tests/integration/test_llm_call_repository.py`'s -- the first of which is
-that the fake stores the very `LLMCall` it was handed, so there is no column
-mapping here to get wrong and almost every assertion in the contract is
-structural on this arm and load-bearing on the other -- and for the one place
-it is *stricter*, which is that it never rounds a cost to the column's scale.
-"""
+"""`FakeLLMCallRepository` against the shared `LLMCallRepository` contract."""
 
 import uuid
 

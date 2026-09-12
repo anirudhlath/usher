@@ -1,8 +1,4 @@
-"""`usher work`'s loop: what a pass that crashes costs, and what it records.
-
-Both roots run one `WorkerLoop`, so a case here is a case about the lane too.
-No database and no network: the DSN below is deliberately unreachable.
-"""
+"""`usher work`'s loop: what a pass that crashes costs, and what it records."""
 
 import asyncio
 import uuid

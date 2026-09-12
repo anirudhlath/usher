@@ -1,9 +1,4 @@
-"""PostgresCredentialStore against real Postgres.
-
-The contract suite runs here unchanged; the four cases below are the ones
-the in-memory fake cannot express, and they are the ones PRD 08's rules
-actually reduce to.
-"""
+"""PostgresCredentialStore against real Postgres."""
 
 import uuid
 
@@ -46,12 +41,10 @@ class TestPostgresCredentialStoreContract(CredentialStoreContract):
         return PostgresCredentialStore(session, KEY)
 
     async def owner(self, store: CredentialStore) -> uuid.UUID:
-        # Reaches into the store's own session rather than taking a second
-        # `session` fixture argument: the credential row's foreign key must
-        # point at a source visible in *this* store's transaction, and two
-        # sessions on the same connection would not see each other's
-        # unflushed work. (`flake8-self`/SLF is not in this project's ruff
-        # selection, so no suppression is needed.)
+        # Reaches into the store's own session rather than taking a second `session`
+        # fixture argument: the credential row's foreign key must point at a source
+        # visible in *this* store's transaction, and two sessions on the same connection
+        # would not see each other's unflushed work.
         assert isinstance(store, PostgresCredentialStore)
         return await _seed_source(store._session)
 

@@ -1,27 +1,4 @@
-"""The 422 handler, at the level where it is cheap to exercise.
-
-`tests/integration/test_admin_sources.py` proves the property that matters
--- a rejected `POST /admin/sources` does not echo the credential it carried
--- against the real route, real Postgres, and a real credential. This
-module pins the same guard without Docker, against an app whose only route
-exists to be sent a bad request, so the fast suite catches a regression
-too. It also covers the two shapes the integration test cannot reach: an
-error kind whose `input` is not a body dict, and the degenerate case of the
-handler being registered for something that is not a
-`RequestValidationError`.
-
-**M9 wrapped PRD 07's RFC 9457 envelope around this handler and the cases
-below moved with it, in the same commit.** The property is unchanged and the
-body is not: the stripped `loc`/`msg`/`type`/`ctx` list is now the `errors`
-extension member rather than `detail`, and `detail` is a fixed sentence that
-interpolates nothing submitted. Changing a 422 body is a client-visible
-break, so the cases that assert the old shape move here rather than being
-updated quietly -- that is the failure they exist to prevent.
-
-Every case that asserts a credential is *absent* carries its own positive
-control, because a body that never contained the value is also what a
-handler that never ran produces.
-"""
+"""The 422 handler, at the level where it is cheap to exercise."""
 
 import json
 from collections.abc import AsyncIterator

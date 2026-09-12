@@ -1,15 +1,4 @@
-"""`PostgresGenomeRepository` against the real database.
-
-The shared contract runs here unchanged, plus the three things a dict cannot
-express: the `halfvec(1128)` width declaration, the quantisation that
-declaration costs, and the schema decisions boundary call 7 rests on -- no
-index beyond the primary key, and a `CASCADE` to `titles`.
-
-The seeder writes through a raw `INSERT` rather than through the port,
-because this port has no writer and deliberately never will: the writer is
-`BulkCatalogRepository.upsert_genome_vectors`, which is a staged, set-based
-join and belongs on that port.
-"""
+"""`PostgresGenomeRepository` against the real database."""
 
 import uuid
 from collections.abc import Sequence

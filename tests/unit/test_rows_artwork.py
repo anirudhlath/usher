@@ -1,38 +1,5 @@
-"""`BaseRow`'s artwork hook -- the fourth read every shelf makes, and the one
-decision on a card that no client could make for itself.
-
-**The wrong implementations these cases rule out:**
-
-1. **Poster and backdrop swapped.** A backdrop in a `portrait` slot is 16:9
-   painted into a 2:3 frame: populated, correctly shaped, and wrong on every
-   card of every shelf at once, with nothing reporting an error. This is the
-   headline plant, and no membership assertion can see it -- both spellings
-   answer an id for every card. Every case here that cares asserts *which* id,
-   with `assert poster_id != backdrop_id` as its own premise so it cannot pass
-   by both being `None`.
-2. **One read per card.** `ImageRepository.primary_for_titles` takes a sequence
-   precisely so the per-card shape is inexpressible, and a shelf is up to
-   thirty cards on a screen composing ten of them. Counted at two lengths and
-   asserted **equal**, never `== 1` once -- `== 1` also passes for an
-   implementation that answers the first title only.
-3. **A read for a shelf with no cards.** `hydrate` returns `()` before it asks
-   anything, and a fourth port call that ran anyway would be one statement per
-   *dropped* row on every screen.
-4. **The first image rather than the flagged one.** `id` is first-sighting
-   order, so a fixture that seeds the flagged image first agrees with `ORDER BY
-   id` by accident -- the trap `CLAUDE.md` names. The flagged image is seeded
-   **second** here and the premise says so.
-5. **A logo on a card.** A card paints a poster or a backdrop and never a logo,
-   and the `kind` filter is the whole of why: a title whose only artwork is a
-   logo carries `artwork=None`, which is the same card a title with no artwork
-   at all gets. That is deliberate and is
-   [ADR-0032](../../docs/prd/decisions/0032-the-image-proxy-clamps-to-a-ladder.md)'s
-   SVG ruling arriving here -- *"no logo"* and *"a logo we will not serve"*
-   produce the identical action on a card, so there is no discriminator.
-6. **A hint the mapping does not cover.** `DisplayHint` is closed at four and
-   two of them (`wide`, `square`) have no emitter in `services/rows/` today, so
-   a mapping written from the providers rather than from the vocabulary is a
-   `KeyError` at render time on the first row that uses one.
+"""`BaseRow`'s artwork hook -- the fourth read every shelf makes, and the one decision
+on a card that no client could make for itself.
 """
 
 import uuid

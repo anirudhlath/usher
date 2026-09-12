@@ -1,32 +1,5 @@
-"""`PostgresSearchIndex` against real Postgres: real `websearch_to_tsquery`,
-the real analyzer, real `ts_rank_cd`, the real generated column.
-
-`tests/unit/test_search_index_contract.py` runs the identical suite against
-`FakeSearchIndex`, which has no text analysis at all -- no stemming, no stop
-words, no `tsquery` parsing, no weight classes beyond four hand-coded
-constants. So *this* file is where "a name match outranks an overview match"
-becomes a statement about the shipped index rather than about a dict.
-
-Four Postgres-only cases sit beside the driver, each asserting something the
-port deliberately does not promise and the fake cannot express: the document
-is a generated column, so a rename is searchable with no index call;
-`remove` drops the vector and leaves the catalog alone; `owned_only` is an
-`EXISTS` and does not multiply a series by its episodes; `min_enrichment` is
-a rank and not a string comparison.
-
-Two more need no container and are here anyway, beside the SQL they guard --
-the translation table's coverage of `SearchFilters`, and the raise for a
-member nothing translates. A guard that lives away from the thing it guards
-is one the next edit leaves behind.
-
-`PostgresSuggestIndex` runs the second contract suite from the same file,
-because the two implementations share a session and the `titles` table and
-nothing else -- which is the observation that made them two ports (ADR-0021)
-and the reason one module holds both. Since M9 it runs
-`TypoTolerantSuggestIndexContract` rather than `SuggestIndexContract`: this is
-**tier 2** of the two-tier suggest, and tier 1 -- the btree prefix probe, whose
-measured typo recall is 1.9% -- signs only the base half of that contract, in
-`test_adapters_search_prefix.py`.
+"""`PostgresSearchIndex` against real Postgres: real `websearch_to_tsquery`, the real
+analyzer, real `ts_rank_cd`, the real generated column.
 """
 
 import dataclasses
@@ -269,12 +242,9 @@ class TestPostgresSearchIndex(SearchIndexContract):
     # was never flipped and the milestone's most delicate logic silently
     # did not run.**
     supports_semantic = True
-    # This backend expresses the whole vocabulary, including the two the
-    # port's docstring says a document-only engine cannot: `owned_only` is
-    # an EXISTS over `media_items` and `min_enrichment` is a predicate on
-    # `titles.enrichment_state`. ADR-0002's "Postgres already holds the
-    # join", as a skip reason. The raise is asserted below instead, against
-    # the failure that is actually reachable here.
+    # This backend expresses the whole vocabulary, including the two the port's
+    # docstring says a document-only engine cannot: `owned_only` is an EXISTS over
+    # `media_items` and `min_enrichment` is a predicate on `titles.enrichment_state`.
     unsupported_filter = None
     # `titles.search_document` is a generated column of a table this port
     # does not own -- see the flag's declaration in the contract.
@@ -282,14 +252,9 @@ class TestPostgresSearchIndex(SearchIndexContract):
 
     @pytest_asyncio.fixture
     async def index(self, session: AsyncSession) -> AsyncIterator[PostgresSearchIndex]:
-        # **100 is no longer `Settings.search_hnsw_ef_search`, which moved to
-        # 200 on 2026-08-19, and the divergence is stated rather than left to
-        # be inferred** -- the same shape as `_TRIGRAM_THRESHOLD` one module
-        # over. Nothing here can tell the two apart: the fixture holds 26
-        # embedded rows, and any `ef_search` at or above the row count makes
-        # this an exact scan wearing an index's name. The value that *is*
-        # load-bearing in this file is `_EF_SEARCH = 40`, pgvector's own
-        # default, which the iterative-scan cases are stated at.
+        # **100 is no longer `Settings.search_hnsw_ef_search`, which moved to 200 on
+        # 2026-08-19, and the divergence is stated rather than left to be inferred** --
+        # the same shape as `_TRIGRAM_THRESHOLD` one module over.
         yield PostgresSearchIndex(session, ef_search=100, rrf_k=_RRF_K)
 
     @pytest.fixture(autouse=True)
@@ -668,30 +633,7 @@ async def test_a_high_trigram_floor_destroys_fuzzy_recall(session: AsyncSession)
 
 @pytest.mark.integration
 async def test_the_threshold_does_not_leak_into_the_next_statement(postgres_url: str) -> None:
-    """`SET` in place of `SET LOCAL`, or `set_limit()` in place of either.
-
-    All three set the same knob; only `SET LOCAL` is scoped to the
-    transaction. On a pooled connection a session-scoped write means one
-    search's threshold governs the next unrelated request, which is a wrong
-    answer in code that never touched this module -- and is invisible to any
-    test that only ever runs one search.
-
-    **The boundary has to be a COMMIT and that is why this case builds its
-    own engine.** PostgreSQL reverts a bare `SET` too when the transaction
-    that issued it is rolled back, so any rollback-based case -- including
-    the plan's own draft, which read `current_setting` back inside the
-    suite's single-transaction fixture -- passes against both spellings.
-    Measured in
-    `test_a_bare_set_outlives_a_commit_and_set_local_does_not`, which pins
-    the same property one layer down against raw statements; this case pins
-    it against the shipped `suggest`.
-
-    `SHOW` is safe here only because the suggest itself loaded `pg_trgm` into
-    this backend -- on a cold connection that read raises
-    `unrecognized configuration parameter`, which is the trap
-    `test_a_contrib_guc_is_unreadable_until_something_loads_the_library`
-    measures in full.
-    """
+    """`SET` in place of `SET LOCAL`, or `set_limit()` in place of either."""
     engine = build_engine(postgres_url)
     try:
         factory = build_session_factory(engine)
@@ -778,27 +720,8 @@ async def test_a_null_popularity_does_not_take_the_first_row(session: AsyncSessi
 async def test_vote_count_orders_the_box_when_every_popularity_is_null(
     session: AsyncSession,
 ) -> None:
-    """**The catalog is not "mostly" NULL-popularity. It is entirely so**, and
-    that is what this case exists for.
-
-    Measured against a real 1,271,138-row bootstrap on 2026-08-03 (ADR-0002's
-    gate): `titles.tmdb_popularity` is NULL on **every** row, because on that
-    catalog neither of its two writers had run -- TMDb enrichment, whose
-    premise in boundary call 4 is an enriched tier of 2k-10k titles, and
-    `link_crosswalk`, which needs `--phase crosswalk`. So `ORDER BY dist ASC,
-    tmdb_popularity DESC NULLS LAST, id ASC` degenerates to `dist ASC, id ASC` --
-    every equal-distance candidate ordered by a UUIDv7, which is insertion
-    order, which is arbitrary. Adding `vote_count DESC NULLS LAST` under
-    popularity moved recall@5 from 78.3% to 82.5% over 2,993 real typo cases,
-    and from 27.8% to 36.1% on 2-4-character names, at unchanged latency.
-
-    Three titles, one query, all three at edit distance 0 from `vane`, so
-    only the tiebreak can separate them -- and every popularity is NULL,
-    which is the production state. Insertion order is deliberately the
-    *reverse* of the wanted order, so the case fails against the statement
-    that has no `vote_count` clause (it answers in id order) **and** against
-    one that has it without `NULLS LAST` (a descending sort puts the
-    vote-less title first, the same trap one column over).
+    """**The catalog is not "mostly" NULL-popularity. It is entirely so**, and that is what
+    this case exists for.
     """
     voteless = _doc("Vane Alpha", popularity=None)
     await _insert_title(session, voteless, vote_count=None)
@@ -820,51 +743,11 @@ async def test_vote_count_orders_the_box_when_every_popularity_is_null(
     )
 
 
-# 10,000 embedded titles, one in fifty a `series`. **Both numbers are the
-# minimum that reproduces the failure, measured rather than chosen.** At
-# 1,000, 3,000 and 5,000 rows the planner does not use the HNSW index at all
-# for this shape -- it drives off the 2% filter on `titles` and re-sorts
-# exactly, so `hnsw.iterative_scan` is unobservable and a case at that scale
-# asserts nothing. At 10,000 the plan flips to
-# `Index Scan using ix_title_embeddings_hnsw` feeding a nested loop, and a
-# request for 10 comes back with 5-6.
-#
-# Measured cost: ~2.8 s to seed, which is what buys a case that can fail.
-#
-# **Derived from the width since `m09e`, because it always depended on it and
-# the literal `10_000` hid that.** Widening the column to 1024 broke
-# `test_the_default_guc_is_what_makes_that_fail` on its own premise guard --
-# `assert 100 < 100`, "this fixture is not reaching the HNSW index at all" --
-# with nothing else in this file touched, which is the guard doing exactly the
-# job it was written for.
-#
-# The mechanism, and it is arithmetic rather than a property of pgvector.
-# `_seed_embedded_catalog` gives row `n` two non-zero lanes, at `n % width` and
-# `(n * 7) % width`, and `_probe_vectors` queries with a **basis vector**. So
-# the only rows at any distance below 1.0 from a probe are the ones carrying a
-# non-zero lane at that exact position -- `2 * rows / width` of them, every
-# other row tying at exactly 1.0. That population has to exceed `_EF_SEARCH`
-# for the graph to be *forced* to choose, and it is what the 2%-selective
-# `series` filter then starves. At 384 lanes and 10,000 rows it was 52 against
-# 40; at 1024 lanes the same 10,000 rows give **20**, which is under the
-# ceiling, so the scan stopped truncating and both GUC settings returned full
-# pages.
-#
-# Bisected on the real container rather than solved on paper: 15,000 still
-# fails, 20,000 passes, 40,000 passes. 20,000 is 39 against 40 and is
-# therefore *on* the boundary, which is not a fixture size to ship. `26 *`
-# reproduces the original 52-against-40 ratio at any width and gives 9,984 at
-# 384 -- i.e. it is the number that was always meant, spelled so the next
-# width change cannot silently un-mean it.
+# 10,000 embedded titles, one in fifty a `series`.
 _EMBEDDED_ROWS = 26 * _VECTOR_DIMENSIONS
 _ONE_SERIES_EVERY = 50
 
-# pgvector's own default, and the value the whole finding is stated at. **At
-# `ef_search = 100` this fixture returns 10 of 10 with the GUC off**, which is
-# not a refutation and is recorded so nobody reads it as one: the amendment's
-# 50,000-row measurement has 40 -> 200 still returning 4.24 of 10, so what
-# scales is the failure, not the size of the `ef_search` that happens to mask
-# it. A fixture is always small enough for some `ef_search` to paper over it.
+# pgvector's own default, and the value the whole finding is stated at.
 _EF_SEARCH = 40
 
 # Any real model name works, because the sentinel `index_many` writes is
@@ -896,36 +779,7 @@ def _probe_vectors(count: int) -> list[tuple[float, ...]]:
 
 
 async def _seed_embedded_catalog(session: AsyncSession, rows: int) -> None:
-    """`rows` enriched titles with a vector each, one in fifty a `series`.
-
-    Generated in SQL rather than in Python: `rows` x 384 floats through the
-    driver is a great deal of round-trip for a fixture. The vectors are
-    *deterministic* -- two non-zero components derived from the row number --
-    and their values are deliberately meaningless.
-
-    **That makes this exactly the right fixture for asserting a row count and
-    exactly the wrong one for asserting recall**, and nothing in this file
-    asserts recall. In 384 dimensions an arbitrary point cloud has no
-    neighbour structure for an ANN index to find, so a recall figure taken
-    here would be measuring the fixture. The amendment records a whole probe
-    thrown away for exactly that reason: uniform-random vectors measured 4.7%
-    unfiltered recall@10, which is a broken harness rather than a pgvector
-    result.
-
-    The `ANALYZE` is load-bearing. Without statistics the planner sizes both
-    relations off an empty `pg_class` and picks the nested loop whatever the
-    real row count is, so the HNSW index is never chosen and the case under
-    test becomes vacuous.
-
-    **And the `ANALYZE` outlives the transaction that ran it, which is why the
-    last caller below takes `restores_the_statistics_this_seed_leaks`.**
-    `reltuples`/`relpages` are written in place rather than as a new catalog
-    row, so `session`'s rollback takes the 26,624 rows away and leaves
-    `pg_class` describing them -- for every later test in the session. That is
-    issue #26, and that fixture's docstring is where it is measured, including
-    why the cleanup runs after the last of these three seeds rather than after
-    each.
-    """
+    """`rows` enriched titles with a vector each, one in fifty a `series`."""
     await session.execute(
         text(
             "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
@@ -958,77 +812,11 @@ async def _seed_embedded_catalog(session: AsyncSession, rows: int) -> None:
 
 @pytest_asyncio.fixture
 async def restores_the_statistics_this_seed_leaks(postgres_url: str) -> AsyncIterator[None]:
-    """Put `pg_class` back after a large seed, because the rollback does not.
-
-    **`ANALYZE` writes `reltuples` and `relpages` with an in-place catalog
-    update, so they survive the transaction that produced them.** Measured on
-    `pgvector/pgvector:pg17` on 2026-08-19, in collection order in one pytest
-    process: a test that calls `_seed_embedded_catalog` and is then rolled
-    back by the `session` fixture leaves the *next* test reading `pg_class` at
-    **26,624 rows / 8,875 pages** for `title_embeddings` and 26,624 / 701 for
-    `titles`, while `SELECT count(*)` on both answers **0**. The rows are gone.
-    The statistics describing them, the dead heap tuples, and the HNSW index
-    entries pointing at them are not.
-
-    **That is issue #26's mechanism, and it is one test changing the planner
-    for the whole session.** With those statistics in place the semantic lane
-    plans as `Index Scan using ix_title_embeddings_hnsw` -> `Nested Loop` ->
-    `Incremental Sort` instead of `Hash Join` -> `Seq Scan` -> `Sort` --
-    measured, both plans read off `EXPLAIN` in the same file. The first is
-    *approximate* (`hnsw.iterative_scan = relaxed_order`, `hnsw.ef_search =
-    40`) over a graph still physically holding the seed's 26,624 dead entries,
-    so a case seeding three vectors is asking an approximate index for an exact
-    answer.
-
-    **That is issue #26's three cases, measured on both sides.** The same
-    six-case selection, twelve runs each on 2026-08-19 under concurrent load:
-    without this fixture **3 runs of 12 failed**, and the losers are exactly
-    the three the issue could not name --
-    `test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found`,
-    `test_a_row_only_one_lane_found_is_still_returned` and
-    `test_a_title_deep_in_both_lanes_still_reaches_the_first_page`. In the worst
-    of them the semantic lane returned **nothing at all** (`assert [] == [3
-    items]`); in another it lost `Salt Flats`, the row at distance **0.0**.
-    Every one of the three reported it as a *fusion* defect -- a missing
-    `COALESCE`, an `INNER JOIN` -- and none of them was one. With this fixture:
-    **0 of 12**.
-
-    **The link is still not closed all the way, which is stated because #7
-    records this project relaying a load theory as settled twice before.** A
-    directed probe that left the statistics leaked and re-ran the deep case's
-    fixture 25 times got the correct three rows **25 of 25**, so the plan flip
-    is a necessary condition and is not shown to be a sufficient one; the
-    remaining variable, most plausibly autovacuum pruning the seed's dead HNSW
-    entries under a live scan, was not isolated.
-
-    `VACUUM (ANALYZE)` puts it back: measured, both tables return to 0 rows /
-    0 pages and the plan returns to the exact one. On a connection of its own
-    because `VACUUM` cannot run inside a transaction block, and *after*
-    `session` has rolled back or the tuples are not yet dead -- which is what
-    the page check is for, since a `VACUUM` that ran too early looks exactly
-    like one that worked. Declare this fixture **before** `session` in the
-    signature; the assertion is what stops that from being a silent
-    convention.
-
-    **It is on the *last* of the three seeding cases and deliberately not on
-    the first two, and that is a measurement rather than a preference.** Put on
-    all three, it makes `test_the_default_guc_is_what_makes_that_fail` fire its
-    own vacuity guard -- `assert 100 < 100`, *"this fixture is not reaching the
-    HNSW index at all"* -- in **2 runs of 12** where the unrepaired file failed
-    it in **0 of 12**. That control case's non-vacuity is partly *borrowed from
-    the leak*: it seeds into a table the previous case has already left 26,624
-    dead tuples and 26,624 dead HNSW entries in, and a graph that dense is what
-    exhausts `ef_search = 40` when the GUC is off. Cleaning up between the two
-    takes that away. So the cleanup runs once, after the last seed, which is
-    the point where every remaining case in the file needs the truth and no
-    seeding case is relying on the lie.
-    """
+    """Put `pg_class` back after a large seed, because the rollback does not."""
     # `media_items` is here because `test_the_owned_path_does_not_use_the_ann_index`
-    # takes this fixture and then runs `ANALYZE media_items` of its own -- so the
-    # one file this entry calls repaired was leaking a third table's statistics
-    # into every case after it. Found 2026-09-02 by re-running
-    # `grep -rn 'text("ANALYZE' tests/integration/` rather than by reading the
-    # ledger, which is the whole reason that ledger says to re-derive it.
+    # takes this fixture and then runs `ANALYZE media_items` of its own -- so the one
+    # file this entry calls repaired was leaking a third table's statistics into every
+    # case after it.
     tables = ("titles", "title_embeddings", "media_items")
     engine = build_engine(postgres_url)
 
@@ -1093,13 +881,11 @@ def _series_request(query_vector: tuple[float, ...]) -> SearchRequest:
 @pytest.mark.leaks_statistics(
     "titles", "title_embeddings", restored_by="restores_the_statistics_this_seed_leaks"
 )
-# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the
-# rollback, and that is deliberate for exactly these three cases -- the
-# cleanup runs once, after the last of them, because the control case's
-# non-vacuity is partly borrowed from the leak (2 failures in 12 when the
-# cleanup ran between them; see `restores_the_statistics_this_seed_leaks`).
-# This marker is what stops `session`'s guard from calling that a defect,
-# and what makes the exception name itself.
+# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the rollback,
+# and that is deliberate for exactly these three cases -- the cleanup runs once, after
+# the last of them, because the control case's non-vacuity is partly borrowed from the
+# leak (2 failures in 12 when the cleanup ran between them; see
+# `restores_the_statistics_this_seed_leaks`).
 @pytest.mark.integration
 async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
     session: AsyncSession,
@@ -1139,13 +925,11 @@ async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
 @pytest.mark.leaks_statistics(
     "titles", "title_embeddings", restored_by="restores_the_statistics_this_seed_leaks"
 )
-# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the
-# rollback, and that is deliberate for exactly these three cases -- the
-# cleanup runs once, after the last of them, because the control case's
-# non-vacuity is partly borrowed from the leak (2 failures in 12 when the
-# cleanup ran between them; see `restores_the_statistics_this_seed_leaks`).
-# This marker is what stops `session`'s guard from calling that a defect,
-# and what makes the exception name itself.
+# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the rollback,
+# and that is deliberate for exactly these three cases -- the cleanup runs once, after
+# the last of them, because the control case's non-vacuity is partly borrowed from the
+# leak (2 failures in 12 when the cleanup ran between them; see
+# `restores_the_statistics_this_seed_leaks`).
 @pytest.mark.integration
 async def test_the_default_guc_is_what_makes_that_fail(
     session: AsyncSession,
@@ -1197,13 +981,11 @@ async def test_the_default_guc_is_what_makes_that_fail(
 @pytest.mark.leaks_statistics(
     "titles", "title_embeddings", restored_by="restores_the_statistics_this_seed_leaks"
 )
-# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the
-# rollback, and that is deliberate for exactly these three cases -- the
-# cleanup runs once, after the last of them, because the control case's
-# non-vacuity is partly borrowed from the leak (2 failures in 12 when the
-# cleanup ran between them; see `restores_the_statistics_this_seed_leaks`).
-# This marker is what stops `session`'s guard from calling that a defect,
-# and what makes the exception name itself.
+# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the rollback,
+# and that is deliberate for exactly these three cases -- the cleanup runs once, after
+# the last of them, because the control case's non-vacuity is partly borrowed from the
+# leak (2 failures in 12 when the cleanup ran between them; see
+# `restores_the_statistics_this_seed_leaks`).
 @pytest.mark.integration
 async def test_the_owned_path_does_not_use_the_ann_index(
     restores_the_statistics_this_seed_leaks: None,
@@ -1421,13 +1203,11 @@ async def test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found(
     index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     await index.index_many([shared, vector_leader])
 
-    # **The two lane rankings the paragraph above does arithmetic on, read
-    # back rather than assumed.** Issue #26: "1/62 + 1/62 against 1/61" is a
-    # claim about where each row sits in each lane, and nothing here used to
-    # check it -- so a lane that came back short or reordered failed the
-    # *fusion* assertion instead, under a message blaming a missing COALESCE.
-    # The premise and the check now fail in different places, with different
-    # words.
+    # **The two lane rankings the paragraph above does arithmetic on, read back rather
+    # than assumed.** Issue #26: "1/62 + 1/62 against 1/61" is a claim about where each
+    # row sits in each lane, and nothing here used to check it -- so a lane that came
+    # back short or reordered failed the *fusion* assertion instead, under a message
+    # blaming a missing COALESCE.
     lexical = await index.search(SearchRequest(query="vacuum", limit=10))
     assert [hit.title_id for hit in lexical.hits] == [lexical_leader.title_id, shared.title_id], (
         "the lexical lane is not the one the RRF arithmetic below assumes"
@@ -1482,12 +1262,10 @@ async def test_a_row_only_one_lane_found_is_still_returned(session: AsyncSession
     index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     await index.index_many(vectors)
 
-    # **"No overlap at all" is the premise, and it is a claim about the two
-    # lanes rather than about the fixture.** Issue #26: this case was seen
-    # failing on the fused set, one row short, under a message saying fusion
-    # was an INNER JOIN -- when what had happened was that the vector lane
-    # returned one of its two rows. A lane that loses a row and a join that
-    # drops one produce the same short set here, so the lanes are read first.
+    # **"No overlap at all" is the premise, and it is a claim about the two lanes rather
+    # than about the fixture.** Issue #26: this case was seen failing on the fused set,
+    # one row short, under a message saying fusion was an INNER JOIN -- when what had
+    # happened was that the vector lane returned one of its two rows.
     lexical_hits = await index.search(SearchRequest(query="vacuum", limit=10))
     semantic_hits = await index.search(
         SearchRequest(
@@ -1522,35 +1300,10 @@ async def test_a_row_only_one_lane_found_is_still_returned(session: AsyncSession
 async def test_tied_scores_are_broken_deterministically_and_survive_a_rewrite(
     session: AsyncSession,
 ) -> None:
-    """**Trap 3: ties are pervasive, not occasional.**
-
-    Two disjoint 50-row lanes produced 100 fused rows with **50 distinct
-    scores -- every score a two-way tie**, which is arithmetic and not luck:
-    rank *i* in either lane contributes the identical 1/(60+i). Without a
-    deterministic tiebreak, pagination duplicates and drops rows between
-    pages, and nobody can reproduce a bug report.
-
-    The rewrite is what makes this a test rather than a coincidence. A
-    trailing `UPDATE` only separates heap order from id order if it is
-    **non-HOT**, so this one moves `sort_name`, which `ix_titles_sort_name`
-    covers -- re-upserting a row unchanged leaves the index entry pointing at
-    the original TID and the scan arrives in the original order, which is how
-    this idiom silently does nothing. Measured on `media_items`: the
-    unchanged upsert left an already-sorted answer already passing, and
-    moving an indexed column flipped it. The rows are rewritten in reverse id
-    order so heap order ends up reversed rather than merely different.
-
-    Asserts the fused order is byte-for-byte identical across the rewrite,
-    and that the scores really are tied -- a fixture that happened to produce
-    distinct scores would make the whole case vacuous.
-    """
-    # **The vector-lane titles are minted first, and that is the whole of what
-    # makes this case bite.** Every id is a UUIDv7, so creation order is id
-    # order; the join emits the lexical lane's rows first, and PostgreSQL's
-    # small-N sort is stable. With the lexical titles created first, id order
-    # and emission order agree and `ORDER BY score DESC` alone answers
-    # identically -- measured, the mutation survived. Minted the other way
-    # round, the two disagree on every tied pair.
+    """**Trap 3: ties are pervasive, not occasional.**"""
+    # **The vector-lane titles are minted first, and that is the whole of what makes
+    # this case bite.** Every id is a UUIDv7, so creation order is id order; the join
+    # emits the lexical lane's rows first, and PostgreSQL's small-N sort is stable.
     vectors = [
         _doc(f"Salt Flats {number:02d}", vector=_vec(*(0.0,) * number, 1.0)) for number in range(4)
     ]
@@ -1591,15 +1344,10 @@ async def test_tied_scores_are_broken_deterministically_and_survive_a_rewrite(
         "without the id tiebreak two identical searches answer differently"
     )
 
-    # **And the half a self-comparison structurally cannot see.** Both halves
-    # above compare the implementation against itself, so they pass against
-    # any order that is merely *repeatable* -- and a tie order decided by the
-    # hash join's emission order is repeatable. Measured with the tiebreak
-    # removed: the fused list comes back `Salt Flats 00, Vacuum 00, Vacuum
-    # 01, Salt Flats 01, ...` -- rank 3 and 4 swapped, because the join's
-    # probe side is the vector lane and PostgreSQL's quicksort is not stable.
-    # So the order is asserted *absolutely*, against the rule the statement
-    # claims to implement, rather than against another run of itself.
+    # **And the half a self-comparison structurally cannot see.** Both halves above
+    # compare the implementation against itself, so they pass against any order that is
+    # merely *repeatable* -- and a tie order decided by the hash join's emission order
+    # is repeatable.
     assert [hit.title_id for hit in after.hits] == [
         hit.title_id for hit in sorted(after.hits, key=lambda hit: (-hit.score, hit.title_id.bytes))
     ], "the fused order is not (score DESC, id ASC); ties are being broken by the plan"
@@ -1691,14 +1439,9 @@ async def test_a_title_deep_in_both_lanes_still_reaches_the_first_page(
     index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     await index.index_many([wanted, near, nearer])
 
-    # These two are the case's premises rather than its subject, and they are
-    # the ones that lose: issue #26's reproduction on 2026-08-19 failed here,
-    # on the semantic lane, missing `Salt Flats` -- the row at distance 0.0.
-    # A lane short of a row is an approximate ANN scan rather than anything
-    # about fusion, and the condition that puts this lane on one is a previous
-    # test's `ANALYZE` outliving its own rollback: see
-    # `restores_the_statistics_this_seed_leaks`, which also records what that
-    # measurement did *not* establish.
+    # These two are the case's premises rather than its subject, and they are the ones
+    # that lose: issue #26's reproduction on 2026-08-19 failed here, on the semantic
+    # lane, missing `Salt Flats` -- the row at distance 0.0.
     lexical = await index.search(SearchRequest(query="vacuum", limit=10))
     assert [hit.title_id for hit in lexical.hits] == [
         first.title_id,

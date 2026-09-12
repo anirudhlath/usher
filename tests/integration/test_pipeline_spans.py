@@ -1,33 +1,4 @@
-"""Pipeline spans, under a real FastAPI server span.
-
-M1 wired `FastAPIInstrumentor` in `create_app` -- and
-`SQLAlchemyInstrumentor`/`HTTPXClientInstrumentor` in `configure_tracing` --
-specifically so this works. That wiring was itself a bug fix: three OTel
-instrumentation packages were declared as runtime dependencies and wired by
-no milestone, so `inject_trace_context` only ever fired in unit tests that
-built their own span and never once in the running service.
-
-**A pipeline that started its own *root* spans would throw all of that away
-with nothing failing.** Every span would still carry a valid id, every trace
-would still export, every existing assertion ("a span exists", "the names
-match PRD 10's tree") would still pass -- and "what happened in this
-request" would silently stop including the work the request triggered, which
-is the entire question PRD 10 says traces are the datasource for. So the
-assertion here is on the *parent-child relationship*, walked all the way up
-to the server span, rather than on the spans existing.
-
-M4 adds no HTTP route -- PRD 07's `POST /admin/sources/{id}/sync` is M9's --
-so the app under test mounts one that drives `ReconcileService` directly.
-That is the same shape M9's route will have, and it is a real request
-through a real `create_app()`, so what instruments it is the real
-`FastAPIInstrumentor` rather than a hand-built span standing in for one.
-
-`tests/conftest.py::reset_otel_tracer_provider` is load-bearing here: every
-pipeline module resolves `trace.get_tracer(...)` at import time and a
-`ProxyTracer` caches the first real provider it ever sees, so without the
-reset the first test in the session to start a pipeline span owns those
-tracers and this file's exporter receives nothing.
-"""
+"""Pipeline spans, under a real FastAPI server span."""
 
 import uuid
 from collections.abc import AsyncIterator
@@ -310,13 +281,7 @@ async def test_the_databases_own_spans_nest_under_the_pipeline(
         if span.context is not None
         and span.name in {"sync.reconcile", "ingest.item", "match.title"}
     }
-    # Statement spans only. `connect` comes from `_wrap_connect`, which
-    # patches `Engine.connect` on the *class* and therefore fires however the
-    # engine was built -- so a test that accepted it would pass against an
-    # engine that produces no statement spans at all. Measured: the
-    # `from ... import create_async_engine` mutation leaves `connect` intact
-    # and removes every `SELECT`/`INSERT`/`UPDATE`, and the loose assertion
-    # survived it.
+    # Statement spans only.
     statements = [
         span
         for span in spans

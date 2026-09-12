@@ -1,9 +1,4 @@
-"""Season and Episode.
-
-Every constraint here is asserted with a value that violates it, not with
-one that satisfies it -- a test that only constructs a valid model passes
-against a model with no validators at all.
-"""
+"""Season and Episode."""
 
 import uuid
 from datetime import date

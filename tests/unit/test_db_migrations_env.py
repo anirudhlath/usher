@@ -1,13 +1,4 @@
-"""Regression coverage for the alembic env.py DSN-handling hazard.
-
-env.py must never round-trip the database URL through alembic's
-ConfigParser-backed Config (`set_main_option` / `get_main_option` /
-`get_section`). A percent-encoded password — RFC 3986 mandates
-percent-encoding any password containing `@`, `/`, `:`, `#`, or `%` — makes
-`configparser`'s interpolation raise before a single migration runs, and
-the raised exception embeds the raw DSN, password included. See env.py's
-module docstring and `_database_url()`.
-"""
+"""Regression coverage for the alembic env.py DSN-handling hazard."""
 
 import ast
 import os
@@ -97,37 +88,7 @@ def test_env_py_never_lets_fileconfig_disable_the_loggers_it_did_not_name() -> N
 
 
 def test_alembic_reports_a_rejected_setting_without_printing_any_value() -> None:
-    """`alembic upgrade head` must not print the settings it was handed.
-
-    **The second entry point at which `Settings` is read, and it had no
-    boundary until 2026-08-13.** `usher.cli` has scrubbed pydantic's
-    `input_value={...}` since M7; `env.py` called `get_settings()` bare, so a
-    bad `USHER_DATABASE_URL` printed a traceback carrying every field pydantic
-    echoes -- including `USHER_SECRET_KEY`, which is not even the setting the
-    operator got wrong.
-
-    **This is the site that matters more, and the reason is the Dockerfile.**
-    `CMD` is `alembic upgrade head && exec python -m usher`, so on a
-    misconfigured container this output is the first thing in the log, emitted
-    before the application whose boundary would have caught it ever starts.
-
-    Driven as a **subprocess** rather than by importing `env.py`, which the
-    rest of this file cannot do: it touches `alembic.context` at import and
-    needs a live migration context. A subprocess is also the only spelling
-    that exercises the thing the container actually runs.
-
-    **The environment variable is what makes this deterministic.** A developer
-    checkout has a real `.env` supplying a valid DSN, so a case that merely
-    *unset* the variable would pass here for the wrong reason and only fail in
-    CI. `USHER_DATABASE_URL` set to a wrong-driver DSN is refused by
-    `Settings`' own validator whatever `.env` says, and it is the exact shape
-    that leaked.
-
-    **Three absences and one presence.** A test that only asserts the password
-    is missing is satisfied by a command that prints nothing at all, or that
-    fails before it reads the setting -- so the diagnostic half is asserted
-    too, and so is the non-zero exit the `&&` above depends on.
-    """
+    """`alembic upgrade head` must not print the settings it was handed."""
     root = Path(usher.db.__file__).parents[2].parent
     # Not a credential -- a canary, so the assertion below can be about a
     # value that could only have come from the environment this test set.

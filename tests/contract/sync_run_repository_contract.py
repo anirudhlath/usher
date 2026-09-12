@@ -1,13 +1,4 @@
-"""Behaviour every `SyncRunRepository` implementation must satisfy.
-
-The port ADR-0015's safety argument rests on: "availability is retracted only
-by a walk that provably finished" is unspellable unless a crashed run and a
-clean one land in distinguishable states, and unless the delta cursor is read
-off the clean ones only.
-
-Subclass and provide `repository` and `source_id`/`other_source_id`, which
-must name rows that actually exist for an implementation with foreign keys.
-"""
+"""Behaviour every `SyncRunRepository` implementation must satisfy."""
 
 import uuid
 from datetime import UTC, datetime, timedelta

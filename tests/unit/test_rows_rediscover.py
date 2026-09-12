@@ -1,16 +1,5 @@
-"""`RediscoverProvider`, and the distractor that is a timestamp on the wrong
-column -- in the other direction from Recently Added's.
-
-The nightly walk touches `updated_at` on up to **1,126,789** rows, so an
-implementation filtering on it turns "watched more than two years ago" into
-"merged more than two years ago", which is true of nothing. **The failure is a
-row that is simply always absent**, and no assertion about a row's contents can
-see it -- which is why the cases here assert both that the old title is present
-*and* that last week's is not.
-
-`RediscoverProvider` also substitutes for a rating column that does not exist,
-and its docstring says so out loud rather than leaving the substitution in the
-query.
+"""`RediscoverProvider`, and the distractor that is a timestamp on the wrong column --
+in the other direction from Recently Added's.
 """
 
 import uuid

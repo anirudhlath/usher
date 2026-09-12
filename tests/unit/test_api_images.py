@@ -1,18 +1,4 @@
-"""`GET /images/{id}` -- the caching proxy on the wire.
-
-Driven through a real `create_app()` with **one** dependency overridden, the
-image proxy service, so the router, the clamp, the caching headers, the RFC
-9457 handler registered app-wide and FastAPI's own `?w=` validation all sit on
-the path a request takes. The service behind the override is the *real*
-`ImageProxyService` over the three port fakes rather than a stub -- a stub
-would make every case below a test of the router's `if` statements and would
-not be able to say how many blobs the store holds.
-
-`httpx.ASGITransport` is correct here and would not be on `/events`: this route
-answers a whole `Response` and does not stream, so the transport's buffering is
-what a client sees anyway. `tests/fakes/streaming_asgi_transport.py` is
-deliberately not reached for.
-"""
+"""`GET /images/{id}` -- the caching proxy on the wire."""
 
 import logging
 import uuid
@@ -627,33 +613,8 @@ async def test_an_upstream_that_refused_this_servers_credentials_is_the_envelope
 async def test_an_upstream_answer_this_proxy_will_not_serve_is_a_503_with_no_retry_after(
     images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """`PortDataMalformed` -- a 4xx, a body past the ceiling, or an answer that
-    is not artwork at all.
-
-    Asking again produces the same unusable answer, so this one is **not**
-    retryable and carries no `Retry-After`. 🔴 Its honest status is a 502 and
-    ADR-0030's closed seven-member vocabulary has no code for one -- its
-    stability rule is that a code carries one status everywhere, so
-    `source_unavailable` cannot be raised at 502, and its growth rule says a
-    member is minted by amending that record rather than by a route.
-    `Retry-After`'s **absence** is what a client branches on, and this case is
-    the pair to the one above rather than a duplicate of it.
-
-    ✅ **C5 asked and M10's F3 answered: `Declined`, on a measurement.** This
-    arm fired on **0 of 240** live fetches against the provider CDN on
-    2026-08-20 -- below 1.25% at 95% confidence -- so both 503 arms are rare,
-    neither sets the other's alarm rate, and `Retry-After` is the contract
-    rather than an interim. ADR-0030 carries the sample and the one population
-    it could not reach.
-
-    **The fixture is a captive portal's HTML under a 200, not an SVG**, and the
-    difference is the whole reason this case has a sibling: an `image/svg+xml`
-    logo raises `MediaTypeNotServable` and is a 404 one case down. An earlier
-    version of this docstring justified the SVG refusal with *"an SVG at a rung
-    means something other than the measured CDN answered"*, which C4's follow-up
-    measured false -- the CDN serves `image/svg+xml` at every rung, roughly one
-    title in seventeen -- and `.claude/rules/ports-and-error-taxonomy.md` keeps
-    that as the worked example of a refusal justified by "this cannot happen".
+    """`PortDataMalformed` -- a 4xx, a body past the ceiling, or an answer that is not
+    artwork at all.
     """
     fetcher = FakeImageFetcher(
         answers=[PortDataMalformed("an image proxy will not cache 'text/html'")]
@@ -846,14 +807,8 @@ def test_the_proxy_records_through_the_row_caches_instruments_and_declares_none(
         "services/images.py does not hold the shared pair -- either the scan is measuring "
         "nothing, or the proxy declared a parallel instrument instead of importing this one"
     )
-    # 🔴 This read `len(mine) == 2` and `mine <= shared` until 2026-08-11, written
-    # when the proxy held nothing but the shared pair. C7 then added
-    # `usher.images.references`, a genuinely different instrument with its own
-    # name, and the equality would have forbidden it. The property this case is
-    # actually about is *identity of the shared pair*, not the size of the set:
-    # what must never happen is a second `usher.cache.*` counter, not a second
-    # counter. The count of the module's own instruments is pinned separately so
-    # a third arrival is a decision rather than an accident.
+    # 🔴 This read `len(mine) == 2` and `mine <= shared` until 2026-08-11, written when
+    # the proxy held nothing but the shared pair.
     assert len(mine - shared) == 1, (
         "services/images.py declares exactly one instrument of its own "
         "(`usher.images.references`); a new one is a deliberate change, not a drive-by"
@@ -944,12 +899,10 @@ async def test_no_provider_url_reaches_the_log_sink(
         max_bytes=1_000_000,
     )
     async with serving(ImageProxyService(images=images, fetcher=fetcher, store=store)) as client:
-        # **The sink goes in after the app is built, not before.**
-        # `create_app` calls `configure_telemetry`, whose `configure_logging`
-        # opens with `logger.remove()` -- so a sink installed first is gone by
-        # the time the request runs and every absence assertion over it is a
-        # false green. Measured: `ValueError: There is no existing handler
-        # with id 23` on the way back out.
+        # **The sink goes in after the app is built, not before.** `create_app` calls
+        # `configure_telemetry`, whose `configure_logging` opens with `logger.remove()`
+        # -- so a sink installed first is gone by the time the request runs and every
+        # absence assertion over it is a false green.
         sink: list[str] = []
         handler = logger.add(sink.append, level="DEBUG")
         try:

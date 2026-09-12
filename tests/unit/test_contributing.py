@@ -1,9 +1,4 @@
-"""`CONTRIBUTING.md`'s gate is `CLAUDE.md`'s gate.
-
-The two files are written for different readers -- one a maintainer, one a
-stranger -- and the list of commands is the one thing that must not differ
-between them.
-"""
+"""`CONTRIBUTING.md`'s gate is `CLAUDE.md`'s gate."""
 
 import pathlib
 import re

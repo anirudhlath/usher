@@ -1,34 +1,4 @@
-"""What `usher.db.staging` costs two callers running at the same instant.
-
-M5 recorded the contention and M6 is what makes it hurt: `EnrichService`
-enqueues one `index` job per enriched title, so a single-row `COPY` runs on
-the pipeline's hot path against the same staging name a nightly walk's batch
-is using. Every case here needs **two real backends that commit**, which is
-why none of them can use the rolled-back `session` fixture.
-
-The three failures these pin are different failures, and only the second is
-the one the plan predicted:
-
-1. **Two concurrent stagers with no leftover table do not wait -- they
-   raise.** `CREATE UNLOGGED TABLE stg_jobs` in two sessions at once races on
-   `pg_type_typname_nsp_index`, which asyncpg reports as
-   `UniqueViolationError` and SQLAlchemy wraps as `IntegrityError`. A
-   repository whose `except IntegrityError` means "a genuine data conflict"
-   cannot tell the two apart, so a perfectly healthy batch is reported to its
-   caller as a constraint violation.
-2. **Two concurrent stagers *with* a leftover table serialise for the length
-   of the other's whole transaction**, not for the length of a DDL, because
-   `ACCESS EXCLUSIVE` is held to commit.
-3. **A committed staging call leaves a table behind in `public`**, which
-   surfaces as schema drift in `test_migration_matches_the_orm_metadata` --
-   in a *later file*, so the suite that caused it passes alone. Nine
-   integration files carried an explicit `DROP TABLE IF EXISTS stg_*` for
-   this; a temporary table deletes the need for all nine.
-
-The fix is `CREATE TEMP TABLE ... ON COMMIT DROP`: a name in the session's
-own `pg_temp` schema, so there is nothing shared to lock, nothing shared to
-race on, and nothing left at commit.
-"""
+"""What `usher.db.staging` costs two callers running at the same instant."""
 
 import asyncio
 import time
@@ -151,27 +121,7 @@ async def test_two_concurrent_enqueues_do_not_race_on_the_type_catalogue(
 async def test_a_leftover_public_staging_table_cannot_serialise_two_enqueues(
     backends: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The wrong implementation: any `DROP`/`CREATE` on a name in `public`.
-
-    A leftover `public.stg_jobs` -- from a crashed batch, or from a release
-    that predates the temporary tables -- is the state in which today's code
-    does not raise but *waits*. Both statements take `ACCESS EXCLUSIVE` and
-    both are held to commit, so the second caller waits for the length of the
-    first caller's whole transaction. Measured at 813 ms against an 800 ms
-    hold, in lockstep.
-
-    Asserted on the measured wait rather than on a lock row, because the
-    property is "the second caller was not made to wait" and a lock row is
-    one implementation's evidence for it. `_HOLD_SECONDS / 2` is the
-    threshold: a wait caused by this is *at least* the whole hold, and
-    nothing else here costs 400 ms.
-
-    Also asserts the leftover is left alone. `DROP TABLE IF EXISTS
-    pg_temp.stg_jobs` is what makes a leftover harmless rather than merely
-    unlikely, and an unqualified drop would take the shared lock exactly once
-    -- which is a 813 ms stall an operator sees once per deployment and can
-    never reproduce.
-    """
+    """The wrong implementation: any `DROP`/`CREATE` on a name in `public`."""
     async with backends() as setup:
         await setup.execute(text("DROP TABLE IF EXISTS public.stg_jobs"))
         await setup.execute(text("CREATE UNLOGGED TABLE public.stg_jobs (sentinel integer)"))

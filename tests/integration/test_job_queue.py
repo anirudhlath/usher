@@ -1,28 +1,4 @@
-"""The shared contract against real Postgres -- the half that can lock.
-
-`FakeJobQueue` cannot express `SELECT ... FOR UPDATE SKIP LOCKED` at all, so
-`test_two_workers_never_claim_the_same_job` is skipped there and runs here,
-against two real backends. Everything the fake's docstring lists as
-"forgiving" is closed by one of the cases below: the locking, the jitter, the
-`CardinalityViolationError` a batch duplicate causes without
-`SELECT DISTINCT ON`, the CHECK constraints, and the poisoned session a
-caught conflict leaves behind without a SAVEPOINT.
-
-**Why the concurrency cases use their own engine-bound sessions.** The shared
-`session` fixture is a single connection inside one externally-managed
-transaction that is rolled back afterward (see `conftest.py`); two
-`PostgresJobQueue` instances over it would be *one* Postgres backend and could
-not contend for a row lock even in principle. The writer commits, so these
-cases clean up after themselves explicitly. Same shape as
-`tests/integration/test_bootstrap_concurrency.py`.
-
-**Every claim in these cases is bounded by `asyncio.wait_for`.** A claim
-spelled `FOR UPDATE` without `SKIP LOCKED` does not return a wrong answer --
-it *blocks*, until the transaction holding the lock ends, which in these
-tests is never. A test that hangs reports nothing and a CI run that hangs
-reports less, so the timeout turns the blocking failure into an ordinary
-assertion failure.
-"""
+"""The shared contract against real Postgres -- the half that can lock."""
 
 import asyncio
 import time
@@ -72,12 +48,9 @@ async def clear_backoff(session: AsyncSession) -> ClearBackoff:
     return _clear
 
 
-# `pg_locks` is per-backend, so this only means anything on the *same* session
-# the enqueue ran on -- which the shared `session` fixture guarantees, being
-# one connection for the whole test. Filtered to `relation` locks because a
-# transaction also holds `virtualxid` and `transactionid` locks that name no
-# relation at all; joined through `pg_namespace` because the schema is the
-# whole property (see the contract case).
+# `pg_locks` is per-backend, so this only means anything on the *same* session the
+# enqueue ran on -- which the shared `session` fixture guarantees, being one connection
+# for the whole test.
 _STAGING_LOCKS = """
 SELECT n.nspname || '.' || c.relname AS name
 FROM pg_locks l
@@ -181,12 +154,10 @@ async def claimers(postgres_url: str) -> AsyncIterator[_PostgresConcurrentClaims
         async with factory() as cleanup:
             await cleanup.execute(text("DELETE FROM jobs"))
             # A `DROP TABLE IF EXISTS stg_jobs` stood here until M6, because
-            # `stage_records` created the staging table with DDL, Postgres DDL
-            # is transactional, and this harness's writer *commits* -- so
-            # unlike every other test in this suite the table survived and
-            # took `test_migration_matches_the_orm_metadata` down in a later
-            # file. `CREATE TEMP TABLE ... ON COMMIT DROP` deleted the need
-            # for it: the commit is now what removes the table.
+            # `stage_records` created the staging table with DDL, Postgres DDL is
+            # transactional, and this harness's writer *commits* -- so unlike every
+            # other test in this suite the table survived and took
+            # `test_migration_matches_the_orm_metadata` down in a later file.
             await cleanup.commit()
         await engine.dispose()
 
@@ -250,28 +221,10 @@ async def test_two_workers_split_two_jobs_rather_than_queueing_behind_each_other
 async def test_the_claim_query_uses_the_partial_index(
     session: AsyncSession, queue: PostgresJobQueue, analyze: Analyze
 ) -> None:
-    """`ix_jobs_claim` is `(priority DESC, created_at) WHERE status =
-    'pending'`. A claim that sorts instead of scanning it is a sort over the
-    whole queue on every single claim, and at a 1.1M-item backfill that is the
-    difference between a worker and a bottleneck.
-
-    Explains the repository's **own** statement, binds and all, rather than a
-    hand-copied lookalike -- the copy drifts, and a plan assertion about a
-    query nothing runs is worse than none.
-
-    **Scoped to the `claimable` CTE deliberately, and here is the measurement
-    that says why.** The claim is two stages: a `LIMIT`ed, locking select
-    (`claimable`) and an `UPDATE ... FROM` it. Only the first has an ordering
-    to serve and only the first grows with queue depth. Explaining the whole
-    statement at 2,000 / 50,000 / 300,000 pending rows (`pgvector/pgvector:
-    pg17`, 2026-07-31) shows the selection stage on
-    `Index Scan using ix_jobs_claim` at every size, and the *update* stage
-    switching from `Hash Join` over a `Seq Scan` (2,000 rows, where a seq scan
-    genuinely is cheaper -- cost 45) to `Nested Loop` + `Index Scan using
-    pk_jobs` from 50,000 rows up. So an unscoped "no Seq Scan anywhere"
-    assertion fails on a small fixture for a plan that is correct, and passes
-    at scale for the wrong reason. This asserts the property that is actually
-    load-bearing.
+    """`ix_jobs_claim` is `(priority DESC, created_at) WHERE status = 'pending'`. A claim
+    that sorts instead of scanning it is a sort over the whole queue on every single
+    claim, and at a 1.1M-item backfill that is the difference between a worker and a
+    bottleneck.
     """
     await queue.enqueue(
         [
@@ -748,27 +701,9 @@ async def test_a_promoting_repeat_survives_a_retryable_failure_of_the_run_it_pro
 async def test_the_claim_ordering_survives_a_planner_that_ignores_the_index(
     session: AsyncSession, queue: PostgresJobQueue
 ) -> None:
-    """The `created_at` key in the claim's `ORDER BY` is *redundant given*
-    `ix_jobs_claim`, which already carries it -- so deleting it changes
-    nothing any ordinary case can observe. Measured, not assumed: the
-    mutation that drops it survives all 50 other cases in this file, because
-    every one of them gets its ordering from the index scan rather than from
-    the clause.
-
-    It stops being redundant the moment the planner does not use that index,
-    which is what this forces. Two things make the distinction observable at
-    all, and both are necessary:
-
-    - **The re-enqueue in the middle**, which is what makes heap order and age
-      order disagree. An `UPDATE` writes a new tuple version further down the
-      page while `created_at` stays put, so a seq scan reaches `new` before
-      the re-written `old`. Without it, heap order *is* insertion order *is*
-      age order and no ordering bug can show.
-    - **`limit=1`, not `limit=2`.** The key under test is inside the
-      `claimable` CTE, where it decides *which* rows the `LIMIT` keeps -- not
-      the order they come back in, which the outer `ORDER BY` fixes anyway. A
-      limit large enough to take every candidate selects the same set either
-      way.
+    """The `created_at` key in the claim's `ORDER BY` is *redundant given* `ix_jobs_claim`,
+    which already carries it -- so deleting it changes nothing any ordinary case can
+    observe.
     """
     for key in ("old", "new", "old"):
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key=key, priority=JobPriority.NEW)])

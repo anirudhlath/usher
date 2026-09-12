@@ -1,16 +1,4 @@
-"""The ticket cipher: domain separation, the TTL boundary, and the no-oracle rule.
-
-Every case here is deterministic. `Fernet.encrypt_at_time`/`decrypt_at_time`
-take the instant as an argument, so expiry is an argument rather than a wait --
-no `sleep`, no patched clock, and
-`test_no_case_in_this_file_sleeps_or_patches_a_clock` is what keeps it that way
-rather than the convention.
-
-Two of this module's facts are measurements that refuted what the plan
-predicted, and both are recorded on the cases that carry them:
-`test_a_ticket_is_a_legal_path_segment_but_quote_safe_empty_is_not_a_no_op`
-and `test_redeem_answers_none_rather_than_raising`'s `non-ascii` arm.
-"""
+"""The ticket cipher: domain separation, the TTL boundary, and the no-oracle rule."""
 
 import ast
 import base64
@@ -97,27 +85,9 @@ def _called_names(tree: ast.AST) -> list[str]:
 
 
 def test_a_token_minted_under_the_credential_subkey_does_not_redeem_as_a_ticket() -> None:
-    """`credentials.py`'s docstring promised this subkey was "domain-separated
-    from any other use a later milestone makes of `USHER_SECRET_KEY`". This is
-    that later milestone, and this is where the promise becomes a measurement.
-
-    The positive control is not decoration. A `redeem` that answers `None` for
-    everything passes the negative assertion perfectly, so the case first
-    proves the ticket cipher redeems *its own* token before proving it refuses
-    the credential store's -- the two ciphers differ only in `info`, and both
-    are built from the same `SecretStr`.
-
-    **The foreign token is stamped with `encrypt_at_time` at the same instant,
-    and that is what makes this a test of the key.** Written with a plain
-    `credential_cipher.encrypt()` it was a test of the *clock*: `encrypt`
-    stamps with the wall clock, `_MINTED_AT` is a fixed literal, and the two
-    were 24,507 seconds apart on the day this was measured -- so the TTL
-    refused the token before the key was ever consulted. Planting
-    `_HKDF_INFO = b"usher.source-credentials.v1"` (which collapses the two
-    ciphers into one) left that spelling **green**, and it is the mutation
-    this case exists to kill. `.claude/rules/testing-discipline.md`'s "a
-    rejection is not an assertion", arriving at the milestone's own named
-    failing test.
+    """`credentials.py`'s docstring promised this subkey was "domain-separated from any
+    other use a later milestone makes of `USHER_SECRET_KEY`". This is that later
+    milestone, and this is where the promise becomes a measurement.
     """
     credential_cipher = build_cipher(_SECRET)
     ticket_cipher = playback_ticket.build_ticket_cipher(_SECRET)
@@ -186,39 +156,10 @@ def test_one_secret_always_derives_the_same_ticket_cipher() -> None:
     ],
 )
 def test_the_subkey_derivation_is_pinned_by_a_known_answer(secret: str, expected_key: str) -> None:
-    """**Without this, the whole derivation is unpinned.** Found by the sweep,
-    refuting the plan's prediction that changing `salt=None` to a literal salt
-    "fails the round-trip": it survives all 3,007 unit cases, because every
-    case builds *both* the cipher and the token through `build_ticket_cipher`,
-    so a consistently-applied change to the derivation moves every key
-    together and nothing can see it. The same is true of `info`, of the
-    hash, and of the secret's encoding -- `_HKDF_INFO` is killed only by the
-    one value that *collides* with the credential store's subkey, and
-    `usher.playback-ticket.v2` would survive exactly as the salt does.
-
-    A known-answer test is the standard answer and the only one that works:
-    the expected key is a literal, computed once and written down, **not**
-    re-derived here -- re-deriving would restate the same five parameters in a
-    second file and move with any mutation applied to both.
-
-    What it pins, therefore: `salt=None`, `info=b"usher.playback-ticket.v1"`,
-    `algorithm=SHA256`, `length=32`, and `.encode("utf-8")` of the secret. A
-    change to any of them is a scheme change that invalidates every
-    outstanding ticket on deploy, which is precisely why the module's `info`
-    string is versioned -- so such a change is a new derivation rather than a
-    silent reinterpretation.
-
-    **The `non-ascii` arm is why there are two, and it closes a survivor the
-    `ascii` arm alone cannot see.** `.encode("utf-8")` mutated to
-    `.encode("latin-1")` survived the whole suite against the hex secret,
-    because the two codecs agree on every ASCII byte -- the identity-element
-    family again, in the codec domain. Nothing constrains `USHER_SECRET_KEY`
-    to ASCII (`Settings` enforces `min_length=32` and nothing else; the hex
-    form is documentation, not a validator), so an operator with a passphrase
-    is a reachable state where the two derive different keys, and one holding
-    any character above U+00FF is a state where `latin-1` raises
-    `UnicodeEncodeError` at cipher construction. With this arm the mutation
-    fails on the key.
+    """**Without this, the whole derivation is unpinned.** Found by the sweep, refuting the
+    plan's prediction that changing `salt=None` to a literal salt "fails the round-
+    trip": it survives all 3,007 unit cases, because every case builds *both* the cipher
+    and the token through `build_ticket_cipher`, so a consistently-applied change to the
     """
     pinned = Fernet(expected_key)
 
@@ -347,36 +288,8 @@ def test_the_module_never_asks_whether_a_ticket_merely_expired() -> None:
 
 
 def test_a_ticket_is_a_legal_path_segment_but_quote_safe_empty_is_not_a_no_op() -> None:
-    """**The plan's measurement is right at one length and wrong as a rule,
-    and D3's deep-link assertion is the thing that would have been ratified by
-    the difference.**
-
-    Measured on cryptography 49.0.0. A Fernet token is
-    `base64url(1 + 8 + 16 + ciphertext + 32)` bytes, and the ciphertext is
-    AES-CBC padded to a 16-byte block -- so the encoded length, and with it the
-    base64 `=` padding, moves in bands of 16 plaintext characters. The plan's
-    sample is a 184-character URL minting a 332-character token for which
-    `quote(token, safe="") == token`; that reproduces exactly, and it holds
-    only for the 176--191 band, whose 249-byte token happens to encode with
-    **no** padding at all. A realistic Emby URL straddles the boundary -- the
-    same URL on a host one character shorter is 175 characters and mints a
-    padded token.
-
-    What is true at every length is the claim that actually matters: `=` is an
-    RFC 3986 sub-delim and therefore a legal `pchar`, so a ticket needs no
-    encoding step to sit in `GET /stream/{ticket}`. It is `quote`'s
-    conservative default that is not a no-op, not the URI grammar.
-
-    **The three tallies are asserted, not narrated, and that is a review
-    finding rather than a preference.** This case shipped with the prose citing
-    a 1--599 sweep as its evidence and a loop that ran `range(1, 200)` -- a
-    third of it, tallying 64/64/71, with `padded > 0` as the only check. The
-    property was true and the numbers were right, but nothing in the suite
-    computed them, so a change that moved the distribution in the untested
-    200--599 band would have left this green while contradicting the sentence
-    beside it. The loop is now the range the numbers come from and the counts
-    are assertions; 599 mints cost **6.4 ms**, which is what makes the choice
-    between narrating and enforcing an easy one.
+    """**The plan's measurement is right at one length and wrong as a rule, and D3's deep-
+    link assertion is the thing that would have been ratified by the difference.**
     """
     cipher = playback_ticket.build_ticket_cipher(_SECRET)
     alphabet = set(string.ascii_letters + string.digits + "-_=")

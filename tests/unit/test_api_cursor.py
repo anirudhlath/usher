@@ -1,34 +1,4 @@
-"""PRD 07's opaque cursor, proved at a request boundary rather than as a pure
-function.
-
-`usher.api.cursor` has **no consumer in `src/` and that is deliberate** -- the
-one place this project's "no member without an emitter" rule is waived, and
-with a reason: four paged routes across three later groups need the same
-codec, and the alternative is the first of them writing it and the other three
-copying it. So the proof cannot be "a route uses it"; it is a **probe route**
-defined here, mounted on a real `create_app()`, exactly the way
-`tests/integration/test_pipeline_spans.py` proves its wiring. The real app is
-what makes the refusal cases mean anything: a `400 invalid_cursor` is a
-problem document only because `usher.api.errors`' handler is registered, and a
-codec tested as a pure function would have proved the raise and not the
-response.
-
-Three properties this file is built around, each of which a smaller fixture
-would have made unobservable:
-
-- **The population's sort order is not its id order.** Ten rows minted with
-  ascending ids carry *descending* years, so `ORDER BY id` and `ORDER BY
-  (year, id)` disagree -- the trap `CLAUDE.md` records as costing M7 five
-  untested orderings. Every ordering case here asserts that premise itself.
-- **Every year appears twice, so a page boundary lands inside a tie group.**
-  With `limit=5` over ten rows the boundary falls between the two rows sharing
-  1980, which is what makes the `id` tiebreaker load-bearing and what makes a
-  `>=` keyset predicate re-serve a row instead of silently agreeing with `>`.
-- **Ten rows and `limit=5` is `count % limit == 0`.** That is the off-by-one
-  the headline case is about: without the over-fetch the second page comes
-  back full and mints a cursor to nothing, and a client learns it is finished
-  only by making a request that returns an empty page.
-"""
+"""PRD 07's opaque cursor, proved at a request boundary rather than as a pure function."""
 
 import base64
 import datetime as dt

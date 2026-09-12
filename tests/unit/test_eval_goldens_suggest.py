@@ -1,13 +1,4 @@
-"""The frame's 2,991 typo cases, regenerated rather than restored.
-
-ADR-0040 re-anchored the frame on `imdb_num_votes`; the gate's own total was
-2,993 and the re-measured one is 2,991. Where a docstring below quotes 2,993
-it is describing ADR-0002's 2026-08-03 run, which is still true of that run.
-
-The pure generator is tested here against a hand-built pool. The catalog
-reads are `tests/integration/test_eval_goldens_postgres.py`'s -- not the
-ledger file beside it, which is the schema and DDL one.
-"""
+"""The frame's 2,991 typo cases, regenerated rather than restored."""
 
 import os
 import subprocess
@@ -163,36 +154,7 @@ def test_the_same_seed_and_pool_produce_a_byte_identical_case_set() -> None:
 
 
 def test_the_case_set_is_identical_in_two_processes_with_different_hash_seeds() -> None:
-    """**The property the whole design rests on, and it was pinned in prose.**
-
-    E1 exists to be comparable with a run taken on 2026-08-03 by a different
-    process on a different day. The case above compares two calls inside one
-    interpreter, so anything salted by `PYTHONHASHSEED` -- a `set` iterated,
-    a `frozenset` of bands, a dict keyed on something unhashable-turned-tuple
-    -- agrees with itself and disagrees with every other run of the harness.
-    Two interpreters, two seeds, one expected digest.
-
-    Behavioural rather than an AST assertion on purpose: the property is
-    cross-process reproducibility, not a spelling, and a structural check
-    pointed at `build_typo_cases` would miss hash-order dependence introduced
-    anywhere else on the path.
-
-    **Two things it deliberately does not catch, so it is not read as
-    standing in for them.** It does not catch `for band in pools:` -- dict
-    iteration is insertion-ordered and `read_pools` inserts in `GATE_BANDS`
-    order, so that spelling is benign today. And it does not catch any of the
-    *deterministic* reorderings: a fresh generator per band, bands reversed,
-    classes reversed. Those move both processes identically and are pinned by
-    `test_the_bands_and_classes_come_out_in_the_order_the_rng_was_consumed`
-    and `test_one_generator_spans_every_band_rather_than_restarting`.
-
-    The environment is the running one with `PYTHONHASHSEED` overridden
-    rather than a hand-built dict: under `uv run` the child needs the
-    parent's `VIRTUAL_ENV`/`PYTHONPATH` resolution. `check=True` and the
-    empty-digest assertion are both load-bearing -- a child that failed to
-    import prints nothing, and without them this compares `""` against `""`
-    and calls it a pass.
-    """
+    """**The property the whole design rests on, and it was pinned in prose.**"""
     digests = set()
     for seed in ("0", "1"):
         # S603: a fixed argv built from `sys.executable` and a module-level
@@ -300,27 +262,9 @@ def test_the_query_id_carries_the_band_and_class_the_strata_are_scored_on() -> N
 
 
 def test_the_case_count_arithmetic_reproduces_the_pinned_total() -> None:
-    """**The strongest evidence the port is faithful, re-pinned 2026-08-19.**
-    Five bands x 150 names x four classes is 3,000, and the shortfall is
-    two-character names, which admit no deletion. Against a synthetic pool
-    whose 2-4 band holds exactly that many, this generator reproduces
-    `GATE_CASES` -- 750 substitutions, 750 transpositions, 750 doubles and
-    the rest deletions.
-
-    Note the transposition arm stays at 750: `"ab"` transposes to `"ba"`,
-    which is why the declines are deletions alone. A generator whose
-    transposition arm also declined would give 2,982 and would not be this
-    procedure.
-
-    **The fixture's short-name count is derived from `GATE_CASES`, not typed
-    beside it.** ADR-0040 re-anchored the frame on `imdb_num_votes` and the
-    live 2-4 band went from seven such names to **nine**, so a hardcoded `7`
-    made this case fail against a correct generator -- the fixture had
-    silently become a claim about the old catalog. Deriving it means the next
-    re-pin moves one constant and this case follows; the *value* of
-    `GATE_CASES` is pinned by a literal in
-    `test_the_gates_recorded_pool_sizes_cannot_be_edited_in_place`'s sibling,
-    which is where a re-pin should force a human to look.
+    """**The strongest evidence the port is faithful, re-pinned 2026-08-19.** Five bands x
+    150 names x four classes is 3,000, and the shortfall is two-character names, which
+    admit no deletion.
     """
     undeletable = 4 * GATE_DRAW_PER_BAND * len(GATE_BANDS) - GATE_CASES
     assert undeletable == 9, "the premise: the pinned total implies nine two-character names"

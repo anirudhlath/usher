@@ -1,18 +1,4 @@
-"""The IR adapter, pinned to arithmetic worked out by hand.
-
-Three queries, one relevant document each: at rank 1, at rank 4, and absent.
-    recall@5 = 2/3      = 0.666667
-    MRR      = (1 + 1/4 + 0)/3 = 0.416667
-Confirmed against ranx 0.3.21 on 2026-08-18. A library upgrade that moves
-either number fails here rather than silently moving a bar.
-
-This file imports `ranx` itself, in one case and deliberately: it is the
-second file a library swap touches, because the premise that
-`library_version()` exists at all -- that `ranx` exposes no `__version__` --
-is a claim about the library and is worth asserting rather than trusting.
-`src/` confinement is unaffected; `grep -rn "ranx" src/` finds
-`metrics/ir.py` and nothing else.
-"""
+"""The IR adapter, pinned to arithmetic worked out by hand."""
 
 import importlib.metadata
 import math
@@ -130,37 +116,7 @@ def test_two_rankings_for_one_query_are_refused_rather_than_overwriting() -> Non
 
 
 def test_a_judgement_naming_the_empty_result_sentinel_is_refused() -> None:
-    """The fourth refusal, and the only one whose damage is a **perfect score**.
-
-    `NO_RESULT` lives in the same namespace as real document ids. Until
-    2026-08-19 its only defence was a property of *callers* -- the comment
-    beside it said it is "deliberately not a UUID, so it can never collide" --
-    and nothing asserted it. `test_the_sentinel_cannot_be_mistaken_for_a_title`
-    above asserts the sentinel is not a valid UUID; it does not assert that the
-    ids reaching `score` are, and neither does the signature, which is a plain
-    `Mapping[str, str]`.
-
-    **What the failure looks like without this guard**, measured 2026-08-19 by
-    running exactly this input against `score` before the guard existed:
-
-        relevant = {"q1": NO_RESULT}, q1's ranking empty
-        -> {'recall@5': 1.0, 'mrr': 1.0}
-
-    A query that returned nothing scores a **perfect hit** -- because `score`
-    substitutes `NO_RESULT` into the run for an empty result, and the judgement
-    then names precisely the document that substitution invented. That is the
-    score rising as the system gets worse, which is the one failure mode
-    `score`'s own docstring pays for three other guards to prevent. It is also
-    quiet: 1.0 is a number somebody writes down. Diluted it is worse rather than
-    better, because it stops being conspicuous -- one sentinel judgement beside
-    one genuine miss reads **0.5**, measured the same way.
-
-    Not reachable from today's callers, which have no way to mint that string
-    into a judgement. Neither is the duplicate document id the case below
-    refuses, and the argument is the same one: this module already pays for
-    three guards against caller mistakes of exactly this shape, and this one is
-    O(len(relevant)) on a path that already walks `relevant` twice.
-    """
+    """The fourth refusal, and the only one whose damage is a **perfect score**."""
     with pytest.raises(EvalRefused) as caught:
         score({"q1": NO_RESULT}, (Ranking("q1", ()),), ["recall@5", "mrr"])
 
@@ -181,33 +137,7 @@ def test_a_judgement_naming_the_empty_result_sentinel_is_refused() -> None:
 
 
 def test_a_document_id_repeated_inside_one_ranking_is_refused_at_construction() -> None:
-    """The fifth refusal, and the only one raised by a **DTO** rather than by
-    `score`.
-
-    It was pinned as a *description* until 2026-08-19 -- the demotion below was
-    this function's measured behaviour and nothing refused it -- and the case
-    below is what that description has become. `Ranking.__post_init__` now
-    refuses it, following `SearchRequest.__post_init__`'s precedent one port
-    over: a DTO buildable in a state no implementation can serve pushes the
-    failure onto whoever notices first, and here that was nobody.
-
-    Three things asserted rather than one, because *that it raised* is the
-    weakest possible check on a refusal and it is the one everybody writes:
-
-    * **`EvalRefused`, not `ValueError`.** It is the same event as `score`'s
-      four guards -- a harness invariant violated -- so it stays in one
-      taxonomy and `runner.py` keeps a single `except`. A bare `ValueError`
-      would be caught by nothing that catches its siblings.
-    * **The message names the query and the offending id**, because a traceback
-      has to point at the surface with the dedupe bug rather than at the
-      scorer. `pytest.raises(EvalRefused)` alone is satisfied by a message
-      naming neither.
-    * **The refusal is at construction, not at scoring.** The `with` block
-      wraps `Ranking(...)` and nothing else, so a guard moved into `score`
-      would fail here -- which matters because `score`'s duplicate-*query*-id
-      guard stays exactly where it is. The two are different events (the
-      collection, versus one ranking's contents) and merging them blurs both.
-    """
+    """The fifth refusal, and the only one raised by a **DTO** rather than by `score`."""
     with pytest.raises(EvalRefused) as caught:
         Ranking("q1", ("t1", "a", "t1"))
 
@@ -226,53 +156,8 @@ def test_a_document_id_repeated_inside_one_ranking_is_refused_at_construction() 
 
 
 def test_the_demotion_the_guard_prevents_is_still_reachable_with_the_guard_suspended() -> None:
-    """The evidence for the refusal above, kept rather than deleted with the
-    behaviour it describes.
-
-    A guard is only demonstrably load-bearing where something suspends it --
-    the reason this repository's `llm_calls` CHECK is proved by
-    `model_construct` cases rather than by ordinary ones. `_unguarded` is that
-    suspension: `Ranking.__new__` plus `object.__setattr__` skips
-    `__post_init__` on a frozen, slotted dataclass, so the scoring path the
-    guard defends is still reachable and still measurable.
-
-    `score` builds its run as a descending-score dict comprehension in rank
-    order, so a repeated id's **last** write wins and the document is scored by
-    its **worst** position: `("t1", "a", "t1")` becomes `{"t1": 1.0, "a": 2.0}`
-    and the document listed first is ranked second.
-
-    **Every arm carries its own duplicate-free control**, and they are the
-    point rather than padding: without them each assertion is satisfied by a
-    `score` that mishandles the *length* of the ranking, or the metric, or the
-    single-query shape. The pairs differ in exactly one position, which is why
-    both arms go through `_unguarded` -- routing the control through the real
-    constructor would make each pair differ in two things at once.
-
-    The third pair is the damage rather than the mechanism, and it is what
-    bought the guard. Six other documents and one repeat of the right answer at
-    the end puts the relevant title at rank 7 of 7, and `recall@5` -- the gate's
-    own hit rate, the number E1 exists to compare against 2026-08-03's -- reads
-    **0.0** for a ranking that opened with the correct answer. It is a total
-    miss reported for a system that found the title first, so the error
-    *depresses* the harness's own headline.
-
-    Note the second pair: the repeat *raises* the score, because what gets
-    demoted is an irrelevant document. So this is not "duplicates lower the
-    number"; it is "a repeat is scored by its worst position", and only a pair
-    that moves the number in both directions says so. Over 200 randomised
-    trials permitting duplicates (`random.Random(20260819)`, lists of 3-10
-    drawn with replacement from 12 documents, each against its own
-    first-occurrence-wins control over nine metrics) **79 differed**.
-
-    Measured 2026-08-19, which also refuted this module's own claim that no
-    assertion here could tell a descending score from a constant one: a
-    constant score answers **1.0** to the first arm's 0.5 and **0.5** to the
-    second's 1.0, because a constant score cannot be overwritten into a
-    different order. That refutation is now historical -- the guard makes every
-    input `score` can be *handed* duplicate-free, so through the public path the
-    two are indistinguishable again (400 randomised duplicate-free trials across
-    nine metrics, zero differing). The **ascending** spelling, which is the
-    defect an author actually writes, is still separated at MRR 0.233.
+    """The evidence for the refusal above, kept rather than deleted with the behaviour it
+    describes.
     """
     one = {"q1": "t1"}
 

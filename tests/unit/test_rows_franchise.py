@@ -1,10 +1,4 @@
-"""`FranchiseProvider` -- one row per collection the household is collecting.
-
-The wrong implementations these cases rule out are all *populated*: a screen
-full of one-card franchise rows, a reason string stating a falsehood aloud, and
-a shelf of a series the household finished years ago. None raises and none is
-empty.
-"""
+"""`FranchiseProvider` -- one row per collection the household is collecting."""
 
 import pytest
 

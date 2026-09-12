@@ -1,91 +1,4 @@
-"""The fingerprint's two halves, and why conflating them breaks CI.
-
-`inputs` decides comparability. `provenance` decides attribution. A field in
-the wrong half is not a cosmetic error: git sha in `inputs` makes every
-commit incomparable with every other, so `baseline-invalid` becomes the only
-reachable verdict and the eval job gets disabled within a fortnight.
-
-**Every case here was written against a named wrong implementation**, because
-the last three modules in this package each shipped a suite that passed
-against a broken one. The list, and the case that kills each:
-
-* a digest computed over `provenance` as well as `inputs` -- the spec's own
-  bug restored -- dies on `..._a_changed_git_sha_does_not_change_the_digest`,
-  and its half-fix (special-case the sha, digest the rest) dies on
-  `..._no_provenance_field_of_any_kind_reaches_the_digest`;
-* a digest that ignores one input field, so a real catalog change reads as
-  comparable, dies on `..._any_one_input_field_moved_on_its_own_...`, one
-  parameter per field -- the plan's single-field positive control cannot see
-  it;
-* a digest over `str(dict)`, or one that sorts only the top level, dies on
-  the two key-order cases (flat, and nested inside `pools`);
-* a digest over the *values* alone dies on
-  `..._reads_the_keys_and_not_only_the_values`;
-* a digest that treats an absent field as equal to a present one dies on
-  `..._absent_is_not_the_same_catalog_as_one_that_is_present`;
-* a digest built on anything `PYTHONHASHSEED` salts -- `hash()`, a `set`
-  iterated -- dies on the two-interpreter case, which is the only one that
-  can see it, because a baseline is written by one process and compared by
-  another;
-* a provenance field silently becoming an input (or the reverse) dies on
-  `..._compares_the_frame_and_records_the_rest`, which pins both halves as
-  exact sets rather than as memberships;
-* a digest that is not a pure function of `inputs` -- object identity mixed
-  in, a clock, a nonce -- dies on `..._stable_across_two_captures_...`;
-* a record that *discards* provenance once it has decided not to compare it
-  dies on `..._provenance_still_reaches_the_record`, and one that records a
-  plausible constant in place of what the run actually imported dies on
-  `..._read_from_the_run_and_not_written_down`.
-
-Every one of the first 28 cases below was watched failing against at least one
-of those, planted out of tree at `/var/tmp/e1-t5/` (2026-08-19): 20 wrong
-implementations, 20 killed, plus two controls that survive all five gate
-steps.
-
-**A review round added 17 more cases and 14 more plants (2026-08-19, out of
-tree at `/var/tmp/e1-t5-review/`, 14 killed).** The plant copy was proved to
-be the one the run imports before any of them were scored -- a `raise` at its
-module scope, and the run reported a collection error naming it -- because a
-plant that did not land looks exactly like a check that passed. The wrong
-implementations they name:
-
-* a `Fingerprint` that keeps the caller's mapping rather than copying and
-  wrapping it -- the question `CursorSpec` settled on the same decorator --
-  dies on `..._inputs_cannot_be_mutated_after_it_is_built` and its provenance
-  twin, and each half-fix dies on one assertion of them: wrapped without a
-  copy on the digest, copied without a wrap on the `TypeError`;
-* a `git_sha` that records a clean sha for a dirty tree dies on
-  `..._a_dirty_tree_is_marked_and_a_clean_one_is_not`, and the two ways of
-  guessing when the tree check itself fails -- reading as clean, reading as
-  dirty -- both die on `..._a_tree_check_that_itself_failed_says_so...`;
-* the three no-sha events collapsed back into one `"unknown"` dies on
-  `..._the_three_events_that_answer_no_sha_answer_three_different_things`
-  and on the three cases that pin the literals;
-* **`check=True` no longer survives**, which corrects what this docstring
-  said above: with one `"unknown"` for all three events it was equivalent,
-  and with the three it answers `"unknown:git-timeout"` for a git that
-  answered 128 immediately, dying on
-  `..._a_directory_that_is_not_a_repository_names_that_event...`;
-* a `check_digest` that compares the frame half only -- which is what "but
-  `check_frame` already covers it" produces -- dies on the `another-seed` and
-  `the-2964-case-set` parameters of `..._is_refused_and_the_input_is_named`,
-  and survives the two parameters `check_frame` really does cover, which is
-  the parametrisation naming which input went unchecked;
-* a hand-transcribed `GATE_DIGEST` that has drifted from the four constants
-  dies on `..._is_the_digest_the_gates_own_constants_produce` **and passes**
-  `..._is_this_exact_value`; a change to the input mapping's shape dies on the
-  second and passes the first. Two claims, two cases, measured both ways;
-* `for_suggest`'s `dict(frame.pools)` deleted dies on
-  `..._the_gates_own_mappingproxy_pools_digest_as_the_plain_dict_spelling...`
-  with `TypeError: Object of type mappingproxy is not JSON serializable`, and
-  on nothing else in this file.
-
-The leak scan's new premise was measured in both directions, since a premise
-that skips an arm can also swallow the defect the arm exists for: with
-`platform.node()` forced to `cachyos` the host arm skips with its reason, and
-with a credential leak planted beside that same coincidence the case still
-**fails** on the credential assertion rather than skipping.
-"""
+"""The fingerprint's two halves, and why conflating them breaks CI."""
 
 import getpass
 import json
@@ -560,31 +473,7 @@ def test_the_gate_digest_is_the_digest_the_gates_own_constants_produce() -> None
 
 
 def test_the_gate_digest_is_this_exact_value() -> None:
-    """The other claim, and the one the case above is structurally blind to.
-
-    A digest is only a comparability check if it is the *same* string across
-    releases: it is written into `eval.runs`, into every `docs/evals/
-    ledger.jsonl` line and, by Task 14, into the `source` of every bar in
-    `docs/evals/bars.toml`. A change to the input mapping's shape -- one key
-    renamed, a separator, a field added -- moves it, and every ledger row
-    written before that change silently stops matching every row written
-    after. Measured 2026-08-19 on this tree.
-
-    **Moved once, deliberately, and the reason is not a serialisation
-    change.** ADR-0040 re-anchored the sampling frame from `vote_count` --
-    which had acquired a second writer on a ~38x different scale -- onto
-    `imdb_num_votes`, and re-measured the five pools, `shared_lower_names`
-    and `case_count` against the restored catalog. Those six numbers are
-    `_GATE_INPUTS`, so the digest *should* move: a run over the old frame and
-    a run over this one are genuinely not comparable, and a digest that
-    survived the re-anchor would be asserting that they are.
-
-    **It cost nothing, because it happened before the first baseline.**
-    Checked at the time: `docs/evals/ledger.jsonl` held **0 rows** and no bar
-    in `docs/evals/bars.toml` named the old digest, so no recorded run was
-    orphaned. A later re-anchor will not be free, and this is the paragraph
-    that says so.
-    """
+    """The other claim, and the one the case above is structurally blind to."""
     assert GATE_DIGEST == "21678a1e2ed38b8a08700e44e5b249323cd0214a272fb07da77941017c7a369d"
 
 
@@ -689,29 +578,8 @@ def test_two_input_mappings_only_the_serialisation_can_tell_apart_are_still_refu
 def test_the_suggest_fingerprint_carries_no_credential_no_host_and_no_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fingerprint is written into a report, a baseline file and a CI log,
-    so anything that rides along in it is published. `Settings`' four secrets
-    are `SecretStr` and this module never reads them -- what it does read is
-    the environment and the machine, through `platform`, and both are one
-    line away from carrying a credential or naming the box.
-
-    The env sentinel is what an `os.environ` capture would drag in; the
-    hostname and the login name are what a `platform.node()` or a
-    `getpass.getuser()` would. Measured on this host 2026-08-19:
-    `platform.platform()` answers
-    `Linux-7.1.3-2-cachyos-x86_64-with-glibc2.43` and holds neither.
-
-    **`needle in json.dumps(value)` cannot tell a leak from a coincidence, and
-    on this distribution the coincidence is one hostname away.** A machine
-    named `cachyos` -- not an exotic choice under CachyOS -- is a substring of
-    its own kernel release, so the host arm would fail with *"the fingerprint
-    names the machine it ran on"* while nothing had leaked. That failure gets
-    the case deleted as flaky and takes the credential and user assertions
-    with it, which are the two that matter. So each arm states its premise
-    against the strings the record legitimately carries, and any arm whose
-    premise does not hold is left unasserted with the run reported as skipped
-    -- **after** the assertions that can still run have run, which is the only
-    ordering pytest offers for skipping part of a case.
+    """A fingerprint is written into a report, a baseline file and a CI log, so anything
+    that rides along in it is published.
     """
     sentinel = "usher-eval-must-not-travel-9f2c"
     monkeypatch.setenv("USHER_SECRET_KEY", sentinel)
@@ -903,28 +771,10 @@ def test_a_tree_check_that_itself_failed_says_so_rather_than_reading_as_clean(
 def test_a_directory_that_is_not_a_repository_names_that_event_rather_than_crashing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A run in a tarball, or in a container with no `.git`, is a legitimate
-    run whose provenance is simply thinner -- and it is the *only* one of the
-    three unknowns that is legitimate, which is why it is named apart from
-    them rather than sharing a bare `"unknown"`.
-
-    Real git rather than a stub, because a stubbed `subprocess.run` answers
-    its scripted `CompletedProcess` whatever the call asked for -- so the
-    return code a real missing repository produces, and what the module does
-    with it, is only observable here.
-
-    **This is now also the case that covers `check=True`, which was reported
-    as an equivalent mutant on 2026-08-19 and is no longer one.**
-    `subprocess.CalledProcessError` subclasses `SubprocessError`, so under
-    `check=True` this returncode-128 path raises and lands in the
-    `SubprocessError` arm -- which answers `"unknown:git-timeout"` about a git
-    that answered immediately. With one `"unknown"` for all three events that
-    was invisible; measured again with the three, it fails here.
-
-    The second assertion is the other half of the same failure: git says
-    *"fatal: not a git repository (or any of the parent directories)"* on
-    stderr and names the directory it looked in, so an implementation that
-    reports what it was told publishes a filesystem path into the record.
+    """A run in a tarball, or in a container with no `.git`, is a legitimate run whose
+    provenance is simply thinner -- and it is the *only* one of the three unknowns that
+    is legitimate, which is why it is named apart from them rather than sharing a bare
+    `"unknown"`.
     """
     assert shutil.which("git"), (
         "the premise: git is on PATH, so the refusal below is a repository "

@@ -1,22 +1,4 @@
-"""Behaviour every `PersonRepository` implementation must satisfy.
-
-PRD 02: *"People are canonical entities, so 'more from this director' is a
-join rather than a string match."* Every case here is about one of the two
-ways that claim fails -- an identity that collapses two people into one, or a
-recurrence count that ranks the wrong person first.
-
-**Every case names the wrong implementation it rules out**, which is the rule
-M6 put on `adapters/search/postgres.py` and which this milestone applies to
-nine providers at once: a test whose docstring cannot name what it kills is a
-test that kills nothing.
-
-Subclass and provide `repository` plus a `seeder`. The seeder exists because
-`list_recurring_for_user` reads four tables this port cannot write --
-`watch_states`, `episodes`, `credits` and `titles` -- so the suite has to be
-able to build a household's history through something. Its `ABC` shape is
-deliberate: a `Protocol` would let a subclass drift out of the suite silently,
-which is ADR-0001's argument applied to a test double.
-"""
+"""Behaviour every `PersonRepository` implementation must satisfy."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -186,30 +168,8 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """The front matter's ranking failure, seeded so the wrong answer is
-        confident rather than empty.
-
-        Person A has **three credits on one watched title** -- one actor
-        playing three parts, which TMDb genuinely emits. Person B has one
-        credit on each of two watched titles. `count(DISTINCT c.title_id)`
-        scores A at 1, below the recurrence floor, and B at 2;
-        `count(*)` scores A at 3 and returns a fully populated row, ranked
-        first, about somebody the household has seen once.
-
-        A is the distractor and the assertion is on **position**, never
-        membership: `assert b in {...}` is satisfied by returning both in
-        physical order.
-
-        **The three credits differ by `character` and not by `job`, and that
-        is the whole of whether this case works.** The read groups by
-        `(person_id, name, kind, job)`, so "a writer who is also a producer, a
-        director and an editor" -- the seeding the milestone plan specifies
-        here -- lands in **four separate groups of one row each**, where
-        `count(*)` and `count(DISTINCT title_id)` agree exactly and the case
-        cannot tell them apart. Measured: injected into the fake, the
-        `count(*)` defect survived this suite entirely under that seeding.
-        Several parts in one film share one group and are the shape that
-        discriminates.
+        """The front matter's ranking failure, seeded so the wrong answer is confident
+        rather than empty.
         """
         await repository.upsert_many(
             [
@@ -224,12 +184,8 @@ class PersonRepositoryContract:
         second_film = await seeder.movie()
         for part in ("A Twin", "The Other Twin", "Their Double"):
             await seeder.credit(person_id=crowded, title_id=first_film, character=part)
-        # Two parts on the first film and one on the second, so B's DISTINCT
-        # count is 2 and its raw row count is 3. Without that asymmetry the
-        # two counts agree for B, and a `count(*)` in the SELECT list alone --
-        # with HAVING and ORDER BY left correct -- reports the wrong number
-        # while ordering and filtering perfectly. Measured: that mutation
-        # survived the whole suite when B had one credit per film.
+        # Two parts on the first film and one on the second, so B's DISTINCT count is 2
+        # and its raw row count is 3.
         await seeder.credit(person_id=spread, title_id=first_film, character="A Detective")
         await seeder.credit(person_id=spread, title_id=first_film, character="Their Reflection")
         await seeder.credit(person_id=spread, title_id=second_film, character="A Detective")
@@ -535,28 +491,7 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """The mirror of the case above, and the one that was missing.
-
-        `_RECURRING_PEOPLE` sorts on three keys and the suite covered the
-        second and third. Deleting the **first** --
-        `count(DISTINCT c.title_id) DESC` -- **survived the whole suite**,
-        because every multi-row case here equalises the counts by construction
-        in order to isolate the recency tiebreak, and every other case returns
-        one row.
-
-        Here the two keys disagree: five films over the years against three
-        last month, both above the floor. The five-film person is seeded
-        **first**, so id order favours the wrong answer too.
-
-        **Two things downstream make this worse than a reordering.**
-        `PeopleProvider` emits the first `_MAX_ROWS` qualifying people, and its
-        score saturates -- so the mutant does not merely reorder the screen, it
-        evicts a genuine long-term collaborator from it. And the provider
-        dedupes by first sighting *because the list is strongest-first*, so the
-        `reason` string renders "You've watched 3 films with X" for someone the
-        household has watched five with: a wrong number in prose written to be
-        spoken aloud.
-        """
+        """The mirror of the case above, and the one that was missing."""
         await repository.upsert_many(
             [person(93_000_045, "Watched Often"), person(93_000_046, "Watched Lately")]
         )

@@ -1,25 +1,4 @@
-"""`PostgresLLMCallRepository` against the real database.
-
-The shared contract runs here unchanged, and **this is the arm where nearly
-all of it is load-bearing** rather than structural. The fake stores the very
-`LLMCall` it was handed, so it has no column mapping to get wrong; this one
-builds eleven parameters against eleven columns, which is where a dropped
-`generation_id`, a `tokens_out` filled from `tokens_in` or a constant
-`purpose` becomes expressible at all. `tests/fakes/llm_call_repository.py`
-enumerates the six divergences and the one place the fake is stricter.
-
-Plus the three things a list cannot express, each with a case of its own here:
-a `NUMERIC(12, 8)` that refuses a number too large for it, the CHECK that
-holds `ok` and `error` to each other, and the SAVEPOINT that lets a caller
-keep using its session after the ledger refused a row -- which matters more on
-this port than on any sibling, because `record()`'s caller is typically
-already inside an exception handler with curated rows it still has to commit.
-
-The ledger reads through a raw `SELECT *` into `LLMCall`, built from
-`LLMCallRow`'s own column list. That is this schema's house shape and it is
-what makes the comparison mechanically 1:1 with the table: a column added
-without a field on the model raises here rather than being silently dropped.
-"""
+"""`PostgresLLMCallRepository` against the real database."""
 
 import uuid
 from decimal import Decimal
@@ -74,38 +53,8 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
     async def test_a_cost_the_column_cannot_hold_is_a_port_error(
         self, repository: PostgresLLMCallRepository, ledger: PostgresLLMCallLedger
     ) -> None:
-        """**The case the whole error contract rests on**, and Postgres-only
-        because a Python `Decimal` has no ceiling to hit.
-
-        `cost_usd` is `NUMERIC(12, 8)`, so four integer digits: a single call
-        above `$9,999.99999999` raises `numeric field overflow`. The
-        misconfiguration that precision exists to catch is a price scaled *up*
-        by a million on the way in -- `$36,000` on one 12,000-token call --
-        and `usher.db.models.curation`'s module docstring holds the one copy
-        of that argument.
-
-        **It is reachable from a validly constructed `LLMCall`**, which is
-        what separates it from every other refusal on this table: the model
-        bounds `cost_usd` with `ge=0` and no upper limit, so no `model_
-        construct` is needed here and a service doing everything right can
-        still produce this row. That is why the translation exists at all --
-        the primary key alone would not have justified it, since a fresh
-        UUIDv7 makes a duplicate nearly unreachable.
-
-        **And the exception it must catch is not the obvious one** -- which is
-        the whole reason this case is worth its round trip.
-        `usher.db.repositories._errors.ROW_REFUSED_SQLSTATE_CLASSES` holds the
-        measurement and the two exception types it is *not*; what matters here
-        is that an implementation catching `IntegrityError` alone, which is
-        what most sibling repositories catch and what this one caught before
-        the measurement, lets a raw SQLAlchemy exception cross the port
-        boundary. The only way a caller could then handle it is to import
-        sqlalchemy itself, which is the one thing ADR-0009 says must never
-        happen.
-
-        There is no constraint to name, so `constraint` is `None`: this is the
-        column's declared precision refusing a value, not a named constraint
-        firing.
+        """**The case the whole error contract rests on**, and Postgres-only because a
+        Python `Decimal` has no ceiling to hit.
         """
         priced_a_million_times_over = llm_call(
             generation_id=new_id(), cost_usd=Decimal("36000.00000000")
@@ -131,30 +80,8 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
         ledger: PostgresLLMCallLedger,
         overrides: dict[str, object],
     ) -> None:
-        """`ck_llm_calls_ok_error_agree`, reached through the repository
-        rather than through raw SQL.
-
-        Constructed with `model_construct`, because
-        `LLMCall._ok_and_error_must_agree` refuses all three first -- which is
-        exactly why the CHECK exists and why that validator is a
-        `model_validator(mode="after")` rather than a `model_post_init` hook:
-        `model_construct` skips a validator and *runs* a post-init hook, so
-        under the other spelling this case would be unwritable and the CHECK
-        would be a constraint nothing had ever proved was real. Its own
-        docstring says so.
-
-        The three shapes are not one case repeated. A failed call with no
-        reason is a row an operator cannot act on; a failed call whose reason
-        is the empty string is the same row wearing a value, and it is the one
-        `str(exc)` produces for an exception raised with no arguments, which
-        is the reachable spelling this port's docstring warns Tasks 11-13
-        about; and a successful call carrying an error reads as a *failure* in
-        every `WHERE error IS NOT NULL` anybody will ever write against this
-        ledger. The `AND error <> ''` half of the constraint is what the
-        second one needs, and without it that row stores.
-
-        `tests/integration/test_curation_schema.py` owns the constraint
-        itself; this owns the translation, which is the half a caller sees.
+        """`ck_llm_calls_ok_error_agree`, reached through the repository rather than
+        through raw SQL.
         """
         valid = llm_call(generation_id=new_id())
         refused = valid.model_construct(**{**valid.model_dump(), **overrides})
@@ -206,63 +133,8 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
         ledger: PostgresLLMCallLedger,
         session: AsyncSession,
     ) -> None:
-        """The other side of the error contract, and the case that makes the
-        SQLSTATE filter load-bearing rather than decorative.
-
-        The wrong implementation this kills: an `except DBAPIError` that
-        translates **everything** into `RepositoryConflict`. Catching the whole
-        class is what `test_a_cost_the_column_cannot_hold_is_a_port_error`
-        forces, and the naive way to satisfy that case is to translate the lot.
-        Then a dropped connection, a statement timeout or a schema that is not
-        there arrives at `CurationService` as "this row is not storable", which
-        is the one failure kind a caller must be able to tell apart: a row that
-        is wrong is a bug in the generation, and a transport that is gone is
-        something a retry fixes. A redundant-looking predicate is a coverage
-        question, not a style question.
-
-        SQLSTATE `42P01` (undefined table) is class 42, so it is outside the
-        `22`/`23` classes `ROW_REFUSED_SQLSTATE_CLASSES` names, and it is
-        deterministic where a timeout would not be. The rename is blunt on
-        purpose: what is exercised is the *class* of failure, not a plausible
-        operational story.
-
-        **What the rename costs, stated because a test that mutates shared
-        state owes it.** `postgres_url` is session-scoped and the schema is
-        built once; this is the only case in the suite that changes it.
-        Measured: `ALTER TABLE ... RENAME` takes an `AccessExclusiveLock` on
-        `llm_calls` and holds it for the rest of the transaction, and a
-        concurrent `SELECT count(*)` from a second session blocks until it
-        times out. Two consequences:
-
-        - **Safety comes from DDL being transactional in PostgreSQL, not from
-          the `finally`.** The explicit rename back exists so the assertions
-          below can read the table; the reason a crash between the two cannot
-          leave the schema renamed is that the enclosing per-test transaction
-          is rolled back and the DDL goes with it. That is the load-bearing
-          fact and it was previously only implied.
-        - **This case is the exception to `tests/integration/conftest.py`'s
-          xdist note**, which grounds its claim on isolation never coming from
-          resetting something shared. That holds for every other test here and
-          not for this one: run in parallel against one container, a worker
-          touching `llm_calls` while this lock is held would block rather than
-          fail, which is slow and confusing rather than wrong. Worth knowing
-          before anyone adopts `pytest-xdist`.
-
-        **The failure is captured by hand rather than with
-        `pytest.raises(DBAPIError)`, and that is the whole difference between
-        this case discriminating and merely failing.** Under the mutation this
-        names, `record()` raises `RepositoryConflict` — which is a
-        `UsherPortError` and therefore *not* a `DBAPIError` — so
-        `pytest.raises` would decline it, let it propagate, and fail the case
-        before reaching a single assertion. The case would still be red, but
-        the line claiming to tell the two apart would never run, which is the
-        defect `35176e0` and `4608f3b` are both about. Captured into a
-        variable, the discriminating assertion is the one that fails and it
-        names what happened. `pytest.raises(Exception)` would have the same
-        property and is refused for two reasons: ruff's `B017` forbids it
-        without a `match=`, and a `match=` on a driver's message text is
-        exactly the dialect- and locale-dependent parsing that
-        `constraint_name` exists to avoid.
+        """The other side of the error contract, and the case that makes the SQLSTATE
+        filter load-bearing rather than decorative.
         """
         raised: Exception | None = None
         await session.execute(text("ALTER TABLE llm_calls RENAME TO llm_calls_moved_away"))

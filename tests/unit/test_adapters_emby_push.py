@@ -37,12 +37,7 @@ ADDED = ("90000200", "90000201")
 REMOVED = "90000202"
 UPDATED = "90000203"
 
-# Every `async for` over the channel is bounded. An iterator that stopped
-# yielding instead of raising, or a `recv` that stopped awaiting, must fail
-# its own case rather than hang the suite -- `SELECT ... FOR UPDATE SKIP
-# LOCKED`'s two wrong spellings taught this project the same lesson, which
-# is why `pytest-timeout` is deliberately not a dependency and the bound
-# belongs to the cases that need it.
+# Every `async for` over the channel is bounded.
 BOUND = 5.0
 
 
@@ -683,30 +678,7 @@ async def test_the_health_ledger_is_the_one_the_caller_handed_in() -> None:
 
 
 async def test_a_consumer_and_a_producer_genuinely_overlap() -> None:
-    """The trap this project has been bitten by, applied to a long-lived
-    socket.
-
-    A bare mock never suspends, so the event loop runs each gathered task
-    through its *entire* cycle before starting the next -- and M3's deleted
-    single-flight lock passed five runs in a row against exactly that. A
-    count assertion here would be worthless for the same reason: "four
-    frames produced, four events consumed" is also what a fully serialised
-    run produces.
-
-    So this asserts on *observed overlap*: the consumer's first event must
-    land before the producer's last frame is queued, and the two wall-clock
-    windows must genuinely intersect.
-
-    The producer is paced against the consumer -- it waits for a `recv` call
-    to land before queueing the next frame -- rather than dumping frames on
-    its own schedule. Both spellings were measured. Unpaced, the producer
-    outruns the consumer (which spends two loop turns per frame, one of them
-    the channel's own cooperative yield) and the windows share only ~37% of
-    their union with 3 of 8 events landing mid-production; paced, they share
-    **80.3-85.4% over 30 runs** with 7 of 8. The paced number is the honest one to assert on,
-    because it is measuring the property under test -- that the two tasks
-    take turns -- rather than the ratio of their loop-turn costs.
-    """
+    """The trap this project has been bitten by, applied to a long-lived socket."""
     connection = FakePushConnection()
     connector = FakePushConnector([connection])
     channel = _channel(connector)
@@ -1087,27 +1059,7 @@ def test_the_stock_websockets_logger_really_does_print_the_token(
 def test_the_socket_logger_survives_a_later_configure_logging(
     capsys: pytest.CaptureFixture[str], restored_logging: None
 ) -> None:
-    """**The order here is the assertion, and the plan had it backwards.**
-
-    A socket outlives the call that opened it. `socket_logger()` runs at
-    connect time; `configure_logging` runs whenever an app is built or the
-    CLI starts, which for a lane that has been up for hours is *afterwards*
-    -- and it clears `handlers` and re-forces `propagate = True` on every
-    logger it finds. So `propagate = False` and a `NullHandler` are both
-    undone while the connection they were protecting is still open.
-
-    The level is the half that survives: `configure_logging` never touches
-    it, `logging.basicConfig(level=0)` sets *root*'s rather than this
-    logger's, and `isEnabledFor` consults `getEffectiveLevel()`, which is
-    this logger's own because it is set. A record that is not enabled is
-    never formatted, so the token is not even interpolated.
-
-    The plan ordered this case `configure_logging` first and `socket_logger`
-    second, and then claimed that dropping the level would fail it. It would
-    not: in that order the `propagate = False` set second is never undone,
-    so the level is unobserved and the mutation survives. Measured both
-    ways.
-    """
+    """**The order here is the assertion, and the plan had it backwards.**"""
     silenced = socket_logger()
     configure_logging(_logging_settings(level="DEBUG"))
     silenced.debug("> GET %s HTTP/1.1", LEAKY_PATH)

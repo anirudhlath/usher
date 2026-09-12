@@ -1,18 +1,4 @@
-"""`GET /titles/{id}/similar` through a real request against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_similar.py` drives the
-route over fakes; `tests/integration/test_services_similar.py` drives
-`SimilarityService` over real Postgres directly. What is left is the request
-itself: that `api/deps.py`'s `get_similarity_service` wiring actually resolves
-against a real session, that `count_stale`'s real SQL predicate (not the
-fake's Python comparison -- `testing-discipline.md`'s staleness-gauge finding)
-reaches the wire scoped to the right seed, and the risk B8's own plan names --
-**the route only reads, so nothing commits** -- checked against real SQL
-rather than argued in a docstring.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""`GET /titles/{id}/similar` through a real request against a real schema."""
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -34,13 +20,11 @@ from usher.domain.title import Title
 from usher.ports.repository import ScoredNeighbor
 from usher.services.similar import blend_fingerprint
 
-# **Read off `Settings` rather than invented, and that changed on 2026-08-13.**
-# A literal was harmless while `blend_fingerprint` ignored the model; now the
-# app under test builds `SimilarityService` from `settings.embedding_model`, so
-# a fake name here makes every "fresh" row read stale through the real wiring —
-# which is the mechanism working, and would be a test asserting against it.
-# `Settings()` here is the same default the `settings` fixture above inherits;
-# neither overrides `embedding_model`.
+# **Read off `Settings` rather than invented, and that changed on 2026-08-13.** A
+# literal was harmless while `blend_fingerprint` ignored the model; now the app under
+# test builds `SimilarityService` from `settings.embedding_model`, so a fake name here
+# makes every "fresh" row read stale through the real wiring — which is the mechanism
+# working, and would be a test asserting against it.
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 # Every title this file writes carries it, so teardown removes exactly what
 # this file created -- `test_titles_route.py`'s convention, for the same

@@ -1,18 +1,5 @@
-"""`IngestService` against the real repositories, for the four things its
-port fakes structurally cannot express.
-
-The unit suite (`tests/unit/test_services_ingest.py`) runs this service
-against dicts. Dicts have no foreign keys, and two of this service's steps
-exist *only* to satisfy one: `resolve_seasons` and `resolve_episodes` are
-what turn a freshly-minted UUIDv7 into the id the catalog actually stored,
-and skipping either writes a `season_id`/`episode_id` naming a row that does
-not exist. Measured directly -- deleting both resolves leaves all 24 unit
-cases green, and fails here on
-`fk_media_items_episode_id_episodes` / `fk_episodes_season_id_seasons`.
-
-Also here rather than there: the second walk of a series the pipeline itself
-stubbed (one `titles` table, read through two ports, where the fakes keep two
-dicts), and one batch really costing one round trip per stage.
+"""`IngestService` against the real repositories, for the four things its port fakes
+structurally cannot express.
 """
 
 import uuid

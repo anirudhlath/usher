@@ -1,43 +1,4 @@
-"""The four watch actions through a real request, a real schema, a real upsert.
-
-**What only this level can see.** `tests/unit/test_api_watch.py` drives the
-same four routes over port fakes, so what is left here is everything the fakes
-stand in for:
-
-- the **un-overridden** dependency graph -- `get_watch_write_service`,
-  `get_session`, `get_default_user_id` and four repositories resolving through
-  FastAPI's own machinery against Postgres, which is a startup error a direct
-  call cannot produce;
-- `set_from_client`'s real statement: `origin = 'api'`, `played =
-  excluded.played`, `play_count = GREATEST(watch_states.play_count, 1)` and the
-  `last_played_at` CASE. `FakeWatchStateRepository` spells all four in Python
-  and cannot disagree with itself;
-- `trg_watch_states_set_updated_at`, the `BEFORE UPDATE` trigger that owns
-  `updated_at` and is the entire mechanism behind "a client write wins over a
-  walk in flight" -- the fake stores a Python `now()` there instead;
-- the **foreign key**. `watch_states.title_id` references `titles(id)` with
-  `ON DELETE RESTRICT`, so a write for an id that names no row is an
-  `IntegrityError` rather than a phantom dict entry: the route's existence read
-  is the difference between a 404 and a 500 carrying a constraint name, and
-  only this file can tell;
-- `PostgresMediaItemRepository.list_for_title`'s `AND episode_id IS NULL`
-  against a real series with real episode rows;
-- and the commit itself, read **from a second connection at the instant of the
-  publish** -- ADR-0033's own measurement shape. A fake commit is a counter;
-  this is the only place "an event is a statement about committed state" is a
-  claim about the database rather than about a journal.
-
-**One override and one only**: the event publisher, replaced by a probe that
-reads `watch_states` on its own session while the frame is being published.
-The probe is asserted non-empty before any claim is read out of it -- a probe
-that never ran records nothing, and every absence claim over it passes.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request, and `watch_states`' two target foreign keys are
-`RESTRICT` rather than `CASCADE` -- deliberately, so nothing silently destroys
-watch history -- which means the rows this file writes have to go before the
-titles they point at.
-"""
+"""The four watch actions through a real request, a real schema, a real upsert."""
 
 import uuid
 from collections.abc import AsyncIterator

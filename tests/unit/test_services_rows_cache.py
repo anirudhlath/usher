@@ -1,16 +1,4 @@
-"""The in-process row and screen caches (PRD 06).
-
-**In-process, per worker, and it dies with the process.** Said here because a
-reader assumes otherwise: this is a dict in the server, not Redis. On the
-deployment this project ships that is exactly one cache -- `compose.yml` runs
-one `usher` service and its `CMD` runs one uvicorn worker.
-
-**The two silent bugs this file exists to make loud.** A key collision serves
-one household's screen to another, which is unreachable at one user and
-*unreachable is not impossible*; and a TTL that never expires serves last
-week's screen with no error anywhere. Neither raises, neither logs, and neither
-is visible on a screen that looks right.
-"""
+"""The in-process row and screen caches (PRD 06)."""
 
 import datetime as dt
 import uuid

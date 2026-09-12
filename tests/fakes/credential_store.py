@@ -1,11 +1,4 @@
-"""In-memory CredentialStore.
-
-Holds plaintext, on purpose. Encryption at rest is a property of a
-persistent store, and a fake that encrypted into a dict would be modelling
-ceremony rather than behaviour -- see the contract suite's module docstring
-for why that property is asserted directly against Postgres instead. Never
-used to assert anything about the shape of stored data.
-"""
+"""In-memory CredentialStore."""
 
 import uuid
 from dataclasses import dataclass

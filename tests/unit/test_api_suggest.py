@@ -1,28 +1,5 @@
-"""`GET /search/suggest` -- two tiers on one route, the tier that answered, and
-the prefix length below which tier 1 does not run.
-
-**The real `SearchService` over two scripted indexes, never a stubbed
-service.** M5's correction, restated by `tests/unit/test_api_home.py` and by
-`tests/unit/test_api_search.py` one route over: a stub would make every case
-here an assertion about `SuggestResponse.of` alone, and the mutation this file
-exists to kill -- the tier parameter selecting the same index for both values
--- lives in the seam between the parameter and the collaborator it picks.
-
-**The two doubles disagree on a typo and agree on a prefix, which is the whole
-of the two-armed case's teeth.** `FakePrefixSuggestIndex` is `startswith` and
-`FakeSuggestIndex` is Levenshtein-over-the-head; a route serving both tiers
-from one index answers the same list twice, and only an arm asserting the
-*absence* of the typo hit can see it.
-
-**Both doubles record their calls**, because half of what this route does is
-*not* reach the database: a `q` below the answering tier's minimum, and a blank
-one, are 200s that must issue no query at all. An assertion on the empty
-`results` list cannot tell that from a query that ran and matched nothing --
-which is the whole cost this route exists to avoid, since at one character it
-is 2,707 ms of it.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
+"""`GET /search/suggest` -- two tiers on one route, the tier that answered, and the
+prefix length below which tier 1 does not run.
 """
 
 import uuid
@@ -92,12 +69,10 @@ class _DeadIndex(SearchIndex):
         raise AssertionError("the suggest route must not reach the search index")
 
     async def semantic_coverage(self, filters: SearchFilters) -> float:
-        # Dead on the same terms as `search`, and it carries a claim of its own
-        # rather than only satisfying the ABC: since #16 the coverage probe is
-        # bought by a search that is about to expand, and type-ahead has no
-        # embed for an expansion to sit in front of. An expansion factored to
-        # the top of `SearchService` -- the tidy-looking version -- reaches
-        # this line before it reaches anything else.
+        # Dead on the same terms as `search`, and it carries a claim of its own rather
+        # than only satisfying the ABC: since #16 the coverage probe is bought by a
+        # search that is about to expand, and type-ahead has no embed for an expansion
+        # to sit in front of.
         raise AssertionError("the suggest route must not measure semantic coverage")
 
 

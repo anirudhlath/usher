@@ -1,13 +1,4 @@
-"""SQLAlchemy model tests: structural checks against Base.metadata.
-
-The first five tests below are what Task 8 originally shipped. The rest
-cover what changed in the post-implementation review: `enrichment_error`
-replacing `EnrichmentState.FAILED`, `WatchStateRow.origin` replacing
-`updated_by`, and the named CHECK constraints that mirror each domain
-model's Pydantic constraints. A CHECK constraint's SQL text can't be
-exercised through metadata alone -- that's proven against a real Postgres
-in Task 9's migration verification, not here.
-"""
+"""SQLAlchemy model tests: structural checks against Base.metadata."""
 
 from typing import cast
 
@@ -185,24 +176,11 @@ def test_enum_columns_are_real_enums_not_bare_strings() -> None:
         # domain model and `usher.domain` may not import `usher.ports` --
         # `ports.llm` re-exports it, so this is the same enum either way.
         (LLMCallRow.__table__.c.purpose, LLMPurpose),
-        # M9's three, all from `m09a`. `search_queries.mode` reuses
-        # `usher.ports.search.SearchMode` rather than minting a domain copy:
-        # `usher.db` sits outside the four-layer contract so the import is
-        # legal, and `usher/domain/search.py` deliberately declares no
-        # `SearchMode`. A second copy of a three-member vocabulary is a
-        # vocabulary that can drift.
+        # M9's three, all from `m09a`.
         (ImageRow.__table__.c.kind, ImageKind),
         (SearchQueryRow.__table__.c.mode, SearchMode),
         (TitleSearchNameRow.__table__.c.kind, SearchNameKind),
-        # M10's two, both from `m10c`. They sit beside `mode` and are
-        # deliberately *not* it: `SearchMode` is `GET /search`'s `?mode=`,
-        # `SearchSurface` is which surface asked, and `SuggestTier` is which
-        # of two `SuggestIndex` implementations answered. Three vocabularies,
-        # three columns -- storing any two under one name is the hazard PRD 10
-        # spends a paragraph refusing. `SuggestTier` moved into
-        # `usher.ports.search` with this revision, which is what lets
-        # `SearchQueryRecord` name it without `usher.ports` importing
-        # `usher.services`.
+        # M10's two, both from `m10c`.
         (SearchQueryRow.__table__.c.surface, SearchSurface),
         (SearchQueryRow.__table__.c.tier, SuggestTier),
     ]
@@ -211,14 +189,7 @@ def test_enum_columns_are_real_enums_not_bare_strings() -> None:
         assert isinstance(column_type, SAEnum)
         assert column_type.enum_class is enum_cls
         assert column_type.native_enum is False
-        # The critical property: stored values are each member's .value
-        # (e.g. TitleKind.MOVIE -> "movie"), never its .name (-> "MOVIE").
-        # SQLAlchemy's default binds/reads .name -- verified directly that
-        # without values_callable, this assertion fails and, worse, the
-        # result processor cannot even parse this schema's own already-
-        # lowercase-stored data. (HdrFormat's real values -- "HDR10", "DV",
-        # "HLG" -- are legitimately uppercase, so this must compare against
-        # enum_cls's actual .value set, not assert a blanket lowercase rule.)
+        # The critical property: stored values are each member's .value (e.g.
         assert set(column_type.enums) == {member.value for member in enum_cls}
         # No membership CHECK: Pydantic owns that, matching every other
         # constraint in this schema (see enum_column's docstring).

@@ -1,11 +1,4 @@
-"""Behaviour every `SourceRepository` implementation must satisfy.
-
-The load-bearing case is `test_update_writes_the_device_id_it_is_given`:
-`device_id` is what makes Usher one durable Emby client instead of an
-accumulating pile of sessions (PRD 03), and an `update()` that quietly
-dropped the column from its SET clause would make a deliberate rotation a
-silent no-op with nothing to notice.
-"""
+"""Behaviour every `SourceRepository` implementation must satisfy."""
 
 from datetime import UTC, datetime
 

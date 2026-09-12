@@ -1,31 +1,4 @@
-"""In-memory `Row` and `RowProvider`, for the composer's own arithmetic.
-
-Both stand in for the nine real providers Group H builds, and both are
-deliberately *incapable* of the thing those providers are hard to get right:
-they hold no signal, read nothing from the context, and propose exactly what
-they were constructed with. That is the point. A composer test wants to fix
-the proposals and vary the composer; a provider test wants the opposite, and
-uses the real provider with a seeded distractor.
-
-**Where this is more forgiving than a real provider, on purpose. Three.**
-
-1. **`propose` never queries**, so nothing here can exercise the failure the
-   milestone is about -- a provider that, finding no signal, returns something
-   generic. `FakeRowProvider(proposals=())` asserts only that empty is a
-   legal, non-exceptional answer. The guarantee is nine per-provider cases.
-2. **`build` never hydrates.** It returns the cards it was given, so a
-   `hydrate()` that loses the progress pair, or that drops unowned titles, is
-   invisible here and is `services/rows/base.py`'s to pin.
-3. **It cannot disagree with itself.** A real provider's `propose` and
-   `build` are two methods reading the same signal at two instants, and
-   either can be the stricter -- a looser `propose` yields an empty row, a
-   stricter one silently suppresses a row that would have been fine. This
-   fake builds whatever it proposed, by construction.
-
-`contexts` records every context `propose` was handed, so Group I can assert
-the composer called each provider exactly once per screen rather than once per
-proposal.
-"""
+"""In-memory `Row` and `RowProvider`, for the composer's own arithmetic."""
 
 from collections.abc import Sequence
 from datetime import timedelta

@@ -1,25 +1,4 @@
-"""IMDb `name.basics` x `title.principals` -> `titles.credit_names`.
-
-No network, no Docker, no real dataset file. Third sibling of
-`test_adapters_bulk_imdb.py` (`title.basics`/`title.ratings`) and
-`test_adapters_bulk_imdb_akas.py` (`title.akas`).
-
-**This file exists because T3's refusal was of a *design*, not of the two
-files.** M9's T3 measured the `people` + `credits` entity design at
-**2,701,697,024 B (2.702 GB) against a 2.0 GB ceiling** and it was refused, so
-nothing here materialises a person or a credit row. What survives the refusal
-is the **name text**, which is what weight class B of `search_document`
-actually indexes -- so the two parsers exist and their only consumer is a
-direct fill of `titles.credit_names`.
-
-**One dataset over two files, and that is the whole reason
-`IMDbCreditNamesDataset` is not two `BulkDataset`s.** A credit name is a join:
-`title.principals` carries `(tconst, ordering, nconst)` and only
-`name.basics` knows what an `nconst` is called. With no `people` table there
-is nowhere in the database to put the right-hand side of that join, so it is
-resolved in the adapter -- against a measured, memory-bounded index rather
-than a `dict[str, str]`.
-"""
+"""IMDb `name.basics` x `title.principals` -> `titles.credit_names`."""
 
 import csv
 import gzip

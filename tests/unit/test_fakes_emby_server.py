@@ -1,37 +1,5 @@
 # tests/unit/test_fakes_emby_server.py
-"""`FakeEmbyServer`'s own fidelity: what it claims to model, it models.
-
-A test double with tests of its own, deliberately. The source-adapter
-contract runs against the real `EmbyAdapter` through this file, so every
-place it quietly diverges from Emby is a place a *wrong adapter* passes
-forty assertions. Two such divergences shipped and are pinned here: a
-position write that rebuilt the watch state from scratch and silently
-discarded the play count and last-played date Emby preserves, and a
-renderer that left its own fixture's `SeriesId`/`ParentIndexNumber`/
-`IndexNumber` showing through for an item seeded without them -- so a
-contract test could assert on an episode number the harness never gave it.
-
-A third is the listing-versus-item `UserData` split M4 added: Emby's
-listing route reports `PlayCount: 0` and omits `LastPlayedDate` for an item
-whose single-item route carries both, and until M4 this fake rendered the
-same block for both routes. Pinned here directly rather than only through
-the adapter, because mutation showed the fake's half of that drift is
-invisible to every other test in the suite -- a correct adapter discards
-those fields whatever the fake supplies, so nothing objects.
-
-A fourth divergence this file could never have caught is why M3's live run
-exists: the *route* itself was wrong. `POST
-/Users/{user}/PlayingItems/{item}/Progress` answers 400 on a real Emby
-4.9.5.0, and a fake that implemented the adapter's own guess agreed with it
-perfectly. The write routes below are now transcribed from that server, 400
-included.
-
-Driven through `EmbySession` rather than by calling the fake's private
-renderers: that is the path the adapter takes, so these assertions cover
-the routing and the token gate as well as the rendering. It is not driven
-through `EmbyAdapter`, so a bug in the adapter cannot make a bug in the
-fake look like correct behaviour.
-"""
+"""`FakeEmbyServer`'s own fidelity: what it claims to model, it models."""
 
 import json
 from collections.abc import AsyncIterator
@@ -277,27 +245,8 @@ async def test_a_seeded_watch_state_round_trips_all_four_facts(driver: _Driver) 
 async def test_the_listing_route_omits_the_play_history_the_item_route_carries(
     driver: _Driver,
 ) -> None:
-    """The measurement ADR-0014 rests on, transcribed as an assertion about
-    *this fake* rather than about the adapter.
-
-    Verified 2026-07-31 against the live Emby 4.9.5.0 server: for one and
-    the same item, `GET /Users/{u}/Items` reported `PlayCount: 0` with no
-    `LastPlayedDate` key at all, while `GET /Users/{u}/Items/{id}` reported
-    `PlayCount: 2` and a real date. `PlaybackPositionTicks` and `Played`
-    were correct in both -- which is what makes the listing's block a
-    *partial* lie and therefore dangerous: every field a harness reads back
-    looks right.
-
-    Why this test exists rather than only the adapter-level one: mutation
-    (M4 plan, Task 3 Step 7) showed that making this fake's listing carry
-    real history is **invisible to the whole suite** if the adapter is
-    correct, because a correct adapter discards those fields regardless.
-    That is the M3 write-back failure's exact shape -- a fake drifting away
-    from the measured server with nothing objecting -- and it is only
-    caught by pinning the fake against the measurement directly, which is
-    what this does. The adapter-level `test_the_walk_reports_absent_play_
-    history` catches the *pair* (adapter trusting the listing plus fake
-    supplying history); this catches the fake's half on its own.
+    """The measurement ADR-0014 rests on, transcribed as an assertion about *this fake*
+    rather than about the adapter.
     """
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
@@ -697,19 +646,8 @@ async def test_an_unrouted_path_is_a_404_not_a_cheerful_200(driver: _Driver) -> 
         await driver.session.json_body("GET", "/Users/x/NoSuchThing", op="probe")
 
 
-# --- the push frames, and where their provenance runs out ------------------
-#
-# These four are the *only* independent check on this file's push side. The
-# six contract push cases drive the same renderers through the real mapper,
-# so the fake sends what the mapper expects and the mapper parses what the
-# fake sends -- which is precisely the shape that let M3 ship a write-back
-# that had never worked. What narrows it here is that each frame is rendered
-# from the committed fixture rather than built inline, so this file cannot
-# drift away from the file M5's live verification diffs against a real
-# capture; and `tests/unit/test_adapters_emby_push.py` parses those same
-# fixtures with no fake server involved. Neither closes the gap. Only the
-# live capture does, and `tests/fixtures/emby/README.md` lists what is
-# still a guess.
+# --- the push frames, and where their provenance runs out ------------------ These four
+# are the *only* independent check on this file's push side.
 
 
 def test_the_push_frames_keep_the_committed_fixtures_shape() -> None:

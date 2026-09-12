@@ -1,22 +1,4 @@
-"""`EnrichService`'s index enqueue, against real Postgres.
-
-**This file exists for one ordering the unit suite cannot see.** The enqueue
-happens after the commit, and the reason is a transaction: a worker claiming
-the index job reads `titles` in a *different* one, so a job enqueued before
-the commit can run against the pre-enrichment row -- fingerprint the old
-text, embed the old text, and then stop matching the stale predicate because
-the fingerprint agrees with what it embedded. A permanently stale vector the
-backfill will never re-claim, produced by the enqueue that exists to keep it
-fresh, with nothing raising anywhere.
-
-`FakeJobQueue` and `FakeTitleRepository` share no transaction, so against
-them an enqueue before the commit is *indistinguishable* from one after.
-`tests/unit/test_services_enrich.py` asserts the order through a recording
-collaborator, which is one more than the plan expected of it and still not
-the data consequence. Here the consequence is readable: the enqueue is made
-by a publisher-shaped probe that reads `titles` back **on its own
-connection**, and a separate connection cannot see an uncommitted write.
-"""
+"""`EnrichService`'s index enqueue, against real Postgres."""
 
 import uuid
 from collections.abc import AsyncIterator, Sequence

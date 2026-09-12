@@ -1,25 +1,4 @@
-"""`PostgresTasteRepository` against the real database.
-
-The shared contract runs here unchanged, plus the four things a dict cannot
-express: `halfvec(384)`'s quantisation, the `NULL`-vs-`NULL` three-valued logic
-the whole invalidation rests on, the `CASCADE` to `users`, and the fact that
-`user_taste` adds no `updated_at` trigger.
-
-**The tolerance here is `abs=1e-3` and in `tests/unit/test_services_taste.py`
-it is `abs=1e-9`.** Both are stated in both files so nobody "fixes" one to
-match the other: the gap is `halfvec(384)`'s measured max round-trip cosine
-error of 1.21e-04, which exists only where a vector crosses this boundary.
-
-The history hooks write through raw `INSERT`/`DELETE` rather than through
-`WatchStateRepository`, and each for its own reason. The insert, because
-`trg_watch_states_set_updated_at` is a `BEFORE UPDATE` trigger that assigns
-`now()` unconditionally -- so an `UPDATE` cannot set `updated_at` to a chosen
-instant and an `INSERT` is the only way to own that column, which is the same
-route `tests/integration/test_services_watch_sync.py` takes. The delete,
-because `WatchStateRepository` has no delete method: PRD 02 hard-deletes
-nothing through a port, so there is no port call that expresses the household
-that unwatched something.
-"""
+"""`PostgresTasteRepository` against the real database."""
 
 import uuid
 from datetime import UTC, datetime, timedelta

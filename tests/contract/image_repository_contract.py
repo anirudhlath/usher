@@ -1,29 +1,4 @@
-"""Behaviour every `ImageRepository` implementation must satisfy.
-
-**The one thing this port exists to make impossible is id churn.** An image has
-no provider integer id, so `(the one owner, provider, provider_path)` is its
-natural key, and a re-derivation that does not recognise it mints a fresh
-UUIDv7 per sighting — which invalidates every client's cached artwork reference
-and makes
-[ADR-0032](../../docs/prd/decisions/0032-the-image-proxy-clamps-to-a-ladder.md)'s
-`Cache-Control: immutable` a lie the first time a title is re-derived. The
-headline case below is the one that catches a delete-then-insert
-implementation, and it asserts its own premise first, because *"the id did not
-change"* is also what a second call that never ran produces.
-
-**Every case names the wrong implementation it rules out.**
-
-Subclass and provide `repository` and `seeder`. The seeder writes the one thing
-this port cannot — a `titles` row for the foreign key to point at — and its
-`ABC` shape is ADR-0001's argument applied to a test double: a `Protocol` would
-let a subclass drift out of the suite silently.
-
-**Every ordering case here turns on `is_primary`, and that is a consequence of
-`m09c` carrying no `sort_order`.** The order is `(is_primary DESC, id)`, so
-there is exactly one key a re-derivation can move and one tiebreak it cannot.
-Cases that would have exercised a middle key are not written as if they pass;
-`ImageRepository`'s docstring states the limit.
-"""
+"""Behaviour every `ImageRepository` implementation must satisfy."""
 
 import uuid
 from abc import ABC, abstractmethod

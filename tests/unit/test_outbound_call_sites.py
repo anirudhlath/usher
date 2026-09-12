@@ -1,56 +1,5 @@
-"""Every outbound HTTP call in `src/usher/adapters/` is enumerated, and each
-one has a recorded decision about its rate limiter.
-
-**The deliverable here is the six declines, not the two limiters.** M10's S3
-went through `adapters/` by grep rather than by memory.
-
-**The unit counted is the module, and that is stated because three different
-counts were in circulation.** Nine modules under `src/usher/adapters/` dial an
-upstream: **eight over httpx**, between them **sixteen call sites** (which is
-what `_call_sites` below resolves), and a ninth, `usher.adapters.emby.push`,
-over `websockets`. *Upstreams* is a smaller number than nine however you count
-it -- `tmdb/client.py` and `tmdb/provider.py` are one host, and
-`/embywebsocket` is the same machine as the media source -- so "nine" is not a
-host count and this file does not use one. **Three of the nine modules are
-paced** (`emby/session.py` behind `SourceGate`, `tmdb/client.py` behind
-`_TokenBucket`, and `tmdb/provider.py` through that one client, which its six
-call sites share) and **six deliberately are not**.
-`test_the_module_census_is_the_one_the_records_quote` asserts those four
-numbers off the table itself, and
-`test_prd_01_prints_the_census_this_table_computes` **opens
-`docs/prd/01-architecture.md` and reads them back out of it**, so the document
-and this docstring cannot drift apart from the tree silently.
-
-🔴 **That last clause was a claim and not a case until 2026-08-19, and the
-count it protected was wrong.** This docstring said the census assertion kept
-PRD 01 from drifting; nothing here opened PRD 01, whose filename appeared only
-in prose and in an assertion *message*, so editing its "nine modules" to "ten"
-was green everywhere -- the same one-way-pointer finding this file records
-for the `src/` files, applied to `src/` and not to the document. And the
-call-site count really had drifted, in the other direction:
-`_OUTBOUND_METHODS` omitted **five** of `httpx.AsyncClient`'s eleven
-request-issuing methods, and one of the five was live --
-`CachedDatasetFile.revision`'s `self._client.head(...)`
-(`bulk/download.py`), a real `HEAD` per dataset per bootstrap that no row of
-this table named and that every number here and in PRD 01 was short by. The
-figure was fifteen and is sixteen.
-
-`.claude/rules/ports-and-error-taxonomy.md` records what happens when a
-decision about an upstream is left implicit: the next reader cannot tell a
-considered "no" from an oversight, and re-litigates it. So each of the six
-carries its reason here *and* beside the code, and this case is what makes the
-table closed rather than illustrative.
-
-**A new adapter with a new outbound call is a red, not a discovery.** The
-assertion is set *equality* against `_DECISIONS`, so an unlisted call site
-fails and so does a listed one that no longer exists -- the second half is what
-keeps the table from rotting into a description of an older tree.
-
-**What this case is not.** It does not check that a limiter is *wired* -- that
-is `test_adapters_factory.py`'s and `test_composition.py`'s job, and
-`test_adapters_emby_session.py::test_every_send_passes_the_gate_including_the_authenticating_one`
-counts the acquisitions. It checks that no outbound call exists whose limiter
-nobody has decided about.
+"""Every outbound HTTP call in `src/usher/adapters/` is enumerated, and each one has a
+recorded decision about its rate limiter.
 """
 
 import ast
@@ -61,25 +10,9 @@ from dataclasses import dataclass
 import usher
 import usher.adapters
 
-#: The httpx client methods that put bytes on a wire -- **all eleven of them**,
-#: which is `httpx.AsyncClient`'s own request-issuing surface and not a
-#: shortlist of the ones this tree happens to use today. `build_request` is in
-#: here because `EmbySession._send` and `TmdbClient._send` both build a request
-#: and then send the reference on its own line (each says why in its own
-#: comment), so a scan that looked only for `send` would find one site per
-#: adapter where the source shows two.
-#:
-#: 🔴 **`put`, `delete`, `patch`, `head` and `options` were missing, and the
-#: omission was not theoretical.** `bulk/download.py`'s
-#: `CachedDatasetFile.revision` has issued `self._client.head(...)` since M2 and
-#: no row of `_DECISIONS` named it, because nothing looked. The four that were
-#: still unused matter for the same reason the enum is closed at
-#: `ConfiguredSourceAdapterFactory.build`: `factory.py` anticipates a Jellyfin
-#: adapter at the `SourceKind` seam, and a write-back adapter -- which is
-#: already what Usher does to Emby, currently routed through `_send` -- is
-#: spelled `put`/`delete`. A scan blind to the verbs a *new* adapter would use
-#: is a scan that reports "no new outbound calls" about exactly the adapter it
-#: was written for.
+# : The httpx client methods that put bytes on a wire -- **all eleven of them**, : which
+# is `httpx.AsyncClient`'s own request-issuing surface and not a : shortlist of the ones
+# this tree happens to use today.
 _OUTBOUND_METHODS = frozenset(
     {
         "build_request",
@@ -108,15 +41,11 @@ _ANCHOR = "usher.adapters.emby.session"
 _CLIENT = "client"
 _LIBRARY = "httpx"
 
-#: **The complement guard's exemption list, and the reason each one is on it.**
-#:
-#: The call-site scan asks *what expression is called*; this asks *what module
-#: imports the library*, and the second question is the one a rename cannot
-#: dodge -- **you cannot make an httpx call without importing httpx.** Twelve
-#: modules under `adapters/` import it, seven of them hold a row in
-#: `_DECISIONS`, and these five are the difference. Each holds or hands out a
-#: client rather than calling one, so each is a *decision* too and gets a
-#: sentence here rather than being subtracted silently.
+# : **The complement guard's exemption list, and the reason each one is on it.** : : The
+# call-site scan asks *what expression is called*; this asks *what module : imports the
+# library*, and the second question is the one a rename cannot : dodge -- **you cannot
+# make an httpx call without importing httpx.** Twelve : modules under `adapters/`
+# import it, seven of them hold a row in : `_DECISIONS`, and these five are the
 _NO_CALL_OF_ITS_OWN: dict[str, str] = {
     "usher.adapters.bulk.imdb": (
         "takes `client: httpx.AsyncClient` and hands it to `CachedDatasetFile` "
@@ -207,12 +136,7 @@ _DATASETS = _Decision(
     paced=False,
 )
 
-#: The closed table. **Keyed by module and call expression rather than by line**
-#: -- a line number drifts on every edit above it, and a key that drifts is a
-#: table that has to be rewritten rather than read. Two sites in one module
-#: spelled the same way (`tmdb/provider.py`'s six `self._client.get` calls) are
-#: one row, because they are one decision; a *new* spelling in that module
-#: (`self._client.post`) would be a new key and a red.
+# : The closed table.
 _DECISIONS: dict[tuple[str, str], _Decision] = {
     ("usher.adapters.emby.session", "self._client.build_request"): _SOURCE,
     ("usher.adapters.emby.session", "self._client.send"): _SOURCE,
@@ -238,12 +162,8 @@ _DECISIONS: dict[tuple[str, str], _Decision] = {
         paced=False,
     ),
     ("usher.adapters.bulk.download", "self._client.stream"): _DATASETS,
-    # The `HEAD` half of the same decision, and **the row this table was
-    # missing entirely** until `_OUTBOUND_METHODS` grew the five verbs it had
-    # omitted. `CachedDatasetFile.revision` has issued it since M2. One
-    # `_Decision` object for both keys, because they are one decision: the
-    # census counts modules, and a second reason here would read as a second
-    # upstream.
+    # The `HEAD` half of the same decision, and **the row this table was missing
+    # entirely** until `_OUTBOUND_METHODS` grew the five verbs it had omitted.
     ("usher.adapters.bulk.download", "self._client.head"): _DATASETS,
     ("usher.adapters.bulk.wikidata", "self._client.get"): _Decision(
         upstream="query.wikidata.org (WDQS)",
@@ -344,42 +264,8 @@ def _names_an_httpx_client(spelling: str) -> bool:
 
 
 def _client_spellings(tree: ast.Module) -> set[str]:
-    """Every spelling in one module that refers to an httpx client, beyond the
-    ones whose own text says so.
-
-    🔴 **A one-line alias defeated the receiver filter, and both spellings of
-    that were measured passing.** `c = self._client` followed by `await
-    c.get(...)` reads as `c.get` at the call site, and `self._http =
-    self._client` reads as `self._http.post` -- neither contains the token, so
-    the scan found nothing and all four cases here stayed green. The second was
-    half-acknowledged in this docstring as *"would need a row in this docstring
-    rather than a silent pass"*, and it **was** the silent pass.
-
-    So a receiver also counts when it is **bound to** something that is a
-    client. Three seeds, and each is narrow on purpose:
-
-    - a parameter annotated with a type naming both `httpx` and a client
-      (`client: httpx.AsyncClient`, and `transport: httpx.AsyncClient` for a
-      constructor that renames it);
-    - an assignment whose value is a bare name or attribute that is already
-      one (`c = self._client`, `self._http = self._client`);
-    - an assignment whose value calls something naming an httpx client
-      (`self._conn = httpx.AsyncClient(...)`).
-
-    **Narrow on purpose, and the wide version was written first and thrown
-    away.** Seeding from *any* expression mentioning a client made
-    `payload = await self._client.get(...)` a client (the callee names one),
-    `self._session = EmbySession(client=...)` a client, and -- through the
-    `websockets.asyncio.client.ClientConnection` annotation -- `emby/push.py`'s
-    socket a client, turning the one module whose whole decline is *"a socket
-    held open is not a request"* into four bogus call sites. Anchoring the
-    seeds to `httpx` keeps every one of those out and still catches both
-    aliases above, because `self._client` is a client by its own name.
-
-    Iterated to a fixed point so an alias of an alias resolves. Module-wide
-    rather than scope-aware: a name is a client anywhere in the file once it is
-    one anywhere, which over-matches rather than under-matches, and
-    over-matching is a red.
+    """Every spelling in one module that refers to an httpx client, beyond the ones whose
+    own text says so.
     """
     names: set[str] = set()
     for node in ast.walk(tree):
@@ -615,30 +501,8 @@ def _imports_httpx(tree: ast.Module) -> bool:
 
 
 def test_every_module_that_imports_httpx_is_recorded_or_exempt() -> None:
-    """The complement of the scan above, and it closes structurally what the
-    receiver test can only close by spelling.
-
-    🔴 **The scan asks what expression is called, and that question has a
-    rename-shaped hole in it.** `_client_spellings` now resolves an alias and a
-    renamed attribute, and it will never resolve *every* spelling -- a client
-    reached through a factory function, a `getattr`, a list. This asks the other
-    question, which has no spelling to dodge: **a module cannot make an httpx
-    call without importing httpx.** So the set of importers is closed, in both
-    directions, against the table:
-
-    - an importer with no row and no exemption is a new outbound call, whatever
-      it named its client -- which is the Jellyfin-adapter case `factory.py`
-      anticipates at the `SourceKind` seam;
-    - a row whose module no longer imports httpx is a decision describing an
-      older tree, the same second half `_DECISIONS`' own equality carries;
-    - an exemption that has stopped importing httpx is a paragraph explaining
-      an absence.
-
-    **The exemptions are five and each carries a reason** (`_NO_CALL_OF_ITS_OWN`),
-    for `.claude/rules/ports-and-error-taxonomy.md`'s argument in the same shape
-    the six declines take: a considered "this one holds a client rather than
-    calling one" and an oversight look identical to the next reader unless the
-    first is written down.
+    """The complement of the scan above, and it closes structurally what the receiver test
+    can only close by spelling.
     """
     importers = {
         module
@@ -715,31 +579,7 @@ def _census_table(document: str) -> list[str]:
 
 
 def test_prd_01_prints_the_census_this_table_computes() -> None:
-    """🔴 **The docstring above claimed this and no case did it.**
-
-    `test_the_module_census_is_the_one_the_records_quote` asserts four numbers
-    off `_DECISIONS`; it never opens `docs/prd/01-architecture.md`, whose name
-    appeared in this module only in prose and in an assertion *message*, and
-    whose own `recorded_in` pointers are eight `src/` files and no document.
-    `tests/unit/test_docs_currency.py` is the only PRD-consistency case in the
-    repository and it covers two status tables, not this one. So editing PRD
-    01's "nine modules" to "ten" was green everywhere, and what the census case
-    actually bought was a *prompt* -- the one-way-pointer finding, applied to
-    the `src/` files and not to the document that prints the same numbers.
-
-    **Two halves, because either alone is satisfiable by the other's defect.**
-    The table's rows are compared as a **set of modules** against the census, so
-    a row added, dropped or renamed is red and every word of prose around them
-    stays free to be rewritten -- the trade
-    `.claude/rules/testing-discipline.md` records both sides of. And the four
-    figures in the paragraph above it are matched as spelled numerals, because
-    a table with nine rows under a sentence saying "ten modules" is exactly the
-    drift that was reachable.
-
-    Scoped to the table rather than to the document (`_PRD_TABLE`), for M9 H2's
-    finding: a check that reads a whole document can be satisfied by the prose
-    written to explain its own repair.
-    """
+    """🔴 **The docstring above claimed this and no case did it.**"""
     document = _prd_01()
     rows = _census_table(document)
     assert len(rows) >= 5, f"the premise: the table walk found {len(rows)} rows"

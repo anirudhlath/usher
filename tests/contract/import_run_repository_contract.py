@@ -1,9 +1,4 @@
-"""Behaviour every `ImportRunRepository` implementation must satisfy.
-
-The three properties here are the ones "resumable and checkpointed" reduces
-to: a first run starts from zero, a matching revision resumes, and a changed
-revision restarts.
-"""
+"""Behaviour every `ImportRunRepository` implementation must satisfy."""
 
 from datetime import UTC, datetime
 

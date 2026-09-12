@@ -1,10 +1,4 @@
-"""Loader for the committed Emby payload fixtures.
-
-Shape-recorded, value-synthetic: field names, nesting, and types were
-transcribed from real Emby 4.9.5.0 responses; every value is invented. See
-`usher.adapters.emby.mapping`'s module docstring for why a real capture is
-not committed.
-"""
+"""Loader for the committed Emby payload fixtures."""
 
 import json
 from pathlib import Path

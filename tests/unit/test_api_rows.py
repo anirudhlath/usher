@@ -1,26 +1,4 @@
-"""`POST /admin/rows/regenerate` -- the enqueue site, at the boundary.
-
-Driven through a real `create_app()` with two dependencies overridden: the job
-queue (so `FakeJobQueue` stands in for Postgres) and the default user id (whose
-real provider writes a `users` row). Everything else is the shipped graph -- the
-router, the DTO, the 202 status code, and FastAPI's own request parsing,
-including the app-wide 422 handler that `test_no_shape_of_request_is_refused_or_degraded`
-exists to show never fires. `tests/integration/test_rows_route.py` is what
-proves the row is *committed* and what measures the repeat against the real
-`_ENQUEUE` predicate; this file is what proves the response is right.
-
-**Where `FakeJobQueue` can and cannot answer for Postgres here.** Its seventh
-documented divergence is that a no-op re-enqueue counts as a row written, so
-nothing in this file may turn on `enqueue`'s **return value** -- and nothing
-does, because the route deliberately discards it (`usher.domain.jobs.JobKind`
-records why: a promoting repeat and a fresh insert both answer 1). The *stored
-row* is faithful in both directions that matter below: the fake's `enqueue`
-takes `max(stored.priority, request.priority)` and skips a `PARKED` row exactly
-as `_ENQUEUE`'s `WHERE jobs.status <> 'parked' AND jobs.priority <
-excluded.priority` does. What it cannot show is the running-repeat table in
-`JobKind.CURATE`'s docstring, which is measured against real Postgres and
-pinned in `tests/integration/test_job_queue.py`.
-"""
+"""`POST /admin/rows/regenerate` -- the enqueue site, at the boundary."""
 
 import ast
 import inspect
@@ -281,27 +259,7 @@ def unreachable(app: FastAPI) -> FastAPI:
 
 
 async def test_an_unreachable_queue_is_not_translated_into_a_503(unreachable: FastAPI) -> None:
-    """The 503 that is not here, asserted by the failure propagating.
-
-    PRD 07's RFC 9457 envelope has one worked example and it is `503
-    source_unavailable`; the deferral has now survived `GET /titles/{id}` and
-    `GET /home` on the structural ground that neither can reach an upstream at
-    all. This route *does* write, so the argument is one step longer: the thing
-    it writes to is Postgres, an outage of which `/health/ready` already
-    reports as a 503 for the whole process. Answering 503 *here* would say
-    "this endpoint is degraded, retry it" about a deployment where every
-    endpoint is down, and would need the envelope to say which -- a milestone
-    early, on an admin route.
-
-    So the handler catches nothing, and this is the assertion that keeps it
-    that way: a well-meaning `except PortUnavailable: raise
-    HTTPException(503)` -- which is the most natural thing in the world to add
-    -- returns a response instead of raising, and fails here. Starlette's
-    `ServerErrorMiddleware` re-raises after sending its 500, which is why the
-    exception is visible to the caller at all through `ASGITransport`; the
-    second half below is the same request with the re-raise turned off, so the
-    *status code* an operator would see is pinned too.
-    """
+    """The 503 that is not here, asserted by the failure propagating."""
     async with LifespanManager(unreachable) as manager:
         raising = httpx.ASGITransport(app=manager.app)
         async with httpx.AsyncClient(transport=raising, base_url="http://test") as connected:
@@ -316,49 +274,9 @@ async def test_an_unreachable_queue_is_not_translated_into_a_503(unreachable: Fa
 
 
 def test_the_regenerate_module_holds_no_llm_client_and_has_no_503_to_give() -> None:
-    """**The two structural claims this task exists for**, asserted on the
-    module rather than on its behaviour, because "it did not raise" and "it did
-    not answer 503" are also what a route that swallowed everything produces.
-
-    *No client.* PRD 06: *"Generation happens in a background job -- never in
-    the request path"*. A route holding an `LLMClient` would make a curation
-    failure an HTTP failure and would buy a completion inside a request, at
-    whatever concurrency an admin UI's retry button produces. `CurationService`
-    is on the forbidden list beside it, because a route can reach a completion
-    through the service without ever naming the client -- that is the whole
-    shape of the defect, and forbidding only `LLMClient` would ratify it.
-
-    *No 503.* There is no status code and no `status.HTTP_503_*` member in the
-    module, so the deferral of PRD 07's RFC 9457 envelope is a property of the
-    code and not of the cases above.
-
-    **What a name list cannot do, and what covers it.** This scan is only ever
-    as complete as the tuple below, and the tuple had a reachable hole:
-    `usher.composition.build_curation_service` is the one public factory in
-    `src/` whose entire job is to return a `CurationService` holding an
-    `LLMClient`, and it is spelled with none of these words -- a router doing
-    `from usher.composition import build_curation_service` passed this case,
-    every other contract, mypy and both suites. `CurationServiceDep` is caught
-    here only because `CurationService` is a substring of it, so a rename to
-    `CuratorDep` would be silent too. Both holes are closed by
-    `pyproject.toml`'s eighth import contract, which forbids *every* router
-    from naming `usher.composition`, `usher.services.curation` or
-    `usher.ports.llm`. Neither check replaces the other: the contract is a
-    property of the import graph and says nothing about what a module does
-    with what it imported, and this scan reads one module's own text -- it
-    sees `503` and `SERVICE_UNAVAILABLE`, which no import graph can, and it
-    sees only the module it is pointed at.
-
-    The name scan runs over the module with its **docstrings removed**, the way
-    `tests/unit/test_rows_curated.py::test_the_curated_module_holds_no_llm_client_and_cannot_complete_anything`
-    does and for the identical reason: this module's own prose argues at length
-    about the client it must not hold and the 503 it must not give, so a raw
-    `"LLMClient" not in source` is an assertion that fails on the *explanation*
-    and would be "fixed" by deleting the sentence. `ast.unparse` of a
-    docstring-stripped tree keeps every identifier and every string annotation
-    -- which is the half that matters, since a string annotation is the one
-    form needing no import at all -- and drops only prose. Comments go with it,
-    which is why the argument lives in the docstrings.
+    """**The two structural claims this task exists for**, asserted on the module rather
+    than on its behaviour, because "it did not raise" and "it did not answer 503" are
+    also what a route that swallowed everything produces.
     """
     source = pathlib.Path(inspect.getfile(rows)).read_text()
     tree = ast.parse(source)
@@ -433,16 +351,8 @@ def _without_prose(tree: ast.Module) -> ast.Module:
     return tree
 
 
-# ---------------------------------------------------------------------------
-# `GET`/`PUT /admin/rows/providers` (E2).
-#
-# Driven through the same real `create_app()` with one more dependency
-# overridden -- `FakeRowProviderSettingsRepository` for the Postgres one -- so
-# the router, both DTOs, the registry join and the app-wide problem handler are
-# all the shipped code. `tests/integration/test_rows_route.py` is what proves
-# the toggle reaches a real `GET /home`; this file is what proves the responses
-# are right and that the refusal writes nothing.
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- `GET`/`PUT
+# /admin/rows/providers` (E2).
 
 PROVIDERS = "/admin/rows/providers"
 

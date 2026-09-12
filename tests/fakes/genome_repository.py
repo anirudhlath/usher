@@ -1,39 +1,4 @@
-"""In-memory `GenomeRepository`.
-
-**Where this is more forgiving than Postgres, on purpose.** Five places, each
-of which the paired `tests/integration/test_genome_repository.py` run is what
-actually closes. The last two are `genome_tags`':
-
-- **No `ck_genome_tags_tag_id_in_vocabulary` and no `ck_genome_tags_tag_not_
-  empty`.** `FakeGenomeSeeder.tags` stores a `tag_id` of `0`, of `2**31`, or a
-  name of `""`; Postgres refuses all three. Nothing in the contract suite
-  depends on which, because the writer that would produce them
-  (`BulkCatalogRepository.replace_genome_tags`) refuses each before either
-  arm is reached -- these are what the CHECKs defend a hand-written `INSERT`
-  against, and only the real arm has them.
-- **No primary key on `tag_id`**, so this dict silently collapses a duplicate
-  lane where Postgres raises. `dict` keying makes the last write win, which is
-  the more forgiving of the two.
-
-And the three `genome_scores` ones, unchanged:
-
-- **No `halfvec` and therefore no quantisation.** A vector round-trips here
-  bit-exactly; through `halfvec(1128)` it does not (M6 measured max cosine
-  error 1.21e-04 over 1,000 vectors). The contract compares with a tolerance
-  for exactly this reason, so the two arms can share one assertion.
-- **No width declaration.** `halfvec(WIDTH)` rejects a vector of the wrong
-  length at the database; this dict stores whatever it is handed. So "the
-  importer verified the vocabulary width" is a property only the real arm
-  can fail on, which is why the importer checks it before reading a score
-  rather than relying on the column.
-- **No foreign key**, so a vector for a title that does not exist is
-  storable here and is rejected there. `GenomeSeeder.title()` exists so no
-  contract case depends on which.
-
-`titles` is a test-double affordance written only by `FakeGenomeSeeder`; the
-port never writes it, and neither will it -- the writers are
-`BulkCatalogRepository.upsert_genome_vectors` and `.replace_genome_tags`.
-"""
+"""In-memory `GenomeRepository`."""
 
 import uuid
 from dataclasses import dataclass, field

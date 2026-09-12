@@ -1,10 +1,4 @@
-"""The shared contract, against the in-memory implementation.
-
-Half of a pair. `test_a_duplicate_episode_inside_one_batch_is_tolerated` and
-its season twin pass here because a dict cannot hold a key twice, which says
-nothing about the `SELECT DISTINCT ON` the real one needs to avoid
-`CardinalityViolationError` -- see `tests/integration/test_episode_repository.py`.
-"""
+"""The shared contract, against the in-memory implementation."""
 
 import uuid
 from datetime import datetime

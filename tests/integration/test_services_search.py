@@ -1,16 +1,4 @@
-"""`SearchService` against real Postgres, for the three things fakes cannot say.
-
-The unit file holds the ranking arithmetic, driven through a scripted index so
-that only ranking varies. What is here instead is everything that is a property
-of a *statement*: how many are issued, what `episode_id IS NULL` costs and buys,
-and whether the two definitions of "owned" -- the boost in `services/search.py`
-and the `owned_only` filter in `adapters/search/postgres.py` -- are actually the
-same predicate. A dict can be made to agree with itself; two SQL statements
-written a task apart cannot.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""`SearchService` against real Postgres, for the three things fakes cannot say."""
 
 import math
 import uuid
@@ -382,28 +370,7 @@ async def test_a_hydrated_result_carries_the_row_and_not_just_an_id(
 async def test_a_household_costs_exactly_two_more_statements_and_it_names_them(
     session: AsyncSession,
 ) -> None:
-    """The read count, against real SQL rather than against a counter.
-
-    Three statements without a household -- the retrieval, `list_by_ids`,
-    `owned_title_ids`. **Five** with one: those three plus
-    `played_title_ids` and `TasteRepository.latest`, one each, whatever the hit
-    count -- and **no vector read at all**, because this household has no
-    stored centroid, which is the shipped state of every deployment whose
-    worker has never run.
-
-    Fails: a per-hit household read, which is the N+1 the batch port exists to
-    delete and which answers identically; a household read issued when there is
-    no household, which costs two statements per search on every caller that
-    has none; and a `list_for_titles` gated on the *row* rather than on the
-    *centroid*, which puts a `title_id IN (...)` over the whole candidate set
-    on every search of every un-indexed deployment and answers `{}`.
-
-    `_record_statements` captures off `before_cursor_execute` and nothing is
-    transcribed, so the count is the count Postgres saw. The three per-table
-    assertions are what say the extra statements are the ones this pair of
-    tasks added rather than a second hydration read that happens to make the
-    arithmetic work.
-    """
+    """The read count, against real SQL rather than against a counter."""
     for index in range(8):
         await _seed_title(session, f"Vacuum Study {index:02d}")
     await session.flush()
@@ -432,26 +399,8 @@ async def test_a_household_costs_exactly_two_more_statements_and_it_names_them(
 async def test_a_stored_centroid_ranks_a_search_on_a_process_that_holds_no_model(
     session: AsyncSession,
 ) -> None:
-    """PRD 05's sixth term end to end, over the two `halfvec` round trips no
-    fake can express — the centroid's and the candidates'.
-
-    Nothing here holds an `Embedder`. `_service` builds none, and neither does
-    `api/deps.get_search_service`; the centroid is written the way a worker
-    writes one and *read* through `TasteRepository.latest`, which is the whole
-    of what this task closed. Fails: a term routed through
-    `TasteService.centroid`, which answers `None` with no embedder and would
-    leave the two rows tied.
-
-    The angle is planted rather than hoped for, and the premise is read back
-    **through the repository** — after the `halfvec` cast, whose measured max
-    round-trip cosine error is 1.21e-04, three orders of magnitude below the
-    0.5 gap seeded here.
-
-    The vector read is asserted to be **scoped and issued once**: this is the
-    six-statement arm of the count case above — the retrieval plus the service's
-    five port reads, where a household with no stored centroid pays five — and
-    the model name on the wire is what stops a mid-swap deployment blending two
-    spaces.
+    """PRD 05's sixth term end to end, over the two `halfvec` round trips no fake can
+    express — the centroid's and the candidates'.
     """
     near = await _seed_title(session, "Vacuum Study Alpha")
     far = await _seed_title(session, "Vacuum Study Beta")
@@ -568,12 +517,9 @@ async def test_a_watched_episode_lifts_its_series_in_a_search(
     }
 
     assert set(anonymous) == {series.id, film.id} == set(theirs)
-    # Scores rather than positions, because the two names do not tie on
-    # `ts_rank` and a rank-0/rank-1 gap is 0.35 against a watch-state weight of
-    # 0.02 -- an ordering assertion here would be an assertion about full-text
-    # scoring. What the household changes is the *gap*, and it changes it in
-    # both directions at once: the series gains the boost, and the film gains a
-    # present-and-zero signal that renormalises its score down.
+    # Scores rather than positions, because the two names do not tie on `ts_rank` and a
+    # rank-0/rank-1 gap is 0.35 against a watch-state weight of 0.02 -- an ordering
+    # assertion here would be an assertion about full-text scoring.
     assert theirs[series.id] > anonymous[series.id]
     assert theirs[film.id] < anonymous[film.id]
     assert theirs[series.id] - theirs[film.id] > anonymous[series.id] - anonymous[film.id]
@@ -601,32 +547,7 @@ async def test_a_search_that_matches_nothing_costs_no_hydration(session: AsyncSe
 async def test_the_analytics_row_is_committed_and_a_second_session_can_read_it(
     postgres_url: str,
 ) -> None:
-    """**The commit, observed from outside the transaction that made it.**
-
-    Every repository in this project flushes and never commits, so a
-    `search_queries` row written inside a search is this session's own
-    uncommitted work until somebody commits it -- and a search writes nothing
-    else, so there is no later write to carry it. `api/deps.get_session`
-    happens to commit when a handler returns; `cli._session_for` disposes its
-    engine without ever committing, which is the root that would lose the row
-    silently. So `SearchService` commits, and this is what says the commit is
-    real rather than "visible within the same still-open transaction" --
-    reading back through the *same* session would pass against a service that
-    only flushed.
-
-    **The second arm is the control that makes the first one a claim about the
-    commit.** The identical search over the identical fixture with a no-op
-    commit leaves the row invisible to a third session and then rolled back, so
-    the difference between the two arms is exactly one `await commit()`. The
-    sweep that makes this worth a case rather than a convention is
-    `QueryExpansionService`'s: **a deleted `commit()` survived 42 cases.**
-
-    Its own engine rather than the per-test `session` fixture, for
-    `test_a_write_is_invisible_to_a_second_session_until_the_caller_commits`'
-    reason: that fixture's isolation is a transaction the harness rolls back,
-    so committing on it would leave rows behind for every later case in this
-    session-scoped container.
-    """
+    """**The commit, observed from outside the transaction that made it.**"""
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
     household = new_id()

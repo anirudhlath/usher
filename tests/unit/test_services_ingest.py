@@ -1,11 +1,4 @@
-"""One batch of a walk, against port fakes.
-
-The single-item cases are the easy half. What a batch exposes -- and what
-every case below the "the batch" heading is about -- is an episode whose
-series arrives on the *same page* rather than an earlier one, a season
-upserted once per episode instead of once per page, and a nightly walk
-re-enqueueing enrichment for all 1,126,674 items it just saw.
-"""
+"""One batch of a walk, against port fakes."""
 
 import uuid
 from collections.abc import Sequence

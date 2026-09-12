@@ -1,11 +1,6 @@
-"""The shared contract against real Postgres, plus the four things a dict
-cannot express: a foreign key, a CHECK constraint, a
-`CardinalityViolationError`, and a poisoned session.
-
-`FakeEpisodeRepository` keys on the natural key, so every "duplicate inside
-one batch" case passes there because a dict cannot hold a key twice. Here the
-same batch is a real `ON CONFLICT DO UPDATE command cannot affect row a
-second time` unless the staging read is `SELECT DISTINCT ON`.
+"""The shared contract against real Postgres, plus the four things a dict cannot
+express: a foreign key, a CHECK constraint, a `CardinalityViolationError`, and a
+poisoned session.
 """
 
 import re
@@ -446,25 +441,7 @@ async def test_next_up_reads_the_episode_key_index_and_does_not_scan_episodes(
     seeded: dict[tuple[int, int], uuid.UUID],
 ) -> None:
     """Scoped to the stage with an ordering to serve, per the standing rule:
-    `uq_episodes_title_season_episode` must appear and `Seq Scan on episodes`
-    must not. Nothing is asserted about the rest of the plan, because an
-    eight-episode fixture seq-scans whatever it is given and an unscoped
-    assertion would be a claim about the fixture.
-
-    This is also the case that justifies **not** adding an index in Task 17.
-    Both spellings of the comparison return identical rows, so nothing about
-    a result can tell them apart.
-
-    **The third assertion is the one with teeth, and the first two are not
-    enough -- measured.** A correctly hand-expanded `OR` still names
-    `uq_episodes_title_season_episode` (the *mark* side uses it either way)
-    and still shows no `Seq Scan` under `enable_seqscan = off`, so that
-    mutation survived both of them. What separates the spellings is *where*
-    the comparison lands: as an `Index Cond` it bounds the scan, and as a
-    `Filter` it reads the whole series and discards. At catalog scale --
-    32,409 series, 999,827 episodes, 200 probed -- that is 15.7 ms against
-    134.1 ms with a `Seq Scan` over every episode in the library, for the
-    identical 200 rows.
+    `uq_episodes_title_season_episode` must appear and `Seq Scan on episodes` must not.
     """
     await session.execute(text("SET LOCAL enable_seqscan = off"))
     result = await session.execute(

@@ -1,13 +1,4 @@
-"""`FakeSearchQueryRepository` against the shared `SearchQueryRepository`
-contract.
-
-No Docker, no database. See `tests/fakes/search_query_repository.py` for the
-four places this half is more forgiving than
-`tests/integration/test_search_query_repository.py`'s -- chiefly that the
-fake has no foreign keys and no client-side integer encoder, so the two
-`RepositoryConflict` cases about *values* a column cannot hold are
-Postgres-only.
-"""
+"""`FakeSearchQueryRepository` against the shared `SearchQueryRepository` contract."""
 
 import uuid
 

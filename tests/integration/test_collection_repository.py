@@ -1,14 +1,4 @@
-"""`PostgresCollectionRepository` against the real database.
-
-The shared contract runs here unchanged, plus what a dict cannot express: a
-foreign key, and the `IS DISTINCT FROM` guard being observable at all.
-
-The guard's *cost* is invisible in both halves -- neither run measures the
-tsvector recompute or the GIN write it exists to avoid. What both can see is
-the returned count, which is why the port promises **changed** rather than
-touched, and why the contract asserts the first call's count as well as the
-second's.
-"""
+"""`PostgresCollectionRepository` against the real database."""
 
 import uuid
 from datetime import date

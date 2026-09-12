@@ -1,28 +1,4 @@
-"""Behaviour every `GenomeRepository` implementation must satisfy.
-
-Ten cases, and most of them are about a value that is *wrong and plausible*
-rather than about a value that is missing -- which is what M7's opening
-section says a genome vector's failures look like. A zero vector, a padded
-missing side, and a cosine taken across two releases all produce a number, in
-range, with nothing to distinguish it from a right one.
-
-**M8 Task 19 added the vocabulary half, where the same failure is worse.** A
-cosine taken across two releases is a wrong *number*; a lane name taken across
-two releases is a sentence about a household's taste, in prose, on a screen.
-So `get_pair` answers `None` across a mismatch and `vocabulary` raises, and
-the four vocabulary cases below are the argument for that asymmetry.
-
-**This port has no writer**, so the suite seeds through an abstract
-`GenomeSeeder` the two arms implement (a raw `INSERT` for Postgres, a dict
-for the fake) -- the same shape `tests/contract/source_harness.py` uses. Its
-`ABC` shape is ADR-0001's argument applied to a test double: a `Protocol`
-would let one arm drift out of the suite silently. Do not add a `put()` to
-the port to make seeding convenient.
-
-**Every case names the wrong implementation it rules out.**
-
-Subclass and provide `repository` and `seeder`.
-"""
+"""Behaviour every `GenomeRepository` implementation must satisfy."""
 
 import uuid
 from abc import ABC, abstractmethod

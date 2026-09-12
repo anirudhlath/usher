@@ -1,15 +1,4 @@
-"""`FakeCuratedRowRepository` against the shared `CuratedRowRepository`
-contract.
-
-No Docker, no database. See `tests/fakes/curated_row_repository.py` for the
-seven places this half is more forgiving than
-`tests/integration/test_curated_row_repository.py`'s -- the first of which is
-that `replace_for_user`'s delete scope is structurally correct here, so
-`test_a_generation_that_produced_nothing_clears_the_screen` is load-bearing in
-the integration run and merely available in this one -- and for the one place
-it is *stricter*, which is that a refusal raised after the delete is
-observable here and is rolled back out of sight there.
-"""
+"""`FakeCuratedRowRepository` against the shared `CuratedRowRepository` contract."""
 
 import uuid
 from collections.abc import Sequence

@@ -1,24 +1,4 @@
-"""`usher rotate-secret` -- its argument surface, its dispatch arm, its report.
-
-The same split `test_cli_backup.py` and `test_cli_restore.py` make: every
-command coroutine in `usher.cli` takes a `Settings` and builds its own engine
-through `_session_for`, so what the rotation does against a real schema lives
-in `tests/integration/test_rotation.py`. What is here needs no database --
-the parser, the environment read, the key validation and
-`_print_rotation_report`, which is a pure function over a `RotationReport`.
-
-**The `_dispatch` arm is the case this file exists for.**
-`.claude/rules/config-cli-and-deployment.md` records the measurement:
-`_dispatch`'s `else` is `serve`, so a subcommand that parses and has no arm
-of its own does not fail -- it starts uvicorn -- and
-`test_every_command_reports_a_dead_database_the_same_way` cannot see it.
-
-**And the security cases are the point of the command.** Two claims are
-asserted here rather than argued: that the new key never reaches `argv`, by
-running the real parser and greping the namespace; and that neither a
-rejected key nor a stored credential reaches a message, by seeding a canary
-and asserting its *presence* somewhere first.
-"""
+"""`usher rotate-secret` -- its argument surface, its dispatch arm, its report."""
 
 import argparse
 import contextlib
@@ -41,13 +21,11 @@ VAR = "USHER_NEW_SECRET_KEY"
 # that finding it anywhere is unambiguous.
 NEW_KEY = "z9-rotation-canary-" + "n" * 21
 
-# The value shipped in documentation as a placeholder, spelled as a literal
-# rather than imported from `usher.config._PLACEHOLDER_SECRET_KEY`: what this
-# case is about is the string an operator copies out of a setup guide, and a
-# test that imports the constant the code compares against cannot fail when
-# the comparison is removed *and* the constant moves with it. It is exactly
-# 32 characters, so `min_length` alone does not refuse it -- which is what
-# makes it a case about the validator rather than about the bound.
+# The value shipped in documentation as a placeholder, spelled as a literal rather than
+# imported from `usher.config._PLACEHOLDER_SECRET_KEY`: what this case is about is the
+# string an operator copies out of a setup guide, and a test that imports the constant
+# the code compares against cannot fail when the comparison is removed *and* the
+# constant moves with it.
 PLACEHOLDER = "change-me-to-a-long-random-string"
 
 
@@ -120,36 +98,7 @@ def test_rotate_secret_takes_a_variable_name_and_never_a_key() -> None:
 def test_a_key_passed_as_new_key_is_refused_and_never_appears_anywhere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """🔴 **The 2026-08-26 defect, and it was a silent success.**
-
-    `argparse`'s `allow_abbrev` defaults to `True`, so `--new-key` was an
-    unambiguous prefix of `--new-key-env`: the operator's key bound to the
-    field meant for a variable *name*, and the "is not set" message printed it
-    back twice -- once as `$<key>` and once inside a suggested `export
-    <key>=...` that invites a paste into the same history the design exists to
-    keep it out of.
-
-    `--new-key` is the single most likely thing to type, because the help text
-    and every document about this command say *"the new key"*.
-
-    The premise fires first: the key is a token of the invocation, so its
-    absence from the output is a claim about a value that was right there.
-
-    🔴 **The last three assertions are the repair, and the sweep is what asked
-    for them.** *"Exit 2 and the key is absent"* is satisfied by deleting the
-    `--new-key` tripwire entirely: `allow_abbrev=False` then leaves argparse
-    saying *"the following arguments are required: --new-key-env"*, which is a
-    refusal, is silent about the value, and even contains the string
-    `--new-key-env`. Measured -- with the tripwire deleted this file was
-    **19 passed**. So the assertions asserted a rejection and this repository
-    already knows that *"a rejection is not an assertion: two implementations
-    that fail for opposite reasons produce the identical failure value"*.
-
-    What the tripwire actually buys is the **sentence**, and the sentence is
-    the point: an operator who has just typed their new key at a shell has put
-    it in `~/.bash_history` and in `ps` output, and nothing about exiting 2
-    tells them to go and deal with that. So the message is what is pinned.
-    """
+    """🔴 **The 2026-08-26 defect, and it was a silent success.**"""
     configured(monkeypatch)
     argv = ["rotate-secret", "--new-key", NEW_KEY]
     assert NEW_KEY in argv, "the premise: the key really is in this invocation"

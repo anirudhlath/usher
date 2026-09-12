@@ -1,15 +1,4 @@
-"""Liveness and readiness endpoints against a real Postgres.
-
-The `client` fixture wraps the app in `asgi_lifespan.LifespanManager`.
-`httpx.ASGITransport` only implements the ASGI "http" protocol, not
-"lifespan" (verified directly against its source) -- FastAPI's own docs
-say so too (Advanced -> Async Tests): "HTTPX's AsyncClient will not
-trigger [lifespan events] automatically." Without this, `create_app`'s
-lifespan -- which builds the engine and sets `app.state.session_factory`
--- never runs, and `/health/ready` would raise `AttributeError` on
-`request.app.state.session_factory` instead of exercising the real
-database check these tests are for.
-"""
+"""Liveness and readiness endpoints against a real Postgres."""
 
 import asyncio
 import time
@@ -33,12 +22,8 @@ from usher.domain.jobs import JobKind, JobPriority
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 
-#: What `lanes` reads for a process running none of them, spelled once so both
-#: cases below assert the **whole** mapping. Whole, not per key, because the
-#: mutation these two exist to kill is a lane field *moving* into
-#: `ReadinessChecks` -- where `all(checks.model_dump().values())` picks it up
-#: and every falsy value here (`[]`, `False`, `None`) turns this 200 into a
-#: 503. A per-key assertion is satisfied by a field that is in both models.
+# : What `lanes` reads for a process running none of them, spelled once so both : cases
+# below assert the **whole** mapping.
 _NO_LANES = {
     "push": [],
     "worker": False,
@@ -155,21 +140,13 @@ async def test_openapi_schema_is_served(client: AsyncClient) -> None:
 
 # -- the orphan-recovery report (M10 F2) ---------------------------------
 
-#: Bounded, because "the lane never ran" is otherwise a hang rather than a
-#: failure. Generous against `IDLE_SLEEP_SECONDS`, imported rather than
-#: transcribed so this comment cannot outlive the constant: a lane's first pass
-#: recovers unconditionally (`api/lanes.py`'s `float("-inf")` origin, M10 F2's
-#: review round), so a working lane answers in milliseconds and only a broken
-#: one waits out a poll.
+# : Bounded, because "the lane never ran" is otherwise a hang rather than a : failure.
 _BOUND_SECONDS = 4 * IDLE_SLEEP_SECONDS
 
-#: A claim nobody is working on, planted as a **raw `INSERT`** because that is
-#: the only way to own `jobs.updated_at`: every statement in
-#: `PostgresJobQueue` stamps it `clock_timestamp()` itself, so a row enqueued
-#: and claimed through the port is by construction fresh and can never be
-#: older than the lease. Backdated an hour, which is past
-#: `USHER_JOB_LEASE_SECONDS`' 300 s default without moving the setting -- the
-#: recovery this case is about is the shipped one, not a tuned one.
+# : A claim nobody is working on, planted as a **raw `INSERT`** because that is : the
+# only way to own `jobs.updated_at`: every statement in : `PostgresJobQueue` stamps it
+# `clock_timestamp()` itself, so a row enqueued : and claimed through the port is by
+# construction fresh and can never be : older than the lease.
 _PLANT_AN_ORPHAN = """
 INSERT INTO jobs (id, kind, key, priority, status, attempts, created_at, updated_at)
 VALUES (
@@ -224,26 +201,9 @@ async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[Non
 async def test_a_recovered_orphan_is_reported_in_the_body_and_moves_no_status_code(
     worker_app: FastAPI, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**M9's S3 condition, survivable since ADR-0037's lease and until now
-    unobservable.** A worker died holding claims; another worker took them
-    back; an operator watching `/health/ready` saw `worker: true` throughout
-    and nothing else. `JobWorker.recover()` has returned the count since W1
-    and both callers threw it away.
-
-    The number is the one `recover()` measured, never a fresh query: this
-    endpoint is polled every 2 s by the shipped compose healthcheck and makes
-    **no upstream request and no extra statement at all**, and a
-    `SELECT count(*) ... WHERE status = 'running'` per poll would scan a table
-    with no index on that value (`ix_jobs_claim` is partial on `pending`,
-    `ix_jobs_parked` on `parked`) -- M4 measured it at 1,126,674 rows.
-
-    **And the status code does not move**, which is the half `LaneReport`
-    exists to guarantee: 200 with a non-zero count in the body.
-
-    Its positive control is the assertion **before** the pass, from a second
-    session, that the planted row really was `running` and really was older
-    than the lease -- a row recovery could not see produces `0`, and `0` is
-    also what a broken report produces.
+    """**M9's S3 condition, survivable since ADR-0037's lease and until now unobservable.**
+    A worker died holding claims; another worker took them back; an operator watching
+    `/health/ready` saw `worker: true` throughout and nothing else.
     """
     settings = worker_app.state.settings
     key = f"an-orphan-{new_id()}"

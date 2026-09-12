@@ -1,16 +1,4 @@
-"""`RotationService` -- two ciphers, one row at a time, and no plaintext key.
-
-`usher rotate-secret` re-encrypts `source_credentials.ciphertext` from the
-cipher `USHER_SECRET_KEY` derives to the one a new key derives. Everything
-about *how many* rows that is lives in the service's own docstring; what is
-here is the behaviour, against an in-memory ciphertext store, because the
-crypto is real either way -- `build_cipher` is the shipped function and a
-Fernet token is a Fernet token whether it came out of Postgres or a dict.
-
-The Postgres arm is `tests/integration/test_rotation.py`, and it owns the two
-claims a dict cannot make: that the write really lands on the row, and that a
-validation refusal leaves the table untouched **as a second session sees it**.
-"""
+"""`RotationService` -- two ciphers, one row at a time, and no plaintext key."""
 
 import json
 from collections.abc import Sequence

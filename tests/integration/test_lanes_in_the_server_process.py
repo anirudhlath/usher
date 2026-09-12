@@ -1,33 +1,4 @@
-"""The lanes, running inside a real `create_app()` against real Postgres.
-
-**This file exists because "the server process grows two lanes" is a claim
-about a process, and no unit test can make it.** `tests/unit/test_api_lanes.py`
-drives `LaneSupervisor` directly over port fakes, which proves the supervisor
-does what it is told; it says nothing about whether `create_app`'s lifespan
-tells it anything. So the headline case here starts nothing but the app,
-runs no `usher work`, and asserts a real row in `jobs` disappears.
-
-The three things a fake cannot express, all here:
-
-- **The worker lane claims from the real queue.** `FakeJobQueue` has no
-  `FOR UPDATE SKIP LOCKED`, no `clock_timestamp()`, and no transaction --
-  and the lane opens one session per pass, which is exactly the shape a
-  rolled-back single-transaction fixture cannot model.
-- **What `_write_push_available` actually writes.** `sources` has a
-  `BEFORE UPDATE` trigger that owns `updated_at` and `now()` is frozen per
-  transaction, so two separate transactions really do produce two different
-  instants -- which is what lets the case below see a *real* change land and
-  a no-op one not. It also measured something the guard's own comment used
-  to claim wrongly: see that case's docstring.
-- **A push lane against a source row.** The lane's source list, credential
-  decryption and adapter build all go through the real repositories.
-
-The adapter itself is a fake, deliberately and by necessity: a real one
-would open a socket to a media server, and no test in this repository makes
-a network request. `dependency_overrides` do not reach the lifespan, so the
-substitution is made where a composition root makes it -- in the unit of
-work handed to `LaneSupervisor`.
-"""
+"""The lanes, running inside a real `create_app()` against real Postgres."""
 
 import asyncio
 import time
@@ -209,31 +180,10 @@ async def _curate_status(sessions: async_sessionmaker[AsyncSession], key: str) -
 async def test_a_curate_job_parks_in_the_server_process_when_there_is_nothing_to_curate(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**The wiring `create_app` has that no unit test can see**, and it is
-    the shape a `RowContext.curated = None` took when `mypy` was the only
-    thing holding it: `tests/unit/test_api_lanes.py` proves a `LaneSupervisor`
-    *given* an `LLMClient` claims curate work, and says nothing about whether
-    the lifespan ever builds one. So this starts nothing but the app.
-
-    Three facts in one run, and each has a different wrong answer behind it:
-
-    - **`llm_client(settings)` is called and its result reaches
-      `build_worker`.** Without it the row is never claimed and stays
-      `pending` -- which is exactly the control below, so the two together
-      are what make either one evidence.
-    - **`PortDataMalformed` parks rather than backing off**, which is the
-      classification PRD 06 rests on: an empty catalog is an operator's
-      problem and does not improve on a backoff schedule, so five more
-      attempts are five more completions at five times the price.
-    - **An empty catalog costs nothing.** `CurationService` raises *before*
-      the client is touched, so this case runs against the default
-      `USHER_LLM_BASE_URL` with `llm_enabled=True` and opens no socket --
-      which is also why it is `llm_calls`-free: nothing was attempted for a
-      ledger to hold a row about.
-
-    PRD 08's operator rule ("every command works against an empty database")
-    is the reason the fixture seeds no catalog at all: this *is* the shape a
-    fresh install has, not an edge case constructed for the test.
+    """**The wiring `create_app` has that no unit test can see**, and it is the shape a
+    `RowContext.curated = None` took when `mypy` was the only thing holding it:
+    `tests/unit/test_api_lanes.py` proves a `LaneSupervisor` *given* an `LLMClient`
+    claims curate work, and says nothing about whether the lifespan ever builds one.
     """
     settings = Settings(
         database_url=postgres_url,
@@ -326,31 +276,7 @@ class _Closes:
 async def test_the_lifespan_releases_every_process_resource_it_built(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch, clean: None
 ) -> None:
-    """**`create_app`'s `finally` is asserted rather than read.**
-
-    Its own comment says a skipped cleanup here "is a real leak, not a
-    theoretical one. This is that milestone; the comment stops being a
-    prediction" -- and until this case nothing in the suite could tell the
-    difference. Measured before writing it: deleting any one of
-    `close_provider()`, `close_model()` or `close_client()` from that
-    `finally` left `tests/unit` and `tests/integration` fully green. The
-    `close_client()` line is M8's and the other two are inherited, so this
-    closes all three rather than only the new one -- a case that pinned the
-    newest resource and left its two neighbours unobserved would be the same
-    gap with a shorter list.
-
-    The three factories are substituted rather than the real ones driven,
-    because the *real* `metadata_provider`/`embedder`/`llm_client` all answer
-    `(None, nothing)` on this deployment's settings and `nothing` is a
-    module-level no-op shared by every degradation path -- so a real run
-    cannot distinguish "closed the thing" from "closed the no-op". Each stub
-    hands back a distinct closer, which is what makes the count and the
-    identity of what was released both observable.
-
-    `worker_enabled=True` is the premise: all three are built only where a
-    worker will use them, so a push-only process legitimately closes
-    nothing.
-    """
+    """**`create_app`'s `finally` is asserted rather than read.**"""
     closes = _Closes()
     monkeypatch.setattr("usher.api.app.metadata_provider", closes.factory("provider"))
     monkeypatch.setattr("usher.api.app.embedder", closes.factory("embedder"))

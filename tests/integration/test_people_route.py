@@ -1,24 +1,4 @@
-"""`GET /people/{id}` through a real request against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_people.py` drives the
-route over the three port fakes, so the grouping, the ordering and the absent
-`groups` key are all covered there. What is left is the wiring and the SQL:
-that `create_app()`'s **un-overridden** dependency graph resolves all three
-repositories onto one request-scoped session, that `PersonRepository.get`'s
-statement really is scoped to the id it was handed, that `list_for_person`
-answers real rows, and what the whole answer costs in statements.
-
-The cost is the half nothing else can measure. This route is two reads and a
-hydration by construction; a spelling that hydrated per credit would answer
-identically and issue one statement per title, which is the round-trip-per-item
-shape `list_by_ids` exists to delete.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request. `credits` cascades from both `people` and `titles`, and
-`title_search_names` cascades from `titles`; nothing here writes `media_items`,
-`watch_states` or `jobs`, because this route reads nothing household-scoped and
-promotes nothing.
-"""
+"""`GET /people/{id}` through a real request against a real schema."""
 
 from collections.abc import AsyncIterator, Iterator
 

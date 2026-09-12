@@ -1,16 +1,4 @@
-"""`GET /collections/{id}` -- PRD 07's franchise page, with its completeness
-signal.
-
-Driven through a real `create_app()` with two dependencies overridden -- the
-collection repository and the title repository -- so the router, the DTO, the
-404 handler registered app-wide and FastAPI's own path-parameter parsing all
-sit on the path a request takes.
-
-**The two fakes are deliberately not wired to each other**, because the real
-ones are not either: `CollectionRepository.get` reads `titles.collection_id`
-and `media_items`, and `TitleRepository.list_by_ids` reads `titles`. `_member`
-below writes both, which is what a real derivation does one table at a time.
-"""
+"""`GET /collections/{id}` -- PRD 07's franchise page, with its completeness signal."""
 
 import uuid
 from collections.abc import AsyncIterator

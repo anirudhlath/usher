@@ -1,18 +1,5 @@
-"""The series hierarchy on the wire: `GET /series/{id}/seasons`,
-`GET /seasons/{id}/episodes` and `GET /episodes/{id}`.
-
-Driven through a real `create_app()` with two dependencies overridden -- the
-title repository and the episode repository -- so the router, the DTOs, A3's
-cursor codec, A2's problem envelope and FastAPI's own path and query parsing
-all sit on the path a request takes. Only the two Postgres reads are stood in
-for; `tests/integration/test_series_route.py` is what runs those.
-
-**These three routes hold no watch state, and that is a decision rather than an
-omission.** `PUT /watch/episodes/{id}` is group D's, and a `watch_state` key
-here would be a second read *per episode* on a paged route -- the N+1 that
-`resolve_episodes` and `next_up` both exist to prevent, arriving through a DTO.
-If group D wants it, it is an additive change to `api/dto/episode.py` and
-belongs there.
+"""The series hierarchy on the wire: `GET /series/{id}/seasons`, `GET
+/seasons/{id}/episodes` and `GET /episodes/{id}`.
 """
 
 import uuid

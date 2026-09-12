@@ -1,33 +1,4 @@
-"""Behaviour every `WatchStateRepository` implementation must satisfy.
-
-The suite that makes ADR-0014 real. `FakeWatchStateRepository` satisfies the
-`COALESCE` cases by accident -- Python's `if value is not None` is naturally
-that shape -- so the Postgres run is the one with teeth. Measured, not
-asserted: the natural one-statement SQL spelling of this merge takes a stored
-`play_count` of 7 to 0 against real Postgres, and `test_absent_play_history_
-leaves_a_stored_count_alone` is what catches it.
-
-Every history case is written twice, once against a title and once against an
-episode. That is not duplication for its own sake: a set-based merge needs a
-separate statement per conflict target (`uq_watch_states_user_title` and
-`uq_watch_states_user_episode` are two different constraints), so a `COALESCE`
-fix applied to one branch and not the other passes every title-only case.
-999,827 of the one measured source's 1,126,674 items are episodes, so the
-branch a title-only suite leaves untested is the majority one.
-
-Subclass and provide `repository`, `user_id`, `title_id` and `episode_id`,
-where the last three must name rows that actually exist for an implementation
-with foreign keys.
-
-**Two of the recency cases in `WatchStateRepositoryInProgressContract` insert
-in an order no id-ordering satisfies, and that is the whole point of them.**
-`watch_states.id` is a UUIDv7, so insertion order and id order are the same
-order, and a fixture that seeds three rows oldest-watched-first is satisfied
-by `ORDER BY id` -- which is not recency, is not what any provider asked for,
-and looks identical to the right answer on that fixture forever. So the
-recency cases seed three rows whose watch order is a permutation of their
-insertion order in both directions.
-"""
+"""Behaviour every `WatchStateRepository` implementation must satisfy."""
 
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -1269,27 +1240,8 @@ class WatchStateRepositoryInProgressContract:
         title_id: uuid.UUID,
         other_title_id: uuid.UUID,
     ) -> None:
-        """`last_played_at < :before` is NULL, and therefore not true, for a
-        state the walk could not date (ADR-0014). So an undatable state is
-        excluded for free.
-
-        That is the exact mirror of
-        `test_a_state_with_no_last_played_at_does_not_outrank_one_that_has_one`,
-        where the same nullability did the *wrong* thing for free. Same
-        column, same three-valued logic, opposite outcomes -- asserted here so
-        a later `COALESCE(last_played_at, updated_at)` "fix" that helps one
-        breaks the other loudly.
-
-        **The undated row is observed *long ago*, and that is what makes the
-        COALESCE observable at all** -- measured. `merge_from_source` writes
-        `updated_at = observed_at` on the insert path, so an undated state
-        merged at the walk's own instant has an `updated_at` far *newer* than
-        any cutoff Rediscover would use, and `COALESCE(last_played_at,
-        updated_at) < before` therefore excludes it anyway: the mutation
-        survived the whole suite on that seeding. Backdating the observation
-        puts the fallback column on the wrong side of the cutoff, which is
-        exactly the state the "helpful fix" would sweep in -- every row a walk
-        wrote long ago and has not touched since.
+        """`last_played_at < :before` is NULL, and therefore not true, for a state the walk
+        could not date (ADR-0014). So an undatable state is excluded for free.
         """
         await _seed_progress(
             repository, user_id, title_id, played=True, last_played_at=THREE_YEARS_AGO

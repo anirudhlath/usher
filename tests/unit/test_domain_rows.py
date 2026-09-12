@@ -1,24 +1,4 @@
-"""The row DTOs, and the three things about them that are load-bearing.
-
-One of the cases below asserts on the *absence* of a field. That reads as a
-style test until you notice what the absence is standing in for: a `progress`
-float is a division by an unknown runtime. It is the kind of field that gets
-added in a five-line diff by someone who read PRD 06's "artwork refs, year,
-rating, progress" and treated it as a schema.
-
-**`artwork` used to be the second such case and is now the first field on the
-card.** M7 refused it rather than shipping it null, with the day it would be
-filled named in the refusal; M9's C2/C3 built the table and the derivation, so
-the case that asserted its absence became the case that asserts its shape. The
-`None` arm is still the common one -- a catalog that has never been derived has
-no artwork at all -- which is why the default is asserted beside the value.
-
-One case pins a *name* rather than a behaviour, which is unusual enough to
-say why: the milestone plan calls the diversity key `RowKind` in Task 1's
-body and `RowFamily` in its own cross-group handoff and file structure, for
-one concept. Two spellings of one vocabulary is a second source of truth,
-and the composer that has to read it is twenty-eight tasks away.
-"""
+"""The row DTOs, and the three things about them that are load-bearing."""
 
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -47,26 +27,9 @@ def _card(**overrides: object) -> RowCard:
 
 
 def test_a_card_carries_one_artwork_reference_and_defaults_to_none() -> None:
-    """**Boundary call 3's other day.** M7 refused this field rather than
-    shipping it null, on the grounds that there was no `Image` table, no
-    `images` column and no `poster_path` on `titles`. M9's C2 and C3 build all
-    three, so the field arrives *populated* and its `None` is a fact rather
-    than a placeholder for a table that does not exist.
-
-    **One id, not a list and not a URL.** A list would put the poster/backdrop
-    choice back on the client, which is the composition ADR-0006 puts on the
-    server -- and the choice is per *row*, keyed on `display_hint`, which no
-    client can make because no client knows the row's hint means a 2:3 slot. A
-    URL would bake the CDN base and the ladder rung into a cached screen;
-    `GET /images/{id}` is the one place either is decided.
-
-    Kills `artwork: str` (a path, which is provider vocabulary a client would
-    have to build a URL from) and `artwork: uuid.UUID` with no default, which
-    would make a household whose catalog has never been derived unrenderable.
-
-    The last assertion is the one that survives: `extra="forbid"` still holds,
-    so a *second* artwork spelling arriving beside this one is a runtime
-    refusal rather than a field pydantic silently drops.
+    """**Boundary call 3's other day.** M7 refused this field rather than shipping it null,
+    on the grounds that there was no `Image` table, no `images` column and no
+    `poster_path` on `titles`.
     """
     assert RowCard.model_fields["artwork"].annotation == uuid.UUID | None
     assert _card().artwork is None
@@ -169,30 +132,8 @@ def test_a_built_row_carries_its_own_ttl_so_a_cached_row_is_self_describing() ->
 
 
 def test_the_row_family_vocabulary_is_prd_06s_three_and_no_others() -> None:
-    """PRD 06's family table, as a set rather than a `<=`: a fourth member
-    fails here and a deleted third one does too.
-
-    **Named for what it asserts.** It was
-    `test_every_row_family_has_something_that_emits_it` through M8 task 14,
-    and nothing in this body links a family to a class that emits it -- this
-    module imports only `usher.domain`, which imports nothing, so the emitters
-    are not reachable from here at all. The assertion that name promised is
-    `test_rows_invariants.py::test_every_row_family_is_emitted_by_a_registered_
-    provider`, which became possible only when M8 task 15 registered
-    `CuratedProvider`; the two are different checks and both are worth having.
-
-    `CURATED` was deliberately *not* pre-declared in M7 -- a diversity rule
-    capping a family with no members is a branch nothing can reach, so the
-    first thing M8 would have discovered is whether that branch was ever
-    right. It costs one line in the diff that adds `LLMRow` (M8 task 14), and
-    that diff is what this assertion moved in.
-
-    The realistic fourth is a family invented to express Continue Watching's
-    pin -- `ports/rows.py` argues that one down at length, because "always
-    ranked first" is a *positional* guarantee and a family is the key the
-    "cap per family" rule **counts**, so a one-member family for the pin puts
-    a position inside a rule about crowding. `ScoredRow.pinned` is where that
-    lives.
+    """PRD 06's family table, as a set rather than a `<=`: a fourth member fails here and a
+    deleted third one does too.
     """
     assert {family.value for family in RowFamily} == {"source", "similarity", "curated"}
 

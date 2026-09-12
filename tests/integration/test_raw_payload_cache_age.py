@@ -1,47 +1,5 @@
-"""TMDb's <=6-month caching term, which is the one dashboard panel in PRD 10
-whose failure is a **licence breach** rather than a blind spot.
-
-`04-catalog-bootstrap.md`'s hard rules encode two halves of the third-party
-data posture. `tests/unit/test_no_third_party_data.py` enforces the
-*redistribution* half mechanically -- nothing ships a prebuilt database, nothing
-scrapes imdb.com. **Nothing enforced the retention half**, and this module plus
-dashboard 5's threshold line is the whole of it.
-
-The series is `raw_payloads.fetched_at`, not `titles.enriched_at`, and the
-difference is the obligation rather than a detail: `enriched_at` records when
-*Usher* enriched a title, `fetched_at` records when the *provider's response*
-was cached, and they diverge exactly when a title is enriched from an
-already-cached payload -- the case the ceiling exists for.
-[ADR-0016](../../docs/prd/decisions/0016-raw-payloads-cache-providers-not-sources.md)
-settled this by refusing a `provider_cache_meta` table by name; the column and
-`ix_raw_payloads_fetched_at` that replaced it ship in
-`e5b8f2c40d17_ingest_pipeline` (M4).
-
-**The SQL is not written here.** It is extracted from PRD 10 dashboard 5's own
-```sql fence by `compliance_panel_sql`, so what this suite proves is what the
-PRD specifies and what D10's dashboard copies. A transcription would be a
-third place to keep in step, and the one that drifts silently is always the
-one nobody executes.
-
-**Two claims, two fixtures**, which is the shape `mutation-sweeps.md` records
-for D4's TTL and B9's cast limit:
-
-- The **count** arm runs at six rows, where `>` versus `>=` is decided by a
-  single row sitting exactly on `now() - interval '6 months'` and the answer is
-  deterministic. At six rows Postgres seq-scans and is right to, so this arm
-  asserts nothing about plans.
-- The **plan** arm seeds `_PLAN_ROWS` and prices the runner-up with
-  `index_suspended`, because "the planner chose the index I meant" is a
-  tie-break rather than a property of the schema until the alternative is
-  measurably worse (#79).
-
-⚠️ **`now()` is `transaction_timestamp()` and is frozen for the life of the
-transaction**, which is what makes the boundary row exact here: the seed and the
-panel's own predicate compute the same instant, so the row lands on the ceiling
-rather than a few microseconds either side of it. The store's `put` deliberately
-uses `clock_timestamp()` for the opposite reason
-(`test_raw_payload_store.py::test_a_refresh_moves_fetched_at_inside_one_transaction`),
-so these rows are inserted directly rather than through the port.
+"""TMDb's <=6-month caching term, which is the one dashboard panel in PRD 10 whose
+failure is a **licence breach** rather than a blind spot.
 """
 
 import pytest
@@ -158,29 +116,8 @@ async def test_the_cache_age_panel_counts_the_rows_past_the_ceiling(
 async def test_the_cache_age_panel_plans_onto_the_fetched_at_index(
     session: AsyncSession, analyze: Analyze
 ) -> None:
-    """`ix_raw_payloads_fetched_at` is ascending **because the question asks for
-    the minimum**, and this is what proves it is asked that way.
-
-    **Two of the panel's three targets are index-served and the third cannot
-    be**, which is why PRD 10 specifies three statements rather than one.
-    `count(*)` over the whole cache has to read every row, so folding it in with
-    the other two costs both of them the index -- measured on the live catalog
-    2026-09-07 at 133,501 payloads: separately the three plan at 0.48, 4.46 and
-    4,813; combined, one `Parallel Seq Scan` with the index unused. The third
-    arm below pins that as a *design* statement rather than leaving it as an
-    unexplained seq scan somebody later "fixes" with an index that cannot help.
-
-    Measured on `pgvector/pgvector:pg17` 2026-09-07 at `_PLAN_ROWS`, by
-    suspending the index rather than inferring from the winner's cost: the
-    oldest entry is **0.35** against **122.02** (349x) and the count **4.32**
-    against **147.01** (34x). Both are far above `A_DECISIVE_MARGIN`, which is
-    the point of quoting them — the constant separates *decided* from *tied*,
-    and a future fixture trimmed for speed would show up here as the margin
-    collapsing rather than as a plan that silently flipped.
-
-    `gen_random_uuid()` rather than `new_id()`: these are filler rows for the
-    planner and never leave the transaction, and one `INSERT ... SELECT` beats
-    5,000 round trips. Identity is still UUIDv7 everywhere it is a domain fact.
+    """`ix_raw_payloads_fetched_at` is ascending **because the question asks for the
+    minimum**, and this is what proves it is asked that way.
     """
     statements = compliance_panel_sql()
     await session.execute(

@@ -1,26 +1,4 @@
-"""The behavioural contract every `ImageBlobStore` implementation must satisfy.
-
-Run against `FakeImageBlobStore` (a dict, no filesystem) and against
-`DiskImageBlobStore` on `tmp_path` (a real filesystem, real renames, real
-`fsync`), both in `tests/unit/test_adapters_images.py`. The two arms fail for
-genuinely different reasons and the fake's docstring lists where it is the more
-forgiving of the pair — which is the direction that hides defects, so the real
-arm is the one that matters and it runs in the same file.
-
-**The three clauses this suite exists for**, each with the defect it stops:
-
-- **A stream that dies part-way leaves nothing.** Not a short entry, not a
-  zero-byte one. C5 serves these bytes with a very long `max-age`, so a
-  fragment is bytes a client keeps for a year, and every later request is a
-  cache *hit* on it — there is no revalidation that would notice.
-- **The key's three terms each separate entries.** Drop `provider` and two
-  providers spelling one path share bytes; drop `width` and every rung serves
-  the first one fetched; drop `provider_path` and a title's poster is its
-  backdrop.
-- **A media type the proxy will not cache is refused and writes nothing.** A
-  passthrough would put arbitrary content behind an origin that serves it back
-  with the type it was given.
-"""
+"""The behavioural contract every `ImageBlobStore` implementation must satisfy."""
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator

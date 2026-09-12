@@ -1,20 +1,4 @@
-"""The seam that makes `SourceAdapterContract` source-agnostic.
-
-The contract suite never constructs an adapter, never touches HTTP, and
-never mentions a wire format. It arranges state through this ABC, whose
-whole vocabulary is `usher.ports.source`'s own DTOs, and each
-implementation translates that into whatever its upstream actually needs:
-`FakeSourceHarness` stores the DTOs directly, `EmbyHarness` renders them
-into Emby JSON served by an in-memory server. A Jellyfin or Plex adapter
-adds a third implementation of this ABC and the suite runs unchanged --
-which is the only sense in which "the abstraction is real" is a testable
-claim rather than an aspiration.
-
-Every mutator is `async` even though both M3 implementations are
-synchronous. The strongest form of this suite is one driven against a live
-server, and that harness has to await; paying the `await` noise now is
-cheaper than rewriting thirty tests later.
-"""
+"""The seam that makes `SourceAdapterContract` source-agnostic."""
 
 from abc import ABC, abstractmethod
 
@@ -37,36 +21,7 @@ class SourceHarness(ABC):
 
     @abstractmethod
     async def given_item(self, item: SourceItem, *, changed_at: AwareDatetime) -> None:
-        """Make the source hold `item`, last changed at `changed_at`.
-
-        `changed_at` is what a `since` cursor filters on, and it is separate
-        from `SourceItem.added_at` on purpose: an item added last year and
-        edited this morning must be found by a delta walk, and a DTO field
-        named `added_at` cannot express that.
-
-        An implementation renders `item` into its own upstream's shape. It
-        must round-trip every field it is given -- the point of this hook is
-        that `adapter.get_item(item.external_id)` returns something equal to
-        `item` in the fields the port promises. Rendering a field only when
-        it is set is the way this is usually broken: whatever the
-        implementation's own template holds shows through instead, and a
-        contract test then asserts happily on a value it never supplied.
-
-        Two widenings are permitted, and an implementation that takes
-        either must **say so in its own docstring** rather than leave it to
-        be discovered:
-
-        - `changed_at` may be held at a coarser resolution than a datetime
-          carries -- Emby's date filters take whole seconds -- so a `since`
-          window may return a superset. The port already permits that;
-          callers deduplicate by `external_id`.
-        - an item with no `container` is a folder to an upstream that
-          models one, and a folder has no media source to hang codecs, a
-          file size, a channel count, or an HDR format off. Those fields
-          may read back `None` for such an item. Nothing seeds one: a
-          source reporting a codec for something it cannot play is not a
-          shape any source produces.
-        """
+        """Make the source hold `item`, last changed at `changed_at`."""
 
     @abstractmethod
     async def given_watch_state(self, state: SourceWatchState) -> None:
@@ -135,33 +90,9 @@ class SourceHarness(ABC):
         step."""
 
     def observed_overlap(self) -> int | None:
-        """The greatest number of upstream requests this harness saw in
-        flight at once, or `None` if it cannot tell. Optional: the default
-        is `None`, and a harness with no transport to instrument leaves it
-        there.
-
-        This exists because `test_operations_recover_from_an_expired_
-        credential` cannot otherwise mean what it looks like it means. It
-        fires four `asyncio.gather`-ed calls and asserts at most one
-        authentication follows, which reads as a single-flight assertion --
-        and is not one. Measured directly: over `httpx.MockTransport`, with
-        *both* of `EmbySession`'s locks deleted, four concurrent expired
-        sessions still produce exactly one authentication. Nothing in that
-        transport ever really awaits on the way to its handler, so the
-        event loop tends to run one gathered call all the way through its
-        own re-auth before starting the next, and every other call then
-        observes an already-fresh token without ever racing for it.
-
-        A harness that returns a number here is claiming its transport
-        genuinely overlaps -- which needs a real `await` in the request
-        path, not a synchronous handler. `EmbyHarness`
-        (`tests/fakes/emby_harness.py`) makes that claim and backs it by
-        running on `tests/fakes/slow_transport.py`; over it, each of the
-        three mutations named above does fail that case. `FakeSourceHarness`
-        leaves this at `None`, which is not a failure -- it is the honest
-        answer for an adapter with no transport at all, and it is why the
-        contract states in that test's own docstring what a green run does
-        and does not prove for each.
+        """The greatest number of upstream requests this harness saw in flight at once, or
+        `None` if it cannot tell. Optional: the default is `None`, and a harness with no
+        transport to instrument leaves it there.
         """
         return None
 
@@ -169,29 +100,7 @@ class SourceHarness(ABC):
 
     @abstractmethod
     async def push_event(self, event: SourceEvent) -> None:
-        """Make the source's push channel deliver this event.
-
-        The arrangement half of every push case. An implementation renders
-        the event into whatever its upstream actually sends -- for Emby that
-        is a `UserDataChanged` or `LibraryChanged` envelope -- so the
-        contract can speak `SourceEvent` and stay source-agnostic, exactly
-        as `given_item` lets it speak `SourceItem`.
-
-        **Rendered from the source's own state, not from the event.** A
-        `WATCH_STATE_CHANGED` event names ids; what the channel then carries
-        for those ids is whatever `given_watch_state` seeded. An
-        implementation that echoed the event's own `watch_states` back would
-        agree with the contract by construction and could never catch an
-        adapter that fabricated them, which is the whole failure mode
-        `recorded_watch_state`'s "read back from the source's own state,
-        never from a log of calls" rule exists for one method over.
-
-        **Must also count as a received message on the adapter's own health
-        ledger**, because that is what `supports_push` reads. A harness that
-        delivered the event out of band would make
-        `test_supports_push_is_false_until_a_message_arrives` pass against
-        an adapter whose ledger is never written.
-        """
+        """Make the source's push channel deliver this event."""
 
     @abstractmethod
     async def push_silence(self) -> None:

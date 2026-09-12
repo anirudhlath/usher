@@ -1,33 +1,4 @@
-"""`usher genres --backfill`, against real Postgres.
-
-**The claim this file exists to verify is not "the column was rewritten".**
-That is assertable against a dict and is, in `tests/unit/test_services_genres.py`.
-The claim here is the one ADR-0039 mispriced: normalising `titles.genres`
-changes **segment 6 of 7** of the document `_FINGERPRINT_SQL` hashes, so a
-title whose genre moved stops reproducing its stored `source_fingerprint` and
-`usher index` claims it — with nothing in the backfill knowing anything about
-embeddings. The alternative implementation this rules out is a backfill that
-hand-rolls a staling mechanism of its own beside the fingerprint, which is two
-definitions of "stale" and the failure `db/repositories/search.py` records as a
-dashboard reading zero while a worker still claims rows.
-
-`md5` over `titles`' own columns is evaluated in Postgres, so none of it is
-expressible against `FakeTitleEmbeddingRepository` — whose own docstring says
-*"any test that asserts staleness against this fake is asserting the fake's own
-arithmetic"*.
-
-**Driven through `_genres` and `_index` themselves** rather than through a
-reimplementation of either loop, which is `test_index_backfill.py`'s rule and
-for its reason: the cursor's advance is one line inside those functions and a
-test that rewrote the loop would be testing the test.
-
-**Every sweep starts from an anchor id, and that is not tidiness.** This module
-commits for real, so the whole `titles` table is inside the sweep's population
-and a bare run's counts would be an assertion about the database rather than
-about the case. `_anchor` seeds one already-canonical title first and every
-sweep resumes after it, which is `test_index_backfill.py::_is_stale`'s
-reasoning applied to a count instead of to a predicate.
-"""
+"""`usher genres --backfill`, against real Postgres."""
 
 import asyncio
 import uuid

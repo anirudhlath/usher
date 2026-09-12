@@ -1,33 +1,4 @@
-"""The admin source routes, end to end against real Postgres.
-
-The adapter behind them is the real `EmbyAdapter` pointed at
-`FakeEmbyServer` through a `MockTransport`, injected by overriding the
-factory dependency -- so `GET /admin/sources/{id}/status` exercises the
-whole stack (route, service, repository, credential store, adapter,
-session, mapper) without a live Emby.
-
-**This is the first place a credential enters Usher from outside**, so most
-of what is asserted here is absence: PRD 08's "credentials are never
-returned by any API, including admin" and "never logged, including in error
-paths and request dumps" are checked against whole serialized bodies, the
-whole captured log stream, and every exported span, rather than against a
-field list somebody has to remember to extend.
-
-Two rules this module keeps about its own failure output, both learned the
-hard way earlier in this project:
-
-1. **A test may not leak the secret it is guarding.** `assert PASSWORD not
-   in response.text` renders *both* operands into the pytest diff when it
-   fails, which puts the credential in the CI log of the run that caught
-   the leak. Every absence check therefore goes through
-   `assert_carries_no_credential`, which raises a hand-built
-   `AssertionError` (an explicit `raise`, never an `assert`, so pytest's
-   assertion rewriting has nothing to expand) carrying a redacted excerpt.
-2. **The secrets are alphanumeric-and-hyphen on purpose.** JSON escaping,
-   percent-encoding, and `repr()` all leave them byte-identical, so a
-   substring search cannot be defeated by the encoding of whatever leaked
-   them.
-"""
+"""The admin source routes, end to end against real Postgres."""
 
 import dataclasses
 import uuid
@@ -164,33 +135,7 @@ def spans() -> Iterator[InMemorySpanExporter]:
 async def app(
     postgres_url: str, server: FakeEmbyServer, spans: InMemorySpanExporter
 ) -> AsyncIterator[FastAPI]:
-    """A real app against the session-scoped container.
-
-    These routes go through the app's *own* session factory and commit for
-    real, so the `session` fixture's transaction-rollback isolation does not
-    apply to them -- without the truncate below, one test's sources leak
-    into the next and the ordering assertion in
-    `test_listing_sources_never_carries_a_credential` fails depending on
-    collection order. `TRUNCATE ... CASCADE` also clears
-    `source_credentials`, which is the foreign key's whole point.
-
-    `jobs` is truncated alongside `sources` for the same reason and is the
-    E3 addition: `jobs.key` carries no foreign key to `sources`
-    (`fixtures-and-fakes.md`'s "titles and jobs do not" cascade), so a `sync`
-    route's own ingest walk enqueuing an ordinary `match` job for an
-    unmatched item -- the everyday PRD 03 behaviour, not a defect -- would
-    otherwise survive into the next test in this file and inflate the count
-    a worker claims there.
-
-    **Truncated on the way out too, not just on the way in.** E3's own
-    tests are the last in this file and are the first here to commit a
-    source and never delete it, so whichever committed row the *last* test
-    to run happened to leave behind used to survive purely by luck of which
-    test that was -- and did, until these were added: `test_cli_pipeline.py`
-    assumes an empty `sources` table and found "Living Room Emby" sitting in
-    it. Symmetric cleanup makes that independent of collection order rather
-    than accidentally true.
-    """
+    """A real app against the session-scoped container."""
     engine = build_engine(postgres_url)
     async with engine.begin() as conn:
         await conn.execute(text("TRUNCATE sources, jobs CASCADE"))
@@ -532,31 +477,8 @@ async def test_a_blank_name_is_rejected_before_anything_is_written(
 async def test_a_rejected_request_does_not_echo_the_credential_it_carried(
     client: AsyncClient,
 ) -> None:
-    """PRD 08: credentials are never returned by any API, and never appear
-    in "error paths and request dumps". A 422 is both.
-
-    This is not hypothetical, and it is not fixed by `SecretStr`. A
-    pydantic `missing` error's `input` is the whole *unparsed* body -- the
-    raw dict, before any field became a `SecretStr` -- so omitting any one
-    field puts the plaintext password of a well-formed request into the
-    response. Reproduced against FastAPI 0.140's default handler before
-    `usher.api.errors` existed:
-
-        {"type":"missing","loc":["body","base_url"],"msg":"Field required",
-         "input":{"kind":"emby","name":"n","username":"…","password":"…"}}
-
-    Two shapes are checked, because they fail differently: a *missing*
-    field echoes its siblings, and a *wrong-typed* field echoes only
-    itself.
-
-    **M9 wrapped PRD 07's RFC 9457 envelope around that handler and this
-    case moved with it, in the same commit.** The stripped error list is now
-    the `errors` extension member; `detail` is a fixed sentence. Each half
-    keeps its positive control -- the request really carried the credential
-    and the route really rejected it -- because a body that never contained
-    the value is also what a handler that never ran produces, and the
-    envelope is exactly the kind of change that could make a handler stop
-    running.
+    """PRD 08: credentials are never returned by any API, and never appear in "error paths
+    and request dumps". A 422 is both.
     """
     incomplete = _payload()
     del incomplete["base_url"]
@@ -654,12 +576,8 @@ async def _drained_pipeline(
 
         @asynccontextmanager
         async def _work() -> AsyncIterator[Pipeline]:
-            # One pipeline for every scope, so the case can read back what the
-            # run wrote on the same session it wrote it on. `build_worker`
-            # opens a scope per claim and per job since M9's W1; the property
-            # that those are *different sessions* is asserted in
-            # `test_services_jobs.py`, which is where a second engine exists to
-            # tell them apart.
+            # One pipeline for every scope, so the case can read back what the run wrote
+            # on the same session it wrote it on.
             yield pipeline
 
         worker = build_worker(

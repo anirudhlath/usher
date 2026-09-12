@@ -1,22 +1,4 @@
-"""`BackupService` against a fake repository: the header, the name, the file.
-
-The integration file next door is where the *contents* are checked against a
-real schema. These are the decisions that are the service's own and that a
-database cannot make wrong -- what the header carries, how a value is
-spelled as JSON, where the file lands when nobody said, and what happens when
-the directory is not there.
-
-**Two of them cross into `usher.db` on purpose.**
-`test_the_projection_built_reference_is_the_one_backup_identity_builds` is
-the cross-file kill for the one duplication K3 accepts (a
-`TitleReference` built from a four-column projection rather than from a 33-
-column `Title`), and
-`test_every_foreign_key_in_the_carried_set_is_rewritten_or_declared_raw` is
-the accounting check whose failure is otherwise completely silent -- a new
-foreign key on a precious table would ship as a raw UUID and only the
-restore, on the day it is needed, would find out. Neither needs Docker, so
-neither is in `tests/integration/`.
-"""
+"""`BackupService` against a fake repository: the header, the name, the file."""
 
 import gzip
 import json
@@ -565,28 +547,7 @@ def test_the_projection_built_reference_is_the_one_backup_identity_builds() -> N
 
 
 def test_every_foreign_key_in_the_carried_set_is_rewritten_or_declared_raw() -> None:
-    """The accounting whose failure is otherwise completely silent.
-
-    A foreign key added to a precious table in a later milestone would be
-    written out as whatever UUID the column holds. The artifact would parse,
-    the counts would agree, and only the restore -- on the day it is needed
-    -- would resolve an id minted by a different import against a catalog
-    where it names something else or nothing at all.
-
-    The premise guards matter here as much as the assertion: an accounting
-    check over an empty carried set passes trivially, and so does one over a
-    set whose tables have no foreign keys at all.
-
-    ⚠️ **This asks whether a column *is* rewritten and never *into what*, so
-    it is the weaker of the two claims about the rewriting path.** A column
-    accounted for here and rewritten into the wrong value passes it -- and
-    three such corruptions survived the whole suite until
-    `tests/integration/test_backup_artifact.py::
-    test_every_carried_reference_holds_the_values_of_the_row_it_names`
-    compared a carried reference to its source row field by field. Recorded
-    because a sweep ledger read this case's kill as evidence for the wider
-    claim, which it is not.
-    """
+    """The accounting whose failure is otherwise completely silent."""
     tables = carried_tables()
     assert tables, "the carried set is empty, so this case proves nothing"
     assert "watch_states" in tables, "the carried set is not the manifest's"

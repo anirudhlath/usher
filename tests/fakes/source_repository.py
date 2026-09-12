@@ -1,11 +1,4 @@
-"""In-memory SourceRepository.
-
-Stamps `created_at`/`updated_at` itself rather than honouring the caller's,
-because Postgres does -- the same divergence the title fake had to be
-corrected for, where "the fake preserved caller timestamps and the real
-repository never did" made a round-trip assertion pass against the fake
-alone.
-"""
+"""In-memory SourceRepository."""
 
 import uuid
 from datetime import UTC, datetime

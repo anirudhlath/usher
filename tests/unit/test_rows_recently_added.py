@@ -1,16 +1,4 @@
-"""`RecentlyAddedProvider`, and the distractor that is a timestamp on the wrong
-column.
-
-The nightly scan touches `last_seen_at` on **every** item **every** night. So
-an implementation ordering by it produces the whole library in scan order, on
-every household, every day, in a correctly-shaped and fully-populated row --
-and every case here seeds the item that makes that visible: **the newest
-`last_seen_at` in the library against the oldest `added_at`.**
-
-The second wrong implementation is the one that never has nothing to say:
-`ORDER BY added_at DESC LIMIT 20` with no window, which puts a "Recently Added"
-shelf about 2019 on a library that has not changed in a year.
-"""
+"""`RecentlyAddedProvider`, and the distractor that is a timestamp on the wrong column."""
 
 from datetime import timedelta
 

@@ -1,93 +1,5 @@
-"""A committed dashboard can lie in three ways, and this module is the three
-checks that close them.
-
-[PRD 10](../../docs/prd/10-telemetry-and-dashboards.md)'s `## Dashboards`
-section makes the dashboards **an asset of this repository** while the stack
-that renders them is not: `dashboards/` holds JSON and a provisioning YAML that
-`~/code/observability/`'s compose project bind-mounts, and Usher's own
-`compose.yml` gains nothing. So nothing in the rendering path is available to a
-unit test, and what *is* checkable is the file — which is exactly where a
-dashboard's three silent failures live.
-
-1. **Structure.** Grafana accepts a file it cannot draw. A panel with no
-   `datasource`, a panel with no target, a file with no `uid` — each loads
-   without an error and renders an empty rectangle that is indistinguishable
-   from a healthy zero. `uid` uniqueness is the one that bites hardest:
-   **Grafana silently overwrites a dashboard whose `uid` collides**, so two
-   committed files become one visible dashboard and there is no error anywhere.
-   The check is structural over the parsed JSON and adds no dependency —
-   `jsonschema` for five inputs is the shape ADR-0027 refused `litellm` under.
-
-2. **Prometheus targets name metrics the catalogue holds.** The extractor is
-   `test_telemetry_search.py`'s `_ROW` regex with the `usher\\.` anchor
-   dropped, because the catalogue's 42nd row is `http.server.duration` — no
-   `usher.` prefix, supplied by `FastAPIInstrumentor` — and a catalogue check
-   that cannot see it cannot grade an API-latency panel at all.
-   **Prometheus mangles dots to underscores, appends the instrument's
-   *unit* and then appends `_bucket`/`_count`/`_sum`/`_total`**, so both
-   sides go through one normaliser and the normaliser has its own case.
-   The unit half was added by D8 and is not cosmetic: every gauge Usher
-   declares carries `unit="1"` and reaches Prometheus as `..._ratio`, every
-   histogram carries `unit="s"` and arrives as `..._seconds_bucket`, so a
-   normaliser that stripped only the aggregation suffix graded **the real
-   name of every Prometheus panel D8 commits as an unknown metric**. D6
-   could not have found this: dashboard 1 has no Prometheus panel, and its
-   synthetic control was written in `usher_suggest_duration_bucket`, a
-   spelling this deployment's exporter does not produce.
-
-3. **Postgres targets name tables and columns that exist.** Against
-   `Base.metadata`, which is the live schema the ORM already holds — not
-   against a SQL parser, which is a dependency this repository does not want.
-
-⚠️ **Invariant 3's false-positive escape, stated here rather than papered
-over.** The scan is over `\\b(\\w+)\\.(\\w+)\\b` pairs whose **left side is a
-real `__tablename__`**. A SQL alias is not a table name, so `t.name` in
-`FROM titles t` is skipped, and **a panel written entirely in aliases is
-checked on nothing**. That is a real limitation with a real cost: it makes the
-invariant's coverage a property of how the committed SQL is spelled. The
-alternative is a SQL parser, and a check that silently covers a third of the
-panels is worse than one whose coverage is stated — so
-`test_a_panel_written_in_aliases_is_checked_on_nothing` pins the hole by name,
-and `01-library-and-catalog.json` is written in **unaliased** table names for
-exactly this reason. `test_the_committed_dashboards_are_not_written_in_aliases`
-is what keeps that true as D7-D10 land.
-
-**The positive controls are the point of the main case, not decoration.** A
-glob that matches nothing and a catalogue that parses nothing both satisfy
-every downstream assertion silently, and this repository has paid for that
-twice: an import-contract verification reporting *7 kept, 0 broken* against a
-substitution that was a no-op, and a suggest-index scan. So `assert files`,
-`assert catalogue`, a named anchor in the catalogue, and a count of the
-table.column pairs actually checked all run before the invariants do.
-
-**A fourth question arrives with Dashboard 2, and it is about what is *not*
-there.** D0's audit found three of PRD 10's eight D2 panels unbacked — no
-play-event log exists, so "watch time by day and user" and "taste drift" have no
-row per play to draw, and `search_queries` hands out no row handle for "row
-effectiveness" ([#84](https://github.com/anirudhlath/usher/issues/84),
-[#85](https://github.com/anirudhlath/usher/issues/85)). Shipping them empty is
-the failure PRD 10's own preamble exists to prevent, so
-`test_dashboard_two_ships_no_panel_the_audit_found_unbacked` asserts the
-committed file names none of them, **with the forbidden list parsed out of the
-PRD rather than retyped** — a retyped list goes stale silently the day the audit
-is corrected. The absences are stated instead on a text panel, and
-`test_the_absence_panels_three_sentences_are_byte_identical_to_prd_tens` pins
-that text to the PRD's own so a correction to one is a red on the other.
-
-**A text panel is exempt from invariant 1's datasource-and-target rule and gains
-its own.** It draws no data, so "no target" is its correct shape rather than an
-empty rectangle; what an empty rectangle looks like for a text panel is empty
-`options.content`, which is what is asserted in place.
-
-**One arm cannot have a live positive control at this HEAD and says so.**
-Dashboard 1 is eleven Postgres panels and **no Prometheus panel at all** — PRD
-10's first principle ("Most of what is worth knowing about a media catalog is
-**not a metric**... The catalog *is* the record") applied to a catalog
-dashboard. So invariant 2 grades zero targets over the committed glob until
-D9's API-latency panel lands. Asserting it had graded something would be red
-today for a correct tree; instead its teeth are proved on a synthetic dashboard
-in `test_a_prometheus_target_naming_a_metric_outside_the_catalogue_is_caught`,
-which is a *stronger* control than a count anyway — it names which token dies.
+"""A committed dashboard can lie in three ways, and this module is the three checks
+that close them.
 """
 
 import json
@@ -106,12 +18,8 @@ _DASHBOARDS = _ROOT / "dashboards"
 _DASHBOARD_TWO = _DASHBOARDS / "02-taste-and-watching.json"
 _PRD_10 = _ROOT / "docs" / "prd" / "10-telemetry-and-dashboards.md"
 
-# `test_telemetry_search.py`'s `_ROW`, with the `usher\.` anchor dropped so the
-# scan reaches `http.server.duration`. That file's own copy stays anchored: it
-# asks a different question (which rows M6 owes) and merging the two would
-# collapse them, which M10's O4 sweep measured -- deleting one catalogue row
-# kills a case in both files today, and that independence is what makes the
-# blast radius informative.
+# `test_telemetry_search.py`'s `_ROW`, with the `usher\.` anchor dropped so the scan
+# reaches `http.server.duration`.
 _METRIC_ROW = re.compile(r"^\|\s*`([a-z][a-z0-9_.]*)`\s*\|\s*(\w+)\s*\|", re.M)
 
 # Grafana's four suffixes for a mangled OTel name. Prometheus appends exactly
@@ -119,35 +27,16 @@ _METRIC_ROW = re.compile(r"^\|\s*`([a-z][a-z0-9_.]*)`\s*\|\s*(\w+)\s*\|", re.M)
 # `_sum` come from the histogram, `_total` from the counter.
 _PROMETHEUS_SUFFIXES = ("_bucket", "_count", "_sum", "_total")
 
-# The exporter's *unit* suffix, which sits between the mangled name and the
-# aggregation suffix -- `usher.jobs.queued` (`unit="1"`, a gauge) reaches
-# Prometheus as `usher_jobs_queued_ratio` and `usher.enrichment.latency`
-# (`unit="s"`) as `usher_enrichment_latency_seconds_bucket`. Measured against
-# the running stack on 2026-09-07 rather than read out of a specification:
-# `/api/v1/label/__name__/values` holds 61 `usher_`-prefixed names and every
-# one of them carries a unit or is a `_total` counter.
-#
-# ⚠️ **Stripping this is only safe while no catalogue row is itself named for
-# a unit**, because `usher.x` and `usher.x.seconds` would collapse onto one
-# key. `test_the_normaliser_is_not_vacuous` is what checks that, over the
-# whole catalogue, in both directions.
+# The exporter's *unit* suffix, which sits between the mangled name and the aggregation
+# suffix -- `usher.jobs.queued` (`unit="1"`, a gauge) reaches Prometheus as
+# `usher_jobs_queued_ratio` and `usher.enrichment.latency` (`unit="s"`) as
+# `usher_enrichment_latency_seconds_bucket`.
 _PROMETHEUS_UNITS = ("_ratio", "_seconds", "_milliseconds", "_bytes")
 
-# 🔴 **And a *unit* segment before them, which this file did not know about
-# until a Prometheus panel was committed against it.** The OTel collector's
-# Prometheus translation appends the instrument's unit to the name: `s` ->
-# `_seconds`, `ms` -> `_milliseconds`, `By` -> `_bytes`, and a gauge's `1` ->
-# `_ratio`. Read off this host's Prometheus on 2026-09-07, PRD 10's
-# `usher.home.compose.duration` is stored as
-# `usher_home_compose_duration_seconds_bucket` and `http.server.duration` as
-# `http_server_duration_milliseconds_bucket`.
-#
-# Stripping only the four above left `usher_home_compose_duration_seconds`,
-# which is in no catalogue -- so invariant 2 **rejected the spelling that
-# renders data and accepted the spelling that renders none**, which is the
-# exact failure it exists to catch.
-# `test_the_catalogue_check_survives_the_unit_suffix_the_collector_appends`
-# is the case; it lists the stored spellings this host actually holds.
+# 🔴 **And a *unit* segment before them, which this file did not know about until a
+# Prometheus panel was committed against it.** The OTel collector's Prometheus
+# translation appends the instrument's unit to the name: `s` -> `_seconds`, `ms` ->
+# `_milliseconds`, `By` -> `_bytes`, and a gauge's `1` -> `_ratio`.
 _UNIT_SUFFIXES = ("_seconds", "_milliseconds", "_bytes", "_ratio")
 
 # PromQL's own vocabulary, which a `[a-z][a-z0-9_.]*` scan cannot tell from a
@@ -328,33 +217,7 @@ def normalise_panel_title(title: str) -> str:
 
 
 def normalise_metric(name: str) -> str:
-    """One OTel or Prometheus spelling of a metric, reduced to a comparable key.
-
-    Dots become underscores, then **one** trailing Prometheus suffix and
-    **one** unit segment are removed, in that order — so PRD 10's
-    `usher.suggest.duration` and the `usher_suggest_duration_seconds_bucket`
-    Prometheus actually stores reduce to the same key. Applied to **both**
-    sides, which is what makes it a normalisation rather than a rewrite of one
-    of them.
-
-    **Two strips, in the exporter's own order**: one aggregation suffix, then
-    one unit. `usher_enrichment_latency_seconds_bucket` needs both to reach
-    `usher_enrichment_latency`, and doing them in the other order reaches
-    nothing -- `_bucket` is not a unit and `_seconds_bucket` is not a suffix
-    in either list.
-
-    No catalogue row ends in one of the four aggregation suffixes or one of
-    the four units today (both checked in
-
-    The order is the storage order and is not interchangeable: the exporter
-    writes `<name>_<unit>_<suffix>`, so stripping the unit first would find
-    nothing to strip on `..._seconds_bucket` and leave the row unmatched.
-
-    No catalogue row ends in one of these eight segments today (checked in
-    `test_the_normaliser_is_not_vacuous`), so stripping on the catalogue side
-    is a no-op; if one ever does, that row and its `_count` or `_seconds`
-    sibling would collapse into one key and the case is what says so.
-    """
+    """One OTel or Prometheus spelling of a metric, reduced to a comparable key."""
     key = name.strip().replace(".", "_")
     for suffix in _PROMETHEUS_SUFFIXES:
         if key.endswith(suffix):
@@ -1174,12 +1037,8 @@ def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
         assert len(titles) == 10, f"PRD 10's dashboard 3 is ten panels, not {len(titles)}"
 
 
-# ---------------------------------------------------------------------------
-# D9's three additions. The first is the panel invariant Dashboard 4's
-# hit-rate panel exists to keep; the second and third are two ways a committed
-# panel renders nothing-that-looks-like-something, and neither was reachable
-# before a Prometheus panel was committed.
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- D9's three
+# additions.
 
 _AGGREGATION = re.compile(r"\b(?:sum|avg|min|max|count|topk|bottomk|stddev|quantile)\b")
 _GROUPING_CLAUSE = re.compile(r"\s*(?:by|without)\s*\(([^)]*)\)")
@@ -1265,32 +1124,8 @@ _LEGEND_LABEL = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
 
 def test_every_legend_entry_names_a_label_its_own_query_still_groups_by() -> None:
-    """🔴 The legend and the `by (…)` are two halves of one claim and only the
-    legend half had teeth.
-
-    `test_the_enrichment_panel_says_its_label_is_outcome_and_carries_no_demand_split`
-    asserts dashboard 3's enrichment targets *legend* on `{{outcome}}`, and
-    nothing asserted what the same target *grouped* by. So changing the legend
-    was caught (it caught D9 at integration) and changing the expression was
-    not: `sum by (outcome) (…)` → `sum by (trigger) (…)` left every case in
-    this file green.
-
-    **That mutation has got worse rather than better since D8 shipped.** When
-    dashboard 3 was written `trigger` was not a label on
-    `usher.enrichment.latency` at all, so the swap would at least have drawn an
-    empty panel. D12 then put `trigger` on the series -- deliberately, because
-    PRD 10's *"Enrichment SLA missed -- demand-triggered p99 > 5 s"* is not
-    expressible without it -- so today the same swap draws a **full** panel
-    over the wrong split, under a legend that still says `outcome` and renders
-    blank because the series no longer carries it.
-
-    Asserted generally rather than on the one panel, because the asymmetry is
-    a property of every `(expr, legendFormat)` pair on every dashboard: a
-    legend entry names a label, and a label the query grouped away is not
-    there to substitute. Together with the legend cases this closes both
-    directions -- change the expr and this fails, change the legend and the
-    per-panel case fails, change both and the panel no longer claims to be the
-    panel PRD 10 asked for.
+    """🔴 The legend and the `by (…)` are two halves of one claim and only the legend half
+    had teeth.
     """
     targets = _legend_targets()
     named = [

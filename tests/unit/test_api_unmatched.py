@@ -1,20 +1,5 @@
-"""The review queue on the wire: `GET /admin/unmatched` and
-`POST /admin/unmatched/{id}/resolve`.
-
-Driven through a real `create_app()` with three dependencies overridden -- the
-media-item, title and episode repositories -- so the router, the DTOs, A3's
-cursor codec, A2's problem envelope and FastAPI's own path, query and body
-parsing all sit on the path a request takes. Only the Postgres reads are stood
-in for; `tests/integration/test_admin_unmatched.py` is what runs those, and it
-is the only place the keyset's NULL boundary is *silently* wrong rather than
-loudly wrong -- a NULL cannot poison a comparison in Python.
-
-**Every ordering case here seeds the newest item first**, so the ids
-`FakeMediaItemRepository` mints run the opposite way to `added_at`. Without
-that, a UUIDv7 primary key makes `ORDER BY id DESC` and
-`ORDER BY added_at DESC NULLS LAST, id DESC` agree by accident and no
-assertion in this file could tell them apart. Each such case asserts that
-premise itself.
+"""The review queue on the wire: `GET /admin/unmatched` and `POST
+/admin/unmatched/{id}/resolve`.
 """
 
 import ast

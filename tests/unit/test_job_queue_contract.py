@@ -1,12 +1,4 @@
-"""The shared contract, against the in-memory implementation.
-
-Half of a pair, and the weaker half by construction. A dict cannot express
-`SELECT ... FOR UPDATE SKIP LOCKED`, so
-`test_two_workers_never_claim_the_same_job` is **skipped** here rather than
-passed -- see `tests/fakes/job_queue.py`'s docstring for the full list of
-what this run does not prove, and `tests/integration/test_job_queue.py` for
-where each of those is actually closed.
-"""
+"""The shared contract, against the in-memory implementation."""
 
 import pytest
 import pytest_asyncio

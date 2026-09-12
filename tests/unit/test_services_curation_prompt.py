@@ -1,52 +1,4 @@
-"""`curation_prompt` -- the body that crosses the wire, read directly.
-
-**This file exists because a prompt has no consumer inside the process.**
-`.claude/rules/testing-discipline.md` records the measurement: a mutation sweep
-over `CurationService` caught every mutation that damaged something a case read
-back through a port and was blind to **sixteen** live mutants in the prompt,
-because mutation coverage of an artefact nothing reads is exactly the list of
-cases that opted in by name. Opting in used to cost a household, four fakes, a
-`CandidatePoolService`, a `TasteService` and a scripted `LLMClient` per
-substring; here it costs a list of `Title`s.
-
-**So the line is drawn deliberately wide.** Every constant and every rendered
-number gets a case, and so does every rule `validate_curation` will drop a row
-for -- ADR-0028 sends an operator reading `duplicate`, `not_in_pool` or
-`row_unusable` to the prompt, so there has to be a rule there for them to fix.
-What is deliberately *not* asserted is framing prose with no constant, no
-rendered number and no `DropReason` behind it: the *"Group by something a
-person would recognise"* rule is now the only one, and a verbatim assertion on
-the sentences most likely to be tuned is a change-detector rather than a test.
-
-**Three sentences that read like framing and are not**, and every one of them
-was left alive by that reasoning once:
-
-- `_COLD_START` is a *branch*. Nearly every fixture in the service's own file
-  seeds no watch history, so it renders constantly and was observed by nothing
-  -- and `CurationService._history` calls a cold start *"the normal state, not
-  an edge case"*.
-- the `reason` bullet's length is a *bound*. `MAX_REASON_CHARS` is the one the
-  validator discards the entire row over as `row_unusable`, which is a strictly
-  stronger consequence than the heading width that was already pinned.
-- **the opening line is a *claim about the pool*, and a `WHERE` clause is what
-  would have to honour it.** It was the "role sentence" this docstring named as
-  the archetype of unpinnable framing until 2026-08-11, and it asserted the
-  household owned every candidate -- which
-  `TitleRepository.list_unwatched_candidates` has never done. Corrected in the
-  prompt rather than in the query, on the measurement in ADR-0028's 2026-08-11
-  amendment, and pinned here.
-
-**The test the third one adds to the list is not "does it read like prose".**
-It is: *is there a query, a constant or a validator anywhere in this system
-that would have to be true for this sentence to be?* A sentence somebody might
-tune is a change-detector; a sentence that has to agree with a `WHERE` clause
-is a test.
-
-What stays in `test_services_curation.py` is what needs the orchestrator: the
-two-port read behind the history, `HISTORY_SIZE` as the `limit` of that read,
-`min_cards` reaching the prompt *and* the validator from one place, and the
-guarantee that no identifier survives the whole assembly.
-"""
+"""`curation_prompt` -- the body that crosses the wire, read directly."""
 
 import ast
 import inspect
@@ -218,39 +170,8 @@ def test_a_household_that_has_finished_nothing_says_so_rather_than_saying_nothin
 
 
 def test_the_opening_line_does_not_claim_the_household_owns_every_candidate() -> None:
-    """**A third sentence that reads like framing and is not**, after
-    `_COLD_START` and the `reason` bound this module's docstring lists.
-
-    The opening line is not prose about the model's role: it is a claim about
-    what the candidate list *is*, and `TitleRepository.list_unwatched_candidates`
-    is what would have to honour it. It does not and deliberately never did --
-    ownership is an `ORDER BY` key there and never a filter, so *"the pool
-    spans the whole catalog, not just the library"* stays true. Measured
-    2026-08-11 through the real Postgres repository over a 1,000-title catalog:
-    a household owning **20** unwatched titles gets a pool of 200 that is
-    **10.0%** owned, and a household owning none gets a pool of 200 that is
-    **0%** owned -- under a sentence saying every one of them is its own. See
-    [ADR-0028](../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
-    2026-08-11 amendment for why the sentence gave way rather than the pool.
-
-    **Two narrow assertions, and the whole-line spelling is deliberately not
-    used here.** `.claude/rules/testing-discipline.md` says *"negative
-    assertions about a rendering are satisfied by renderings that are still
-    wrong; assert the line"* -- but that rule was measured on `one_line`, where
-    the **rendering itself** is the artefact under test and every character of
-    it is the defence. Here the artefact is a **claim**, and the wording is the
-    part most likely to be tuned: ADR-0028 measures this sentence at +26 prompt
-    tokens and says so, which makes it a standing candidate for a copy-edit.
-    Pinning all 47 words would fail every future edit that kept the claim
-    intact, for a reason that has nothing to do with what this case is about --
-    the change-detector the two sibling repairs in this file (`_COLD_START`, the
-    `reason` bound) each avoided by pinning a narrow substring or an
-    interpolated constant.
-
-    So: the ownership claim must be **absent**, and an explicit not-all-owned
-    statement must be **present**. Neither is asserted through a module constant
-    on purpose -- an interpolated-constant check is blind to a mutation *of the
-    constant*, which is exactly the inversion this case exists to catch.
+    """**A third sentence that reads like framing and is not**, after `_COLD_START` and the
+    `reason` bound this module's docstring lists.
     """
     built = _built()
 
@@ -470,28 +391,8 @@ def test_the_prompt_shows_the_example_object_the_schema_asks_for() -> None:
 
 
 def test_one_whitespace_collapse_defends_both_prompts() -> None:
-    """The structural half of *"every run of whitespace collapsed to one
-    space"*, and the reason it is structural.
-
-    `curation_prompt` and `query_expansion` are the two modules in this project
-    that render third-party text into a prompt -- a media server's or TMDb's
-    `titles.name` here, a viewer's typed query there -- and both shipped the
-    same body under two names (`_one_line`, `_sanitise`), each carrying its own
-    copy of the same measured argument.
-
-    **Two copies of a defence is the defence's own failure mode**, not a
-    tidiness complaint. The measurement in
-    `.claude/rules/testing-discipline.md` is that the narrower spelling
-    `replace("\\n", " ")` survives a `\\r\\n` case, because `str.splitlines()`
-    breaks on `\\r` too -- so narrowing *one* of the two copies leaves one
-    prompt still protected and one open, and every case in this file goes on
-    passing while a search box forges a rule the model reads as ours. One
-    definition makes that edit unspellable.
-
-    An `ast` walk over the *shape* rather than a scan for either name, for
-    `test_no_service_mints_its_own_ledger_row`'s reason one module over: both
-    modules argue about the collapse at length in prose, and only a function
-    whose body really is the collapse counts.
+    """The structural half of *"every run of whitespace collapsed to one space"*, and the
+    reason it is structural.
     """
     import usher.services.curation_prompt as prompt_module
     import usher.services.query_expansion as expansion_module

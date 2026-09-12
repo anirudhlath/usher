@@ -1,61 +1,4 @@
-"""The milestone's conformance check: `/openapi.json` against PRD 07, both ways.
-
-M9's headline acceptance criterion is *"every endpoint in PRD 07's Screens,
-Resources, Actions and Admin tables answers, and `/openapi.json` describes
-real shapes for all of them"*. Nothing ran that until this file, and a
-criterion nobody can run is a criterion that gets asserted at the end by
-reading.
-
-**Five claims, deliberately at different scopes.**
-
-1. **PRD's endpoint tables ⊆ the app's routes**, compared as `(method, path)`
-   pairs. Narrow on purpose, twice over: a table is a promise to a client, so
-   every spelling in one has to answer, and the *method* is half of what a cell
-   promises. Path granularity was measured to be too weak -- see
-   `test_every_endpoint_prd_07_promises_is_in_the_schema`.
-2. **The app's routes ⊆ every endpoint PRD 07 spells anywhere.** Wider on
-   purpose, and the width is not laxity -- three M9 routes are documented
-   outside the tables (`GET /images/{image_id}` under `## Images`,
-   `POST /titles/{id}/play` under `## Playback`, `GET /events` under
-   `## Streaming updates (SSE)`), and this direction is the only thing that
-   obliged `GET /stream/{ticket}` to be spelled in that file at all.
-3. **Every status a route can raise is described as a problem document**, and
-   every non-2xx the document describes *is* one unless it is an encoded
-   exemption carrying its reason and the shape it keeps instead.
-4. **The `code` enum in the schema is `ProblemCode` as a set**, so a member
-   added without regenerating the schema fails here as well as in
-   `tests/unit/test_api_problem_vocabulary.py`.
-5. **Every problem response is declared at `application/problem+json`**, the
-   media type the document declares is the one the wire really sends, and no
-   other body was moved onto it. Keyed on the schema rather than on the
-   status, which is what excludes `GET /health/ready`'s 503 by construction
-   rather than by a second exemption list.
-
-**Every scan carries its positive control, and the control runs before any
-membership claim is read out of it.** An app that failed to build and a PRD
-file that parsed to nothing both produce an empty-set comparison that passes,
-which is the shape `CLAUDE.md` calls a guard that globbed nothing.
-
-**The route walk is A2's and is imported rather than re-derived.**
-`include_router` on FastAPI 0.140 appends one opaque `_IncludedRouter` per
-router rather than flattening, so a one-level `isinstance(route, APIRoute)`
-walk finds **zero** of Usher's routes and iterates an empty list happily.
-`tests/unit/test_api_problem.py::test_the_route_walk_finds_the_shipped_surface`
-is the premise for the descent; every case here carries one of its own too.
-
-**The bounded untruth this file used to name is now checked, and the reason it
-was tolerated did not survive being written down.** A problem document goes out
-as `application/problem+json`; FastAPI rendered every
-`responses={404: {"model": ProblemResponse}}` declaration under the route's own
-response media type, i.e. `application/json`, so the document was wrong about
-the one header RFC 9457 makes load-bearing. The old note said the media type
-"buys a client nothing it cannot read off the `type` member", which is a claim
-about a client that has already decided to parse the body as a problem
-document -- and a generated client decides that from the declared media type,
-before it parses anything. Issue #6, and `api/app.py`'s `UsherAPI.openapi` is
-the fix. The two assertions it forks (`test_api_playback.py`,
-`test_api_watch.py`) each say so where they stand.
-"""
+"""The milestone's conformance check: `/openapi.json` against PRD 07, both ways."""
 
 import ast
 import importlib
@@ -118,12 +61,9 @@ _ENDPOINTS_IN_THE_TABLES: Final = 29
 #: The anchor every non-2xx in `/openapi.json` has to point at.
 _PROBLEM_SCHEMA: Final = "ProblemResponse"
 
-#: A floor under the media-type walk, for the reason `_ENDPOINTS_IN_THE_TABLES`
-#: is one: **56** responses across 35 operations carried a `ProblemResponse`
-#: when issue #6 was measured, and a route added later only raises that. What
-#: it guards is the vacuous pass -- a walk that matched nothing satisfies
-#: `wrong == {}` exactly as well as a document that is right, and on FastAPI
-#: 0.140 an empty walk is the *default* failure here.
+# : A floor under the media-type walk, for the reason `_ENDPOINTS_IN_THE_TABLES` : is
+# one: **56** responses across 35 operations carried a `ProblemResponse` : when issue #6
+# was measured, and a route added later only raises that.
 _PROBLEM_RESPONSES: Final = 50
 
 #: The non-problem bodies, and this one is an exact count rather than a floor
@@ -133,13 +73,8 @@ _PROBLEM_RESPONSES: Final = 50
 #: operations and 92 response bodies.
 _NON_PROBLEM_BODIES: Final = 36
 
-#: Non-2xx responses that are deliberately **not** problem documents, each with
-#: the shape it keeps instead and the reason it keeps it. A bare skip list
-#: would make an oversight and a decision look identical, so every entry is
-#: asserted rather than excused: a named model has to be the model the schema
-#: really carries, and `None` has to be a response with no body at all.
-#:
-#: Entries are independent and their order carries nothing.
+# : Non-2xx responses that are deliberately **not** problem documents, each with : the
+# shape it keeps instead and the reason it keeps it.
 _NOT_A_PROBLEM_DOCUMENT: Final[tuple[tuple[str, str, str | None, str], ...]] = (
     (
         "/health/ready",
@@ -389,15 +324,7 @@ def test_every_endpoint_prd_07_promises_is_in_the_schema(
         f"the app published {len(served)} paths -- it did not build, and every comparison "
         "below would be vacuous"
     )
-    # `include_in_schema=False` is filtered here and nowhere else in this
-    # file. The walk is deliberately unfiltered -- `test_api_problem.py` needs
-    # every route the app serves, schema member or not -- but *this* assertion
-    # compares against the published document, and a route that opted out of
-    # the document is absent from it by construction. Without the filter the
-    # case can only pass while no such route exists, which is to say only on a
-    # checkout where `web/dist` has never been built: `mount_console` returns
-    # early with no bundle, and its `/` and `/console/config.json` are the two
-    # routes in the tree that opt out.
+    # `include_in_schema=False` is filtered here and nowhere else in this file.
     walked = {_normalise(route.path) for route in api_routes(app) if route.include_in_schema}
     assert walked, "the walk found no schema-bearing route, so the comparison below is vacuous"
     assert served == walked, "the schema and the route walk disagree about what this app serves"
@@ -691,13 +618,8 @@ def test_every_exemption_names_a_real_response_and_the_shape_it_keeps(
     """
     assert len(_NOT_A_PROBLEM_DOCUMENT) >= 2, "the exemption tuple is too small to be a set"
 
-    # PRD 07 promises that the "every route declares its problem responses"
-    # check *imports* `dto/problem.py`'s reasoned map rather than re-deriving
-    # it. This is that import, and the relationship is the assertion: exactly
-    # one entry here is a route whose **handler** declines the envelope, and it
-    # has to be one A2 recorded. The other two are statuses that carry no body
-    # at all -- a fact about 302 and 304 rather than a decision about a
-    # handler -- so they must *not* be in that map.
+    # PRD 07 promises that the "every route declares its problem responses" check
+    # *imports* `dto/problem.py`'s reasoned map rather than re-deriving it.
     by_handler = {path for path, _, model, _ in _NOT_A_PROBLEM_DOCUMENT if model is not None}
     assert by_handler == {"/health/ready"}, sorted(by_handler)
     assert by_handler <= set(PROBLEM_EXEMPTIONS), (

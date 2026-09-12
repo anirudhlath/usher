@@ -1,17 +1,4 @@
-"""`ProviderCdnImageFetcher` and `DiskImageBlobStore`.
-
-Both contract suites are run here, each against its fake and against its real
-implementation — `httpx.MockTransport` needs no container and a filesystem
-needs no container either, so the real arms of both ports are unit cases. The
-live CDN arm is `tests/integration/test_image_fetcher_live.py` and skips itself
-unless one is configured.
-
-**Nothing in this file opens a socket.** `.claude/rules/fixtures-and-fakes.md`
-is explicit that the network guard *"lives outside the tree — it is a check to
-re-run, not a dependency to add"*, so a default `uv run pytest` would not stop
-one; the constraint here is structural, and it is `MockTransport` in every case
-that reaches the fetcher.
-"""
+"""`ProviderCdnImageFetcher` and `DiskImageBlobStore`."""
 
 import ast
 import hashlib
@@ -552,31 +539,8 @@ async def test_a_media_type_the_cache_cannot_name_is_refused_before_the_body_is_
 
 
 async def test_an_svg_logo_is_declined_quietly_rather_than_reported_as_a_fault() -> None:
-    """The refusal is the decision, and 🔴 **the reason this case gave until
-    2026-08-11 was measurably wrong.**
-
-    It said the provider rasterises SVG logos at every sized rung, so an SVG
-    arriving here means something other than the measured CDN answered.
-    Measured against three real `.svg` logos across 51 popular and top-rated
-    titles: `w154`, `w342`, `w500` and `original` all answer HTTP 200
-    `image/svg+xml`, and `w342` returns **10,216 bytes of raw SVG XML, byte for
-    byte the size of `original`**. The CDN ignores the ladder entirely for this
-    type — which makes the refusal *stronger*: the clamp is the whole mechanism
-    of ADR-0032 and it has no effect here, so four rungs would cache four
-    identical copies and the "four entries an image" bound is not a bound. That,
-    plus active content on an internet-facing origin under a year-long
-    `max-age`, on a proxy with no decoder that could sanitise it.
-
-    **So the assertion this case is really about is the type, not the raise.**
-    Roughly one title in seventeen has an SVG logo, so this fires on ordinary
-    catalog data; refused as a bare `PortDataMalformed` it would be spelled
-    identically to a captive portal answering HTML, which is a genuine upstream
-    fault. `MediaTypeNotServable` is what lets C5 answer one as an absence and
-    the other as a fault, and it subclasses the old type so nothing that
-    catches `PortDataMalformed` had to change.
-
-    The body is a plausible size rather than `b"<svg/>"` so that "refused
-    without reading it" stays a claim about the header.
+    """The refusal is the decision, and 🔴 **the reason this case gave until 2026-08-11 was
+    measurably wrong.**
     """
     delivered: list[int] = []
 

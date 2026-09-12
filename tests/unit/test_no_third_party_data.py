@@ -1,94 +1,4 @@
-"""No third-party data is committed, checked rather than asserted.
-
-`CLAUDE.md`'s hardest rule is "ship importers, never data": IMDb's
-non-commercial licence and TMDb's terms both forbid redistribution, so no
-row of either dataset may be committed here or reach a release artifact.
-That rule was a convention with nothing enforcing it for three milestones,
-and it was broken the whole time -- `tests/fixtures/bulk/` carried real
-IMDb rows including ratings with vote counts, which is the most
-licence-restricted part of that dataset, under a README asserting they were
-synthetic. A convention nothing checks is not a control. This is the check.
-
-**What it covers, and what it deliberately does not.** `src/` is what
-`hatchling` packages into the wheel and what the container image copies;
-`tests/` is the corpus a contributor reads and copies patterns from. Both
-are scanned. `docs/` and `CLAUDE.md` are not, and that is deliberate rather
-than an omission: they are this project's engineering record, and a
-sentence naming a real row as the *specimen* for a measurement ("21 titles
-in the first 553,395 rows carry a literal quote, e.g. ...") is a factual
-claim about a dataset, not a copy of one. Neither ships.
-
-⚠️ **"Neither ships" is true of `docs/` and false of `README.md`, and the
-coverage is not uniform.** `pyproject.toml` declares `readme = "README.md"`,
-so hatchling embeds the whole file as the distribution's long description --
-`dist-info/METADATA` is the README verbatim, inside `/app/.venv` in the
-image. The runtime image's own-repo payload is **four** things, not three:
-`/app/.venv`, `/app/src`, `alembic.ini` and `/app/web/dist`.
-
-So: `src/` is inside all four checks. `alembic.ini` and `README.md` are
-inside the whole-repository dataset-row scan and **nothing else** -- which
-is adequate, because a dataset row is the licence-relevant shape wherever
-it sits, and that is that check's own argument. And `web/dist` is inside
-**none** of them, because it does not exist in the repository: it is built
-at image time from `web/src/`, which the whole-repo scan does cover.
-
-**The three checks, and why three.**
-
-- `test_every_imdb_id_is_in_the_reserved_synthetic_band` is the general
-  one: every IMDb-shaped identifier anywhere in `src/` or `tests/` must
-  sit in the reserved band, so a real one cannot be added by any route.
-  It works because IMDb ids have a recognisable shape and a *bounded*
-  allocated range -- real tconsts sat around `tt3xxxxxxx` in 2026, so the
-  `tt99` band is roughly three times above allocation.
-- `test_every_id_in_a_fixture_is_synthetic` covers the identifiers that
-  have no such shape. A TMDb or TVDb id is a bare integer and any integer
-  is a plausible one, so the only mechanical rule available is a floor:
-  inside a committed fixture, every entity id must be at or above
-  `_SYNTHETIC_ID_FLOOR`, which is two orders of magnitude above TMDb's
-  live movie id space (~1.4M, measured from its own daily export) and
-  above TVDb's episode ids (~10M, observed live).
-- `test_no_identifier_this_repository_once_committed_has_come_back` is the
-  regression list. It is a denylist, which is a weak shape in general and
-  the right one here: the specific way this fails is someone pasting a
-  real capture back in, and the ids most likely to arrive that way are the
-  famous ones TMDb's own reference documentation illustrates its endpoints
-  with. Those are three-digit and four-digit numbers, so a floor rule
-  cannot reject them in a `.py` file without also rejecting `tmdb_id=1`,
-  which is a legitimate placeholder. Naming the offender can.
-
-`test_no_dataset_row_is_committed_anywhere` is the fourth, and it is the
-only one that scans the **whole repository**, `docs/` included. The three
-above are scoped to what ships and to what a contributor copies; this one
-targets a *shape* rather than a location, because a row of IMDb's
-`title.basics` or a record of TMDb's daily id export is the licence-relevant
-artifact wherever it sits. It is what would have caught two things the
-location-scoped checks missed on the first pass: `docs/plans/`'s M2 document,
-which prescribed the original fixture verbatim -- data, and the instruction
-that would put it back -- and two real id-export records transcribed into
-`usher.adapters.bulk.tmdb_ids`' module docstring, which is in the wheel.
-Prose never looks like a nine-column tab-separated line beginning with a
-tconst, so scanning documentation for this costs nothing in noise.
-
-`test_the_guard_reads_what_it_claims_to_read` is the fifth, and exists
-because a guard that globs nothing passes exactly like a guard that passes.
-Same family as `CLAUDE.md`'s "prove the guard is installed before believing
-a green run" for the network check.
-
-**A known, recorded hole: none of the four can recognise a MovieLens row.**
-A genome-scores row is three integers and a float; a `links.csv` row is
-three integers. Neither is distinguishable from any other CSV, so
-`_IMDB_DATASET_ROW` (a tconst followed by a tab) and `_TMDB_EXPORT_RECORD`
-(a JSON object carrying `original_title`/`original_name`) both miss them by
-construction, and a committed `.zip` is dropped by `_every_text_file` on
-`UnicodeDecodeError` before any of them looks. `.csv` was added to
-`_SCANNED_SUFFIXES` for M7 so a committed slice at least falls inside the
-band and denylist checks; that is a narrowing, not a fix. The actual control
-is that MovieLens fixtures are **Python literals in a scanned `.py` file**,
-which two of the four do read. See `tests/fixtures/bulk/README.md`.
-
-See `tests/fixtures/README.md` for the allocation table these bands come
-from and for how to regenerate a fixture.
-"""
+"""No third-party data is committed, checked rather than asserted."""
 
 import hashlib
 import json
@@ -100,12 +10,7 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 _SCANNED_ROOTS = ("src", "tests")
-# `.csv` joined for MovieLens (M7). It does **not** make a MovieLens row
-# detectable -- a genome row is three integers and a float, and `links.csv`
-# is three integers, both indistinguishable from any CSV ever written, which
-# is why those fixtures are Python literals rather than files. What the
-# suffix buys is that a future committed `.csv` falls inside the IMDb-band
-# and once-committed-identifier checks, which is strictly more than zero.
+# `.csv` joined for MovieLens (M7).
 _SCANNED_SUFFIXES = frozenset({".py", ".json", ".jsonl", ".tsv", ".md", ".sql", ".txt", ".csv"})
 _FIXTURES = _REPO / "tests" / "fixtures"
 
@@ -149,21 +54,8 @@ _ID_KEYS = frozenset(
     }
 )
 
-# Every third-party identifier this repository is known to have committed,
-# as a truncated SHA-256 of the id rather than the id.
-#
-# Hashed, not listed, so this file is not itself the last place in `src/`
-# or `tests/` holding real IMDb and TMDb identifiers -- a refusal list is
-# not a dataset row, but an exception in the one file whose job is the rule
-# is exactly the shape that lets a rule rot. Nothing is lost: the failure
-# message prints the offending value read out of the file being scanned,
-# which is the actionable half. 31 entries -- 15 IMDb tconsts/nconsts and
-# 16 TMDb/TVDb/TVRage/keyword ids -- covering the M1-M4 fixtures and the
-# ids TMDb's own reference pages use.
-#
-# Add one with:
-#   python -c 'import hashlib,sys as s;\
-#       print(hashlib.sha256(s.argv[1].encode()).hexdigest()[:12])' <id>
+# Every third-party identifier this repository is known to have committed, as a
+# truncated SHA-256 of the id rather than the id.
 _ONCE_COMMITTED_HERE = frozenset(
     {
         "00b8f2fdf1fb",
@@ -205,31 +97,13 @@ def _fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:12]
 
 
-# An id-*position*, so a bare `550` that happens to be a byte count or a
-# line number is not a finding. Each alternative captures exactly one value.
-# A committed *dataset row*, as opposed to an identifier in prose. An IMDb
-# `title.basics`/`title.ratings` line is a tconst followed by a tab; a TMDb
-# daily-export record is one JSON object carrying `original_title` or
-# `original_name`. Both shapes are unmistakable and neither occurs in prose.
+# An id-*position*, so a bare `550` that happens to be a byte count or a line number is
+# not a finding.
 _IMDB_DATASET_ROW = re.compile(r"^(tt\d{7,8})\t")
 _TMDB_EXPORT_RECORD = re.compile(r"\{[^{}]*\"(?:original_title|original_name)\"[^{}]*\}", re.S)
 _EXPORT_RECORD_ID = re.compile(r"\"id\"\s*:\s*(\d+)")
 
 # Everything the whole-repository scan walks past.
-#
-# **`node_modules` and `dist` joined this set the day `web/` appeared, and the
-# reason is the scan's cost rather than its correctness.** This walker
-# `read_text()`s every decodable file in the repository; an installed npm tree
-# is ~220 packages and tens of thousands of files, and `web/dist` is a build
-# artefact regenerated from sources this scan already reads. Both are
-# gitignored, so neither can carry a committed dataset row — which is what this
-# module exists to catch — and walking them would turn a fast unit test into a
-# multi-second one that measures a dependency tree nobody here wrote.
-#
-# The console's own *sources* are still scanned, exactly as `src/` and `docs/`
-# are. A fixture full of real IMDb rows under `web/src/test/` is precisely the
-# kind of thing this test is for, and the shipping rule ("importers, never
-# data") does not stop at the language boundary.
 _NEVER_SCANNED = frozenset(
     {
         ".git",

@@ -1,16 +1,4 @@
-"""The match stage, against port fakes. No network, no database.
-
-Every case names the tier it exercises and the wrong implementation it
-fails, because the ladder's whole value is that it stops at the first hit --
-a matcher that tried every tier and took the best answer would resolve a
-film by name when its own TMDb id said otherwise.
-
-**The cases that matter are the batch-level ones.** A single-item matcher
-is easy to get right; what a page of 500 items exposes is a stub created
-twice for one TMDb id, a lookup issued per item, and -- the one that would
-have doubled the catalog -- an episode falling through the ladder and
-creating a `Title` from its own episode-level provider ids.
-"""
+"""The match stage, against port fakes. No network, no database."""
 
 import uuid
 from collections.abc import Sequence

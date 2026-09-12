@@ -36,33 +36,10 @@ async def test_a_second_run_row_for_one_dataset_is_a_port_error(
 async def test_the_session_survives_a_conflict_for_the_callers_next_statement(
     postgres_url: str,
 ) -> None:
-    """Pins the bug Group F found live against a real two-process race:
-    `save()` translated the `uq_import_runs_dataset` IntegrityError to
-    `RepositoryConflict` correctly (see the test above), but never rolled
-    back -- so Postgres left the *session's* transaction aborted, and the
-    very next statement on it raised `sqlalchemy.exc.PendingRollbackError`
-    instead of whatever it was trying to do. `BootstrapService.
-    import_dataset`'s except handler is exactly such a next statement
-    (`self._runs.get(dataset.name)`, run immediately after catching this
-    same `RepositoryConflict`, to build the durable FAILED record its own
-    docstring promises never to skip) -- so the bug was not academic, it
-    broke that documented "does not re-raise" contract for real.
-
-    Deliberately does NOT use the shared `session` fixture every other test
-    in this file uses. That fixture binds its session to a connection with
-    an externally-managed outer transaction (`conn.begin()`, see
-    tests/integration/conftest.py), and SQLAlchemy's `join_transaction_mode`
-    resolves to "rollback_only" for exactly that shape -- a real
-    `session.rollback()` there rolls back the *fixture's* transaction, not
-    just this call's own work, which would corrupt every other integration
-    test's isolation instead of pinning this one repository's bug. This is
-    exactly the shape tests/integration/test_bulk_repository.py's
-    `test_bulk_load_window_commits_the_callers_own_pending_work` uses for
-    the same reason, including its cleanup discipline: two independent,
-    engine-bound sessions -- the same shape production's `deps.get_session`
-    and `usher.cli` both use -- stand in for the two real OS processes the
-    actual bug needs, with a real, unforced IntegrityError from Postgres,
-    not a mocked one.
+    """Pins the bug Group F found live against a real two-process race: `save()` translated
+    the `uq_import_runs_dataset` IntegrityError to `RepositoryConflict` correctly (see
+    the test above), but never rolled back -- so Postgres left the *session's*
+    transaction aborted, and the very next statement on it raised
     """
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
@@ -73,14 +50,9 @@ async def test_the_session_survives_a_conflict_for_the_callers_next_statement(
             winner_run = await PostgresImportRunRepository(winner).start("race.dataset", "etag-1")
             await winner.commit()
 
-            # "loser" replays exactly what its own start() does the instant
-            # it -- correctly, at the moment it checked -- believed no row
-            # existed yet for this dataset: build a fresh ImportRun (a new
-            # id) and save() it. Two real processes reach this identical
-            # state via a genuine TOCTOU race (both see `existing is None`
-            # before either commits); constructing it directly here makes
-            # the repro deterministic rather than depending on winning a
-            # timing race against Postgres's own row-lock queue.
+            # "loser" replays exactly what its own start() does the instant it --
+            # correctly, at the moment it checked -- believed no row existed yet for
+            # this dataset: build a fresh ImportRun (a new id) and save() it.
             loser_repo = PostgresImportRunRepository(loser)
             with pytest.raises(RepositoryConflict) as exc_info:
                 await loser_repo.save(ImportRun(dataset="race.dataset", revision="etag-1"))

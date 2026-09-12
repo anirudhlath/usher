@@ -1,72 +1,4 @@
-"""The bar file, its hash, and the four verdicts a bar can return.
-
-**Every case here was written against a named wrong implementation**, because
-this module's whole job is to stop a number being believed and the suites that
-went before it in this package each shipped cases that passed against a broken
-one. The wrong implementations, and the case that kills each:
-
-* **a `pending` bar that reads as passing** -- the most damaging one, since
-  three of the five shipped bars are deliberately pending until Task 14 fills
-  them in. `test_a_pending_bar_never_gates` kills the obvious spelling (the
-  `kind == "pending"` arm deleted, so the absent bounds pass everything). Its
-  *careful* spelling is an enum alias -- `PENDING = "pass"` makes
-  `Judgement.PENDING` and `Judgement.PASS` the same object, so that case is
-  green while every report, ledger row and exit code says `pass` -- and only
-  `test_the_four_judgements_are_four_different_strings_and_pending_is_not_spelled_pass`
-  can see it;
-* **a window checked on one side**, so a value above the ceiling reads as
-  fine, dies on `test_a_window_fails_in_both_directions`;
-* **a bound compared with the wrong operator** -- `>` where `>=` is meant, or
-  the comparison inverted -- dies on `test_a_floor_fails_only_below` for the
-  inversion and on the two boundary cases for the operator, which judge the
-  bound value *itself* and are the only cases that can: every other case here
-  sits comfortably inside or outside;
-* **a missing bar treated as a pass** dies on
-  `test_an_unbarred_metric_is_unbarred_rather_than_passing`, and a `find` that
-  matches on three of the four keys -- so a stratum's bar answers another
-  stratum's question -- dies on `test_a_bar_is_found_by_all_four_of_its_keys`
-  and on `test_the_three_pending_suggest_bars_are_three_bars_and_not_one_found_three_times`;
-* **the four lookup keys taken positionally**, which is not a wrong
-  implementation of anything in this module but a wrong *call site* it makes
-  available: `metric` and `stratum` are two adjacent `str` parameters that read
-  alike, transposing them answers `UNBARRED`, and `UNBARRED` fails at no level
-  -- not the judgement, not the verdict, not the exit code. `mypy` is blind to
-  it because all four are `str`. Keyword-only is the only check there is, and
-  `test_the_four_lookup_keys_cannot_be_handed_over_positionally` is what says
-  it is still in force;
-* **a bar and a verdict fetched by two separate lookups**, which agree today
-  and are one edit from quoting one bar's thresholds beside another bar's
-  judgement in the same ledger row, is refused structurally: `judge_with_bar`
-  is the single lookup and `judge` delegates to it, pinned by
-  `test_the_bar_and_the_verdict_come_from_one_lookup`;
-* **a second bar on an already-registered key**, which `find` never reaches and
-  which still reads as a registered bar, dies on
-  `test_two_bars_sharing_all_four_keys_are_refused_rather_than_one_shadowing_the_other`.
-  That is Task 14's own most likely slip and the reason the refusal exists;
-* **a `sha256` over the parsed TOML** rather than the raw bytes, which leaves
-  an edited comment or a reordered table invisible and makes the
-  pre-registration claim unfalsifiable, dies on
-  `test_the_hash_is_over_the_bytes_so_a_comment_edited_after_the_fact_moves_it`
-  and **not** on `test_the_hash_changes_when_the_file_changes`, which a parsed
-  digest passes -- the two are one page apart on purpose;
-* **judgement precedence** wrong when more than one condition applies is
-  refused one layer earlier: a bar that names a number *and* declines to gate
-  on it cannot be loaded at all
-  (`test_a_pending_bar_carrying_a_number_is_refused_at_load`), so neither
-  precedence is reachable;
-* **a bar file the harness cannot use, read as one it can** -- absent,
-  malformed, holding no bars, holding a bar with no floor, an unknown kind,
-  transposed bounds or a key another bar already answers to -- dies on the
-  refusal cases at the end. `docs/evals/bars.toml` is data this code reads, and
-  a default that shadows a broken file would make a broken file read as
-  working.
-
-**The numbers in `test_the_registered_numbers_are_the_ones_that_were_registered`
-are literals on purpose, and a later task will have to edit them.** That is
-the point rather than a maintenance cost: filling in a pending bar is exactly
-the edit that has to be visible, and a case whose expectation is read out of
-the file it is checking would pass against any file at all.
-"""
+"""The bar file, its hash, and the four verdicts a bar can return."""
 
 import inspect
 import tomllib
@@ -146,49 +78,7 @@ def test_the_shipped_bar_file_loads() -> None:
 
 
 def test_the_registered_numbers_are_the_ones_that_were_registered() -> None:
-    """The five bars E1 pre-registered, pinned as **literals**.
-
-    This is the case a bar edited after seeing a number has to get past, and
-    the only reason it can do that is that the expectations here are written
-    down rather than read out of the file under test. Both halves are needed
-    and neither is the other: the `sha256` makes an edit *visible in the
-    record*, and this makes it *fail the suite*.
-
-    Task 14 fills the three pending bars in from the first reproducing
-    `--full` run, and will have to edit this case to do it. That edit is the
-    deliberate, reviewed act the design asks for -- it is not the same event
-    as a number being nudged until CI goes green, which is what would happen
-    if this case derived its expectations from `bars.toml`.
-
-    ⚠️ **The prefix ceiling moved 0.022 -> 0.028 on 2026-08-20 and this case
-    is where that edit had to be made**, so it is the first worked example of
-    the distinction the paragraph above draws. It is the reviewed act and not
-    the nudge, and the check is that **the number shipped is not the number
-    that makes the run green**: 0.024 would have done that, and 0.024 is
-    exactly what was refused. 0.028 is the observed mean of sixteen draws plus
-    3 draw SD, and it is the smallest ceiling that also admits ADR-0031's own
-    B3 gate run of 0.0267 -- an independent draw, measured on 2026-08-12,
-    which the old window had *also* failed. A window fitted to this baseline
-    would have kept that one failing. The argument is in `bars.toml`'s
-    `source` beside the number, worked through in ADR-0031 under *"Bar (4)'s
-    window was wrong"*, and the three pending bars below are **untouched** --
-    a widening that also filled those in would be the two events happening at
-    once, which is what this case exists to keep apart.
-
-    ⚠️ **`registered` is a `dict` keyed by the four-tuple, so two bars sharing
-    one key would collapse into one entry and this case would fail with a
-    message about a missing bar rather than about a duplicate one.** That is a
-    trap for whoever edits this case in Task 14, because "make the expected
-    dict match what loaded" is then an available and wrong repair. It is not
-    reachable through this assertion any more -- `load_bars` refuses a
-    duplicate key outright, so a copied-and-not-re-keyed bar raises *two bars
-    answer to one key* from the `load_bars` line above and never reaches the
-    comprehension. **If that is the red you are looking at, the repair is the
-    `stratum` line you forgot in `bars.toml`, not this dict.** No count
-    assertion is written here on purpose: with duplicates refused at load it
-    could not fail independently of the equality below it, and an assertion
-    that cannot fail is what this module's neighbours keep having to delete.
-    """
+    """The five bars E1 pre-registered, pinned as **literals**."""
     bars = load_bars(_SHIPPED)
 
     registered = {
@@ -371,27 +261,8 @@ def test_a_pending_bar_never_gates(tmp_path: Path) -> None:
 
 
 def test_the_four_judgements_are_four_different_strings_and_pending_is_not_spelled_pass() -> None:
-    """The verdicts are values on the wire -- a report line, a ledger row, an
-    exit code -- so what they *are* matters as much as which one is returned.
-
-    This is the only case that can see the most damaging spelling of "a
-    pending bar reads as passing": `PENDING = "pass"` does not create a fourth
-    member, it creates an **alias**, so `Judgement.PENDING is Judgement.PASS`
-    and every `is Judgement.PENDING` assertion in this module stays green
-    while a run with no bar at all reports `pass`. Same for `UNBARRED`, whose
-    whole reason for existing is that silence must not read as success.
-
-    The four literals are written down rather than read off the enum for the
-    reason every constant in this module is: an expectation derived from the
-    thing under test pins that it is in force and cannot pin its value.
-
-    Both assertions are over the **whole** enum, because the direct spelling
-    cannot be written: `Judgement.PENDING is not Judgement.PASS` is refused by
-    `mypy` as a *non-overlapping identity check* (measured 2026-08-19), which
-    is the type checker being right about today's enum and silent about the
-    one this case exists to catch. An alias does not show up as two members
-    that are equal -- it shows up as a member that has vanished from the
-    iteration and from the set.
+    """The verdicts are values on the wire -- a report line, a ledger row, an exit code --
+    so what they *are* matters as much as which one is returned.
     """
     assert [one.value for one in Judgement] == ["pass", "fail", "pending", "unbarred"]
     assert len({Judgement.PASS, Judgement.FAIL, Judgement.PENDING, Judgement.UNBARRED}) == 4, (
@@ -599,26 +470,8 @@ def test_a_bar_whose_bounds_are_transposed_is_refused_at_load(
 def test_two_bars_sharing_all_four_keys_are_refused_rather_than_one_shadowing_the_other(
     tmp_path: Path,
 ) -> None:
-    """`find` returns the first match, so a second bar on the same four keys is
-    dead weight that still reads as a registered bar.
-
-    **The reachable spelling is Task 14's, and it is what this case seeds**:
-    fill the `band=2-4` bar in by copying the `stratum = "all"` pending entry
-    above it, change `kind`, `low` and `source`, forget the `stratum` line. The
-    pending copy answers first, the floor below it gates on nothing, that
-    stratum reports `pending` for good -- and `pending` is not a failure, so
-    the run exits 0. Same family as the four refusals around it: a bar that
-    cannot do its job has to say so rather than answer quietly.
-
-    Measured against `f392bec`, that file loaded two bars and answered
-    `pending` to `0.10` -- a value 0.6 below the floor it was supposed to have
-    been gated by.
-
-    The second half is the control, and it is what stops this being satisfied
-    by a loader that refuses any file holding more than one bar: the same two
-    entries differing only in `stratum` are two bars and load fine. Without it,
-    the refusal above is also what a loader that had stopped supporting the
-    three-stratum shipped file would produce.
+    """`find` returns the first match, so a second bar on the same four keys is dead weight
+    that still reads as a registered bar.
     """
     shadowed = _bar(kind="pending", metric="recall_at_5") + _bar(
         kind="floor", metric="recall_at_5", low=0.7014

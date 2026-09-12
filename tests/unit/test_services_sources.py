@@ -1,10 +1,4 @@
-"""SourceService against port fakes. No network, no database.
-
-The first service in the codebase to be driven entirely through ports --
-`BootstrapService` already was, and this one inherits the pattern: ADR-0009
-makes repositories ports, so `services/` may not import `db/`, and every
-dependency here is either a domain object or a port fake.
-"""
+"""SourceService against port fakes. No network, no database."""
 
 import uuid
 from collections.abc import Callable

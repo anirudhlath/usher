@@ -1,22 +1,4 @@
-"""`usher backup` -- its argument surface, its dispatch arm, and its report.
-
-The same split `test_cli_curate.py` and `test_cli_derive.py` make: every
-command coroutine in `usher.cli` takes a `Settings` and builds its own engine
-through `_session_for`, so what the writer does against a real schema lives
-in `tests/integration/test_backup_artifact.py`. What is here is what needs no
-database -- the parser, the `_dispatch` arm, and `_print_backup_report`,
-which is a pure function over a `BackupReport`.
-
-**The `_dispatch` arm is the case this file exists for.**
-`.claude/rules/config-cli-and-deployment.md` records the measurement:
-`_dispatch`'s `else` is `serve`, so a subcommand that parses and has no arm
-of its own does not fail -- it starts uvicorn -- and
-`test_every_command_reports_a_dead_database_the_same_way` cannot see it,
-because `_every_command_raises` patches every dispatch coroutine **and**
-`uvicorn.run` to raise identically, which is exactly what makes it a test of
-the *boundary*. A new command owes its own case; the boundary table does not
-supply it.
-"""
+"""`usher backup` -- its argument surface, its dispatch arm, and its report."""
 
 from datetime import UTC, datetime
 from pathlib import Path
@@ -105,28 +87,8 @@ def test_backup_dispatches_to_backup_and_not_to_the_server(
 def test_a_missing_directory_is_one_line_and_exit_one(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Through `OSError` in `OPERATOR_ERRORS`, and not through a handler of
-    this command's own.
-
-    ADR-0026's Uncertainty section predicted that *"a milestone that adds a
-    subprocess, a message broker or a filesystem watcher adds a family with
-    it"*. This is that milestone and the family is `OSError` -- which has
-    been in the tuple since M7, put there because asyncpg lets a refused TCP
-    connection out unwrapped. The prediction fired and the tuple was already
-    right.
-
-    The real `_backup` is left in place and the *path* is what fails, so the
-    case exercises the boundary rather than a substituted raise.
-
-    ⚠️ **`FileNotFoundError` is named in the assertion and that is the whole
-    difficulty of this case.** `USHER_DATABASE_URL` here points at a port
-    nothing listens on, so a refused connection is *also* an `OSError` and
-    also renders as one line -- which means an assertion on the family, or on
-    the shape of the message, passes identically against a run that never got
-    near the filesystem. `BackupService.write` checks the destination before
-    it reads anything for exactly this reason (the operator half of it is a
-    typo reported in milliseconds instead of after the whole carried set),
-    and naming the type is what makes this case a statement about the path.
+    """Through `OSError` in `OPERATOR_ERRORS`, and not through a handler of this command's
+    own.
     """
     configured(monkeypatch)
     missing = tmp_path / "no-such-directory" / "x.jsonl.gz"

@@ -1,20 +1,4 @@
-"""The series hierarchy through real requests against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_series.py` drives the
-three routes over `FakeEpisodeRepository`, whose ordering is Python's `sorted`
-and whose keyset is a tuple comparison -- so the statement this milestone
-actually ships, its `ORDER BY`, and its two-arm `WHERE`, are never executed
-there. Here they are, against `pgvector/pgvector:pg17`, and the cost of a page
-is counted off the statements the repositories really issued rather than off a
-fake's call counter.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request even when the handler only read, and CLAUDE.md records
-what leaving `titles` behind did to four tests in three other files, each of
-which passed in isolation. `seasons` and `episodes` cascade from `titles`, so
-deleting this file's own titles is enough -- and the delete is bound to this
-file's marker rather than emptying a table another committing file is using.
-"""
+"""The series hierarchy through real requests against a real schema."""
 
 import uuid
 from collections.abc import AsyncIterator, Iterator, Sequence

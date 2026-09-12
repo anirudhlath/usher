@@ -1,9 +1,4 @@
-"""The metadata port's settled shape.
-
-Every 🔶 marker in `usher/ports/metadata.py` that named M4 has an assertion
-here, and each is written so reverting the corresponding production line
-fails it. ADR-0017 is the reasoning; this file is the enforcement.
-"""
+"""The metadata port's settled shape."""
 
 import inspect
 import uuid

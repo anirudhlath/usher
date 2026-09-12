@@ -1,16 +1,4 @@
-"""The worker loop, against `FakeJobQueue`.
-
-**What this file cannot say, stated before the cases that can.** The fake is
-one dict behind one event loop: it has no row lock, no transaction, and no
-second session, so "the claim is committed before the work starts" is
-checked here as an *ordering of calls* and there is nothing here that could
-tell an ordering from a durability. `tests/integration/test_services_jobs.py`
-is where a second Postgres backend looks at the queue from outside a running
-handler and sees `running` rather than `pending`, and where two real workers
-claim disjoint halves of one batch. The fake's own module docstring lists
-`SKIP LOCKED` first among the things it cannot express, and the worker is
-the code that depends on it most.
-"""
+"""The worker loop, against `FakeJobQueue`."""
 
 import asyncio
 import contextlib
@@ -142,12 +130,8 @@ class _Fixture:
         #: Every scope this fixture has opened, so a case can assert there was
         #: one per job rather than one per worker.
         self.scopes: list[JobScope] = []
-        # `concurrency` above 1 by default, so every case in this file runs
-        # under the shape production runs under rather than under a serialised
-        # special case. The shipped *global* is `Settings.job_concurrency` and
-        # `tests/unit/test_config.py` pins its value; four is enough here to
-        # make a pool a pool, and the fake suspends nowhere, so the ordering
-        # cases below stay deterministic under it.
+        # `concurrency` above 1 by default, so every case in this file runs under the
+        # shape production runs under rather than under a serialised special case.
         self.worker = JobWorker(
             self._scope,
             dict.fromkeys(self._handlers, concurrency),
@@ -1190,12 +1174,11 @@ async def test_a_job_waiting_at_its_kinds_ceiling_is_heartbeated_too() -> None:
         entered += 1
         if entered > 1:
             return
-        # **Read once, from the job that holds the gate, and only after the
-        # other one has had a turn of the loop to reach it.** Two spellings
-        # were wrong before this one: `held.update(...)` on *every* call unions
-        # the two jobs' own ids and passes against a worker that heartbeats
-        # nothing until a job starts, and reading immediately on entry
-        # snapshots before `create_task` has even scheduled the sibling.
+        # **Read once, from the job that holds the gate, and only after the other one
+        # has had a turn of the loop to reach it.** Two spellings were wrong before this
+        # one: `held.update(...)` on *every* call unions the two jobs' own ids and
+        # passes against a worker that heartbeats nothing until a job starts, and
+        # reading immediately on entry snapshots before `create_task` has even scheduled
         for _ in range(100):
             await asyncio.sleep(0)
             if len(fixture.worker._in_flight) > 1:

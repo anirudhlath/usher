@@ -1,9 +1,5 @@
-"""The whole Phase 0-2 pipeline against real Postgres, over committed
-synthetic slices. Nothing downloads.
-
-This is the test that proves the parts compose: dataset -> service ->
-repository -> Postgres, with checkpoints, resumption, and the crosswalk
-link.
+"""The whole Phase 0-2 pipeline against real Postgres, over committed synthetic slices.
+Nothing downloads.
 """
 
 import gzip
@@ -143,16 +139,8 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
     linked = await catalog.link_crosswalk()
     assert linked.linked == 2
 
-    # `imdb_average_rating` beside `tmdb_vote_average`, and the NULL is the
-    # assertion ADR-0040 bought. Nothing in phases 0-2 enriches, so the IMDb
-    # ratings import above is the only writer of a rating figure anywhere in
-    # this bootstrap -- and before the split it wrote that figure into
-    # `tmdb_vote_average`, so this same projection read 7.4 in the TMDb column
-    # and NULL in the IMDb one, exactly inverted, with nothing recording the
-    # swap. No claim about phase *ordering* is involved: it is the pair of
-    # columns that carries the provenance, which is why both are selected.
-    # This is the whole fix seen from the bootstrap it ships in, rather than
-    # from one repository call.
+    # `imdb_average_rating` beside `tmdb_vote_average`, and the NULL is the assertion
+    # ADR-0040 bought.
     result = await session.execute(
         text(
             "SELECT imdb_id, tmdb_id, tvdb_id, tmdb_popularity, imdb_average_rating, "
@@ -164,23 +152,11 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
     assert rows[0] == ("tt99000020", 90000020, None, 12.5, 7.4, None, "skeleton")
     assert rows[1] == ("tt99000030", 90001399, 91000030, 31.5, 6.8, None, "skeleton")
 
-    # **The enrichment tier is non-empty on a bootstrap-only catalog, which is
-    # issue #42 and the reason this assertion exists at all.** After ADR-0040
-    # redirected the IMDb writer, `scripts/enqueue_tier_enrichment.py`'s tier
-    # still read `tmdb_vote_count` -- a column `upsert_titles` omits,
-    # `link_crosswalk` never touches and only TMDb enrichment fills. So a fresh
-    # `--phase all` produced `NULL >= 100` on every row, the tier selected zero,
-    # and the crawl could not start itself: enrichment was the only thing that
-    # filled the column the enrichment queue selected on.
-    #
-    # **The script's own statement is executed rather than transcribed**, which
-    # is what makes this catch the defect rather than describe it: a tier
-    # re-pointed at any column a bootstrap does not fill selects zero rows here
-    # and fails, whatever it is spelled as. Transcribing the predicate would
-    # instead pin this case to agree with whichever spelling it copied --
-    # including the broken one. The committed slice carries numVotes 12,345 and
-    # 4,321, so the script's real `TIER_MIN_VOTES` of 100 is exercised rather
-    # than lowered for the fixture.
+    # **The enrichment tier is non-empty on a bootstrap-only catalog, which is issue #42
+    # and the reason this assertion exists at all.** After ADR-0040 redirected the IMDb
+    # writer, `scripts/enqueue_tier_enrichment.py`'s tier still read `tmdb_vote_count`
+    # -- a column `upsert_titles` omits, `link_crosswalk` never touches and only TMDb
+    # enrichment fills.
     tier_page = await session.execute(
         text(_enqueue_tier_module()._PAGE),
         {"min_votes": _enqueue_tier_module().TIER_MIN_VOTES, "after": None, "size": 100},
@@ -267,15 +243,10 @@ async def test_a_restart_resumes_from_the_stored_checkpoint(
         assert checkpoint is not None
         assert checkpoint.rows_seen == 4
 
-        # Every write below is an upsert, so `count_titles() == 5` at the end
-        # would hold even if resumption were silently broken and the second
-        # run restarted from line 0 -- confirmed directly, by disabling
-        # resume_from in BootstrapService._drain and watching this test's
-        # final assertions still pass. `batches_seen` and the imdb_ids
-        # actually written close that gap: a genuine resume calls write()
-        # exactly once, with only the one row (tt99000050) that was never
-        # committed before the crash; a silent restart would call it three
-        # times (batch_size=2 over all five rows again).
+        # Every write below is an upsert, so `count_titles() == 5` at the end would hold
+        # even if resumption were silently broken and the second run restarted from line
+        # 0 -- confirmed directly, by disabling resume_from in BootstrapService._drain
+        # and watching this test's final assertions still pass.
         seen_ids: list[str] = []
         batches_seen = 0
 
@@ -381,11 +352,8 @@ async def test_a_titles_aliases_survive_a_batch_boundary_against_real_postgres(
 
 
 # --- the movielens phase, end to end over a synthetic archive --------------
-#
-# `tt99000020` is `SHAWSHANK`'s id in the shared bulk contract; the IMDb
-# fixture slice this file already stages holds it. `links.csv` carries the
-# digits bare, so the archive's own column is `99000020` and the adapter's
-# `zfill(7)` produces the joined form.
+# `tt99000020` is `SHAWSHANK`'s id in the shared bulk contract; the IMDb fixture slice
+# this file already stages holds it.
 _ML_ROOT = "ml-latest/"
 _ML_LINKS = "\n".join(
     [
@@ -394,12 +362,10 @@ _ML_LINKS = "\n".join(
         "90000502,99000998,90000602",  # in links, in the genome, in no title
     ]
 )
-# **The real 1,128, not a convenient two.** `genome_scores.relevance` is
-# declared `halfvec(1128)` and the cast in the staged upsert refuses anything
-# else -- measured, `asyncpg.exceptions.DataError: expected 1128 dimensions,
-# not 2` -- so a narrow fixture here would exercise everything except the one
-# width production runs at. Generated rather than written out: 1,128 tag names
-# and 2,256 score rows are a loop, and every value is invented.
+# **The real 1,128, not a convenient two.** `genome_scores.relevance` is declared
+# `halfvec(1128)` and the cast in the staged upsert refuses anything else -- measured,
+# `asyncpg.exceptions.DataError: expected 1128 dimensions, not 2` -- so a narrow fixture
+# here would exercise everything except the one width production runs at.
 _ML_TAGS = "\n".join(
     ["tagId,tag"] + [f"{tag},synthetic tag {tag}" for tag in range(1, GENOME_TAG_COUNT + 1)]
 )

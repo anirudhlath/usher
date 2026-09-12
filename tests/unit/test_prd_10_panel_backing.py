@@ -1,55 +1,6 @@
-"""A dashboard panel with no series behind it is indistinguishable from one
-nobody has written yet — which is
-[PRD 10](../../docs/prd/10-telemetry-and-dashboards.md)'s own first principle
-("right datasource per question") applied to panels instead of to metrics.
-
-Dashboards 3, 4, 5 and 6 each carry a paragraph that says, in bold, which of
-their panels have a writer behind them and as of when. Dashboards 1 and 2 did
-not, so nothing distinguished *"every panel here is backed"* from *"nobody has
-checked"*. This module is the check that keeps them all annotated.
-
-**The scan's own premises are asserted, because a scan that globs nothing
-passes exactly like a scan that passes.** These headings are Markdown, and the
-next reformat can move them: a stray blank line, an em-dash turned into a
-hyphen, or a promotion of `### 1 — …` to `## 1 — …` would leave
-`_DASHBOARD_HEADING` matching zero sections and `unbacked == []` trivially
-true. So the count, the contiguity of the numbering and two headings by name
-are asserted before the thing the module exists to check.
-
-**Six sections, not five.** The task that commissioned this file was drafted
-2026-08-13 and specified five; `### 6 — Quality evals` has landed since, with
-its own `✅ **Backed by real data as of E1**` paragraph, and the document's own
-preamble under `## Dashboards` reads "Six." The exact count is deliberate
-rather than a `>=`: a seventh dashboard must come here and say so, which is the
-same currency discipline `test_docs_currency.py` applies to the status tables.
-
-**A backing statement is a *bolded* opening, and unbolded prose does not
-satisfy it.** Section 5's first paragraph — "Data freshness is backed by real
-data as of M2" — is exactly the shape that must not count on its own, and the
-reason is the trap `test_docs_currency.py` records: a documentation check that
-reads prose can be answered by prose written to explain the fix. The bold run
-is the annotation; a sentence merely containing the words is narration.
-Section 5 passes on its *second* paragraph, which is bolded.
-`test_the_scan_refuses_an_unbolded_mention_of_backing` pins that arm.
-
-**M10's D5 adds a second subject to this file, and it is one panel rather than
-every section.** Dashboard 5's cache-age panel is the only panel in the six
-dashboards whose failure is a *licence breach* rather than a blind spot — TMDb's
-≤6-month caching term — so what it names is worth pinning by name and not merely
-counting as "backed". Two spellings have to stay dead: `titles.enriched_at`,
-which is when *Usher* enriched rather than when the *payload* was cached, and
-`provider_cache_meta`, a table
-[ADR-0016](../../docs/prd/decisions/0016-raw-payloads-cache-providers-not-sources.md)
-refused by name and which no migration has ever created. Both were live in this
-document or in M10's spec, and a compliance ceiling stated against a column that
-answers a different question — or a table that does not exist — is worse than no
-panel at all, because it reads as enforcement.
-
-`compliance_panel_sql` is here rather than in the integration suite so that the
-PRD stays the single source for the panel's own SQL:
-`tests/integration/test_raw_payload_cache_age.py` executes exactly what this
-module extracts, and D10's dashboard JSON copies the same block. A second
-transcription is a second thing to keep in step.
+"""A dashboard panel with no series behind it is indistinguishable from one nobody has
+written yet — which is [PRD 10](../../docs/prd/10-telemetry-and-dashboards.md)'s own
+first principle ("right datasource per question") applied to panels instead of to
 """
 
 import json
@@ -78,12 +29,7 @@ _STATUS_MARKER = "[✅⚠️\U0001f534⏳]"
 # run. `DOTALL` because the run wraps — section 5's spans three lines.
 _BOLD_OPENING = re.compile(rf"\A(?:{_STATUS_MARKER}\s*)*\*\*(?P<claim>.+?)\*\*", re.DOTALL)
 
-# What the bold run has to say. Both spellings are in use: "backed by real data
-# as of M4" (sections 3, 4, 5, 6) and, for a panel that has no writer, some form
-# of "unbacked". Case-insensitive because section 6's run *opens* on the word —
-# `**Backed by real data as of E1**` — and the run is whitespace-normalised
-# before it is searched because sections 3 and 5 wrap theirs across a line
-# break, so "backed by real\ndata as of M4" is the literal text on the page.
+# What the bold run has to say.
 _BACKING_CLAIM = re.compile(r"backed by real data as of |unbacked", re.IGNORECASE)
 
 
@@ -251,13 +197,8 @@ def test_the_dashboards_preamble_names_a_path_that_exists_and_how_it_is_provisio
     paths = [name for name in quoted if name.endswith((".json", ".yml", "/"))]
     assert paths, f"the preamble names no path at all, so nothing below can fail: {quoted}"
 
-    # **The two kinds of path here are the asymmetry itself**, so they are
-    # separated rather than filtered. A repository-relative path has to resolve;
-    # `~/code/observability/` has to *not* resolve, because the stack that
-    # renders these dashboards is deliberately not an asset of this repository.
-    # Filtering the second out silently would leave a check that reads as
-    # "every path exists" while skipping the only one whose absence is the
-    # design.
+    # **The two kinds of path here are the asymmetry itself**, so they are separated
+    # rather than filtered.
     external = [name for name in paths if name.startswith(("~", "/"))]
     internal = [name for name in paths if name not in external]
 
@@ -627,27 +568,8 @@ _INTERVAL = re.compile(r"interval\s+'(?P<term>[^']+)'")
 
 
 def test_the_committed_compliance_panels_read_the_term_the_prd_states() -> None:
-    """🔴 The retention half of TMDb's licence has exactly one enforcement in
-    this repository, and it is the committed JSON rather than the PRD.
-
-    `tests/unit/test_no_third_party_data.py` enforces the redistribution half
-    mechanically; **nothing enforces retention**, which the panel's own
-    description says in bold ("the one panel here whose failure is a licence
-    breach"). Every other check in this module grades PRD 10's ```sql fence,
-    and the dashboard is a *second transcription* of that block -- so a ceiling
-    doubled on one committed target renders perfectly, reports zero breaches
-    for six months longer than the term allows, and passes every case above,
-    because the other two targets still carry the six-month string the PRD is
-    scanned for. A survivor here is a compliance number that reads as
-    enforcement.
-
-    **The set of terms, not a substring of any one target.** The two
-    transcriptions differ on purpose -- the PRD writes bare `fetched_at` and
-    the dashboard writes `raw_payloads.fetched_at`, because
-    `test_dashboards.py` grades every committed `table.column` against
-    `Base.metadata` -- so a byte comparison would pin the spelling rather than
-    the term, and would fail on the next qualification change instead of on
-    the next ceiling change.
+    """🔴 The retention half of TMDb's licence has exactly one enforcement in this
+    repository, and it is the committed JSON rather than the PRD.
     """
     statements = committed_compliance_sql()
 

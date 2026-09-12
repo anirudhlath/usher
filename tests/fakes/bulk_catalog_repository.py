@@ -1,65 +1,4 @@
-"""In-memory BulkCatalogRepository, for unit-testing BootstrapService.
-
-Mirrors the Postgres implementation's *observable* behaviour, not its
-mechanism: the same dedupe-within-a-batch rule (and its specific,
-deterministic winner -- not just "one row survives"), the same
-skip-if-unchanged rule, the same namespace-aware conflict rules, the same
-NULL-only-fills and global-uniqueness guards on `link_crosswalk`. Where the
-real one gets those from `DISTINCT ON`, `IS DISTINCT FROM`, `NOT EXISTS`, and
-composite unique indexes, this one does them in Python — and the shared
-contract suite is what proves the two agree. A prior version of this file
-matched the real implementation's *shape* (dedupe, skip-unchanged, kind
-scoping) without matching several of its *specific rules* -- last-write-wins
-instead of first/highest/smallest, and no NULL guard or cross-title
-uniqueness check on `link_crosswalk` at all -- and 24/24 contract tests
-still passed, because nothing exercised the difference. See the contract
-module's docstring for what a Postgres-vs-fake mutation check found.
-
-**Where this fake is more forgiving than Postgres, enumerated rather than
-discovered later.** Every entry is a thing the contract suite therefore
-cannot pin from the unit arm alone:
-
-- **No foreign keys, and no `titles` row is required to exist for anything
-  but a dictionary lookup.** Nothing here can produce the failure
-  `EnrichService._store_hierarchy` hit on the *second* enrichment rather
-  than the first -- a row naming an entity the catalog does not hold. The
-  bulk methods route that through their `unmatched` counters instead, so
-  the shape is modelled and the *constraint* is not.
-- **`enrichment_state` is a `bool`, not the three-rung ladder.**
-  `fill_credit_names`' precedence predicate is `enrichment_state =
-  'skeleton'` in Postgres and `not stored.enriched` here, which agree only
-  because nothing in this fake can be `stub`. A defect that deferred on the
-  wrong rung is invisible from this arm.
-- **`credit_names` is a Python tuple with no `text[]` semantics.** Postgres
-  distinguishes `'{}'` from NULL and this does not; the column is NOT NULL
-  with a `'{}'` default precisely because `usher_array_text` is STRICT, and
-  a fake storing `None` would look identical to one storing `()`.
-- **No transaction, so "nothing was written before the refusal" is a
-  property this arm can demonstrate and Postgres cannot** -- the mirror of
-  the usual direction, and the reason a divergence list needs entries for
-  where the fake is *stricter* too.
-- **No `set_updated_at` trigger, no GIN index and no stored generated
-  column**, so the whole cost argument behind every `IS DISTINCT FROM`
-  guard is unobservable here: a fake that rewrote every row on every replay
-  would fail only the cases that assert the *count*.
-- **Python's `str.lower()` is not Postgres's `lower()`, and `replace_aliases`
-  compares names with it.** Python applies Unicode's *contextual* final-sigma
-  rule and the database does not, so `"ΟΔΟΣ".lower() == "Οδος".lower()` is
-  `True` here and `lower('ΟΔΟΣ') = lower('Οδος')` is **false** in Postgres --
-  this fake would drop that alias as a restatement of the title's own name and
-  the real one stores it. Measured over the whole pinned
-  `title.akas.tsv.gz`: **32,223 of 46,202,631 retained rows (0.070%)** are in
-  the two families where the three foldings disagree (German `ß`, Greek final
-  sigma). Recorded rather than fixed, because reimplementing a collation in
-  Python is a second implementation and not a stand-in, and because Postgres
-  is *authoritative* by construction here -- the rule is "does this alias
-  reach anything `ix_titles_name_lower_prefix` does not", and that index is a
-  btree over the database's own `lower(name)`.
-  `tests/integration/test_bulk_repository.py::
-  test_the_canonical_comparison_is_the_databases_own_lower_and_not_pythons`
-  is the only case in the suite that can see it, and it is deliberately not in
-  the shared contract.
-"""
+"""In-memory BulkCatalogRepository, for unit-testing BootstrapService."""
 
 import contextlib
 import math
@@ -179,13 +118,10 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
             self.window_depth -= 1
 
     async def upsert_titles(self, rows: Sequence[ImdbTitle]) -> BulkWriteResult:
-        # First occurrence wins within a batch: the real implementation
-        # assigns each staged row a fresh UUIDv7 in input order and runs
-        # `SELECT DISTINCT ON (imdb_id) * FROM stg_titles ORDER BY imdb_id,
-        # id` -- id ascending means the earliest-generated, i.e. first-seen,
-        # row survives. Postgres requires *some* deterministic winner
-        # regardless: one statement may not hit the same ON CONFLICT target
-        # twice.
+        # First occurrence wins within a batch: the real implementation assigns each
+        # staged row a fresh UUIDv7 in input order and runs `SELECT DISTINCT ON
+        # (imdb_id) * FROM stg_titles ORDER BY imdb_id, id` -- id ascending means the
+        # earliest-generated, i.e.
         deduped: dict[str, ImdbTitle] = {}
         for row in rows:
             deduped.setdefault(row.imdb_id, row)
@@ -317,13 +253,8 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
         self._search_names.append((stored.id, SearchNameKind.PERSON.value, name, None, None))
 
     async def upsert_tmdb_ids(self, rows: Sequence[TmdbId]) -> int:
-        # Highest popularity wins within a batch, matching `ORDER BY
-        # tmdb_id, kind, popularity DESC`. There is no IS DISTINCT FROM
-        # guard on this upsert (see repository.py's docstring on this
-        # method), so -- unlike upsert_titles/apply_ratings -- this always
-        # counts every distinct key, whether or not the stored row's data
-        # actually changes; a replay reports the same count again, not
-        # zero.
+        # Highest popularity wins within a batch, matching `ORDER BY tmdb_id, kind,
+        # popularity DESC`.
         winners: dict[tuple[int, TitleKind], TmdbId] = {}
         for row in rows:
             key = (row.tmdb_id, row.kind)
@@ -347,13 +278,9 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
             self._crosswalk[row.imdb_id] = (
                 row
                 if stored is None
-                # COALESCE, not `or`: an id of 0 is falsy but not absent,
-                # so `or` would wrongly fall through to `stored`'s value --
-                # unreachable with real TMDb/TVDB ids in practice, but
-                # `is not None` is free. The three SPARQL joins each fill
-                # one column and run as three separate passes, so a later
-                # pass carrying only one column must not blank what an
-                # earlier pass stored in the other two.
+                # COALESCE, not `or`: an id of 0 is falsy but not absent, so `or` would
+                # wrongly fall through to `stored`'s value -- unreachable with real
+                # TMDb/TVDB ids in practice, but `is not None` is free.
                 else replace(
                     stored,
                     tmdb_movie_id=(
@@ -393,14 +320,8 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
                     continue
                 if stored.tmdb_id == tmdb_id:
                     continue  # already linked; a replay, not a conflict
-                # `stored.tmdb_id is not None`: only fills a currently-NULL
-                # tmdb_id (this method's own port docstring). A title that
-                # already carries a *different* id must not be silently
-                # retargeted -- that would overwrite popularity a later,
-                # better-informed enrichment pass already wrote, not merely
-                # misreport a count. Without this guard the fake reports a
-                # *link* here where Postgres reports a *conflict* (measured
-                # directly), and both the id and popularity get overwritten.
+                # `stored.tmdb_id is not None`: only fills a currently-NULL tmdb_id
+                # (this method's own port docstring).
                 if stored.tmdb_id is not None or (tmdb_id, kind) in claimed:
                     conflicted += 1
                     continue
@@ -411,22 +332,10 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
                 claimed.add((tmdb_id, kind))
                 linked += 1
 
-        # tvdb_id: same NULL-only-fills guard, plus global uniqueness
-        # (ix_titles_tvdb_id is a unique partial index -- two titles cannot
-        # legitimately hold the same one, the exact "fake ignores
-        # provider-id uniqueness" class documented on
+        # tvdb_id: same NULL-only-fills guard, plus global uniqueness (ix_titles_tvdb_id
+        # is a unique partial index -- two titles cannot legitimately hold the same one,
+        # the exact "fake ignores provider-id uniqueness" class documented on
         # title_repository_contract.py's own duplicate-tvdb-id test).
-        # `tvdb_winner` mirrors the real implementation's own dedup of the
-        # *stored crosswalk data itself* -- `SELECT DISTINCT ON
-        # (tvdb_series_id) ... ORDER BY tvdb_series_id, imdb_id` -- which
-        # runs before any title is even considered, because Wikidata can
-        # associate the same tvdb id with more than one imdb_id.
-        #
-        # Deliberately does not touch linked/unmatched/conflicted: the real
-        # implementation's classification query is scoped to the tmdb-only
-        # _CROSSWALK_PAIRS view, and its tvdb UPDATE's rowcount is never
-        # read, so tvdb linking is invisible to those three counters there
-        # too.
         tvdb_winner: dict[int, str] = {}
         for imdb_id, pair in self._crosswalk.items():
             if pair.tvdb_series_id is None:
@@ -448,15 +357,8 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
     async def upsert_genome_vectors(
         self, rows: Sequence[GenomeVector], *, revision: str
     ) -> GenomeWriteResult:
-        # First occurrence wins among rows resolving to one title, mirroring
-        # `SELECT DISTINCT ON (t.id) ... ORDER BY t.id, s.imdb_id` -- the real
-        # statement *must* pick one, because a second hit on the same ON
-        # CONFLICT target is a CardinalityViolationError that aborts the whole
-        # batch. Here it is a dict; there it is a clause a mutation deletes.
-        #
-        # `kind is MOVIE` is the `AND t.kind = 'movie'` of the real statement.
-        # `imdb_id` is unique per title regardless of kind, so this changes
-        # nothing against today's data and is exactly why it needs a case.
+        # First occurrence wins among rows resolving to one title, mirroring `SELECT
+        # DISTINCT ON (t.id) ...
         by_title: dict[uuid.UUID, tuple[float, ...]] = {}
         unmatched = 0
         for row in rows:

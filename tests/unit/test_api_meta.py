@@ -1,46 +1,4 @@
-"""`GET /meta/attribution`, and the scan that keeps its list honest.
-
-PRD 04's hard rule 4 -- "the API exposes required attribution strings so
-every client can display them" -- and PRD 07's Meta table have both named
-this route since M1, and neither was true until this task:
-`grep -rn "\\.attribution" src/` found zero readers of `BulkDataset.attribution`.
-
-`test_every_attribution_constant_in_the_adapters_is_served` is this task's
-plan-named failing-test-first case. It `ast.parse`s every module under
-`src/usher/adapters/`, collects module-level `Assign` nodes (not
-`ImportFrom` -- `adapters/tmdb/__init__.py` re-exports `TMDB_ATTRIBUTION` and
-would otherwise count as a sixth definition) whose target name ends in
-`_ATTRIBUTION`, `ast.literal_eval`s the values, and asserts **at least five
-assignments over at least four distinct values** before trusting anything
-else -- the non-emptiness control, because a scan that globbed nothing passes
-identically to one that passed. Only then does it compare the served set
-against the scanned set, in both directions. Before the router existed this
-failed with a 404, not with an assertion -- the case names the wrong
-implementation rather than merely failing.
-
-**Both counts are floors, not pins.** A reviewer added a fifth adapter module
-with a correctly-scanned, correctly-served `NEWSOURCE_ATTRIBUTION` and this
-file's own `== 4` failed anyway -- the exact shape CLAUDE.md's own thesis
-warns about: a hand-maintained *count* goes stale exactly like a
-hand-maintained *list* does, on the very next legitimate addition. `>= 5` and
-`>= 4` are the honest floors; nothing here should ever need editing to add a
-sixth source.
-
-**What the scan cannot see, and why that is left open rather than closed.**
-It matches a module-level `Assign`, never `BulkDataset.attribution` itself --
-so a computed property (the exact case `ports/bulk.py`'s own docstring names:
-"a dataset with no attribution requirement returns its own name and source
-URL"), a class attribute, or a container like `SOURCE_ATTRIBUTIONS = {...}`
-(which fails the `_ATTRIBUTION` suffix check before `ast.literal_eval` would
-even run) all produce **silence**, not a loud failure. Widening the scan to
-see the property directly would mean instantiating every `BulkDataset`
-subclass, and some want an `httpx.AsyncClient` -- not something a route's own
-scan should be doing. `test_every_bulkdataset_attribution_property_is_a_bare_scanned_constant`
-is the canary in place of that: it does not widen what the scan sees, it pins
-the *shape* a concrete `attribution` override must have for the scan to see
-it, and fails loudly the moment a future adapter's override stops being that
-shape.
-"""
+"""`GET /meta/attribution`, and the scan that keeps its list honest."""
 
 import ast
 from pathlib import Path
@@ -172,15 +130,8 @@ def _flatten(dependant: Dependant) -> set[object]:
 
 async def test_every_attribution_constant_in_the_adapters_is_served() -> None:
     scanned = _scanned_attribution_values(_ADAPTERS_ROOT)
-    # The non-emptiness control, asserted before anything downstream of it
-    # is trusted: a scan that globbed nothing passes identically to one that
-    # passed. Today: five assignments (IMDb, TMDb x2, MovieLens, Wikidata)
-    # over four distinct values (the two TMDb constants are byte-identical).
-    # Both are floors (`>=`), not pins (`==`) -- a legitimately-added fifth
-    # source is a sixth assignment and a fifth distinct value, and pinning
-    # either count exactly would fail that addition for the same reason a
-    # hand-maintained list would: this file went stale on the next
-    # legitimate entry, once, before this comment existed.
+    # The non-emptiness control, asserted before anything downstream of it is trusted: a
+    # scan that globbed nothing passes identically to one that passed.
     assert len(scanned) >= 5
     assert len(set(scanned)) >= 4
 

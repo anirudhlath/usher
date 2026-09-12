@@ -1,10 +1,4 @@
-"""The vocabulary that crosses the ingest boundary.
-
-Every DTO here is frozen and hashable, because `MatchService` uses them as
-dict keys: one batch of 5,000 items becomes a handful of set-based lookups
-keyed on these, which is the difference between a design that works at
-1,126,674 items and one that is 1,126,674 round trips.
-"""
+"""The vocabulary that crosses the ingest boundary."""
 
 import dataclasses
 from datetime import UTC, datetime

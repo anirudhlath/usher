@@ -1,31 +1,4 @@
-"""`WatchWriteService` -- write locally, invalidate, publish, enqueue.
-
-**The order is the contract and one case asserts the whole of it.**
-`test_the_four_effects_happen_in_the_order_the_service_promises` drives every
-collaborator through one journal, so "publish before the local write
-committed" -- the defect
-[ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)
-names -- is a reordering of a list rather than four separate assertions that
-each pass on their own.
-
-**Nothing here reaches a source, and that is structural rather than
-defensive.** PRD 03's write-back is "best effort" as a description of *the
-caller*: `push_watch_state` raises by contract, and a request that never
-blocks or fails on a down source is only that if the request does not make
-the call. The absence is asserted on the module's imports in
-`tests/unit/test_api_watch.py`, because "it did not raise" is also what a
-service that swallowed everything produces.
-
-**Two divergences from Postgres that matter here**, both recorded in
-`tests/fakes/watch_state_repository.py`: this fake stamps `updated_at` in
-Python where a `BEFORE UPDATE` trigger owns it there, and its `last_played_at`
-moves on every `played=True` write exactly as the shipped
-`CASE WHEN excluded.played THEN now()` does. The second is why the
-changed-row guard below is measured on `(position_seconds, played,
-play_count)` and not on the whole row -- see `_changed`'s own docstring in
-`services/watch_write.py`. `tests/integration/test_watch_routes.py` is what
-runs the same claims against the real statement.
-"""
+"""`WatchWriteService` -- write locally, invalidate, publish, enqueue."""
 
 import uuid
 from collections.abc import Sequence

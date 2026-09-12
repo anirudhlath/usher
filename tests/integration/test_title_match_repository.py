@@ -1,12 +1,5 @@
-"""The shared contract against real Postgres, plus the one thing no fake can
-see: the plan.
-
-`FakeTitleMatchRepository` matches on `name.lower()` in Python, so it agrees
-with `lower(name)` by construction. The wrong spelling --
-`lower(:probe) = t.name`, or `t.name ILIKE :probe` -- returns *identical
-rows* while seq-scanning 1,271,138 of them per probe. No assertion on results
-can tell them apart, which is why the last two cases here assert on
-`EXPLAIN`.
+"""The shared contract against real Postgres, plus the one thing no fake can see: the
+plan.
 """
 
 import uuid
@@ -176,34 +169,9 @@ async def test_name_year_matching_uses_the_expression_index(
     catalog: TitleCatalog,
     analyze: Analyze,
 ) -> None:
-    """A query that lowercases the *probe* instead of the column cannot use an
-    expression index on `lower(name)` at all, and the fake -- which matches on
-    `name.lower()` in Python -- agrees with either spelling. Only the plan
-    tells them apart.
-
-    Explains the repository's own statement, binds and all, rather than a
-    hand-copied lookalike: a plan assertion about a query nothing issues reads
-    like coverage and is worse than none.
-
-    **Asserted on the `Index Cond`, not on an index name, and that is a
-    correction `m09a` forced.** This read `"ix_titles_name_lower_year" in
-    plan` while that was the only expression index on `lower(name)`; `m09a`
-    added a second (`ix_titles_name_lower_prefix`, `lower(name)
-    text_pattern_ops`, tier 1 of the two-tier suggest), whose opclass family
-    contains `=`, so the planner may serve this equality from either. The
-    `Index Cond` is the property the case is actually about and it is strictly
-    stronger than a name: an index name in a plan does not prove the *column*
-    was the thing lowercased.
-
-    **The swap costs nothing, measured rather than assumed.** On
-    `pgvector/pgvector:pg17` at 200,000 titles, `EXPLAIN (ANALYZE, BUFFERS)`
-    over this exact statement: `ix_titles_name_lower_prefix` gives
-    `cost=0.42..8.45`, **4 buffers, 0.031 ms**, and dropping it so
-    `ix_titles_name_lower_year` must serve gives `cost=0.43..8.45`, **4
-    buffers, 0.031 ms** -- byte-identical plans below the index node. The
-    narrower index wins the tie because it is one column narrower; the
-    two-column one remains the only one that can also serve the `year`
-    predicate from the index, which is why both are kept.
+    """A query that lowercases the *probe* instead of the column cannot use an expression
+    index on `lower(name)` at all, and the fake -- which matches on `name.lower()` in
+    Python -- agrees with either spelling. Only the plan tells them apart.
     """
     for index in range(_PLAN_ROWS):
         await catalog.given_title(

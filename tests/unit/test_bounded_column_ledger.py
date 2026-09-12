@@ -1,21 +1,4 @@
-"""F9's guard: the bounded-column ledger is checked by a test, not by a person.
-
-[ADR-0044](../../docs/prd/decisions/0044-a-bounded-column-is-a-declared-type-that-refuses.md)
-closes with *"Nothing runs `--check`. It is not in the gate, not in CI, and the
-drift it detects is detected only when a person asks... F9 owns wiring it,
-because F9's guard is a test."* This module is that wiring.
-
-**It is one call to the script's own `_drift()`, and the spelling is the
-decision.** The record's first draft specified this guard as *"assert the
-`exposed-sqlalchemy` bucket is empty"*, and review refuted it by stubbing
-`write_sites()` to `[]`: every bucket goes empty and the assertion passes.
-`_drift()` compares the whole census against `PUBLISHED` and
-`PUBLISHED_AT_M08B`, at both heads, under all three readings, and the metadata
-column set against an independent replay of the migration chain -- so this
-guard inherits every degeneracy check that file has today and every one it
-gains later, rather than restating a subset of them here where the two copies
-can drift apart.
-"""
+"""F9's guard: the bounded-column ledger is checked by a test, not by a person."""
 
 import ast
 
@@ -186,18 +169,8 @@ class Repository:
         # another outside any wrapper, and that second statement's refusal is
         # what crosses the port boundary raw.
         ("mixed", "none"),
-        # **The third exemption**: a call into a function that reaches no
-        # statement of its own. `_stage` reaches only `stage_records`.
-        #
-        # ⚠️ This case does **not** exercise `_COPY_EXECUTION`, though its
-        # comment used to say so. Measured 2026-08-20: setting that frozenset
-        # empty changes no count, produces no drift and moves none of these
-        # cases -- a COPY reaches the driver through a bare-name call or a
-        # non-session receiver, so no other predicate claims it either. The
-        # exemption is a declaration of intent for the day a repository reaches
-        # a COPY through `self._session`, and it is inert today. Said here
-        # rather than left implied, because three co-equal load-bearing
-        # exemptions is a claim and two-plus-one is the measurement.
+        # **The third exemption**: a call into a function that reaches no statement of
+        # its own.
         ("staged", "refusals_as_conflict"),
         # **The second exemption, in its narrow and true form**: a `SELECT`
         # with **no caller-supplied bind** cannot carry a caller value into a
@@ -205,19 +178,17 @@ class Repository:
         # query -- assembled entirely from module constants -- outside its own
         # translation and must not be penalised for it.
         ("reading_outside", "refusals_as_conflict"),
-        # 🔴 **And the counter-case that made the old rule false.** *"A `SELECT`
-        # changes no row, so it cannot be refused for one"* is wrong: one
-        # carrying a bind raises class 22 routinely (`22P02` on a cast, `22012`
-        # on a division, `22003` on an overflow) and an unwrapped one crosses
-        # the port boundary as raw as an `INSERT`'s would. This method reads
-        # `none` today and read `refusals_as_conflict` until 2026-08-20.
+        # 🔴 **And the counter-case that made the old rule false.** *"A `SELECT` changes
+        # no row, so it cannot be refused for one"* is wrong: one carrying a bind raises
+        # class 22 routinely (`22P02` on a cast, `22012` on a division, `22003` on an
+        # overflow) and an unwrapped one crosses the port boundary as raw as an
+        # `INSERT`'s would.
         ("bound_read_outside", "none"),
-        # 🔴 **A live defect the narrowed predicate found.** `mapping.get(...)`
-        # is a `dict.get` on a caller's argument, and matching bare attribute
-        # names against the module's function names read it as a delegated call
-        # into this module's own `get` -- which is an untranslated read, so its
-        # `none` was carried across an edge that does not exist. A delegation
-        # is `self.<name>(...)` or a bare `<name>(...)`, nothing else.
+        # 🔴 **A live defect the narrowed predicate found.** `mapping.get(...)` is a
+        # `dict.get` on a caller's argument, and matching bare attribute names against
+        # the module's function names read it as a delegated call into this module's own
+        # `get` -- which is an untranslated read, so its `none` was carried across an
+        # edge that does not exist.
         ("calling_a_foreign_get", "refusals_as_conflict"),
         # The ORM branch, which was pinned only against the real tree.
         ("orm_writing", "except DBAPIError"),

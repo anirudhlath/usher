@@ -1,16 +1,4 @@
-"""`DeriveService` against fakes: no database, no network, no clock.
-
-Every collaborator is a port, which is the point -- ADR-0016's whole claim is
-that these four entities come out of a payload M4 already cached, and the
-way that stays true is structural rather than disciplinary.
-
-**The central case is
-`test_a_series_payload_does_not_attach_its_cast_to_a_movie_with_the_same_tmdb_id`**,
-and it is the only one a derivation keyed on the bare integer fails. Every
-other case here passes against that defect with the right counts, the right
-people and the right idempotence -- which is this milestone's opening
-argument arriving inside its own test suite.
-"""
+"""`DeriveService` against fakes: no database, no network, no clock."""
 
 import uuid
 from typing import Any

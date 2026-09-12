@@ -1,41 +1,4 @@
-"""PRD 10's *Cost anomaly*, executed against a real PostgreSQL.
-
-**The alert's subject is a table, not a series, and that is the whole reason
-this file exists.** Six of PRD 10's seven alerts are PromQL, and
-`tests/unit/test_alerts.py` grades them the only way a unit test can: by
-reading the expression and asking whether it could ever select anything.
-Nothing in this repository evaluates PromQL. The seventh is a `SELECT`, and a
-`SELECT` this repository *can* run -- so the grading moves from "is this
-spelled like a query that works" to "does this query answer the question PRD
-10 asked", which is a strictly stronger claim and the one an operator is
-relying on at 2 a.m.
-
-**Every case here executes the committed statement**, read out of
-`dashboards/alerts/grafana/usher.yml` by `cost_anomaly_sql()` and never
-retyped: a statement measured in one file and shipped from another is a
-statement whose copy is what stops tracking the original.
-
-🔴 **And most of them execute a *planted* variant beside it.** The four
-decisions in this query -- eight calendar days, a median rather than a mean,
-an absolute floor, and arithmetic that stays in `numeric` -- are each one
-token wide, and each reads perfectly correct alone. A case that only asserted
-the right answer would pass with any of them deleted on some fixture, which is
-the failure `.claude/rules/mutation-sweeps.md` records at `TICKET_TTL_SECONDS`,
-`CAST_LIMIT` and `SimilarityService._WEIGHTS` -- three constants in one
-milestone, each pinned by a case that moved both sides together. So the arms
-here fix the fixture and move the *statement*, and assert the two disagree.
-Every plant is checked to have landed before it is scored, because a
-`str.replace` that matched nothing produces the committed statement back and
-"they disagree" then fails for a reason that has nothing to do with the claim.
-
-⚠️ **What this file cannot check.** It does not run Grafana, so the
-table-frame-to-alert-instance conversion -- one numeric column becomes the
-series, every string column becomes a label -- is asserted structurally in
-`tests/unit/test_alerts.py` and measured for real against a throwaway Grafana,
-recorded in `dashboards/README.md`. What *is* here is that the statement
-returns exactly one row with exactly one numeric column, which is the property
-that conversion depends on.
-"""
+"""PRD 10's *Cost anomaly*, executed against a real PostgreSQL."""
 
 import re
 from collections.abc import Mapping, Sequence
@@ -49,21 +12,8 @@ from tests.integration.conftest import A_DECISIVE_MARGIN, Analyze, index_suspend
 from tests.unit.test_alerts import cost_anomaly_sql
 from usher.db.models.curation import COST_PRECISION, COST_SCALE
 
-#: What one ordinary night costs this deployment, and **the fixture's unit is
-#: a measurement rather than a round number**.
-#:
-#: `02-data-model.md`'s `llm_calls` row: *"`cost_usd` verified exact end to end
-#: on 2026-08-07: `0.00000000` against a local model, `0.01658700` with prices
-#: configured -- exactly `Decimal((4359x3 + 234x15) / 1e6)` -- and `SUM()`
-#: agrees to 8 decimal places."* That is one generation, at the `3`/`15` USD
-#: per Mtok pair the live verification used, and PRD 06's shape is one
-#: generation per household per night.
-#:
-#: Using it here is what makes the floor arm mean anything: the floor exists to
-#: separate "an operator priced their model today" from "tonight cost three
-#: times what a night costs", and those two are only distinguishable against a
-#: real night's price. A fixture of `1.00` would clear the floor by fifty times
-#: and prove only that a large number is larger than a small one.
+# : What one ordinary night costs this deployment, and **the fixture's unit is : a
+# measurement rather than a round number**.
 _A_NIGHT = Decimal("0.01658700")
 
 #: The floor, **read out of the committed statement** rather than retyped, so a
@@ -72,45 +22,12 @@ _A_NIGHT = Decimal("0.01658700")
 #: `test_the_anomaly_query_fires_on_a_tripled_day_and_not_on_a_doubled_one`.
 _THE_FLOOR = Decimal(re.findall(r">= (\d+\.\d+)\b", cost_anomaly_sql())[0])
 
-#: Rows land at this hour UTC on every day but today, which is far enough from
-#: both midnights that no arm is reading a boundary it did not mean to. Today's
-#: row is written at `now()` instead: an hour literal would be in the *future*
-#: for part of every day, which is a legal ledger row (`llm_calls.at` is
-#: written by the caller and carries no `server_default`) but would make the
-#: time-zone arm below argue with the clock rather than with the statement.
+# : Rows land at this hour UTC on every day but today, which is far enough from : both
+# midnights that no arm is reading a boundary it did not mean to.
 _A_MIDDAY = 12
 
-#: How many ledger rows the plan assertion seeds, and the number is the
-#: assertion's premise. **Measured 2026-09-11 on PostgreSQL 17.10**
-#: (`pgvector/pgvector:pg17`), seeding one row every six hours back from `now()`
-#: so the statement's own eight-day window selects **32 rows whatever the table
-#: holds** and only the relation's size varies. Each row is `EXPLAIN` of the
-#: committed statement with `ix_llm_calls_at` available against `EXPLAIN` with
-#: it suspended, so the ratio compares this index against the *best
-#: alternative* rather than against an assumption:
-#:
-#: | seeded rows | plan chosen | chosen | next best | ratio |
-#: |---|---|---|---|---|
-#: | 100   | `Seq Scan`   | 46.42 | 46.42  | **1.00** |
-#: | 300   | `Index Scan` | 50.64 | 54.42  | **1.07** |
-#: | 1,000 | `Index Scan` | 50.77 | 83.92  | **1.65** |
-#: | 2,000 | `Index Scan` | 50.77 | 124.92 | 2.46 |
-#: | 4,000 | `Index Scan` | 50.77 | 208.80 | 4.11 |
-#:
-#: 🔴 **Three bold rows, not one, and the middle two are the danger.** At 100
-#: rows the planner picks `Seq Scan` and is right to -- the relation is a
-#: handful of pages. At 300 it already picks the index, so a case asserting
-#: only the plan's *name* would be **green there**, on a margin of **1.07** --
-#: a tie-break wearing a measurement's clothes. At 1,000 the margin
-#: is still **1.65**, below the 2.0 `A_DECISIVE_MARGIN` demands. 4,000 reads
-#: 4.11, which clears it twice over.
-#:
-#: ⚠️ **The whole-plan ratio understates the index by design.** Both plans
-#: carry the same ~42 of CTE-scan cost for the calendar series and the
-#: aggregate, which is identical work either way; the scan node alone reads
-#: `9.01` against `166.16` at 4,000, **18.4x**. The assertion is on the root
-#: cost because that is what `total_cost` reads and what the sibling plan cases
-#: compare, and because the diluted number is the conservative one.
+# : How many ledger rows the plan assertion seeds, and the number is the : assertion's
+# premise.
 _SEEDED_LEDGER_ROWS = 4000
 
 _SEED_AT_HOUR = text(
@@ -216,34 +133,7 @@ def _planted(replacements: Mapping[str, str]) -> str:
 async def test_the_anomaly_query_fires_on_a_tripled_day_and_not_on_a_doubled_one(
     session: AsyncSession, multiple: Decimal, fires: bool
 ) -> None:
-    """🔴 The headline, and **the multiples are literal on purpose**.
-
-    PRD 10's condition is *"Daily LLM spend > 3x trailing 7-day median"*, so
-    the number under test is `3`. A case spelling its fixture as
-    `3 * median +/- epsilon` moves both sides of the comparison together: it
-    pins that *a* multiplier is in force and pins nothing at all about its
-    value, so `2` and `10` both pass it. `.claude/rules/mutation-sweeps.md`
-    records that shape costing this project three constants in one milestone.
-    `2.9` and `3.1` are written out here, and against a flat trailing week at
-    one measured night's price they land either side of `3` by about a third of
-    a cent -- 0.04810230 and 0.05141970 against a bar of 0.04976100.
-
-    **The premises are read back out of the database, not computed in Python.**
-    The trailing median is asserted as the string Postgres renders, because a
-    median computed in Python from the values the fixture *passed* cannot
-    notice a day boundary that put one of them in the wrong bucket -- and the
-    two disagree the moment a time zone does. `days_in_window` and
-    `days_with_spend` are the statement's own answer about its window, so a
-    seed that landed outside it fails here rather than passing with a median
-    over fewer days than it thinks.
-
-    **And the floor is asserted not to be what decided**, which is the arm's
-    other premise: both today values clear it by more than double, so this case
-    is measuring the multiplier alone. Without that assertion a later edit
-    raising the floor above 0.0514 would turn both arms green for the wrong
-    reason -- the 3.1 arm would stop firing and the parametrisation would
-    report a failure whose message named the multiple.
-    """
+    """🔴 The headline, and **the multiples are literal on purpose**."""
     await _seed(
         session,
         [(day, _A_NIGHT) for day in range(1, 8)] + [(None, _A_NIGHT * multiple)],
@@ -286,31 +176,8 @@ async def test_the_anomaly_query_fires_on_a_tripled_day_and_not_on_a_doubled_one
 async def test_a_zero_trailing_median_is_held_by_the_floor_and_not_by_the_comparison(
     session: AsyncSession, nights: int, fires: bool
 ) -> None:
-    """🔴 The state every unpriced deployment is in, and the one the comparison
-    alone gets catastrophically wrong.
-
-    A trailing median of `0` makes `3 x median` zero, and **any** spend is then
-    greater than it. That is not an edge case: both per-million-token prices
-    default to `Decimal(0)` (`src/usher/config.py`'s `llm_price_in_per_mtok`
-    and `llm_price_out_per_mtok`), which that file calls the honest value for a
-    local model and the wrong one for a hosted model an operator forgot to
-    price -- and this host's LLM is a local vLLM. So the majority state is a
-    week of `0.00000000` nights, and the day an operator finally fills those
-    two settings in, the first priced generation is infinitely more than the
-    trailing median.
-
-    **The floor is what that costs, and the two arms are what make it a floor
-    rather than a mute button.** One ordinary night (0.01658700, the 2026-08-07
-    measurement) is below 0.02 and does not page. Four nights in one evening
-    (0.06634800) is above it and does, against the same zero median -- so a
-    deployment that really did spend four times its usual on the first day it
-    had prices still gets told. `testing-discipline.md`: *"has any fixture, in
-    either arm, ever written the other value?"*
-
-    **`spend_ratio` is a sentence, not a number, and that is the zero-versus-
-    absence rule applied to the page itself.** A ratio against a zero median is
-    undefined, and rendering it as `0.0000` or `Infinity` would put a number in
-    front of an operator that means neither "no anomaly" nor "an enormous one".
+    """🔴 The state every unpriced deployment is in, and the one the comparison alone gets
+    catastrophically wrong.
     """
     await _seed(session, [(None, _A_NIGHT * nights)])
 
@@ -372,29 +239,7 @@ async def test_deleting_the_floor_pages_every_unpriced_deployment_on_its_first_p
 async def test_the_trailing_statistic_is_a_median_and_a_mean_would_miss_this_night(
     session: AsyncSession,
 ) -> None:
-    """🔴 PRD 10 says median, and **a flat trailing week ratifies the mean**.
-
-    That is the trap in this arm and it is worth stating before the fixture:
-    over seven equal days `avg` and `percentile_disc(0.5)` return the same
-    number, so the parametrised case above -- which needs a flat week to make
-    its 2.9/3.1 literals mean anything -- cannot tell the two apart. Neither
-    can the fixture the task text prescribes for this arm, *"one zero day and
-    one double day"*: over `[0, N, N, N, N, N, 2N]` the mean is `7N/7 = N` and
-    the median is `N` **exactly**, so that week ratifies the mean too.
-
-    So this week is `[0, 0, N, N, N, N, 6N]` -- two silent nights and one
-    re-run that cost six -- where the median is `N` and the mean is `10N/7`,
-    about 1.43 times it. Today spent `3.5N`, which is over the median's bar of
-    `3N` and under the mean's of `30N/7`. The committed statement pages; the
-    planted one is silent about a night that cost three and a half times a
-    normal one.
-
-    **And that is the failure mode PRD 10's choice is about**, rather than a
-    statistical preference: this deployment makes one generation per household
-    per night, so a single failed night at $0 and a single re-run at 2x are
-    both *ordinary*, and a mean carries both of them into the bar. A median
-    does not move until half the week does.
-    """
+    """🔴 PRD 10 says median, and **a flat trailing week ratifies the mean**."""
     week = [
         (7, Decimal(0)),
         (6, Decimal(0)),
@@ -437,28 +282,8 @@ async def test_the_trailing_statistic_is_a_median_and_a_mean_would_miss_this_nig
 async def test_the_window_is_seven_complete_trailing_days_and_reaches_no_further(
     session: AsyncSession,
 ) -> None:
-    """🔴 Eight calendar days: seven complete ones judged, plus the partial one
-    being judged. Both ends are asserted, and by the same fixture.
-
-    **Why eight and not seven.** The trailing median excludes today, so a
-    seven-day window would hold six complete days and one partial. A window
-    that instead included today in the median compares today against a bar it
-    is a member of, which moves toward whatever fired it.
-
-    **Why a median makes this hard to pin, and how this fixture does it.**
-    Dropping the *lowest* trailing day from seven values leaves the median
-    where it was -- that is what a median is for -- so the obvious fixture
-    (an ascending week) cannot see the window narrow. Here the oldest
-    in-window day is the **largest**: `[7N, 1N, 2N, 3N, 4N, 5N, 6N]` from
-    oldest to newest, whose median is `4N`. Drop the oldest and it falls to
-    `3N`. Add the day before it -- `0.5N`, seeded outside the window on purpose
-    -- and it also falls to `3N`. Today spent `11N`, which is under the correct
-    bar of `12N` and over the mutants' `9N`, so **both** the narrowed and the
-    widened window page on a night the committed statement correctly ignores.
-
-    A spurious page is the right direction to test in: an alert that fires on
-    an ordinary Tuesday is one an operator turns off, after which it is not an
-    alert at all.
+    """🔴 Eight calendar days: seven complete ones judged, plus the partial one being
+    judged. Both ends are asserted, and by the same fixture.
     """
     # `(days_back, multiple of one night)`, so the *first* entry is the oldest
     # day in the window and is deliberately the largest -- an ascending week
@@ -510,35 +335,7 @@ async def test_the_window_is_seven_complete_trailing_days_and_reaches_no_further
 async def test_the_comparison_stays_in_numeric_and_float8_pages_on_an_exact_tie(
     session: AsyncSession,
 ) -> None:
-    """🔴 `cost_usd` is `NUMERIC(12, 8)` and the ratio has to stay there.
-
-    `02-data-model.md`'s `llm_calls` row: *"never a float: `$3/Mtok x 1,200
-    tokens` is exactly `0.0036` and at scale 4 a `$0.02/Mtok` call stores as
-    `0.0000` -- measured."* The usual objection is that at these magnitudes a
-    `double precision` carries fifteen significant digits and loses nothing
-    visible, which is true -- and is not the failure. **The failure is at the
-    boundary**, which is the only place a threshold alert ever is.
-
-    A trailing median of exactly `0.14500000` and a today of exactly
-    `0.43500000` is exactly three times, and PRD 10's condition is *greater
-    than* three times, so the honest answer is silence. In binary floating
-    point `3 * 0.145` is `0.43499999999999994`, which `0.435` is greater than.
-    So the float spelling **pages on a day that is exactly, and not more than,
-    three times the median** -- and it does it on the day an operator would
-    least believe it, when the ratio the page carries reads `3.0000` either
-    way. Both statements report the identical `spend_ratio` here; only `fired`
-    differs, which is what makes this indistinguishable from a real firing
-    unless somebody knows to look.
-
-    ⚠️ **`percentile_cont` is this cast, arriving without anyone writing
-    `::float8`.** Postgres has no `numeric` overload of it: measured with
-    `pg_typeof` on PostgreSQL 17.10, 2026-09-11, `percentile_cont(0.5) WITHIN
-    GROUP (ORDER BY <numeric>)` is `double precision` and `percentile_disc` of
-    the same is `numeric`. Over the seven trailing days -- a set whose size is
-    fixed at seven by the generated calendar, so always odd -- both return the
-    same element. That is why the statement that shipped is not the one the
-    task text supplies.
-    """
+    """🔴 `cost_usd` is `NUMERIC(12, 8)` and the ratio has to stay there."""
     exactly_three = Decimal("0.14500000")
     await _seed(
         session,
@@ -594,36 +391,8 @@ async def test_the_comparison_stays_in_numeric_and_float8_pages_on_an_exact_tie(
 async def test_the_day_boundary_does_not_move_with_the_sessions_time_zone(
     session: AsyncSession, elsewhere: str
 ) -> None:
-    """`date_trunc('day', <timestamptz>)` truncates in the **session's** time
-    zone, so the unqualified spelling makes "today" a property of who is asking.
-
-    Nothing in this repository sets that session. Grafana's PostgreSQL
-    datasource inherits whatever the server was started with, and a Grafana
-    restarted with a different `TZ`, or a server whose `timezone` is changed,
-    silently re-buckets every night in this alert's window.
-
-    **Two of today's rows are seeded at 05:00 and 20:00 UTC, and the pair is
-    what makes the disagreement independent of the clock.** A shift of `o`
-    hours re-buckets a row *relative to `now()`* exactly when one of them
-    crosses a local midnight and the other does not -- for `+14` that is
-    `h >= 10` and for `-11` it is `h < 11`, and 05:00 and 20:00 sit either side
-    of both. So whatever hour the suite runs at, exactly one of the two lands
-    on a different local day from `now()` and the unqualified spelling reports
-    a different day's spend. Without that pair this case would pass or fail by
-    the time of day, which is the worst of both.
-
-    The committed statement says `AT TIME ZONE 'UTC'` in both places and is
-    asserted byte-identical between UTC and each of two zones 25 hours apart.
-    The plant is the whole qualification removed, and it is asserted to
-    *disagree* -- an arm that only checked the committed statement would pass
-    just as happily against a database that happened to be running in UTC,
-    which this one is (`SHOW timezone` is `Etc/UTC` on
-    `pgvector/pgvector:pg17`).
-
-    ⚠️ The window bound stays on the raw `timestamptz` column, so this
-    qualification costs nothing at the index:
-    `test_the_windows_lower_bound_is_served_by_the_time_index` is the case that
-    says so.
+    """`date_trunc('day', <timestamptz>)` truncates in the **session's** time zone, so the
+    unqualified spelling makes "today" a property of who is asking.
     """
     await _seed(session, [(day, _A_NIGHT) for day in range(1, 8)])
     for hour, cost in ((5, Decimal("0.02000000")), (20, Decimal("0.03000000"))):
@@ -657,31 +426,8 @@ async def test_the_day_boundary_does_not_move_with_the_sessions_time_zone(
 async def test_the_windows_lower_bound_is_served_by_the_time_index(
     session: AsyncSession, analyze: Analyze
 ) -> None:
-    """**`ix_llm_calls_at` earns its keep on this statement too**, which is the
-    other half of the sentence `m08a` deferred it with.
-
-    That migration wrote the DDL out by name and said what it was for:
-    *"dashboard 5's 'LLM spend per day and month' and the cost-anomaly alert
-    ('daily spend > 3x the trailing 7-day median'), both `WHERE at >=
-    :since`"*. **This case is the whole of that justification**: no reader of
-    `llm_calls` exists in `src/`, so the index is defensible only against the
-    statement quoted there, and this is that statement.
-
-    🔴 **The seeded size is the assertion's premise**, and
-    `_SEEDED_LEDGER_ROWS` carries the measured ladder that picked it. The short
-    version: at 300 rows the planner already chooses this index, on a margin of
-    **1.07**, and at 1,000 it is still only **1.65** -- under the 2.0
-    `A_DECISIVE_MARGIN` calls decided. A case asserting the plan's name alone
-    would be green at 300 and would be reporting tie-breaking order, which is
-    the shape of issue #79's two CI failures.
-
-    **The `AT TIME ZONE 'UTC'` qualification is on the *truncation*, never on
-    the column**, and this case is what holds that apart: `llm_calls.at AT TIME
-    ZONE 'UTC'` in the `GROUP BY` is a computed expression no btree over `at`
-    can serve, while the `WHERE` compares the raw column against a stable
-    expression. If somebody "tidies" the two into one spelling, the `Index
-    Cond` below becomes a `Filter` and the alert starts reading the whole
-    ledger every ten minutes.
+    """**`ix_llm_calls_at` earns its keep on this statement too**, which is the other half
+    of the sentence `m08a` deferred it with.
     """
     await session.execute(_SEED_LADDER, {"rows": _SEEDED_LEDGER_ROWS})
     # Without statistics the planner sizes `llm_calls` off an empty `pg_class`,
@@ -727,28 +473,9 @@ async def test_the_windows_lower_bound_is_served_by_the_time_index(
 async def test_the_statement_returns_one_row_and_one_numeric_column(
     session: AsyncSession,
 ) -> None:
-    """🔴 Grafana's SQL-to-alerting conversion reads a table frame as *one
-    series per numeric column, labelled by every string column*, and the
-    condition on this rule is a `> 0` threshold.
-
-    So a second numeric column is not a cosmetic slip: `days_in_window` is
-    `8` by construction, and returned as a number it would be a second series
-    that clears `> 0` on every evaluation, pinning this alert firing forever
-    with a page that names no anomaly. That is the Postgres-side twin of the
-    empty-vector failure `dashboards/alerts/usher.yml`'s header opens with,
-    and it fails in the louder direction rather than the silent one -- but it
-    fails to an operator who then turns the alert off.
-
-    The types are read out of `information_schema` through a temporary view
-    over the committed statement, which is the database's own answer about
-    what it will hand a client. Asserting the `::text` casts in the SQL text is
-    the unit test's job (`test_the_cost_anomaly_rule_hands_grafana_exactly_one_
-    numeric_column`); this is the arm that would notice a cast that is present
-    and does not do what it looks like.
-
-    ⚠️ **The view is created inside the test's own transaction and dies with
-    the rollback.** `CREATE TEMP VIEW` is transactional DDL in PostgreSQL, and
-    a temporary object is scoped to the connection besides.
+    """🔴 Grafana's SQL-to-alerting conversion reads a table frame as *one series per
+    numeric column, labelled by every string column*, and the condition on this rule is
+    a `> 0` threshold.
     """
     await session.execute(text(f"CREATE TEMP VIEW cost_anomaly AS {cost_anomaly_sql()}"))
     columns = (

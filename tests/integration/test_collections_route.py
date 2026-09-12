@@ -1,23 +1,4 @@
-"""`GET /collections/{id}` through a real request against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_collections.py` drives
-the route over two fakes, so the counts, the ownership flags and the 404 are
-covered there. What is left is the wiring and the SQL: that `create_app()`'s
-**un-overridden** graph resolves both repositories onto one request-scoped
-session, that `_GET_COLLECTION`'s `array_agg(... ORDER BY release_date ...)`
-really is what the page renders in, that its own `kind = 'movie'` clause holds
-against a row `attach_titles` would have refused, and what the whole answer
-costs in statements.
-
-The `available` half of `owned` is real only here as well:
-`FakeCollectionRepository` models it, but nothing about the fake can show that
-`media_items.available` is what the *join* reads.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request. Order matters in the teardown: `media_items` references
-both `sources` and `titles`, and `titles.collection_id` references
-`collections`, so the rows come out innermost-first.
-"""
+"""`GET /collections/{id}` through a real request against a real schema."""
 
 from collections.abc import AsyncIterator, Iterator
 from datetime import date

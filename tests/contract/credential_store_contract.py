@@ -1,25 +1,4 @@
-"""Behaviour every `CredentialStore` implementation must satisfy.
-
-Deliberately silent about *how* the secret is stored. "Encrypted at rest"
-is a property of a persistent store and cannot be asserted against an
-in-memory dict, so it is pinned directly against Postgres in
-tests/integration/test_credential_store.py (three cases: the raw column is
-not the plaintext, a different key cannot read it, and deleting the owning
-source removes it). Asserting it here would either force the in-memory fake
-to carry a cipher it has no reason to have, or -- worse -- be written so
-loosely that both implementations pass it while only one is actually
-encrypting.
-
-Subclass and provide a `store` fixture plus an `owner` hook:
-
-    class TestFakeCredentialStore(CredentialStoreContract):
-        @pytest.fixture
-        def store(self) -> FakeCredentialStore:
-            return FakeCredentialStore()
-
-        async def owner(self, store: CredentialStore) -> uuid.UUID:
-            return new_id()
-"""
+"""Behaviour every `CredentialStore` implementation must satisfy."""
 
 import uuid
 

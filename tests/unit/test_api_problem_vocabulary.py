@@ -1,31 +1,4 @@
-"""ADR-0030's `code` vocabulary, encoded rather than written down.
-
-`tests/unit/test_api_problem.py` covers the envelope's *shape* -- A2's
-module, A2's cases. This file covers the **vocabulary**: which members exist,
-what status each one carries, and the two mechanisms that keep a parallel
-fan-out from growing the set by instinct. It is a separate file because the
-two have different owners and different failure modes: a shape defect is a
-malformed document, a vocabulary defect is a contract nobody agreed to.
-
-**Why a decision record is the source of truth and not this file.** A
-vocabulary that lives in a test is a vocabulary the next route's author
-edits in the same commit as the route, which is the drift ADR-0030 exists to
-stop -- six independent drafters proposed seventeen members against a budget
-of four, under two mutually exclusive conventions for the same 404. The
-table lives in `docs/prd/decisions/0030-*.md`; every case here reads it, and
-a fan-out task needing a member the design did not give it has to amend a
-decision record in the same commit. Growth becomes a recorded amendment
-rather than silent drift. The same idiom
-`tests/unit/test_decision_register.py` uses on `decisions/README.md`.
-
-**Every scan here carries a control, because a scan that globs nothing
-passes identically to a scan that passes.** The AST harvest asserts it found
-`source_unavailable` -- which `api/routers/playback.py` demonstrably emits --
-before any comparison is read out of it; the table parse asserts the same;
-the route walk asserts it found `/titles/{title_id}`, because
-`include_router` on FastAPI 0.140 appends one opaque `_IncludedRouter` per
-router and a one-level walk finds zero of Usher's routes.
-"""
+"""ADR-0030's `code` vocabulary, encoded rather than written down."""
 
 import ast
 import pathlib
@@ -54,12 +27,10 @@ _ADR = (
     / ("0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md")
 )
 
-# The table is read out of a delimited region rather than out of the whole
-# document, so a second status-bearing table added by a later amendment --
-# the declined members, a worked example -- cannot be unioned into the
-# vocabulary by a regex that was only ever aimed at one of them. The markers
-# are asserted present; a parse that found no region and a parse that found
-# an empty one must not look alike.
+# The table is read out of a delimited region rather than out of the whole document, so
+# a second status-bearing table added by a later amendment -- the declined members, a
+# worked example -- cannot be unioned into the vocabulary by a regex that was only ever
+# aimed at one of them.
 _TABLE_BEGIN = "<!-- vocabulary:begin -->"
 _TABLE_END = "<!-- vocabulary:end -->"
 _ROW = re.compile(r"^\|\s*`([a-z][a-z_]*)`\s*\|\s*(\d{3})\s*\|", re.MULTILINE)
@@ -452,32 +423,7 @@ def test_the_status_translation_table_covers_only_what_usher_does_not_raise_itse
 
 
 def test_the_image_proxys_amendment_is_no_longer_open() -> None:
-    """ADR-0030's image amendment has an answer, and `Open` is not one.
-
-    **Why a case rather than a reading.** This record's own text says that a
-    request left open while the table states an answer flatly is *"how an
-    unanswered question quietly becomes an answered one"* -- it happened to
-    the sibling amendment, which was open in one bullet and settled precedent
-    in two other files. `GET /images/{image_id}`'s second upstream arm is the
-    one M10's spec picked up out of `08-operations.md` as an open defect. So
-    the disposition is asserted rather than left to whoever reads the section
-    next.
-
-    **The positive control is the whole reason this is trustworthy.** A regex
-    that matches nothing passes exactly like one that passes, and this one is
-    aimed at prose. So: the scan must find status lines at all, and it must
-    find the **accepted** `not_playable` amendment reading `Accepted` --
-    a section this file does not otherwise touch and whose disposition has
-    been settled since M9. Without that anchor, a renamed heading, a reworded
-    status line or a moved section all read as "no longer open".
-
-    **Scoped to the image amendment on purpose.** The `?mode=semantic`
-    amendment beside it is a different question with a stronger case for
-    minting by this record's own reading, and it is deliberately left `Open`;
-    a case asserting *every* amendment is answered would either fail today or
-    press the next reader into answering both at once, which is the fan-out
-    ADR-0030 exists to prevent.
-    """
+    """ADR-0030's image amendment has an answer, and `Open` is not one."""
     statuses = _amendment_statuses()
     assert statuses, (
         f"the amendment scan found no `Status of the amendment:` lines in {_ADR.name} -- "

@@ -1,41 +1,4 @@
-"""`usher restore` against a real schema, and the transaction it refuses in.
-
-K3 wrote the artifact; this is the other direction. **Restore's normal path
-is not an empty database**, and that is the fact every case here is built
-on: `watch_states.title_id` is `ON DELETE RESTRICT` (ADR-0010, and re-read
-off `pg_constraint` on 2026-08-25 -- `fk_watch_states_title_id_titles` is
-`r`, `fk_watch_states_episode_id_episodes` is `r`,
-`fk_watch_states_user_id_users` is `c`), so an insert into an empty catalog
-fails for the one table PRD 08 calls load-bearing. What
-`docs/prd/08-operations.md` actually promises is *"a short restore plus a
-background rebuild"*: the importers rebuild the catalog and restore lands
-the precious rows on top of it. Every fixture here therefore seeds titles
-first.
-
-**This module commits for real**, which is what separates it from every
-other file in this directory and is the whole reason it exists. The suite's
-`session` fixture is a connection-bound transaction that is rolled back, so
-a service that never committed and a service that committed and then had its
-work discarded are indistinguishable inside it -- and *"refuses rather than
-half-applies"* is exactly a claim about committed state. So the sessions
-here come from an engine of their own, the assertions are read on a
-**second** session, and the file cleans up after itself in foreign-key
-order. `test_watch_routes.py`'s commit probe is the precedent and its
-argument is the same one.
-
-**The artifacts are built by hand rather than by `BackupService`, except
-where a case is about the two halves agreeing.** A hand-built file is what
-lets a case plant `m09e` into the header, name a table the manifest does not
-classify, or truncate a row -- none of which a writer will ever produce.
-`test_an_artifact_this_projects_own_backup_wrote_restores_into_a_rebuilt_catalog`
-is the one that closes the loop, and it is the reason the hand-built shape
-can be trusted at all. (This sentence named a function that does not exist --
-`..._and_a_second_run_is_a_no_op` -- for one commit, which is a citation
-nothing checks in a file whose whole subject is citations going stale; the
-second-run claim is
-`test_the_same_artifact_restored_twice_is_a_no_op_on_the_second_run`, a
-different case.)
-"""
+"""`usher restore` against a real schema, and the transaction it refuses in."""
 
 import base64
 import gzip
@@ -61,13 +24,8 @@ from usher.domain.ids import new_id
 from usher.services.backup import MANIFEST_VERSION, BackupService
 from usher.services.restore import RestoreRefused, RestoreReport, RestoreService
 
-# Synthetic throughout, per this repository's rule 1: no real TMDb or IMDb
-# identifier may be committed, docstrings and fixtures included. ⚠️ **The plan
-# for this task spelled the missing title as a `tt` followed by seven nines,
-# which is inside IMDb's allocated range** -- and writing that literal into
-# this comment is what `test_every_imdb_id_is_in_the_reserved_synthetic_band`
-# fails on, which it duly did on the first whole-suite run. `tt99` is the
-# reserved band and the plan's spelling is not in it.
+# Synthetic throughout, per this repository's rule 1: no real TMDb or IMDb identifier
+# may be committed, docstrings and fixtures included.
 HELD_IMDB_ID = "tt99000560"
 HELD_TMDB_ID = 99000560
 SERIES_IMDB_ID = "tt99000561"
@@ -497,34 +455,8 @@ async def test_a_schema_mismatch_is_refused_with_both_revisions_in_the_message(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """The refusal fires and names both values, and **that is all this case
-    says** -- which is less than its first version claimed.
-
-    An artifact from a schema this database is not at is refused, and the
-    message carries the artifact's revision and the database's, the shape
-    `api/routers/health.py::_check_migrations` already logs: *"the schema does
-    not match"* without the two values is a sentence an operator cannot act
-    on, and the action differs by direction.
-
-    🔴 **What this case does *not* establish, stated here because its first
-    version opened by claiming the opposite in bold.** It read *"the
-    comparison is live, and `m09e` in the header is what proves it"* and went
-    on to say the case *"also moves the database"* -- which it does not; it
-    asserts `live == head` as a **premise** at the line below. Measured on
-    2026-08-25 by planting `code_head_revision()` in place of
-    `database_revision`: this case stays **green**, because on a healthy
-    container the two are the same string, so both implementations compare
-    `m09e` against it and both refuse with the same message. A pair that is
-    equal by construction cannot say which of the two was read.
-
-    `test_the_stamp_the_refusal_compares_is_the_databases_and_not_the_codes`
-    is the falsifying arm -- it moves the **database** and stamps the artifact
-    with the code's head, the two revisions the other way round -- and
-    `tests/unit/test_services_restore.py::
-    test_the_schema_mismatch_names_both_revisions_and_follows_the_database`
-    is the same claim one layer up, where the fake answers `m09f` against a
-    code head of `m10a`. Both kill that plant; this one does not, and its name
-    said it did.
+    """The refusal fires and names both values, and **that is all this case says** -- which
+    is less than its first version claimed.
     """
     head = code_head_revision()
     assert head is not None, "the code has no single head, so there is nothing to disagree with"
@@ -653,29 +585,7 @@ async def test_the_same_artifact_restored_twice_is_a_no_op_on_the_second_run(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """Every carried table, counted after each run, table by table.
-
-    **This has to be a case because it is the operator's instinct.** After a
-    partial failure the next thing anybody does is run it again, and five of
-    the eight merge rules are *not* an insert precisely so that the second run
-    is free: `ON CONFLICT DO NOTHING` on `llm_calls` is what makes restoring
-    one spend ledger twice safe, and the `IS DISTINCT FROM` guards on
-    `watch_states` and `row_provider_settings` are what make the second run
-    report `skipped` rather than claim to have written rows that did not move.
-
-    The counts are compared per table rather than in total, because a run that
-    inserted a duplicate `llm_calls` row and lost a `watch_states` one sums to
-    the same number.
-
-    **All eight carried tables, which is what makes the source and the media
-    item seeded rather than restored.** `media_items`' merge is an `UPDATE`
-    over a row the *walk* creates, so an artifact restored into a database
-    that has not walked yet lands nothing there -- which is a real state and
-    is exactly the second thing `skipped` covers, but it would leave this
-    case's `media_items` count at zero and its premise vacuous. Seeding the
-    source is what lets the link land, and it is why `sources` reports
-    `skipped` on the first run: the id is already here.
-    """
+    """Every carried table, counted after each run, table by table."""
     source_id = new_id()
     async with sessions() as session:
         await _seed_source(session, source_id)
@@ -841,15 +751,7 @@ async def test_a_second_source_under_the_same_name_is_refused_rather_than_insert
     assert clean.written["sources"] == 1
 
 
-#: The seeded source. ⚠️ **Bound as Python objects, not as the artifact's
-#: JSON strings**, and the reason is worth one sentence because it is also why
-#: `db/repositories/backup.py::_coerce` exists: `CAST(:created_at AS
-#: timestamptz)` does **not** make asyncpg treat the parameter as text.
-#: Measured -- it answers `invalid input for query argument $9: (expected a
-#: datetime.date or datetime.datetime instance, got 'str')`, client-side,
-#: before a byte reaches Postgres. So a JSON string cannot be handed to a
-#: `timestamptz`, a `uuid` or a `numeric` bind however the SQL is spelled, and
-#: the coercion has to happen in Python off the column's declared type.
+# : The seeded source.
 _INSERT_SOURCE = (
     "INSERT INTO sources (id, kind, name, base_url, credentials_ref, device_id, enabled, "
     "supports_push) VALUES (:id, :kind, :name, :base_url, :credentials_ref, :device_id, "
@@ -1206,12 +1108,10 @@ async def test_the_artifact_columns_are_what_a_backup_writes(session: AsyncSessi
         {"id": new_id(), "name": COLUMN_SHAPE_HOUSEHOLD},
     )
     await session.flush()
-    # ⚠️ **Picked by name rather than unpacked as the only row**, and the first
-    # spelling of this case did the latter and failed in the whole-suite run
-    # while passing alone: `tests/integration/` shares one session-scoped
-    # container and several files in it commit, so `users` is not empty when
-    # this runs. `(carried,) = ...` reported `too many values to unpack`, which
-    # is a fact about the neighbours rather than about the column set.
+    # ⚠️ **Picked by name rather than unpacked as the only row**, and the first spelling
+    # of this case did the latter and failed in the whole-suite run while passing alone:
+    # `tests/integration/` shares one session-scoped container and several files in it
+    # commit, so `users` is not empty when this runs.
     carried = next(
         row for row in await repository.carry("users") if row.row["name"] == COLUMN_SHAPE_HOUSEHOLD
     )
@@ -1221,33 +1121,8 @@ async def test_the_artifact_columns_are_what_a_backup_writes(session: AsyncSessi
 async def test_the_stamp_the_refusal_compares_is_the_databases_and_not_the_codes(
     session: AsyncSession, artifact_path: Path
 ) -> None:
-    """🔴 **The mismatch is against `database_revision`, and only a database
-    that disagrees with the code can say so.**
-
-    `test_a_schema_mismatch_is_refused_with_both_revisions_in_the_message`
-    plants a stale revision into the *header* and is satisfied by an
-    implementation reading `code_head_revision()`: the artifact says `m09e`,
-    the code says the head, the two differ, and the refusal fires for the
-    wrong reason. Measured -- planting `code_head_revision()` leaves that case
-    green and this one red. This one moves the **database** instead and stamps
-    the artifact with the code's own head, so a restore comparing against the
-    code sees two equal strings and does not refuse at all, while one
-    comparing against the database refuses and names the stale value.
-
-    ⚠️ **The two revisions are the wrong way round from the other case on
-    purpose**, and that is what makes this the falsifying arm rather than a
-    second copy. Its sibling one layer up is
-    `tests/unit/test_services_restore.py::
-    test_the_schema_mismatch_names_both_revisions_and_follows_the_database`,
-    whose fake answers `m09f` against a code head of `m10a` -- so the property
-    has an arm per layer and the same plant dies in both.
-
-    It runs on the suite's rolled-back `session` rather than the committing
-    factory, which is what makes writing to `alembic_version` safe: the
-    session-scoped container is shared by every other file, and a committed
-    `UPDATE` here would put all of them one revision behind. K3's
-    `test_the_stamp_is_the_revision_the_database_holds...` is the same shape
-    for the writing half.
+    """🔴 **The mismatch is against `database_revision`, and only a database that disagrees
+    with the code can say so.**
     """
     head = code_head_revision()
     assert head is not None, "the code has no single head, so there is nothing to disagree with"
@@ -1279,27 +1154,8 @@ async def test_two_sources_in_one_artifact_under_one_name_land_once_and_refuse_o
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **The bug the first version of this merge shipped: the refusal read
-    the target once and never saw its own writes.**
-
-    `test_a_second_source_under_the_same_name_is_refused_rather_than_inserted`
-    puts the colliding source in the **target**, and that is the case the rule
-    was written against. It says nothing about two rows colliding *inside one
-    artifact*, and the first implementation built its `name -> id` map before
-    the loop and never updated it -- so both rows passed both checks and both
-    landed, with `refused=()`, `written={'sources': 2}` and an exit code of 0.
-    The restore created the exact state its own docstring and PRD 08 say it
-    may not create, and reported success.
-
-    **The precondition is reachable**, which is what makes this a bug rather
-    than a hardening exercise: `PostgresSourceRepository.add` guards
-    `pk_sources` and nothing else, `sources.name` has no unique index, so two
-    same-named sources are creatable through the ordinary admin path -- and
-    `usher backup` then carries both into an artifact this command has to
-    read.
-
-    The premise is asserted, because *"one source landed"* is also what a
-    restore that writes no source at all produces.
+    """🔴 **The bug the first version of this merge shipped: the refusal read the target
+    once and never saw its own writes.**
     """
     first, second = new_id(), new_id()
     assert first != second
@@ -1652,27 +1508,8 @@ async def test_the_flag_skips_the_unresolvable_rows_and_commits_everything_else(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **K5's drill: a correctly rebuilt catalog refused the whole file on
-    rows the manifest calls re-derivable.**
-
-    Measured against the live deployment on 2026-08-25. 6 titles of 1,272,891
-    carry neither an `imdb_id` nor a `tmdb_id` -- all 6 `series` stubs the
-    ingest ladder created -- and they are named by **304 `media_items` link
-    rows**, one per episode file. `UNRESOLVED_RULE["media_items"]` is `REFUSE`
-    and restore is one transaction, so the household, the source, its
-    credential, **3,347 resolved watch states** and 89 search queries were all
-    written and all rolled back, for 304 links that the next `usher sync`
-    re-derives to the same answer.
-
-    The flag is the operator saying they accept that trade. What it must *not*
-    do is quietly write something: the rows are **dropped**, counted under
-    `unresolved`, and everything that did resolve commits.
-
-    Both premises are asserted. The unresolvable title has to be genuinely
-    unresolvable -- no `imdb_id`, no `tmdb_id`, and an id this catalog does not
-    hold, which is K2's rung 3 answering *no* -- and the resolvable rows have
-    to be rows a refusing run would have thrown away, or *"the flag committed
-    something"* is satisfied by an artifact with nothing at stake.
+    """🔴 **K5's drill: a correctly rebuilt catalog refused the whole file on rows the
+    manifest calls re-derivable.**
     """
     unfindable = {"kind": "series", "id": str(new_id()), "imdb_id": None, "tmdb_id": None}
     async with sessions() as probe:

@@ -104,16 +104,10 @@ async def test_count_by_state_reports_the_catalog(repo: PostgresTitleRepository)
     assert counts[EnrichmentState.ENRICHED] == 0
 
 
-# --- Regression coverage for the session-poisoning decision the plan's
-# "Open question flagged for Group E" left open (see title.py's module
-# docstring for the resolution: session.begin_nested() SAVEPOINTs around
-# both add()'s and update()'s flush, not session.rollback()). The three
-# tests below must keep passing -- that's the property the SAVEPOINT
-# exists for. They are not hypothetical: written and run against a naive
-# bare try/except flush() (no SAVEPOINT) first, they failed with exactly
-# the errors their comments describe -- PendingRollbackError from
-# add()/update(), and a raw, uncaught sqlalchemy.exc.IntegrityError
-# escaping update() -- before the fix in title.py made them pass.
+# --- Regression coverage for the session-poisoning decision the plan's "Open question
+# flagged for Group E" left open (see title.py's module docstring for the resolution:
+# session.begin_nested() SAVEPOINTs around both add()'s and update()'s flush, not
+# session.rollback()).
 
 
 async def test_add_leaves_the_session_usable_after_a_caught_conflict(
@@ -123,13 +117,7 @@ async def test_add_leaves_the_session_usable_after_a_caught_conflict(
     await repo.add(title)
     with pytest.raises(RepositoryConflict):
         await repo.add(title)
-    # Postgres aborts the whole transaction on any statement error until a
-    # ROLLBACK. Without a SAVEPOINT, this next, entirely unrelated add()
-    # fails with "current transaction is aborted, commands ignored until
-    # end of transaction block" instead of succeeding -- a caller that
-    # caught RepositoryConflict above and kept using the session (e.g. "try
-    # to add, fall back to update on conflict") would see that opaque
-    # error, not the RepositoryConflict that actually caused it.
+    # Postgres aborts the whole transaction on any statement error until a ROLLBACK.
     other = Title(kind=TitleKind.MOVIE, name="Arrival", sort_name="Arrival")
     await repo.add(other)
     assert await repo.get(other.id) is not None
@@ -174,30 +162,8 @@ async def test_update_leaves_the_session_usable_after_a_caught_conflict(
 async def test_a_caught_conflict_leaves_an_expired_row_and_every_read_refreshes_it(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """The case above reads back a *different* title; this one reads back the
-    title the conflict was about, which is the one the SAVEPOINT rollback
-    leaves behind.
-
-    Issue #8. `SessionTransaction._restore_snapshot` expires every dirty state
-    in the identity map when a SAVEPOINT rolls back, so a caught
-    `RepositoryConflict` leaves this session holding a **fully expired**
-    `TitleRow` -- alive until CPython's cyclic collector takes it, since
-    nothing strongly references it. In an async session an expired attribute
-    is a *lazy load*, and a lazy load reached from a synchronous frame is
-    exactly `MissingGreenlet: greenlet_spawn has not been called`. That is the
-    error one of three `usher work` daemons died on 78 minutes into M9's S3
-    run, whose last two log records were both this conflict path.
-
-    So this case measures both halves. The hazard is real and is asserted
-    directly rather than described -- an f-string, a `__repr__`, a pydantic
-    validator or a log line that formats this row raises it. And every read
-    `PostgresTitleRepository` ships refreshes the row inside its own `await`
-    instead, which is what keeps the hazard closed and is the property a
-    future read must not break.
-
-    The premise is asserted first for `testing-discipline.md`'s reason: if
-    SQLAlchemy ever stopped leaving the row expired, every assertion below
-    would pass while being about nothing.
+    """The case above reads back a *different* title; this one reads back the title the
+    conflict was about, which is the one the SAVEPOINT rollback leaves behind.
     """
     first = Title(
         kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=90000201, imdb_id="tt99000201"
@@ -240,23 +206,9 @@ async def test_a_caught_conflict_leaves_an_expired_row_and_every_read_refreshes_
     assert sum((await repo.count_by_state()).values()) == 2
 
 
-# --- Regression coverage for autoflush leaking storage exceptions past
-# reads -- a different door than the session-poisoning tests above, but the
-# same underlying rule: no sqlalchemy.exc type may ever escape this class.
-# session.get()/session.execute() autoflush by default, so a pre-existing,
-# unflushed, invalid row elsewhere on the *shared* session can make a pure
-# read raise sqlalchemy.exc.IntegrityError -- get(), get_by_tmdb_id(),
-# get_by_imdb_id(), and count_by_state() had no translation at all, and
-# update()'s own session.get() lookup ran outside both its try and its
-# SAVEPOINT. Not reachable through this repository alone today (add() and
-# update() always flush before returning, so nothing of this repository's
-# own making is ever left pending) -- reachable the moment a second
-# repository (M4's MediaItemRepository/WatchStateRepository) shares this
-# session and leaves work pending across a repository boundary. Written and
-# run against the pre-fix title.py first: all five tests below failed --
-# the four pure reads raised the raw sqlalchemy.exc.IntegrityError directly,
-# and the update() case raised it in place of the RepositoryConflict it
-# raises after the fix.
+# --- Regression coverage for autoflush leaking storage exceptions past reads -- a
+# different door than the session-poisoning tests above, but the same underlying rule:
+# no sqlalchemy.exc type may ever escape this class.
 
 
 async def _insert_bypassing_the_identity_map(session: AsyncSession, **values: object) -> uuid.UUID:
@@ -440,26 +392,9 @@ _COLUMNS_NO_CONSUMER_READS = (
 async def test_no_entity_read_ships_credit_names_over_the_wire(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """`credit_names` is in `DERIVED_COLUMNS`, so `_to_domain` drops it from
-    every row it builds -- after Postgres has detoasted up to ten cast names
-    per title, serialised them and put them on the wire.
-
-    **The three reads that select the whole entity are the whole population**,
-    and they are asserted together because the deferral is per statement: two
-    of them shipped one `defer()` and the third the same one, so a fix applied
-    to the read that prompted it would leave the other two paying.
-
-    `search_document` is asserted beside it although that half already held.
-    Not decoration: the two are one `options()` call, and a rewrite that drops
-    the deferral drops both -- pinning only the new one would let the tsvector
-    come back with nothing to notice.
-
-    Verified by reading every consumer rather than by this case alone: nothing
-    reaches `credit_names` through a loaded `TitleRow`. `credit_names_for`
-    selects the column explicitly (a column read, unaffected by an entity
-    load's options), `db/repositories/people.py` writes it in raw SQL and
-    `db/repositories/search.py` reads it in raw SQL inside the document
-    fingerprint.
+    """`credit_names` is in `DERIVED_COLUMNS`, so `_to_domain` drops it from every row it
+    builds -- after Postgres has detoasted up to ten cast names per title, serialised
+    them and put them on the wire.
     """
     title = Title(
         kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", genres=("Sci-Fi",), year=2021
@@ -491,38 +426,7 @@ async def test_no_entity_read_ships_credit_names_over_the_wire(
 async def test_an_unloaded_derived_column_refuses_by_name_rather_than_by_greenlet(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """Issue #8's second candidate, settled by measurement (M10's F10).
-
-    `_WITHOUT_DERIVED_COLUMNS` deferred `credit_names` **without**
-    `raiseload`, and the comment above it argued the choice: `raiseload` would
-    convert a mis-routed read into an `InvalidRequestError`, while *"plain
-    deferral costs one small extra query for ten short strings -- prefer the
-    failure that degrades"*.
-
-    🔴 **On an `AsyncSession` there is no degradation to prefer.** A deferred
-    column reached from an ordinary async frame is a lazy load, a lazy load is
-    IO, and IO outside `greenlet_spawn` is `MissingGreenlet` -- the exact
-    error one of three `usher work` daemons died on 78 minutes into M9's S3.
-    So the choice was never "raise or degrade"; it was **which** error, and
-    plain deferral picked the one that names neither the attribute nor the
-    fix. Measured here rather than reasoned about, which is what makes this a
-    guard instead of a claim about a suite run in 2026-08.
-
-    Both halves, because the repair has a way of passing while being about
-    nothing: the sanctioned reader still works (`credit_names_for` selects the
-    column explicitly, so an entity load's options do not touch it), and the
-    premise -- that the attribute really is unloaded -- is asserted before the
-    refusal it explains.
-
-    **The shipped `options()` rather than a shipped method**, because
-    `Session.identity_map` is weak: `list_by_ids` hands back domain models and
-    nothing then references the `TitleRow`, so a case reaching for the mapped
-    row through a repository call is reaching for one CPython may already have
-    collected. `_WITHOUT_DERIVED_COLUMNS` is the artefact under test and it is
-    what every entity read passes;
-    `test_no_entity_read_ships_credit_names_over_the_wire` is what pins that
-    all three of them still do.
-    """
+    """Issue #8's second candidate, settled by measurement (M10's F10)."""
     title = Title(
         kind=TitleKind.MOVIE,
         name="Dune",
@@ -567,35 +471,10 @@ async def test_an_unloaded_derived_column_refuses_by_name_rather_than_by_greenle
 async def test_the_candidate_pool_ranks_on_a_narrow_projection(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """**The sort is over the whole catalog and the projection it carried was
-    the whole row.** `list_unwatched_candidates` outer-joins 1,271,138 titles
-    to a `DISTINCT` over `media_items`, anti-joins `watch_states`, sorts on
-    four keys and keeps 200 -- and every row entering that sort carried all
-    thirty-one columns, including `overview`, `keywords` and
-    `field_provenance`, so the sort's working set is the catalog's text rather
-    than its keys. Its consumers read four fields.
-
-    The shape asserted here is: rank on `titles.id` plus the sort keys, then
-    join the entity back onto the ~200 survivors. Three assertions, and each
-    names a different way the rewrite can be wrong:
-
-    - **Two stages project `titles`, not one.** Before, there is one stage and
-      it is the wide one; a rewrite that merely reordered the clauses still has
-      one.
-    - **The ranking stage names none of the columns nobody reads.** A "narrow"
-      projection that kept the entity is the defect wearing the fix's shape.
-    - **The final `ORDER BY` follows the `LIMIT` in the text**, which is what
-      says the surviving rows are re-ordered rather than handed back in
-      whatever order the join produced. Measured rather than assumed: deleting
-      that clause fails this case *and* nine of the thirteen cases in
-      `TitleRepositoryCandidateContract` on this arm, so the fixture is not
-      resting on luck today. It is asserted here anyway because what those nine
-      observe is one planner's output order at four rows, and ADR-0028's
-      stability is a claim about 1,271,138.
-
-    The ordering *contract* is unchanged and stays where it lives -- thirteen
-    positional cases on both arms. This case is about the shape those cases
-    cannot see.
+    """**The sort is over the whole catalog and the projection it carried was the whole
+    row.** `list_unwatched_candidates` outer-joins 1,271,138 titles to a `DISTINCT` over
+    `media_items`, anti-joins `watch_states`, sorts on four keys and keeps 200 -- and
+    every row entering that sort carried all thirty-one columns, including `overview`,
     """
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
     await repo.add(title)
@@ -628,20 +507,11 @@ async def test_the_candidate_pool_ranks_on_a_narrow_projection(
     )
 
 
-# --- Regression coverage for update() rewriting unchanged ARRAY columns --
-# see tests/unit/test_title_repository.py's
-# test_to_row_emits_lists_not_tuples_for_array_columns for the necessary-
-# but-not-sufficient type-level pin (no Postgres needed); this is the
-# end-to-end proof against real SQLAlchemy unit-of-work.
-#
-# updated_at cannot be used to detect this: the fixture wraps each test in
-# one Postgres transaction (see conftest.py), and Postgres's now() /
-# CURRENT_TIMESTAMP is *transaction*-scoped, not statement-scoped -- every
-# now() call inside one transaction returns the same value, so updated_at
-# looks identical before and after *any* number of updates within a single
-# test regardless of whether this bug is fixed. Counting the actual SQL
-# statements SQLAlchemy sends is the direct, transaction-timing-independent
-# way to prove no UPDATE was issued at all.
+# --- Regression coverage for update() rewriting unchanged ARRAY columns -- see
+# tests/unit/test_title_repository.py's
+# test_to_row_emits_lists_not_tuples_for_array_columns for the necessary- but-not-
+# sufficient type-level pin (no Postgres needed); this is the end-to-end proof against
+# real SQLAlchemy unit-of-work.
 
 
 async def test_update_does_not_rewrite_unchanged_columns(
@@ -746,16 +616,8 @@ class TestPostgresTitleRepositoryOwned(TitleRepositoryOwnedContract):
         self, session: AsyncSession, owning_source_id: uuid.UUID
     ) -> Callable[..., Awaitable[None]]:
         async def _own(title_id: uuid.UUID, *, episode: bool = False) -> None:
-            # A real `media_items` row rather than a flag, because the whole
-            # point of the read is the semi-join. `episode_id` is left NULL
-            # even for the episode case: `episodes` needs a `seasons` row and
-            # a `titles` row and none of that changes what this statement
-            # sees, which is that the title has an available copy. What the
-            # episode case must *not* do is write a title-level row where the
-            # implementation under test would demand one -- so it writes a row
-            # that a `episode_id IS NULL` bound would still accept, and the
-            # divergence is pinned in the fake's half where it is expressible
-            # without three parent rows.
+            # A real `media_items` row rather than a flag, because the whole point of
+            # the read is the semi-join.
             await session.execute(
                 insert(cast(Table, MediaItemRow.__table__)).values(
                     id=new_id(),
@@ -822,28 +684,10 @@ class TestPostgresTitleRepositoryCandidates(TitleRepositoryCandidateContract):
             title_id: uuid.UUID, *, episode: bool = False, available: bool = True
         ) -> None:
             # **`episode=True` writes a real `episode_id`, and
-            # `TitleRepositoryOwnedContract.own` deliberately does not.** That
-            # fixture leaves it NULL because `episodes` needs a `seasons` row
-            # and a `titles` row and it has no helper for either; this class
-            # does, so the excuse does not transfer -- and copying it made the
-            # case vacuous. Measured: with `episode_id` left NULL, adding
-            # `MediaItemRow.episode_id.is_(None)` to the ownership subquery
-            # gives **12 passed, 0 failed** here, so the bound the case exists
-            # to rule out was unobservable on the only arm that has it.
-            #
-            # Both ids together is also the production shape rather than a
-            # test convenience: `ports/ingest.py`'s `MediaItemTarget` records
-            # that an episode's row holds **both**, because `IngestService`
-            # writes `title_id` (the series' canonical title) alongside
-            # `episode_id` for a client browsing a season. So a semi-join
-            # carrying `episode_id IS NULL` reports every series in a real
-            # library as unowned, which on 999,827 episodes of 1,126,674 items
-            # is most of it.
-            #
-            # `available=False` writes a real retracted row -- what
-            # `mark_unseen_unavailable` leaves behind -- which the fake cannot
-            # express and which is the only way the read's own `available`
-            # predicate is observable at all.
+            # `TitleRepositoryOwnedContract.own` deliberately does not.** That fixture
+            # leaves it NULL because `episodes` needs a `seasons` row and a `titles` row
+            # and it has no helper for either; this class does, so the excuse does not
+            # transfer -- and copying it made the case vacuous.
             await session.execute(
                 insert(cast(Table, MediaItemRow.__table__)).values(
                     id=new_id(),
@@ -867,12 +711,9 @@ class TestPostgresTitleRepositoryCandidates(TitleRepositoryCandidateContract):
             episode_id: uuid.UUID | None = None,
             played: bool = True,
         ) -> None:
-            # Raw, rather than through `merge_from_source`: that path is a
-            # two-statement upsert with its own dedup and its own conflict
-            # rule, and a fixture that went through it would be testing that
-            # instead. `ck_watch_states_exactly_one_target` still applies,
-            # which is what makes a case naming neither target impossible to
-            # write by accident.
+            # Raw, rather than through `merge_from_source`: that path is a two-statement
+            # upsert with its own dedup and its own conflict rule, and a fixture that
+            # went through it would be testing that instead.
             await session.execute(
                 text(
                     "INSERT INTO watch_states "
@@ -1005,15 +846,9 @@ class TestPostgresTitleRepositoryBrowse(TitleRepositoryBrowseContract):
             title_id: uuid.UUID, *, episode: bool = False, available: bool = True
         ) -> None:
             # `episode=True` writes **both** ids, which is the production shape
-            # (`ports/ingest.py`'s `MediaItemTarget`) and the only row that can
-            # tell browse's `episode_id IS NULL` bound apart from
-            # `list_owned_by_tag`'s deliberate absence of one. The candidate
-            # arm's fixture records at length why leaving `episode_id` NULL
-            # here would make the case vacuous.
-            #
-            # `available=False` writes a real retracted row -- what
-            # `mark_unseen_unavailable` leaves behind -- which the fake cannot
-            # express at all.
+            # (`ports/ingest.py`'s `MediaItemTarget`) and the only row that can tell
+            # browse's `episode_id IS NULL` bound apart from `list_owned_by_tag`'s
+            # deliberate absence of one.
             await session.execute(
                 insert(cast(Table, MediaItemRow.__table__)).values(
                     id=new_id(),
@@ -1054,37 +889,7 @@ async def _browse_by_offset(
 async def test_offset_duplicates_a_row_a_concurrent_insert_pushed_down_and_the_keyset_does_not(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """**PRD 07's own reason for refusing offset paging, measured instead of
-    asserted.**
-
-    *"Offset paging is not offered -- it degrades badly over a 1.3M-row catalog
-    and produces duplicates under concurrent writes."* The first clause was
-    measured in M4 (`list_unmatched`'s `OFFSET` at 43.7 ms / 388.9 ms). The
-    second was not, and ADR-0034's *Uncertainty* section says so in as many
-    words: it *"needs a real database with a row inserted between page 1 and
-    page 2 -- which needs a repository that exposes a wire-paged read, and none
-    does yet. It must ride with group B's first paged route."* This is that
-    read, so this is that case.
-
-    Both arms page the same table with the same `ORDER BY`, and a row is
-    committed between the two requests -- an ordinary concurrent write, not a
-    contrived one. The keyset resumes from a *position* and is unaffected; the
-    offset resumes from a *count* and the count moved under it.
-
-    **Three premises, because without them the case is a coincidence.** The
-    inserted row must sort into the page already served (a row after the
-    cursor is a page-2 row under both spellings); the two spellings must agree
-    on page 1 (or the disagreement below is about the `ORDER BY` rather than
-    about how page 2 resumes); and the offset arm's duplicate is asserted *as
-    a duplicate*, by name, rather than inferred from a length.
-
-    **What this measures is a duplicate and not a drop, which is exactly what
-    PRD 07 claims.** An insert grows the population by one, so the window that
-    slid by one still reaches the last row: nothing here is lost, `Charlie` is
-    simply served twice. The mirror defect — a row *never* served — needs a
-    concurrent **delete**, which is a different write and is not claimed by
-    the sentence this case exists to verify.
-    """
+    """**PRD 07's own reason for refusing offset paging, measured instead of asserted.**"""
     seeded = [
         Title(kind=TitleKind.MOVIE, name=name, sort_name=name.lower())
         for name in ("Alpha", "Bravo", "Charlie", "Delta", "Echo")
@@ -1134,12 +939,8 @@ async def test_offset_duplicates_a_row_a_concurrent_insert_pushed_down_and_the_k
     )
 
 
-#: A browse population carrying, for **every** member of `BrowseSort`, at least
-#: one tie and — where the column is nullable — at least two NULLs. Both are
-#: needed for the equivalence below to be about anything: a fixture with no
-#: ties cannot see the `id` tail move and one with no NULLs cannot see the
-#: NULLS-LAST leg move, which are the only two ways the two spellings could
-#: disagree. Seeded in this order, which is id order and is no sort's answer.
+# : A browse population carrying, for **every** member of `BrowseSort`, at least : one
+# tie and — where the column is nullable — at least two NULLs.
 _EQUIVALENCE_POPULATION: tuple[tuple[str, str, int | None, float | None, int | None], ...] = (
     # name, sort_name, year, popularity, vote_count
     ("Delta", "delta", 1999, 3.0, 40),
@@ -1177,27 +978,8 @@ async def _seed_equivalence_population(repo: PostgresTitleRepository) -> list[Ti
 async def test_the_shipped_order_is_byte_identical_to_the_written_out_one(
     repo: PostgresTitleRepository, session: AsyncSession, sort: BrowseSort
 ) -> None:
-    """**The guarantee that replaced a legibility argument, and it is stronger
-    than what it replaced.**
-
-    `browse` used to spell its `ORDER BY` as `(key IS NOT NULL) DESC, key
-    <dir>, id` — written out, so that a reader could see it and
-    `_browse_after`'s three arms were term for term the same rule. B7 measured
-    what that costs: **299.21 ms p50 against 0.92 ms, 317x**, on `sort=name`
-    over a real 1,272,367-title catalog, because an index is matched by the
-    *sort-key expression* and no index carries `sort_name IS NOT NULL`. The
-    clause is now `key <dir> NULLS LAST, id`.
-
-    The two are the same order **by an argument**, and an argument is what this
-    case replaces. It runs both spellings over one population and compares them
-    position for position — unpaged, and again as a keyset walk, because the
-    `WHERE` predicate was not touched and has to keep agreeing with a clause
-    that no longer looks like it.
-
-    The reference is built from `BrowseSort.order_for`, so it cannot drift on
-    *which* column or direction a sort means; only the spelling under test is
-    the shipped object's. Every premise is asserted, because an equivalence
-    over a fixture with no NULLs and no ties is an equivalence about nothing.
+    """**The guarantee that replaced a legibility argument, and it is stronger than what it
+    replaced.**
     """
     seeded = await _seed_equivalence_population(repo)
     column, descending = BrowseSort.order_for(sort)
@@ -1402,30 +1184,7 @@ async def test_resolving_natural_keys_costs_one_statement_for_a_whole_batch(
 async def test_the_ladder_plans_to_the_indexes_it_was_designed_for(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """Each rung is an index probe, not a scan of `titles`.
-
-    `titles` is 1,272,888 rows on the deployment this project measures, so a
-    rung that quietly became a sequential scan is three full scans per
-    restore -- correct, and unusable.
-
-    **On the index *names*, deliberately, and this is the case where
-    `db-and-sql.md`'s "assert the `Index Cond`, not the artefact" rule points
-    the other way.** The three rungs are distinguished from each other by
-    *which* index each binds -- `imdb_id` alone, `(tmdb_id, kind)`, the
-    primary key -- so the name is the property rather than a stand-in for
-    it. An `Index Cond` assertion would be satisfied by all three rungs
-    binding the same index, which is one of the wrong implementations this
-    exists to refuse. The absence of a sequential scan is asserted
-    separately, because "three index names appear" does not say that a
-    fourth path did not.
-
-    `enable_seqscan = off` is what separates *not chosen* from *not
-    choosable* on a fixture this small -- the `text_pattern_ops` idiom, one
-    subsystem over -- and it is also what keeps this out of the
-    load-sensitive plan-shape family `.claude/rules/mutation-sweeps.md`
-    records: the disabled-node penalty is 1e10, so no amount of contention
-    moves the choice.
-    """
+    """Each rung is an index probe, not a scan of `titles`."""
     await session.execute(text("SET LOCAL enable_seqscan = off"))
     plan = "\n".join(
         str(line)

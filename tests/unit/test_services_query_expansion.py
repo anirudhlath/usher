@@ -1,31 +1,4 @@
-"""`QueryExpansionService` -- one completion in front of `SearchService`'s embed.
-
-**The cases this file exists for are the ones where the call worked and the
-search still has to run.** An expansion enhances one lane of a search that is
-answerable without it, so every failure here is absorbed: the service returns
-`None`, the caller embeds what the viewer typed, and the `llm_calls` row is the
-only record the money was spent. That is the opposite of `CurationService`,
-which re-raises because the generation *is* the job -- and it is why "the ledger
-row was written and committed" is asserted on every arm here rather than being a
-detail of one.
-
-**The prompt is an artefact whose only real consumer is a language model**, so
-nothing observes it unless a case opts in by name
-(`.claude/rules/testing-discipline.md`). `build_expansion_prompt` is a pure
-function over one string, so the opt-in costs a call rather than a household --
-which is why it is public. Pinned below: the key `read_expansion` looks under,
-the character bound it refuses a completion over, the JSON instruction the
-adapter's parser needs, the viewer's query and its sanitising, the order of the
-two blocks, and the fact that every declared rule is rendered. **Deliberately
-unpinned: the wording of the rules themselves and of the role sentence.** Each
-is prose with no constant, no rendered number and nothing `read_expansion` will
-discard a completion for, and a verbatim assertion on the sentences most likely
-to be *tuned* is a change-detector -- the line `.claude/rules/testing-
-discipline.md` draws after curation's own prompt sweep.
-
-Every query below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""`QueryExpansionService` -- one completion in front of `SearchService`'s embed."""
 
 import inspect
 import time
@@ -66,12 +39,7 @@ NOW = datetime(2026, 8, 7, 4, 0, tzinfo=UTC)
 #: response came back to read one from.
 ASKED = "test/asked-1"
 
-#: Where the injected monotonic clock starts. Deliberately **not** zero:
-#: `time.monotonic()`'s epoch is arbitrary, and a fixture starting at `0.0`
-#: makes `clock() - started` and `clock()` the same number -- so an *absolute*
-#: reading, on the one field this service takes an injected clock in order to
-#: measure, would be invisible. Recorded in `.claude/rules/testing-
-#: discipline.md` as the `ORDER BY`-under-UUIDv7 trap in the time domain.
+# : Where the injected monotonic clock starts.
 _T0 = 1_000.0
 
 _ELAPSED = 0.25

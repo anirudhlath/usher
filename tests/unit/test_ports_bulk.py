@@ -1,10 +1,4 @@
-"""The bulk port's shape, and the guarantees its DTOs are supposed to carry.
-
-Every assertion here is one someone could delete the corresponding line of
-production code and see fail — `frozen=True` and `slots=True` in particular
-are tested by attempting the operation they forbid, not by reading a config
-dict back.
-"""
+"""The bulk port's shape, and the guarantees its DTOs are supposed to carry."""
 
 import dataclasses
 import inspect

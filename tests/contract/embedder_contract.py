@@ -1,18 +1,4 @@
-"""What every `Embedder` implementation owes the index path.
-
-Runs against `FakeEmbedder` (no model, no network) and -- marked, opt-in --
-against the real `FastEmbedEmbedder`, which downloads 129-134 MB and is
-therefore not part of any default selection.
-
-**Nothing here asserts relevance**, and that is deliberate rather than an
-omission: `FakeEmbedder` is a hash, so a relevance assertion against it
-would pass for a reason unrelated to the code under test, which is the
-vacuous-pass failure this repository has shipped once already. These five
-cases are the plumbing: order, width, normalisation, determinism, and not
-calling a model for nothing.
-
-Subclass and provide an `embedder` fixture.
-"""
+"""What every `Embedder` implementation owes the index path."""
 
 import math
 

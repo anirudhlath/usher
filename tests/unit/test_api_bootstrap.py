@@ -1,20 +1,4 @@
-"""`POST /admin/bootstrap/{phase}` -- the M2 command, as an enqueue.
-
-Unit-level: the enqueued row, the 422 for a phase the vocabulary does not
-hold, and the structural shape (no `BulkDataset`, no `BootstrapService`
-reachable from the router). Driven through a real `create_app()` with
-`get_job_queue` overridden, exactly as `test_api_sources.py` does for
-`POST /admin/sources/{id}/sync` and `test_api_rows.py` for
-`POST /admin/rows/regenerate`.
-
-The end-to-end walk -- a claimed `bootstrap` job really running a phase
-against real Postgres, and a concurrent owner's checkpoint surviving it --
-lives in `tests/integration/test_admin_bootstrap.py`; this file is what a
-route that merely *looked* like an enqueue could still fail. **"It did not
-download" is also what a route that did nothing at all produces**, which is
-why the enqueued row and the silent transport are both asserted in the same
-case rather than in two.
-"""
+"""`POST /admin/bootstrap/{phase}` -- the M2 command, as an enqueue."""
 
 import ast
 import dataclasses

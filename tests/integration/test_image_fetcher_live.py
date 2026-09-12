@@ -1,31 +1,4 @@
-"""`ImageFetcherContract` against the real provider CDN, when one is asked for.
-
-**Skipped by default, and it says so loudly rather than passing quietly.** Set
-`USHER_TEST_IMAGE_PATH` to a provider path the CDN actually holds — a TMDb
-`poster_path`, e.g. `/abc123.jpg`, which `usher derive` puts in
-`images.provider_path` — and optionally `USHER_TEST_IMAGE_CDN_BASE_URL` to
-point somewhere other than the shipped default. Nothing in CI sets them, so
-this file is a tool an operator points at their own deployment before trusting
-`GET /images/{id}` against it.
-
-**A contract suite that passes because nothing ran is the `sitecustomize.py`
-trap**, which this repository has hit in three other forms. So the variable is
-read once at import, the whole module is `skip`ped when it is absent — a skip
-is visible in pytest's summary where a vacuous pass is not — and
-`test_the_cdn_was_really_reached` asserts a body larger than any fake in this
-repository produces and a media type off the real wire.
-
-**It really opens a socket**, so it is one of the two files here the network
-guard would block; the other is `test_llm_client_live.py`, and the same
-sentence applies. `CLAUDE.md`'s "no test in this repository makes a network
-request" stays true of every run that does not set the variable, which is every
-run anybody has made.
-
-**No credential is involved and that is the point being verified**, not merely
-assumed: the image CDN is unauthenticated, so this arm needs no key and would
-have nowhere to put one — `ProviderCdnImageFetcher.__init__` takes no
-credential parameter at all.
-"""
+"""`ImageFetcherContract` against the real provider CDN, when one is asked for."""
 
 import os
 

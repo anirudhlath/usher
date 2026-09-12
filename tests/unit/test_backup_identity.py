@@ -1,17 +1,4 @@
-"""The identity layer K4's restore resolves its references through.
-
-Two claims are being made here and they fail in opposite directions, so
-they get separate cases: that a reference the target does not hold is
-**refused by name** rather than answered `None` (which a caller reads as a
-null column), and that a title id is minted per bootstrap so the natural key
-is the only thing that survives a boundary between two catalogs.
-
-The Postgres half of the same behaviour is the shared contract suite --
-`TitleRepositoryNaturalKeyContract` and its episode twin -- which runs
-against `FakeTitleRepository` in `tests/unit/test_title_repository_contract.py`
-and against real Postgres in `tests/integration/test_title_repository.py`.
-Nothing here reaches a database.
-"""
+"""The identity layer K4's restore resolves its references through."""
 
 import pytest
 

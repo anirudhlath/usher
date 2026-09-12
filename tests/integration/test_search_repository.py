@@ -1,14 +1,4 @@
-"""The embedding repository, the predicate pair, and the keyset cursor.
-
-Integration only, and deliberately no shared contract suite. The three
-behaviours that matter here -- the `halfvec` round trip, the SQL
-fingerprint's agreement with the composer, and the fact that `md5` is
-evaluated by Postgres -- are all *unexpressible* against an in-memory dict,
-so a contract case both a fake and this could satisfy would be exactly the
-vacuous pass the plan's trap section warns about.
-`FakeTitleEmbeddingRepository` exists for the later tasks' plumbing tests
-and carries a docstring listing what it cannot see.
-"""
+"""The embedding repository, the predicate pair, and the keyset cursor."""
 
 import uuid
 from collections.abc import Iterator
@@ -267,26 +257,10 @@ async def test_a_refused_title_is_counted_as_refused_and_not_as_stale(
 async def test_the_cursor_drains_and_never_repeats_a_title(
     session: AsyncSession,
 ) -> None:
-    """Keyset, not OFFSET. `list_unmatched`'s OFFSET pagination is measured
-    at 43.7 ms at offset 0 and **388.9 ms at offset 1,126,574** -- linear per
-    page, quadratic to drain -- which is fine for an operator reading the
-    first few pages and wrong for anything that walks a population to
-    exhaustion. A backfill does exactly that.
-
-    The loop is bounded so a non-converging cursor fails this case rather
-    than hanging the suite, the same shape the watch-history backfill's
-    termination case uses.
-
-    **The `UPDATE` is what makes the missing `ORDER BY t.id` observable, and
-    without it this case ratifies its absence.** Every id here is a UUIDv7
-    minted at insert time, so a run of plain inserts leaves heap order and id
-    order as one sequence and an unordered scan is accidentally sorted --
-    measured: deleting the `order_by` passed this case untouched until this
-    line existed. The update must also be **non-HOT** to move the row: it
-    touches `name`, which `ix_titles_name_lower_year` and
-    `ix_titles_name_trgm` both index, so Postgres writes a new index entry
-    and the tuple lands at the end of the heap. Re-writing an unindexed
-    column would be a heap-only update and change nothing.
+    """Keyset, not OFFSET. `list_unmatched`'s OFFSET pagination is measured at 43.7 ms at
+    offset 0 and **388.9 ms at offset 1,126,574** -- linear per page, quadratic to drain
+    -- which is fine for an operator reading the first few pages and wrong for anything
+    that walks a population to exhaustion. A backfill does exactly that.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     expected = {await _enriched(session, f"Relay {i}") for i in range(7)}
@@ -545,20 +519,7 @@ async def test_a_vector_for_a_title_that_does_not_exist_is_a_repository_conflict
     assert await repository.count_stale(_MODEL) == 0
 
 
-# --- The cross-check, and the reason this file's docstring names it. ---
-#
-# `_FINGERPRINT_SQL` and `usher.services.search.compose_document` are two
-# implementations of one assembly. The SQL half cannot call the Python half
-# (the assembly is per-title, so it cannot be a bound parameter, and `db/` may
-# not import `services/`), so the agreement is a test rather than a type. If
-# these two ever diverge by so much as a join character the failure is
-# entirely silent: `source_fingerprint` stops being a statement about the
-# vector, every enriched title matches the stale predicate forever, the
-# backfill re-claims the whole tier every pass, and the
-# `usher.search.embeddings.stale` gauge never reaches zero. Nothing raises.
-#
-# Same discipline the generated column's stored-versus-fresh drift test gets,
-# for the same reason.
+# --- The cross-check, and the reason this file's docstring names it.
 
 _CROSS_CHECK_TITLES: list[tuple[str, dict[str, object]]] = [
     ("every column populated", {}),
@@ -588,29 +549,7 @@ _CROSS_CHECK_TITLES: list[tuple[str, dict[str, object]]] = [
 async def test_the_composer_and_the_sql_fingerprint_agree(
     session: AsyncSession, columns: dict[str, object]
 ) -> None:
-    """**The case the whole fingerprint scheme rests on.**
-
-    Runs `compose_document` in Python and `_FINGERPRINT_SQL` in Postgres over
-    the *same* row and compares the two hashes. Both halves are read out of
-    their own modules -- neither assembly is transcribed here, because a
-    hand-copied lookalike drifts and then reads like coverage, which this
-    project has recorded twice.
-
-    Four wrong composers this fails, each of which passes every unit case in
-    `tests/unit/test_services_search_document.py`: one that appends a section
-    only when the field is populated (the predicate `coalesce`s and always
-    emits six), one that joins arrays on `", "` (the predicate uses
-    `usher_array_text`, which is `array_to_string($1, ' ')`), one that
-    includes `year` (the predicate has no year column), and one that skips
-    `original_name` when it equals `name`.
-
-    The rows are parametrised over the shapes where the two spellings can
-    disagree rather than over a catalog sample: a NULL in each nullable
-    column, an empty array, a multi-element array, a value containing the
-    item separator, a value containing the section separator, non-ASCII, and
-    the degenerate title. A single fully-populated row would pass against all
-    four wrong composers but the third.
-    """
+    """**The case the whole fingerprint scheme rests on.**"""
     title = _cross_check_title(**columns)
     await _insert(session, title)
 
@@ -653,32 +592,8 @@ async def test_the_composer_refuses_exactly_the_titles_the_refused_predicate_fin
 
 
 async def test_the_second_page_still_applies_the_predicate(session: AsyncSession) -> None:
-    """**A page after the first must still be filtered, and the obvious
-    spelling of the keyset clause silently stops filtering.**
-
-    `select(...).where(a, b)` joins the fragments with `AND`, and `AND` binds
-    tighter than `OR` -- so an unparenthesised
-    `CAST(:after AS uuid) IS NULL OR t.id > CAST(:after AS uuid)` parses as
-
-        (population AND stale AND :after IS NULL) OR (t.id > :after)
-
-    On the **first** page `:after` is NULL, the left arm is the real
-    predicate and the right arm is NULL, so the answer is exactly right.
-    From the second page on the left arm is false and the whole clause
-    collapses to `t.id > :after`: every remaining row in `titles`, skeletons
-    and already-current titles alike. At 1,271,138 titles that is the whole
-    catalog enqueued for embedding -- 4-6 hours of work against 25 seconds --
-    produced by a backfill whose *first* page was correct and which reports a
-    plausible number all the way through.
-
-    **Invisible to a cursor test whose rows are all stale**, which is why the
-    drain case above did not catch it: when every row satisfies the
-    predicate, `t.id > :after` and the filtered predicate return the same
-    set. This case seeds a not-stale row and a skeleton *after* the stale one
-    in id order, so the second page is where the difference shows.
-
-    Found by driving the real sweep end to end in
-    `tests/integration/test_index_backfill.py`.
+    """**A page after the first must still be filtered, and the obvious spelling of the
+    keyset clause silently stops filtering.**
     """
     repository = PostgresTitleEmbeddingRepository(session)
     # Ids are UUIDv7 minted at construction, so constructing in this order is
@@ -763,28 +678,8 @@ async def test_an_uncredited_title_still_agrees_after_class_b_lands(
 async def test_an_indexed_title_with_credits_stops_matching_the_stale_predicate(
     session: AsyncSession,
 ) -> None:
-    """**Trap 2, as a closure property rather than as an equality of two
-    strings, and the only case that sees site three.**
-
-    Move both spellings correctly and leave `IndexService` calling
-    `compose_document(title)`, and this is what happens: the handler runs, the
-    embed is real, `usher.embedding.duration` looks healthy, the row is
-    written -- and the title still matches the stale predicate, because the
-    fingerprint it stored was computed over the M6 document while
-    `_FINGERPRINT_SQL` reads `credit_names`. The backfill re-claims it on the
-    next pass, and the pass after that.
-
-    **An infinite backfill that never errors.** Nothing raises, `usher index`
-    reports a plausible stale count that never reaches zero, and the worker is
-    busy. So the observable is not "the two hashes match" -- it is *after
-    indexing, the title stops matching*. Reproduced before the fix: with site
-    three left at the M6 call, `count_stale` came back `1` after indexing, and
-    `1` again after indexing a second time, from a handler that returned
-    successfully both times.
-
-    The embedder is a stand-in rather than the real model: what is under test
-    is which text was fingerprinted, and loading 65 MB of ONNX to find that
-    out would make this case a model test.
+    """**Trap 2, as a closure property rather than as an equality of two strings, and the
+    only case that sees site three.**
     """
     embeddings = PostgresTitleEmbeddingRepository(session)
     title = _cross_check_title(name="The Quiet Vacuum")

@@ -1,13 +1,5 @@
 # tests/unit/test_fakes_slow_transport.py
-"""`SlowTransport`'s own fidelity, where it stands in for `MockTransport`.
-
-Two suites drive `FakeEmbyServer` through *both* transports, so anywhere
-this one behaves differently is a place a test passes or fails for a reason
-that has nothing to do with the adapter. Its `max_in_flight` counter is
-worse than that: the session and adapter single-flight tests assert on it
-to prove they are genuinely concurrent, so an instrument that can over-read
-is one that can certify a test as meaningful when it is not.
-"""
+"""`SlowTransport`'s own fidelity, where it stands in for `MockTransport`."""
 
 import asyncio
 from collections.abc import AsyncIterator

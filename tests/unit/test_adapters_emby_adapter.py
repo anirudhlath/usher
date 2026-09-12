@@ -1,11 +1,4 @@
-"""EmbyAdapter behaviours the source-agnostic contract cannot express.
-
-The contract suite (run against this adapter in the next task) pins what
-every `SourceAdapter` must do. This module pins what *Emby's* adapter must
-do: which query parameters the walk sends, how it terminates, which
-endpoints a write-back uses and in which order, and how `verify` tells
-"unreachable" from "bad credentials".
-"""
+"""EmbyAdapter behaviours the source-agnostic contract cannot express."""
 
 import asyncio
 import io
@@ -166,29 +159,8 @@ async def test_the_walk_asks_for_the_types_and_fields_the_mapper_needs() -> None
 
 
 async def test_the_walk_asks_for_a_total_order_ascending() -> None:
-    """Both sort keys, pinned as literal parameters because neither is
-    demonstrable from this side of the wire.
-
-    **The tiebreak is the load-bearing one.** `StartIndex` paging reads a
-    window out of an order the server recomputes per request, so it is only
-    safe over a total order; `DateCreated` ties are the normal case after a
-    bulk import. `test_tied_timestamps_do_not_drop_items_out_of_the_paging_
-    window` is that failure end to end -- this test is only here to pin
-    *which* parameter buys it, since a server may honour any number of
-    tiebreaks and the walk has to name one.
-
-    **Ascending is the narrower claim**, and an earlier version of this
-    docstring stated the wrong reason for it. An insertion under *any* sort
-    order shifts items right, which produces duplicates -- the port permits
-    those -- not skips. What ascending buys is that a newly added item's
-    `DateCreated` puts it past the window entirely, so a mid-walk insertion
-    costs nothing at all, where descending lands it at index 0 and makes
-    every later page re-serve something already read. Skips come from
-    deletions and from tie instability instead.
-
-    `EnableTotalRecordCount` rides along here because the walk's early
-    termination depends on the count actually being returned; Emby omits it
-    unless asked.
+    """Both sort keys, pinned as literal parameters because neither is demonstrable from
+    this side of the wire.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -550,29 +522,8 @@ async def test_a_watch_state_walk_resumes_from_the_start_index_it_is_given() -> 
 
 
 async def test_a_resumed_watch_state_walk_re_yields_what_it_dropped() -> None:
-    """**The port's `start_index` number and Emby's `StartIndex` are not the
-    same quantity, and this is the case that says by how much.**
-
-    `watch_state` yields a record per payload `to_watch_state` can read, and
-    drops the ones carrying no `UserData`. `StartIndex` is an offset into the
-    server's *filtered* set and cannot see a client-side drop -- so a walk
-    that yielded 4 records out of 6 entries checkpoints `position = 4`, and
-    asking for `start_index=4` re-serves entries 4 and 5, both of which the
-    first walk already yielded and merged.
-
-    Six entries, two without `UserData`, so the divergence is 2 rather than
-    1: a one-payload drop is the kind of margin an off-by-one repair would
-    make disappear for the wrong reason.
-
-    **The direction is the entire safety argument.** The resumed walk lands
-    *early* and re-yields; it never lands late, so no record is skipped, and
-    every write on this lane is an idempotent upsert. The port's docstring
-    promises exactly that bound -- at-or-before, never after -- rather than
-    the exact alignment it claimed until 2026-08-26.
-
-    It is also **per-attempt, not cumulative**: the checkpoint counts the
-    records *this* attempt yielded, so the lag is one attempt's drops and
-    does not compound over the 3-10 attempts a full walk is expected to take.
+    """**The port's `start_index` number and Emby's `StartIndex` are not the same quantity,
+    and this is the case that says by how much.**
     """
     entries = [
         {"Id": f"movie-{index}", "Type": "Movie", "Name": f"m{index}"}
@@ -1850,26 +1801,9 @@ async def test_a_rate_limited_walk_surfaces_the_retry_hint() -> None:
 
 
 async def test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identifier() -> None:
-    """Issue #35: `PortUnavailable(f"{method} {path} failed: …")` put the
-    Emby **user id** into `sync_runs.error`, and the reported example carried
-    a real one into a public issue.
-
-    The reasoning that let it through is at `session.redact_path`'s own
-    docstring: *"safe because an Emby URL carries no credential"* -- true,
-    and not the test that was owed. `CLAUDE.md` lists a user id alongside a
-    credential and a host.
-
-    **Enumerated by driving the real adapter, not transcribed.** A table of
-    paths written by hand proves nothing about the set it was meant to
-    cover -- the same failure `is_servable_path`'s pair table is guarded
-    against in `.claude/rules/ports-and-error-taxonomy.md`. This exercises
-    every method that issues a request and reads the paths off the wire, so
-    a route added later with an id in a new position fails this case rather
-    than shipping.
-
-    The control fires first and it is not optional: it asserts the raw paths
-    genuinely *do* carry both ids, so a redaction checked against a
-    recording that never held one cannot pass.
+    """Issue #35: `PortUnavailable(f"{method} {path} failed: …")` put the Emby **user id**
+    into `sync_runs.error`, and the reported example carried a real one into a public
+    issue.
     """
     seen: list[str] = []
     server = FakeEmbyServer()

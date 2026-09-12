@@ -1,10 +1,4 @@
-"""`Person`, `Credit`, `Collection`, and the four calls their shapes encode.
-
-Unit, not integration: every claim here is about a pydantic model, and the
-paired schema assertions (CHECK bodies, FK delete rules, the 1:1
-correspondence) are Task 5's and live in tests/unit/test_db_models_people.py
-and tests/integration/test_people_schema.py.
-"""
+"""`Person`, `Credit`, `Collection`, and the four calls their shapes encode."""
 
 import uuid
 

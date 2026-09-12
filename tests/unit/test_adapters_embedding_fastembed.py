@@ -1,18 +1,4 @@
-"""`FastEmbedEmbedder`'s two decisions that do not need a loaded model.
-
-**No case here loads `fastembed`.** The package lives behind an extra and is
-not installed in the environment this suite runs in, which is itself the
-point: the constructor's import is local, so a deployment without the extra
-must be able to import this module, run every other lane, and fail only where
-it would have used a model.
-
-What is exercised instead is the code that runs *around* the model — the norm
-check, the batch-length check, the empty-batch short circuit, and the
-runtime/checkpoint split — by driving `embed` with the model attribute
-replaced. That is a real seam rather than a convenience: `_embed_sync` is the
-one method that touches the library, and everything worth asserting is on
-either side of it.
-"""
+"""`FastEmbedEmbedder`'s two decisions that do not need a loaded model."""
 
 import importlib
 import math

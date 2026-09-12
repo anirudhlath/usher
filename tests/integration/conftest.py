@@ -1,48 +1,4 @@
-"""Integration fixtures backed by a real PostgreSQL with pgvector.
-
-`postgres_url` builds its schema by running the real Alembic migration
-chain (`alembic upgrade head`), not `Base.metadata.create_all`. The
-migration is hand-maintained for two kinds of change autogenerate can't
-see at all -- CHECK constraint bodies, and the three `set_updated_at`
-triggers (see CLAUDE.md's Commands section and the migration's own
-comments) -- so a suite that never actually executes it can drift from
-`Base.metadata` with nothing to notice. Verified directly: against a
-`create_all`-built schema, `SELECT tgname FROM pg_trigger WHERE NOT
-tgisinternal` returns nothing -- the triggers whose own migration comment
-calls them "what actually guarantees updated_at reflects every write,
-regardless of how it was made" had never once run in this suite (see
-test_migrations.py).
-
-Running the real migration is real DDL against a real database, much more
-expensive than `create_all`/`drop_all` against a from-scratch schema in an
-empty one, so it runs once per test session (`postgres_url` is
-session-scoped) instead of once per test. Each test still gets a fully
-isolated database: `session` opens its own connection, starts a
-transaction, and binds a plain `AsyncSession` to it. SQLAlchemy's default
-`join_transaction_mode` ("conditional_savepoint") resolves to
-"rollback_only" for a connection that already has a plain, non-nested
-transaction open, so the session's own flush()/begin_nested() calls all
-participate in that one transaction (verified directly, including that
-PostgresTitleRepository's own begin_nested() SAVEPOINTs nest correctly
-inside it) -- and the whole thing is rolled back afterward, undoing
-everything the test did. That replaces 23 full DDL cycles (create every
-table, index, and constraint; drop them all again) with one DDL cycle plus
-23 cheap connect/transaction/rollback cycles. It also means no fixture
-holds mutable state across tests -- each test's isolation comes entirely
-from its own connection and transaction, never from resetting something
-shared -- which is what would matter for running this suite under
-pytest-xdist, should that ever get adopted.
-
-**The one thing the rollback does not undo is `pg_class`.** `ANALYZE` and
-`CREATE INDEX` both write `reltuples`/`relpages` with an in-place catalog
-update, so a test that seeds, analyzes and rolls back leaves every later test
-in the process planning against rows that are gone -- issues #26, #43 and #79.
-`session`'s teardown therefore asserts, after its own rollback, that `pg_class`
-still describes this database, and repairs what it finds. Take the `analyze`
-fixture rather than executing `ANALYZE` directly; `index_suspended` and
-`A_DECISIVE_MARGIN` are the other half, for a test whose subject is which index
-a plan takes.
-"""
+"""Integration fixtures backed by a real PostgreSQL with pgvector."""
 
 import os
 import re
@@ -165,17 +121,9 @@ def run_alembic(database_url: str, target: str, *, direction: str | None = None)
 
 @pytest.fixture(scope="session")
 def postgres_url() -> Iterator[str]:
-    # `testcontainers.community.postgres`, not `testcontainers.postgres`:
-    # the latter is a shim that raises a DeprecationWarning at import time
-    # and is the only warning this suite emits. Same class, same behaviour
-    # -- confirmed by running the whole integration suite against it -- and
-    # it removes a future break rather than deferring one, since a shim
-    # that announces its own removal will eventually take it.
-    #
-    # Still a local import. `pytest -m "not integration"` imports this whole
-    # conftest module even though it filters every test in it back out, and
-    # `testcontainers` pulls in `docker`; deferring keeps that off the fast
-    # path.
+    # `testcontainers.community.postgres`, not `testcontainers.postgres`: the latter is
+    # a shim that raises a DeprecationWarning at import time and is the only warning
+    # this suite emits.
     from testcontainers.community.postgres import PostgresContainer
 
     with PostgresContainer(
@@ -258,32 +206,8 @@ async def _assert_pg_class_still_describes_this_database(
     expected: frozenset[str],
     inherited: frozenset[str],
 ) -> None:
-    """The property every test in this directory is entitled to assume:
-    `pg_class` describes the database it is about to plan against.
-
-    **`ANALYZE` writes `reltuples` and `relpages` with an in-place catalog
-    update, so `session`'s rollback does not take them back.** A test that
-    seeds two thousand rows, `ANALYZE`s, and rolls back leaves every *later*
-    test in the process planning against a row count that no longer exists --
-    issue #26's mechanism, inventoried per-file in #43, and the reason #79
-    exists. Per-file repairs enumerate; this asserts the property, so a leak
-    nobody has enumerated fails **in the test that caused it** rather than in
-    whichever unlucky test plans next.
-
-    **It repairs what it found before failing, which is not politeness.** The
-    leak is durable, so a guard that only reports turns one leaking test into
-    an error in that test *and in every test after it* -- measured, running
-    `test_raw_payload_store.py` alone: two errors, the second on a case that
-    did nothing wrong. Cleaning up leaves exactly one red, on the test that
-    caused it.
-
-    **And it fails only on what this test *introduced*, which is the other
-    half of naming the culprit.** `inherited` is the same reading taken at the
-    top of the test, so a lie already in place when it started is repaired and
-    not blamed on it. Without that, a table analyzed while rows were genuinely
-    committed -- which route-driven tests do, since `get_session` is the
-    request's commit boundary -- and emptied later reds whichever test happens
-    to run next.
+    """The property every test in this directory is entitled to assume: `pg_class`
+    describes the database it is about to plan against.
     """
     lying = await _tables_pg_class_is_wrong_about(conn, forgiven)
     if lying:
@@ -431,15 +355,8 @@ async def session(
         async with factory(bind=conn) as s:
             yield s
         await conn.rollback()
-        # Switching isolation level needs the connection to be between
-        # transactions, which the rollback above has just made true. Both the
-        # restore and the guard run here rather than in a fixture of their own
-        # because a fixture's teardown ordering is *positional* -- the
-        # convention "declare it before `session`" is one signature edit away
-        # from putting a `VACUUM` in front of the rollback it waits on, which
-        # is not an assertion failure but a hang on a relation lock. Measured:
-        # an autouse fixture that merely touched `session` was enough to
-        # reorder it that way.
+        # Switching isolation level needs the connection to be between transactions,
+        # which the rollback above has just made true.
         autocommit = await conn.execution_options(isolation_level="AUTOCOMMIT")
         if _analyzed_tables:
             await _restore_the_statistics(autocommit, frozenset(_analyzed_tables))

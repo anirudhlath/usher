@@ -1,19 +1,4 @@
-"""`HomeService` -- proposal, scoring, and the diversity constraints.
-
-Every case here asserts on the **sequence** the composer returns, never on
-membership. `assert row in screen` is satisfied by a composer that returns
-every proposal in registry order, which is precisely the implementation these
-cases exist to kill -- and a screen returned in the wrong order is populated,
-correctly shaped, and wrong forever.
-
-**The stubs are `FakeRowProvider`/`FakeRow` and not a private class**, which
-is a correction to the plan on two points. Task 29's own `_StubProvider`
-snippet spells `build(self, ctx, proposal)`; the shipped `Row.build(ctx)` takes
-no proposal, because `ScoredRow` carries the `Row` itself and a per-seed row is
-a per-seed *instance*. And a second stub in this file would be a second answer
-to "what does a fake row do", one file away from the one `tests/fakes/` already
-holds.
-"""
+"""`HomeService` -- proposal, scoring, and the diversity constraints."""
 
 import ast
 import dataclasses
@@ -356,29 +341,8 @@ async def test_the_screen_is_never_longer_than_the_row_ceiling(ctx: RowContext) 
 async def test_the_default_row_ceiling_is_reachable_now_that_a_third_family_exists(
     ctx: RowContext,
 ) -> None:
-    """**The branch `RowFamily.CURATED` made reachable**, and the reason
-    `domain/rows.py` declined to pre-declare that member.
-
-    With two families the longest screen this composer could return was
-    **nine** rows -- one pinned plus `_MAX_PER_FAMILY` (4) from each of `SOURCE`
-    and `SIMILARITY` -- and the *registry* could only reach eight of those,
-    since `BecauseYouWatchedProvider` is the only `SIMILARITY` emitter and its
-    `_MAX_SEEDS` is 3. Both are under the default `_MAX_ROWS = 10`, so it
-    truncated nothing at any input, and `services/home.py` said so in its own
-    docstring rather than leaving it to be found. The case above reaches the
-    slice only by *injecting* `max_rows=4`. Three families put thirteen
-    candidates past the cap and the shipped ceiling starts doing work.
-
-    The "one pinned" term is a registry property rather than a composer one --
-    `_select` sets pinned candidates aside before the cap with no bound of its
-    own -- and `test_rows_invariants.py::test_continue_watching_is_the_only_
-    provider_that_pins_and_it_pins_one_row` is where that is asserted.
-
-    **Asserted on what was built, not only on what came back**, and that is the
-    whole of the teeth: `_order` bounds the *returned* sequence by the same
-    `_max_rows`, so deleting `[: self._max_rows]` from `_select` still returns
-    ten rows -- having hydrated thirteen. PRD 06 says "builds the top N", and
-    over-selection is invisible to a length assertion.
+    """**The branch `RowFamily.CURATED` made reachable**, and the reason `domain/rows.py`
+    declined to pre-declare that member.
     """
     pinned = _stub("continue-watching", score=1.0, pinned=True)
     capped = [
@@ -518,35 +482,8 @@ async def test_a_proposal_the_cap_declined_is_selected_zero_rather_than_absent(
 
 
 async def test_a_screen_the_cache_can_answer_reads_no_taste_at_all(ctx: RowContext) -> None:
-    """**PRD 06's ~30 s screen cache is meant to cost nothing, and one
-    dependency was making it cost three statements.**
-
-    `RowContext.affinities` was `await taste.genre_affinity(user.id)` evaluated
-    while FastAPI assembled the context -- i.e. before `compose_report` could
-    look in the cache -- so a screen hit had already paid `list_recent(50)`,
-    `list_by_ids(50)` and the library-wide `unnest(genres) GROUP BY`. On the
-    measured 1,271,570-title catalog that is the most expensive thing a *hit*
-    does, and most requests are hits.
-
-    So the field is a callable, awaited by the one provider that reads it, and
-    this case asserts both halves of what that has to mean:
-
-    - **one** read on a miss, which is what makes the deferral a deferral and
-      not a field quietly wired to nothing (the failure
-      `.claude/rules/testing-discipline.md` records for this exact dependency);
-    - **still one** after a second compose the cache answers, which is the
-      finding.
-
-    **What "before" was, stated exactly, because there is no honest count to
-    quote here.** Against the old shape this case is not expressible at all --
-    the field was the sequence, so a counting callable in it fails inside
-    `GenreAffinityProvider.propose` with `TypeError: 'function' object is not
-    subscriptable`, which is what it did. The before/after *number* belongs to
-    the dependency and is measured there:
-    `test_api_home.py::test_the_route_does_not_read_a_households_taste_until_a_
-    row_asks_for_it` went from 1 read to 0 at context assembly. This case is
-    the other half -- that the read the assembly no longer does is done by the
-    composition that needs it, and by no other.
+    """**PRD 06's ~30 s screen cache is meant to cost nothing, and one dependency was
+    making it cost three statements.**
     """
     reads = 0
 
@@ -575,29 +512,8 @@ async def test_a_screen_the_cache_can_answer_reads_no_taste_at_all(ctx: RowConte
     assert cache.get_screen(ctx.user.id) is not None
 
 
-# ---------------------------------------------------------------------------
-# The registry left-joined onto the stored overrides (M9 E2).
-#
-# `row_provider_settings` ships **empty** and is never seeded, so
-# `RowProviderSettingsRepository.overrides()` answers only what an operator has
-# touched and **absence is meaningful**. A caller spelling `.get(slug, False)`
-# therefore disables every provider nobody has ever touched -- ten shelves
-# gone, on a virgin database, silently. Three docstrings on the port warn about
-# it and nothing in the types prevents it; these cases are what does.
-#
-# **None of the three registry pins moves, and that was checked rather than
-# assumed.** `test_rows_invariants.py` (class names + `len(...) == 10`),
-# `test_the_registry_holds_the_ten_providers_prd_06_specifies_under_their_own_
-# names` above (`slug_prefix`) and `test_domain_rows.py` (`RowFamily`) all
-# assert about `ROW_PROVIDERS` and `RowFamily`, and **neither is touched**: the
-# filter applies to *what a composer is handed*, and the overrides table ships
-# empty, so the default composition is what M8 left. That is also why no
-# row-count assertion moves the way `RowFamily.CURATED` moved them (M8 trap 1)
-# -- the reachable screen length is unchanged until a row is stored, and the
-# two cases that assert a count (`len(screen) == 10` here, `len(ROW_PROVIDERS)
-# == 10` in `test_api_home.py`) are over an explicit stub list and over the
-# untouched registry respectively.
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- The
+# registry left-joined onto the stored overrides (M9 E2).
 
 
 def test_a_provider_no_one_has_ever_touched_renders_as_enabled() -> None:

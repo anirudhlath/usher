@@ -1,39 +1,4 @@
-"""Regression coverage for the fixture actually running the real migration.
-
-`tests/integration/conftest.py` used to build its schema with
-`Base.metadata.create_all` -- which only ever sees SQLAlchemy `Table`
-metadata, never the hand-written `op.execute(...)` calls the migration
-itself needs for triggers and functions (CLAUDE.md's Commands section
-already documents that `--autogenerate` is blind to these; the same
-blindness applies to `create_all`, for the same reason: neither one runs
-Alembic's actual migration script). That meant the Alembic migration chain
-was never executed against a live Postgres anywhere in this suite, so it
-and `Base.metadata` were free to drift with nothing here to notice.
-
-Both tests take `postgres_url` directly, not `session` -- deliberately: the
-schema must come from whatever `postgres_url` itself builds, so that these
-tests fail if that fixture ever regresses back to not running the
-migration. Both were written and run before the fixture fix, confirming
-each fails for the right reason: `test_migration_creates_the_updated_at_triggers`
-found no triggers at all (`postgres_url` handed back a schema-less
-database -- schema creation used to live entirely in the `session`
-fixture, via `Base.metadata.create_all`, which these two tests don't
-request), and `test_migration_matches_the_orm_metadata` reported sixteen
-`add_table`-shaped diffs for the same reason. Neither failure is
-hypothetical or contrived.
-
-`test_migration_matches_the_orm_metadata` turns out not to be enough on its
-own, which M4 found by mutation rather than by reading: deleting one
-`sa.CheckConstraint(...)` line from a migration leaves this whole file
-green. `compare_metadata` reports nothing at all for a CHECK constraint
-present in `Base.metadata` and absent from the database -- the same
-blindness CLAUDE.md records for a *changed* CHECK body, one step further
-than it was stated. Since CHECK constraints are the only thing standing
-between the bulk `COPY` path and a negative episode number (that path
-never constructs a Pydantic model), that gap mattered.
-`test_every_check_constraint_in_the_models_exists_in_the_database` closes
-it by reading `pg_constraint` directly.
-"""
+"""Regression coverage for the fixture actually running the real migration."""
 
 import asyncio
 import functools
@@ -85,33 +50,10 @@ async def test_migration_creates_the_updated_at_triggers(postgres_url: str) -> N
         # `raw_payloads` have no `updated_at` column at all.
         "trg_seasons_set_updated_at",
         "trg_episodes_set_updated_at",
-        # M7. Both are written by `INSERT ... ON CONFLICT DO UPDATE` out of a
-        # temporary staging table, which `onupdate=` never reaches. There is
-        # deliberately **no** `trg_credits_set_updated_at`: `credits` has no
-        # `updated_at` column at all, because every write to it is an insert
-        # -- a title's credit set is replaced rather than merged, and an
-        # upsert cannot express the deletion of a credit that disappeared
-        # upstream. If a run demands that seventh name, the model grew an
-        # `updated_at` it should not have.
+        # M7.
         "trg_people_set_updated_at",
         "trg_collections_set_updated_at",
         # M8 adds `curated_rows` and `llm_calls` and this set does not move.
-        # Both are write-once artefacts -- a curated row is replaced
-        # wholesale, an `llm_calls` row records something that already
-        # happened -- so neither has an `updated_at` for a trigger to own.
-        # `db/models/curation.py` says so on both tables, because the
-        # tempting edit is to add one "for consistency" and it would fail
-        # here rather than there.
-        #
-        # M9's `m09a` adds four tables and this set still does not move, with
-        # a different reason each, all of them precedents already in this
-        # comment: `images` is replaced wholesale per owner (`credits`', which
-        # has no `updated_at` at all for exactly that reason);
-        # `search_queries` records something that already happened
-        # (`llm_calls`'); `title_search_names` is replaced per
-        # `(title_id, kind)` (`credits`' again); and
-        # `row_provider_settings`' one writer -- the admin route -- sets
-        # `updated_at` explicitly on every statement (`jobs`').
     }
 
 
@@ -346,35 +288,10 @@ async def _insert_series_tree(
 async def test_the_row_read_indexes_carry_the_clauses_that_make_them_work(
     session: AsyncSession,
 ) -> None:
-    """`compare_metadata` does not diff a partial index's predicate or a
-    btree's null ordering, so `test_migration_matches_the_orm_metadata` is
-    green against an index missing either -- and an index missing either is
-    not an error, it just silently stops serving the query it was built for.
-
-    `ix_watch_states_user_recent` without `NULLS LAST` serves the filter and
-    cannot supply the order, so Postgres replaces an incremental sort with a
-    full one and Continue Watching sorts the household's whole per-user set
-    on every home screen. The rows it returns are identical, which is why
-    nothing else can see it.
-
-    `ix_media_items_recently_added` without its `WHERE` is a larger index
-    over every row including the review queue and every retracted file.
-    Correct answers, wrong size, and no test would notice.
-
-    `ix_curated_rows_user_newest` is M8's, and its `DESC` is the one entry
-    here that is **not** plan-observable -- measured on
-    `pgvector/pgvector:pg17` at 30,000 rows, an ascending index answers
-    `ORDER BY generated_at DESC` with an `Index Scan Backward` at the same
-    cost, because a btree is bidirectional and the leading column is fixed by
-    equality. It is declared, and pinned here, for what a *wrong* direction
-    costs later: `ffc` dropped `ix_titles_popularity` for exactly that, and
-    the day this read grows a second ordering key the direction stops being
-    free. So this assertion pins a declaration rather than a plan, and says
-    so -- the alternative is a comment nothing checks.
-
-    Asserted off `pg_indexes.indexdef` -- what Postgres will actually do --
-    rather than off `Base.metadata`, the same discipline
-    `test_search_schema.py` applies to `confdeltype`.
+    """`compare_metadata` does not diff a partial index's predicate or a btree's null
+    ordering, so `test_migration_matches_the_orm_metadata` is green against an index
+    missing either -- and an index missing either is not an error, it just silently
+    stops serving the query it was built for.
     """
     for name, expected in (
         (
@@ -495,28 +412,8 @@ async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url:
 
 
 async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str) -> None:
-    """**The one thing `m10b` does that no schema reader in this file can
-    see**: `ADD COLUMN … NOT NULL` against a table that already holds rows.
-
-    Every other case here migrates a *freshly created, empty* database, and
-    `env.py` never passes `compare_server_default` -- so the server default
-    is unobservable to all of them. Measured: deleting
-    `server_default=sa.text("0")` from `m10b.upgrade()`'s `sa.Column` left
-    the whole unit suite and all eleven cases in this file green.
-
-    It is not a hypothetical row. Issue #41 is *"this lane has failed
-    repeatedly"* — three rows left `running` and aged 7-11 h, plus every
-    attempt before them — so `sync_runs` on any deployment reaching this
-    revision is non-empty by construction, and without the default it aborts
-    with `column "position" of relation "sync_runs" contains null values` --
-    the deployment cannot roll forward at all.
-
-    Seeded **below** the revision and read above it, the shape
-    `test_m10a_moves_field_provenance_keys_in_both_directions` uses, because
-    the backfill is only observable across the boundary. One assertion pins
-    three things at once: that the column is `NOT NULL`, that it has a
-    default, and that the default is the 0 a walk restarting from the top
-    means.
+    """**The one thing `m10b` does that no schema reader in this file can see**: `ADD
+    COLUMN … NOT NULL` against a table that already holds rows.
     """
     admin, scratch, url = await scratch_database(postgres_url, "resume")
     source_id, run_id = new_id(), new_id()
@@ -539,15 +436,9 @@ async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str
                         "device": "unused",
                     },
                 )
-                # Any pre-existing row exercises the backfill; `failed` is
-                # chosen because it is a *terminal* row, so the assertion
-                # below cannot be confused with anything the resume logic
-                # does. ⚠️ It is **not** the shape #41 observed: that
-                # deployment's three stuck rows are `running`, aged 7-11 h,
-                # which is what a worker killed mid-walk leaves. The column
-                # lands identically on both, and the service-level case for
-                # the `running` shape is
-                # `test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned`.
+                # Any pre-existing row exercises the backfill; `failed` is chosen
+                # because it is a *terminal* row, so the assertion below cannot be
+                # confused with anything the resume logic does.
                 await conn.execute(
                     text(
                         "INSERT INTO sync_runs (id, source_id, kind, status) "
@@ -578,161 +469,23 @@ async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str
 
 
 async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) -> None:
-    """`downgrade base` then `upgrade head`, on a throwaway database, with
-    the index set compared before and after.
-
-    **This exists because a mutation survived without it.** Deleting the
-    `op.create_index("ix_watch_states_user_played", ...)` from `ff`'s
-    `downgrade()` passes every other case in this file, and it would pass
-    forever: the session-scoped schema is built by one `upgrade head` and
-    never goes down, so an upgrade-only migration is green in a suite that
-    never reverses one. What it costs in production is a schema that is one
-    index short of where it started after a rollback -- and `watch_states`
-    is the table whose merge path runs a million times a night.
-
-    A throwaway database rather than the shared one, because
-    `downgrade base` drops every table and every other test in this run is
-    built on the schema it would take with it.
-
-    Deliberately compares the whole index set rather than the two indexes
-    this milestone touches: a downgrade that forgets *any* index is the same
-    defect, and naming only the new ones would make this case blind to the
-    next one.
-
-    **The step-back block has two halves and they answer different
-    questions.** `-1` exercises whatever the *current head* is, so it moves
-    with the chain and is what catches a brand-new migration whose
-    `downgrade()` is a no-op. The named `fe1d40c8b7a3` target below it
-    exercises `ff` specifically, which `-1` stopped reaching the moment `ffa`
-    landed on top -- the failure this case had on the first run after that,
-    and a good illustration of why a step count is the wrong pin.
-
-    **Head is `m10f` and the `-1` half is re-pointed at its one artefact** --
-    `sync_runs.error_code`, asserted absent one step below head, because a
-    creating head's `downgrade()` is what removes it. **One artefact, one
-    assertion**: the column carries no constraint and no index, so there is
-    nothing that could be dropped independently of it. That is the
-    **sixteenth** landing in a row to break and re-point this block (`ffa`,
-    `ffb`, `ffc`, `m08a`, `m08b`, `m09a`, `m09c`, `m09d`, `m09e`, `m09f`,
-    `m10a`, `m10b`, `m10c`, `m10d`, `m10e`, `m10f`). ⚠️ Read that number
-    against the *seven* this docstring claimed until 2026-08-25: five landings
-    re-pointed the block and left the prose alone, so the jump is a gap in the
-    record rather than a burst of migrations. `.claude/rules/db-and-sql.md`
-    carries the same count and the same caveat.
-
-    **The worked example below is `m09c` and is kept because it is the
-    better one**, not because it is the head. Its predecessor asserted
-    `m09a`'s four primary keys were *absent*, which held because
-    `-1`-from-`m09a` ran `m09a.downgrade()` and dropped its four tables.
-    `-1`-from-`m09c` runs `m09c.downgrade()` instead and stops at the `m09a`
-    state, where all four are present -- so the inherited assertion
-    **failed, loudly and immediately**, and it was run and watched to fail
-    before it was touched (`AssertionError: assert 'pk_images' not in {...}`).
-
-    `m09c` creates no table. It does three things and needs an assertion per
-    artefact *kind*, which is the "one per table" rule generalised to a head
-    that alters one:
-
-    - a unique **constraint**, `uq_images_owner_provider_path`, which carries
-      an index of the same name and so is visible to `index_set`;
-    - a **column rename**, `remote_url` -> `provider_path`, visible only to
-      `column_set`;
-    - a **constraint rename**, `ck_images_remote_url_not_empty` ->
-      `..._provider_path_not_empty`, visible to neither, which is why
-      `_constraint_set` exists. That one is worth spelling out: a
-      `downgrade()` that forgot it would leave a CHECK named for a column that
-      no longer exists, and **the whole-chain `base`/`head` half cannot see
-      it** -- `base` drops the table and `head` rebuilds it clean, exactly the
-      blind spot `column_set`'s own docstring records for a column-only
-      migration.
-
-    Each head's displaced assertions move into the revision-pinned block
-    below, where revision ids do not drift -- displaced *because they had
-    teeth*, on the first run with the new head present. `m09a`'s five moved
-    when `m09c` landed; `m10a`'s seven moved when `m10b` did; `m10b`'s one
-    moved when `m10c` did; `m10c`'s five moved when `m10d` did; `m10d`'s one
-    when `m10e` did; and `m10e`'s one when `m10f` did.
-
-    That is the general case rather than this migration's luck, and it is
-    worth stating because the opposite was written here first and was wrong:
-    **an inherited `-1` assertion that had teeth cannot survive a new head.**
-    Having teeth *means* being true at the state `-1` lands on and false at
-    the head's own state -- that is what "observes the head's `downgrade()`"
-    is -- and a new head makes `-1` land on exactly the state where it is
-    false. The direction of the assertion has nothing to do with it: `ffc`'s
-    was positive (`in`) and broke; `ffb`'s was negative (`not in`) and broke
-    too, because `-1`-from-`ffc` lands at the `ffb` state where
-    `blend_fingerprint` is present. Sixteen landings, sixteen loud breaks --
-    the same sixteen the paragraph above counts, which is the point of
-    stating the number in both places -- which only works if both are
-    maintained.
-    Both said *seven* until 2026-08-25, five landings after they stopped
-    being true, so the redundancy meant to catch a stale count was two stale
-    copies agreeing with each other. **So the
-    alarm to watch for is a `-1` half that stays
-    green after a new migration**, which means the assertion it inherited
-    never had teeth. `.claude/rules/db-and-sql.md` carries the measurement.
-
-    The displaced assertion has moved into the revision-pinned block below,
-    where revision ids do not drift.
+    """`downgrade base` then `upgrade head`, on a throwaway database, with the index set
+    compared before and after.
     """
     admin, scratch, url = await scratch_database(postgres_url, "cycle")
     try:
         await asyncio.to_thread(run_alembic, url, "head")
         before = await index_set(url)
 
-        # One step back first, which is what an operator rolling back the
-        # last migration actually runs -- and the only state in which a
-        # forgotten `drop_index`, or (for `ffc`) a forgotten `create_index` in
-        # its own `downgrade`, is observable at all. Going straight to `base`
-        # drops the tables, and a table takes its indexes with it, so a
-        # downgrade that forgets one is invisible from there.
+        # One step back first, which is what an operator rolling back the last migration
+        # actually runs -- and the only state in which a forgotten `drop_index`, or (for
+        # `ffc`) a forgotten `create_index` in its own `downgrade`, is observable at
+        # all.
         await asyncio.to_thread(run_alembic, url, "-1")
-        # **Asserted against whatever the current head actually reverses**, so
-        # every new migration breaks this block and has to re-point it. That
-        # is the design rather than a defect: the assertion is only doing its
-        # job while it is false at the head's own state, which is precisely
-        # what makes it fail the moment `-1` starts landing there. Group F
-        # re-pointed it for `ffa`, `af64ba2` for `ffb`, M7 Task 36 for `ffc`,
-        # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`, M9 Task M1 for `m09a`,
-        # M9 Task C2 for `m09c`, T4R for `m09d`, then `m09e`, `m09f` and
-        # `m10a` in turn, issue #41's Task 1 for `m10b`, M10's J1 for `m10c`,
-        # and the polish milestone's 1D, 1E and 1F for `m10d`, `m10e` and
-        # `m10f` — sixteen. (The three before `m10b` had been going unrecorded
-        # here: the list said `m09d` while the count below said twelve, so it
-        # read as a jump rather than as the omission it was.) It is cheaper
-        # than a step count, which keeps passing for the wrong reason instead
-        # of failing for the right one.
-        #
-        # **The direction of the assertion does not decide this.** `m09c`
-        # creates a constraint and renames a column, so its artefacts are
-        # asserted *absent* and the pre-rename name *present*; `ffc` dropped
-        # an index so its artefact was asserted present. Both spellings break
-        # for the same reason when a head lands on them -- verified against
-        # the real chain, see this test's docstring. You do not get to pick
-        # the direction; the head's own `downgrade()` does.
-        #
-        # **One assertion per artefact kind**, which is the rule `m08a` needed
-        # per *table* generalised to a head that alters one. `m09c` reverses
-        # three things and each is invisible to the other two's reader: a
-        # unique constraint (an index, so `index_set`), a column rename
-        # (`column_set`), and a CHECK's rename (`_constraint_set`, which
-        # exists for this -- see that helper).
-        #
-        # The mutation this block catches is a `downgrade()` body replaced by
-        # `pass`, which no other case in this suite can see -- the shared
-        # schema is built by one `upgrade head` and never goes down, and the
-        # whole-chain `base` round trip below drops every table anyway.
-        # **`m10f`'s one artefact, re-pointed here the moment it became head**
-        # — the sixteenth landing in a row to do this. `m10f` *creates*, so
-        # the assertion is negative: one step below head the column does not
-        # exist, and only `m10f.upgrade()` makes it.
-        #
-        # **One artefact, one assertion**, which is `m10b`'s shape rather than
-        # `m10c`'s: `error_code` carries no CHECK and no index, so there is
-        # nothing a `downgrade()` could drop the column and forget. Its
-        # backfill is not an artefact either — a column-adding revision's
-        # inverse is dropping the column, and the rows it read are gone with it.
+        # **Asserted against whatever the current head actually reverses**, so every new
+        # migration breaks this block and has to re-point it. Sixteen landings,
+        # sixteen loud breaks -- `test_db_migration_status.py` reds if that count
+        # and the chain on disk disagree, here or in `db-and-sql.md`.
         at_m10e_columns = await column_set(url, "sync_runs")
         assert "error_code" not in at_m10e_columns, "error_code should not exist below m10f"
         # The premise, for the reason the `m09a` stop below records: an empty
@@ -768,19 +521,10 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
             "the premise: `title_neighbors` still exists at `m10c`"
         )
 
-        # **A named stop at `m10b`, holding `m10c`'s five.** Displaced from the
-        # `-1` half the moment `m10d` became head, and displaced *because they
-        # had teeth*: `-1`-from-`m10d` landed on `m10c`'s applied state, where
-        # all five are present and every `not in` below is false.
-        #
-        # **Five artefacts, five assertions**, and here that rule is
-        # load-bearing in a way it is not for a one-column head: `m10c` touches
-        # two tables and neither is dropped by anything below it, so a
-        # `downgrade()` that dropped the two columns and forgot the three
-        # indexes leaves all three behind on live tables and satisfies a check
-        # naming only `surface`. The two columns are invisible to `index_set`
-        # and the three indexes to `column_set`, which is `m09c`'s
-        # per-artefact-kind rule as well.
+        # **A named stop at `m10b`, holding `m10c`'s five.** Displaced from the `-1`
+        # half the moment `m10d` became head, and displaced *because they had teeth*:
+        # `-1`-from-`m10d` landed on `m10c`'s applied state, where all five are present
+        # and every `not in` below is false.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10b", direction="down"))
         at_m10b_columns = await column_set(url, "search_queries")
         assert "surface" not in at_m10b_columns, "surface should not exist below m10c"
@@ -792,36 +536,19 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         assert "ix_llm_calls_generation_id" not in at_m10b_indexes
         assert "pk_llm_calls" in at_m10b_indexes, "the premise: `llm_calls` still exists at `m10b`"
 
-        # **A named stop at `m10a`, holding `m10b`'s one.** Displaced from the
-        # `-1` half the moment `m10c` became head, and displaced *because it
-        # had teeth*: `-1`-from-`m10c` lands on `m10b`'s applied state, where
-        # `sync_runs.position` is present and `not in` is false. Run and
-        # watched to fail before it was touched — `AssertionError: position
-        # should not exist below m10b`.
-        #
-        # **One artefact, not two**, and the CHECK is the omission worth
-        # naming: `ck_sync_runs_position_non_negative` cannot outlive the
-        # column it constrains, so a `downgrade()` that dropped the column and
-        # forgot the constraint is not a state Postgres can be in. That is the
-        # same redundancy `m08a` shipped an index assertion for and had it
-        # removed.
+        # **A named stop at `m10a`, holding `m10b`'s one.** Displaced from the `-1` half
+        # the moment `m10c` became head, and displaced *because it had teeth*:
+        # `-1`-from-`m10c` lands on `m10b`'s applied state, where `sync_runs.position`
+        # is present and `not in` is false.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10a", direction="down"))
         at_m10a_columns = await column_set(url, "sync_runs")
         assert "position" not in at_m10a_columns, "position should not exist below m10b"
         assert at_m10a_columns, "the premise: `sync_runs` still exists at `m10a`"
 
-        # **A named stop at `m09f`, holding `m10a`'s seven.** Displaced from
-        # the `-1` half the moment `m10b` became head, and displaced *because
-        # they had teeth*: `-1`-from-`m10b` lands on `m10a`'s applied state,
-        # where the renames have happened and every `not in` below is false.
-        #
-        # `m10a` is a *renaming* head, so `column_set` carries it in both
-        # directions at once: the new spellings are absent here and the old
-        # ones present, and a `downgrade()` that renamed only some of them
-        # fails on the half it forgot. One assertion per artefact kind — the
-        # columns via `column_set`, the constraints via `_constraint_set`,
-        # because a rename that moved a column and left its CHECK named for
-        # the old one is invisible to the column reader.
+        # **A named stop at `m09f`, holding `m10a`'s seven.** Displaced from the `-1`
+        # half the moment `m10b` became head, and displaced *because they had teeth*:
+        # `-1`-from-`m10b` lands on `m10a`'s applied state, where the renames have
+        # happened and every `not in` below is false.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09f", direction="down"))
         at_m09f_columns = await column_set(url, "titles")
         for new in ("tmdb_vote_average", "tmdb_vote_count", "tmdb_popularity"):
@@ -861,15 +588,10 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         assert await _column_type(url, "user_taste", "centroid") == "halfvec(384)"
         assert "ix_title_embeddings_hnsw" in await index_set(url)
 
-        # **A named stop at `m09c`, holding `m09d`'s five.** Displaced from the
-        # `-1` half the moment `m09e` became head, and displaced *because they
-        # had teeth*: `-1`-from-`m09e` lands on `m09d`'s applied state, where
-        # every one of these artefacts is present and every `not in` above was
-        # false. Nine landings, nine loud breaks.
-        #
-        # `m09d` is a creating head, so the direction is `not in` -- three
-        # artefact kinds, one assertion each, because none is observable
-        # through another's reader.
+        # **A named stop at `m09c`, holding `m09d`'s five.** Displaced from the `-1`
+        # half the moment `m09e` became head, and displaced *because they had teeth*:
+        # `-1`-from-`m09e` lands on `m09d`'s applied state, where every one of these
+        # artefacts is present and every `not in` above was false.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09c", direction="down"))
         at_m09c = await index_set(url)
         assert "ix_credits_source_natural_key" not in at_m09c
@@ -883,34 +605,17 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         assert "tmdb_id" in people_columns
         assert "ck_people_imdb_id_not_empty" not in await _constraint_set(url, "people")
 
-        # **A second named stop, at `m09a`, and it exists because `m09c`'s
-        # artefacts are not observable at the deep one.** `m09c` alters
-        # `images`, and `images` is created by `m09a` -- so at
-        # `fe1d40c8b7a3` the table is gone and `column_set(url, "images")` is
-        # the empty set, which makes a column assertion there vacuous in one
-        # direction and false in the other. That was measured rather than
-        # reasoned: moving these four assertions straight into the block below
-        # failed on `assert 'remote_url' in set()`.
-        #
-        # So a displaced assertion moves to **the shallowest revision at which
-        # its artefact still exists**, not automatically to the deep stop. The
-        # general form for the next head that alters an existing table rather
-        # than creating one: `-1` proves your own `downgrade()`, and the
-        # previous head's proof needs a stop above whatever created the thing
-        # it altered.
-        #
-        # `m09a` is a revision id and not a step count, for the reason the
-        # deep stop gives: every migration added later shifts what `-2` means.
+        # **A second named stop, at `m09a`, and it exists because `m09c`'s artefacts are
+        # not observable at the deep one.** `m09c` alters `images`, and `images` is
+        # created by `m09a` -- so at `fe1d40c8b7a3` the table is gone and
+        # `column_set(url, "images")` is the empty set, which makes a column assertion
+        # there vacuous in one direction and false in the other.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09a", direction="down"))
         at_m09a = await index_set(url)
-        # `m09c`'s four, displaced from the `-1` half the moment `m09d` became
-        # head -- and displaced *because they had teeth*:
-        # `uq_images_owner_provider_path` failed loudly on the first run with
-        # `m09d` present, which is the eighth landing in a row to do so. Three
-        # artefact kinds, and both directions on the rename for the reason the
-        # `-1` block used to give: a `downgrade()` that dropped the column
-        # rather than renaming it back satisfies the absence and leaves
-        # `images` a column short.
+        # `m09c`'s four, displaced from the `-1` half the moment `m09d` became head --
+        # and displaced *because they had teeth*: `uq_images_owner_provider_path` failed
+        # loudly on the first run with `m09d` present, which is the eighth landing in a
+        # row to do so.
         assert "uq_images_owner_provider_path" not in at_m09a
         images_columns = await column_set(url, "images")
         assert "provider_path" not in images_columns
@@ -923,78 +628,33 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # pass at any depth below `m09a` while asserting nothing.
         assert images_columns, "the premise: `images` still exists at `m09a`"
 
-        # Then down to the revision *below* `ff`, which is where M7 group E's
-        # two index changes become observable -- `ffa` sits between head and
-        # them now, and `-1` alone no longer reaches them.
-        #
-        # **Named, not counted in `-N` steps.** Every migration added after
-        # this one shifts what `-2` means, so a step count would silently
-        # re-point this block at an unrelated revision and keep passing for
-        # the wrong reason. A revision id is stable, and reversing more than
-        # `ff` on the way there costs these assertions nothing.
+        # Then down to the revision *below* `ff`, which is where M7 group E's two index
+        # changes become observable -- `ffa` sits between head and them now, and `-1`
+        # alone no longer reaches them.
         await asyncio.to_thread(
             functools.partial(run_alembic, url, "fe1d40c8b7a3", direction="down")
         )
         stepped = await index_set(url)
-        # `ffa`'s, `ffb`'s and `ffc`'s own artefacts, checked here rather than
-        # after `-1`. These targets are **revision ids**, so unlike the
-        # step-back above they do not drift when a migration lands on top --
-        # which is precisely why `ffb`'s column assertion moved here the
-        # moment `ffc` became head, and why `ffc`'s index assertion moved here
-        # the moment `m08a` did. `ffc.downgrade()` recreates
-        # `ix_titles_popularity` (wrong declaration and all -- a downgrade
-        # restores the schema it reversed, not a better one), and reaching
-        # `fe1d40c8b7a3` runs it, so this is the same assertion the `-1` half
-        # used to make and it is still exercising `ffc`.
+        # `ffa`'s, `ffb`'s and `ffc`'s own artefacts, checked here rather than after
+        # `-1`.
         assert "ix_titles_popularity" in stepped
         assert "pk_genome_scores" not in stepped
-        # `m08a`'s two, displaced from the `-1` half the moment `m08b` became
-        # head. One assertion per table, for the reason that block records:
-        # a `downgrade()` that drops `curated_rows` and forgets `llm_calls`
-        # passes a check naming only the first, so `pk_llm_calls` is what
-        # stands for that table.
-        #
-        # ⚠️ This comment read "and `llm_calls` carries no index beyond its
-        # primary key" until `m10c` gave it `ix_llm_calls_at` and
-        # `ix_llm_calls_generation_id`. The assertion did not move and the
-        # reason did: neither name needs an assertion here for the same reason
-        # `ix_curated_rows_user_newest` does not — an index cannot outlive its
-        # table, so below `m08a` both are absent because `llm_calls` is.
-        #
-        # There is deliberately no assertion on `ix_curated_rows_user_newest`.
-        # It would be **strictly redundant**: an index cannot outlive its
-        # table, so that name is present exactly when `pk_curated_rows` is.
-        # Correspondingly, deleting the explicit `op.drop_index` from `m08a`'s
-        # `downgrade()` is an equivalent mutation -- `drop_table` takes the
-        # index either way -- and that line's own comment says so rather than
-        # claiming this block covers it.
+        # `m08a`'s two, displaced from the `-1` half the moment `m08b` became head.
         assert "pk_curated_rows" not in stepped
         assert "pk_llm_calls" not in stepped
-        # `m08b`'s one, displaced from the `-1` half the moment `m09a` became
-        # head -- and it is displaced *because it had teeth*, not because it
-        # stopped having them: it failed loudly on the first run with `m09a`
-        # present, which is the sixth landing in a row to do so.
-        # `genome_tags` ships no index beyond its primary key -- deliberately,
-        # `genome_scores`' precedent -- so `pk_genome_tags` is the whole of
-        # what stands for it.
+        # `m08b`'s one, displaced from the `-1` half the moment `m09a` became head --
+        # and it is displaced *because it had teeth*, not because it stopped having
+        # them: it failed loudly on the first run with `m09a` present, which is the
+        # sixth landing in a row to do so.
         assert "pk_genome_tags" not in stepped
-        # `m09a`'s five, displaced from the `-1` half the moment `m09c` became
-        # head -- and displaced *because they had teeth*: `pk_images` failed
-        # loudly on the first run with `m09c` present, which is the seventh
-        # landing in a row to do so. One assertion per table, four tables; a
-        # `downgrade()` that drops three of four passes a check naming only
-        # the first.
+        # `m09a`'s five, displaced from the `-1` half the moment `m09c` became head --
+        # and displaced *because they had teeth*: `pk_images` failed loudly on the first
+        # run with `m09c` present, which is the seventh landing in a row to do so.
         assert "pk_images" not in stepped
         assert "pk_search_queries" not in stepped
         assert "pk_row_provider_settings" not in stepped
         assert "pk_title_search_names" not in stepped
-        # The fifth is not a fifth table. `ix_titles_name_lower_prefix` sits on
-        # `titles`, which survives every step above `a8a0e10ff464`, so it is
-        # the one artefact `m09a` creates that no `drop_table` collects, and
-        # deleting its `op.drop_index` is observable here and nowhere else.
-        # `ix_images_title_id` and its two siblings are the redundant kind ruled
-        # out below, and so is `ix_title_search_names_name_lower_prefix`: none
-        # can fail independently of its own table's primary key.
+        # The fifth is not a fifth table.
         assert "ix_titles_name_lower_prefix" not in stepped
         assert "blend_fingerprint" not in await column_set(url, "title_neighbors")
         assert "ix_watch_states_user_recent" not in stepped

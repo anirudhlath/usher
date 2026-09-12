@@ -1,18 +1,5 @@
-"""`GET /search` -- the three-valued mode, the two mode fields, and the
-rewrite that has to reach the wire.
-
-**The real `SearchService` over scripted ports, never a stubbed service.**
-M5's correction, restated by `tests/unit/test_api_home.py`: a stub would make
-every case below an assertion about `SearchResponse.of` alone, and the three
-mutations this file exists to kill -- deleting `expanded_query`, collapsing
-`requested_mode` into `mode`, re-clamping `limit` in the route -- all live in
-the seam between the service's answer and the body. Retrieval is held fixed
-with a scripted index for `tests/unit/test_services_search.py`'s reason: that
-file's fake has no text analysis, so a route case driven through its matching
-would be an assertion about a tokenizer nobody shipped.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
+"""`GET /search` -- the three-valued mode, the two mode fields, and the rewrite that
+has to reach the wire.
 """
 
 import ast

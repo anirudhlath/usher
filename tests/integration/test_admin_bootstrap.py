@@ -1,21 +1,5 @@
-"""`POST /admin/bootstrap/{phase}` and `GET /admin/bootstrap/status` against
-real Postgres, and the run-time facts the two routes depend on and cannot
-check.
-
-`tests/unit/test_api_bootstrap.py` is the routes' own file -- the 202, the
-422, the report's serialisation and the structural shape. What can only be
-seen here is what happens *after* the trigger: a real `jobs` row, a real
-`import_runs` checkpoint, and the two guards that were an operator's problem
-while `usher bootstrap` was a separate process and are a *serving* process's
-problem now that a route can start one. And, for the status half, the one
-claim no fake can make: that the sentence `usher bootstrap-status` prints and
-the document the route serialises are two renderings of **one** decision.
-
-Nothing downloads. Every dataset is served out of the committed synthetic
-slice `tests/integration/test_bootstrap_end_to_end.py` already uses, through
-the same `MockTransport` handler, and `composition.bulk_client` is
-monkeypatched so the shared dispatch builds a client over it -- which also
-makes "one client for the whole run" observable rather than argued.
+"""`POST /admin/bootstrap/{phase}` and `GET /admin/bootstrap/status` against real
+Postgres, and the run-time facts the two routes depend on and cannot check.
 """
 
 import gzip
@@ -144,12 +128,11 @@ async def test_a_killed_bootstrap_leaves_a_resumable_checkpoint_rather_than_noth
         "bulk_client",
         lambda _: httpx.AsyncClient(transport=_local(cache)),
     )
-    # Engine-bound sessions rather than the suite's rolled-back fixture: a
-    # checkpoint that survives a crash is a claim about a *commit*, and the
-    # shared fixture's outer transaction makes a commit structurally
-    # unobservable -- the same reason `test_bootstrap_concurrency.py` and
-    # `test_bulk_load_window_commits_the_callers_own_pending_work` build
-    # their own, with the same cleanup discipline.
+    # Engine-bound sessions rather than the suite's rolled-back fixture: a checkpoint
+    # that survives a crash is a claim about a *commit*, and the shared fixture's outer
+    # transaction makes a commit structurally unobservable -- the same reason
+    # `test_bootstrap_concurrency.py` and
+    # `test_bulk_load_window_commits_the_callers_own_pending_work` build their own, with
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
     try:
@@ -383,11 +366,10 @@ async def test_the_route_writes_a_real_job_row_and_no_import_run(
 
 
 # --- `GET /admin/bootstrap/status` -------------------------------------------
-#
 # Committing sessions rather than the suite's rolled-back one, for the reason
-# `tests/integration/test_rows_route.py` gives: the route reads through its own
-# engine and `usher bootstrap-status` opens a third, so seeded state that is
-# only pending in this test's transaction is state neither of them can see.
+# `tests/integration/test_rows_route.py` gives: the route reads through its own engine
+# and `usher bootstrap-status` opens a third, so seeded state that is only pending in
+# this test's transaction is state neither of them can see.
 
 _SEEDED_IMDB_PREFIX = "tt990006"
 _RELEASE_A = "an-invented-etag-a"

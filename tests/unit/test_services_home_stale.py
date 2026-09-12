@@ -1,46 +1,4 @@
-"""Serve-stale-while-refreshing on the composed screen (PRD 06).
-
-PRD 06:980 has said since M7 that rows are *"recomputed lazily and served
-stale while refreshing, so the home screen never blocks on a slow row"*, and
-M7 corrected the sentence rather than half-implementing it. This file is the
-implementation's own suite, and its subject is the three constraints in the
-feature's name, each of which has a different failure:
-
-- **the screen never waits on it** -- a request that can end up awaiting the
-  refresh is a latency regression wearing a cache's clothes, and it is
-  *invisible* to any fixture whose refresher happens not to block. Asserted by
-  driving `compose` by hand: `coro.send(None)` must raise `StopIteration`,
-  which a coroutine that suspended anywhere cannot do. That is the shape
-  `tests/unit/test_api_lanes.py` established for `LaneSupervisor.start`, and
-  it is here for the same reason recorded in
-  `.claude/rules/api-telemetry-and-lanes.md`: a deadlock-shaped case can only
-  ever report a timeout, and a timeout is indistinguishable from a slow box.
-- **serve stale** -- something decides how stale is too stale.
-  `SCREEN_STALE_GRACE` is that bound, it sits beside `_SCREEN_TTL` where a
-  reader looking up the 30 s finds it, and past `TTL + grace` an entry is a
-  hard miss that is never served. Asserted by stepping the clock **exactly
-  onto** the second boundary, which is the habit M5's surviving `stale_after`
-  `<=` -> `<` mutation exists to teach.
-- **the refresh is bounded** -- an unbounded background refresh is how a cache
-  stampede melts the box, so the handover is a *bounded, deduplicating* queue
-  and full means dropped rather than blocked. Dropping is safe because an
-  entry past `TTL + grace` is a hard miss, so a dropped refresh degrades to
-  the cost M7 already pays.
-
-**The refresher is a synchronous callable, and that is the strongest available
-spelling of the first constraint.** `Callable[[User], None]` has nothing to
-await, so `await self._refresh(...)` -- the whole defect this task exists to
-prevent -- is a mypy error at the gate rather than a case that has to be
-lucky. `RowContext.affinities` is the precedent for a callable field on the
-services side (`ports/rows.py`), and it is awaited because its *value* is the
-product of three statements; this one hands a key over and returns.
-
-**The grace window is gated on there being a refresher**, which is what keeps
-the other half of the trade honest: a composer that opened the window with
-nothing behind it would serve a stale screen and never replace it, which is
-strictly worse than the miss it was avoiding. `usher home` is exactly that
-caller and passes none.
-"""
+"""Serve-stale-while-refreshing on the composed screen (PRD 06)."""
 
 import asyncio
 import dataclasses

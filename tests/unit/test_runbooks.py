@@ -1,71 +1,5 @@
-"""`docs/runbooks/` is four operator-facing documents and an index, and the
-index is the part a rename breaks silently.
-
-Four checks and a control, and each exists because the cheap version of it
-passes over nothing at all.
-
-**1. The index and the directory are one set.** `docs/runbooks/README.md`'s
-links are resolved and compared against the `.md` files beside it. A runbook
-index that points at a file somebody renamed is worse than no index — an
-operator following a dead link in a disaster is worse off than one who had to
-`ls` — and this is the same shape as the PRD link check that
-`.claude/rules/prd-maintenance.md` prescribes, for the same reason.
-
-🔴 **`set() == set()` is `True`, which is the whole design of the first case.**
-A scan over a `docs/runbooks/` that does not exist globs nothing, compares the
-empty set against the empty set, and reports success — so the index is read
-**before** the directory is scanned, and `Path.read_text()`'s
-`FileNotFoundError` names the missing path. A missing directory is a failure
-that names a file, not a pass. `test_the_index_is_read_before_the_directory_is_scanned`
-pins that ordering against a temporary directory holding nothing, because a
-plant that did not land looks exactly like a check that passed.
-
-**2. Every command a runbook names is a command the CLI advertises.** Extracted
-from the prose and checked against `build_parser()`'s subparser choices — read
-off the parser, **never** off a `grep -c "add_parser("`, which counts its own
-comment (measured on this milestone, in K3's review). The floor of six
-occurrences is the premise: an extraction that matched nothing would otherwise
-report every runbook clean.
-
-⚠️ **Subcommands only, deliberately, and the sibling that goes further says
-why it can.** `test_backup_manifest.py::test_every_rebuild_step_is_a_command_the_cli_really_accepts`
-hands whole command strings to `parse_args` and so catches a bad flag too — it
-can, because a manifest entry is a bare command with no shell around it. A
-runbook's are pasteable lines: `uv run usher restore … --dry-run 2>&1 | tee
-/var/tmp/restore-report.txt` is three of them, and `shlex.split` of that
-reaches argparse as `2>&1`. What is checkable here without inventing a shell
-parser is the first non-flag token, plus whatever flags precede it — and both
-are checked, so `uv run usher --output /var/tmp/x.gz backup` fails on the flag
-and on the "subcommand" `/var/tmp/x.gz` rather than passing.
-
-🔴 **That last sentence was written before it was true, and the plant is what
-said so.** The first spelling matched the flags and the subcommand in one
-regex, and `uv run usher --output /var/tmp/x.gz backup` matched *none of it*:
-`[a-z]` does not match `/`, so the occurrence was skipped and the case stayed
-green over a defect written to be caught. `_INVOCATION` carries the mechanism.
-The lesson is the standing one — a plant that did not land looks exactly like a
-check that passed — arriving as a docstring that described a guard the code did
-not have.
-
-**2b. And every link in every runbook resolves.** The link check
-`.claude/rules/prd-maintenance.md` prescribes is scoped to `docs/prd/**` plus
-`CLAUDE.md` and `README.md` — deliberately, and that exclusion is a correction
-rather than a convenience — so **nothing in this repository walks
-`docs/runbooks/`**. Measured 2026-08-26: 21 `.md` links across the five files,
-17 of them to a sibling runbook, 2 to PRD 08 and 2 to ADR-0038 — and an ADR
-rename is exactly the event that would break the last pair silently.
-
-**3. PRD 08 points at the index, and the link resolves.** Asserted here rather
-than left to the link check in `.claude/rules/prd-maintenance.md`: that check
-is a heredoc an operator runs by hand, it is not in `scripts/` and no test
-invokes it, so *"the PRD link check prints OK"* is a claim about a command
-somebody remembered to type. This case is the same obligation with a runner.
-
-**4. No runbook puts a key on a command line.** `--new-key` is a tripwire
-argument that exists so that typing it is a refusal rather than a leak
-(`cli.py`'s `_rotate_secret_parser`); `--new-key-env` takes the *name* of an
-exported variable. A runbook is the most-pasted text this project ships, so the
-one place the wrong spelling must never appear is in one of these files.
+"""`docs/runbooks/` is four operator-facing documents and an index, and the index is
+the part a rename breaks silently.
 """
 
 import argparse
@@ -92,25 +26,7 @@ RUNBOOKS_THE_SPEC_ASKS_FOR = 4
 #: keeps `https://…` links and image paths out.
 _MARKDOWN_LINK = re.compile(r"\]\(([^)#][^)]*\.md)\)")
 
-#: Every `uv run usher …` and the rest of its line. Stopping at a backtick as
-#: well as at a newline is what makes one pattern serve both a fenced block and
-#: an inline `` `uv run usher work` `` in a sentence; stopping at `&`, `|` and
-#: `;` is what makes a *chain* two invocations rather than one. Measured: with
-#: the shell separators left in, `uv run usher index --backfill && uv run usher
-#: work` consumed the whole line as a single tail and `re.findall` resumed past
-#: the second command, so `docs/runbooks/disaster-recovery.md` reported 24
-#: invocations where it has 25 and the trailing `work` was checked by nothing.
-#:
-#: ⚠️ **This was `uv run usher((?:\s+--[a-z…]*)*)\s+([a-z…]*)` — a flag group
-#: and a subcommand in one regex — and the plant walked straight through it.**
-#: `uv run usher --output /var/tmp/x.gz backup` matches *nothing*: the flag
-#: group takes `--output`, the subcommand group then meets `/var`, `[a-z]` does
-#: not match `/`, and backtracking to zero flags meets `--output`. A defect
-#: written to be caught was silently skipped instead, and the case stayed green
-#: — which is the one failure a check like this must not have. The tail is now
-#: captured whole and walked in `_invocations`, where "no subcommand here" is a
-#: value the assertions can see rather than an occurrence the regex declines to
-#: report.
+# : Every `uv run usher …` and the rest of its line.
 _INVOCATION = re.compile(r"uv run usher\b([^\n`&|;]*)")
 
 #: Measured 2026-08-26: the three K5/K8 runbooks alone carry 25 invocations of

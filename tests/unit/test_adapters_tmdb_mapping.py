@@ -1,14 +1,4 @@
-"""TMDb payload -> canonical state. No network, no client, no clock.
-
-**Every case here is a movie/TV divergence or a value a source can put in a
-payload that `Title` would reject.** Those are the two ways this mapper can
-be wrong: TMDb keys the same concept differently in its two id spaces
-(`title`/`name`, `release_date`/`first_air_date`, `keywords.keywords`/
-`keywords.results`, `release_dates`/`content_ratings`, a top-level `imdb_id`
-against `external_ids.imdb_id`), and a `pydantic.ValidationError` is not a
-`UsherPortError`, so one stray value would abort an enrichment job with an
-exception no caller can catch.
-"""
+"""TMDb payload -> canonical state. No network, no client, no clock."""
 
 import json
 import uuid

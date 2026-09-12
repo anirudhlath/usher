@@ -1,15 +1,4 @@
-"""The three job handlers, and the remote-search tier only one of them uses.
-
-`JobWorker` is a generic claim/run/park loop; these are the only place its
-vocabulary meets the pipeline's. Two properties carry most of the cases:
-
-- **a key that does not parse must be a `UsherPortError`.** `JobWorker` lets
-  anything else propagate on purpose, so a `ValueError` from `uuid.UUID`
-  would kill the worker instead of parking one job.
-- **work that has become impossible completes rather than parks.** PRD 08
-  reserves parking for work a human has to look at; an item the source
-  deleted is not that.
-"""
+"""The three job handlers, and the remote-search tier only one of them uses."""
 
 import uuid
 from datetime import UTC, datetime

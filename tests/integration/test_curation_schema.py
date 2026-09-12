@@ -1,16 +1,4 @@
-"""M8's two tables, and the four consequences of their two shape decisions.
-
-Everything here is asserted off real DDL behaviour rather than off
-`Base.metadata` — `tests/unit/test_db_models_curation.py` owns the
-declarations, and this file owns what Postgres will actually do with them.
-Same split `test_search_schema.py` makes.
-
-Two of these cases exist because `db/models/curation.py` *claims* something
-about the array shape, and a claim in a docstring is not a test. The array
-preserving order is the property it was chosen for; a dangling id after a
-title delete is the price it was chosen at. Both are asserted, so neither can
-quietly stop being true.
-"""
+"""M8's two tables, and the four consequences of their two shape decisions."""
 
 import uuid
 from datetime import UTC, datetime
@@ -265,28 +253,8 @@ async def test_a_sub_cent_cost_round_trips_exactly_as_a_decimal(session: AsyncSe
 async def test_the_database_refuses_an_ok_error_disagreement_the_model_no_longer_can(
     session: AsyncSession,
 ) -> None:
-    """`LLMCall._ok_and_error_must_agree`, in the database — and this case is
-    the reason "rather than as a CHECK alone" has an *alone* in it.
-
-    The invalid rows are built with `model_construct`, which skips validation
-    entirely, so each one reaches Postgres **through the model** with every
-    other field exactly as the ledger would write it. That is the house idiom
-    for proving a model guard and a database guard are independent
-    (`test_sync_run_repository.py`, `test_episode_repository.py`,
-    `test_person_repository.py` and `test_credit_repository.py` all use it);
-    it works here because the invariant is a `model_validator(mode="after")`,
-    which `model_construct` does not run.
-
-    **Both directions, not one.** A CHECK with an inverted or half-written
-    condition answers correctly by luck of direction when only one kind of
-    bad row is offered — the same reason a staleness case has to seed a stale
-    row *and* a fresh one. `ok = true` carrying an error reads as a failure
-    in every `WHERE error IS NOT NULL` anyone will write against a cost
-    ledger; `ok = false` carrying none is a failure an operator cannot act
-    on.
-
-    Each attempt runs inside a savepoint, because a constraint violation
-    aborts the surrounding transaction and this case makes two.
+    """`LLMCall._ok_and_error_must_agree`, in the database — and this case is the reason
+    "rather than as a CHECK alone" has an *alone* in it.
     """
     valid = _call()
     for changes in (

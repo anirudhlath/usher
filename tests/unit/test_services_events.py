@@ -1,25 +1,4 @@
-"""The in-memory client event bus.
-
-**The one case this file exists for is the non-blocking one, and it is
-asserted twice.** "The publish completed and the slow subscriber got its
-event" is what a fully serialised run produces too, and this project has
-measured that trap directly -- a deleted single-flight lock passed five runs
-in a row against a transport that never truly awaited. So:
-
-- `test_publish_never_suspends_when_a_subscribers_queue_is_full` drives the
-  coroutine by hand, one step, with no event loop scheduling involved at
-  all. A coroutine that never awaits raises `StopIteration` on its first
-  `send(None)`; one that awaits a full `asyncio.Queue` yields a future
-  instead. Deterministic, microseconds, and it fails on its own assertion
-  rather than on a timeout -- which matters, because the mutation it rules
-  out (`await queue.put` for `put_nowait`) *deadlocks* rather than answering
-  wrongly, and an unbounded case would hang the suite.
-- `test_publishing_does_not_block_on_a_subscriber_that_is_not_reading`
-  measures the operational form on wall-clock intervals: the publisher's own
-  window must sit inside the window during which a subscriber is provably
-  parked and not reading, reported as intersection-over-union the way
-  `JobQueueContract.overlapping()` and M5 group B1's channel cases do.
-"""
+"""The in-memory client event bus."""
 
 import asyncio
 import uuid

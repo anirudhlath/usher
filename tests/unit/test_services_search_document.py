@@ -1,14 +1,4 @@
-"""The composer, its fingerprint, and its refusal.
-
-Every title here is invented -- `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-
-**The cross-check that holds `compose_document` to `_FINGERPRINT_SQL` is not
-in this file and cannot be.** The predicate's assembly is evaluated by
-Postgres over a `titles` row, so the case that catches the two drifting apart
-lives in `tests/integration/test_search_repository.py`. Everything here is
-the half a pure function can answer on its own.
-"""
+"""The composer, its fingerprint, and its refusal."""
 
 import hashlib
 from typing import Any

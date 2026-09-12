@@ -1,32 +1,4 @@
-"""`RowCard.artwork` end to end -- a real `GET /home` over real Postgres.
-
-**What only this level can see.** `tests/unit/test_rows_artwork.py` drives
-`BaseRow._artwork` against `FakeImageRepository`, which answers out of a dict;
-what it cannot exercise is the wiring -- `api/deps.py:get_image_repository`
-building a `PostgresImageRepository` on the request's session, that repository
-reaching `RowContext.images`, and `ImageRepository.primary_for_titles` filtering
-on `kind` in SQL rather than in Python. `images=None` in `get_row_context`
-type-checks, constructs (the context is a frozen dataclass with no runtime
-validation) and fails as an `AttributeError` inside `hydrate` on the first
-request; only a request that really builds a row sees it.
-
-**Both kinds are seeded on the same title, deliberately.** A `portrait` shelf
-asking for a poster and getting one is satisfied by a repository that ignores
-`kind` entirely, as long as the title has only posters. With a backdrop stored
-beside it, "ignores `kind`" and "reads the poster" are two different ids, and
-the read order (`is_primary DESC, id`) decides which the sloppy implementation
-would answer.
-
-**The case commits for real and cleans up after itself.** A route goes through
-`get_session`, which is the request's commit boundary, so a screen composed
-from a route writes durably against the session-scoped container -- unlike
-every rolled-back test in this suite. `images` and `media_items` go with their
-owners' `ON DELETE CASCADE`; `titles`, `sources` and -- since issue #73 made
-this a read route that promotes what it draws -- the `enrich` `jobs` are
-deleted by id. The `users` row is a singleton reached by
-`ON CONFLICT (name) DO NOTHING` and is left standing, as `test_rows_route.py`
-leaves it.
-"""
+"""`RowCard.artwork` end to end -- a real `GET /home` over real Postgres."""
 
 import uuid
 from collections.abc import AsyncIterator
@@ -160,14 +132,8 @@ async def household(
         yield _Household(derived=derived.id, bare=bare.id, poster=poster.id, backdrop=backdrop.id)
     finally:
         async with sessions() as session:
-            # `images` and `media_items` cascade from the rows below them;
-            # `titles` and `sources` do not.
-            #
-            # Neither does `jobs`: `GET /home` promotes every skeleton it draws
-            # (issue #73) and `get_session` commits at the end of a successful
-            # request, so this file's reads write `enrich` rows. **Before the
-            # titles** -- the job's `key` is the title's id as text, so once
-            # the title row is gone there is nothing left to identify them by.
+            # `images` and `media_items` cascade from the rows below them; `titles` and
+            # `sources` do not.
             await session.execute(
                 text(
                     "DELETE FROM jobs WHERE kind = 'enrich' AND key IN "

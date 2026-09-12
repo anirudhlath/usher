@@ -1,12 +1,4 @@
-"""`usher.domain.image.Image` -- the twin `m09a` deliberately shipped without.
-
-Two claims live here and nowhere else. The **1:1 field/column correspondence**
-with `ImageRow`, which `test_db_models.py`'s version is scoped to
-`TitleRow`/`Title` only, so `images` had no such check until this file; and the
-**exactly-one-owner** validator, which mirrors `ck_images_exactly_one_owner` the
-way `WatchState._exactly_one_of_title_or_episode` mirrors
-`ck_watch_states_exactly_one_target`.
-"""
+"""`usher.domain.image.Image` -- the twin `m09a` deliberately shipped without."""
 
 import uuid
 from typing import cast

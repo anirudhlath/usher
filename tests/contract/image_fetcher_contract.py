@@ -1,26 +1,4 @@
-"""The behavioural contract every `ImageFetcher` implementation must satisfy.
-
-Run against `FakeImageFetcher` and against `ProviderCdnImageFetcher` over
-`httpx.MockTransport` (both in `tests/unit/test_adapters_images.py`, because
-`MockTransport` needs no container), and against a **live** CDN in
-`tests/integration/test_image_fetcher_live.py`, which skips itself unless one
-is configured and asserts it really reached something before believing its own
-result — a contract suite that passes because nothing ran is the
-`sitecustomize.py` trap.
-
-**What this suite deliberately does not assert.** Anything about the *bytes*.
-Every implementation here is free to be driven by a script, a `MockTransport`
-or a real CDN, and a case expecting a JPEG's magic number would be a test of
-whichever one is in front of it. What is shared is that a body arrives at all,
-that its media type is one the cache can name, that the answer is closed by a
-caller who walks away from it, and that a width off the ladder is refused
-before anything is sent.
-
-**The off-ladder refusal is the clause with teeth**, and it is here rather than
-in the adapter's own file because it is the property the whole clamp rests on.
-The CDN's allowlist is closed and answers HTTP 400 off it, so a fake that
-accepted any width would let the clamp rot with this suite still green.
-"""
+"""The behavioural contract every `ImageFetcher` implementation must satisfy."""
 
 from abc import ABC, abstractmethod
 

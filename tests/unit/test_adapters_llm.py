@@ -1,27 +1,4 @@
-"""`OpenAICompatibleClient` over `httpx.MockTransport`. No network.
-
-Six things a scripted `FakeLLMClient` can never show, and each is a
-measurement from this milestone's live probes rather than a defensive guess:
-
-- **The fence.** With no `response_format` at all, 5 of 5 responses from a
-  real endpoint were wrapped in a ` ```json ` fence, so `json.loads(content)`
-  fails every time.
-- **The status split.** M4 established against TMDb that a 4xx which is not a
-  429 is `PortDataMalformed` rather than `PortUnavailable`, because five
-  retries reach the identical answer. A single `raise PortUnavailable` arm
-  passes every happy-path case.
-- **The truncation.** `finish_reason == "length"` is the one failure that
-  produces *valid* output: guided decoding closes the braces, the JSON parses,
-  and rows are silently missing from the end of the list.
-- **The credential.** It goes in an `Authorization` header and never in a URL,
-  because `HTTPXClientInstrumentor` records the full URL as a span attribute.
-- **The cost.** No provider reports it, so it is computed here from two
-  configured prices ([ADR-0027]).
-- **The latency.** A scripted fake *reports* a number; only this client
-  *measures* one, and `CurationService._ledger_row` prefers whatever came back
-  in the `LLMUsage` whenever one did -- so on every successful generation the
-  number PRD 10's latency panel plots is the one computed here.
-"""
+"""`OpenAICompatibleClient` over `httpx.MockTransport`. No network."""
 
 import inspect
 import json
@@ -55,13 +32,7 @@ _SCHEMA: dict[str, Any] = {
 # omits `usage` entirely is a real shape and one case is about it.
 _REPORTED = object()
 
-#: A JSON nesting depth past the one `json.loads` refuses. Measured on CPython
-#: 3.13 at the default recursion limit of 1,000: **9,998 parses and 9,999
-#: raises** `RecursionError` -- the C scanner has its own budget and it is an
-#: order of magnitude past `sys.getrecursionlimit()`, which is why the obvious
-#: guess of "a bit over 1,000" does not reach it and a case built on that guess
-#: would pass against the unfixed code. Clear of the boundary rather than on
-#: it: the exact number is an interpreter property, not this project's.
+# : A JSON nesting depth past the one `json.loads` refuses.
 _DEEP = 12_000
 
 #: Where the injected clock starts. **Deliberately not zero**, for the reason
@@ -71,21 +42,16 @@ _DEEP = 12_000
 #: the one field this client takes an injected clock in order to measure.
 _T0 = 1_000.0
 
-#: How long this file's transport takes to answer, and **why it is not the
-#: 1,420 ms the live run measured as its median.** `_T0 + 1.42` is `1001.42`,
-#: which is not representable in binary, so `int((1001.42 - 1000.0) * 1000)` is
-#: **1419** -- an exact assertion on a measured-looking constant would have
-#: been an off-by-one nobody could read as anything but a defect. 1.5 is
-#: dyadic, so every step below is exact.
+# : How long this file's transport takes to answer, and **why it is not the : 1,420 ms
+# the live run measured as its median.** `_T0 + 1.42` is `1001.42`, : which is not
+# representable in binary, so `int((1001.42 - 1000.0) * 1000)` is : **1419** -- an exact
+# assertion on a measured-looking constant would have : been an off-by-one nobody could
+# read as anything but a defect.
 _SEND_SECONDS = 1.5
 
-#: **A literal, deliberately not `int(_SEND_SECONDS * 1000)`**, and that is the
-#: same finding rather than a second one: the derived spelling performs a
-#: *different* computation from the client's, which subtracts first. Measured
-#: -- at 1.42 they answer **1420** and **1419** -- so a derivation would agree
-#: here, silently disagree the day somebody puts the measured median back, and
-#: fail on the arithmetic rather than on the code. Change one, recompute the
-#: other the way `complete_json` does.
+# : **A literal, deliberately not `int(_SEND_SECONDS * 1000)`**, and that is the : same
+# finding rather than a second one: the derived spelling performs a : *different*
+# computation from the client's, which subtracts first.
 _SEND_MS = 1_500
 
 
@@ -428,35 +394,7 @@ async def test_the_reported_model_falls_back_to_the_configured_one() -> None:
 
 
 async def test_the_latency_is_the_whole_send_and_not_what_was_left_after_it() -> None:
-    """**The success path's latency, pinned to the millisecond.**
-
-    `CurationService._ledger_row` writes `latency_ms=usage.latency_ms` whenever
-    a usage came back, so on every successful generation the number PRD 10's
-    latency panel plots is this one -- the service's own stopwatch is the
-    *fallback*, reached only when the call failed and there is no `LLMUsage` to
-    read. Until this case the only assertion anywhere was `latency_ms >= 0`,
-    which `max(0, ...)` makes unfalsifiable, and **no test in the repository
-    ever passed this client a clock** although it takes one for exactly this.
-
-    Two spellings of the defect, and this case exists for the second:
-
-    - **The careless one** -- `int(self._clock() * 1000)`, an absolute reading
-      of a clock whose epoch is arbitrary -- is caught by `ruff` as
-      `F841 Local variable 'started' is assigned to but never used`. That is
-      the gate holding it, not the suite. Killed here anyway: the assertion
-      would read `1_001_500`.
-    - **The careful one** -- `started` re-read *after* `await self._send(...)`,
-      so the measured window excludes the request -- passes every gate step.
-      It reports **0 ms** for a 1,500 ms completion, and a flat panel is the
-      failure shape M8's live run already recorded a taste of: a 1,420 ms
-      median that nothing in the suite could tell from zero.
-
-    Same finding as M8 Task 12's `_T0`, one layer down and on the arm that
-    matters more. That task fixed `CurationService`, whose measured number is
-    only ever written on the **failure** path; the adapter's is written on the
-    **success** path -- every ordinary night -- and was left with the same
-    shape.
-    """
+    """**The success path's latency, pinned to the millisecond.**"""
     clock = _Clock()
 
     def handler(_request: httpx.Request) -> httpx.Response:

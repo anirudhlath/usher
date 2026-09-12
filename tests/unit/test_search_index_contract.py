@@ -1,11 +1,4 @@
-"""`FakeSearchIndex` against the shared `SearchIndex` contract. No Docker.
-
-The integration half -- `PostgresSearchIndex`, real `tsquery`, real
-`ts_rank`, real HNSW -- runs the identical suite in
-`tests/integration/test_adapters_search_postgres.py`. A fake and a real
-implementation with matching signatures are not interchangeable; only the
-same assertions against both prove it.
-"""
+"""`FakeSearchIndex` against the shared `SearchIndex` contract. No Docker."""
 
 import pytest
 

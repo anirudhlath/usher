@@ -1,9 +1,4 @@
-"""The `eval` schema against a real Postgres, and its idempotence.
-
-The unit arm cannot see any of this: `CREATE SCHEMA IF NOT EXISTS`, a
-`jsonb` cast, an `ON DELETE CASCADE` and a view are all statements only a
-database can answer for.
-"""
+"""The `eval` schema against a real Postgres, and its idempotence."""
 
 from dataclasses import replace
 from datetime import UTC, datetime

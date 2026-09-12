@@ -1,17 +1,4 @@
-"""CachedDatasetFile, driven entirely by an httpx MockTransport.
-
-No network, and no real dataset: every byte here is gzipped -- or zipped --
-in the test. That is the licensing rule, not a convenience -- PRD 04's
-"never a full download in tests".
-
-The zip fixtures below are **assembled here from string literals rather than
-committed as a binary**, and that is also a licensing decision.
-`tests/unit/test_no_third_party_data.py::_every_text_file` skips any file
-that fails `read_text()`, and its other three checks read only
-`_SCANNED_SUFFIXES`, so a committed `.zip` is invisible to all four guards --
-precisely the shape "ship importers, never data" cannot enforce. A zip built
-in a `.py` file is fully scanned by two of the four, and is diffable besides.
-"""
+"""CachedDatasetFile, driven entirely by an httpx MockTransport."""
 
 import datetime as dt
 import email.utils

@@ -1,12 +1,4 @@
-"""`FakeCreditRepository` against the shared `CreditRepository` contract.
-
-No Docker, no database. See tests/fakes/credit_repository.py for the five
-places this half is more forgiving than
-tests/integration/test_credit_repository.py's -- the first of which is that
-`replace_for_titles`' delete scope is structurally correct here, so the case
-that exists to catch a scope derived from the rows is a real assertion only in
-the integration run.
-"""
+"""`FakeCreditRepository` against the shared `CreditRepository` contract."""
 
 import uuid
 

@@ -1,34 +1,5 @@
-"""The push lane, whole: a socket's event into catalog state and out to a
-client, against real Postgres -- and what it costs.
-
-**What is here that is not in `tests/integration/test_services_push.py`.**
-That file drives `PushApplyService` directly and owns the two properties
-only Postgres can express: the `observed_at` a merge must carry
-(`trg_watch_states_set_updated_at` owns `updated_at`, so a push stamped with
-anything earlier writes nothing at all) and ADR-0014's `COALESCE` on both
-columns (`play_count` **and** `last_played_at`, because the nullable one
-survives the wrong statement and a case checking only the timestamp would
-ratify the bug). Neither is repeated here.
-
-What is left is the composition: `PushSupervisor`'s own loop driving
-`PushApplyService` into real repositories and out through the **real**
-`InMemoryEventBus` to a real subscriber, the real `PostgresJobQueue` behind
-the backfill's `(kind, key)` uniqueness, and the two measurements shaped so
-a quadratic would show.
-
-**The measurements, and what each holds fixed.** M4's lesson is that "a
-statement-count assertion needs the right thing held fixed", so the
-database half holds the **event count** fixed at 20 and varies the items per
-event (1, then 10) -- a per-item round trip inside an event is the candidate
-defect, and at 1,126,789 items on the one measured source a
-`UserDataChanged` naming a thousand of them is an ordinary afternoon. The
-bus half holds the **event count** fixed and varies the subscriber count at
-two points far enough apart to tell linear from quadratic, which one point
-cannot.
-
-This module runs inside the integration fixture's rolled-back transaction,
-so unlike the three other files this task adds it commits nothing and leaks
-no `stg_*` table.
+"""The push lane, whole: a socket's event into catalog state and out to a client,
+against real Postgres -- and what it costs.
 """
 
 import asyncio
@@ -246,12 +217,9 @@ async def test_a_pushed_watch_state_lands_and_is_published(
             )
             # **Three frames, not one, since M7.** The lane publishes one
             # `row.invalidated` per row a watch state can move and then the
-            # `watchstate.updated`, and the whole sequence is read rather than
-            # searched for: a loop that read *until* it found a watch-state
-            # event would pass against a lane that published forty row
-            # invalidations first, which is precisely the fan-out trap 5 is
-            # about. Bounded by `BOUND`, so a lane that publishes fewer fails
-            # here rather than hanging.
+            # `watchstate.updated`, and the whole sequence is read rather than searched
+            # for: a loop that read *until* it found a watch-state event would pass
+            # against a lane that published forty row invalidations first, which is
             published = [await asyncio.wait_for(anext(subscribed), timeout=BOUND) for _ in range(3)]
         finally:
             lane.cancel()
@@ -381,24 +349,10 @@ async def test_the_push_lanes_cost_per_event_does_not_grow_with_the_items_in_it(
         f"{one_item_each} statements for 20 events of 1 item, {ten_items_each} for 20 "
         "events of 10 -- something in the push lane costs a statement per item"
     )
-    # **And the level, because flatness alone hides what this found.** Nine
-    # statements per event, measured: one `resolve_targets`, then `SAVEPOINT`
-    # / `DROP TABLE IF EXISTS pg_temp.stg_watch_states` / `CREATE TEMP TABLE
-    # stg_watch_states` / four merge statements (an `UPDATE ... FROM` and an
-    # `INSERT ... ON CONFLICT DO NOTHING` per conflict target, title and
-    # episode) / `RELEASE SAVEPOINT`, plus a `COPY` this counter cannot see.
-    #
-    # So **a push event costs staging DDL**, and a `UserDataChanged` arriving
-    # once a second during playback pays it every time. Bounded per event
-    # rather than growing with anything, which is why the count is recorded
-    # here rather than optimised. The *contention* half of this note is
-    # settled: `stg_watch_states` used to be a fixed, shared name taking an
-    # `ACCESS EXCLUSIVE` lock, so the push lane and a nightly watch-state
-    # walk serialised against each other for the length of each other's
-    # batch; M6 made every staging table `CREATE TEMP TABLE ... ON COMMIT
-    # DROP`, so there is no shared name left to serialise on. Same fix
-    # `tests/integration/test_titles_route.py` records for `stg_jobs` on the
-    # read path; this is the write path's copy of it.
+    # **And the level, because flatness alone hides what this found.** Nine statements
+    # per event, measured: one `resolve_targets`, then `SAVEPOINT` / `DROP TABLE IF
+    # EXISTS pg_temp.stg_watch_states` / `CREATE TEMP TABLE stg_watch_states` / four
+    # merge statements (an `UPDATE ...
     assert one_item_each == 20 * 9, (
         f"{one_item_each / 20} statements per event against the nine measured "
         "2026-08-01: one resolve, four merge statements, and four of staging"
@@ -406,37 +360,7 @@ async def test_the_push_lanes_cost_per_event_does_not_grow_with_the_items_in_it(
 
 
 async def test_the_sse_fan_out_stays_linear_in_the_subscriber_count() -> None:
-    """The bus half of the same question, measured at **two** points.
-
-    One publish is O(subscribers) by construction -- that is what a fan-out
-    is -- so the plan's shape ("50 subscribers within 10x of 1") is not the
-    claim: it compares a point dominated by fixed cost with one dominated by
-    fan-out, and a correct implementation can legitimately fail it. What
-    must not grow is the work *per subscriber*, so this measures the same
-    burst at 25 and at 200 subscribers and compares the ratio against what
-    each shape predicts: **8x if the per-subscriber cost is flat, ~64x if
-    the fan-out is quadratic in subscribers.**
-
-    Both ends are measured rather than predicted, on this host,
-    2026-08-01: **6.0x, 6.3x, 6.2x** over three rounds as shipped (below
-    8x, because a fixed per-publish cost dilutes the fan-out at the small
-    end), against **25.6x** for a `publish` given an artificial O(S)
-    check per subscriber. The bound sits between the two with a 2.4x
-    margin below and a 1.7x margin above, and the failure message carries
-    the numbers rather than a verdict. A ratio is also robust to a host
-    that is uniformly slow, which a wall-clock threshold is not.
-
-    **What this cannot see, stated rather than implied:** work proportional
-    to the *replay ring* done once per subscriber. That is O(subscribers x
-    ring), which is still linear in subscribers, so both points scale
-    together and the ratio is unchanged. It is also the more plausible
-    defect of the two, and what rules it out is `publish` being a
-    `put_nowait` and a branch -- pinned by driving the coroutine one step by
-    hand in `tests/unit/test_services_events.py`, and by the interval
-    measurement in `tests/contract/event_publisher_contract.py`. A
-    wall-clock ratio is the weakest of the three and is here for the one
-    thing the other two cannot express.
-    """
+    """The bus half of the same question, measured at **two** points."""
     events = 200
     small, large = 25, 200
 

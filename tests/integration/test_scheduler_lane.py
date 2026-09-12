@@ -1,28 +1,4 @@
-"""The scheduled-work lane, running inside a real `create_app()` (ADR-0046).
-
-**This file exists because "the server process runs the scheduler" is a claim
-about a process, and no unit test can make it.**
-`tests/unit/test_services_scheduler.py` drives `Scheduler` directly over fake
-jobs, which proves the loop does what it is told; it says nothing about whether
-`create_app`'s lifespan tells it anything. So the headline case here starts
-nothing but the app and asserts a **job ran** -- not that a lane object exists,
-not that a setting was read. `test_lanes_in_the_server_process.py`'s shape
-exactly, and for its reason.
-
-**The job is a fake, and it stays one now that a real registration exists.**
-What these cases are about is the *lane* -- does the server process tick at
-all, and does the switch decide whether it does -- and a real job would make
-each of them depend on the state of a table as well. The real registration's
-own database work is `tests/integration/test_search_query_retention.py`'s
-subject. So the substitution is made where a composition root makes it -- by
-replacing `usher.api.lanes.build_scheduler`, the way
-`test_the_lifespan_releases_every_process_resource_it_built` replaces
-`metadata_provider`. `dependency_overrides` do not reach the lifespan.
-
-**The mirror case is what makes the headline one evidence.** With
-`scheduler_enabled=False` -- the shipped default -- the same fake must not run.
-Without it, "the fake ran" could be anything in the process.
-"""
+"""The scheduled-work lane, running inside a real `create_app()` (ADR-0046)."""
 
 import asyncio
 import time

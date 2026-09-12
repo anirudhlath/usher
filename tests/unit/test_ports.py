@@ -118,12 +118,7 @@ ALL_PORTS: list[type[ABC]] = [
     WatchStateRepository,
     Row,
     RowProvider,
-    # M10's J4. Not a repository and not a driven adapter: the *loop* is
-    # `usher.services.scheduler`, and this is the shape a batch has to have
-    # to be registered with it. It is on this list because
-    # `test_every_port_abc_is_registered_in_all_ports` below would
-    # otherwise report it missing -- which is the whole reason that case
-    # exists.
+    # M10's J4.
     ScheduledJob,
 ]
 
@@ -141,27 +136,9 @@ def test_port_declares_abstract_methods(port: type[ABC]) -> None:
 
 @pytest.mark.parametrize("port", ALL_PORTS)
 def test_no_port_is_a_protocol(port: type[ABC]) -> None:
-    """ADR-0001: ports are `abc.ABC`, never `typing.Protocol`. A Protocol is
-    satisfied structurally, so a fake that drifts from the port keeps passing
-    and the contract suite silently stops being a contract.
-
-    **Nothing in this file checked that, and the M7 group B sweep is what
-    found it.** The obvious assertions all pass against the rewrite ADR-0001
-    forbids: a `Protocol` subclass that keeps its `@abstractmethod`
-    decorators has a populated `__abstractmethods__`, so
-    `test_port_declares_abstract_methods` is green, and instantiating it
-    raises `TypeError` with the message *"Can't instantiate abstract class P
-    without an implementation for abstract methods ..."* -- **byte-identical
-    to the ABC's**, verified directly, so `test_port_cannot_be_instantiated_
-    directly` is green too and even `pytest.raises(TypeError,
-    match="abstract")` cannot tell them apart. The three mutations
-    `class <Port>(Protocol)` survived the whole file before this case
-    existed.
-
-    `ABC in __mro__` is what discriminates: `typing.Protocol` derives from
-    `Generic` and only its *metaclass* is an `ABCMeta`, so the class object
-    itself never has `ABC` in its MRO. Both halves are asserted, because
-    `ABC in __mro__` alone would pass for a class inheriting from both.
+    """ADR-0001: ports are `abc.ABC`, never `typing.Protocol`. A Protocol is satisfied
+    structurally, so a fake that drifts from the port keeps passing and the contract
+    suite silently stops being a contract.
     """
     assert ABC in port.__mro__, f"{port.__name__} is not an ABC (ADR-0001)"
     # Widened to `object` deliberately: `typing.Protocol` is a typing special
@@ -176,13 +153,9 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
 @pytest.mark.parametrize(
     "port,methods",
     [
-        # `get` is here as of M9's `GET /people/{id}`, which is the caller
-        # Task 6 said the absence was waiting for -- "nothing in M7 reads one
-        # person by id and `GET /people/{id}` is M9's". So the deliberate gap
-        # closes because its route arrived, not because a fake wanted a
-        # read-back: the suite still reads a stored person through
-        # `PersonHistorySeeder.stored`, which is what keeps that seam off the
-        # shipped surface.
+        # `get` is here as of M9's `GET /people/{id}`, which is the caller Task 6 said
+        # the absence was waiting for -- "nothing in M7 reads one person by id and `GET
+        # /people/{id}` is M9's".
         (
             PersonRepository,
             {"get", "upsert_many", "resolve_tmdb_ids", "list_recurring_for_user", "count"},
@@ -196,49 +169,32 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
                 "count_titles_with_credits",
             },
         ),
-        # `get` is here as of M9's `GET /collections/{id}`, the second of Task
-        # 6's four absences to close and for the same reason as
-        # `PersonRepository.get`: the route arrived. It is not `list_owned`
-        # with a filter -- it carries **no `min_owned`**, which is the whole
-        # difference between "what belongs on a screen" and "the franchise the
-        # client asked for by id".
+        # `get` is here as of M9's `GET /collections/{id}`, the second of Task 6's four
+        # absences to close and for the same reason as `PersonRepository.get`: the route
+        # arrived.
         (
             CollectionRepository,
             {"get", "upsert_many", "resolve_tmdb_ids", "attach_titles", "list_owned", "count"},
         ),
-        # Not one of Task 6's three, and added here by M7's Task 35 because
-        # this is exactly the list that catches what that task did: it grew
-        # `count_stale` on a port six milestones old, and nothing else in the
-        # suite would have noticed the surface move.
-        # `resume_cursor` is M10's J6 and lands on the same terms `count_stale`
-        # did: a port six milestones old grew a method, and this list is the
-        # only thing in the suite that notices a surface move. It reads across
-        # `title_embeddings` as well as this table -- the lowest embedded seed
-        # with no row under the running blend, minus one -- which is why it is
-        # here rather than on `TitleEmbeddingRepository`: the question is what
-        # the *artefact* says has been done.
+        # Not one of Task 6's three, and added here by M7's Task 35 because this is
+        # exactly the list that catches what that task did: it grew `count_stale` on a
+        # port six milestones old, and nothing else in the suite would have noticed the
+        # surface move.
         (
             TitleNeighborRepository,
             {"replace", "list_for", "computed_at", "count_stale", "resume_cursor"},
         ),
-        # M8 Task 9, and it is on this list for the reason `count_stale` is:
-        # the surface is where the decisions live. **`replace_for_user` takes
-        # no `generation_id` parameter** -- every `CuratedRow` carries one, so
-        # a third argument would be a second spelling of a fact the rows
-        # already hold, and the delete's scope is `user_id` rather than the
-        # generation (M8's plan names a three-argument signature; the port
-        # docstring carries the argument for departing from it). A parameter
-        # re-added here without that argument being answered moves this set.
+        # M8 Task 9, and it is on this list for the reason `count_stale` is: the surface
+        # is where the decisions live.
         (
             CuratedRowRepository,
             {"replace_for_user", "list_for_user"},
         ),
-        # **An append and no read, and the absence is the entry's content.**
-        # A windowed `list_since` was added in M10 and deleted again once it
-        # was measured to have no caller in `src/`: every spend panel and the
-        # cost-anomaly alert are SQL living in Grafana, so a read here is a
-        # surface maintained for a consumer that never imports it.
-        # `ix_llm_calls_at` answers that alert directly.
+        # **An append and no read, and the absence is the entry's content.** A windowed
+        # `list_since` was added in M10 and deleted again once it was measured to have
+        # no caller in `src/`: every spend panel and the cost-anomaly alert are SQL
+        # living in Grafana, so a read here is a surface maintained for a consumer that
+        # never imports it.
         (
             LLMCallRepository,
             {"record"},
@@ -248,76 +204,15 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
 def test_the_new_repository_ports_declare_exactly_these_abstract_methods(
     port: type[ABC], methods: set[str]
 ) -> None:
-    """The exact set, not merely a non-empty one, and the sweep is why.
-
-    `test_port_declares_abstract_methods` asserts `port.__abstractmethods__`
-    is truthy, which is satisfied by a port that lost the decorator on one
-    method of three -- the other two keep the class abstract, so
-    instantiation still raises and nothing notices. That mutation survived
-    the whole file. A method that silently became concrete returns `None`,
-    and a fake that never implements it passes its own contract suite while
-    the real repository is the only thing that works.
-
-    Also a spelled-out inventory of the methods Task 6 settled, so the four
-    deliberately-absent ones -- `PersonRepository.get`,
-    `CollectionRepository.get`, `list_members`, and any `rebuild` -- cannot
-    be added without this list moving and someone reading the reason.
-    **Two of those four are now present** -- `PersonRepository.get` and
-    `CollectionRepository.get` -- and each arrived with the M9 route Task 6
-    named as the caller it was waiting for. `list_members` and `rebuild` are
-    still absent and still deliberate: `OwnedCollection` carries the member
-    list, so a separate members read would be a second opinion about the same
-    fact.
-
-    It moved once, and this is the record of it: M7's `usher derive` report
-    added `PersonRepository.count`, `CollectionRepository.count` and
-    `CreditRepository.count_titles_with_credits`. Each is read by that
-    command's bare form, which is the same bargain `usher index`'s bare form
-    takes with `count_stale`/`count_refused` -- a count with a caller, not a
-    port method whose only test is its own. `count_titles_with_credits`
-    counts **titles**, never rows, and its name says so because a report
-    reading "412,000 credits" answers a question nobody asked.
-    """
+    """The exact set, not merely a non-empty one, and the sweep is why."""
     assert set(port.__abstractmethods__) == methods
 
 
 def test_every_port_abc_is_registered_in_all_ports() -> None:
-    """`ALL_PORTS` is hand-maintained, and until this case existed nothing
-    noticed a port that was left out of it -- so a new port silently got
-    neither the "cannot be instantiated" check nor the "declares abstract
-    methods" one, which are the two properties ADR-0001 chose ABCs *for*.
-
-    M6 adds `SuggestIndex` and is the second milestone in a row to add a
-    port. The plan assumed the list was correct so far by attention;
-    running this case for the first time reported **thirteen** missing
-    names, not one -- `JobQueue`, `EventPublisher`, `BulkDataset` and all
-    nine repository ports had never been checked at all. Attention had not
-    in fact been keeping it. Two lines of `pkgutil` is cheaper.
-
-    Deliberately walks `usher.ports.*` rather than asserting a count: a
-    count moves for a rename, which teaches people to edit the number.
-
-    The two `declared` assertions are the control, and they are not
-    decoration. A scan that globs nothing passes exactly like a scan that
-    passes -- the failure mode `tests/unit/test_no_third_party_data.py`
-    carries the same guard against, and the one this case's own mutation
-    sweep found: emptying `pkgutil.iter_modules(...)` broke nothing.
-
-    **`walk_packages`, not `iter_modules`, and M9 is what that is for.**
-    `iter_modules` does not descend into a subpackage, and the filter below
-    keeps a class only when `value.__module__ == namespace.__name__` -- so
-    the moment `ports/repository.py` became `ports/repository/`, every one
-    of its re-exported ABCs carried `usher.ports.repository.title` against a
-    namespace called `usher.ports.repository` and stopped matching.
-    Measured both ways at the split: `iter_modules` finds **13** ports and
-    `walk_packages` finds **32**, so the naive spelling dropped all
-    **nineteen** repository ports at once -- and both of this case's own
-    controls survive that, because `declared` is still full and `SearchIndex`
-    is still in it. Demonstrated rather than reasoned about: with
-    `TitleRepository` deleted from `ALL_PORTS`, the `iter_modules` spelling
-    passes and this one fails naming it. That is the cheapest false green in
-    the milestone -- a scan whose *subject* narrowed while every guard on it
-    stayed true.
+    """`ALL_PORTS` is hand-maintained, and until this case existed nothing noticed a port
+    that was left out of it -- so a new port silently got neither the "cannot be
+    instantiated" check nor the "declares abstract methods" one, which are the two
+    properties ADR-0001 chose ABCs *for*.
     """
     import importlib
     import pkgutil
@@ -548,27 +443,8 @@ def test_metadata_candidate_uses_the_canonical_kind_vocabulary() -> None:
 
 
 # --- TitleRepository (the port, not the domain model) -----------------------
-#
-# Repositories are ports too (ADR-0009): usher.services may not import
-# usher.db, so a service that needs persistence can only depend on this ABC.
-# FakeTitleRepository (tests/fakes/title_repository.py) is not a throwaway
-# instantiation check -- it is the in-memory double services get unit-tested
-# against from M4 onward, standing in for
-# usher.db.repositories.title.PostgresTitleRepository the same way a fake
-# Embedder above stands in for a real one. It lives outside this module so
-# M4 can import it without dragging in this file's fixtures and parametrized
-# tests.
-#
-# The behavioural suite that used to live here (add/get round trip, reject
-# duplicate, update, count_by_state, ...) moved to
-# tests/contract/title_repository_contract.py (Task 10), so the identical
-# assertions run against both this fake and the real, Postgres-backed
-# PostgresTitleRepository instead of two hand-maintained copies drifting
-# apart -- see tests/unit/test_title_repository_contract.py and
-# tests/integration/test_title_repository.py's
-# TestPostgresTitleRepositoryContract. What's left here is the one check
-# with no real-repository counterpart to share it with: the ABC-shape
-# assertion this whole file is about.
+# Repositories are ports too (ADR-0009): usher.services may not import usher.db, so a
+# service that needs persistence can only depend on this ABC.
 
 
 def test_complete_title_repository_implementation_instantiates() -> None:

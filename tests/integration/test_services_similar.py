@@ -1,22 +1,4 @@
-"""The similarity precompute against real Postgres.
-
-The unit file holds the blend. What is here is everything a dict cannot say:
-that `WHERE e.embedding IS NOT NULL` is *written down* rather than skipped by
-the accident of a Python control flow; that the candidate query is an exact
-scan rather than the HNSW graph; that the `halfvec` round trip does not reorder
-a top five; that a page costs one candidate statement rather than one per seed;
-and that `replace` is a real DELETE plus INSERT, where "replaced" and "merged"
-are distinguishable and in a dict they are not.
-
-**Every cosine is planted, never hoped for**, for the reason the unit file
-gives -- and here with one extra caveat that is a fact about the column: after
-the `halfvec` cast the vectors are no longer unit (norm drift 1.19e-07 ->
-1.21e-04, measured), so any margin smaller than ~1.2e-04 is measuring the
-storage format rather than the code.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""The similarity precompute against real Postgres."""
 
 import math
 import uuid
@@ -208,12 +190,10 @@ async def test_the_candidate_query_is_an_exact_scan_and_not_the_hnsw_index(
 
     await session.execute(text("SET LOCAL enable_indexscan = off"))
     await session.execute(text("SET LOCAL enable_bitmapscan = off"))
-    # `_NEAREST` read out of the module rather than transcribed, and rather
-    # than re-using the captured text: `before_cursor_execute` hands back the
-    # *compiled* statement, whose `:limit` has already become `$1`, so
-    # EXPLAINing that string leaves asyncpg expecting two arguments nobody can
-    # supply. Same rule the fingerprint cross-check follows -- a hand-copied
-    # lookalike drifts and then reads like coverage.
+    # `_NEAREST` read out of the module rather than transcribed, and rather than re-
+    # using the captured text: `before_cursor_execute` hands back the *compiled*
+    # statement, whose `:limit` has already become `$1`, so EXPLAINing that string
+    # leaves asyncpg expecting two arguments nobody can supply.
     assert seen[candidate].count("$") == 2, "the captured statement is not the candidate query"
     result = await session.execute(
         text(f"EXPLAIN {_NEAREST}"),
@@ -456,32 +436,7 @@ async def test_a_read_orders_by_rank_and_not_by_the_neighbours_own_id(
 async def test_count_stale_counts_rows_from_another_blend_and_not_rows_from_this_one(
     session: AsyncSession,
 ) -> None:
-    """The staleness predicate, against Postgres rather than against the fake.
-
-    Inverting `<>` to `=` in `_COUNT_STALE_NEIGHBORS` **survived the whole
-    suite**: every test of neighbour `count_stale` runs against
-    `FakeTitleNeighborRepository`, whose comparison is Python, and the only
-    integration reads of `count_stale` are the unrelated *embedding* one. So
-    the one clause that decides whether `usher.similarity.neighbors.stale`
-    means anything had no Postgres coverage at all.
-
-    **Both kinds of row have to be in the table at once.** With only stale rows
-    seeded, `<>` answers 1 and `=` answers 0 -- which an `== 1` assertion does
-    catch, but only by luck of direction; with only fresh rows the two swap and
-    a `== 0` assertion is satisfied by the inversion. Seeding one of each makes
-    the two predicates count *different rows*, and the per-title assertions pin
-    which is which.
-
-    The failure this guards is the one PRD 10 names: on a table inherited from
-    M6 -- the deployment the column was added for -- an inverted predicate
-    reads **zero**, and a gauge reading zero is indistinguishable from a fresh
-    table.
-
-    Both fingerprints are literals, for the reason `_FP` is one: the predicate
-    compares two strings and does not care whether either is today's real
-    blend, while a case that inherited `blend_fingerprint()` would stop
-    expressing "a different blend" the moment the weights moved.
-    """
+    """The staleness predicate, against Postgres rather than against the fake."""
     neighbors = PostgresTitleNeighborRepository(session)
     first, second = planted_pair(math.pi / 4)
     stale_seed = await _seed(session, vector=first)
@@ -565,12 +520,10 @@ async def test_computed_at_is_the_oldest_page_and_none_before_any_rebuild(
         [ScoredNeighbor(title_id=seed_id, neighbor_title_id=other_id, score=0.5, rank=0)],
         blend_fingerprint=_FP,
     )
-    # Backdated with a raw UPDATE, because the integration fixture is one
-    # transaction and `now()` is `transaction_timestamp()` -- frozen for its
-    # whole length, so two `replace` calls here genuinely share an instant and
-    # `min` versus `max` would be unobservable without giving the stamp
-    # something to move away from. Same device as
-    # `test_the_update_trigger_owns_updated_at`.
+    # Backdated with a raw UPDATE, because the integration fixture is one transaction
+    # and `now()` is `transaction_timestamp()` -- frozen for its whole length, so two
+    # `replace` calls here genuinely share an instant and `min` versus `max` would be
+    # unobservable without giving the stamp something to move away from.
     await session.execute(
         text("UPDATE title_neighbors SET computed_at = computed_at - interval '1 day'")
     )
@@ -669,27 +622,8 @@ async def test_the_seed_page_reports_which_titles_carry_a_genome(
 async def test_a_pair_carries_a_genome_cosine_only_when_both_sides_have_one(
     session: AsyncSession,
 ) -> None:
-    """The `None`-not-zero rule, asserted against the real join rather than
-    against the fake's dict.
-
-    Three candidates around one genomed seed: one sharing its genome lane
-    (cosine 1.0), one on a different lane (0.0 -- a *real* answer, and the
-    thing `None` must stay distinguishable from), and one with no genome row
-    at all (`None`).
-
-    **The middle candidate is what makes this case bite.** Without it, `None`
-    and `0.0` are the only two values present and an implementation that
-    `COALESCE`d the absent side to zero would be indistinguishable from a
-    correct one on these rows. With it, the two states are both present and
-    genuinely different.
-
-    **"Carries", not "scores", since M9's S7.** Nothing blends this value any
-    more, so the distinction the case pins now has exactly one consumer:
-    `NeighborRebuild.pairs_with_tags`, which counts `tags is not None`. A join
-    that answered 0.0 for a half-covered pair would report the genome as fully
-    covering a catalog it barely touches -- making a dead signal look live,
-    which is the wrong direction for the number a later milestone would re-open
-    the decision on.
+    """The `None`-not-zero rule, asserted against the real join rather than against the
+    fake's dict.
     """
     seed_vector, near = planted_pair(math.pi / 3)
     seed_id = await _seed(session, vector=seed_vector, name="Harbour Nine")
@@ -751,33 +685,7 @@ def lines() -> Iterator[list[str]]:
 async def test_the_scheduled_rebuild_refuses_a_table_written_by_another_model(
     session: AsyncSession, lines: list[str]
 ) -> None:
-    """🔴 **The registration refuses a mixed table, and refusing means writing
-    nothing.**
-
-    `blend_fingerprint` hashes the **configured** model and `nearest_for` does
-    not filter by `model_name`, so a scheduler started with the wrong
-    `USHER_EMBEDDING_MODEL` finds every row stale, walks for hours, draws its
-    pools from one embedding space and stamps them with the other's
-    fingerprint. On the catalog this project measures that is the *default*
-    configuration: `Settings.embedding_model` is
-    `fastembed:BAAI/bge-large-en-v1.5` and every stored vector is
-    `openai:BAAI/bge-m3` (133,364 rows, measured 2026-09-07).
-
-    **Asserted on the table, not on the log.** "It logged" is satisfied by a
-    job that logged and then ran anyway, which is the whole failure -- so the
-    row count is the assertion and the log line is checked for *both* names
-    beside it, because a message naming only one is not actionable.
-
-    **`last_done()` is unchanged**, so nothing is recorded as done and the
-    refusal is not mistaken for a completion. It answers `DECLINED` rather
-    than raising: a raise would be counted on `usher.scheduler.job.failures`,
-    which describes a job that tried and broke rather than a deployment
-    configured for the wrong model.
-
-    The positive control is the second half: the identical arrangement with the
-    configured model *matching* writes rows. Without it a guard that refused
-    unconditionally -- or a fixture with no seeds at all -- would pass.
-    """
+    """🔴 **The registration refuses a mixed table, and refusing means writing nothing.**"""
     ids = []
     for index in range(3):
         _, vector = planted_pair(0.3 * (index + 1))
@@ -841,27 +749,7 @@ class _RecordingEmbeddings(PostgresTitleEmbeddingRepository):
 async def test_a_resumed_rebuild_starts_at_the_first_seed_without_a_current_fingerprint(
     session: AsyncSession,
 ) -> None:
-    """`rebuild(resume=True)` computes its start cursor once, from the artefact.
-
-    **The failure this closes is a walk that restarts rather than resumes.**
-    `rebuild`'s keyset begins at `after = None` on every run, so an
-    interruption at 3.2 hours of a 3.58-hour walk redoes 3.2 hours -- and a
-    process restarted more often than the walk takes never reaches the end of
-    the catalog. The fix stores nothing: the cursor is derived from the rows
-    that are already there.
-
-    **A starting offset, computed once -- not a loop predicate.** The loop
-    still advances on `id` and still ends when `list_embedded` returns empty,
-    so a seed the rebuild cannot clear is re-attempted once per run rather
-    than looped on forever. That is the distinction `rebuild`'s docstring
-    argues the other side of.
-
-    **Two positive controls, and both are load-bearing.** A `max_seeds` that
-    wrote nothing would satisfy "the resume started later" trivially, so the
-    first run's two seeds are asserted in the table rather than in the report
-    alone; and a wrapper that recorded no call at all would make the cursor
-    assertion vacuous, so `calls` is asserted non-empty before it is indexed.
-    """
+    """`rebuild(resume=True)` computes its start cursor once, from the artefact."""
     ids = []
     for index in range(6):
         _, vector = planted_pair(0.2 * (index + 1))
@@ -918,26 +806,8 @@ async def _written_rows(session: AsyncSession) -> list[tuple[uuid.UUID, uuid.UUI
 async def test_a_rebuild_with_no_argument_walks_exactly_as_a_resumed_one_over_a_stale_table(
     session: AsyncSession,
 ) -> None:
-    """`rebuild()` is unchanged, and `resume=True` over a fully-stale table is
-    the same walk rather than a different one.
-
-    **The regression this closes is the one a new keyword argument invites**:
-    a default that is not today's behaviour. Both forms run here over a table
-    where nothing carries the running fingerprint, and both the *page cursors*
-    and the *written rows* are compared -- the cursors because that is where
-    `resume=True` can differ at all, and the rows because a walk that read the
-    same pages and blended them differently would pass a cursor-only check.
-
-    ⚠️ **A fully-stale table is also the second spelling of the cursor's
-    `None`.** The first embedded seed carries no current row, so there is
-    nothing before it to resume from, and the honest answer is a walk from the
-    start -- the same answer an all-current table gives, for a different
-    reason. A cursor that answered the *uncovered seed itself* rather than its
-    predecessor would skip the first seed here, and the row comparison is what
-    sees it.
-
-    `computed_at` is excluded from the comparison and nothing else is: it is a
-    clock reading, and the two runs are seconds apart by construction.
+    """`rebuild()` is unchanged, and `resume=True` over a fully-stale table is the same
+    walk rather than a different one.
     """
     ids = []
     for index in range(4):

@@ -1,12 +1,4 @@
-"""`VisibilityService` — the read surfaces' half of PRD 03's demand lane.
-
-`JobPriority.VISIBLE` was defined in M4 carrying the comment *"in a row the
-client just requested (M5)"* and had exactly one call site in the tree by
-2026-08-26, in `watch_write.py`, which is not a read surface. So every catalog
-screen returned skeletons it never promoted, and the only way to enrich one was
-to open it — `GET /titles/{id}` one title at a time, against a catalog that is
-1,139,982 skeletons.
-"""
+"""`VisibilityService` — the read surfaces' half of PRD 03's demand lane."""
 
 import uuid
 from collections.abc import Sequence

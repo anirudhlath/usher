@@ -1,12 +1,4 @@
-"""The push lane: applying one event, and supervising the channel.
-
-**What the fakes here cannot say, named rather than implied.**
-`FakeWatchStateRepository` stores `observed_at` as `updated_at`, while
-Postgres has a `BEFORE UPDATE` trigger that owns that column -- so a push
-merge carrying anything but a fresh instant is accepted here and silently
-refused there, which is the one defect in `_apply_watch_state` no case below
-can reach. `tests/integration/test_services_push.py` is the paired run.
-"""
+"""The push lane: applying one event, and supervising the channel."""
 
 import asyncio
 import inspect
@@ -291,12 +283,10 @@ async def test_a_watch_event_that_changed_something_publishes_it(fixture: _Fixtu
             watch_states=(SourceWatchState(external_id="i1", position_seconds=61, played=False),),
         )
     )
-    # **Three events, and the sequence is asserted rather than filtered.** M7
-    # added one `row.invalidated` per slug a watch state can move, published
-    # *before* the watch-state event so a client that refetches on the first
-    # one gets a screen composed after the cache was cleared. A case that
-    # filtered for `WATCHSTATE_UPDATED` here would pass against a lane that
-    # published forty row invalidations.
+    # **Three events, and the sequence is asserted rather than filtered.** M7 added one
+    # `row.invalidated` per slug a watch state can move, published *before* the watch-
+    # state event so a client that refetches on the first one gets a screen composed
+    # after the cache was cleared.
     assert [event.kind for event in fixture.events.published] == [
         ClientEventKind.ROW_INVALIDATED,
         ClientEventKind.ROW_INVALIDATED,
@@ -480,25 +470,8 @@ async def test_the_span_names_the_event_kind(
     assert "push.watch_state_changed" in names
 
 
-# ===========================================================================
-# The supervisor: reconnect, backoff, and the gap it closes.
-# ===========================================================================
-#
-# **Everything below runs on an injected clock and an injected sleep, and
-# nothing here sleeps for real except the two cases that measure an overlap.**
-# A supervised reconnect loop with a real backoff schedule is a suite that
-# takes minutes; with an injected one it is a suite that takes milliseconds
-# and asserts on the *schedule* rather than on having waited.
-#
-# **The two ways a case here can lie, both disarmed.** A mutation of this
-# loop does not necessarily fail -- it can spin, and `asyncio.wait_for`
-# cannot bound a coroutine that never yields to the event loop, so the case
-# would hang rather than fail and nothing on a starved loop could observe it.
-# `_ScriptedAdapter` therefore caps its own connection attempts and raises a
-# plain `AssertionError` past the cap (not a `UsherPortError`, so the
-# supervisor cannot catch it and the case fails in milliseconds with the
-# count in the message), the injected sleep yields, and every case is
-# additionally bounded by `asyncio.wait_for`.
+# =========================================================================== The
+# supervisor: reconnect, backoff, and the gap it closes.
 
 
 class _Lane:
@@ -549,30 +522,7 @@ _DROP = SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("__drop__",
 
 
 class _ScriptedAdapter(FakeSourceAdapter):
-    """A source whose push channel is a script of connections.
-
-    Each entry in `connections` is what one connection delivers before the
-    peer goes away; when the script runs out, `events()` itself raises
-    `PortUnavailable` without opening anything, which is a connection that
-    failed rather than one that dropped. That is what makes the connection
-    *count* an assertion with teeth: a supervisor that reset its failure
-    counter on connection would never reach the ceiling and would keep
-    calling `events()` forever.
-
-    **It really awaits.** A bare mock never suspends, so the event loop runs
-    each task through its whole cycle before starting the next and a
-    "concurrent" producer never overlaps anything -- the same reason
-    `tests/fakes/slow_transport.py` exists. Frames are produced by a task of
-    their own, with a real interval when a case asks for one, so a consumer
-    parked in the supervisor's own loop genuinely yields to it.
-
-    **Where it is more forgiving than `EmbyPushChannel`:** no transport, no
-    handshake, no watchdog of its own, and `supports_push` is a count of
-    frames this connection has *yielded* rather than a ledger with a
-    staleness window. The six push contract cases are what hold the real
-    channel to the three-clause rule; this exists to script a supervisor's
-    world, not to model a socket.
-    """
+    """A source whose push channel is a script of connections."""
 
     def __init__(
         self,
@@ -626,12 +576,10 @@ class _ScriptedAdapter(FakeSourceAdapter):
         if not self._script:
             if not self._unbounded:
                 raise PortUnavailable("the scripted source refused the connection")
-            # A proxy that upgrades and then buffers connects perfectly
-            # **every** time -- there is no supply of connections to run out
-            # of, which is exactly why the ceiling has to come from the
-            # failure counter rather than from the world getting tired. A
-            # script that ran dry would terminate a mutated loop for the
-            # wrong reason and let it pass.
+            # A proxy that upgrades and then buffers connects perfectly **every** time
+            # -- there is no supply of connections to run out of, which is exactly why
+            # the ceiling has to come from the failure counter rather than from the
+            # world getting tired.
             return self._open([])
         return self._open(self._script.pop(0))
 

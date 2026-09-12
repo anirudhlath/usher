@@ -1,24 +1,5 @@
-"""The scheduler loop over fake jobs, and `SearchQueryRetention` over a fake
-store -- both with an injected clock and no database anywhere.
-
-**Every job the *loop* cases drive is a fake, and that is the point rather
-than a convenience.** What they pin is the loop -- the due comparison, the
-sequencing, the failure isolation and the two lifecycle promises -- against
-jobs that exist only to be observed, so a defect in a registration cannot make
-one of them green or red.
-
-**The retention cases below are the other half and drive the real job**
-(M10's J5) over `FakeSearchQueryRepository` through a recording scope. Its
-`last_done()` is an *arithmetic* claim over what the store answers, so a fake
-store is the right arm for it; the Postgres arm -- the real statement, the
-real boundary and the real commit -- is
-`tests/integration/test_search_query_retention.py`.
-
-**The clock's origin is deliberately not zero.** `.claude/rules/
-testing-discipline.md`: *"a fixture whose origin is the identity element of the
-operation under test cannot distinguish the operation from its absence"* -- a
-`datetime` at the epoch would make `now - last` and `now` the same instant for
-a `last_done()` of `datetime.min`, and the whole subject here is a subtraction.
+"""The scheduler loop over fake jobs, and `SearchQueryRetention` over a fake store --
+both with an injected clock and no database anywhere.
 """
 
 import asyncio
@@ -323,26 +304,9 @@ def _settings(**overrides: object) -> Settings:
 
 
 def test_the_registry_a_composition_root_builds_holds_both_jobs_in_order() -> None:
-    """**J4 shipped the loop with no registrations, J5 added the first and J6
-    the second**, and a registry nothing asserts is indistinguishable from one
-    somebody forgot to fill.
-
-    ⚠️ **This case read `scheduler.jobs == ()` for one commit and then one
-    name**, which is why each turn is a rewrite rather than a deletion: the
-    point it makes is unchanged -- what a deployment will actually run is a
-    line somebody has to write in `build_scheduler` -- and the value it asserts
-    moves when a registration lands.
-
-    **The order is asserted, not just the membership.** `Scheduler.tick` walks
-    the registry in registration order and runs due jobs sequentially, so on a
-    tick that finds both due the order decides whether a 0.072 ms prune waits
-    behind a walk measured in hours or the other way round. A set comparison
-    would be satisfied by either.
-
-    Names rather than types. Each is a metric label
-    (`usher.scheduler.job.duration` and its two siblings are all labelled
-    `job`) and a span name, so a rename is an emptied panel; a case asserting
-    `isinstance(..., SearchQueryRetention)` would let that through.
+    """**J4 shipped the loop with no registrations, J5 added the first and J6 the second**,
+    and a registry nothing asserts is indistinguishable from one somebody forgot to
+    fill.
     """
     scheduler = build_scheduler(_settings(), sessions=_no_sessions())
 
@@ -371,27 +335,7 @@ def test_a_scheduler_with_no_way_to_reach_a_database_registers_nothing() -> None
 async def test_the_retention_registration_carries_the_window_and_the_batch_an_operator_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The two settings reach the job, and the period comes from neither.
-
-    The wrong implementations this kills: a registration that hard-codes 90
-    days beside a setting an operator can change, which is the failure a
-    setting exists to prevent; one that ignores the chunk size and drains the
-    whole table in a single transaction; and one that reads the *period* off
-    the retention window, which is the design ADR-0046 shipped with and
-    `ScheduledJob.last_done` refuses.
-
-    **Read off what the job does, not off accessors it would otherwise have
-    no reason to carry.** The window is the arithmetic in `last_done()` --
-    `min(at) + window` -- and the chunk size is observable as the number of
-    scopes a drain opens, which is `tests/unit/test_services_scheduler.py::
-    test_the_prune_drains_in_chunks_and_opens_a_scope_for_each`'s own idiom:
-    seven expired rows at a batch of three are chunks of 3, 3, 1, where the
-    shipped default of 10,000 would be one.
-
-    The period is pinned to the literal as well as to the constant: a day is
-    what `.env.example`, `Config.settings.ts`, PRD 08 and PRD 10 all state in
-    prose no other test reads.
-    """
+    """The two settings reach the job, and the period comes from neither."""
     user_id = new_id()
     repository = FakeSearchQueryRepository()
     oldest = _NOW - timedelta(days=300)

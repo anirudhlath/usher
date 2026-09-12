@@ -1,43 +1,4 @@
-r"""D5's other two leak pins: a telemetry attribute and the loguru sink.
-
-**Why these two live here and not beside `test_api_playback_leaks.py`.** Both
-of ADR-0012's remaining named surfaces need a *real* outbound call to be a
-meaningful pin. Against a `FakeSourceAdapter` nothing calls `httpx` at all, so
-"no span attribute -- including `url.full` from `HTTPXClientInstrumentor` --
-carries the token" would be vacuously true: there would be no httpx span to
-carry anything. This file drives the real `EmbyAdapter` over
-`FakeEmbyServer`, the same graph `test_playback_route.py` uses, so the claim
-is proved against a real round trip rather than assumed from its absence.
-
-**Every case uses a deliberately tiny URL.** `FakeEmbyServer` mints its own
-session token (`session-token-N`), which is short by construction and not
-controllable to the exact `tok-Zq7` the unit file uses -- what makes the
-positive control meaningful here is not the token's length, it is that
-nothing here scripts it: `server.tokens[-1]` is the token the adapter really
-authenticated with, read back rather than written down in advance.
-
-**Pin 5's positive control is a `WARNING`, not an `INFO`, and that is a
-finding rather than a shortcut.** `usher.telemetry.configure_logging`
-deliberately drops `httpx`'s own per-request `INFO` line
-(`logging.getLogger("httpx").setLevel(logging.WARNING)`, `telemetry.py:162`)
--- measured directly here before this file was written: driving a real
-request through `httpx.MockTransport` after `configure_logging` runs puts
-**zero** httpx records in a DEBUG sink, only WARNING and above. And nothing
-else in a successful play-then-redeem cycle logs at `INFO` at all --
-`api/routers/playback.py`'s own docstring says so ("there is no `logger` in
-this module"), and `PlaybackService` logs only at `DEBUG` (a copy naming a
-source that is gone) and `WARNING` (a source that failed). A `sink == []`
-assertion over a cycle where nothing above WARNING can ever be produced is
-exactly the false green the rules files name under `sink == []`
-(`grep -rn 'sink == \[\]' .claude/rules/` finds it; it moved between files
-on 2026-09-01, which a line number would not have survived), so the
-positive control this pin uses is the one genuine record the resolution
-logic itself produces: a second, uncredentialed source on the same title
-triggers `PlaybackService._copy_targets`'s existing
-`"playback: source {source_id} has no stored credentials"` `WARNING` --
-safe by construction (it names a source id, never a URL) and, critically,
-*real* rather than planted for the test.
-"""
+"""D5's other two leak pins: a telemetry attribute and the loguru sink."""
 
 import http.server
 import threading
@@ -498,13 +459,10 @@ async def test_no_exported_span_attribute_carries_the_token(
         and "opentelemetry.instrumentation.httpx" in one.instrumentation_scope.name
     ]
     assert http_spans, "the premise: the real EmbyAdapter really produced an httpx span"
-    # The attribute name is `url.full` under OTel's newer semantic-convention
-    # opt-in and `http.url` under the default this deployment runs with
-    # (`OTEL_SEMCONV_STABILITY_OPT_IN` unset) -- both name the same value, and
-    # the premise is that *one of them* is really on the span, not which
-    # spelling. `HTTPXClientInstrumentor` measured 2026-08-11 emitting
-    # `http.url` on this stack; both are checked so the case survives either
-    # convention rather than pinning the one this environment happens to run.
+    # The attribute name is `url.full` under OTel's newer semantic-convention opt-in and
+    # `http.url` under the default this deployment runs with
+    # (`OTEL_SEMCONV_STABILITY_OPT_IN` unset) -- both name the same value, and the
+    # premise is that *one of them* is really on the span, not which spelling.
     urls = [
         str(span.attributes.get(name, ""))
         for span in http_spans

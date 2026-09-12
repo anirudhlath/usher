@@ -1,21 +1,4 @@
-"""Serving Usher Console from this process, and the shadowing question.
-
-The console is a `StaticFiles` mount with a history fallback, which is the one
-kind of route that can answer a request meant for something else. So the cases
-that matter here are not "does `/console/` return HTML" — they are the three
-ways this mount could quietly eat the API:
-
-1. a path under a router's prefix reaching the fallback instead of the router;
-2. an unrouted path answering `index.html` with a 200 instead of an RFC 9457
-   404, which is the failure the previous client hit through nginx and whose
-   symptom named neither the proxy nor the path;
-3. a missing asset answering `index.html` with a 200, so a build that dropped a
-   chunk looks like a working page that renders nothing.
-
-The mount is driven through a real `create_app()` against a real directory on
-disk, because the thing under test is Starlette's route resolution order and a
-fake mount would not have it.
-"""
+"""Serving Usher Console from this process, and the shadowing question."""
 
 import json
 from collections.abc import AsyncIterator, Iterator

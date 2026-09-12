@@ -1,29 +1,4 @@
-"""`usher rotate-secret` against a real `source_credentials`.
-
-`tests/unit/test_services_rotation.py` owns the ordering decisions against an
-in-memory ciphertext store. What is here is what a dict cannot say:
-
-- the rewrite really lands on the row, and the row afterwards is one
-  `PostgresCredentialStore` built from the **new** key can read and one built
-  from the old one cannot -- which is the whole of what rotation is for;
-- a key `Settings` would refuse is refused **before the first row is
-  touched**, read back on a second session, because *"nothing was written"*
-  against the writer's own session is satisfied by a service that never
-  committed at all;
-- the per-row commit is visible to a second connection while the run is still
-  going, which is what makes the interrupted-run argument true rather than
-  aspirational.
-
-**This module commits for real**, `test_restore.py`'s precedent and the same
-argument: the suite's `session` fixture is a connection-bound transaction
-that is rolled back, so committed state is not a question it can be asked.
-So the sessions here come from an engine of their own, the assertions read on
-a second session, and the file cleans up after itself in foreign-key order.
-
-⚠️ Every row this file writes carries `SOURCE_NAME` or a `ROTATION_REF`
-prefix, so the teardown deletes what this file created rather than emptying a
-table another committing file shares.
-"""
+"""`usher rotate-secret` against a real `source_credentials`."""
 
 import asyncio
 import uuid
@@ -477,13 +452,9 @@ async def _updated_at(sessions: async_sessionmaker[AsyncSession], ref: str) -> d
         return stamp
 
 
-# ---------------------------------------------------------------------------
-# K8's drill, run for real on 2026-08-26 against a scratch
-# `pgvector/pgvector:pg17` and transcribed into `docs/runbooks/rotation.md`.
-# The four arms below are that drill's four arms, held here so the runbook's
-# claims are re-checked by the gate rather than only by the day they were
-# written.
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- K8's
+# drill, run for real on 2026-08-26 against a scratch `pgvector/pgvector:pg17` and
+# transcribed into `docs/runbooks/rotation.md`.
 
 
 async def _seed_three(

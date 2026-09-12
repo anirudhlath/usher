@@ -1,28 +1,4 @@
-"""What a generation produced and what it cost, and the states neither may reach.
-
-These two models are the only place in this project where the *write* is the
-whole guarantee. `title_neighbors` can be diffed against a fresh computation and
-`search_document` has a case asserting the stored value equals a freshly
-computed one; a curated row has no oracle and is not deterministic even at a
-fixed temperature. So every case below is about a state that must be
-unconstructible rather than about a value that must be recomputable.
-
-Three of them assert on the *absence* of something -- `LLMCall` has no
-`user_id`, `CuratedRow` has no derivation of `slug` from `title`, `reason` has
-no coercion of `""` to `None`. Each absence is a five-line diff somebody would
-write while tidying, and each has a specific failure on the other side of it:
-a denormalised spend column that dashboard 5's join already answers, two
-generations colliding on one `RowCache` key, and a subtitle that cannot tell
-"nothing to say" from "said nothing".
-
-**`LLMPurpose`'s two-import identity case is the load-bearing one for the move**
-that put the enum in `usher.domain`. `lint-imports`' `hexagonal layering`
-contract already refuses `usher.domain -> usher.ports`, so the *layering* needs
-no case here (verified by planting the import: 6 kept, 1 broken). What no
-contract can see is the other tidy-up -- re-declaring the enum in `ports/llm.py`
-instead of re-exporting it, which keeps every import resolving, keeps every
-contract kept, and gives the codebase two vocabularies that compare unequal.
-"""
+"""What a generation produced and what it cost, and the states neither may reach."""
 
 import uuid
 from datetime import UTC, datetime
@@ -127,30 +103,8 @@ def test_a_curated_row_with_no_cards_is_not_constructible() -> None:
 
 
 def test_the_order_the_model_returned_is_the_product_and_survives_construction() -> None:
-    """A curated row *is* an ordering -- it is the only judgement the completion
-    was bought for.
-
-    Kills a `field_validator` that sorts or dedupes `card_title_ids`, which is
-    the shape a "tidy-up" takes on a tuple of ids, and kills
-    `card_title_ids: frozenset[uuid.UUID]`.
-
-    **Two premises, because the fixture has to be hostile to both tidy-ups and
-    an earlier version was only hostile to one.** `new_id()` is a monotonic
-    UUIDv7, so ids minted in a row arrive already sorted and a sorting
-    validator would hand them straight back -- the trap that cost M7 five
-    untested orderings. And three *distinct* ids cannot see an order-preserving
-    dedupe (`tuple(dict.fromkeys(v))`) at all: it is the identity function on
-    them, so the case ratified a mutation it claimed to kill. The fourth id
-    repeats the first, which is a real thing the validator will meet -- a model
-    asked for five titles does name one twice.
-
-    Deduping *here* is the wrong layer even though the row is wrong: ADR-0028
-    counts what it drops, under `not_in_pool` and `unparseable`, and a model
-    that silently collapsed a repeat would remove a card from the screen with
-    no counter moving. The row keeps what it was handed; the validator decides.
-
-    Both premise assertions fail loudly if someone later swaps these for
-    freshly minted ids, which is exactly how the fixture would go quiet.
+    """A curated row *is* an ordering -- it is the only judgement the completion was bought
+    for.
     """
     ids = (_CARD_A, _CARD_B, _CARD_C, _CARD_A)
     assert list(ids) != sorted(ids), "the fixture is pre-sorted, so it cannot see a sort"
@@ -159,35 +113,7 @@ def test_the_order_the_model_returned_is_the_product_and_survives_construction()
 
 
 def test_card_ids_are_a_tuple_even_when_a_list_is_handed_in() -> None:
-    """Kills `card_title_ids: list[uuid.UUID]`.
-
-    Two consequences, and the second is the one that bites at runtime. A list
-    field makes the model unhashable even though it is frozen -- `DomainModel`'s
-    own docstring records that `Title` is the one model in this set that is not
-    hashable and why -- and a curated row is a value a cache and a composer both
-    hold. And a list is mutable by whoever received it: `row.card_title_ids.
-    append(...)` on a row read out of `RowCache` edits the cached object for
-    every later reader, silently, with no write anywhere.
-
-    The list input is deliberate: pydantic coerces it, so the annotation is the
-    only thing standing between a caller's list and a shared mutable.
-
-    **Two assertions, two different wrong implementations, because the first
-    shadows the second.** `isinstance` fires before the round trip ever runs,
-    so the list mutation cannot be what gives the second assertion teeth -- a
-    case resting on it would ratify the hashability claim without once testing
-    it. What kills the round trip on its own is a `dict` field arriving on this
-    model: `field_provenance: dict[str, str]`, exactly the shape
-    `DomainModel`'s docstring records as making `Title` the one model in this
-    set that is *not* hashable, and exactly the field an adapter grows when it
-    wants to record where each value came from. Measured -- that mutation fails
-    this case and no other, with `TypeError: unhashable type: 'dict'`.
-
-    A round trip rather than `hash(row) is not None`, which no object can fail
-    and which therefore asserted nothing. Looking the row up again by an
-    *equal* row pins what a cache actually needs: `__hash__` and `__eq__`
-    agreeing, not merely hashability.
-    """
+    """Kills `card_title_ids: list[uuid.UUID]`."""
     row = _row(card_title_ids=[_CARD_A, _CARD_B])
     assert isinstance(row.card_title_ids, tuple)
     assert {row: "cached"}[row.evolve()] == "cached"
@@ -397,29 +323,6 @@ def test_a_failed_call_must_say_what_went_wrong_and_an_empty_string_does_not() -
 def test_model_construct_can_still_build_the_row_the_validator_refuses() -> None:
     """**The escape hatch is deliberate, and it is why this invariant is a
     `model_validator(mode="after")` rather than a `model_post_init`.**
-
-    Kills spelling it as `model_post_init`, which is what it was. The two hooks
-    agree on every input except this one: `model_construct` bypasses validators
-    and *runs* post-init hooks, so under the old spelling the line below raised
-    and this case could not be written at all.
-
-    That matters because of what the other side of the boundary owes. This
-    invariant is enforced twice on purpose -- here, where the service builds the
-    row, and again as a CHECK on `llm_calls`, because a model is not a
-    constraint and nothing stops a future writer reaching the table another way.
-    Proving the CHECK is real means presenting the database with a row pydantic
-    would have refused, and `model_construct` is the only way to make one.
-    Five cases across this repository already do exactly that
-    (`test_sync_run_repository.py`, `test_episode_repository.py`,
-    `test_person_repository.py`, `test_credit_repository.py`), which is what
-    makes this the house style rather than a preference --
-    `WatchState._exactly_one_of_title_or_episode` is the sibling with this same
-    shape and is spelled the same way.
-
-    So this case is not asserting that an invalid `LLMCall` is acceptable. It
-    is asserting that one can be *manufactured*, so that Task 8's integration
-    suite can watch Postgres reject it rather than trusting that pydantic ran
-    first.
     """
     smuggled = LLMCall.model_construct(
         id=uuid.uuid4(),
@@ -442,27 +345,7 @@ def test_model_construct_can_still_build_the_row_the_validator_refuses() -> None
 
 
 def test_a_call_that_answered_perfectly_and_kept_nothing_is_a_failure() -> None:
-    """**ADR-0028 rule 3, which is why `ok` is not "the HTTP call returned
-    200".**
-
-    Kills any reading of `ok` as transport health -- a validator clause
-    tying `ok = false` to a zero cost or zero output tokens, which is the shape
-    "a failed call cost nothing" takes when someone writes it down.
-
-    This is the run that produced the rule: the model was asked over a pool that
-    could not answer the question, returned the right identifiers with the wrong
-    JSON type, and the obvious `id in set[str]` comparison scored 108 of 108
-    out-of-pool. That generation had real token counts, a real cost and a real
-    latency, and left the household with no curated rows. The ledger has to be
-    able to say the call succeeded and the generation did not -- which means a
-    failed row with 316 output tokens and a non-zero cost on it is legal and is
-    the interesting case, not a contradiction.
-
-    **The assertion is that the construction below does not raise.** Everything
-    after it names what "a real bill on a failed row" means, in exact values
-    rather than as `> 0` -- which is the shape standing rule 4 warns about, and
-    which here would also be satisfied by any failed call at all.
-    """
+    """**ADR-0028 rule 3, which is why `ok` is not "the HTTP call returned 200".**"""
     call = _call(ok=False, error="validated to zero rows", tokens_out=316)
     assert (call.ok, call.error) == (False, "validated to zero rows")
     assert (call.tokens_in, call.tokens_out) == (2924, 316)
@@ -616,44 +499,8 @@ def test_the_purpose_vocabulary_is_closed_at_the_two_that_have_call_sites() -> N
 
 
 def test_the_purpose_a_port_caller_imports_is_the_one_a_domain_model_types() -> None:
-    """**What makes the move to `usher.domain` invisible to every caller, and
-    exactly the property a tidy-up would break.**
-
-    The enum moved because `LLMCall.purpose` has to be typed and
-    `usher.domain` may not import `usher.ports`; `ports/llm.py` re-exports it so
-    every existing `from usher.ports.llm import LLMPurpose` still resolves.
-
-    Kills re-declaring the enum in `ports/llm.py` rather than re-exporting it.
-    That mutation is invisible to everything else: both spellings import,
-    `test_ports.py`'s vocabulary pin passes against either copy, mypy is happy,
-    and `lint-imports` reports every contract kept -- because a duplicate
-    definition is not an import. What breaks is at runtime and only under
-    comparison: `LLMCall(purpose=ports.LLMPurpose.CURATION).purpose is domain.
-    LLMPurpose.CURATION` is `False`, and the `enum_column` that Task 8 will
-    store this through would then be writing one enum's values and reading them
-    back as another's members.
-
-    `is` rather than `==`: these are `StrEnum` members, so two independent
-    declarations compare **equal** on value and would pass an `==` assertion
-    while still being different objects with different identities. The
-    member-level consequence (`ports.LLMPurpose.CURATION is not
-    domain.LLMPurpose.CURATION`) is what actually bites, and it is stated here
-    rather than asserted: under the re-declaration the module-level check
-    already fails, and under the correct implementation the member check is the
-    tautology `X.CURATION is X.CURATION`. There is no implementation that fails
-    one without the other, so it was a line that could never carry the case.
-
-    The layering half of this needs no case: `lint-imports`' `hexagonal
-    layering` contract already refuses `usher.domain -> usher.ports`, verified
-    by planting that import in `domain/curation.py` and watching it report
-    6 kept, 1 broken.
-
-    Both `__all__`s are asserted, and the declaring module's is the one that
-    was wrong: `usher.domain.curation` shipped `["CuratedRow", "LLMCall"]`,
-    excluding the single name another module re-exports from it, against
-    `domain/rows.py`'s `["BuiltRow", "DisplayHint", "RowCard", "RowFamily"]` --
-    which lists its enums. A re-export of a name its own module does not
-    declare public reads as an accident to whoever tidies next.
+    """**What makes the move to `usher.domain` invisible to every caller, and exactly the
+    property a tidy-up would break.**
     """
     import usher.domain.curation as domain_module
     import usher.ports.llm as port_module

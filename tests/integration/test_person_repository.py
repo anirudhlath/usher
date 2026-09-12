@@ -1,21 +1,4 @@
-"""`PostgresPersonRepository` against the real database.
-
-The contract suite runs here unchanged -- that is the point of it -- plus the
-cases `FakePersonRepository` documents itself as unable to express:
-
-- **Foreign keys.** A credit naming a `person_id` no row carries is a
-  `RepositoryConflict` here and silently fine in a dict.
-- **`xmax = 0`.** `test_upsert_reports_inserts_and_updates_separately` is a
-  real assertion only here; the fake computes the answer from dict membership.
-- **`SELECT DISTINCT ON`.** `test_a_duplicate_person_inside_one_batch_is_tolerated`
-  passes in the fake because a dict is structurally last-wins, and passes here
-  only if the staging read deduplicates.
-- **The join through `episodes`.**
-  `test_an_episode_watch_state_reaches_its_series_credits` is a real join here
-  and a reproduced one there.
-- **CHECK constraints**, which fire at the `INSERT ... SELECT` rather than
-  during the `COPY`, because the staging table carries none.
-"""
+"""`PostgresPersonRepository` against the real database."""
 
 import uuid
 from datetime import datetime

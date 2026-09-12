@@ -1,15 +1,4 @@
-"""Behaviour every `EpisodeRepository` implementation must satisfy.
-
-999,827 of the one measured source's 1,126,674 items are episodes, so this is
-the port the ingest walk spends most of its writes in. Everything here is a
-batch, and every case that names a "COALESCE rule" is about the same failure
-the media-item upsert has: a nightly walk carries a source's numbers and
-nothing else, and must not blank what enrichment wrote.
-
-Subclass and provide `repository`, `title_id` and `season_id`, where the last
-two must name rows that actually exist for an implementation with foreign
-keys.
-"""
+"""Behaviour every `EpisodeRepository` implementation must satisfy."""
 
 import uuid
 from collections.abc import Sequence
@@ -375,18 +364,8 @@ class EpisodeRepositoryContract:
         await repository.upsert_episodes([episode(title_id, season_id, 1)])
         assert await repository.list_for_title(other_title_id) == ([], [])
 
-    # ------------------------------------------------------------------
-    # The two bounded reads `GET /series/{id}/seasons` and
-    # `GET /seasons/{id}/episodes` are built on.
-    #
-    # `list_for_title` above answers the same questions and **no route may use
-    # it**: it returns the whole tree, measured at 20,001 rows / 22.901 ms /
-    # 402 buffers for one pathological series. It exists for enrichment's
-    # change detection and the CLI's report, where the whole tree is the
-    # answer. A route needs a *bounded* read on both sides -- the seasons of a
-    # series (few, and a client renders all of them) and one page of one
-    # season's episodes.
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ The two bounded
+    # reads `GET /series/{id}/seasons` and `GET /seasons/{id}/episodes` are built on.
 
     async def test_the_seasons_of_a_series_are_ordered_and_scoped_to_it(
         self,

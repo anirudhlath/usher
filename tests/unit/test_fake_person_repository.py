@@ -1,11 +1,4 @@
-"""`FakePersonRepository` against the shared `PersonRepository` contract.
-
-No Docker, no database -- the unit half of proving the fake and
-`PostgresPersonRepository` (tests/integration/test_person_repository.py) agree.
-See tests/contract/person_repository_contract.py's module docstring, and
-tests/fakes/person_repository.py's for the six places this half is more
-forgiving than the other.
-"""
+"""`FakePersonRepository` against the shared `PersonRepository` contract."""
 
 import uuid
 from datetime import datetime

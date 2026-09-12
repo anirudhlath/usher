@@ -1,29 +1,4 @@
-"""`PlaybackService` against port fakes. No network, no database, no cipher.
-
-Three things about the fixtures here are load-bearing rather than
-incidental, and each of them is a defect this repository has already paid
-for once:
-
-- **The mint is never the identity.** `PlaybackService` takes
-  `mint: Callable[[str], str]`, so a case injecting `lambda url: url` would
-  satisfy every leak assertion below while the service published the
-  source's credential verbatim. `RecordingMint` hands back an opaque
-  `tkt<n>a` that is demonstrably not the URL it was given, and hands back a
-  *fresh* one on every call -- so an implementation that minted twice for
-  one URL fails the "both targets redeem the same string" assertion instead
-  of quietly passing it.
-- **The URL is deliberately tiny.** `tests/unit/test_ports_source.py`'s
-  redaction probe uses one for the reason recorded in ADR-0012: loguru
-  truncates a rendered value at ~128 characters, and a realistic Emby
-  direct-play URL is long enough that its trailing `api_key` falls off the
-  end -- so a leak assertion built on a real URL passes whether or not the
-  leak exists.
-- **Every ordering case asserts its own premise.** The fake mints a
-  `MediaItem`'s id at the moment it stores it, so id order is insertion
-  order; a fixture that seeded the right answer first would pass against a
-  service that returned the copies in physical order. The two ordering
-  cases below seed the *wrong* answer first and assert that they did.
-"""
+"""`PlaybackService` against port fakes. No network, no database, no cipher."""
 
 import json
 import uuid

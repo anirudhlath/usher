@@ -1,22 +1,4 @@
-"""`SearchQueryRetention` against the real table (ADR-0046, M10's J5).
-
-**`tests/unit/test_services_scheduler.py` owns the arithmetic and this file
-owns everything a dict cannot express.** There, `last_done()`'s
-`min(min(at) + window, now)` is checked over a fake store, which is the right
-arm for a claim that is arithmetic. Here: the real `DELETE` and its `<`
-boundary, the real `min(at)` coming back with a **timezone**, the real foreign
-keys either side of the delete, and -- in the last case -- a real **commit per
-chunk**, observed from a connection that never saw the writing session.
-
-⚠️ **Two session shapes, and the difference is the point.** Most cases below
-drive the job through a scope bound to this suite's own rolled-back `session`
-fixture, so nothing they write survives the test; that scope does **not**
-commit, and it does not need to, because what those cases are about is which
-rows the statement selects. The commit case builds its own engine off
-`postgres_url` and drives the **composition-built** scope, because *"a commit
-per chunk"* is precisely the claim a rolled-back transaction cannot make -- and
-a prune that never committed would leave every case above green.
-"""
+"""`SearchQueryRetention` against the real table (ADR-0046, M10's J5)."""
 
 import asyncio
 import uuid
@@ -116,22 +98,7 @@ def _job(
     )
 
 
-#: A ceiling on any `SearchQueryRetention.run()` this file drives.
-#:
-#: 🔴 **A non-terminating drain is this job's one shipped bug, and without a
-#: deadline the suite cannot turn it into a red.** `wip: ... not reviewed, not
-#: gated` carried `if deleted > self._batch: break`, which `prune` can never
-#: satisfy, so `run()` spun at a full core. Every case here passed a *hang* up
-#: to pytest, which has no timeout plugin in this project, so CI would have
-#: reported a job timeout hours later rather than a failing assertion -- and
-#: the M10 J5 sweep scored the same mutation `HUNG` rather than `KILLED` for
-#: exactly this reason.
-#:
-#: Generous on purpose: the whole selection's green baseline is under eight
-#: seconds, so five is "the loop is not advancing", never "the box is busy".
-#: `.claude/rules/testing-discipline.md` states the shape -- give any wait a
-#: deadline that *gives up*, because a claim whose failure mode is a deadlock
-#: can otherwise only ever report a timeout.
+# : A ceiling on any `SearchQueryRetention.run()` this file drives.
 DRAIN_DEADLINE = 5.0
 
 
@@ -327,38 +294,7 @@ async def test_the_prune_takes_no_household_and_no_title_with_it(
 async def test_the_chunked_delete_walks_the_index_oldest_first(
     session: AsyncSession, repository: PostgresSearchQueryRepository, user_id: uuid.UUID
 ) -> None:
-    """Two claims one statement makes and nothing else can see.
-
-    **Oldest first.** The inner `ORDER BY at` is what makes an interrupted
-    drain have removed the rows furthest past the window rather than an
-    arbitrary sample, so a batch of two over five expired rows must take the
-    two oldest. A `DELETE ... WHERE id IN (SELECT id ... LIMIT n)` with no
-    `ORDER BY` is a legal statement that passes every count assertion.
-
-    🔴 **The seeding order is the whole of this case's teeth, and it was age
-    order until 2026-09-07.** The fixture wrote `(400, 300, 200, 150, 100,
-    10)` in that sequence, so the heap order of the expired rows *was* their
-    age order and an unordered `LIMIT 2` returned the same two rows the
-    ordered one does. Measured 2026-09-07: dropping `ORDER BY at` from `_PRUNE`
-    left this case green. Seeded as below, age order agrees with neither of the
-    two orders an unordered statement can reach for free -- `ctid`, which is
-    what a sequential scan hands back, and `id`, which a UUIDv7 key makes
-    monotonic in insertion order -- and **both disagreements are asserted as
-    premises before the prune** rather than left in prose. Same reasoning as
-    the sibling `oldest()` contract case, which seeds out of order for exactly
-    this reason.
-
-    **`ix_search_queries_at` is what serves it.** `EXPLAIN` under
-    `enable_seqscan = off` is the shipped idiom for separating *not chosen*
-    from *not choosable* (`.claude/rules/db-and-sql.md`) -- at this fixture's
-    size the planner would pick a sequential scan whatever index existed, so
-    an unforced plan assertion here would be vacuous. ⚠️ **It explains
-    `_PRUNE` itself**, imported from the repository rather than transcribed:
-    the arm used to carry its own inline `SELECT`, which is a plan assertion
-    about a string in this file and says nothing about the statement that
-    ships. `EXPLAIN` without `ANALYZE` plans and does not execute, so the four
-    surviving rows are still there afterwards.
-    """
+    """Two claims one statement makes and nothing else can see."""
     # Deliberately not age order. The two oldest expired rows are written
     # third and fourth, so the first two a heap walk reaches are the two
     # *youngest* expired ones -- and `new_id()` is UUIDv7, so allocating the
@@ -371,12 +307,10 @@ async def test_the_chunked_delete_walks_the_index_oldest_first(
         await repository.record(record)
 
     expired = {"before": NOW - WINDOW}
-    # Two premises, asserted rather than described, because each is a free
-    # ride an unordered statement could take: the physical order a sequential
-    # scan hands back (`ctid`) and the key order a UUIDv7 makes monotonic
-    # (`id`) must both disagree with age order. If either agreed, the pair
-    # they name would be the pair `ORDER BY at` names and the row assertion
-    # below would pass with the inner ordering gone.
+    # Two premises, asserted rather than described, because each is a free ride an
+    # unordered statement could take: the physical order a sequential scan hands back
+    # (`ctid`) and the key order a UUIDv7 makes monotonic (`id`) must both disagree with
+    # age order.
     free_rides = (
         "SELECT id FROM search_queries WHERE at < CAST(:before AS timestamptz) "
         "ORDER BY ctid LIMIT 2",
@@ -404,39 +338,14 @@ async def test_the_chunked_delete_walks_the_index_oldest_first(
     assert "ix_search_queries_at" in "\n".join(row[0] for row in plan)
 
 
-# The only case in this directory that leaves rows *committed* on a second
-# engine, which is the whole point of it -- and long enough for autovacuum's
-# autoanalyze to read them. It does, in a whole-suite run: measured 2026-09-07,
-# three `uv run pytest` runs out of three left `pg_class` claiming
-# search_queries=5 (the count at the first chunk boundary) and users=1 against
-# a table the `finally` had already emptied, while two `pytest tests/integration`
-# runs did not. Nothing here executes ANALYZE, so this is the guard's
-# side-effect arm rather than its `analyze`-fixture one; the statistics are
-# restored either way, the marker only stops the blame.
+# The only case in this directory that leaves rows *committed* on a second engine, which
+# is the whole point of it -- and long enough for autovacuum's autoanalyze to read them.
 @pytest.mark.leaks_statistics("search_queries", "users")
 async def test_the_prune_commits_each_chunk_where_a_composition_root_wired_it(
     postgres_url: str, session: AsyncSession
 ) -> None:
-    """🔴 **The one claim a rolled-back suite cannot make, so this case owns
-    its own engine.**
-
-    *"A commit per chunk"* is the whole reason `run()` opens a scope per chunk
-    rather than one for the drain, and a `search_query_scope` that forgot to
-    commit would leave every other case in this file green: they read through
-    the same session that wrote. Here the rows are committed by one engine and
-    counted on **another connection**, so what is asserted is durability
-    rather than visibility.
-
-    Six expired rows against a batch of two: three chunks, three commits, and
-    the count is taken **while the job is still running** -- from inside the
-    second chunk, through a scope that wraps the real one -- so a `run()` that
-    committed once at the end reads 6 there instead of 2. That is the arm that
-    distinguishes "committed per chunk" from "committed at all".
-
-    ⚠️ Everything this writes is committed, so it cleans up after itself in a
-    `finally`: a leftover row takes down whichever file counts this table
-    next, which is `.claude/rules/fixtures-and-fakes.md`'s recorded shape for
-    a route-driven test.
+    """🔴 **The one claim a rolled-back suite cannot make, so this case owns its own
+    engine.**
     """
     engine = build_engine(postgres_url)
     sessions = build_session_factory(engine)

@@ -144,28 +144,7 @@ def test_diagnose_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_httpxs_per_request_info_line_does_not_reach_the_sink() -> None:
-    """**A command's answer is stdout, and `httpx` was writing to it.**
-
-    `httpx` logs `HTTP Request: <method> <url> "<status>"` at INFO once per
-    request, and `_InterceptHandler` -- correctly -- redirects every stdlib
-    record into loguru, whose sink is `sys.stdout` at INFO on the shipped
-    defaults. Measured 2026-08-07 against a loopback server: one request put a
-    ~900-character JSON envelope on stdout *in front of* the command's own
-    output. `usher search` and `usher curate` both pass `report=False` to
-    their factories to keep exactly that off the answer, and that call could
-    only silence Usher's own line.
-
-    Two arms, and the second is what stops the fix being "log nothing":
-    INFO is dropped, WARNING still arrives. Asserted through a **DEBUG** sink,
-    so the suppression has to be the stdlib logger's own level and not the
-    loguru sink's -- a fix that raised the sink threshold instead would pass
-    an INFO-sink version of this case and still print on a deployment running
-    `USHER_LOG_LEVEL=DEBUG`.
-
-    Nothing observable is lost: `configure_tracing` instruments `httpx`
-    unconditionally, so the same request is already a client span with method,
-    URL and status on it.
-    """
+    """**A command's answer is stdout, and `httpx` was writing to it.**"""
     httpx_logger = logging.getLogger("httpx")
     before = httpx_logger.level
     configure_logging(_settings_with_telemetry_disabled())
@@ -185,30 +164,8 @@ def test_httpxs_per_request_info_line_does_not_reach_the_sink() -> None:
 
 
 def test_configure_logging_reclaims_a_logger_that_fileconfig_disabled() -> None:
-    """**`configure_logging` cleared handlers and levels and left `.disabled`
-    standing, so one `fileConfig` call muted a logger permanently.**
-
-    Found 2026-08-10 from CI, and the shape of the failure is the finding:
-    `pytest tests/unit` was green, `pytest tests/integration
-    tests/unit/test_telemetry.py` failed the httpx case above on its *second*
-    arm -- the WARNING that must still arrive. `env.py` calls
-    `fileConfig(config.config_file_name)`, whose `disable_existing_loggers`
-    defaults to **True**, which sets `.disabled = True` on every logger absent
-    from alembic.ini's `[loggers] keys = root,sqlalchemy,alembic`. The
-    integration suite migrates in-process, so `httpx` was disabled before the
-    unit suite ran.
-
-    `Logger.disabled` is checked in `Logger.handle`, *below* both the level
-    check and the handler walk, so nothing `configure_logging` did could
-    recover it: the loop cleared every logger's handlers and forced
-    `propagate = True` -- exactly to reclaim logging from a library that had
-    taken it -- and a disabled logger defeats that as completely as a stray
-    handler does, which is why the reclaim now includes it.
-
-    Pinned here rather than by suite order: this case disables the logger
-    itself, so it fails on `pytest tests/unit/test_telemetry.py` alone. The
-    httpx case is where it surfaced only because its second arm is the rare
-    assertion that requires a stdlib record to *arrive*.
+    """**`configure_logging` cleared handlers and levels and left `.disabled` standing, so
+    one `fileConfig` call muted a logger permanently.**
     """
     httpx_logger = logging.getLogger("httpx")
     before_level, before_disabled = httpx_logger.level, httpx_logger.disabled
@@ -251,25 +208,9 @@ def test_no_metric_exporter_constructed_when_telemetry_disabled(
     configure_metrics(settings)
 
 
-# **A port nothing listens on, deliberately, and not the collector's 4317.**
-# The two cases below assert on what the exporter *constructs* — the channel's
-# `_insecure` flag, and whether a processor was attached — and never on whether
-# anything answers. Pointing them at the live collector this host happens to run
-# would make an environment-independent suite (`tests/unit`: "no Docker, no
-# network") pass partly *because* of the environment.
-#
-# Nothing would in fact be sent even then, and the mechanism is worth stating so
-# the choice does not rest on the observation: `grpc.insecure_channel()` connects
-# **lazily**, so no I/O happens at construction, and these cases record no span
-# and no measurement, so the `shutdown()` at the end flushes an empty queue and
-# issues no RPC. That is a property of what these cases happen not to do — add
-# one recorded span and it stops holding. A dead port makes it structural
-# instead, which is the difference between a suite that is isolated and one that
-# is isolated today.
-#
-# **Do not "fix" this back to 4317.** The real endpoint belongs in `.env` and in
-# `.claude/rules/api-telemetry-and-lanes.md`, which records the live run that
-# used it. Loopback, so that even a connection attempt cannot leave the host.
+# **A port nothing listens on, deliberately, and not the collector's 4317.** The two
+# cases below assert on what the exporter *constructs* — the channel's `_insecure` flag,
+# and whether a processor was attached — and never on whether anything answers.
 _DEAD_OTLP_HOST_PORT = "127.0.0.1:1"
 
 
@@ -282,43 +223,9 @@ def _settings_with_endpoint(endpoint: str) -> Settings:
 
 
 def test_a_configured_endpoint_builds_one_real_exporter_over_an_insecure_channel() -> None:
-    """The positive mirror of the two "nothing is constructed when disabled"
-    cases above, which is the half nobody wrote -- and it asserts one
-    *installation* rather than one *construction*, because those are
-    different failures. `test_no_exporter_constructed_when_telemetry_disabled`
-    monkeypatches the exporter class to raise, so it can only ever say that
-    zero were built; a `configure_tracing` that built an exporter and then
-    guarded the `add_span_processor` call instead of the exporter satisfies
-    it, ships a provider with an empty processor list, and exports nothing.
-    That is the state this case exists to tell apart from a working one.
-
-    **The positive control is the point, not decoration.** A provider with
-    no span processor and a provider with no metric reader *are* the
-    disabled state (`telemetry.py:191-197`, `:222-232` add neither when
-    `settings.telemetry_enabled` is false), so an assertion phrased as
-    "nothing wrong is attached" is satisfied by nothing being attached at
-    all. `assert processors` and `assert readers` run before the counts for
-    exactly that reason.
-
-    The provider and the reader are shut down at the end because both own a
-    background thread -- see `configure_tracing`'s docstring on the five
-    orphaned threads that motivated its idempotency guard. Nothing is
-    recorded through either, so both queues are empty and neither shutdown
-    reaches the network.
-
-    **The reader count is read off `_metric_readers` and not off
-    `_all_metric_readers`, which is a class attribute.** Measured directly:
-    `MeterProvider._all_metric_readers` is a `WeakSet` on the *class*, the
-    SDK's registry for refusing to bind one reader to two providers, so two
-    providers holding one and two readers each both report **3**. The first
-    spelling of this case read it and passed alone and under `-k`, then
-    failed the whole unit suite with `got 12` -- one weakref per
-    `InMemoryMetricReader` any earlier test had built. Same family as this
-    repository's standing "a suite run one directory at a time is not the
-    suite" finding: an assertion over global state is satisfied by whatever
-    else happens to be in the process, and the isolated run is the one that
-    lies. `_metric_readers` is the per-provider list (1, 2 and 0 for the
-    three providers above).
+    """The positive mirror of the two "nothing is constructed when disabled" cases above,
+    which is the half nobody wrote -- and it asserts one *installation* rather than one
+    *construction*, because those are different failures.
     """
     settings = _settings_with_endpoint(f"http://{_DEAD_OTLP_HOST_PORT}")
     assert settings.telemetry_enabled is True, "the premise: this endpoint enables telemetry"

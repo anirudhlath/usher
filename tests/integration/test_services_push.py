@@ -1,29 +1,5 @@
-"""`PushApplyService` against real Postgres, for the two things its port
-fakes structurally cannot express.
-
-1. **`observed_at` is `now()`, and only Postgres can say so.** PRD 03's
-   "latest `updated_at` wins" covers the whole record, and
-   `trg_watch_states_set_updated_at` stamps the *write* instant on every
-   update however it was made -- so a push merge carrying anything earlier
-   than that (the event's own timestamp, the last walk's start instant, a
-   cached `datetime` on the lane) is refused by the very row it is meant to
-   update and writes nothing at all. `FakeWatchStateRepository` stores
-   `observed_at` as `updated_at`, so it accepts exactly what Postgres
-   refuses and every unit case passes against the bug. Same trap
-   `backfill_one` documents, one lane over.
-2. **The `COALESCE`, on a push payload.** `watch_states.play_count` is
-   `NOT NULL`, so the insert path writes `COALESCE(play_count, 0)` and the
-   natural one-statement merge reads `excluded.play_count` back as `0`
-   rather than `NULL`. `last_played_at` is nullable and survives that same
-   statement, which is why both columns are asserted here: a case checking
-   only the timestamp ratifies the bug.
-
-   This matters more on the push path than on the walk's, because a
-   `UserDataChanged` entry is a *third* payload shape (a listing is one, an
-   item route another) and nothing in this repository has parsed a real
-   one. The adapter reports `play_count=None` for it deliberately, so every
-   pushed play event arrives on this path carrying an absent count over a
-   row that may hold a real one.
+"""`PushApplyService` against real Postgres, for the two things its port fakes
+structurally cannot express.
 """
 
 import uuid
@@ -302,12 +278,8 @@ async def test_a_pushed_item_is_ingested_and_published(
             kind=SourceItemKind.MOVIE,
             year=2021,
             container="mkv",
-            # A provider id the catalog does not hold, so the ladder falls
-            # through to stub-on-sight and the item ends up with a
-            # `title_id`. Without one it resolves to `UNMATCHED`, which is
-            # a legitimate outcome that publishes nothing -- and a case
-            # asserting on the publish would then be asserting on the
-            # matcher rather than on this lane.
+            # A provider id the catalog does not hold, so the ladder falls through to
+            # stub-on-sight and the item ends up with a `title_id`.
             provider_ids={"tmdb": "90000551"},
         ),
         SEEN_AT,

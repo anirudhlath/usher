@@ -1,36 +1,4 @@
-"""`GET /images/{id}` through a real request, a real schema and a real disk.
-
-**What only this level can see.** `tests/unit/test_api_images.py` drives the
-route over three port fakes, and `tests/unit/test_adapters_images.py` drives
-each adapter on its own -- so what is left is the wiring nobody overrides here:
-`get_image_proxy_service` resolving a real `PostgresImageRepository` off
-`get_session`, `create_app`'s lifespan building the store from `Settings`, and
-`DiskImageBlobStore` putting a real file on a real filesystem. Three claims
-follow that a dict cannot make:
-
-- **"Exactly one blob" is a `rglob` over a directory tree**, not a count of
-  dict keys, so the sharding, the extension and the atomic rename are all in
-  the answer. The fake's own docstring says it has no filename and therefore
-  nothing there can catch a path built from something a client sent.
-- **The id that survives a re-derivation is the one `ON CONFLICT ON CONSTRAINT
-  uq_images_owner_provider_path DO UPDATE` returned**, rather than one a Python
-  dict kept because its tuple key collided. That is the property the long
-  `max-age` rests on, and `m09c` is what makes it enforceable.
-- **`get_session` is the commit boundary**, so the row the second request reads
-  is committed rather than flushed inside a transaction the first request
-  outlived.
-
-**One thing is replaced and only one: the socket.** `app.state.image_fetcher`
-is swapped for the *same* `ProviderCdnImageFetcher` class over an
-`httpx.MockTransport` after the lifespan has run. Everything else -- the
-dependency function, the repository, the session, the store, the router -- is
-what a deployment runs. `tests/integration/test_image_fetcher_live.py` is where
-a real CDN is reached, and it skips itself unless one is configured.
-
-**This module commits for real, so it cleans up after itself.** `images` has a
-real foreign key to `titles` and does not cascade from anything this file
-writes, so both are deleted by the id this file minted.
-"""
+"""`GET /images/{id}` through a real request, a real schema and a real disk."""
 
 import uuid
 from collections.abc import AsyncIterator
@@ -161,16 +129,8 @@ async def client(settings: Settings, cdn: httpx.MockTransport) -> AsyncIterator[
     app = create_app(settings)
     async with LifespanManager(app) as manager:
         # The one substitution, made **after** the lifespan so the real
-        # `composition.image_proxy` ran and the store beside it is the one the
-        # settings named. Same class, same base URL, same ceiling -- only the
-        # transport differs. On `app` rather than `manager.app`: the latter is
-        # asgi_lifespan's wrapper, not the FastAPI instance, and `app.state` is
-        # what `get_image_proxy_service` reads.
-        #
-        # The client the lifespan built is left for `close_images()` to close
-        # on the way out. It has opened nothing -- an `httpx.AsyncClient` is a
-        # pool, not a connection -- and reaching into it to close it early
-        # would be this file naming a private attribute of an adapter.
+        # `composition.image_proxy` ran and the store beside it is the one the settings
+        # named.
         app.state.image_fetcher = ProviderCdnImageFetcher(
             httpx.AsyncClient(transport=cdn),
             base_url=settings.image_cdn_base_url,

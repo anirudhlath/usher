@@ -1,9 +1,4 @@
-"""The credential contract against the in-memory double. No Docker.
-
-tests/integration/test_credential_store.py runs the identical assertions
-against Postgres, plus the three at-rest encryption cases this fake has no
-way to satisfy.
-"""
+"""The credential contract against the in-memory double. No Docker."""
 
 import uuid
 

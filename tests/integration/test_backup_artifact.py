@@ -1,43 +1,4 @@
-"""What `usher backup` actually writes, against the schema the migrations build.
-
-K1 classified every table and K2 decided what a carried reference *is*.
-This file is the first thing that runs both against a real database and
-reads the bytes back, which is why it is the failing test the task was
-written around: at HEAD before K3, `usher.services.backup` does not exist
-and every case here fails at import.
-
-**Why the headline case is a set comparison and not a spot check.** The
-failure a backup has is silent in both directions and neither shows up at
-backup time. A precious table left out is discovered at restore, by an
-operator who no longer has the database it came from; a rebuildable table
-carried in is discovered as a 1 GB artifact nobody keeps, or -- for
-`genome_scores` and `raw_payloads` -- as third-party data in a file this
-project told its users to keep, which is
-`tests/unit/test_no_third_party_data.py`'s rule one directory over. So the
-assertion is over the *whole* emitted set against the *whole* manifest,
-derived from `tables_of` rather than transcribed, and `curated_rows` is
-named on its own because it is the one table two independent arguments
-exclude (K1 classifies it `REBUILDABLE`; K2 rules it out again because
-`curated_rows.card_title_ids` is a `uuid[]` with no foreign key, so a naive
-carry restores dead ids and the database cannot tell).
-
-**Both positive controls are load-bearing and this repository has been
-bitten without them five times.** An artifact carrying *nothing* trivially
-carries no rebuildable table -- which is the exact shape of a scan that
-passes by finding nothing -- so `assert "watch_states" in tables` is what
-separates "the manifest's precious set was written" from "the writer wrote
-zero rows", and `assert seeded_rebuildable` is what separates "no
-rebuildable table was carried" from "the fixture seeded none to carry".
-
-**Row counts here are the fixture's, not the deployment's**, and the
-deployment's are worth knowing because the plan for this task quoted stale
-ones. Re-measured read-only against the live `usher` database on
-2026-08-25: 1 user, 1 source, 1 credential row, **3,347** watch states, 0
-`llm_calls`, **1** row-provider setting, **89** search queries and
-**10,819** linked media items of 13,539. The plan measured watch states at
-**0** -- so when the reference-rewriting ladder this file exercises was
-designed, no real row exercised it at all.
-"""
+"""What `usher backup` actually writes, against the schema the migrations build."""
 
 import gzip
 import json
@@ -111,12 +72,10 @@ async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
         "series": new_id(),
         "season": new_id(),
         "episode": new_id(),
-        # **Not `new_id()`, and the whole of the ordering case rests on it.**
-        # `new_id()` is UUIDv7 and monotonic, so a fixture that mints ids in
-        # insertion order makes heap order and `ORDER BY id` identical and the
-        # `ORDER BY` unobservable -- the trap `testing-discipline.md` records
-        # costing M7 five untested orderings. These two are spelled so that
-        # the row inserted **first** sorts **second**.
+        # **Not `new_id()`, and the whole of the ordering case rests on it.** `new_id()`
+        # is UUIDv7 and monotonic, so a fixture that mints ids in insertion order makes
+        # heap order and `ORDER BY id` identical and the `ORDER BY` unobservable -- the
+        # trap `testing-discipline.md` records costing M7 five untested orderings.
         "watch_movie": uuid.UUID("00000000-0000-7000-8000-0000000000b2"),
         "watch_episode": uuid.UUID("00000000-0000-7000-8000-0000000000a1"),
         "llm_call": new_id(),
@@ -260,19 +219,8 @@ async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
             "clicked": ids["movie"],
         },
     )
-    # The third one is unmatched -- **both** links `NULL` -- and it is the
-    # answer to *"has any fixture, anywhere, ever set this to the other
-    # value?"*. Without it the `WHERE title_id IS NOT NULL OR episode_id IS
-    # NOT NULL` predicate is unobservable: every row would be carried either
-    # way. It is not a corner either -- on **this** deployment, read
-    # 2026-08-25, 2,720 of 13,539 `media_items` rows are unmatched, and on a
-    # library that has bootstrapped and never run a match pass the unmatched
-    # population *is* the library.
-    # Inserted `emby-2` first for the reason the two watch-state ids are
-    # spelled by hand: `media_items` does not carry its `id` at all (the
-    # `PARTIAL` entry names two link columns), so `_order_by` falls back to
-    # the carried natural key -- and heap order has to disagree with it for
-    # that fallback to be observable.
+    # The third one is unmatched -- **both** links `NULL` -- and it is the answer to
+    # *"has any fixture, anywhere, ever set this to the other value?"*.
     for key, external, title_id, episode_id in (
         ("media_item_episode", "emby-2", ids["series"], ids["episode"]),
         ("media_item_movie", "emby-1", ids["movie"], None),
@@ -337,32 +285,8 @@ def _carried(rows: Sequence[Mapping[str, Any]], table: str) -> list[Mapping[str,
 async def test_every_carried_reference_holds_the_values_of_the_row_it_names(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """🔴 **The case this file shipped without, and the reason the command
-    exists rather than `pg_dump`.**
-
-    Every other assertion here is about *shape* -- a UUID sits under an `id`
-    key, an object carries `kind`, some reference offers an `imdb_id`. Three
-    separate corruptions of the natural key satisfy all of them and survived
-    the whole 5,891-case suite when planted: stamping every reference
-    `TitleKind.MOVIE`, carrying `users.id` under the key `user` instead of
-    `users.name`, and transposing `season_number` with `episode_number`. The
-    unit cases could not see any of them either, because they drive a fake
-    repository that is *handed* pre-built references and therefore pin the
-    JSON spelling and nothing about construction.
-
-    ⚠️ **The `kind` one is severe rather than cosmetic.** ADR-0011 exists
-    because TMDb's movie and series id spaces overlap on 26,968 ids -- 47.3%
-    of every series id Wikidata knows -- so a series reference stamped `movie`
-    does not fail at restore. It **resolves**, through K2's `(kind, tmdb_id)`
-    rung, onto a different title. That is *"a wrong id fails nothing at all"*
-    -- the failure `backup_identity`'s whole design exists to prevent --
-    arriving through the rung it declares to be an identity.
-
-    So this case reads the seeded row back and compares the carried reference
-    to it **field by field**, with the fixture chosen so every field is
-    distinguishable from every other: two titles of different `kind`, one
-    with a `tmdb_id` and one without, an episode whose season and episode
-    numbers differ, and a user whose name is not its id.
+    """🔴 **The case this file shipped without, and the reason the command exists rather
+    than `pg_dump`.**
     """
     # The premises, and they are the case. An equality is only a statement
     # about the field it names if a wrong field would give a different answer.
@@ -428,30 +352,8 @@ async def test_every_carried_reference_holds_the_values_of_the_row_it_names(
 async def test_the_stamp_is_the_revision_the_database_holds_and_not_the_one_the_code_expects(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """🔴 **`schema_revision` is the stamp K4 refuses on, and nothing could
-    tell it from the code's own head.**
-
-    `test_the_header_stamps_the_revision_the_code_expects...` asserts
-    `header["schema_revision"] == code_head_revision()`, which an
-    implementation that *returns* `code_head_revision()` satisfies trivially
-    -- and planting exactly that passed ruff, mypy and the whole suite. The
-    two are equal by construction in this fixture, because `postgres_url`
-    runs `alembic upgrade head`, so no case in the repository could
-    distinguish them.
-
-    A backup stamping the code's head instead of the database's is the one
-    failure that makes K4's refusal **unreachable**: the artifact would claim
-    whatever schema the process that wrote it was compiled for, so a restore
-    could never see a mismatch and would half-apply into a schema that never
-    matched. Three docstrings and a PRD paragraph argue that *"two readers of
-    one fact is how a restore comes to accept what a running service would
-    refuse"*, and the one reader was enforced by nothing.
-
-    The two are separated by moving the *database* and leaving the code
-    alone. `m09f` is the real predecessor of today's head -- the state a
-    deployment running one migration behind is genuinely in -- and the write
-    happens inside this test's own transaction, which the `session` fixture
-    rolls back, so the session-scoped container is untouched.
+    """🔴 **`schema_revision` is the stamp K4 refuses on, and nothing could tell it from the
+    code's own head.**
     """
     head = code_head_revision()
     assert head is not None, "the code has no single head, so there is nothing to disagree with"
@@ -477,27 +379,9 @@ async def test_the_stamp_is_the_revision_the_database_holds_and_not_the_one_the_
 async def test_every_carried_table_is_ordered_by_its_key_rather_than_by_the_heap(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """The port promises a stable order *"because a diff between two nights'
-    artifacts is a thing an operator will do"*, and deleting the whole
-    `ORDER BY` clause passed all 5,891 cases: the one place order was
-    observable was a `set` comparison.
-
-    ⚠️ **A UUIDv7 primary key is what makes this hard to test and easy to
-    believe.** `new_id()` is monotonic, so a fixture that inserts rows in id
-    order leaves heap order and `ORDER BY id` identical and the clause
-    unobservable -- `testing-discipline.md` records that trap costing M7 five
-    untested orderings. The fixture therefore inserts every one of these
-    three tables in the *reverse* of its key order, and each arm asserts that
-    premise by reading the table back with no `ORDER BY` at all before
-    asserting what the artifact holds.
-
-    Three tables because `_order_by` has two branches and one of them is
-    reached by a single table: `watch_states` is the UUID primary key,
-    `row_provider_settings` is a **text** primary key, and `media_items` is
-    the entry whose `id` the `PARTIAL` column set does not carry, so it falls
-    back to `(source_id, external_id)` -- a real unique constraint
-    (`uq_media_items_source_external`), which is what makes the fallback a
-    total order rather than a hope.
+    """The port promises a stable order *"because a diff between two nights' artifacts is a
+    thing an operator will do"*, and deleting the whole `ORDER BY` clause passed all
+    5,891 cases: the one place order was observable was a `set` comparison.
     """
     _, rows = await _write(session, artifact)
 
@@ -550,12 +434,9 @@ async def test_the_artifact_carries_every_precious_table_and_no_rebuildable_one(
         "the artifact's tables must be exactly the manifest's precious set plus "
         "its one partial entry -- derived from `tables_of`, never transcribed"
     )
-    # Named rather than left to the set comparison, because it is the one
-    # table two independent arguments exclude and a reader arriving here
-    # should see the second one stated. K1 classifies it REBUILDABLE (one
-    # completion regenerates the shelf); K2 rules it out again because
-    # `curated_rows.card_title_ids` is a `uuid[]` with no foreign key, so a
-    # carried row restores dead ids and nothing in the database notices.
+    # Named rather than left to the set comparison, because it is the one table two
+    # independent arguments exclude and a reader arriving here should see the second one
+    # stated.
     assert "curated_rows" not in tables
 
 

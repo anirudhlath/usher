@@ -1,10 +1,4 @@
-"""`FakeGenomeRepository` against the shared `GenomeRepository` contract.
-
-No Docker, no database. See tests/fakes/genome_repository.py for the five
-places this half is more forgiving -- chiefly that there is no `halfvec`
-here, so a vector round-trips bit-exactly where the real column quantises,
-and that `genome_tags`' three CHECKs and its primary key are absent.
-"""
+"""`FakeGenomeRepository` against the shared `GenomeRepository` contract."""
 
 import uuid
 from collections.abc import Sequence

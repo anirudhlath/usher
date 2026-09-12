@@ -1,16 +1,4 @@
-"""PRD 10's `usher.sse.connections`.
-
-**A metric that is documented and never emitted is a dashboard panel that is
-permanently empty, and nothing distinguishes that from a healthy zero.** So
-every case here drives the real bus rather than a stub reader, and reads the
-value back out of an `InMemoryMetricReader` -- asserting that the instrument
-*exists* would pass against a `create_observable_gauge` nobody ever feeds.
-
-This is the one of PRD 10's four M5 rows that **is** ticked, and the
-difference is that it needs no lane: `create_app` builds the bus and
-registers this reader unconditionally, so every running server emits it. The
-three push rows still wait on the lanes.
-"""
+"""PRD 10's `usher.sse.connections`."""
 
 from collections.abc import Iterator
 

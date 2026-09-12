@@ -1,19 +1,4 @@
-"""A rule about the whole `api/dto/` package, not about one model.
-
-PRD 08: "Credentials are never returned by any API, including admin.
-Write-only." The admin routes satisfy that today because `SourceResponse`
-has no field to put one in -- but "today" is the weak part. This module
-turns it into a property every present and future response DTO has to keep:
-it enumerates the package rather than naming models, so a response type
-added in M5 or M9 is covered the moment it is written, without anyone
-remembering this file exists.
-
-Two independent checks, because they fail differently. A field *named*
-`password` is the obvious mistake; a field *typed* `SecretStr` is the
-subtle one -- it renders as `**********` in a log line and serializes to
-the real value in a response body, so it is precisely the shape that looks
-safe while shipping the secret.
-"""
+"""A rule about the whole `api/dto/` package, not about one model."""
 
 import importlib
 import pkgutil

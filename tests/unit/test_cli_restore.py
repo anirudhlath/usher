@@ -1,22 +1,4 @@
-"""`usher restore` -- its argument surface, its dispatch arm, and its report.
-
-The same split `test_cli_backup.py` makes: every command coroutine in
-`usher.cli` takes a `Settings` and builds its own engine through
-`_session_for`, so what the merge does against a real schema lives in
-`tests/integration/test_restore.py`. What is here needs no database -- the
-parser, the `_dispatch` arm, and `_print_restore_report`, which is a pure
-function over a `RestoreReport`.
-
-**The `_dispatch` arm is the case this file exists for.**
-`.claude/rules/config-cli-and-deployment.md` records the measurement:
-`_dispatch`'s `else` is `serve`, so a subcommand that parses and has no arm
-of its own does not fail -- it starts uvicorn -- and
-`test_every_command_reports_a_dead_database_the_same_way` cannot see it,
-because `_every_command_raises` patches every dispatch coroutine **and**
-`uvicorn.run` to raise identically, which is exactly what makes it a test of
-the *boundary*. A new command owes its own case; the boundary table does not
-supply it.
-"""
+"""`usher restore` -- its argument surface, its dispatch arm, and its report."""
 
 import gzip
 from pathlib import Path
@@ -476,27 +458,7 @@ def test_a_dry_run_that_refused_nothing_exits_zero(monkeypatch: pytest.MonkeyPat
 def test_the_refusal_list_is_capped_and_the_per_table_counts_stay_exact(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """🔴 **K5's drill printed a 14,176-line report.**
-
-    Restoring the real artifact into an empty catalog refused 14,166 of 14,259
-    rows and named every one. *"Every refusal is named and none is summarised
-    away"* is the right rule at 41 and is unusable at 14,166 -- a five-figure
-    wall of text is not a report, it is what an operator scrolls past to reach
-    the summary they needed.
-
-    **What the cap must not cost is the counts**, which is why both halves are
-    asserted here: 25 refusals produce 20 named lines, a tail naming the
-    remaining 5, and a **per-table** figure of 25. An implementation that
-    capped the list by truncating the *report* rather than the *rendering*
-    would satisfy the first two and fail the third.
-
-    🔴 **That third assertion was `"25 refused" in out` for one round, and the
-    sweep proved it could not fail.** Capping `refused_by_table()` at 20 leaves
-    the summary line reading `25 refused, from …`, so a membership test over
-    the whole output matched the *summary* while the per-table line said 20 --
-    exactly `CLAUDE.md`'s *"a membership assertion is not an ordering test"*
-    arriving at a count. The assertion now reads the per-table line by itself.
-    """
+    """🔴 **K5's drill printed a 14,176-line report.**"""
     refusals = tuple(
         RestoreRefusal(
             table="watch_states",

@@ -18,12 +18,9 @@ def test_code_head_revision_matches_the_head_migration_on_disk() -> None:
     assert code_head_revision() == "m10f"
 
 
-#: The chain three documents spell out, in the order they spell it: every
-#: revision from `ffa` -- the landing that created
-#: `test_migrations.py`'s `-1` block -- to head inclusive. A literal for
-#: `test_code_head_revision_matches_the_head_migration_on_disk`'s reason, so
-#: the seventeenth landing is a loud red here rather than a silent
-#: disagreement with the prose.
+# : The chain three documents spell out, in the order they spell it: every : revision
+# from `ffa` -- the landing that created : `test_migrations.py`'s `-1` block -- to head
+# inclusive.
 _REPOINTING_CHAIN = (
     "ffa",
     "ffb",

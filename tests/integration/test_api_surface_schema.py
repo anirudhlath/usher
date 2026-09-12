@@ -1,28 +1,4 @@
-"""`m09a`'s four tables and two indexes, asserted against a real database.
-
-`tests/unit/test_db_models_api_surface.py` owns the *declarations*; this file
-owns what Postgres will actually do with them. The same split
-`test_curation_schema.py` and `test_search_schema.py` make, and it is the one
-that matters here: three of the four properties this migration was written for
--- a CHECK body, a delete rule, and an operator class -- are invisible to
-`compare_metadata`, so a model and a migration can agree with each other and
-disagree with the database.
-
-**One case per table for existence, deliberately.** A migration that ships
-three tables of four passes a check naming only the first, which is the rule
-`m08a` needed for two tables and this head needs for four.
-
-**And the index cases carry their own premise.** An index that exists proves
-nothing about what it serves: `ix_titles_name_lower_year` is a btree over
-`(lower(name), year)` with the *default* opclass and it has been on `titles`
-since M1, so "there is a btree on `lower(name)`" was already true before this
-migration and `LIKE 'pre%'` still could not use it. The planner probe under
-`SET LOCAL enable_seqscan = off` is what tells the two apart, and it was run
-against the pre-migration schema first -- with `m09a.upgrade()` still a `pass`,
-`EXPLAIN` for that predicate is a `Seq Scan on titles` even with seq scans
-disabled, i.e. the existing index is not merely not-chosen, it is not
-*choosable*. That measurement is the whole of "two indexes, not one".
-"""
+"""`m09a`'s four tables and two indexes, asserted against a real database."""
 
 import uuid
 
@@ -289,68 +265,9 @@ async def test_the_title_search_names_foreign_key_cascades(session: AsyncSession
 async def test_every_cascade_in_this_migration_has_an_index_the_lookup_can_use(
     session: AsyncSession,
 ) -> None:
-    """Postgres implements ON DELETE CASCADE by finding referencing rows *by
-    that column*, so a CASCADE without a lookup index sequentially scans the
-    child table on every parent delete. M4's
-    `test_both_new_foreign_keys_have_an_index_the_referential_check_can_use`
-    makes the identical argument for `ix_media_items_episode_id` and
-    `ix_watch_states_episode_id`, and `ix_title_neighbors_neighbor_id` exists
-    for it too.
-
-    `enable_seqscan = off` forces the planner to reveal whether a usable index
-    exists *at all*, which is the property being claimed -- an empty table
-    would otherwise seq-scan regardless of how many indexes it has, and prove
-    nothing.
-
-    **`search_queries` is deliberately absent from this list**, and it is the
-    one place in `m09a` where a declared delete rule has no lookup behind it:
-    the table carries no index on `clicked_title_id`, so
-    `fk_search_queries_clicked_title_id_titles`' SET NULL scans it on every
-    title delete. That is the plan's call, recorded in the migration docstring
-    rather than quietly repaired here. ⚠️ **This read *"no index beyond its
-    primary key"* until `m10c`**, which added `ix_search_queries_at` -- on
-    `at`, for PRD 10's retention `DELETE`, which no `SET NULL` on
-    `clicked_title_id` can use. The premise moved and the conclusion did not,
-    so the sentence is narrowed to the column the delete rule needs rather
-    than to the table.
-
-    **`images.title_id` has two acceptable answers since `m09c`, and that is a
-    measurement rather than a shrug.** `uq_images_owner_provider_path` leads on
-    `title_id`, so it can serve this lookup too -- and on the *empty* table this
-    fixture builds, the two cost identically (`4.16..9.52` for both) and the
-    planner's tie-break is arbitrary: it named the unique constraint the first
-    time `m09c` ran against this case. Measured on `pgvector/pgvector:pg17`
-    with 200,000 images over 40,000 titles and `ANALYZE` run, which is the
-    state a real deployment is in:
-
-    | index | size | chosen for `WHERE title_id = ?` |
-    |---|---|---|
-    | `ix_images_title_id` | 2,680 kB | **yes**, `Index Scan`, 4 buffers |
-    | `uq_images_owner_provider_path` | 13 MB | no |
-
-    The same narrow index is chosen for the real parent `DELETE` and for
-    `list_for_title`. So `ix_images_title_id` is not made redundant by `m09c`,
-    it is simply indistinguishable from the wider index at zero rows.
-
-    **This asserted a *set of index names* until 2026-08-31, and the set was
-    wrong in a way only a plan flip could show.** `uq_images_owner_provider_path`
-    leads on a coalesced owner, so it serves `episode_id` exactly as it serves
-    `title_id`; the set said so for one column and not for the other, and a
-    perturbation of `pg_class` was enough to make the planner take it for
-    `episode_id` and fail a case about a property that still held --
-    `Index Scan using uq_images_owner_provider_path ... Index Cond: (episode_id
-    = ...)`, measured under both an all-empty and an all-large `pg_class` (#79).
-    A hand-maintained list of acceptable winners has to be re-derived every
-    time an index is added, and nothing reminds anyone.
-
-    So the assertion is the property instead: **the plan reaches this table
-    through an `Index Cond` on this column.** That is what "the referential
-    check has an index it can use" means, it holds however many indexes could
-    serve it, and it is *stronger* than naming one -- an index scan that walks
-    the whole index and puts the column in a `Filter` passes a name check and
-    fails this one. That distinction is not hypothetical: it is exactly the
-    shape of the other #79 failure, where a prefix lookup was served by a full
-    `pk_titles` walk.
+    """Postgres implements ON DELETE CASCADE by finding referencing rows *by that column*,
+    so a CASCADE without a lookup index sequentially scans the child table on every
+    parent delete.
     """
     probes = [
         ("images", "title_id"),
@@ -614,8 +531,4 @@ async def test_the_tier_one_index_on_the_narrow_table_serves_the_same_prefix(
 
 
 # The down/up cycle for this head lives in
-# `test_migrations.py::test_a_full_down_and_up_cycle_restores_every_index`,
-# not here. That case owns the one `-1` re-point M9 gets, it already builds a
-# throwaway database and compares the whole index set across `base`/`head`, and
-# a second copy of that harness in this file would be a second scratch database
-# per run asserting the same five names.
+# `test_migrations.py::test_a_full_down_and_up_cycle_restores_every_index`, not here.

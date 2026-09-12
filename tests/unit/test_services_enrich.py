@@ -1,13 +1,4 @@
-"""PRD 03 stage 3, against port fakes. No database, no network.
-
-Two invariants carry most of these cases. **ADR-0008:** the enrichment tier
-and an enrichment failure are orthogonal -- a failed attempt records
-`Title.enrichment_error` and leaves the tier exactly where it was, and every
-tier comparison goes through `ENRICHMENT_RANK` because `EnrichmentState` is a
-`StrEnum` and `ENRICHED > STUB` is `False`. **ADR-0016:** the provider's
-response is cached verbatim, which is what lets M7 and M9 derive
-`Person`/`Credit`/`Collection`/`Image` later with no second network call.
-"""
+"""PRD 03 stage 3, against port fakes. No database, no network."""
 
 import uuid
 from collections.abc import Sequence
@@ -697,12 +688,9 @@ async def test_no_domain_only_field_name_reaches_the_wire(
     leaked = fields & set(WIRE_FIELD_NAMES)
     assert not leaked, f"domain attribute names reached the wire: {sorted(leaked)}"
 
-    # **The premise, and not decoration.** Without it the assertion above is
-    # satisfied by a fixture whose provider supplies none of the renamed
-    # fields at all -- an empty intersection reads identically to a correct
-    # mapping. Read off the *stored* title so it is derived too: `_given`
-    # seeds a stub carrying none of these, so a renamed field with a value
-    # after enrichment is one this provider really did supply.
+    # **The premise, and not decoration.** Without it the assertion above is satisfied
+    # by a fixture whose provider supplies none of the renamed fields at all -- an empty
+    # intersection reads identically to a correct mapping.
     stored = await titles.get(title.id)
     assert stored is not None
     moved = {field for field in WIRE_FIELD_NAMES if getattr(stored, field) is not None}

@@ -1,22 +1,4 @@
-"""`SimilarityService`'s blend, its exclusions, and its determinism.
-
-**Every cosine in this file is planted, never hoped for.** `FakeEmbedder` is a
-hash: similarity between two related titles is noise, so a case that asserted
-"these two are similar" against it would pass or fail for reasons unrelated to
-the code. `planted_pair(theta)` gives `dot(a, v) == cos(theta)` exactly --
-verified to 2.22e-16 -- so a case that needs "these two are 0.9 similar"
-states 0.9 and gets 0.9. A threshold a hash has to land on the right side of is
-a case that goes red on an unrelated change and gets loosened once,
-permanently.
-
-**Every id is a fixed `uuid.UUID(int=...)`, for the reason the search service's
-unit file gives:** several of the mutations here collapse two candidates onto
-one blended score, and the case can only see that if it knows which of the two
-the tiebreak would then pick.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""`SimilarityService`'s blend, its exclusions, and its determinism."""
 
 import ast
 import hashlib
@@ -513,14 +495,10 @@ async def test_the_rebuild_walks_every_page_of_the_population() -> None:
         assert len(await neighbors.list_for(title_id, limit=100)) == len(ids) - 1
 
 
-# --- the genome, the fourth signal -----------------------------------------
-#
-# Group F measured the genome's off-diagonal spread against a bar written
-# before any vector existed and **no clause fired**: mean 0.6101, sd 0.0913,
-# min 0.2556, p1 0.4075, p99 0.8165, top-10 gap 0.2456, over all 268,157,000
-# ordered off-diagonal pairs. So Task 35's Step 1 is already answered -- the
-# term is not saturated, the vectors ship raw, and these cases size the
-# distractors against sd 0.0913 rather than against a guess.
+# --- the genome, the fourth signal ----------------------------------------- Group F
+# measured the genome's off-diagonal spread against a bar written before any vector
+# existed and **no clause fired**: mean 0.6101, sd 0.0913, min 0.2556, p1 0.4075, p99
+# 0.8165, top-10 gap 0.2456, over all 268,157,000 ordered off-diagonal pairs.
 
 
 def test_a_genome_bearing_candidate_gets_no_score_a_pair_without_one_would_not() -> None:
@@ -637,16 +615,11 @@ async def test_the_rebuild_reports_how_many_seeds_carried_a_genome() -> None:
     assert report.seeds_with_genome == 2
 
 
-# --- the genome is measured and no longer blended (M9 S7) ------------------
-#
-# S5 walked the whole embedded population once, read-only, over the pool
-# `nearest_for` draws: **130,647 seeds, 13,064,700 candidate pairs, 323,297 of
-# them carrying a genome vector on both sides -- 2.4746%.** That is a *second*
-# measurement rather than a delta against M7's 1.81%, which S1 settled came
-# from 5,020 owned, name-selected, pre-TMDb seeds in a database that no longer
-# exists; and it is still four times below the 10% floor
-# `docs/prd/09-roadmap.md` records the 0.25 weight as assuming. So the term
-# comes out of the blend and stays in the report.
+# --- the genome is measured and no longer blended (M9 S7) ------------------ S5 walked
+# the whole embedded population once, read-only, over the pool `nearest_for` draws:
+# **130,647 seeds, 13,064,700 candidate pairs, 323,297 of them carrying a genome vector
+# on both sides -- 2.4746%.** That is a *second* measurement rather than a delta against
+# M7's 1.81%, which S1 settled came from 5,020 owned, name-selected, pre-TMDb seeds in a
 
 
 def test_the_tag_genome_cosine_no_longer_reorders_a_pool() -> None:
@@ -677,29 +650,8 @@ def test_the_tag_genome_cosine_no_longer_reorders_a_pool() -> None:
 def test_the_four_signal_fingerprint_this_file_pins_is_the_one_m7_and_m8_stamped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Licenses the literal below, so the staleness case is about the tables an
-    operator really has rather than about an invented string.
-
-    A literal is the only spelling that can pin a *previous* blend -- deriving
-    it would mean keeping the superseded weights in `src/`, which is the thing
-    S7 removes. This case is what stops the literal drifting into a number
-    nothing produced.
-
-    ⚠️ **It can no longer be licensed by calling `blend_fingerprint`, and that
-    is the finding rather than an inconvenience.** Until 2026-08-13 this case
-    monkeypatched `_WEIGHTS` to M7's four and asserted the function reproduced
-    the literal. Then `embedding_model` joined the hashed payload, so the
-    *shape* changed: no arguments to the current function can produce a
-    three-key digest. Reconstructing the historical payload explicitly is the
-    honest licence -- it says in code that the superseded digest came from a
-    serialisation this project no longer performs, which a `monkeypatch` of one
-    input cannot say.
-
-    The reconstruction is spelled out rather than imported, mirroring what
-    `blend_fingerprint` did at M7 (`sort_keys`, the compact separators,
-    `usedforsecurity=False`). If a future edit changes the *encoding* rather
-    than the inputs, this keeps pinning what M7 really stamped instead of
-    silently following the new spelling.
+    """Licenses the literal below, so the staleness case is about the tables an operator
+    really has rather than about an invented string.
     """
     monkeypatch.setattr("usher.services.similar._WEIGHTS", _M7_FOUR_SIGNAL_WEIGHTS)
     historical_payload = json.dumps(
@@ -968,27 +920,7 @@ async def test_rows_written_under_a_previous_blend_read_as_stale() -> None:
 
 
 def test_swapping_the_embedding_model_makes_every_stored_neighbour_stale() -> None:
-    """The gap this fingerprint had for three milestones, as a case.
-
-    `cosine` is **0.45 of every score** and it is the cosine of two embeddings,
-    so the model that produced them decides what a stored row means. Until
-    2026-08-13 `blend_fingerprint` hashed only `_WEIGHTS`,
-    `_NEIGHBORS_PER_TITLE` and `_CANDIDATE_POOL` -- so swapping the model left
-    the digest untouched, every `title_neighbors` row read as current, and
-    `usher.similarity.neighbors.stale` reported zero while the vectors
-    underneath had been replaced.
-
-    **That was not hypothetical when it was found.** `m09e` had just re-embedded
-    130,720 titles from `fastembed:BAAI/bge-small-en-v1.5` to
-    `openai:BAAI/bge-m3`; the 3,268,000 stored rows were saved only because the
-    width change deleted them outright, which is luck rather than mechanism. A
-    same-width swap -- bge-m3 for any other 1024-lane model -- would have left a
-    silently stale similarity graph.
-
-    Asserted on the two real model strings for the shape rather than for
-    sentiment: the failure is that two *different* checkpoints agree, so the
-    case has to hand it two.
-    """
+    """The gap this fingerprint had for three milestones, as a case."""
     small = blend_fingerprint(embedding_model="fastembed:BAAI/bge-small-en-v1.5")
     m3 = blend_fingerprint(embedding_model="openai:BAAI/bge-m3")
 

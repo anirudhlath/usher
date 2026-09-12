@@ -1,7 +1,4 @@
-"""The quiet-host check every measurement harness closes with.
-
-Loaded by path for `tests/bounded_ledger.py`'s reasons: `scripts/` is not a package.
-"""
+"""The quiet-host check every measurement harness closes with."""
 
 import importlib.util
 import sys

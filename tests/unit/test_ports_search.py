@@ -1,6 +1,6 @@
 """The search port's DTOs. The ABCs' behaviour is `tests/contract/
-search_index_contract.py`; what is asserted here is the shape of the values
-that cross the port, which is where 🔶 1's four defects actually lived.
+search_index_contract.py`; what is asserted here is the shape of the values that
+cross the port, which is where 🔶 1's four defects actually lived.
 """
 
 import dataclasses
