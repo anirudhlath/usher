@@ -718,15 +718,13 @@ class Settings(BaseSettings):
     #
     # **A `bool` and deliberately not a sample rate.** Every absence in PRD
     # 10's *"which absence means what"* table is exact, so a rate makes every
-    # count over this surface an estimate and adds a further absence -- *the
-    # row that was not written* -- indistinguishable in the data from the ones
-    # that are real. Volume is bounded by retention instead.
+    # count over this surface an estimate and adds a further absence nobody
+    # can name. Volume is bounded by retention instead.
     #
     # **On, because the row no longer sits on the request a keystroke waits
-    # for.** It costs ~3.5 ms, of which 3.0 ms is a WAL flush, against a
-    # tier-1 answer of 2.53 ms -- which is why this shipped off while the write
-    # was synchronous. `SearchQueryBuffer` takes the row and a drain writes it,
-    # so what the request pays is an append.
+    # for.** It shipped off while the write was synchronous, when it cost half
+    # again the tier-1 answer it measured; `SearchQueryBuffer` takes the row
+    # and a drain writes it, so the request pays an append.
     #
     # It narrows the suggest surface only. `GET /search` and `usher search`
     # write regardless -- a household that turns off keystroke analytics has

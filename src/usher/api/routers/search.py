@@ -422,13 +422,11 @@ async def suggest(
     # `tier` says which index ran. Every mode-split panel owes a
     # `WHERE surface = 'search'` it did not previously need.
     #
-    # 🔴 **The short-`q` arm below writes nothing, and that is this route's
+    # **The short-`q` arm below writes nothing, and that is this route's
     # decision rather than the service's.** It returns before
-    # `SearchService.suggest` is called at all, so there is no answered query
-    # to record: PRD 10 excludes a blank or whitespace-only query because a
-    # search box sends one between every character, and a `q` below its tier's
-    # minimum is that same exclusion with a number on it. A writer moved above
-    # this line would be a row per keystroke a client never meant to send.
+    # `SearchService.suggest` is called, so there is no answered query to
+    # record; a writer moved above this line would be a row per keystroke a
+    # client never meant to send.
     minimum = _MIN_CHARS_FOR_TIER[tier]
     if len(q.strip()) < minimum:
         return SuggestResponse.of(q, tier=tier, min_query_length=minimum)

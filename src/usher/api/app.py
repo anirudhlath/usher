@@ -173,14 +173,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         image_fetcher, image_store, close_images = image_proxy(settings)
         app.state.image_fetcher = image_fetcher
         app.state.image_store = image_store
-        # PRD 10's keystroke rows, written off the request path. One buffer and
-        # one drain per process: `api/deps.get_search_service` hands every
-        # request the same one, so a row a keystroke submits is written by a
-        # task the answered request is no longer waiting on. Unconditional, on
-        # `app.state.embedder`'s terms -- the switch that decides whether rows
-        # are submitted is `USHER_SEARCH_SUGGEST_ANALYTICS`, read in
-        # `composition.build_search_service`, and a buffer nobody submits to
-        # holds a deque and a task parked on an `Event`.
+        # PRD 10's keystroke rows. One buffer and one drain per process, so a
+        # row a keystroke submits is written by a task the answered request is
+        # no longer waiting on. Unconditional on `app.state.embedder`'s terms:
+        # a buffer nobody submits to holds a deque and a parked task.
         search_queries = search_query_buffer(session_factory)
         app.state.search_queries = search_queries
         draining = asyncio.create_task(search_queries.drain())

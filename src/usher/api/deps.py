@@ -1295,12 +1295,9 @@ def get_search_service(
     model: Embedder | None = request.app.state.embedder
     # `commit=nothing`: `get_session` commits when the handler returns, so a
     # row that committed itself would end this request's transaction and leave
-    # everything after it -- the demand promotion both search routes do -- in a
-    # second one, for two WAL flushes per request where one will do.
-    #
-    # The buffer is the lifespan's, read the same way the model above is: a
-    # keystroke's row is submitted to it and written by the process's own
-    # drain, so the answered request waits for nothing.
+    # the demand promotion after it in a second one -- two WAL flushes where
+    # one will do. The buffer is the lifespan's, read the way the model above
+    # is, so a keystroke's row is written by the process's own drain.
     buffer: SearchQueryBuffer = request.app.state.search_queries
     return build_search_service(session, settings, embedder=model, commit=nothing, buffer=buffer)
 
