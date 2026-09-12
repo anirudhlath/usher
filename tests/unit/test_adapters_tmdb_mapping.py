@@ -620,8 +620,8 @@ def test_an_infinite_popularity_is_dropped_rather_than_raising() -> None:
     """`1e400` is well-formed JSON, `json.loads` maps it onto `inf`, and this
     module's contract is that **nothing TMDb can put in a payload may raise**.
 
-    Both halves matter and only together. `Title.tmdb_popularity` carries
-    `allow_inf_nan=False` since M10's F9, so an unfiltered `inf` would leave
+    Both halves matter and only together. `DomainModel` carries
+    `allow_inf_nan=False`, so an unfiltered `inf` would leave
     the constructor below as a `pydantic.ValidationError` — which is not a
     `UsherPortError`, so it would escape `EnrichService`'s `except` and kill
     the worker rather than parking the job. The payload is built by parsing

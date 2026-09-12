@@ -277,29 +277,14 @@ def test_title_serialization_round_trips() -> None:
 
 
 def test_tmdb_popularity_refuses_a_non_finite_value() -> None:
-    """PRD 09's carried *"`Title.popularity` accepts infinity"* debt, closed by
-    M10's F9.
+    """`ge=0` alone does not refuse `inf` — `float("inf") >= 0` is `True` — and
+    neither does the column: `titles.tmdb_popularity` is `double precision`,
+    where IEEE `Infinity` is legal and satisfies
+    `ck_titles_tmdb_popularity_non_negative`. `DomainModel`'s
+    `allow_inf_nan=False` is the only layer that says no.
 
-    `1e400` is well-formed JSON and `json.loads` maps it onto `inf` with no
-    error at all, so this is the value a TMDb payload actually delivers rather
-    than a constructed one — spelled that way here so the case is about the
-    reachable shape and not about `float("inf")`.
-
-    `ge=0` alone does not refuse it (`float("inf") >= 0` is `True`), and
-    neither does the column: `titles.tmdb_popularity` is `sa.Float()` —
-    `double precision`, where IEEE `Infinity` is legal — and `Infinity >= 0`
-    satisfies `ck_titles_tmdb_popularity_non_negative` too. So this model is
-    the only layer that can say no, which is why ADR-0044 leaves it to the
-    field while leaving every *narrower*-than-its-field column to the
-    repository.
-
-    **The field is `tmdb_popularity` and was `popularity` when F9 wrote this
-    case; ADR-0040's rename carried the defect across rather than fixing it.**
-    That record split three dual-written columns into five source-named ones
-    and reproduced `Field(default=None, ge=0)` verbatim on the new
-    `tmdb_popularity` — so the debt survived a rename that touched the exact
-    line holding it, which is worth knowing before assuming a rename pass
-    would have caught something like this.
+    `1e400` is well-formed JSON and `json.loads` maps it onto `inf`, so this is
+    the value a TMDb payload actually delivers rather than a constructed one.
     """
     for value in (json.loads("1e400"), float("inf"), float("nan")):
         with pytest.raises(ValidationError):
@@ -317,19 +302,13 @@ def test_a_finite_tmdb_popularity_is_still_accepted() -> None:
 
 
 @pytest.mark.parametrize("field", ["tmdb_vote_average", "imdb_average_rating"])
-def test_a_rating_refuses_a_non_finite_value_by_its_ceiling(field: str) -> None:
-    """Neither rating field ever had `tmdb_popularity`'s defect, and the reason
-    is the `le=10` rather than anything about them being better designed.
+def test_a_rating_refuses_a_non_finite_value(field: str) -> None:
+    """`DomainModel`'s `allow_inf_nan=False` is what refuses these, not the
+    `le=10` — the ceiling is pinned by
+    `test_a_rating_rejects_values_outside_the_zero_to_ten_scale` instead.
 
-    Stated as a case because neither carries `allow_inf_nan=False`: if a later
-    change relaxes or removes either ceiling — TMDb changing scale, say — the
-    protection goes with it silently. This is the thing that notices.
-
-    **Parametrised over both because ADR-0040 turned one such field into two.**
-    Before that record this was `community_rating` alone; the split gave IMDb
-    its own `imdb_average_rating` with the same `ge=0, le=10`, so the accident
-    is now load-bearing in two places and a case naming one of them would leave
-    the other free to lose its ceiling unobserved.
+    Parametrised over both because each carries its own `ge=0, le=10` and a case
+    naming one would leave the other free to lose its ceiling unobserved.
     """
     for value in (json.loads("1e400"), float("nan")):
         with pytest.raises(ValidationError):

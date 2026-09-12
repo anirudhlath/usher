@@ -949,8 +949,8 @@ def _non_negative_float(value: Any) -> float | None:
     `1e400`, which is well-formed JSON -- straight onto `inf` with no error.
     Before M10's F9 that value reached `titles.popularity` (`double
     precision`, where IEEE `Infinity` is legal and satisfies the column's own
-    `>= 0` CHECK) and sorted above every real title forever. `Title.popularity`
-    now carries `allow_inf_nan=False`, so without this filter the same payload
+    `>= 0` CHECK) and sorted above every real title forever. `DomainModel`
+    carries `allow_inf_nan=False`, so without this filter the same payload
     would raise `pydantic.ValidationError` out of the constructor below --
     which is not a `UsherPortError`, and this module's contract is that nothing
     TMDb can put in a payload may raise.

@@ -996,8 +996,12 @@ so there is no width to widen and no refusal to translate. In the same commit,
 may raise and a `pydantic.ValidationError` is not a `UsherPortError`.
 `json.loads('1e400')` is a case on both sides. `_bounded` needs no such clause
 and is left alone — `low <= inf <= high` is `False` — which is why
-`community_rating` never had the defect, and there is now a case pinning that
-its `le=10` is what does the refusing.
+`community_rating` never had the defect.
+
+⚠️ **The flag has since moved onto `DomainModel.model_config`**, so the
+inversion above is the rule for every domain model rather than one field's
+exception, and a ceiling no longer refuses non-finite values on any model's
+behalf.
 
 **`titles.year` and `titles.vote_count` are excluded, with a case that says
 so.** Both are `Field(ge=0)` against `integer` and both accept `2**31`; both sit

@@ -29,7 +29,7 @@ class DomainModel(BaseModel):
     `TypeError` from `hash()`, not silent corruption.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
     def evolve(self, **changes: object) -> Self:
         """Return a copy with `changes` applied, re-validated from scratch.

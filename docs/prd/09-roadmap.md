@@ -1116,14 +1116,19 @@ suspicion.
   `UsherPortError`, so an unfiltered `inf` would have escaped `EnrichService`'s
   `except` and killed the worker instead of parking the job. The bound is on the
   model rather than on the column because there is no width to widen: see below.
-  `community_rating` is safe only by accident of its `le=10`, which is now a case
-  so that relaxing the ceiling cannot quietly re-open it.
+  `community_rating` was safe only by accident of its `le=10`.
+  ⚠️ **Stage 1A moved `allow_inf_nan=False` off the field and onto
+  `DomainModel.model_config`**, so every domain model refuses non-finite floats
+  and no ceiling is load-bearing for that any more. `SearchResult.popularity`,
+  `SearchResult.score`, `SimilarTitle.score` and `Centroid.vector` had neither a
+  ceiling nor the flag and accepted `inf`; `tests/unit/test_domain_non_finite.py`
+  is the case over all four.
   ⚠️ **Every column this paragraph names was renamed by `m10a` and both of its
   test citations went with them, re-measured 2026-09-07.** `Title.popularity` is
   `Title.tmdb_popularity`; `community_rating` is `tmdb_vote_average`, joined by
   `imdb_average_rating` carrying the same `ge=0, le=10`, so the accident is
   load-bearing twice and the case is parametrised over both —
-  `test_a_rating_refuses_a_non_finite_value_by_its_ceiling`, not the singular
+  `test_a_rating_refuses_a_non_finite_value`, not the singular
   `test_community_rating_…` name this bullet carried.
   ⚠️ **`titles.year`, `titles.tmdb_vote_count` and `titles.imdb_num_votes` are
   the same `Field(ge=0)`-against-`integer` shape and are deliberately *not*
