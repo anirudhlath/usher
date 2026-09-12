@@ -489,6 +489,55 @@ def test_a_mid_run_port_error_keeps_the_partials_and_reports_the_failure(
     assert code == 1, f"a run that ended on a port error must return non-zero; got {code}"
 
 
+def test_the_incomplete_line_is_redacted_like_every_other_line_that_prints_a_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """🔴 The last unredacted `str(exc)` in this family.
+
+    `BudgetExceeded` names the request it refused, and the `Budget` hook builds
+    that name out of `request.url.path` -- the **real** path, which is
+    `/Users/{emby_user_id}/Items/...`. So the one exception this harness raises
+    itself is the one carrying a credential, and the `INCOMPLETE` line printed
+    it raw where the sibling arms redact their identical line.
+
+    A 401 is what reaches the refusal without an over-subscribed budget:
+    `EmbySession.request` re-authenticates and resends, so one probe costs two
+    requests and a plan whose arithmetic fits still runs out.
+    """
+    sent: list[httpx.Request] = []
+    built: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        # The **second** request, not the first: the first warm-up is the
+        # anonymous `/System/Info/Public`, which does not re-authenticate.
+        if len(sent) == 2:
+            return httpx.Response(401, json={})
+        return httpx.Response(
+            200, json={"Items": [], "TotalRecordCount": 500_000, "Id": "stub-item"}
+        )
+
+    code = _drive_run(
+        budget=8,
+        reps=1,
+        sent=sent,
+        built=built,
+        monkeypatch=monkeypatch,
+        transport=httpx.MockTransport(handler),
+    )
+    printed = capsys.readouterr().out
+
+    # The premise: the 401 really did cost an extra request and the budget
+    # really did refuse one, or there is no `INCOMPLETE` line to redact.
+    assert "INCOMPLETE" in printed, f"the budget never refused a request: {printed!r}"
+    assert "BudgetExceeded" in printed, f"the report must name the class: {printed!r}"
+    assert _SECRETS["emby_user_id"] not in printed, (
+        f"the user id reached the terminal on the INCOMPLETE line: {printed!r}"
+    )
+    assert "<user-id>" in printed, f"redaction must leave a readable placeholder: {printed!r}"
+    assert code == 1, f"a run that ended early must return non-zero; got {code}"
+
+
 def test_the_four_probe_classes_are_read_only_and_spend_no_discovery_request() -> None:
     """The bar's read-only bound, asserted rather than promised.
 

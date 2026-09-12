@@ -928,7 +928,10 @@ async def _run(
         # class, so a 429 that persisted nine rows says INCOMPLETE and does not
         # read as a clean nine-rep run.
         failure = exc
-        print(f"\nINCOMPLETE -- ended on {type(exc).__name__}: {exc}")
+        # Redacted, like every other line this file prints a failure on:
+        # `Budget` names the request it refused out of `request.url.path`, so
+        # the one exception this harness raises itself carries the user id.
+        print(f"\nINCOMPLETE -- ended on {redact(f'{type(exc).__name__}: {exc}', secrets)}")
     finally:
         await client.aclose()
         provider.force_flush()
