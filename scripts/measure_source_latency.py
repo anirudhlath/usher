@@ -1031,12 +1031,11 @@ async def _run(
                     f"against a wall-clock median of {by_op[op].median:.4f}"
                 )
 
-    # ⚠️ **A local-CPU guard on a network-bound measurement.** For most of a
-    # run this process is idle-blocked on a socket, so the thing that could
-    # actually invalidate it -- contention on the path to the household server,
-    # or on the server itself -- is not sampled at all. A TCP-connect RTT
-    # sample to the same host before and after costs no Emby request and is
-    # the right addition.
+    # ⚠️ **A local-CPU guard on a network-bound measurement.** This process is
+    # idle-blocked on a socket for most of a run, so contention on the path to
+    # the household server -- the thing that could actually invalidate it -- is
+    # not sampled at all. A TCP-connect RTT sample to the same host, before and
+    # after, costs no Emby request and is the right addition.
     if not quiet_closing(opening):
         return 1
     return 1 if failure is not None else 0

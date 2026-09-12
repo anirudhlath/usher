@@ -1,7 +1,6 @@
 """The bar/secrets/redaction preamble, across every arm that measures a live source.
 
-Loaded by path for `tests/bounded_ledger.py`'s reasons: `scripts/` is not a
-package, so an ordinary import is unresolvable under the gate's `mypy`.
+Loaded by path for `tests/bounded_ledger.py`'s reasons: `scripts/` is not a package.
 """
 
 import importlib.util

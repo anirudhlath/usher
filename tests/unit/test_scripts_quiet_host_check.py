@@ -1,7 +1,6 @@
 """The quiet-host check every measurement harness closes with.
 
-Loaded by path for `tests/bounded_ledger.py`'s reasons: `scripts/` is not a
-package, so an ordinary import is unresolvable under the gate's `mypy`.
+Loaded by path for `tests/bounded_ledger.py`'s reasons: `scripts/` is not a package.
 """
 
 import importlib.util
