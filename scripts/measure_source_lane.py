@@ -176,8 +176,6 @@ class Overlap:
     peak: int
     mean_in_flight: float
     iou: float
-    union_seconds: float
-    busy_seconds: float
 
 
 def overlap_of(timings: Sequence[Timing]) -> Overlap:
@@ -192,7 +190,7 @@ def overlap_of(timings: Sequence[Timing]) -> Overlap:
     `max(ended_at)`, and this function is where that is honoured.
     """
     if not timings:
-        return Overlap(peak=0, mean_in_flight=0.0, iou=0.0, union_seconds=0.0, busy_seconds=0.0)
+        return Overlap(peak=0, mean_in_flight=0.0, iou=0.0)
     events: list[tuple[float, int]] = []
     for one in timings:
         events.append((one.started_at, 1))
@@ -223,8 +221,6 @@ def overlap_of(timings: Sequence[Timing]) -> Overlap:
         peak=peak,
         mean_in_flight=(busy / union) if union > 0 else 0.0,
         iou=(ge_two / union) if union > 0 else 0.0,
-        union_seconds=union,
-        busy_seconds=busy,
     )
 
 
@@ -422,21 +418,6 @@ async def run_block(
 
 def _stats_table(timings: Sequence[Timing]) -> str:
     return _table("per concurrency setting (harness wall clock)", summarise(timings, "probe"))
-
-
-def _overlap_table(groups: Mapping[str, list[Timing]]) -> str:
-    lines = [
-        "",
-        "observed overlap (CLAUDE.md's fourth evidence rule)",
-        f"{'setting':>12} {'n':>4} {'peak':>5} {'mean in flight':>15} {'IoU':>7} {'union s':>9}",
-    ]
-    for name in sorted(groups):
-        seen = overlap_of(groups[name])
-        lines.append(
-            f"{name:>12} {len(groups[name]):>4} {seen.peak:>5} "
-            f"{seen.mean_in_flight:>15.2f} {seen.iou:>7.3f} {seen.union_seconds:>9.3f}"
-        )
-    return "\n".join(lines)
 
 
 def _spacing(timings: Sequence[Timing]) -> list[float]:
