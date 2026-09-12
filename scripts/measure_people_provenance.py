@@ -1,52 +1,4 @@
-"""Measure the IMDb/TMDb provenance design for `people` and `credits`.
-
-**Not a test.** It downloads the real IMDb dumps -- `title.principals.tsv.gz`
-and `name.basics.tsv.gz`, ~700 MiB compressed beyond the two the shipped
-bootstrap already fetches -- and it writes to a real database.
-`scripts/measure_bulk_load.py` and `scripts/measure_imdb_people.py` state the
-same contract for the same reason. Nothing it writes lands under
-`tests/fixtures/`, no dataset row is ever committed, and everything it creates
-in the scratch database is prefixed `t4r_` and dropped by `--phase drop`.
-
-    export USHER_DATABASE_URL=...          # the catalog, read only
-    export USHER_T4R_SCRATCH_URL=...       # a scratch database, written and dropped
-    export USHER_SECRET_KEY=...
-    uv run python scripts/measure_people_provenance.py --phase head
-    uv run python scripts/measure_people_provenance.py --phase extract
-    uv run python scripts/measure_people_provenance.py --phase keys
-    uv run python scripts/measure_people_provenance.py --phase load
-    uv run python scripts/measure_people_provenance.py --phase dedup
-    uv run python scripts/measure_people_provenance.py --phase overlap
-    uv run python scripts/measure_people_provenance.py --phase blast
-    uv run python scripts/measure_people_provenance.py --phase latency --label before
-    uv run python scripts/measure_people_provenance.py --phase latency --label after
-    uv run python scripts/measure_people_provenance.py --phase drop
-
-**The bar this measures against was written first**, to `/var/tmp/t4r/BAR.md`,
-`sha256 fbb9ced3f33840989d81841c48b51dcaeefb1d4ada5bfb2ad5df157ded223e30`,
-2026-08-12T14:49:10-05:00 -- before the first byte was downloaded. The hash is
-recomputed at run time and printed, so an edit made after a number was seen is
-visible in the log rather than invisible in the prose.
-
-**The snapshot is pinned, and that is not optional.**
-`CachedDatasetFile.ensure_local` short-circuits on the *upstream* ETag rather
-than on local presence, and IMDb regenerates these files daily -- so a
-measurement spanning two days silently mixes two snapshots. `--phase head`
-resolves each file's ETag once and writes it to `--pin`; every later phase
-passes that pinned value to `ensure_local` and refuses to continue if the byte
-stream upstream actually served carries a different one.
-
-**Column counts are taken with `line.split("\\t")`.** IMDb TSVs have no quoting
-mechanism and `csv.reader`'s default `QUOTE_MINIMAL` silently strips embedded
-`"`, which moves a column count in the direction that looks correct.
-
-**`--phase latency` is the one phase that reports a duration**, and it is the
-only one whose number host load can move. It carries its own quiet-check --
-CPU *drift* between two idle moments, matching argv tokens and skipping shells
-and `sleep`, which is `scripts/measure_suggest_tiers.py`'s working version and
-not either of the two obvious wrong ones. Every other phase reports a count or
-a byte size, neither of which host load moves.
-"""
+"""Measure the IMDb/TMDb provenance design for `people` and `credits`."""
 
 import argparse
 import asyncio
@@ -592,14 +544,10 @@ FROM t4r_principals s JOIN t4r_people p ON p.imdb_id = s.nconst
 """
 
 
-# The staged design copied into the **real** `people`/`credits`, which is what
-# `--phase latency --label after` has to read: every probe in `_PROBES` names
-# the shipped tables and is served by the shipped indexes, so measuring
-# against `t4r_credits` would price a table nothing queries.
-#
-# Requires `alembic upgrade head` at `m09d` or later -- without `source` the
-# INSERT has no column to name, which is a loud failure rather than a quiet
-# one.
+# The staged design copied into the **real** `people`/`credits`, which is what `--phase
+# latency --label after` has to read: every probe in `_PROBES` names the shipped tables
+# and is served by the shipped indexes, so measuring against `t4r_credits` would price a
+# table nothing queries.
 _APPLY_PEOPLE = """
 INSERT INTO people (id, tmdb_id, imdb_id, name, sort_name, known_for_department,
                     created_at, updated_at)
@@ -1016,12 +964,9 @@ async def phase_latency(label: str, out_dir: Path, reps: int) -> None:
                 async def _call(sql: Any = compiled, args: dict[str, Any] = bound) -> None:
                     (await conn.execute(sql, args)).all()
 
-                # The premise, asserted before the number is believed: a probe
-                # that matches nothing is not a fast probe, it is no probe --
-                # and it reads as a pass in both runs. The first baseline this
-                # script took was discarded for exactly that: the FTS probe
-                # used the CLI documentation's synthetic phrase and returned
-                # zero rows at 0.24 ms.
+                # The premise, asserted before the number is believed: a probe that
+                # matches nothing is not a fast probe, it is no probe -- and it reads as
+                # a pass in both runs.
                 rows = len((await conn.execute(compiled, bound)).all())
                 if rows == 0:
                     raise SystemExit(

@@ -1,42 +1,4 @@
-"""Walk the candidate pool once and read off two pair rates over one population.
-
-**Not a test, and it writes nothing.** It opens a real database, walks the
-whole embedded population through the *shipped* `TitleEmbeddingRepository`, and
-prints numbers. There is no `INSERT`, no `UPDATE`, no `DELETE` and no `COMMIT`
-anywhere in this file — each page is read and then rolled back, so an
-eighty-minute walk is not one eighty-minute transaction. It is the shape
-`scripts/measure_rows.py` has, minus that script's seeding half.
-
-    export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:55434/usher"
-    export USHER_SECRET_KEY="<32+ char secret>"
-    uv run python scripts/measure_pair_rates.py --out /var/tmp/m9-S5/walk.json
-
-**The number this exists to produce is the candidate-pair rate**, per
-`/tmp/m9-gate/BAR.md`: of all `(seed, candidate)` pairs a real neighbour
-rebuild considers, the fraction carrying the signal on **both** sides. It is
-counted over the pool `TitleEmbeddingRepository.nearest_for` returns and never
-over the rows a rebuild stores — `_CANDIDATE_POOL` is 100 and
-`_NEIGHBORS_PER_TITLE` is 25, and the stored rows are the pool already sorted
-by a blend that weights the genome cosine at 0.25, so a rate taken there is
-inflated by construction. A standalone SQL join over tag membership is not this
-number either and must never be reported as one.
-
-**One walk, both signals, so they are comparable to each other.** The genome
-counter is the comparability control: it is byte-for-byte the quantity
-`SimilarityService.rebuild()` reports as `pairs_with_tags / candidate_pairs`,
-and `tests/unit/test_scripts_measure_pair_rates.py` pins the two together
-against the same fake. If a later rebuild disagrees with the number this
-prints, the walk drew a different pool and the tags number beside it is void.
-
-**The tag input is a scratch table and nothing in `src/` may learn its name.**
-`ml_tags_tmp` (`imdb_id`, `n_tags`) is joined to `titles.imdb_id` here, in an
-operations script, exactly as `ml-latest`'s own archive is read by an importer
-and never by the package.
-
-**No neighbour row is written, deliberately.** Any blend change invalidates
-every row of `title_neighbors`, so writing the table before the blend is
-settled is work thrown away — and the table holds zero rows today.
-"""
+"""Walk the candidate pool once and read off two pair rates over one population."""
 
 import argparse
 import asyncio

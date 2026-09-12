@@ -1,16 +1,4 @@
-"""Measure a real IMDb load with and without index suspension.
-
-Answers the question PRD 04's Phase 0 left open. **Not a test**: it
-downloads the real 214 MiB `title.basics.tsv.gz`, so it never runs in CI.
-Run it once, by hand, and record the numbers in PRD 04.
-
-    export USHER_DATABASE_URL=... USHER_SECRET_KEY=...
-    uv run alembic upgrade head
-    uv run python scripts/measure_bulk_load.py
-
-The database is truncated between passes, so run it against a scratch
-database, never a real catalog.
-"""
+"""Measure a real IMDb load with and without index suspension."""
 
 import asyncio
 import time

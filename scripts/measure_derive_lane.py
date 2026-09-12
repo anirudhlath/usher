@@ -1,59 +1,4 @@
-"""Price `derive` at 1, 2, 4 and 8 in flight on one pool. **Zero live requests.**
-
-**Not a test.** It starts a throwaway `pgvector/pgvector:pg17` container, runs
-the real Alembic chain into it, seeds a synthetic catalog and throws the whole
-container away afterwards. It touches **no** third party: `derive` is pure
-Postgres by construction -- a JSONB read and writes through five repositories,
-with `DeriveService` holding a `MetadataProvider` only for `to_derivation`,
-which is synchronous and opens no socket. The dev database is not touched
-either; nothing here connects to `USHER_DATABASE_URL`.
-
-    uv run python scripts/measure_derive_lane.py
-    uv run python scripts/measure_derive_lane.py --titles 240 --ladder 1,2,4,8
-
-## The run this exists to be
-
-`usher.services.jobs.KIND_CONCURRENCY[JobKind.DERIVE]` is **4**, and its own
-comment says what it is and is not:
-
-> ⚠️ **Not measured** [...] it is derived from a *budget* rather than from a
-> throughput: derivation is pure Postgres [...] so its ceiling is what the
-> connection pool can serve without starving the API in the in-process lane --
-> four of `Settings.db_pool_size`'s twenty. **The measurement that would replace
-> it is derive jobs/s against 1, 2, 4 and 8 in flight on one pool; nothing in
-> this repository has run it.**
-
-This is that run, spelled from that sentence.
-
-## What is seeded, and why it is synthetic
-
-Each title gets one `raw_payloads` row built from the committed
-`tests/fixtures/tmdb/movie.json` -- a **shape-recorded** fixture, per
-`.claude/rules/fixtures-and-fakes.md` -- re-keyed to a distinct `tmdb_id` and
-given synthetic cast, crew and image arrays at the sizes the shipped mapper
-caps them to. Synthetic because the alternative is shipping third-party
-metadata, which this repository refuses (`CLAUDE.md`: *"Ship importers, never
-data"*), and because the question is a *throughput* one: what matters is that
-every job does a realistic amount of work, not that the names are real.
-
-⚠️ **So the absolute jobs/s is a property of this seed and this box, not of any
-real catalog**, and the number worth carrying is the **shape of the curve** --
-what the second, fourth and eighth in-flight job add. Stated here rather than
-discovered by whoever quotes the absolute number at a different catalog.
-
-## One pool, which is the whole point
-
-Every coroutine gets its **own session** (`AsyncSession` is explicitly not
-concurrency-safe, which is `.claude/rules/rows-and-genome.md`'s own finding and
-why row building is sequential) from **one** `async_sessionmaker` over **one**
-engine -- exactly the shape `usher work` has, where the worker opens a scope
-per claim and per job against the process's single pool. `Settings.db_pool_size`
-defaults to 20 with `db_max_overflow` 10, and the ladder deliberately runs to 8
-so the curve is visible on both sides of the shipped 4.
-
-The bar is `/var/tmp/m10-gate/BAR-S7.md`, whose `sha256` is re-computed here and
-printed, so an edit made after a number was seen shows up in the log.
-"""
+"""Price `derive` at 1, 2, 4 and 8 in flight on one pool. **Zero live requests.**"""
 
 from __future__ import annotations
 
@@ -225,19 +170,11 @@ async def run_rung(url: str, title_ids: Sequence[uuid.UUID], *, concurrency: int
     )
     engine = build_engine(url, pool_size=settings.db_pool_size)
     sessions = build_session_factory(engine)
-    # **`__new__` without `__init__`, and it is safe for a reason that was read
-    # rather than assumed.** `DeriveService` holds the provider for
-    # `to_derivation` alone -- `build_derive_service`'s own docstring says so,
-    # and `test_deriving_makes_no_provider_fetch` asserts it over a provider
-    # whose `fetch` raises. `TmdbMetadataProvider.to_derivation` reads **no**
-    # instance attribute: it delegates entirely to `mapping.people_and_credits`,
-    # `collection_from_payload` and `images_from_payload`, and passes the
-    # module-level `PROVIDER_NAME`. So an instance with no `_client`, `_region`
-    # or `_today` is complete for this call and cannot reach a socket, which is
-    # a stronger guarantee than a stub honouring the same contract.
-    #
-    # The alternative -- a real `TmdbClient` over a dead transport -- would need
-    # an api key in this process for a method that never touches one.
+    # **`__new__` without `__init__`, and it is safe for a reason that was read rather
+    # than assumed.** `DeriveService` holds the provider for `to_derivation` alone --
+    # `build_derive_service`'s own docstring says so, and
+    # `test_deriving_makes_no_provider_fetch` asserts it over a provider whose `fetch`
+    # raises.
     provider = TmdbMetadataProvider.__new__(TmdbMetadataProvider)
     gate = asyncio.Semaphore(concurrency)
     latencies: list[float] = []
@@ -357,11 +294,9 @@ def main() -> int:
         _upgrade_head(url)
 
         # **A derivation that derives nothing runs very fast and reads as a
-        # throughput.** Before any rung, one job is run and the rows it wrote
-        # are counted, so a seed the mapper silently declines fails here rather
-        # than becoming the fastest number in the table. `mutation-sweeps.md`'s
-        # standing rule, one register over: a run that did not run is not a
-        # pass, and a job that did no work is not a job.
+        # throughput.** Before any rung, one job is run and the rows it wrote are
+        # counted, so a seed the mapper silently declines fails here rather than
+        # becoming the fastest number in the table.
         probe_ids = asyncio.run(seed(url, titles=1, fixture=fixture, offset=0))
         written = asyncio.run(_probe_one_job(url, probe_ids[0]))
         print(

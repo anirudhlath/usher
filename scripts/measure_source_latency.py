@@ -1,85 +1,4 @@
-"""Price one request to a real Emby, per op class, and read the answer twice.
-
-**Not a test.** It opens real sockets against somebody else's media server. It
-writes nothing: every probe is a `GET`, nothing is sent to `/PlayedItems` or
-`/UserData`, and there is therefore nothing to restore afterwards.
-
-    uv run python scripts/measure_source_latency.py \
-        --secrets /path/to/secrets.yaml \
-        --database-url "$USHER_DATABASE_URL" \
-        --prometheus-container observability-prometheus-1
-    uv run python scripts/measure_source_latency.py --secrets ... --budget 0   # dry run
-
-## Why this exists
-
-`"Emby is slow (~1-5 s/request observed)"` entered this repository in `0c823e0`
-on 2026-07-28 -- the first PRD commit, two days before `src/usher/adapters/emby/`
-existed and before any request had been sent to any Emby from this project. It
-is cited 22 times and called *measured* 11 times. No run stood behind it, and
-the one live reading the repository did hold contradicted it by an order of
-magnitude (M9's H5: 0.141 / 0.142 / 0.143 s for an item read back).
-
-So the question this harness answers is not "is 1-5 s right", it is **which op
-class is it about** -- a single-item read, or a 200-item page carrying the full
-`Fields` set.
-
-## Two instruments, because one measuring itself is not a measurement
-
-* **`usher.source.request.duration`**, the histogram `EmbySession._send` has
-  recorded in a `finally` since M3, exported over OTLP and read back out of
-  Prometheus. Nine milestones have emitted it and nobody has ever read it.
-* **This harness's own `time.monotonic()`** around each call, which never
-  touches the SDK at all.
-
-They must agree. S3's live TMDb run agreed to 0.5% between a probe and
-`raw_payloads.fetched_at` deltas; that is the precedent.
-
-## The deviation this harness makes, stated rather than buried
-
-`configure_metrics` installs **no `View`**, so `usher.source.request.duration`
-takes the OTel SDK's default explicit bucket boundaries -- which are
-`(0.0, 5.0, 10.0, 25.0, ...)` **in seconds**. Every observation below five
-seconds lands in one bucket, so `histogram_quantile` over the shipped pipeline
-cannot resolve a median below 5 s at all. This harness therefore installs a
-`View` with fine geometric boundaries for its own export, and **replays the
-identical recorded timings through a second provider configured exactly as
-`configure_metrics` does**, under a second `service.name`, so both are in
-Prometheus and the difference is visible rather than asserted. The replay
-issues zero extra Emby requests.
-
-## The bound
-
-`--budget` is enforced *before* the transport: the harness refuses to issue the
-budget+1st request and names the budget when it does. **≤ 60** is S1's share of
-Group S's declared ≤ 256. There is no iterator anywhere in here -- a page cost
-is measured by calling `EmbySession.json_body`'s underlying `request()` with an
-explicit `StartIndex`/`Limit`, never through `list_items`/`_walk` -- so
-`MAX_PAGES` is never approached and `PortDataMalformed` cannot be raised as a
-bound. `--budget 0` is the dry run and issues nothing at all.
-
-## Credentials
-
-The secrets path is an **argument** (or `USHER_EMBY_SECRETS`) with no
-host-specific default, and the base URL, user id, device id and token are
-redacted from everything this script prints -- `CLAUDE.md`'s live-verification
-rule. Only four keys are read out of that file; the rest is never loaded. The
-operator's file holds an access token and a user id, not a password, so
-`POST /Users/AuthenticateByName` cannot be exercised and `_authenticate_locked`
-is replaced by one that installs the known token, exactly as M3, M4, M5 and
-M9's H4/H5 all did. That swap issues zero requests.
-
-The pre-registered bar is `/var/tmp/m10-gate/BAR-S1.md`, whose sha256 is
-re-computed at run time and printed below, so an edit made after a number was
-seen shows up in the log. `/var/tmp`, not `/tmp`: `/tmp` on this host is tmpfs,
-and a bar whose only property is that it predates the numbers does not survive
-a reboot there.
-
-Quiet-check: the two-sided idle-sampled CPU drift and the argv-token foreign
-process census from `scripts/measure_suggest_tiers.py`, imported rather than
-re-derived -- a one-minute load average rises from the run's own work and would
-condemn every clean run, and `pgrep -f pytest` counts the shell that mentions
-the word.
-"""
+"""Price one request to a real Emby, per op class, and read the answer twice."""
 
 import argparse
 import asyncio
@@ -121,12 +40,7 @@ from usher.adapters.http import SourceGate
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import UsherPortError
 
-#: S1's identities, as **defaults** rather than as module constants. A second
-#: arm of this harness (S7's concurrency run) needs its own bar, its own
-#: `service.name` and its own budget; baking S1's into module scope is what
-#: makes reuse a fork. `/var/tmp`, not `/tmp`: `/tmp` here is tmpfs, and a bar
-#: whose only property is that it predates the numbers does not survive a
-#: reboot there (CLAUDE.md).
+# : S1's identities, as **defaults** rather than as module constants.
 DEFAULT_BAR = Path("/var/tmp/m10-gate/BAR-S1.md")  # noqa: S108 -- durable, not tmpfs
 
 METRIC = "usher.source.request.duration"
@@ -905,28 +819,9 @@ async def _run(
         await run_probes(session, probes, timings)
     except (BudgetExceeded, ProbeFailed, UsherPortError) as exc:
         # **Caught, not propagated, so the partial run still reports.** Every
-        # observation already on `timings` was paid for against a real
-        # household server; discarding them because the run ended early is
-        # throwing away the only thing the requests bought.
-        #
-        # 🔴 **`UsherPortError` is in this tuple because leaving it out was the
-        # same defect C2 was created to close, one arm over.** A 429
-        # (`PortRateLimited`), an unreachable server (`PortUnavailable`) or a
-        # rejected credential (`PortAuthFailed`) raised mid-run is exactly what
-        # a household server does under load -- it is the scenario S4 exists
-        # for -- and with only `(BudgetExceeded, ProbeFailed)` caught it
-        # propagated past this block, past the report and past the
-        # `--timings-out` write, so a 429 at request 10 spent ten real requests
-        # and persisted zero rows. Every port failure is a *value* here: it
-        # ended the run early, and the rows before it are still the rows the
-        # requests bought. It is **not** bare `Exception` -- a `KeyError` in
-        # this harness is a bug, not a bounded upstream failure, and must still
-        # reach `main`'s redacting handler rather than being logged as an
-        # "incomplete run".
-        #
-        # `failure is not None` makes the run return 1 and the print names the
-        # class, so a 429 that persisted nine rows says INCOMPLETE and does not
-        # read as a clean nine-rep run.
+        # observation already on `timings` was paid for against a real household server;
+        # discarding them because the run ended early is throwing away the only thing
+        # the requests bought.
         failure = exc
         # Redacted, like every other line this file prints a failure on:
         # `Budget` names the request it refused out of `request.url.path`, so
@@ -959,17 +854,10 @@ async def _run(
         print(f"\nrequests issued: {budget.spent} (budget {budget.limit}); nothing recorded")
         return 1
 
-    # **Two windows, and the wide one first, because the first spelling of
-    # this printed only the narrow one and the write-up then quoted a
-    # different instant than the artifact held.** `timings` excludes the
-    # warm-up; every request in `warmups` went to the same server and belongs
-    # in "when did this harness touch it".
-    #
-    # ⚠️ **S7 note:** `every[0]`/`every[-1]` and `timings[0]`/`timings[-1]`
-    # assume the list is in start order, which is true only because this arm
-    # issues one request at a time. Under concurrency the last-*appended* timing
-    # is not the last to *start*; a concurrency arm must take min(started_at)
-    # and max(ended_at) rather than the endpoints of the list.
+    # **Two windows, and the wide one first, because the first spelling of this printed
+    # only the narrow one and the write-up then quoted a different instant than the
+    # artifact held.** `timings` excludes the warm-up; every request in `warmups` went
+    # to the same server and belongs in "when did this harness touch it".
     window = f"{_iso(every[0].started_at)} -> {_iso(every[-1].ended_at)}"
     reps_window = (
         f"{_iso(timings[0].started_at)} -> {_iso(timings[-1].ended_at)}" if timings else "none"
@@ -997,16 +885,10 @@ async def _run(
         time.sleep(args.prometheus_wait)
         stored = read_back(args.prometheus_container, args.service_name, sorted(by_op))
         # **Warm-up included, and this is a correction the first run earned.**
-        # `EmbySession._send` records the histogram in a `finally` on *every*
-        # request, including the four this harness discards from its own
-        # statistics -- so a comparison of the reps-only wall clock against the
-        # histogram is not two instruments on one sample, it is two samples.
-        # Measured 2026-08-15: the medians barely moved (they are robust to one
-        # extra observation) but `verify`'s **mean** read 18.11% apart, all of
-        # it the first request of the run carrying the TCP and TLS connect. The
-        # comparison below is therefore over `warmups + timings`, which is
-        # exactly what the histogram holds; the reported statistics above stay
-        # reps-only.
+        # `EmbySession._send` records the histogram in a `finally` on *every* request,
+        # including the four this harness discards from its own statistics -- so a
+        # comparison of the reps-only wall clock against the histogram is not two
+        # instruments on one sample, it is two samples.
         by_op_all = summarise(every, "op")
         print(
             f"\n{'op':<12} {'wall median':>12} {'prom median':>12} {'delta%':>8} "

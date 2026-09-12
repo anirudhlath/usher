@@ -1,56 +1,4 @@
-"""The per-column ledger behind ADR-0044 and issue #10.
-
-**Not a test, offline, and it writes nothing.** It opens no database and no
-socket. Every fact it prints is derived from three artefacts already in this
-repository -- the SQLAlchemy metadata in `usher.db.models`, the source of
-`usher.db.repositories` read as an AST, and the pydantic models in
-`usher.domain` -- plus an independent replay of `usher/db/migrations/versions/`
-used only to cross-check the first of those.
-
-    uv run python scripts/audit_bounded_columns.py                  # the ledger
-    uv run python scripts/audit_bounded_columns.py --summary        # the counts
-    uv run python scripts/audit_bounded_columns.py --at m08b        # a past head
-    uv run python scripts/audit_bounded_columns.py --reading pydantic
-    uv run python scripts/audit_bounded_columns.py --check          # exit 1 on drift
-
-**Nothing runs this file.** It is not wired into CI and `--check` is not part
-of the gate, so its drift detection is a thing a person runs, not a thing that
-fires. F9 owns closing that, because F9's guard is a test and tests do run.
-
-**Why this exists.** *"67 bounded columns, 17 provably safe, 5 already
-translated, 45 exposed, 31 through the COPY path"* has been quoted in
-`docs/prd/09-roadmap.md`, in issue #10 and in two milestone plans, and until
-this file none of the five could be reproduced from anything in the tree. The
-17 in particular had no ledger anywhere: no list of which columns they were.
-A number that cannot be recomputed is a number that silently goes stale, which
-is exactly what happened -- M9 added eight bounded columns and translated five
-more tables, and every quotation of the five figures kept the M8 arithmetic.
-
-`alembic upgrade head --sql` is **not** used and must not be built on: offline
-it dies at `e5b8f2c40d17_ingest_pipeline.py:107` on `MockConnection`, which is
-why the migration cross-check below replays the operations as an AST rather
-than asking Alembic to render them.
-
-**The bounding rule this file implements is ADR-0044's, stated once here so
-the total and the COPY figure cannot disagree again:**
-
-    A column is BOUNDED when its declared Postgres type refuses at least one
-    value that the Python object feeding it can represent.
-
-Consequences of that rule, all of which were contested and are settled in the
-ADR rather than here: `bigint` is **in** (a Python `int` is unbounded, so
-`media_items.file_size_bytes` refuses values just as `integer` does, and the
-COPY figure has always silently counted it); `double precision` is **out**
-(IEEE-754 binary64 is exactly a Python `float`, so it refuses nothing -- which
-is why `titles.popularity`, an `sa.Float()` and not the `NUMERIC` PRD 09 named,
-accepts infinity: a defect of the opposite sign); `halfvec(N)` is **in**, on the
-same rule, because a `list[float]` has no fixed length and all three of its
-columns leak today; and a CHECK constraint is **out**, because it is not the
-declared type and
-because it fires server-side as SQLSTATE 23514, which every `except
-IntegrityError` in this package already catches. CHECK-bounded columns are
-counted separately and printed, so the figure is visible rather than hidden.
-"""
+"""The per-column ledger behind ADR-0044 and issue #10."""
 
 import argparse
 import ast
@@ -432,25 +380,7 @@ def _module_texts(tree: ast.Module) -> dict[str, str]:
 _FIXED_POINT_ROUNDS = 12
 
 
-# The calls that actually reach the database. A function holding SQL is not a
-# write site: `watch_state.py`'s `_deduped`, `_update` and `_insert` are string
-# builders, and counting them as writers put five "no `except`" verdicts on
-# `watch_states` columns that `merge_from_source` does translate.
-#
-# **Ablated one name at a time, 2026-08-20, and only `execute` moves the
-# answer** -- dropping it raises `DegenerateScan` on the `unwritten` bucket,
-# and dropping any of the other eight changes no count at all, because
-# `_executing_functions` takes a transitive closure and `_rowcount`, `_stage`
-# and `_write_result` are all defined in the same module as their callers.
-# They stay listed rather than trimmed because `stage_records` and
-# `copy_records_to_table` are defined *elsewhere* (`db/staging.py`, asyncpg) and
-# would need this list the moment a repository stopped wrapping them, and
-# because the list is a statement of what reaches the database rather than a
-# minimal working set. The ablation is recorded so nobody re-derives it, and
-# `_check_call_lists_are_live` below is what stops the list going stale --
-# **which it caught one of on its very first run**: `add_all` was listed here
-# and nothing in `usher` calls it, so it had been contributing nothing while
-# looking exactly like a name that contributed everything.
+# The calls that actually reach the database.
 _EXECUTING_CALLS = frozenset(
     {
         "execute",
@@ -542,27 +472,8 @@ _ORM_STATEMENT_CALLS = frozenset({"update", "delete", "pg_insert"})
 
 
 def _constructed_rows(tree: ast.Module) -> dict[str, set[str]]:
-    """Per module-level function, the tables whose mapped class it *constructs*,
-    followed transitively across calls inside this module.
-
-    🔴 **The blind spot this closes, and the direction it points.**
-    `_orm_destinations` used to read only the mapped classes appearing as a
-    bare `ast.Name` in the method itself, and
-    `PostgresTitleRepository.add` writes `self._session.add(_to_row(title))` --
-    so `TitleRow` never appears in it, the method resolved to no destination,
-    and `write_sites()` **dropped it silently**. That is worse than a
-    pessimistic attribution: a writer the scan cannot resolve makes its table's
-    columns *optimistically* `translated`, because a bucket is worst-case over
-    the writers the scan can see. Measured before the fix: narrowing
-    `title.py:add`'s `except` back to `IntegrityError` produced **no drift and
-    no failing case**. This function, `_orm_destinations`' use of it, and the
-    `DegenerateScan` in `write_sites()` are the three halves of closing it.
-
-    **Constructed, not merely referenced**, and the narrowness is deliberate:
-    `_to_domain(row: TitleRow) -> Title` names the class in an annotation and
-    writes nothing, so crediting every mention would attribute `titles` to
-    every reader in the module the moment one of them flushed for an unrelated
-    reason.
+    """Per module-level function, the tables whose mapped class it *constructs*, followed
+    transitively across calls inside this module.
     """
     functions = {
         node.name: node
@@ -630,13 +541,9 @@ def _orm_destinations(
     return (referenced if flushed else set()) | statement_targets
 
 
-#: Ranked weakest-first, and the *order* is the whole content: `except
-#: IntegrityError` does not catch a column refusing a **value**, because
-#: neither shape `_errors.py` measures is an `IntegrityError`.
-#: `refusals_as_conflict` and `except DBAPIError` both reach `is_row_refusal`,
-#: so they catch the same set and the ranking only has to put both above
-#: `except IntegrityError`; they stay distinct answers because the ledger
-#: prints which spelling a site uses.
+# : Ranked weakest-first, and the *order* is the whole content: `except :
+# IntegrityError` does not catch a column refusing a **value**, because : neither shape
+# `_errors.py` measures is an `IntegrityError`.
 _TRANSLATION_RANK = (
     "none",
     "except IntegrityError",
@@ -644,16 +551,8 @@ _TRANSLATION_RANK = (
     "refusals_as_conflict",
 )
 
-#: The two calls that reach Postgres on the **raw asyncpg connection**, outside
-#: SQLAlchemy's error translation entirely. They are deliberately *not* refusal
-#: points: no `except` clause a repository can write catches either shape they
-#: raise (a bare `builtins.OverflowError` with no SQLSTATE, or an
-#: `asyncpg.exceptions.StringDataRightTruncationError` that is not a
-#: `DBAPIError` and carries no `.orig` chain -- both observed, see
-#: `tests/integration/test_staging.py`). That is the whole of why ADR-0044's
-#: `exposed-copy` bucket is decided by the column's *shape* before any writer's
-#: `except` is consulted, and counting a COPY as an untranslated refusal point
-#: would report every staged writer in `bulk.py` as `none`.
+# : The two calls that reach Postgres on the **raw asyncpg connection**, outside :
+# SQLAlchemy's error translation entirely.
 _COPY_EXECUTION = frozenset({"stage_records", "copy_records_to_table"})
 
 #: A call is a session call only when its receiver is spelled `_session` or
@@ -742,60 +641,8 @@ def _statement_text(node: ast.Call, texts: Mapping[str, str]) -> str | None:
 def _refusal_points(
     node: ast.AST, texts: Mapping[str, str], local: frozenset[str], covered: int = 0
 ) -> Iterator[RefusalPoint]:
-    """Every call in this subtree that can make Postgres refuse a *row*, paired
-    with the rank of the translation **lexically enclosing it**.
-
-    The lexical part is the point. The predecessor of this function asked "does
-    the name `refusals_as_conflict` appear anywhere in the body", which is
-    satisfied by a method that wraps one statement and runs a second outside
-    the wrapper.
-
-    **Three exemptions, and they are not co-equal -- one of them is currently
-    inert and is labelled as such rather than presented as load-bearing.**
-
-    1. **A COPY** (`_COPY_EXECUTION`) runs on the raw asyncpg connection,
-       outside SQLAlchemy's translation, and neither shape it raises is
-       catchable by any `except` a repository can write -- both observed, see
-       `tests/integration/test_staging.py`. ⚠️ **Measured 2026-08-20: setting
-       `_COPY_EXECUTION = frozenset()` moves no count, produces no drift and
-       changes no synthetic case.** It is inert because a COPY reaches the
-       driver through a bare-name call (`stage_records(...)`) or through a
-       receiver that is not the session (`connection.copy_records_to_table`),
-       so no *other* predicate here would claim it either. It is kept as a
-       declaration of intent for the day a repository reaches the COPY through
-       `self._session`, and the honest statement is that it implements nothing
-       today.
-    2. **A `SELECT` with no caller-supplied bind.** 🔴 **The rule used to be
-       "a `SELECT` changes no row, so it cannot be refused for one", and that
-       is false.** A `SELECT` carrying a bind raises class 22 routinely --
-       `22P02` on a cast of a bad literal, `22003` on an overflowing
-       expression, `2201B` on a regex -- and an unwrapped one crosses the port
-       boundary exactly as raw as an `INSERT`'s would. Two questions were being
-       conflated: *should this statement be wrapped in `refusals_as_conflict`?*
-       (no -- a class-22 fault in a computed `SELECT` is a **statement** fault,
-       and ADR-0044 question (3) says translating it reports this repository's
-       own bug as the caller's row being wrong) and *does this method leak?*
-       (yes). This ledger's `translation` column is a proxy for the second, so
-       the exemption is now the narrow, true one: **a `SELECT` with no bind
-       cannot carry a caller value into a class-22 refusal.**
-    3. **A call into a function with no refusal point of its own.**
-       `bulk.py:_stage` reaches only `stage_records`.
-
-    ⚠️ **A bind-carrying `SELECT` is marked rather than decided.** There is no
-    *uncovered* one at any write site today (measured), and what such a method
-    should read is genuinely unresolved -- it does not leak in the way an
-    untranslated `INSERT` leaks, and it must not be translated in the way one
-    is. `write_sites` raises if one ever appears, so the question arrives as a
-    failure rather than as an answer somebody invented here. ADR-0044 records
-    it as open.
-
-    ⚠️ **"Writes" is three regexes** -- `_INSERT`, `_UPDATE`, `_DELETE`. A
-    `MERGE`, a `SELECT setval(...)`, a `CALL` into a writing procedure or a
-    `SELECT ... FOR UPDATE` that later mutates would each be read as a
-    bind-free read and exempted, and its method would read `translated` on no
-    evidence. There is none of that in this package today; adding one means
-    adding it here, and the failure mode is optimistic, which is the direction
-    every other guard in this file is arranged against.
+    """Every call in this subtree that can make Postgres refuse a *row*, paired with the
+    rank of the translation **lexically enclosing it**.
     """
     if isinstance(node, ast.AsyncWith | ast.With):
         inner = covered
@@ -829,23 +676,11 @@ def _refusal_points(
             yield RefusalPoint("", covered)
         elif _is_session_call(node, _EXECUTE_CALL):
             if _core_dml(node):
-                # A Core DML construct -- `execute(update(SyncRunRow)...)` --
-                # carries no SQL text for `_statement_text` to read, and the
-                # strings it *does* contain are arguments rather than
-                # statements: `.execution_options(synchronize_session="fetch")`
-                # reads back as the statement `"fetch"`, which matches none of
-                # the three write regexes and carries no bind, so the site
-                # yielded no refusal point at all.
-                #
-                # 🔴 **This is F9's own finding one axis over, and it landed the
-                # same way it did there.** `_orm_destinations` already resolves
-                # `_ORM_STATEMENT_CALLS` to a table, so the *destination* scan
-                # could see the write while the *translation* scan could not --
-                # exactly the asymmetry `_rowcall`'s repair recorded, arriving
-                # via `PostgresSyncRunRepository.save` when issue #41 rewrote it
-                # from a `setattr` loop into a Core `UPDATE` (2026-08-26). The
-                # guard below caught it loudly, which is what it is for; the
-                # instrument is what was wrong, not the repository.
+                # A Core DML construct -- `execute(update(SyncRunRow)...)` -- carries no
+                # SQL text for `_statement_text` to read, and the strings it *does*
+                # contain are arguments rather than statements:
+                # `.execution_options(synchronize_session="fetch")` reads back as the
+                # statement `"fetch"`, which matches none of the three write regexes and
                 yield RefusalPoint("", covered)
             else:
                 statement = _statement_text(node, texts)
@@ -995,32 +830,7 @@ def _score(
 
 
 def _translations(tree: ast.Module) -> dict[str, str]:
-    """Per-function translation, resolved **across call edges in this module**.
-
-    🔴 **The asymmetry this ends.** `_executing_functions` above already takes a
-    transitive closure over exactly these edges to answer *"does this method
-    write?"* -- `bulk.py:apply_ratings` is in the executing set **only** because
-    `_rowcount` calls `execute`. The predecessor of this function refused to
-    traverse the same edge to answer *"does this method translate?"*, so a
-    module that moved its translation into a shared helper read as twenty
-    untranslated writers. M10's F9 backed a better `bulk.py` out on exactly
-    that reading, with a comment instructing the next author to keep it backed
-    out; both are gone.
-
-    **The closure is narrower than the execution one, and it has to be.**
-    "The callee translates, so the caller translates" over-credits a caller
-    that *also* runs a statement of its own outside the helper. So execution
-    takes **any** refusal point and translation takes the **weakest**: a
-    method's answer is the `min` over its refusal points of
-    `max(what encloses the call, what the callee itself does)`. One uncovered
-    statement is enough to make the whole method `none`, which is the truth
-    -- that statement's refusal is what crosses the port boundary raw.
-
-    Keyed by bare name for callers that want one answer per method; where a
-    module has two definitions of a name, this returns the **weakest** of them,
-    for `_definitions`' reason. `write_sites` scores each definition on its own
-    and does not go through here.
-    """
+    """Per-function translation, resolved **across call edges in this module**."""
     points = _points_of(tree)
     scored = _score(points, _refusing(points))
     weakest: dict[str, str] = {}
@@ -1064,18 +874,9 @@ def write_sites() -> list[WriteSite]:
             destinations |= _orm_destinations(node, constructed)
             destinations &= set(Base.metadata.tables)
             if not destinations:
-                # **A write that resolves to no table must fail, not vanish**,
-                # and this is the degeneracy class ADR-0044's own testing
-                # missed: it covered dead scans and empty maps, never "a writer
-                # the scan cannot place". Dropping such a method is the one
-                # direction that reads *optimistically* -- a bucket is
-                # worst-case over the writers the scan can see, so an
-                # unresolvable one launders its table.
-                #
-                # `flush()` on the session is the marker, because it is
-                # unambiguous here in a way `add` is not: it is a write, full
-                # stop, so failing to name its table is a scan defect rather
-                # than a method that happens to write nothing.
+                # **A write that resolves to no table must fail, not vanish**, and this
+                # is the degeneracy class ADR-0044's own testing missed: it covered dead
+                # scans and empty maps, never "a writer the scan cannot place".
                 if any(
                     isinstance(inner, ast.Call) and _is_session_call(inner, frozenset({"flush"}))
                     for inner in ast.walk(node)
@@ -1087,20 +888,9 @@ def write_sites() -> list[WriteSite]:
                     )
                 continue
             key = (node.name, node.lineno)
-            # **A site with no refusal point is a failure, not a translated
-            # site**, and this is the mirror of the `flush`-with-no-destination
-            # raise above -- the same asymmetry, on the other axis, found by
-            # the same review. `_score` answers `refusals_as_conflict` for a
-            # definition it found nothing to score, which is the top of the
-            # lattice on **no evidence**; harmless for the reads that never
-            # reach here, and a laundered writer for anything that does.
-            # `_executing_functions` and `_refusal_points` use different
-            # predicates (`_EXECUTING_CALLS` also carries the COPY primitives),
-            # so a method whose only database access is a COPY is *executing*
-            # with zero refusal points. `bulk.py:_stage` is that shape today
-            # and is saved from being a counter-example only by resolving no
-            # destination -- which is exactly the coincidence this refuses to
-            # rely on.
+            # **A site with no refusal point is a failure, not a translated site**, and
+            # this is the mirror of the `flush`-with-no-destination raise above -- the
+            # same asymmetry, on the other axis, found by the same review.
             if key not in refusing:
                 raise DegenerateScan(
                     f"{path.name}:{node.qualname if hasattr(node, 'qualname') else node.name} "
@@ -1109,20 +899,7 @@ def write_sites() -> list[WriteSite]:
                     "and a site scored on no evidence reads fully translated"
                 )
             # The condition this file deliberately does not answer -- see
-            # `_refusal_points`' second exemption. An *uncovered* bind-carrying
-            # `SELECT` at a write site is a method that can leak a caller's
-            # value as a raw driver exception and that must nonetheless not be
-            # wrapped in `refusals_as_conflict`.
-            #
-            # **Only where counting it changes the verdict.** A method already
-            # reading `none` for an untranslated statement of its own has no
-            # open question:
-            # `media_item.py:mark_unseen_unavailable` runs `_SWEEP_COUNTS` (a
-            # bound `SELECT`) and `_SWEEP` (an `UPDATE`) both outside any
-            # translation, and the second already decides it. So the ledger is
-            # scored both ways and refuses only on a disagreement -- which is
-            # exactly the set where somebody would otherwise have had to invent
-            # an answer. Empty today.
+            # `_refusal_points`' second exemption.
             if translations[key] != without_bound_selects[key]:
                 site = f"{path.name}:{node.name} -> {sorted(destinations)}"
                 otherwise = without_bound_selects[key]
@@ -1213,13 +990,7 @@ def _load(reference: str) -> type[BaseModel]:
 def _bound_of(annotation: Any, metadata: Sequence[Any]) -> str:
     """How the domain field is bounded, in the vocabulary the ADR uses."""
     if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
-        # The **longest member**, not a bare "enum". A closed value set only
-        # keeps a column safe if every member fits it, and classifying on the
-        # word alone would file a future enum member longer than its column as
-        # `safe` while it raised `22001`. The tightest margins in the schema
-        # today are `JobKind` (15 into `varchar(32)`) and `SyncRunKind` (11
-        # into `varchar(16)`), so this is dormant -- and dormant is exactly
-        # what `_fully_bounded`'s substring bug was.
+        # The **longest member**, not a bare "enum".
         longest = max((len(str(member.value)) for member in annotation), default=0)
         return f"enum(longest={longest})"
     parts: list[str] = []
@@ -1237,15 +1008,9 @@ def _bound_of(annotation: Any, metadata: Sequence[Any]) -> str:
     return "; ".join(sorted(parts)) if parts else ""
 
 
-# `usher.domain` declares **no `max_length` at all** -- measured 2026-08-20,
-# zero occurrences across all nineteen modules -- so the only thing that can
-# bound a `str` above is an anchored `pattern`, and there is exactly one such
-# pattern in the package. Its longest match is 10 characters, against a
-# `varchar(16)` destination, which is what makes `titles.imdb_id` and
-# `episodes.imdb_id` provably safe. Written out as a table rather than computed,
-# because deriving a maximum match length from an arbitrary regex is a harder
-# problem than this ledger has, and a wrong answer here would silently move a
-# column between buckets.
+# `usher.domain` declares **no `max_length` at all** -- measured 2026-08-20, zero
+# occurrences across all nineteen modules -- so the only thing that can bound a `str`
+# above is an anchored `pattern`, and there is exactly one such pattern in the package.
 _PATTERN_MAX_LENGTH: Mapping[str, int] = {r"^tt\d{7,8}$": 10}
 
 
@@ -1265,19 +1030,7 @@ def domain_bounds() -> dict[tuple[str, str], str]:
     return bounds
 
 
-# --------------------------------------------------------------------------
-# 3b. The bound on the path that actually writes
-#
-# **This section exists because the hand-maintained table it replaced was
-# wrong, and wrong in a way the ledger's own self-agreement could not see.**
-# Until 2026-08-20 the staged bound was inferred from `_DOMAIN_FOR_TABLE`
-# alone, which knows only `usher.domain`. `tmdb_ids` has no domain model, so
-# `tmdb_ids.kind` came back unbounded and landed in `exposed-copy` as a
-# `22001` -- while `titles.kind`, which is **the same construction one file
-# over** (`row.kind.value` off a `TitleKind` on a frozen dataclass), was
-# classified `safe` by a two-entry hand table. One rule, two answers, one
-# shape. Deriving the bound from the writer's own parameter type is what makes
-# that impossible rather than merely noticed.
+# -------------------------------------------------------------------------- 3b.
 
 
 def _staging_sources() -> dict[str, tuple[str, type[Any]]]:
@@ -1294,27 +1047,10 @@ def _staging_sources() -> dict[str, tuple[str, type[Any]]]:
         tree = ast.parse(path.read_text())
         texts = _module_texts(tree)
         # **Imported lazily, and only for a module that really stages.**
-        # `_written_sources()` is every module in the package on purpose, and
-        # importing all of them eagerly made this scan depend on every optional
-        # dependency any of them has: `usher/eval/metrics/ir.py` raises
-        # `EvalDependencyMissing` at import time when the `eval` extra is not
-        # synced, so the whole ledger crashed on a module that stages nothing.
-        #
-        # ⚠️ **Not the gate's environment** -- `.github/workflows/ci.yml:63` is
-        # `uv sync --frozen --extra eval`, so CI has `ranx` and this crash does
-        # not reach it. The environment that lacks it is the **shipped image**:
-        # `Dockerfile`'s two syncs are `--no-dev` with no `--extra`, while
-        # `COPY src/ ./src/` puts `usher/eval/` in the image regardless. So an
-        # operator running this audit against a deployment is exactly who hit
-        # it, and a gate-green claim would not have covered them. (This comment
-        # said "which is the gate's own environment" for one commit and that
-        # was false; the fix is right for a reason it got wrong.)
-        #
-        # An exclusion list would go stale the moment `usher/eval/` grew a
-        # writer; deferring the import to the point a staging table is actually
-        # found cannot, because a module with a writer is still imported and
-        # still fails loudly if it cannot be. `module` is only read by
-        # `_sequence_element`.
+        # `_written_sources()` is every module in the package on purpose, and importing
+        # all of them eagerly made this scan depend on every optional dependency any of
+        # them has: `usher/eval/metrics/ir.py` raises `EvalDependencyMissing` at import
+        # time when the `eval` extra is not synced, so the whole ledger crashed on a
         module: Any = None
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -1338,13 +1074,9 @@ def _staging_sources() -> dict[str, tuple[str, type[Any]]]:
                 module = _import_of(path)
             element = _sequence_element(node, module)
             if element is None:
-                # **Per table, not in aggregate.** `if element is None:
-                # continue` used to be silent here, and the only backstop was
-                # `if not staged: raise` in `build_ledger`, which fires when
-                # *all sixteen* fail. Dropping one -- `stg_tmdb_ids` -- moved
-                # `safe` 18 -> 17 and `exposed-copy` 31 -> 32 with no error at
-                # all. All sixteen resolve today; dormant and silent is the
-                # combination this whole record argues against.
+                # **Per table, not in aggregate.** `if element is None: continue` used
+                # to be silent here, and the only backstop was `if not staged: raise` in
+                # `build_ledger`, which fires when *all sixteen* fail.
                 raise DegenerateScan(
                     f"{path.name}:{node.name} stages {sorted(staged)} and no "
                     "Sequence[X] parameter of it resolves to a class -- the bound "
@@ -1812,19 +1544,8 @@ def _replay_call(
         if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
             schema.get(table, {}).pop(argument.value, None)
     elif name == "alter_column" and len(node.args) > 1:
-        # `m09e` moves both vector columns to a new width this way, so a replay
-        # blind to `type_=` reports the width the chain started at.
-        #
-        # **And `m10a` *renames* six columns this way, which is the second
-        # keyword.** A replay that reads only `type_=` keeps the old name and
-        # never learns the new one, so `--check` reported
-        # `only-metadata=[('titles', 'tmdb_vote_count', …)]` against
-        # `only-migrations=[('titles', 'vote_count', …)]` -- the metadata and
-        # the chain describing the same column under two names. That is the
-        # column-set comparison doing exactly what it is for; it is also the
-        # reason this branch cannot be left at one keyword, because a rename is
-        # the one edit that changes a column's identity without changing
-        # anything the rest of this replay looks at.
+        # `m09e` moves both vector columns to a new width this way, so a replay blind to
+        # `type_=` reports the width the chain started at.
         column = _text(node.args[1], strings)
         if column is None:
             return
@@ -1898,18 +1619,9 @@ def _shape(destination_type: str, staging_type: str | None) -> str:
     return SHAPE_SQLA
 
 
-#: The three readings of "the value set is closed", and the ADR publishes all
-#: three because choosing between them moves published figures and the choice
-#: has to be visible rather than fallen into.
-#:
-#: - `closure`  -- a bound declared anywhere counts, including a `pattern` on a
-#:                 pydantic model that the writing path never constructs.
-#: - `path`     -- **the default.** Only the bound on the class the writer
-#:                 actually takes counts. An enum still counts on a frozen
-#:                 dataclass, because `row.kind.value` closes the set by itself:
-#:                 anything that is not an enum member has no `.value`.
-#: - `pydantic` -- stricter still: a bound counts only where a validator runs,
-#:                 so a frozen dataclass's annotation closes nothing.
+# : The three readings of "the value set is closed", and the ADR publishes all : three
+# because choosing between them moves published figures and the choice : has to be
+# visible rather than fallen into.
 READINGS = ("closure", "path", "pydantic")
 DEFAULT_READING = "path"
 
@@ -2091,13 +1803,11 @@ def _bound_for(
             return Bound(on_path[0], on_path[2])
         return Bound("", "")
 
-    # Staged: the source class is authoritative, **including its silence.**
-    # Falling back to the domain model here is what produced the original
-    # defect twice over -- `titles.imdb_id`'s `pattern` is on `domain.Title`
-    # while `upsert_titles` takes `ports.bulk.ImdbTitle` (a bare `str`), and
-    # `jobs.priority`'s `ge=0, le=100` is on `domain.Job` while `enqueue`
-    # takes `JobRequest` (a bare `int`). Crediting either asserts a validator
-    # the writing path never runs.
+    # Staged: the source class is authoritative, **including its silence.** Falling back
+    # to the domain model here is what produced the original defect twice over --
+    # `titles.imdb_id`'s `pattern` is on `domain.Title` while `upsert_titles` takes
+    # `ports.bulk.ImdbTitle` (a bare `str`), and `jobs.priority`'s `ge=0, le=100` is on
+    # `domain.Job` while `enqueue` takes `JobRequest` (a bare `int`).
     if fed is not None:
         if on_path is None:
             return Bound("", "")
@@ -2108,13 +1818,10 @@ def _bound_for(
     return Bound(declared, "declared on the domain model") if declared else Bound("", "")
 
 
-# `genome_tags.tag_id` is the one column in this schema bounded by neither its
-# own type nor its domain field but by an invariant the *writer* enforces over
-# the whole batch: `replace_genome_tags` refuses a vocabulary that is not
-# exactly 1..n, so the largest value reaching the driver is the length of the
-# sequence handed in. Named here because a per-column scan cannot see a
-# batch-level check, and leaving it out would put a demonstrably safe column in
-# the exposed bucket. `.claude/rules/db-and-sql.md` holds the measurement.
+# `genome_tags.tag_id` is the one column in this schema bounded by neither its own type
+# nor its domain field but by an invariant the *writer* enforces over the whole batch:
+# `replace_genome_tags` refuses a vocabulary that is not exactly 1..n, so the largest
+# value reaching the driver is the length of the sequence handed in.
 _BATCH_BOUNDED: Mapping[tuple[str, str], str] = {
     ("genome_tags", "tag_id"): "bounded at the batch by replace_genome_tags' 1..n contiguity check",
 }
@@ -2190,12 +1897,7 @@ def _fully_bounded(sql_type: str, domain: str) -> bool:
         if declared is None:
             return False
         width = int(declared.group(1))
-        # Parsed rather than substring-matched. `f"max_length={width}" in
-        # domain` reads `max_length=160` as satisfying `VARCHAR(16)`, and
-        # `f"pattern={p}" in domain` matches any pattern with `p` as a prefix.
-        # Both are dormant today only because `usher.domain` declares zero
-        # `max_length` and exactly one pattern -- which is precisely the state
-        # question (5) debates changing.
+        # Parsed rather than substring-matched.
         length = declared_parts.get("max_length", "")
         if length.isdigit() and int(length) <= width:
             return True
@@ -2309,106 +2011,14 @@ def counts(rows: Sequence[LedgerRow]) -> dict[str, int]:
 
 BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 
-#: The figures ADR-0044 publishes, keyed by reading. **This is the drift check
-#: with teeth**: `--check` compares the live ledger against it, so a change to
-#: the schema, to a writer's `except`, or to a source class that moves a column
-#: between buckets fails the run and names the document that has gone stale.
-#: A cross-check that only compared the metadata against the migrations could
-#: not see any of that -- every `shape`, `staging`, `writer` and `translation`
-#: cell F9 consumes had no drift check at all.
-#:
-#: **Moved by M10's F9 on 2026-08-20, which is what makes the count a decision
-#: rather than an observation.** The `exposed-sqlalchemy` bucket went 20 -> 1
-#: under the adopted reading. **Twenty writing sites took a translation, all
-#: twenty of them** -- eleven replacing an `except IntegrityError` and nine
-#: where there was no `except` at all. The bucket is 1 rather than 0 because of
-#: one **column**, `jobs.attempts`, whose four remaining writers
-#: (`jobs.py:claim`/`fail`/`touch`/`requeue_running`) are deliberately not
-#: among the twenty: its only writer of that column computes the value
-#: server-side as `attempts = attempts + 1`, so translating it would report a
-#: *statement* fault as a refused row, which is the misuse `_errors.py:66-75`
-#: exists to warn about. ADR-0044's scope section carries the evidence.
-#: (This comment said "nineteen of the twenty writing sites took ... and
-#: `jobs.attempts` did not", which counted a column as a site and was wrong on
-#: both halves.)
-#:
-#: 🔴 **Every reading gained one `translated` on 2026-08-21, and the cause is
-#: `m10a`/ADR-0040 rather than anything F9 did.** That revision split
-#: `titles.vote_count` -- one `integer` column with two writers -- into
-#: `tmdb_vote_count` and `imdb_num_votes`, and the ledger separates them for
-#: exactly the reason the record split them: `imdb_num_votes` is fed by
-#: `bulk.py:apply_ratings` through `stg_ratings.imdb_num_votes integer`, so it
-#: is **exposed-copy**, and `tmdb_vote_count` is reached only through the ORM,
-#: so it is **translated**. The old column was `exposed-copy` because a COPY
-#: writer touched it at all -- worst case over its writers, which is what a
-#: dual-written column costs. So `exposed-copy` holds station (the IMDb half
-#: inherits the slot), `translated` gains the TMDb half, and the bounded total
-#: goes 79 -> 80. **The provenance split is legible in this instrument without
-#: anyone having taught it about ADR-0040**, which is a corroboration of that
-#: record rather than drift against it.
-#:
-#: 🔴 **Every reading gained a second `translated` on 2026-08-26, and this one
-#: arrived with a *scan* repair rather than with the column.** Issue #41's
-#: `m10b` adds `sync_runs.position` -- `integer` in the table, `ge=0` and no
-#: ceiling on `SyncRun.position`, so it is bounded by rule -- written only by
-#: `sync.py:save` under `except DBAPIError` + `is_row_refusal`, i.e.
-#: `translated`. The bounded total goes 80 -> 81.
-#:
-#: ⚠️ **The column alone would not have moved the number, because the same
-#: commit rewrote its writer into a shape this instrument could not read.**
-#: `save` went from a `setattr` loop to `execute(update(SyncRunRow)...)`, and
-#: `_statement_text` read the *keyword argument* of
-#: `.execution_options(synchronize_session="fetch")` as the statement -- so a
-#: Core `UPDATE` matched none of the three write regexes, carried no bind, and
-#: yielded **no refusal point at all** while `_orm_destinations` resolved the
-#: same call to `sync_runs`. That is F9's own finding one axis over: the
-#: destination scan followed an edge the translation scan refused to. It
-#: surfaced as `DegenerateScan` rather than as a laundered column, which is the
-#: whole point of the raise at that site, and `_core_dml` is the repair.
-#:
-#: **Every reading gained two more `translated` on 2026-08-26, from `m10c`, and
-#: this pair moved nothing else.** `search_queries.surface VARCHAR(8)` and
-#: `search_queries.tier VARCHAR(6)` are bounded by declared width, and their
-#: only writers are `search_query.py:record`/`record_outcome`, which already
-#: catch on the SQLSTATE class through `refusals_as_conflict` -- so both land
-#: **translated** with no repair needed and no `except` to widen. The bounded
-#: total goes 81 -> 83. **A widened column with a pre-translated writer is the
-#: cheap case, and it is worth having one in the record**: the two entries
-#: above are both a bucket moving *because of a scan or a redirect*, which
-#: makes them look like the normal shape when they are the interesting one.
-#:
-#: **`m10f` is the same cheap case, one more time.** `sync_runs.error_code
-#: VARCHAR(32)` is bounded by declared width and its only writer is
-#: `sync.py:add`/`save`, already translating on the SQLSTATE class -- so it
-#: lands **translated** on every reading with nothing to repair. The bounded
-#: total goes 83 -> 84.
+# : The figures ADR-0044 publishes, keyed by reading.
 PUBLISHED: Mapping[str, Mapping[str, int]] = {
     "closure": {"safe": 20, "translated": 33, "exposed-copy": 30, "exposed-sqlalchemy": 1},
     "path": {"safe": 18, "translated": 34, "exposed-copy": 31, "exposed-sqlalchemy": 1},
     "pydantic": {"safe": 14, "translated": 34, "exposed-copy": 34, "exposed-sqlalchemy": 2},
 }
 
-#: Same, at M8's head, which is what the roadmap's corrections are scored
-#: against. `17` appears in none of them, and that is the finding.
-#:
-#: ⚠️ **These moved with F9 too, and the reason is worth knowing before
-#: reading them as history.** `--at m08b` is *"that revision's columns,
-#: classified with **today's** source"* -- so translating a writer today
-#: changes what this rule says about M8's schema. The `translated` column here
-#: went 5 -> 23 without a line of M8-era code changing. What is still
-#: comparable across the two heads is the *column set*, which is what the
-#: roadmap's `67` is scored on; the buckets are a statement about today's
-#: writers and always were.
-#:
-#: 🔴 **And these moved on 2026-08-21 with no M8-era column changing, which is
-#: the warning above paying out.** `m10a` redirected `bulk.py:apply_ratings`
-#: off `vote_count` and onto `imdb_num_votes` -- a column that does not exist
-#: at `m08b` -- so M8's `titles.vote_count` lost its only COPY writer and is
-#: scored **translated** today where it was **exposed-copy** yesterday. Hence
-#: `exposed-copy` -1 and `translated` +1 on every reading, with the bounded
-#: total unchanged at that head. Read as: *a redirect in today's source
-#: reclassified a column M8 shipped*, which is the property this block's
-#: warning describes and not a discovery about M8.
+# : Same, at M8's head, which is what the roadmap's corrections are scored : against.
 PUBLISHED_AT_M08B: Mapping[str, Mapping[str, int]] = {
     "closure": {"safe": 18, "translated": 23, "exposed-copy": 29, "exposed-sqlalchemy": 1},
     "path": {"safe": 16, "translated": 24, "exposed-copy": 30, "exposed-sqlalchemy": 1},
@@ -2529,12 +2139,9 @@ def summary(
     return "\n".join(lines)
 
 
-#: The three columns whose width the migration chain writes as an imported
-#: constant -- `HALFVEC(GENOME_TAG_COUNT)`, `HALFVEC(EMBEDDING_DIMENSIONS)` and
-#: `sa.Numeric(COST_PRECISION, COST_SCALE)`. Resolving those against the live
-#: package is what lets the replay run at all, and it also means their
-#: agreement with the metadata is a tautology rather than a check. Named here
-#: so "79 from each, zero drift" is read as 76 agreements and 3 tautologies.
+# : The three columns whose width the migration chain writes as an imported : constant
+# -- `HALFVEC(GENOME_TAG_COUNT)`, `HALFVEC(EMBEDDING_DIMENSIONS)` and :
+# `sa.Numeric(COST_PRECISION, COST_SCALE)`.
 _TAUTOLOGOUS = (
     ("genome_scores", "relevance"),
     ("user_taste", "centroid"),

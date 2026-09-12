@@ -1,46 +1,4 @@
-"""Measure `title.principals`, `name.basics` and `title.akas` against a real catalog.
-
-**Not a test.** It downloads the real IMDb dumps -- 1.49 GiB compressed beyond
-the two the shipped bootstrap already fetches -- and it writes to a real
-database. `scripts/measure_bulk_load.py` states the same contract for the same
-reason. Nothing it writes lands under `tests/fixtures/`, no dataset row is ever
-committed, and everything it creates in the scratch database is prefixed `t3_`
-and dropped by `--phase drop`.
-
-    export USHER_DATABASE_URL=...          # the catalog, read only
-    export USHER_T3_SCRATCH_URL=...        # a scratch database, written and dropped
-    export USHER_SECRET_KEY=...
-    uv run python scripts/measure_imdb_people.py --phase head
-    uv run python scripts/measure_imdb_people.py --phase counts
-    uv run python scripts/measure_imdb_people.py --phase relations
-    uv run python scripts/measure_imdb_people.py --phase names
-    uv run python scripts/measure_imdb_people.py --phase titles   # needs alembic head
-    uv run python scripts/measure_imdb_people.py --phase blast
-    uv run python scripts/measure_imdb_people.py --phase drop
-
-**Every number in the write-up comes out of one of these phases.** Nothing was
-measured at a `psql` prompt and transcribed: a figure with no phase behind it
-is indistinguishable from a figure somebody computed in their head, which is
-exactly the review finding that added `--phase titles` and the trimmed-table
-arm of `--phase relations`.
-
-**The snapshot is pinned, and that is not optional.**
-`CachedDatasetFile.ensure_local` short-circuits on the *upstream* ETag rather
-than on local presence, and IMDb regenerates every one of these files daily --
-so a measurement spanning two days silently mixes two snapshots. `--phase head`
-resolves each file's ETag once and writes it to `--pin`; every later phase
-passes that pinned value to `ensure_local` and refuses to continue if the byte
-stream upstream actually served carries a different one.
-
-**Column counts are taken with `line.split("\\t")`.** IMDb TSVs have no quoting
-mechanism and `csv.reader`'s default `QUOTE_MINIMAL` silently strips embedded
-`"`, which moves a column count in the direction that looks correct.
-
-**No wall-clock or throughput figure is printed anywhere.** This was written to
-run on a contended host, where a duration measures the host and not the
-dataset; every number it reports is a count or a byte size, neither of which
-host load moves.
-"""
+"""Measure `title.principals`, `name.basics` and `title.akas` against a real catalog."""
 
 import argparse
 import asyncio
@@ -385,21 +343,9 @@ def _count_akas(
 # phase relations
 # --------------------------------------------------------------------------
 
-# The two candidate designs, spelled as the shipped tables plus exactly what
-# a bulk IMDb source needs:
-#
-# * `t3_people` is `people` (M7) plus `imdb_id` and its partial unique index,
-#   which is the only column T4's merge rule could key on.
-# * `t3_credits` is `credits` (M7) unchanged. Its IMDb-side idempotency index
-#   is created and measured *separately*, because `tmdb_credit_id` is NULL for
-#   every IMDb row and its partial unique index therefore indexes none of them.
-# * `t3_aliases` is `title_search_names` (`m09a`) exactly, including both of
-#   its indexes and its btree bound.
-#
-# Every index is created *after* the load rather than declared in
-# `CREATE TABLE`, so the sizes below do not depend on the order the ids
-# happened to arrive in. Nothing here references `titles`: a foreign key
-# occupies no storage, and this scratch database has no catalog to point at.
+# The two candidate designs, spelled as the shipped tables plus exactly what a bulk IMDb
+# source needs: * `t3_people` is `people` (M7) plus `imdb_id` and its partial unique
+# index, which is the only column T4's merge rule could key on.
 
 _STAGING_DDL = (
     """
@@ -508,15 +454,7 @@ _EXTRA_INDEX = (
     "CREATE INDEX ix_t3_credits_imdb_natural_key ON t3_credits (title_id, person_id, kind)"
 )
 
-# The trimmed variant, and the reason it is measured rather than reasoned
-# about. If (A) fails, the first question anybody asks is "did it fail only
-# because `character` and `job` are fat, in which case the entity design was
-# salvageable?" -- so the answer has to be a size on disk, not arithmetic on
-# the full table's number. `t3_credits_trimmed` is the same 12.6M rows reduced
-# to the five columns a credit cannot do without, carrying only its primary key
-# and the two foreign-key indexes: no `character`, no `job`, no `department`,
-# no `tmdb_credit_id`, no `created_at`, no partial unique index. Nothing about
-# a `people`/`credits` design can be smaller than this and still be one.
+# The trimmed variant, and the reason it is measured rather than reasoned about.
 _TRIMMED_DDL = (
     "DROP TABLE IF EXISTS t3_credits_trimmed CASCADE",
     """
@@ -813,22 +751,10 @@ GROUP BY title_id
 """
 
 
-# --------------------------------------------------------------------------
-# phase titles -- what filling `credit_names` costs the `titles` relation
-# --------------------------------------------------------------------------
-#
-# This phase exists because the cost is not the names. `search_document` is a
-# STORED generated column with `usher_array_text(credit_names)` at weight B, so
-# writing the column rewrites the document and the GIN index over it, and an
-# `UPDATE` of 1.19M rows leaves a dead tuple beside every live one. None of
-# that is visible in `sum(octet_length(...))` of the names, so it is measured
-# on a real copy of the catalog at the `m09a` schema: baseline, post-`UPDATE`,
-# and post-`VACUUM FULL`, which are three genuinely different numbers an
-# operator sees at three different moments.
-#
-# `LIKE titles INCLUDING ALL` is what makes the copy faithful -- it brings the
-# generated expression, every CHECK and all eleven indexes -- and it is also
-# why the scratch database must be at `alembic upgrade head` before this runs.
+# -------------------------------------------------------------------------- phase
+# titles -- what filling `credit_names` costs the `titles` relation
+# -------------------------------------------------------------------------- This phase
+# exists because the cost is not the names.
 
 # Every column of `titles` except the generated one, which Postgres computes
 # and refuses to be given. Read from the catalogue rather than hardcoded: a

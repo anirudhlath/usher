@@ -1,102 +1,4 @@
-"""What N concurrent requests cost somebody else's media server, relative to one.
-
-**Not a test.** It opens real sockets against a household Emby. It writes
-nothing: every probe is a `GET /Users/{user}/Items/{item}` over an id
-`media_items` already holds, so there is nothing to restore afterwards. No
-walk, no iterator, no `list_items` -- `MAX_PAGES` is never approached and
-`PortDataMalformed` cannot be raised as a bound (CLAUDE.md's live-run rule).
-
-    uv run python scripts/measure_source_lane.py \
-        --secrets /path/to/secrets.yaml \
-        --database-url "$USHER_DATABASE_URL"
-    uv run python scripts/measure_source_lane.py --secrets ... --budget 0   # dry run
-
-## What this answers, and what S1 deliberately left open
-
-S1 (2026-08-15, 52 bounded requests) priced this deployment's source **one
-request at a time**: `get_item` at 0.1495 s median, 0.1649 s mean. Its own
-write-up says in as many words that it licenses **no** concurrency figure, and
-`.claude/rules/emby-push-and-ingest.md` names this harness as the thing that
-would close it.
-
-`usher.services.jobs.KIND_CONCURRENCY` gives `MATCH`, `WATCH_HISTORY` and
-`WATCH_WRITEBACK` a ceiling of **4**, and the comment above it says the number
-is a bound rather than a measurement. So the question is **what four concurrent
-single-item reads cost this server relative to one** -- per-request latency at
-1, 2 and 4 in flight, and whether the tail degrades.
-
-**It is deliberately not "how many rps".** M9's W1 records why: a faster number
-does not distinguish *"the pool got better"* from *"the box got faster"*. W1
-measured a **37% per-worker throughput loss** going from one worker to three
-against TMDb, with per-worker throughput *rising* when a worker died. If a
-household server shows the same shape, the polite number is smaller than 4 and
-the measurement says so.
-
-## Three arms, because two of them answer different questions
-
-* **The ladder** -- 1, 2 and 4 in flight with the outbound gate **off**, which
-  is what prices the *server*.
-* **Arm C, the shipped default** -- the same four coroutines with
-  `USHER_SOURCE_REQUESTS_PER_SECOND` at its shipped **0.4**. `_MinInterval`
-  holds its lock across the wait and `SourceGateRegistry` gives one source one
-  gate shared by every adapter, so the prediction registered in the bar is that
-  four in flight produce requests **2.5 s apart, peak in-flight 1**. If that
-  holds, the concurrency entry is not what bounds this deployment's request
-  rate to a source and has not been since S3 landed -- and that is measured on
-  the wire here rather than argued from the source, because arguing from the
-  source is what this whole group exists to stop.
-
-**The settings are interleaved, not blocked.** S1's finding: blocked puts every
-sample of one setting in one contiguous stretch of wall clock, so any drift in
-what else the server is doing lands entirely on one setting and reads as a
-concurrency effect.
-
-## Observed overlap, not a count
-
-`CLAUDE.md`'s fourth evidence rule: *"four jobs finished"* is also what a
-serialised loop produces. Every arm reports **peak concurrent in-flight**,
-**mean in-flight** (the sum of the durations over the wall clock during which
-at least one was in flight -- the concurrency actually achieved, against the
-one configured) and an **IoU** (the wall clock covered by two or more requests
-over the wall clock covered by one or more). At c=1 all three are 1, 1 and 0
-by construction, which is what makes them readable at c=2 and c=4.
-
-An IoU of 0 at c=4 means this harness measured a serialised loop wearing a
-concurrency label, and the bar declares that a **failure** rather than a
-refutation: the run is void and is said to have been discarded.
-
-## The bound
-
-`--budget` is enforced *before* the transport, in an httpx request event hook,
-so it counts requests on the wire rather than probes -- S1's correction, which
-a 401 retry is what earned. **≤ 150** is S7's share of Group S's declared
-≤ 256, of which S1 spent 52. `check_lane_budget` refuses a plan the budget
-cannot finish **before the first packet**, and it is this file's own
-arithmetic: S1's `WARMUP_REQUESTS + PROBE_CLASSES * reps` is correct only for
-S1's sequential plan and its own docstring says reusing it here would silently
-mis-count.
-
-## Credentials
-
-The secrets path is an argument (or `USHER_EMBY_SECRETS`) with no
-host-specific default, and the base URL, user id, device id and token are
-redacted from everything this script prints. Only four keys are read out of
-that file. The operator's file holds an access token rather than a password, so
-`_authenticate_locked` is replaced by one that installs the known token --
-exactly as M3, M4, M5, M9's H4/H5 and S1 all did, and it issues zero requests.
-
-The pre-registered bar is `/var/tmp/m10-gate/BAR-S7.md`, whose `sha256` is
-re-computed at run time and printed below, so an edit made after a number was
-seen shows up in the log. `/var/tmp`, not `/tmp`: `/tmp` here is tmpfs.
-
-Quiet-check: the two-sided idle-sampled CPU drift and the argv-token foreign
-process census from `scripts/measure_suggest_tiers.py`, imported rather than
-re-derived -- a one-minute load average rises from the run's own work and would
-condemn every clean run, and `pgrep -f pytest` counts the shell that mentions
-the word. ⚠️ It checks **this** box, which is the one running the harness; the
-server is somebody else's machine and its quiet is the operator's statement,
-recorded with the window rather than measured.
-"""
+"""What N concurrent requests cost somebody else's media server, relative to one."""
 
 from __future__ import annotations
 
@@ -267,33 +169,7 @@ def lane_probe(user_id: str, item_id: str, *, name: str) -> Probe:
 
 
 class WireLog:
-    """When each request was **on the wire**, from httpx's own event hooks.
-
-    🔴 **The second instrument, and verification against a stub is what earned
-    it before it cost a live request.** `issue()` times around
-    `session.request`, and `EmbySession._send` calls `await
-    self._limiter.take()` *inside* that region -- deliberately, because the
-    gate's wait is its own series and `_send` starts the histogram's clock
-    after it. So the harness's own window is *"when this coroutine was
-    working"*, which under a gated arm is dominated by **queueing**.
-
-    Measured on a stub: three requests through a `SourceGate(0.4)` paced
-    correctly at ~2.5 s and the coroutine-window instrument reported **peak
-    in-flight 3, IoU 0.667** -- for a server that saw exactly one at a time.
-    Reporting that as observed concurrency would have inverted arm C's whole
-    conclusion, and `CLAUDE.md`'s fourth evidence rule would have been
-    satisfied by an artifact.
-
-    So overlap is computed from *these* stamps: the `request` hook runs
-    immediately before the transport, downstream of the gate and of every
-    retry, and the `response` hook runs when the answer is in. That pair is the
-    window the server actually saw.
-
-    ⚠️ **The request object is held in the value, not just keyed by `id()`.**
-    M9's F7 recorded `id()` being reused by the next object allocated in the
-    same slot; holding a reference makes the address un-reusable for the life
-    of the log, which is the cheap defence rather than a hash nobody needs.
-    """
+    """When each request was **on the wire**, from httpx's own event hooks."""
 
     def __init__(self) -> None:
         self._open: dict[int, tuple[httpx.Request, float]] = {}
@@ -333,28 +209,7 @@ class WireLog:
 
 
 class Journal:
-    """Every timing on disk **the instant it arrives**, one JSON object a line.
-
-    🔴 **This exists because the first run of this harness lost 96 live
-    observations to a `TypeError`, and an in-memory list plus a `finally` is
-    not enough.** S1 had already recorded the shape -- *"a run that ends early
-    otherwise loses every observation it bought"* -- and defended against it by
-    catching `BudgetExceeded` and reporting anyway. That defence is a
-    **denylist**: it names the exceptions a run was expected to end with, and
-    the exception that actually ended this one was an ordinary programming
-    error in a later arm, which is not on any such list and never will be.
-
-    So the report is no longer what makes an observation durable. The write is.
-    A line is flushed and `fsync`-free-but-flushed per request, so a crash, a
-    `SIGKILL`, a full disk on the *next* line or an exception of any type
-    leaves every request already paid for on disk. `mutation-sweeps.md` records
-    the same lesson one register over: *a log file that is opened but never
-    flushed is worse than no log, because its existence invites the reader to
-    assume it was consulted.*
-
-    JSONL rather than one JSON document for exactly that reason: a partial
-    JSONL file is readable, and a partial `json.dumps([...])` is not.
-    """
+    """Every timing on disk **the instant it arrives**, one JSON object a line."""
 
     def __init__(self, path: Path | None) -> None:
         self._handle = path.open("w", encoding="utf-8") if path else None
@@ -496,13 +351,6 @@ async def _run(
         for round_index in range(args.rounds):
             # **Rotated, so no setting is always the one that arrives first.**
             # Interleaving alone spreads *drift*; it does not spread *order*.
-            # Every setting in a round asks for the same item ids -- which is
-            # what makes the three comparable -- so whichever runs first pays
-            # for any cache miss and the others read a warm server. With a
-            # fixed order that subsidy always lands on c2 and c4, i.e. exactly
-            # in the direction that would make concurrency look free. Rotating
-            # gives each setting the cold position once per `len(LADDER)`
-            # rounds; run `--rounds` in multiples of three for it to balance.
             offset = round_index % len(LADDER)
             for concurrency in LADDER[offset:] + LADDER[:offset]:
                 mark = len(wire.windows)
@@ -549,16 +397,10 @@ async def _run(
             )
             arm_c_wire = wire.since(arm_c_mark)
     except Exception as exc:
-        # 🔴 **`Exception`, not `(BudgetExceeded, ProbeFailed, UsherPortError)`,
-        # and the widening was paid for in live requests.** That tuple is S1's
-        # and it is a *denylist of expected endings*: it names the ways a run
-        # was anticipated to stop. The first run of this harness stopped on a
-        # `TypeError` -- an ordinary programming error in the arm-C session
-        # builder -- which is on no such list, propagated past every line that
-        # reports, and discarded **96 observations already bought from
-        # somebody else's server**. The journal above is the real repair and
-        # this is the second one: a bug in a later arm must not be able to
-        # invalidate an earlier arm's data.
+        # 🔴 **`Exception`, not `(BudgetExceeded, ProbeFailed, UsherPortError)`, and the
+        # widening was paid for in live requests.** That tuple is S1's and it is a
+        # *denylist of expected endings*: it names the ways a run was anticipated to
+        # stop.
         failure = exc
         print(f"\nRUN ENDED EARLY: {redact(f'{type(exc).__name__}: {exc}', secrets)}")
     finally:

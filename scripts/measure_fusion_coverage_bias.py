@@ -1,95 +1,4 @@
-"""Does RRF's absent-lane `COALESCE` cost a skeleton its own exact name?
-
-Issue #21 argues that `PostgresSearchIndex._FUSED` sums two reciprocal-rank
-terms over a `FULL OUTER JOIN`, so **membership in the semantic lane -- a fact
-about enrichment state -- adds score the ordering cannot distinguish from
-relevance**. The arithmetic is not in dispute: at `rrf_k = 60` and
-`lane_limit = 100`, an enriched title at semantic rank <= 38 clears a
-skeleton's *perfect* lexical match. What was never measured is whether any real
-query loses a correct title to it.
-
-**This script is that measurement and nothing else.** It reads a real catalog,
-issues real queries through the shipped statements, and writes nothing: no
-title, no embedding, no index, and no `search_queries` row (the service arm
-passes `user_id=None`, which is the condition `SearchService` already uses to
-decide a search has nobody to record it for). Point it at the live catalog
-read-only, or at a copy.
-
-    docker cp scripts/measure_fusion_coverage_bias.py usher-usher-1:/app/m.py
-    docker exec -w /app usher-usher-1 python m.py --out /app/run.json
-
-================================================================================
-THE BAR -- written down, hashed, and frozen before any number was produced
-================================================================================
-
-The authoritative copy is `/var/tmp/usher-i21-bar/BAR.md`,
-`sha256 0687983a9ec4d41f275c7b6b273b29d734ab44e5eef51f269654631bf348bc62`,
-written **2026-08-19T01:52:51-05:00** -- before the first query was issued.
-`/var/tmp` and not `/tmp`, because `/tmp` on this host is tmpfs and a bar whose
-whole value is that it provably predates the numbers must survive a reboot
-(CLAUDE.md; M9's B3 got this wrong). It is restated here so the two copies have
-to agree, and the digest is re-read at run time and reported beside the results
--- a bar edited after a number was seen is the one failure pre-registration
-exists to prevent, and the digest is the only thing that can say so.
-
-**The workload.** Exact-name known-item queries over the skeleton frame
-(`enrichment_state = 'skeleton'`, verified on this catalog to coincide exactly
-with "has no `title_embeddings` row"). Draw is deterministic:
-`ORDER BY md5(id::text || '20260819-i21')`.
-
-- **Stratum A**, n = 1,000, uniform over the whole skeleton frame.
-- **Stratum B**, n = 300, uniform over the skeletons whose `lower(name)` is also
-  borne by an embedded title -- the sub-population where the mechanism must bite
-  hardest if it exists at all.
-
-**B1** -- stratum A: `recall@1(fused) >= recall@1(full_text) - 1.0` point. The
-tolerance is a point rather than a strict inequality because the paired
-difference on n = 1,000 has sampling noise; a strict "not lower" fails on one
-discordant query.
-
-**B2** -- stratum A, the mechanism: exact one-sided McNemar over `a` (full_text
-right at rank 1, fused wrong **with an embedded row at fused rank 1**) against
-`b` (fused right, full_text wrong). FAIL at one-sided `P(X >= a) < 0.05`. A miss
-to another *skeleton* is not evidence for this issue and is excluded from `a`,
-which is instruction 2 of the issue's own bar.
-
-**B3** -- both, recomputed on stratum B with its own denominator.
-
-**The power control, which is what lets a null be reported as a refutation.**
-If fewer than 100 of the 300 stratum-B queries return any embedded title in the
-fused top-20 at all, the verdict is `NO POWER`, not `REFUTED`: a sample that
-could not have seen the effect has not refuted it.
-
-**The miss split is the existing four-way idiom** -- below the floor /
-truncated / dropped / out-ranked -- so it is comparable with the
-`82.8 / 0.0 / 0.0 / 17.2` recorded in `.claude/rules/search-and-embeddings.md`
-for `GIN % @0.3 cap 200 + vote tiebreak`. The suggest path's stages are *match
-predicate -> candidate cap -> re-rank -> returned rows*; the analogues here are
-stage for stage:
-
-- **below the floor**: the target does not match
-  `search_document @@ websearch_to_tsquery('english', q)`. A skeleton has no
-  vector, so the lexical predicate is its only candidacy -- it is in no lane.
-- **truncated**: it matches, but its *uncapped* lexical rank exceeds the cap the
-  mode applies (`LIMIT 20` for full_text, `LIMIT :lane_limit = 100` for fused).
-- **dropped**: inside the cap, absent from the returned rows -- the fusion lost
-  it. Structurally 0.0 for full_text, which has no stage between its cap and its
-  answer, and that 0.0 is *reported* rather than omitted, because the two zeros
-  are the half of the recorded split that carries the claim.
-- **out-ranked**: returned inside the top-20, but not at rank 1.
-
-**`coverage_t` is measured and no bar attaches to it.** The issue names it as
-the quantity only this catalog can answer. **`semantic_coverage`, which the CLI
-prints, is not it**: `_COVERAGE` counts `embedded / total` over
-`enrichment_state <> 'skeleton'`, i.e. the enriched tier's embedding
-completeness (~1.0 here), which says nothing about relevance. Four estimators,
-each with its denominator, because `search_queries` is empty and there is no
-typed workload to average over -- uniform (the issue's ~0.10 null),
-`vote_count`-weighted (a named *proxy* for demand, not a workload), exact-name
-relevant sets over the drawn queries (biased low by construction, since the
-query is drawn from a skeleton that is always in its own relevant set), and the
-share of the embedded relevant documents the lexical lane already finds.
-"""
+"""Does RRF's absent-lane `COALESCE` cost a skeleton its own exact name?"""
 
 import argparse
 import asyncio
@@ -159,13 +68,11 @@ ORDER BY md5(t.id::text || '{SEED}')
 LIMIT :n
 """  # noqa: S608 - SEED is a module constant
 
-# **Stratum C is not part of the bar and is off by default.** It was added
-# after the pre-registered verdict was computed and frozen (the frozen copies
-# are `/var/tmp/usher-i21-bar/run-full.json` and `run-summary.json`, hashed in
-# `RESULTS.sha256`), it enters no verdict, and it exists for one reason: the
-# bar measures what the absent-lane bonus *costs* when the typed title is a
-# skeleton, and the same arithmetic must *buy* something when the typed title
-# is enriched. Reporting one without the other would be reporting half a trade.
+# **Stratum C is not part of the bar and is off by default.** It was added after the
+# pre-registered verdict was computed and frozen (the frozen copies are
+# `/var/tmp/usher-i21-bar/run-full.json` and `run-summary.json`, hashed in
+# `RESULTS.sha256`), it enters no verdict, and it exists for one reason: the bar
+# measures what the absent-lane bonus *costs* when the typed title is a skeleton, and
 _DRAW_C = f"""
 SELECT t.id, t.name
 FROM titles AS t JOIN title_embeddings AS e ON e.title_id = t.id
@@ -723,12 +630,11 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--stratum-a", type=int, default=STRATUM_A)
     parser.add_argument("--stratum-b", type=int, default=STRATUM_B)
-    # **Off by default, because it is not part of the bar.** Stratum C was added
-    # after the pre-registered verdict was computed and frozen, and it enters no
-    # verdict: it exists because the bar's own result raises the question of how
-    # large the effect is in the *other* direction, and an answer to that is
-    # worth more to whoever prices the fix than a second opinion on the bar.
-    # Running the defaults reproduces the pre-registered run exactly.
+    # **Off by default, because it is not part of the bar.** Stratum C was added after
+    # the pre-registered verdict was computed and frozen, and it enters no verdict: it
+    # exists because the bar's own result raises the question of how large the effect is
+    # in the *other* direction, and an answer to that is worth more to whoever prices
+    # the fix than a second opinion on the bar.
     parser.add_argument("--stratum-c", type=int, default=0)
     args = parser.parse_args()
     asyncio.run(measure(args.out, n_a=args.stratum_a, n_b=args.stratum_b, n_c=args.stratum_c))
