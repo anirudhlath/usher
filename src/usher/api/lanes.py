@@ -80,7 +80,6 @@ a way an autouse default would not be.
 """
 
 import asyncio
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -113,7 +112,7 @@ from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
 from usher.ports.source import SourceAdapter, SourceEvent
 from usher.services.home import HomeService
-from usher.services.jobs import JobWorker
+from usher.services.jobs import JobWorker, WorkerLoop
 from usher.services.push import PushOutcome, PushSupervisor
 from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache, StaleScreen
@@ -878,97 +877,58 @@ class LaneSupervisor:
         means a database that is down at boot delays the first job instead of
         crashing the lane.
 
-        **Recovery runs on a timer, not once.** `startup()` ran exactly once,
-        at process start, with `older_than_seconds=0.0` -- which could only
-        recover *this* process's orphans and only by stealing every other
-        worker's live claims. `recover()` takes an age instead, so it is safe
-        to call repeatedly and safe to call while other workers are running,
-        which is the only shape under which a crashed peer's claims ever come
-        back. Throttled to half the lease because it is an `UPDATE` scanning
-        `status = 'running'` and there is nothing to find between leases.
+        **Recovery runs on a timer, not once**, and the throttle, the per-pass
+        guard and the idle sleep all live in `WorkerLoop` -- one loop for this
+        lane and for `usher work`, which are the same deployment one setting
+        apart.
+
+        A crashed pass costs the pass, `UsherPortError` included: a database
+        outage must slow the lane down, never end it, because a lane that
+        returned would leave the queue draining only on the next restart with
+        nothing in `/health/ready` saying so.
         """
         register_queue_gauges(self._gauges.read)
         register_search_gauges(self._backlog.read)
         registry = SourceRegistry()
-        worker: JobWorker | None = None
-        # 🔴 **`-inf`, never `0.0`, and this is a defect rather than a style.**
-        # `time.monotonic()` on Linux is seconds since **boot**, so against a
-        # `0.0` origin `now - throttled_at >= lease / 2` is *false* for the
-        # first 150 s of host uptime at the shipped lease -- a worker-enabled
-        # process started with the machine skips its first recovery pass
-        # entirely and reports `recovered_claims: null`, which this file
-        # documents as meaning "this process runs no worker". The field lies at
-        # exactly the moment a compose stack comes up holding the previous
-        # boot's orphans. `-inf` is the identity for `max`-like "never yet",
-        # and it makes the first pass unconditional, which is what this
-        # docstring and `usher work`'s copy have always claimed.
-        # `.claude/rules/testing-discipline.md`: an origin that is the identity
-        # element of the operation under test cannot distinguish the operation
-        # from its absence.
-        throttled_at = float("-inf")
-        while True:
-            ran = 0
-            try:
-                if worker is None:
-                    worker = build_worker(
-                        self._work,
-                        self._settings,
-                        provider=self._provider,
-                        embedder=self._embedder,
-                        client=self._client,
-                        registry=registry,
-                        user_id=await self._user_id(),
-                        # This process serves the screens, so an enrichment
-                        # running here has a cache to invalidate. `usher work`
-                        # passes nothing and composes nothing.
-                        rows=self._rows,
-                    )
-                now = time.monotonic()
-                if now - throttled_at >= self._settings.job_lease_seconds / 2:
-                    # The return value has a reader, which it did not until
-                    # M10's F2: `/health/ready`'s body carries the total, so
-                    # an operator can see the condition M9's S3 hit rather
-                    # than only a WARNING that fires when it is non-zero.
-                    self._note_recovery(await worker.recover())
-                    throttled_at = now
-                ran = await worker.run_once()
-                async with self._work() as pipeline:
-                    await self._gauges.refresh(pipeline.queue)
-                    await self._backlog.refresh(
-                        pipeline.embeddings,
-                        pipeline.neighbors,
-                        self._settings.embedding_model,
-                    )
-            except asyncio.CancelledError:
-                await registry.aclose()
-                raise
-            except Exception as exc:
-                # Including a `UsherPortError`: a database outage must slow
-                # the lane down, never end it. A worker lane that returned
-                # would leave the queue draining only on the next restart,
-                # with nothing in `/health/ready` saying so.
-                #
-                # 🔴 **`logger.exception`, and it was `logger.warning` until
-                # M10's F10.** Issue #8 is a `MissingGreenlet` that killed a
-                # `usher work` daemon and left no frames, and the CLI boundary
-                # was only *one* of the two reasons: the same fault raised
-                # inside this lane was answered with `str(exc)` -- a message,
-                # so no frames -- and this root does not even die, so there was
-                # no crash for an operator to notice either. Neither root
-                # recorded a traceback for a bug in this project's own code,
-                # which is why ~92,000 jobs produced a rate and no evidence.
-                # The stack is what makes the next occurrence evidence.
-                #
-                # The cost, named rather than discovered: a database outage
-                # logs a stack per pass instead of a sentence per pass. The
-                # *rate* is unchanged -- `ran` is still 0, so the sleep below
-                # still applies -- and this arm cannot tell an outage from a
-                # bug without re-deciding `cli.OPERATOR_ERRORS` one layer down.
-                # `configure_logging` sets `diagnose=False`, so the frames
-                # carry no locals.
-                logger.exception("the worker lane's pass failed: {error}", error=str(exc))
-            if ran == 0:
-                await asyncio.sleep(self._idle_seconds)
+
+        async def _build() -> JobWorker:
+            return build_worker(
+                self._work,
+                self._settings,
+                provider=self._provider,
+                embedder=self._embedder,
+                client=self._client,
+                registry=registry,
+                user_id=await self._user_id(),
+                # This process serves the screens, so an enrichment running
+                # here has a cache to invalidate. `usher work` passes nothing
+                # and composes nothing.
+                rows=self._rows,
+            )
+
+        async def _refresh() -> None:
+            async with self._work() as pipeline:
+                await self._gauges.refresh(pipeline.queue)
+                await self._backlog.refresh(
+                    pipeline.embeddings,
+                    pipeline.neighbors,
+                    self._settings.embedding_model,
+                )
+
+        try:
+            await WorkerLoop(
+                _build,
+                lease_seconds=self._settings.job_lease_seconds,
+                idle_seconds=self._idle_seconds,
+                refresh=_refresh,
+                # `/health/ready`'s body carries the total, so an operator can
+                # see a peer's claims coming back rather than only a WARNING
+                # that fires when the count is non-zero.
+                recovered=self._note_recovery,
+                failure="the worker lane's pass failed: {error}",
+            ).run()
+        finally:
+            await registry.aclose()
 
 
 __all__ = ["IDLE_SLEEP_SECONDS", "LaneSupervisor"]

@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Final
 
 import httpx
-from loguru import logger
 from pydantic import SecretStr, ValidationError
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,6 +91,7 @@ from usher.services.curation import CurationReport
 from usher.services.curation_validate import DropReason
 from usher.services.genres import GenreNormalisationService
 from usher.services.home import ComposeReport, HomeService
+from usher.services.jobs import JobWorker, WorkerLoop
 from usher.services.reconcile import RETRACTION_ERROR_CODE
 from usher.services.restore import RestoreRefused, RestoreReport, RestoreService
 from usher.services.rotation import RotationReport, RotationService
@@ -729,132 +729,67 @@ async def _work(settings: Settings, *, once: bool) -> None:
             user_id=user_id,
         )
 
-        # 🔴 **`-inf`, never `0.0`** -- `api/lanes.py` carries the argument, and
-        # it applies here with one extra consequence: `usher work --once` from
-        # a cron inside the first 150 s of host uptime would recover nothing at
-        # all, while `_measure` below claims it recovers "before the first
-        # claim". `time.monotonic()` is seconds since boot on Linux.
-        throttled_at = float("-inf")
         # The running total of what this process has taken back from workers
         # that stopped heartbeating, kept for the same reason the server keeps
-        # it in `/health/ready`'s body: `recover()` has returned this number
-        # since M9's W1 and **both** callers discarded it, so the only trace of
-        # M9's S3 condition was a WARNING that fires when the count is
-        # non-zero. This command has no readiness route, so it goes in the pass
-        # line it already prints rather than growing a surface (M10 F2).
-        #
-        # An `int` here and an `int | None` on `LaneReport`, deliberately.
-        # `None` there is *"this process runs no worker"*, which is a state
-        # `create_app` really has (`USHER_WORKER_ENABLED=false`) and which
-        # `usher work` cannot be: with the origin above, the first `_measure`
-        # always recovers before anything is printed, so `0` on this line means
-        # *asked and found none* and there is no third state for a `None` to
-        # name. Spelling it `int | None` would add a branch no run can reach.
+        # it in `/health/ready`'s body: `recover()` returns it, and a caller
+        # that discards it leaves a lost worker's claims traceable only through
+        # a WARNING. This command has no readiness route, so the total goes in
+        # the pass line it already prints rather than growing a surface.
         recovered = 0
+        # `None` is *nothing printed yet*, which is the state that makes the
+        # startup line unconditional. An `int | None` on `LaneReport` means
+        # something else entirely -- *this process runs no worker* -- and
+        # `usher work` has no such state.
+        printed: int | None = None
 
-        async def _measure() -> int:
-            # PRD 08's recovery, on the lease rather than on "everything
-            # running". Before the first claim, so a dead process's abandoned
-            # claims are this one's work rather than nobody's -- and it is now
-            # safe to run beside another live worker, which is the whole
-            # difference from the `startup()` it replaces. Throttled to half
-            # the lease for `api/lanes.py`'s reason: it is an `UPDATE` scanning
-            # `status = 'running'`, and between leases there is nothing to
-            # find.
-            nonlocal throttled_at, recovered
-            now = time.monotonic()
-            if now - throttled_at >= settings.job_lease_seconds / 2:
-                recovered += await worker.recover()
-                throttled_at = now
-            done = await worker.run_once()
+        def _took(claims: int) -> None:
+            nonlocal recovered
+            recovered += claims
+
+        def _report(ran: int) -> None:
+            """Print the pass line at startup, and after that only when the
+            recovered total has moved.
+
+            **On a change, never per pass.** A line per pass is ~17,280 a day
+            at the idle floor, which is the rate that trains an operator to
+            ignore output; a line only at startup reports the total when it is
+            almost always zero, hiding every later recovery in the only mode a
+            container runs.
+            """
+            nonlocal printed
+            if printed != recovered:
+                print(f"{ran} jobs, {recovered} recovered claims")
+                printed = recovered
+
+        async def _refresh() -> None:
             async with work() as pipeline:
                 await gauges.refresh(pipeline.queue)
                 await backlog.refresh(
                     pipeline.embeddings, pipeline.neighbors, settings.embedding_model
                 )
-            return done
 
-        async def _pass() -> int:
-            """One pass, and in the daemon form a bug in it costs the pass
-            rather than the process.
+        async def _built() -> JobWorker:
+            return worker
 
-            **The arm `api/lanes.py`'s worker lane has had since M6, arriving
-            at the other root of the same worker** (M10 F10). `JobWorker._pass`
-            re-raises the first task failure after every task has settled, so
-            without this one job's `AttributeError` ends `usher work` while the
-            identical job under `USHER_WORKER_ENABLED=true` costs the lane one
-            pass -- two survival semantics for one defect, in a deployment an
-            operator picks between with a setting, and nothing said so.
-
-            🔴 **`logger.exception`, never `logger.warning`, and that is the
-            whole reason this arm is safe to have.** Issue #8 is a crash that
-            left two lines and no frames; an arm that swallowed a bug and
-            logged a *message* would turn a dead worker -- which is at least
-            visible -- into a healthy-looking one that silently retries a
-            deterministic fault. The stack is what makes the next occurrence
-            evidence, and it is the deliverable here even though the cause is
-            still unknown. `telemetry.configure_logging` sets `diagnose=False`,
-            so the frames carry no locals and PRD 08's
-            credentials-are-never-logged rule survives (`services/jobs.py`
-            makes the same call for the same reason).
-
-            ⚠️ **`--once` is deliberately outside the arm.** A cron entry and
-            `docker compose exec usher python -m usher work --once` read the
-            *exit code*, and a guard around this form would answer a crashed
-            pass with `0` -- so the thing that exists to notice would be the
-            last to. The daemon has no exit code to report with and its
-            survival is the property; `--once` has no survival to protect and
-            its exit code is. Pinned by
-            `tests/unit/test_cli_work.py::
-            test_one_pass_keeps_its_exit_code_rather_than_logging_and_returning`.
-
-            **`Exception`, never `BaseException`:** `CancelledError` is how a
-            SIGINT reaches this loop, and catching it would build a daemon that
-            cannot be stopped out of the arm that stops it dying. Pinned by an
-            **AST** case (`test_both_worker_roots_record_a_crashed_pass_with_
-            its_frames`) rather than by a behavioural one, and that is
-            `testing-discipline.md`'s rule about a failure mode that is a
-            deadlock: a case that cancels this loop and waits can only report a
-            timeout, and it does not even manage that -- the planted
-            `BaseException` hangs the test runner's own teardown on the
-            unstoppable task, so it produces no red line at all.
-
-            Returning `0` is not a consolation value -- it is what makes the
-            caller sleep `_IDLE_SLEEP_SECONDS` instead of hot-looping a
-            failing pass, which is the same thing the lane's `ran = 0` does.
-            The cost, named rather than discovered: a database outage now logs
-            a stack per pass instead of a sentence per pass. The *rate* is
-            unchanged, only the size, and the arm cannot tell an outage from a
-            bug without re-litigating `OPERATOR_ERRORS` one layer down.
-            """
-            if once:
-                return await _measure()
-            try:
-                return await _measure()
-            except Exception as exc:
-                logger.exception(
-                    "the worker pass failed; the daemon continues: {error}", error=str(exc)
-                )
-                return 0
-
-        ran = await _pass()
-        print(f"{ran} jobs, {recovered} recovered claims")
-        while not once:
-            if ran == 0:
-                await asyncio.sleep(_IDLE_SLEEP_SECONDS)
-            taken = recovered
-            ran = await _pass()
-            if recovered != taken:
-                # **On a change, never per pass.** Without this a daemon prints
-                # exactly one line, at startup, when the total is almost always
-                # zero -- so every later recovery, which is precisely M9's S3,
-                # is invisible in the only mode a container runs, and PRD 08's
-                # "`usher work` ... prints the same total in its pass line"
-                # would be true of `--once` alone. A line *per pass* is the
-                # other error: at `_IDLE_SLEEP_SECONDS` that is ~17,280 a day,
-                # the rate `.claude/rules/config-cli-and-deployment.md` already
-                # records as training an operator to ignore output.
-                print(f"{ran} jobs, {recovered} recovered claims")
+        loop = WorkerLoop(
+            _built,
+            lease_seconds=settings.job_lease_seconds,
+            idle_seconds=_IDLE_SLEEP_SECONDS,
+            refresh=_refresh,
+            recovered=_took,
+            failure="the worker pass failed; the daemon continues: {error}",
+        )
+        if once:
+            # ⚠️ **`--once` is deliberately outside the daemon's guard**, which
+            # is why it calls the unguarded pass. A cron entry and `docker
+            # compose exec usher python -m usher work --once` read the *exit
+            # code*, and a guard around this form would answer a crashed pass
+            # with `0` -- so the thing that exists to notice would be the last
+            # to. The daemon has no exit code to report with and its survival
+            # is the property instead.
+            _report(await loop.pass_once())
+        else:
+            await loop.run(after=_report)
     finally:
         await registry.aclose()
         await aclose()

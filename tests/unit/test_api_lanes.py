@@ -1603,13 +1603,19 @@ class _JustBooted:
     Substituted for the **module's** `time`, never the global one:
     `asyncio`'s own timers resolve `time.monotonic` through `loop.time()` at
     call time, so patching `time.monotonic` globally freezes every sleep in
-    the event loop and the case hangs instead of failing.
+    the event loop and the case hangs instead of failing. The module is
+    `services/jobs.py`, which is where the throttle both worker roots share
+    reads the clock; `perf_counter` is carried because a job's duration
+    histogram reads the same module attribute.
     """
 
     def __init__(self, uptime: float) -> None:
         self._uptime = uptime
 
     def monotonic(self) -> float:
+        return self._uptime
+
+    def perf_counter(self) -> float:
         return self._uptime
 
 
@@ -1639,7 +1645,7 @@ async def test_the_worker_lane_recovers_on_its_first_pass_on_a_host_that_just_bo
     one `test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass`
     makes at a normal uptime. Against `0.0` this reports **0** requeues.
     """
-    monkeypatch.setattr("usher.api.lanes.time", _JustBooted(10.0))
+    monkeypatch.setattr("usher.services.jobs.time", _JustBooted(10.0))
     supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
     assert _settings().job_lease_seconds / 2 > 10.0, (
         "the premise: the shimmed uptime is inside the window the throttle would skip"
