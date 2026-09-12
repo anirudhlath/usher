@@ -362,20 +362,7 @@ class Journal:
     def record(self, timing: Timing, *, arm: str) -> None:
         if self._handle is None:
             return
-        self._handle.write(
-            json.dumps(
-                {
-                    "arm": arm,
-                    "probe": timing.probe,
-                    "op": timing.op,
-                    "seconds": timing.seconds,
-                    "started_at": timing.started_at,
-                    "ended_at": timing.ended_at,
-                    "payload_bytes": timing.payload_bytes,
-                }
-            )
-            + "\n"
-        )
+        self._handle.write(json.dumps({"arm": arm, **dataclasses.asdict(timing)}) + "\n")
         self._handle.flush()
 
     def close(self) -> None:
@@ -585,20 +572,7 @@ async def _run(
 
     if args.timings_out:
         Path(args.timings_out).write_text(
-            json.dumps(
-                [
-                    {
-                        "probe": one.probe,
-                        "op": one.op,
-                        "seconds": one.seconds,
-                        "started_at": one.started_at,
-                        "ended_at": one.ended_at,
-                        "payload_bytes": one.payload_bytes,
-                    }
-                    for one in every
-                ],
-                indent=1,
-            ),
+            json.dumps([dataclasses.asdict(one) for one in every], indent=1),
             encoding="utf-8",
         )
         print(f"wrote {len(every)} raw timings to {args.timings_out} (no credential in it)")

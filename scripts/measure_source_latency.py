@@ -83,6 +83,7 @@ the word.
 
 import argparse
 import asyncio
+import dataclasses
 import hashlib
 import json
 import os
@@ -942,15 +943,7 @@ async def _run(
         Path(args.timings_out).write_text(
             json.dumps(
                 [
-                    {
-                        "probe": one.probe,
-                        "op": one.op,
-                        "seconds": one.seconds,
-                        "started_at": one.started_at,
-                        "ended_at": one.ended_at,
-                        "payload_bytes": one.payload_bytes,
-                        "warmup": index < len(warmups),
-                    }
+                    {**dataclasses.asdict(one), "warmup": index < len(warmups)}
                     for index, one in enumerate(every)
                 ],
                 indent=1,
