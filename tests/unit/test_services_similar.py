@@ -24,14 +24,14 @@ import inspect
 import json
 import math
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 
 import pytest
 
 import usher.services.similar
 from tests.fakes.embedding import planted_pair
+from tests.fakes.similarity_scope import rebuild_job
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
@@ -41,7 +41,6 @@ from usher.services.similar import (
     _CANDIDATE_POOL,
     _NEIGHBORS_PER_TITLE,
     _WEIGHTS,
-    NeighborRebuildJob,
     SimilarityService,
     _blend,
     _jaccard,
@@ -1023,22 +1022,11 @@ def test_the_runtime_prefix_is_part_of_the_fingerprint_not_just_the_checkpoint()
     )
 
 
-def _rebuild_job(service: SimilarityService) -> NeighborRebuildJob:
-    @asynccontextmanager
-    async def scope() -> AsyncIterator[SimilarityService]:
-        yield service
-
-    return NeighborRebuildJob(scope, period=timedelta(hours=24))
-
-
 async def test_the_scheduled_rebuild_declines_a_table_written_by_another_model() -> None:
     """The refusal is an outcome the scheduler reads, not a silent return.
 
     A `run()` that answered nothing made this indistinguishable from a
-    completed walk: the scheduler timed it into `usher.scheduler.job.duration`,
-    counted it as work, and offered the job again on the very next tick, so a
-    deployment configured for the wrong model logged the refusal every five
-    minutes forever. `ScheduledJob.run` carries what `DECLINED` buys.
+    completed walk; `JobOutcome` carries what that cost.
 
     The positive control is the second half -- the same arrangement with the
     configured model matching -- because a guard that refused everything, or a
@@ -1049,7 +1037,7 @@ async def test_the_scheduled_rebuild_declines_a_table_written_by_another_model()
         _, vector = planted_pair((math.pi / 2) / (index + 3))
         await embeddings.given(title_id, vector, model_name="fake:another-checkpoint")
 
-    assert await _rebuild_job(service).run() is JobOutcome.DECLINED
+    assert await rebuild_job(service).run() is JobOutcome.DECLINED
     assert await service.computed_at() is None, "the refusal rebuilt the table anyway"
 
     agreed, agreed_embeddings, _ = _service()
@@ -1057,7 +1045,7 @@ async def test_the_scheduled_rebuild_declines_a_table_written_by_another_model()
         _, vector = planted_pair((math.pi / 2) / (index + 3))
         await agreed_embeddings.given(title_id, vector, model_name=_EMBEDDING_MODEL)
 
-    assert await _rebuild_job(agreed).run() is JobOutcome.DONE
+    assert await rebuild_job(agreed).run() is JobOutcome.DONE
     assert await agreed.computed_at() is not None, (
         "the matching arm wrote nothing, so the refusal above proves nothing"
     )

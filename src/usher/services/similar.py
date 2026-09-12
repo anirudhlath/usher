@@ -773,11 +773,9 @@ class NeighborRebuildJob(ScheduledJob):
 
         **The refusal is `JobOutcome.DECLINED` rather than a raise or a bare
         return.** A raise would describe a job that tried and broke; a bare
-        return was indistinguishable from a completed walk, so the refusal was
-        timed into `usher.scheduler.job.duration`, counted as work and offered
-        again on the very next tick -- a line every five minutes for as long
-        as the misconfiguration lasted. Declining leaves `last_done()`
-        untouched and lets the loop space the job out instead.
+        return was indistinguishable from a completed walk. `JobOutcome`
+        carries what declining buys, and `last_done()` is untouched either
+        way, so nothing is recorded as done.
 
         **`resume=True`, which is what makes a registration converge.** A run
         cancelled by `Scheduler.stop()` or a process restart leaves a prefix of

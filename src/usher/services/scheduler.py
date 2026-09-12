@@ -290,11 +290,12 @@ class Scheduler:
 
     async def tick(self) -> int:
         """Walk the registry once and run whatever is due. Returns how many
-        ran to completion.
+        did the work, which is **not** how many were due.
 
-        A job that raised is **not** counted: the number answers *"how much
-        work happened"*, and counting a failure as work is what makes a
-        `--once` line from a cron read as healthy on a night nothing ran.
+        Two results are excluded: a job that raised, and one that answered
+        `JobOutcome.DECLINED`. The number says *"how much work happened"*, and
+        counting either as work is what makes a `--once` line from a cron read
+        as healthy on a night nothing ran.
         """
         if not self._jobs:
             if not self._said_empty:
@@ -398,13 +399,8 @@ class Scheduler:
     async def _run(self, job: ScheduledJob) -> bool:
         """One job, inside its own root span. Returns whether it did the work.
 
-        **A `JobOutcome.DECLINED` is not work and not a failure**, so it is
-        left out of `usher.scheduler.job.duration` and off
-        `usher.scheduler.job.failures` -- a job that refused because the
-        deployment is misconfigured would otherwise report a run of
-        milliseconds into a histogram of hours. The caller backs it off, which
-        is what stops the refusal being logged on every tick until an operator
-        acts.
+        **A `JobOutcome.DECLINED` is neither timed nor counted as a failure**
+        -- `JobOutcome` carries why -- and the caller spaces it out.
 
         **A root span with a `Link`, never a child**, and `context=Context()`
         -- an empty context -- is what makes "root" structural rather than a
@@ -443,9 +439,8 @@ class Scheduler:
         finally:
             # In a `finally` so a failed run is still timed: a batch that
             # raised after three hours is exactly the one an operator wants
-            # the duration of. A refusal is the one thing that is not timed --
-            # it did nothing, and its milliseconds would sit in a histogram of
-            # hours.
+            # the duration of. A refusal is the one thing not timed at all --
+            # see `JobOutcome`.
             if outcome is not JobOutcome.DECLINED:
                 _job_duration.record(time.perf_counter() - started, {"job": job.name})
         if outcome is JobOutcome.DECLINED:
@@ -462,6 +457,10 @@ class Scheduler:
     def _back_off(self, job: ScheduledJob) -> None:
         """Do not offer this job again for a doubling number of ticks,
         **capped at its own period**.
+
+        **The spacing for a failed run and for a `JobOutcome.DECLINED` alike**
+        -- both are a job that did not do its work, and the cap below is what
+        keeps either from being re-offered at the tick rate.
 
         The cap is what makes this safe rather than a second schedule: a job
         that keeps failing settles to being retried no more often than the

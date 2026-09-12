@@ -40,16 +40,20 @@ nothing here that would want to.
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 
 
-class JobOutcome(Enum):
-    """What one `ScheduledJob.run()` amounted to.
+class JobOutcome(StrEnum):
+    """What one `ScheduledJob.run()` amounted to, and what the loop does with
+    each. **The one statement of this; every other site points here.**
 
-    `DECLINED` is a run that never started: the deployment is in a state no
-    retry fixes, so the scheduler counts it as neither work nor failure and
-    keeps it out of `usher.scheduler.job.duration`, which is a histogram over
-    runs that did something.
+    `DECLINED` is a run that never started, because the deployment is in a
+    state no retry fixes. It is neither work nor failure, so it is counted in
+    neither place: a refusal's milliseconds in `usher.scheduler.job.duration`
+    would read as a fast run of a job measured in hours, and
+    `usher.scheduler.job.failures` is for a job that tried and broke. What it
+    does get is a failure's *spacing*, which is what stops the refusal being
+    logged on every tick for as long as an operator leaves it.
     """
 
     DONE = "done"
@@ -166,8 +170,7 @@ class ScheduledJob(ABC):
         """Do the work, once.
 
         Answers `DONE`, or `DECLINED` for work this deployment's state makes
-        pointless to attempt -- a decline is spaced out the way a failure is,
-        so a refusal lasting until an operator acts is not logged every tick.
+        pointless to attempt -- `JobOutcome` carries what each costs.
 
         **Must be safe to cancel at any `await`**: `Scheduler.stop()` cancels
         the loop task, so an in-flight run is cancelled wherever it happens to

@@ -384,9 +384,10 @@ async def test_the_retention_registration_carries_the_window_and_the_batch_an_op
     **Read off what the job does, not off accessors it would otherwise have
     no reason to carry.** The window is the arithmetic in `last_done()` --
     `min(at) + window` -- and the chunk size is observable as the number of
-    scopes a drain opens, which is `test_the_prune_drains_in_chunks_and_opens
-    _a_scope_for_each`'s own idiom: seven expired rows at a batch of three are
-    chunks of 3, 3, 1, where the shipped default of 10,000 would be one.
+    scopes a drain opens, which is `tests/unit/test_services_scheduler.py::
+    test_the_prune_drains_in_chunks_and_opens_a_scope_for_each`'s own idiom:
+    seven expired rows at a batch of three are chunks of 3, 3, 1, where the
+    shipped default of 10,000 would be one.
 
     The period is pinned to the literal as well as to the constant: a day is
     what `.env.example`, `Config.settings.ts`, PRD 08 and PRD 10 all state in
@@ -976,15 +977,9 @@ async def test_a_declined_run_is_not_work_and_is_spaced_out_like_a_failure(
 ) -> None:
     """A job that refuses did not try, and the loop has to be able to tell.
 
-    With `run()` answering nothing, a refusal was indistinguishable from a
-    completed run: it was timed into `usher.scheduler.job.duration` beside
-    walks measured in hours, counted in `tick()`'s total, and left due on the
-    very next tick -- so a deployment configured for the wrong embedding model
-    logged the same refusal every five minutes forever.
-
-    It is not a failure either. Nothing broke, so
-    `usher.scheduler.job.failures` stays empty and the spacing is all the two
-    outcomes share.
+    `JobOutcome` carries what a decline costs and what it buys; this is the
+    loop's half of it -- out of `tick()`'s total, on neither instrument, and
+    not offered again on the very next tick.
 
     The control is the second half: an assertion that an instrument recorded
     nothing is satisfied by an instrument nobody wired.

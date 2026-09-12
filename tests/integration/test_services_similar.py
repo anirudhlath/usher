@@ -20,9 +20,8 @@ scans this file.
 
 import math
 import uuid
-from collections.abc import AsyncIterator, Iterator, Sequence
-from contextlib import asynccontextmanager, contextmanager
-from datetime import timedelta
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 
 import pytest
 from loguru import logger
@@ -30,6 +29,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.embedding import planted_pair
+from tests.fakes.similarity_scope import rebuild_job
 from usher.db.repositories.search import (
     _NEAREST,
     PostgresTitleEmbeddingRepository,
@@ -41,7 +41,7 @@ from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.repository import NeighborSeed, ScoredNeighbor, TitleEmbeddingUpsert
 from usher.ports.scheduler import JobOutcome
-from usher.services.similar import NeighborRebuildJob, SimilarityService
+from usher.services.similar import SimilarityService
 
 # The blend these arranged rows claim to have been computed under. A literal,
 # never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
@@ -747,14 +747,6 @@ def lines() -> Iterator[list[str]]:
     logger.remove(sink)
 
 
-def _rebuild_job(service: SimilarityService) -> NeighborRebuildJob:
-    @asynccontextmanager
-    async def scope() -> AsyncIterator[SimilarityService]:
-        yield service
-
-    return NeighborRebuildJob(scope, period=timedelta(hours=24))
-
-
 @pytest.mark.integration
 async def test_the_scheduled_rebuild_refuses_a_table_written_by_another_model(
     session: AsyncSession, lines: list[str]
@@ -806,7 +798,7 @@ async def test_the_scheduled_rebuild_refuses_a_table_written_by_another_model(
     )
     before = await mismatched.computed_at()
 
-    assert await _rebuild_job(mismatched).run() is JobOutcome.DECLINED
+    assert await rebuild_job(mismatched).run() is JobOutcome.DECLINED
 
     written = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
     assert written == 0, "the guard logged and then rebuilt anyway"
@@ -817,7 +809,7 @@ async def test_the_scheduled_rebuild_refuses_a_table_written_by_another_model(
     assert _MODEL in refusals[0]
 
     # The control: same rows, same job, a service that agrees with the table.
-    assert await _rebuild_job(_service(session)).run() is JobOutcome.DONE
+    assert await rebuild_job(_service(session)).run() is JobOutcome.DONE
 
     agreed = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
     assert agreed == len(ids) * (len(ids) - 1), (
@@ -1021,7 +1013,7 @@ async def test_a_refusal_written_under_another_model_does_not_block_the_rebuild(
     service = _service(session)
     assert await service.foreign_embedding_models() == ()
 
-    await _rebuild_job(service).run()
+    await rebuild_job(service).run()
 
     written = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
     assert written == len(ids) * (len(ids) - 1), "the refused row's model name refused the walk"
