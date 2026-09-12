@@ -26,7 +26,7 @@ import pytest
 from tests.unit.commands import configured, dispatched
 from usher.cli import _print_restore_report, build_parser, main, parse_args
 from usher.config import Settings
-from usher.ports.repository import RestoreRefusal
+from usher.ports.repository import RestoreRefusal, TableOutcome
 from usher.services.restore import RestoreReport
 
 ARTIFACT = Path("/srv/usher/backups/usher-backup-20260825T143000Z.jsonl.gz")
@@ -42,14 +42,30 @@ def _report(
     dry_run: bool = False,
     committed: bool = True,
 ) -> RestoreReport:
+    written = {"users": 1, "watch_states": 3_347} if written is None else written
+    present = {"users": 0, "watch_states": 12} if present is None else present
+    absent = {} if absent is None else absent
+    unresolved = {} if unresolved is None else unresolved
+    tables = (
+        set(written)
+        | set(present)
+        | set(absent)
+        | set(unresolved)
+        | {refusal.table for refusal in refused}
+    )
     return RestoreReport(
         path=ARTIFACT,
         schema_revision="m10a",
-        written={"users": 1, "watch_states": 3_347} if written is None else written,
-        present={"users": 0, "watch_states": 12} if present is None else present,
-        absent={} if absent is None else absent,
-        unresolved={} if unresolved is None else unresolved,
-        refused=refused,
+        outcomes={
+            table: TableOutcome(
+                written=written.get(table, 0),
+                present=present.get(table, 0),
+                absent=absent.get(table, 0),
+                unresolved=unresolved.get(table, 0),
+                refused=tuple(one for one in refused if one.table == table),
+            )
+            for table in sorted(tables)
+        },
         dry_run=dry_run,
         committed=committed,
     )

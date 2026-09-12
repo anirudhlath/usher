@@ -157,9 +157,9 @@ class UnresolvedRule(StrEnum):
     """Write the column `NULL` and count it. The column already permits it."""
 
 
-#: Per table, because the answer differs per table on purpose and K4 must
-#: read one field rather than re-derive the argument at each call site --
-#: `BackupEntry.restore` next door is the same decision for the same reason.
+#: Per table, because the answer differs per table on purpose and is not a
+#: function of anything K1 already records: K4 reads one field rather than
+#: re-deriving the argument at each call site.
 #:
 #: `watch_states`: a watch state whose title is missing is a real loss and
 #: the operator must see it. It is also recoverable -- enrich the title,
@@ -283,18 +283,21 @@ async def _answer[ReferenceT: (TitleReference, EpisodeReference)](
     to learn nothing, the same guard `list_by_ids` and `resolve_tmdb_ids`
     carry one port up.
 
-    The membership test is `is None` rather than falsiness, for the reason
-    `_Family.owned` states one subsystem over: a `uuid.UUID` is truthy today
-    and that is a fact about a type this module does not own.
+    `references` is passed whole because the port already deduplicates its
+    own probe list, and the comprehension collapses the repeats again on the
+    way out -- so a household naming one title from every watch state costs
+    one probe here and none extra.
+
+    Membership rather than falsiness, for the reason `_Family.owned` states
+    one subsystem over: the resolver omits what it could not find, and a
+    `uuid.UUID` being truthy is a fact about a type this module does not own.
     """
     if not references:
         return {}
-    unique = tuple(dict.fromkeys(references))
-    found = await resolve(unique)
-    answers: dict[ReferenceT, uuid.UUID | Unresolved] = {}
-    for reference in unique:
-        resolved = found.get(reference)
-        answers[reference] = (
-            resolved if resolved is not None else Unresolved(reference, keys_tried(reference))
-        )
-    return answers
+    found = await resolve(references)
+    return {
+        reference: found[reference]
+        if reference in found
+        else Unresolved(reference, keys_tried(reference))
+        for reference in references
+    }

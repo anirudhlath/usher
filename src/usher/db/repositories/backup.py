@@ -39,23 +39,11 @@ exactly the operator's judgement and lands on the `NULL`. Writing over a
 link the target already holds is the one thing that would lose information
 in both directions at once.
 
-## One statement per row, and the number that makes it affordable
+## One statement per table, over parallel `unnest` arrays
 
-The writes below are one statement per row rather than a batched `VALUES`
-join, which is the opposite of what `bulk.py` and `replace_genres` do. The
-reason is the report: `written` / `skipped` / `refused` is the artefact this
-whole command exists for -- *"restored 9 rows"* over an artifact holding 50
-is the failure it is built to make visible -- and a per-row verdict needs a
-per-row `RETURNING`. `text()` executemany does not aggregate `RETURNING`
-rows and `rowcount` over it is the driver's business rather than a promise.
-
-The cost is bounded by the same measurement the read half is:
-**14,259 rows** on the deployment this project runs against, re-counted
-read-only on 2026-08-25, of which 10,819 are `media_items` and 3,347 are
-`watch_states`. The resolution that precedes them is *not* per row -- it is
-one `resolve_natural_keys` round trip per kind per table, which is the N+1
-`db-and-sql.md` records as the thing to avoid, and it is the half that
-scales with the catalog rather than with the artifact.
+Every merge below binds its whole batch through `_arrays` and reads its
+verdict off `RETURNING`; what a statement cannot decide per row is decided in
+Python first, against one read of the target.
 
 ## The column list is derived, in both of the two ways a table can be carried
 
@@ -133,7 +121,9 @@ from typing import Any, Final, assert_never
 
 import sqlalchemy as sa
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql.base import PGDialect
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import TextClause
 
 from usher.db import models  # noqa: F401  -- registers every table on `Base.metadata`
 from usher.db.backup_identity import (
@@ -640,11 +630,10 @@ class PostgresRestoreRepository(RestoreRepository):
         prepared, refused, unresolved = await self._prepare(
             table, rows, skip_unresolvable=skip_unresolvable
         )
-        # One SAVEPOINT for the table rather than one per row: a refused row
-        # here is a damaged artifact, the whole file is about to be rolled
-        # back either way, and 14,259 savepoints would be the cost of a
-        # distinction nothing acts on. ADR-0044's rule is what makes the
-        # wrapper non-optional -- `watch_states.position_seconds`,
+        # One SAVEPOINT for the table, which is also the granularity the
+        # writes have: a refused row here is a damaged artifact and the whole
+        # file is about to be rolled back either way. ADR-0044's rule is what
+        # makes the wrapper non-optional -- `watch_states.position_seconds`,
         # `llm_calls.cost_usd` and `search_queries.result_count` are all
         # narrower than the value a hand-edited artifact can carry, and an
         # untranslated write here would put those columns back in the
@@ -658,6 +647,23 @@ class PostgresRestoreRepository(RestoreRepository):
             unresolved=unresolved,
             refused=(*refused, *merged.refused),
         )
+
+    async def _write(
+        self, statement: TextClause, table: str, rows: Sequence[Mapping[str, Any]]
+    ) -> int:
+        """One statement for one batch, answering how many rows moved.
+
+        Every batched write in this class goes through here, so *how a batch
+        is bound* is one decision rather than seven: the rows are transposed
+        into one array per carried column, which is what the statement's
+        `unnest` expects.
+
+        The count is `RETURNING`'s rows and never `rowcount`, which is what
+        keeps *written* and *already present* two numbers: a conflicting row
+        whose merged columns already equal the artifact's returns nothing.
+        """
+        result = await self._session.execute(statement, _as_arrays(rows, _carried_columns(table)))
+        return len(result.all())
 
     async def _merge(self, table: str, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """One table's merge rule. A table with no arm raises rather than
@@ -696,12 +702,9 @@ class PostgresRestoreRepository(RestoreRepository):
         the name, so a household the target already has is simply the one every
         watch state resolves onto.
         """
-        written = 0
-        for row in rows:
-            result = await self._session.execute(
-                text(_insert("users") + " ON CONFLICT (name) DO NOTHING RETURNING id"), row
-            )
-            written += len(result.all())
+        if not rows:
+            return TableOutcome(written=0, present=0)
+        written = await self._write(_INSERT_USERS, "users", rows)
         return TableOutcome(written=written, present=len(rows) - written)
 
     async def _merge_sources(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
@@ -743,7 +746,8 @@ class PostgresRestoreRepository(RestoreRepository):
         if not rows:
             return TableOutcome(written=0, present=0)
         by_id, by_name = await self._existing_sources(rows)
-        written = skipped = 0
+        skipped = 0
+        landing: list[Mapping[str, Any]] = []
         refused: list[RestoreRefusal] = []
         for row in rows:
             if row["id"] in by_id:
@@ -763,13 +767,13 @@ class PostgresRestoreRepository(RestoreRepository):
                     )
                 )
                 continue
-            await self._session.execute(text(_insert("sources")), row)
-            # The row this run just wrote is now one the target holds, and the
-            # next row of the same artifact has to see it. Both maps, because
-            # both checks above read one each.
+            landing.append(row)
+            # The row this pass has just accepted is one the target will hold,
+            # and the next row of the same artifact has to see it. Both maps,
+            # because both checks above read one each.
             by_id[row["id"]] = str(row["name"])
             by_name[str(row["name"])] = row["id"]
-            written += 1
+        written = await self._write(_INSERT_SOURCES, "sources", landing) if landing else 0
         return TableOutcome(written=written, present=skipped, refused=tuple(refused))
 
     async def _existing_sources(
@@ -827,7 +831,7 @@ class PostgresRestoreRepository(RestoreRepository):
                 )
             ).all()
         }
-        written = skipped = 0
+        landing: list[Mapping[str, Any]] = []
         refused: list[RestoreRefusal] = []
         for row in rows:
             if row["source_id"] not in held:
@@ -839,15 +843,13 @@ class PostgresRestoreRepository(RestoreRepository):
                     )
                 )
                 continue
-            result = await self._session.execute(
-                text(_insert("source_credentials") + " ON CONFLICT (ref) DO NOTHING RETURNING ref"),
-                row,
-            )
-            if result.all():
-                written += 1
-            else:
-                skipped += 1
-        return TableOutcome(written=written, present=skipped, refused=tuple(refused))
+            landing.append(row)
+        written = (
+            await self._write(_INSERT_SOURCE_CREDENTIALS, "source_credentials", landing)
+            if landing
+            else 0
+        )
+        return TableOutcome(written=written, present=len(landing) - written, refused=tuple(refused))
 
     async def _merge_watch_states(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """Upsert on whichever of the two unique constraints the row's target
@@ -868,15 +870,22 @@ class PostgresRestoreRepository(RestoreRepository):
         second run of the same file reports `skipped` rather than claiming to
         have written 3,347 rows that did not move.
         """
-        written = skipped = 0
-        for row in rows:
-            arbiter = "user_id, title_id" if row["title_id"] is not None else "user_id, episode_id"
-            result = await self._session.execute(text(_upsert_watch_state(arbiter)), row)
-            if result.all():
-                written += 1
-            else:
-                skipped += 1
-        return TableOutcome(written=written, present=skipped)
+        by_title = [row for row in rows if row["title_id"] is not None]
+        by_episode = [row for row in rows if row["title_id"] is None]
+        written = 0
+        for statement, arbiter, batch in (
+            (_UPSERT_WATCH_STATE_ON_TITLE, ("user_id", "title_id"), by_title),
+            (_UPSERT_WATCH_STATE_ON_EPISODE, ("user_id", "episode_id"), by_episode),
+        ):
+            # Per arbiter, because the two statements conflict on different
+            # columns and a row is only a duplicate of one it shares a target
+            # with. Two artifact rows can collapse onto one target here even
+            # though the source held them apart, when two of its titles resolve
+            # to one of this catalog's.
+            batch = _one_per(arbiter, batch)
+            if batch:
+                written += await self._write(statement, "watch_states", batch)
+        return TableOutcome(written=written, present=len(rows) - written)
 
     async def _merge_row_provider_settings(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """Upsert on `slug_prefix`, the one carried table with no id in it.
@@ -886,14 +895,11 @@ class PostgresRestoreRepository(RestoreRepository):
         carrying the same choice under a later stamp has not changed anything
         an operator would call a change.
         """
-        written = skipped = 0
-        for row in rows:
-            result = await self._session.execute(text(_UPSERT_ROW_PROVIDER_SETTING), row)
-            if result.all():
-                written += 1
-            else:
-                skipped += 1
-        return TableOutcome(written=written, present=skipped)
+        settings = _one_per(("slug_prefix",), rows)
+        if not settings:
+            return TableOutcome(written=0, present=0)
+        written = await self._write(_UPSERT_ROW_PROVIDER_SETTING, "row_provider_settings", settings)
+        return TableOutcome(written=written, present=len(rows) - written)
 
     async def _append(self, table: str, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
         """`INSERT ... ON CONFLICT (id) DO NOTHING`, for the two append-only
@@ -908,12 +914,9 @@ class PostgresRestoreRepository(RestoreRepository):
         because the FK is already `ON DELETE SET NULL` and the analytic value
         is the query text and the outcome.
         """
-        written = 0
-        for row in rows:
-            result = await self._session.execute(
-                text(_insert(table) + " ON CONFLICT (id) DO NOTHING RETURNING id"), row
-            )
-            written += len(result.all())
+        if not rows:
+            return TableOutcome(written=0, present=0)
+        written = await self._write(_APPEND[table], table, rows)
         return TableOutcome(written=written, present=len(rows) - written)
 
     async def _merge_media_item_links(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
@@ -944,14 +947,23 @@ class PostgresRestoreRepository(RestoreRepository):
         list is the artifact's own and on the deployment this project measures
         that is 10,819 pairs against a real unique index.
         """
-        held = await self._existing_media_items(rows)
-        written = absent = 0
-        for row in rows:
-            if (row["source_id"], row["external_id"]) not in held:
-                absent += 1
-                continue
-            result = await self._session.execute(text(_UPDATE_MEDIA_ITEM_LINKS), row)
-            written += len(result.all())
+        if not rows:
+            return TableOutcome(written=0, present=0)
+        # `external_id` is `TEXT`, so the target's side of the key is a `str`
+        # and the artifact's is read as one **once**, here: the membership
+        # test below and the bind that follows it have to agree about what the
+        # key is, and a row the first spelling calls absent and the second
+        # binds anyway is the two of them disagreeing.
+        keyed = [dict(row, external_id=str(row["external_id"])) for row in rows]
+        held = await self._existing_media_items(keyed)
+        absent = sum(1 for row in keyed if (row["source_id"], row["external_id"]) not in held)
+        # Every remaining row goes to the statement, the absent ones included:
+        # the join is on the same key `held` was read under, so a row with
+        # nothing to write onto matches nothing and a second pass to drop it
+        # first would be a filter the database already applies.
+        written = await self._write(
+            _UPDATE_MEDIA_ITEM_LINKS, "media_items", _one_per(_MEDIA_ITEM_KEY, keyed)
+        )
         return TableOutcome(written=written, present=len(rows) - written - absent, absent=absent)
 
     async def _existing_media_items(
@@ -968,30 +980,16 @@ class PostgresRestoreRepository(RestoreRepository):
         obvious spelling does not run.**
         `WHERE (source_id, external_id) = ANY(:pairs)` compiles and then fails
         in the driver: `asyncpg.exceptions.UnsupportedClientFeatureError:
-        input of anonymous composite types is not supported` -- *"PostgreSQL
-        does not implement anonymous composite type input"*, so a list of
+        input of anonymous composite types is not supported`, so a list of
         tuples cannot be bound at all without declaring a composite type in the
-        schema. Measured 2026-08-25 against `pgvector/pgvector:pg17`.
-        `unnest(a, b)` in a `FROM` clause expands two arrays row for row, which
-        needs no new type, keeps the join exact (a cross product of the two
-        columns would answer a *superset*) and stays one round trip.
+        schema. `unnest(a, b)` in a `FROM` clause expands two arrays row for
+        row, which needs no new type, keeps the join exact (a cross product of
+        the two columns would answer a *superset*) and stays one round trip.
         """
         if not rows:
             return set()
         found = (
-            await self._session.execute(
-                text(
-                    "SELECT m.source_id, m.external_id FROM media_items m "
-                    "JOIN unnest(CAST(:sources AS uuid[]), CAST(:externals AS text[])) "
-                    "AS wanted(source_id, external_id) "
-                    "ON m.source_id = wanted.source_id "
-                    "AND m.external_id = wanted.external_id"
-                ),
-                {
-                    "sources": [row["source_id"] for row in rows],
-                    "externals": [str(row["external_id"]) for row in rows],
-                },
-            )
+            await self._session.execute(_EXISTING_MEDIA_ITEMS, _as_arrays(rows, _MEDIA_ITEM_KEY))
         ).all()
         return {(row.source_id, str(row.external_id)) for row in found}
 
@@ -1214,8 +1212,74 @@ def _coerce(column: sa.Column[Any], value: object) -> object:
     return value
 
 
+#: The dialect the column types are rendered through to reach the array casts
+#: `_arrays` binds. One instance, because compiling a type is all it is used
+#: for and every statement below is built once at import. The base dialect
+#: rather than the asyncpg one: the rendering is the same and the base needs
+#: no driver to construct. The ignore is SQLAlchemy's untyped `__init__`.
+_DIALECT: Final = PGDialect()  # type: ignore[no-untyped-call]
+
+
+def _array_of(column: sa.Column[Any]) -> str:
+    """The array type one column's bind is cast to.
+
+    ⚠️ **A character column is cast to `TEXT[]` and never to its declared
+    width.** An *explicit* cast to `VARCHAR(n)` truncates an over-long value
+    silently, where the assignment cast an `INSERT` still makes raises
+    `22001`; keeping the width here would turn a hand-edited
+    `search_queries.surface` into a shorter string that is written, reported
+    as written, and then raises out of the Enum result processor on every
+    later read. Nothing is lost by widening: the column's own definition is
+    what the row lands against either way.
+
+    Everything else keeps the type it declares, because `unnest` of an uncast
+    parameter gives Postgres nothing to infer and a `text[]` standing in for a
+    `uuid[]` would be a cast per row on the join.
+    """
+    if isinstance(column.type, sa.String):
+        return "TEXT[]"
+    return f"{column.type.compile(_DIALECT)}[]"
+
+
+def _arrays(table: str, columns: Sequence[str]) -> str:
+    """`unnest(<one array bind per column>) AS carried(<columns>)`.
+
+    A batch travels as one array per column rather than one bind set per row,
+    so a statement's text does not depend on how many rows it is about to
+    write and can be built once.
+    """
+    binds = ", ".join(
+        f"CAST(:{column} AS {_array_of(Base.metadata.tables[table].columns[column])})"
+        for column in columns
+    )
+    return f"unnest({binds}) AS carried({', '.join(columns)})"
+
+
+def _as_arrays(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> dict[str, list[Any]]:
+    """One batch of rows transposed into the arrays `_arrays` binds."""
+    return {column: [row[column] for row in rows] for column in columns}
+
+
+def _one_per(key: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The batch with at most one row per `key`, the artifact's first winning.
+
+    A set-based write cannot carry two rows naming one conflict target: a
+    second `ON CONFLICT ... DO UPDATE` on it is SQLSTATE `21000`, which is
+    outside `ROW_REFUSED_SQLSTATE_CLASSES` and would cross the port as a raw
+    `DBAPIError`; an `UPDATE ... FROM` picks one of the two arbitrarily and
+    writes a value nobody chose. Both are states the source's own unique
+    constraints make unwritable, so a batch that has them is a hand-edited
+    file -- and the artifact's own order is the only thing that can decide
+    between its rows, which is the rule `_merge_sources` already follows.
+    """
+    chosen: dict[tuple[Any, ...], Mapping[str, Any]] = {}
+    for row in rows:
+        chosen.setdefault(tuple(row[column] for column in key), row)
+    return list(chosen.values())
+
+
 def _insert(table: str) -> str:
-    """`INSERT INTO <table> (<carried columns>) VALUES (<binds>)`.
+    """`INSERT INTO <table> (<carried columns>) SELECT … FROM unnest(…)`.
 
     Every fragment is a table or column name read off `MANIFEST` and
     `Base.metadata`, never input, and `apply` has already refused a table the
@@ -1226,11 +1290,10 @@ def _insert(table: str) -> str:
     """
     columns = _carried_columns(table)
     names = ", ".join(columns)
-    binds = ", ".join(f":{column}" for column in columns)
-    return f"INSERT INTO {table} ({names}) VALUES ({binds})"  # noqa: S608
+    return f"INSERT INTO {table} ({names}) SELECT {names} FROM {_arrays(table, columns)}"  # noqa: S608
 
 
-def _upsert_watch_state(arbiter: str) -> str:
+def _upsert_watch_state(arbiter: str) -> TextClause:
     """The upsert, with the conflict target the row's own target decides.
 
     `RETURNING id` with the `WHERE` on the `DO UPDATE` is what separates
@@ -1240,18 +1303,43 @@ def _upsert_watch_state(arbiter: str) -> str:
     assignments = ", ".join(f"{column} = excluded.{column}" for column in _WATCH_STATE_MERGED)
     held = ", ".join(f"watch_states.{column}" for column in _WATCH_STATE_MERGED)
     offered = ", ".join(f"excluded.{column}" for column in _WATCH_STATE_MERGED)
-    return (
+    return text(
         f"{_insert('watch_states')} ON CONFLICT ({arbiter}) DO UPDATE SET {assignments} "
         f"WHERE ({held}) IS DISTINCT FROM ({offered}) RETURNING id"
     )
 
 
+#: Insert on the name, which `uq_users_name` makes an identity.
+_INSERT_USERS: Final = text(f"{_insert('users')} ON CONFLICT (name) DO NOTHING RETURNING id")
+
+#: No conflict clause: `_merge_sources` has already decided which rows may
+#: land, because the refusal this table needs is one the schema cannot make.
+_INSERT_SOURCES: Final = text(f"{_insert('sources')} RETURNING id")
+
+_INSERT_SOURCE_CREDENTIALS: Final = text(
+    f"{_insert('source_credentials')} ON CONFLICT (ref) DO NOTHING RETURNING ref"
+)
+
+#: The two append-only tables, keyed by name because `_append` serves both and
+#: the statement is the only thing that differs between them.
+_APPEND: Final[MappingProxyType[str, TextClause]] = MappingProxyType(
+    {
+        table: text(f"{_insert(table)} ON CONFLICT (id) DO NOTHING RETURNING id")
+        for table in ("llm_calls", "search_queries")
+    }
+)
+
+#: Two statements rather than one, because a UNIQUE constraint over a nullable
+#: column does not collide on `NULL`: a single arbiter would silently insert
+#: duplicates of the other kind.
+_UPSERT_WATCH_STATE_ON_TITLE: Final = _upsert_watch_state("user_id, title_id")
+_UPSERT_WATCH_STATE_ON_EPISODE: Final = _upsert_watch_state("user_id, episode_id")
+
 #: `slug_prefix` is the primary key and `enabled` is the whole of the
 #: decision, so the guard compares that one column: an artifact re-restored
 #: under a later `updated_at` has not changed an operator's choice.
-_UPSERT_ROW_PROVIDER_SETTING: Final = (
-    "INSERT INTO row_provider_settings (slug_prefix, enabled, updated_at) "
-    "VALUES (:slug_prefix, :enabled, :updated_at) "
+_UPSERT_ROW_PROVIDER_SETTING: Final = text(
+    f"{_insert('row_provider_settings')} "
     "ON CONFLICT (slug_prefix) DO UPDATE SET enabled = excluded.enabled, "
     "updated_at = excluded.updated_at "
     "WHERE row_provider_settings.enabled IS DISTINCT FROM excluded.enabled "
@@ -1260,9 +1348,20 @@ _UPSERT_ROW_PROVIDER_SETTING: Final = (
 
 #: The `PARTIAL` entry's merge, and `AND title_id IS NULL` is the whole of it.
 #: `(source_id, external_id)` is `uq_media_items_source_external`, a real
-#: unique constraint, so the `WHERE` names at most one row.
-_UPDATE_MEDIA_ITEM_LINKS: Final = (
-    "UPDATE media_items SET title_id = :title_id, episode_id = :episode_id "
-    "WHERE source_id = :source_id AND external_id = :external_id AND title_id IS NULL "
-    "RETURNING id"
+#: unique constraint, so each carried key names at most one row.
+_UPDATE_MEDIA_ITEM_LINKS: Final = text(
+    "UPDATE media_items SET title_id = carried.title_id, episode_id = carried.episode_id "  # noqa: S608
+    f"FROM {_arrays('media_items', _carried_columns('media_items'))} "
+    "WHERE media_items.source_id = carried.source_id "
+    "AND media_items.external_id = carried.external_id "
+    "AND media_items.title_id IS NULL "
+    "RETURNING media_items.id"
+)
+
+#: Which of this batch's keys the target already holds, for the `absent`
+#: half of the `media_items` report.
+_EXISTING_MEDIA_ITEMS: Final = text(
+    "SELECT m.source_id, m.external_id FROM media_items m "  # noqa: S608
+    f"JOIN {_arrays('media_items', _MEDIA_ITEM_KEY)} "
+    "ON m.source_id = carried.source_id AND m.external_id = carried.external_id"
 )

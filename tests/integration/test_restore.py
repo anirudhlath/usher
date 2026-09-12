@@ -1894,3 +1894,120 @@ async def test_an_artifact_whose_header_over_counts_its_body_is_refused(
         await _count(sessions, "SELECT count(*) FROM users WHERE name = :name", name=HOUSEHOLD_NAME)
         == 0
     ), "a row landed from an artifact shorter than its own header"
+
+
+async def test_two_artifact_rows_on_one_conflict_target_land_as_one_row(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """⚠️ **Unexecuted at the commit that wrote it**: `tests/integration/`
+    shares one container and the suite was not run.
+
+    The source's `uq_watch_states_user_title` makes two rows on one
+    `(household, title)` unwritable *there*, and resolution is what can
+    collapse them *here*: the two references below name the same target title
+    through different rungs of K2's ladder -- one by `imdb_id`, one by
+    `(kind, tmdb_id)` -- so one artifact arrives holding two rows for one
+    conflict target.
+
+    A set-based upsert cannot carry both: the second is SQLSTATE `21000`,
+    which is outside `ROW_REFUSED_SQLSTATE_CLASSES` and would cross the port
+    as a raw `DBAPIError` rather than as a refusal anything renders. So
+    `_one_per` drops it, the artifact's first row wins, and the assertions
+    below are the three halves of that: one row in the table, the *first*
+    row's values in it, and a report whose buckets still add up to what was
+    submitted.
+    """
+    first = _watch_state(
+        title=_title(kind="movie", imdb_id=HELD_IMDB_ID, tmdb_id=None), position=111
+    )
+    second = _watch_state(
+        title=_title(kind="movie", imdb_id=None, tmdb_id=HELD_TMDB_ID), position=222
+    )
+    _write_artifact(
+        artifact_path,
+        [("users", _user()), ("watch_states", first), ("watch_states", second)],
+        schema_revision=code_head_revision(),
+    )
+
+    report = await _restore(sessions, artifact_path)
+
+    assert report.committed and not report.refused, report.refused
+    # Both rows were submitted and the buckets account for both: one landed,
+    # one was superseded by it. A report that lost the second row entirely
+    # would be the failure `TableOutcome`'s own docstring is about.
+    outcome = report.outcomes["watch_states"]
+    assert outcome.written + outcome.present + outcome.absent + outcome.unresolved == 2, outcome
+    assert outcome.written == 1, outcome
+
+    async with sessions() as probe:
+        landed = (
+            await probe.execute(
+                text(
+                    "SELECT position_seconds FROM watch_states WHERE title_id = :title "
+                    "AND user_id IN (SELECT id FROM users WHERE name = :household)"
+                ),
+                {"title": rebuilt["movie"], "household": HOUSEHOLD_NAME},
+            )
+        ).all()
+    assert [row.position_seconds for row in landed] == [111], (
+        "the two rows did not collapse onto one, or the artifact's second row won"
+    )
+
+
+async def test_an_over_length_enum_value_is_refused_rather_than_silently_truncated(
+    sessions: async_sessionmaker[AsyncSession],
+    rebuilt: Mapping[str, uuid.UUID],
+    artifact_path: Path,
+) -> None:
+    """⚠️ **Unexecuted at the commit that wrote it**, for the case above's
+    reason.
+
+    🔴 **An explicit cast to a bounded character type truncates in silence.**
+    `search_queries.surface` is `VARCHAR(8)` under
+    `enum_column(native_enum=False, create_constraint=False)`, so nothing in
+    the schema would catch a shortened value either: it would be written,
+    reported `written`, and then raise `LookupError` out of the Enum result
+    processor on every later read of the row -- damage this command inflicted,
+    discovered by whatever next read the analytics surface makes.
+
+    The bind is therefore cast to `TEXT[]` and the width is enforced where it
+    always was, by the `INSERT`'s assignment coercion, which raises `22001`
+    -- class 22, so `refusals_as_conflict` turns it into the `RepositoryConflict`
+    this command renders as *a value the column will not take*.
+
+    The positive control is the same artifact with a legal `surface`, so the
+    refusal is about the width rather than about `search_queries` never being
+    written at all.
+    """
+    query = _search_query(clicked=None)
+    _write_artifact(
+        artifact_path,
+        [("users", _user()), ("search_queries", {**query, "surface": "console-wall-panel"})],
+        schema_revision=code_head_revision(),
+    )
+
+    with pytest.raises(RestoreRefused) as refusal:
+        await _restore(sessions, artifact_path)
+
+    assert "will not take" in str(refusal.value), refusal.value
+    assert (
+        await _count(
+            sessions,
+            "SELECT count(*) FROM search_queries WHERE user_id IN "
+            "(SELECT id FROM users WHERE name = :household)",
+            household=HOUSEHOLD_NAME,
+        )
+        == 0
+    ), "a truncated surface was written rather than refused"
+
+    _write_artifact(
+        artifact_path,
+        [("users", _user()), ("search_queries", query)],
+        schema_revision=code_head_revision(),
+    )
+    clean = await _restore(sessions, artifact_path)
+
+    assert clean.refused == (), clean.refused
+    assert clean.written["search_queries"] == 1

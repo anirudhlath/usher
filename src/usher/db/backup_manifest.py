@@ -165,10 +165,7 @@ class BackupClass(StrEnum):
 
 
 class RestoreRule(StrEnum):
-    """What restore does with the table. Stored per entry rather than derived
-    from the class at read time, so K4 reads one field; `__post_init__`
-    refuses an entry whose rule disagrees with its class.
-    """
+    """What restore does with the table, read off `BackupEntry.restore`."""
 
     WHOLE = "whole"
     """Every column of every row the artifact carries."""
@@ -180,9 +177,9 @@ class RestoreRule(StrEnum):
     """Restore does not write this table."""
 
 
-#: Which rule each class takes. One mapping rather than a rule repeated at
-#: 29 call sites, and `__post_init__` is what makes it binding on the
-#: entries K3 and the test fixtures build that this file never sees.
+#: Which rule each class takes. The one definition of it: `BackupEntry.restore`
+#: reads it, so the entries K3 and the test fixtures build -- constructions this
+#: file never sees -- cannot carry a rule that disagrees with their class.
 _RULE_FOR: Final[MappingProxyType[BackupClass, RestoreRule]] = MappingProxyType(
     {
         BackupClass.PRECIOUS: RestoreRule.WHOLE,
@@ -209,7 +206,6 @@ class BackupEntry:
     """
 
     kind: BackupClass
-    restore: RestoreRule
     reason: str
     rebuilt_by: str = ""
     """`REBUILDABLE` only: the command(s) that reproduce it, `" then "`-joined."""
@@ -220,16 +216,22 @@ class BackupEntry:
     def __post_init__(self) -> None:
         if not self.reason.strip():
             raise ValueError("a backup entry needs a reason; the class alone is the prose table")
-        if self.restore is not _RULE_FOR[self.kind]:
-            raise ValueError(
-                f"{self.kind} restores as {_RULE_FOR[self.kind]}, not {self.restore}",
-            )
         wants_columns = self.kind is BackupClass.PARTIAL
         if bool(self.columns) is not wants_columns:
             raise ValueError(f"{self.kind} entries name columns iff they are PARTIAL")
         wants_command = self.kind is BackupClass.REBUILDABLE
         if bool(self.rebuilt_by.strip()) is not wants_command:
             raise ValueError(f"{self.kind} entries name a rebuild command iff they are REBUILDABLE")
+
+    @property
+    def restore(self) -> RestoreRule:
+        """What restore does with this table, which the class alone decides.
+
+        Derived rather than stored so the two cannot disagree: a field would
+        be a second spelling of `_RULE_FOR` that every construction site --
+        including the fixtures this file never sees -- has to keep true.
+        """
+        return _RULE_FOR[self.kind]
 
     @property
     def rebuild_commands(self) -> tuple[str, ...]:
@@ -240,13 +242,12 @@ class BackupEntry:
 
 
 def _precious(reason: str) -> BackupEntry:
-    return BackupEntry(kind=BackupClass.PRECIOUS, restore=RestoreRule.WHOLE, reason=reason)
+    return BackupEntry(kind=BackupClass.PRECIOUS, reason=reason)
 
 
 def _rebuildable(reason: str, rebuilt_by: str) -> BackupEntry:
     return BackupEntry(
         kind=BackupClass.REBUILDABLE,
-        restore=RestoreRule.NEVER,
         reason=reason,
         rebuilt_by=rebuilt_by,
     )
@@ -255,14 +256,13 @@ def _rebuildable(reason: str, rebuilt_by: str) -> BackupEntry:
 def _partial(reason: str, columns: tuple[str, ...]) -> BackupEntry:
     return BackupEntry(
         kind=BackupClass.PARTIAL,
-        restore=RestoreRule.MERGE,
         reason=reason,
         columns=columns,
     )
 
 
 def _schema(reason: str) -> BackupEntry:
-    return BackupEntry(kind=BackupClass.SCHEMA, restore=RestoreRule.NEVER, reason=reason)
+    return BackupEntry(kind=BackupClass.SCHEMA, reason=reason)
 
 
 #: Every table in the live schema, classified. Exhaustiveness is enforced

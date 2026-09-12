@@ -21,15 +21,13 @@ four rungs is not a directory: `ext4`'s htree copes and `ls` does not, and a
 they wonder how big the cache is. `ab/cd/` spreads it over 65,536 leaves at
 ~78 files each.
 
-**Writes are atomic.** A scratch file in the *same directory* — so the move is
-a rename within one filesystem and never a copy — then `Path.replace`, which is
-`os.replace` and is atomic on POSIX. C5 serves these bytes with a very long
-`max-age`, so a partially written file is bytes a client keeps for a year;
-`finally: unlink(missing_ok=True)` is what makes a stream that dies mid-body
-leave nothing rather than a fragment. The scratch name carries a random suffix
-because two concurrent misses for one rung are expected (ADR-0032 accepts the
-double fetch), and two writers sharing one scratch name would interleave into a
-file that is neither.
+**Writes are atomic.** A `usher.atomic.scratch_beside` file, then
+`Path.replace`, which is `os.replace` and is atomic on POSIX. C5 serves these
+bytes with a very long `max-age`, so a partially written file is bytes a client
+keeps for a year; `finally: unlink(missing_ok=True)` is what makes a stream that
+dies mid-body leave nothing rather than a fragment. The rename is not
+`write_atomically` because the body arrives as an async stream under a byte
+ceiling, which a synchronous callback cannot consume.
 
 **`fsync` before the rename, and it is not ceremony here.** The rename is
 atomic with respect to *other processes*; it is not atomic with respect to a
@@ -40,9 +38,9 @@ flushed. Under `immutable` that is a corrupt image cached for a year, and one
 
 import asyncio
 import os
-import uuid
 from pathlib import Path
 
+from usher.atomic import scratch_beside
 from usher.ports.images import (
     SUPPORTED_MEDIA_TYPES,
     FetchedImage,
@@ -104,7 +102,7 @@ class DiskImageBlobStore(ImageBlobStore):
         extension = extension_for(fetched.content_type)
         final = self._path(key, extension)
         await asyncio.to_thread(final.parent.mkdir, parents=True, exist_ok=True)
-        scratch = final.with_name(f"{final.name}.{uuid.uuid4().hex}.part")
+        scratch = scratch_beside(final)
         body = bytearray()
         try:
             handle = await asyncio.to_thread(scratch.open, "wb")

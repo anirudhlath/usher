@@ -12,6 +12,19 @@ driving" (ADR-0009) for repositories, the same mechanism serving both
 contracts.
 """
 
+import gzip
+import zlib
+from typing import Final
+
+#: What a gzip body that is damaged, truncated or not gzip at all raises,
+#: named once because it cannot be stated as one base class: `BadGzipFile` is
+#: an `OSError`, `zlib.error` is not, and a member that ends mid-stream raises
+#: a bare `EOFError` out of `GzipFile.read`. Both readers of a compressed
+#: upstream file -- the dataset cache and the backup artifact -- translate the
+#: same set, and a reader that caught a subset of it would let one flavour of
+#: the same damage escape as a stack.
+DAMAGED_GZIP: Final = (gzip.BadGzipFile, EOFError, zlib.error)
+
 
 class UsherPortError(Exception):
     """Base for every error a port implementation may raise."""
