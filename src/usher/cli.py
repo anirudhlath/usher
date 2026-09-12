@@ -2249,18 +2249,16 @@ def _print_restore_report(report: RestoreReport) -> None:
     and the artifact. The keys printed are `keys_tried`'s own rendering, so
     what an operator reads is what was looked for rather than a paraphrase.
     """
-    for table in report.tables:
+    for table, outcome in sorted(report.outcomes.items()):
         counts = (
-            f"{report.written.get(table, 0):>9,} written"
-            f"{report.present.get(table, 0):>10,} present"
-            f"{report.absent.get(table, 0):>10,} nothing to write onto"
+            f"{outcome.written:>9,} written"
+            f"{outcome.present:>10,} present"
+            f"{outcome.absent:>10,} nothing to write onto"
         )
-        unresolved = report.unresolved.get(table, 0)
-        if unresolved:
-            counts += f"{unresolved:>10,} skipped as unresolvable"
-        refused = report.refused_by_table().get(table, 0)
-        if refused:
-            counts += f"{refused:>10,} refused"
+        if outcome.unresolved:
+            counts += f"{outcome.unresolved:>10,} skipped as unresolvable"
+        if outcome.refused:
+            counts += f"{len(outcome.refused):>10,} refused"
         print(f"  {table:<24}{counts}")
     for refusal in report.refused[:_REFUSALS_NAMED]:
         print(f"  refused {refusal.table:<16}{', '.join(refusal.keys)} -- {refusal.reason}")

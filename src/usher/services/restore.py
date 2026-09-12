@@ -94,6 +94,7 @@ from usher.ports.repository import (
     EpisodeReference,
     RestoreRefusal,
     RestoreRepository,
+    TableOutcome,
     TitleReference,
 )
 
@@ -140,63 +141,68 @@ class RestoreReport:
     this command is built to make visible, and an operator reading it has no
     second copy of the database to compare against.
 
-    `committed` is separate from `refused` on purpose. A refused run and a
+    `committed` is separate from the refusals on purpose. A refused run and a
     `--dry-run` both leave the database untouched and they are not the same
     event, so a report that inferred one from the other could not tell an
     operator which of the two they just did.
+
+    Each table keeps the whole `TableOutcome` the repository answered with.
+    Five parallel maps would be the same five numbers with a fifth chance for
+    one table to be in four of them, and a renderer would have to put the row
+    back together to print a line.
     """
 
     path: Path
     schema_revision: str | None
-    written: Mapping[str, int]
-    present: Mapping[str, int]
-    absent: Mapping[str, int]
-    unresolved: Mapping[str, int]
-    refused: tuple[RestoreRefusal, ...]
+    outcomes: Mapping[str, TableOutcome]
     dry_run: bool
     committed: bool
 
     @property
+    def written(self) -> Mapping[str, int]:
+        return {table: outcome.written for table, outcome in self.outcomes.items()}
+
+    @property
+    def present(self) -> Mapping[str, int]:
+        return {table: outcome.present for table, outcome in self.outcomes.items()}
+
+    @property
+    def absent(self) -> Mapping[str, int]:
+        return {table: outcome.absent for table, outcome in self.outcomes.items()}
+
+    @property
+    def unresolved(self) -> Mapping[str, int]:
+        return {table: outcome.unresolved for table, outcome in self.outcomes.items()}
+
+    @property
+    def refused(self) -> tuple[RestoreRefusal, ...]:
+        return tuple(refusal for outcome in self.outcomes.values() for refusal in outcome.refused)
+
+    @property
     def total_written(self) -> int:
-        return sum(self.written.values())
+        return sum(outcome.written for outcome in self.outcomes.values())
 
     @property
     def total_present(self) -> int:
-        return sum(self.present.values())
+        return sum(outcome.present for outcome in self.outcomes.values())
 
     @property
     def total_absent(self) -> int:
-        return sum(self.absent.values())
+        return sum(outcome.absent for outcome in self.outcomes.values())
 
     @property
     def total_unresolved(self) -> int:
-        return sum(self.unresolved.values())
-
-    @property
-    def tables(self) -> tuple[str, ...]:
-        """Every table this run touched, in a stable order.
-
-        Derived rather than kept, so a bucket added later cannot be one the
-        renderer forgets to iterate.
-        """
-        return tuple(
-            sorted(
-                set(self.written)
-                | set(self.present)
-                | set(self.absent)
-                | set(self.unresolved)
-                | {refusal.table for refusal in self.refused}
-            )
-        )
+        return sum(outcome.unresolved for outcome in self.outcomes.values())
 
     def refused_by_table(self) -> Mapping[str, int]:
         """How many rows each table refused. **Exact whatever the renderer
         caps**, which is the half of K5's finding 4 that a truncated list of
         lines cannot carry."""
-        counted: dict[str, int] = {}
-        for refusal in self.refused:
-            counted[refusal.table] = counted.get(refusal.table, 0) + 1
-        return counted
+        return {
+            table: len(outcome.refused)
+            for table, outcome in self.outcomes.items()
+            if outcome.refused
+        }
 
 
 class RestoreService:
@@ -254,21 +260,12 @@ class RestoreService:
         _refuse_an_unknown_table(rows, self._repository)
         decoded = _decode_rows(rows, self._repository)
 
-        written: dict[str, int] = {}
-        present: dict[str, int] = {}
-        absent: dict[str, int] = {}
-        unresolved: dict[str, int] = {}
-        refused: list[RestoreRefusal] = []
+        outcomes: dict[str, TableOutcome] = {}
         for table in self._repository.restored_tables():
-            batch = [row for name, row in decoded if name == table]
+            batch = decoded.get(table)
             if not batch:
                 continue
-            outcome = await self._apply(table, batch, skip_unresolvable=skip_unresolvable)
-            written[table] = outcome.written
-            present[table] = outcome.present
-            absent[table] = outcome.absent
-            unresolved[table] = outcome.unresolved
-            refused.extend(outcome.refused)
+            outcomes[table] = await self._apply(table, batch, skip_unresolvable=skip_unresolvable)
 
         # The single decision, after the last table rather than inside the
         # loop. `--dry-run` takes the identical path and lands here with
@@ -278,7 +275,7 @@ class RestoreService:
         # commit.** A row dropped under `--skip-unresolvable` is one the
         # operator asked to drop; treating it as a refusal would make the flag
         # a slower way of doing nothing.
-        committed = not refused and not dry_run
+        committed = not any(outcome.refused for outcome in outcomes.values()) and not dry_run
         if committed:
             await self._commit()
         else:
@@ -286,21 +283,14 @@ class RestoreService:
         return RestoreReport(
             path=source,
             schema_revision=revision,
-            # Four independent keyword arguments: each is a tally over a
-            # disjoint set of rows and none is computed from another, so their
-            # *order* in this call decides nothing.
-            written=written,
-            present=present,
-            absent=absent,
-            unresolved=unresolved,
-            refused=tuple(refused),
+            outcomes=outcomes,
             dry_run=dry_run,
             committed=committed,
         )
 
     async def _apply(
         self, table: str, rows: Sequence[Mapping[str, object]], *, skip_unresolvable: bool
-    ) -> Any:
+    ) -> TableOutcome:
         """One table, with a refused *row* rendered as a refused *file*.
 
         `RepositoryConflict` is what `db/repositories/_errors.py` raises for a
@@ -481,8 +471,13 @@ def _refuse_an_unknown_table(
 
 def _decode_rows(
     rows: Sequence[Mapping[str, Any]], repository: RestoreRepository
-) -> list[tuple[str, Mapping[str, object]]]:
-    """Every body line, with its references read back out of JSON.
+) -> dict[str, list[Mapping[str, object]]]:
+    """Every body line, with its references read back out of JSON, in one list
+    per table.
+
+    Grouped here rather than by the caller filtering the whole body once per
+    table: the artifact interleaves tables freely, and eight passes over
+    14,259 rows to find eight batches is a scan the decode is already making.
 
     The key set is compared against `restored_columns` rather than trusted,
     which is the *truncated row* half of refusal 1: a row that lost a column
@@ -491,7 +486,7 @@ def _decode_rows(
     checked one function up -- two databases at one revision have one column
     set, so a mismatch here is a damaged file and not a version skew.
     """
-    decoded: list[tuple[str, Mapping[str, object]]] = []
+    decoded: dict[str, list[Mapping[str, object]]] = {}
     for position, line in enumerate(rows, start=2):
         table = str(line["table"])
         row = line["row"]
@@ -507,7 +502,9 @@ def _decode_rows(
                 f"line {position} is not a whole {table} row: missing {missing}, "
                 f"unexpected {unknown}"
             )
-        decoded.append((table, {key: _decode(value, position) for key, value in row.items()}))
+        decoded.setdefault(table, []).append(
+            {key: _decode(value, position) for key, value in row.items()}
+        )
     return decoded
 
 
