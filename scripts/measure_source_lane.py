@@ -113,7 +113,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-from pydantic import SecretStr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -136,7 +135,6 @@ from scripts.measure_source_latency import (
 )
 
 from usher.adapters.http import SourceGate
-from usher.ports.credentials import SourceCredentials
 
 #: `/var/tmp`, not `/tmp` -- tmpfs here, and a bar's only property is that it
 #: provably predates the numbers.
@@ -511,14 +509,7 @@ async def _run(
     # The gate **off** for the ladder: this arm prices the server, and a gate
     # at the shipped 0.4 would pace every setting identically and measure the
     # limiter instead. Arm C measures the limiter, deliberately and separately.
-    session = build_session(
-        client,
-        credentials=SourceCredentials(username="unused", password=SecretStr("unused")),
-        source_name=args.source_label,
-        device_id=secrets["emby_device_id"],
-        token=secrets["emby_token"],
-        user_id=secrets["emby_user_id"],
-    )
+    session = build_session(client, secrets, source_name=args.source_label)
     user_id = secrets["emby_user_id"]
 
     try:
@@ -584,11 +575,8 @@ async def _run(
             )
             gated = build_session(
                 client,
-                credentials=SourceCredentials(username="unused", password=SecretStr("unused")),
+                secrets,
                 source_name=args.source_label,
-                device_id=secrets["emby_device_id"],
-                token=secrets["emby_token"],
-                user_id=secrets["emby_user_id"],
                 limiter=SourceGate(SHIPPED_RATE, source=args.source_label),
             )
             probes = [

@@ -70,9 +70,7 @@ import httpx
 import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from pydantic import SecretStr
 
-from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortRateLimited, PortUnavailable, UsherPortError
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "measure_source_latency.py"
@@ -125,6 +123,13 @@ _RUN_PROBES: Callable[..., Awaitable[None]] = _MODULE.run_probes
 
 _USER = "u-not-a-real-user"
 
+_SECRETS: Mapping[str, str] = {
+    "emby_server": "http://stub.invalid",
+    "emby_user_id": _USER,
+    "emby_device_id": "stub-device",
+    "emby_token": "stub-token",
+}
+
 
 def _stub(sent: list[httpx.Request], *, first_401: bool = False) -> httpx.MockTransport:
     """A transport that records every request that reaches it.
@@ -150,14 +155,7 @@ def _session(transport: httpx.MockTransport, budget: _Budget | None = None) -> o
     client = httpx.AsyncClient(transport=transport, base_url="http://stub.invalid")
     if budget is not None:
         budget.install(client)
-    return _BUILD_SESSION(
-        client,
-        credentials=SourceCredentials(username="stub", password=SecretStr("stub")),
-        source_name="stub",
-        device_id="stub-device",
-        token="stub-token",
-        user_id=_USER,
-    )
+    return _BUILD_SESSION(client, _SECRETS, source_name="stub")
 
 
 def _six_probes() -> list[_Probe]:
@@ -266,13 +264,6 @@ def test_the_budget_counts_requests_on_the_wire_and_not_probes() -> None:
 
 
 # -- the dry run, where the guard actually lives ------------------------------
-
-_SECRETS: Mapping[str, str] = {
-    "emby_server": "http://stub.invalid",
-    "emby_user_id": _USER,
-    "emby_device_id": "stub-device",
-    "emby_token": "stub-token",
-}
 
 
 def _run_stub(sent: list[httpx.Request]) -> httpx.MockTransport:

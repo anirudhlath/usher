@@ -76,7 +76,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-from pydantic import SecretStr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -90,7 +89,6 @@ from scripts.measure_source_latency import (
 )
 
 from usher.adapters.emby.adapter import ITEM_TYPES
-from usher.ports.credentials import SourceCredentials
 
 DEFAULT_BAR = Path("/var/tmp/m10-gate/BAR-S8.md")  # noqa: S108 -- durable, not tmpfs
 DEFAULT_SOURCE_LABEL = "s8-probe"
@@ -224,14 +222,7 @@ async def _run(args: argparse.Namespace, secrets: Mapping[str, str]) -> int:
     client = budget.install(
         httpx.AsyncClient(base_url=secrets["emby_server"], timeout=httpx.Timeout(args.timeout))
     )
-    session = build_session(
-        client,
-        credentials=SourceCredentials(username="unused", password=SecretStr("unused")),
-        source_name=args.source_label,
-        device_id=secrets["emby_device_id"],
-        token=secrets["emby_token"],
-        user_id=secrets["emby_user_id"],
-    )
+    session = build_session(client, secrets, source_name=args.source_label)
     opened = time.time()
     drifts: list[Drift] = []
     try:

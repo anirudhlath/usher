@@ -332,35 +332,29 @@ class _TokenSession(EmbySession):
 
 def build_session(
     client: httpx.AsyncClient,
+    secrets: Mapping[str, str],
     *,
-    credentials: SourceCredentials,
     source_name: str,
-    device_id: str,
-    token: str,
-    user_id: str,
     limiter: SourceGate | None = None,
 ) -> EmbySession:
-    """S1's session, plus the one seam S7 needs and could not reach.
+    """The session every arm of this harness runs against.
 
-    ⚠️ **`limiter` defaults to `None`, which is what `EmbySession` already
-    does** -- it mints a disabled `SourceGate(0.0)` for a caller that passes
-    none -- so S1's own runs are byte-for-byte the same call they always were
-    and its recorded numbers are unaffected. Added rather than worked around
-    because the alternative was S7 importing `_TokenSession` past its
-    underscore, and a private name reached from a second file is how two
-    harnesses come to disagree about what a session is.
+    The credentials are a placeholder because they are never used: the
+    operator's file holds a token, so `_TokenSession` installs it and
+    `POST /Users/AuthenticateByName` is never reached. Passing them in per
+    caller only spread one unused literal across three files.
 
-    S7 passes a **real** gate for one arm deliberately: the ladder prices the
-    *server* with the gate off, and one separate arm prices the shipped
-    default, which is a different question about a different subject.
+    `limiter` defaults to `None`, which is what `EmbySession` already does for
+    a caller that passes none. An arm that prices the shipped rate limit
+    passes a real gate; an arm that prices the server must not.
     """
     return _TokenSession(
         client,
-        credentials,
+        SourceCredentials(username="unused", password=SecretStr("unused")),
         source_name=source_name,
-        device_id=device_id,
-        token=token,
-        user_id=user_id,
+        device_id=secrets["emby_device_id"],
+        token=secrets["emby_token"],
+        user_id=secrets["emby_user_id"],
         limiter=limiter,
     )
 
@@ -863,14 +857,7 @@ async def _run(
     client = budget.install(
         client_factory(base_url=secrets["emby_server"], timeout=httpx.Timeout(args.timeout))
     )
-    session = build_session(
-        client,
-        credentials=SourceCredentials(username="unused", password=SecretStr("unused")),
-        source_name=args.source_label,
-        device_id=secrets["emby_device_id"],
-        token=secrets["emby_token"],
-        user_id=secrets["emby_user_id"],
-    )
+    session = build_session(client, secrets, source_name=args.source_label)
     try:
         total_items = await warm_up(
             session, user_id=secrets["emby_user_id"], item_ids=item_ids, into=warmups
