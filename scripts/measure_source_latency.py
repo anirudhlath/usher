@@ -83,6 +83,7 @@ the word.
 
 import argparse
 import asyncio
+import dataclasses
 import hashlib
 import json
 import os
@@ -93,7 +94,7 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -332,35 +333,29 @@ class _TokenSession(EmbySession):
 
 def build_session(
     client: httpx.AsyncClient,
+    secrets: Mapping[str, str],
     *,
-    credentials: SourceCredentials,
     source_name: str,
-    device_id: str,
-    token: str,
-    user_id: str,
     limiter: SourceGate | None = None,
 ) -> EmbySession:
-    """S1's session, plus the one seam S7 needs and could not reach.
+    """The session every arm of this harness runs against.
 
-    ⚠️ **`limiter` defaults to `None`, which is what `EmbySession` already
-    does** -- it mints a disabled `SourceGate(0.0)` for a caller that passes
-    none -- so S1's own runs are byte-for-byte the same call they always were
-    and its recorded numbers are unaffected. Added rather than worked around
-    because the alternative was S7 importing `_TokenSession` past its
-    underscore, and a private name reached from a second file is how two
-    harnesses come to disagree about what a session is.
+    The credentials are a placeholder because they are never used: the
+    operator's file holds a token, so `_TokenSession` installs it and
+    `POST /Users/AuthenticateByName` is never reached. Passing them in per
+    caller only spread one unused literal across three files.
 
-    S7 passes a **real** gate for one arm deliberately: the ladder prices the
-    *server* with the gate off, and one separate arm prices the shipped
-    default, which is a different question about a different subject.
+    `limiter` defaults to `None`, which is what `EmbySession` already does for
+    a caller that passes none. An arm that prices the shipped rate limit
+    passes a real gate; an arm that prices the server must not.
     """
     return _TokenSession(
         client,
-        credentials,
+        SourceCredentials(username="unused", password=SecretStr("unused")),
         source_name=source_name,
-        device_id=device_id,
-        token=token,
-        user_id=user_id,
+        device_id=secrets["emby_device_id"],
+        token=secrets["emby_token"],
+        user_id=secrets["emby_user_id"],
         limiter=limiter,
     )
 
@@ -668,6 +663,45 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def run_measurement(
+    run: Callable[[Mapping[str, str]], Coroutine[Any, Any, int]],
+    *,
+    bar: str | Path,
+    secrets_path: str | Path | None,
+) -> int:
+    """The bar, the secrets and the redacting handler every live arm shares.
+
+    A missing bar is fatal rather than a `MISSING` line: a bar's only property
+    is that it provably predates the numbers, and a run that cannot show one
+    has no way to acquire that property afterwards.
+
+    `logger.remove()` because loguru's default handler runs with
+    `diagnose=True`, which renders every name on the frame of a raised
+    exception -- including the payload dict `EmbySession._send` goes to such
+    lengths to keep off its own awaiting line. `create_app` installs
+    `configure_logging`; a bare script does not.
+
+    The handler prints the **traceback**, redacted. `str(exc)` alone loses
+    where the run died, and an unredacted traceback prints a frame carrying
+    the token; `redact` over `format_exc` keeps both properties.
+    """
+    logger.remove()
+    if not secrets_path:
+        raise SystemExit("--secrets (or USHER_EMBY_SECRETS) is required; there is no default")
+    bar = Path(bar)
+    if not bar.exists():
+        raise SystemExit(f"the pre-registered bar {bar} does not exist; refusing to measure")
+    print(f"bar: {bar} sha256 {_sha256(bar)}")
+    secrets = read_secrets(Path(secrets_path))
+    try:
+        return asyncio.run(run(secrets))
+    except SystemExit:
+        raise
+    except BaseException:
+        print(f"FAILED:\n{redact(traceback.format_exc(), secrets)}")
+        return 1
+
+
 def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, UTC).strftime("%H:%M:%SZ")
 
@@ -801,65 +835,30 @@ async def _run(
     args: argparse.Namespace,
     secrets: Mapping[str, str],
     *,
-    plan: Callable[..., list[Probe]] = plan_probes,
-    runner: Callable[..., Awaitable[None]] = run_probes,
-    warmer: Callable[..., Awaitable[int]] = warm_up,
     client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     provider_factory: Callable[..., MeterProvider] = build_meter_provider,
 ) -> int:
-    """The whole run, with the three things a second arm must replace injected.
+    """The whole run, against the two collaborators a test must replace.
 
-    **`plan`, `runner` and `warmer` are composition seams, not test seams**, and
-    they exist because M10's S7 is invited to build a *concurrency* arm on this
-    harness. A concurrency arm replaces exactly those three -- a different probe
-    plan, a loop with N in flight, and possibly a different warm-up -- and
-    reuses everything else here: the quiet check, `_item_ids`, the budget, the
-    session and its token swap, `summarise`/`_table`, `--timings-out`, the
-    replay and `read_back`. Without the seams that reuse is a fork, and a fork
-    is how two harnesses come to disagree about what a request costs.
-    `--bar`, `--source-label` and `--service-name` are arguments for the same
-    reason: they were S1 identities at module scope.
+    `--budget 0` is enforced *here* rather than in `run_probes`: by the time a
+    probe loop is reached the warm-ups have already gone to the operator's
+    server, so a guard down there is unreachable in production.
 
-    ⚠️ **`--budget`'s default is S1's share of Group S's ceiling, not a
-    property of this file.** A second arm passes its own, and there is still no
-    shared ledger across S1/S7/S8/S11 -- each declares and each is trusted.
-    Named here rather than discovered by whoever spends it twice.
+    `client_factory` is what lets a test drive this function against a stub
+    transport and assert on the wire; `provider_factory` lets it run the real
+    loop without a `PeriodicExportingMetricReader` opening a gRPC channel.
 
-    `--budget 0` is enforced *here*: by the time `runner` is reached the
-    warm-ups have already gone to the operator's server, so a guard down there
-    is unreachable in production. `client_factory` is what lets a test drive
-    *this* function against a stub transport and assert on the wire, and
-    `provider_factory` lets it run the real loop without a
-    `PeriodicExportingMetricReader` opening a gRPC channel.
-
-    **Three spellings of the dry-run defect, measured rather than described,
-    because two earlier versions of this docstring asserted one spelling's
-    behaviour for all of them:**
-
-    * this early return moved below the **warm-ups**, alone -> **0** requests
-      on the wire and an **uncaught `BudgetExceeded`**; the case dies there,
-      before it reaches its own assertions.
-    * the same, plus `Budget.spend`'s "0 means unlimited" idiom -> **4**
-      requests on somebody else's Emby, and it returns 0.
-    * this early return moved below the **client construction** -- literally
-      the shape this harness shipped before the guard was hoisted -> **0**
-      requests, but a client is built. This is the plant `built == []` earns
-      its place against, and `return 1` here is what `code == 0` earns its.
+    ⚠️ `--budget`'s default is S1's share of Group S's ceiling, not a property
+    of this file. There is no shared ledger across the group -- each arm
+    declares its own and each is trusted -- so a second arm passes its own.
     """
-    # The import is inside the function on purpose: `_run` reads these three
-    # names at *call* time, so a test can `monkeypatch.setattr` the module and
-    # be seen. A module-level import would bind them once at import and the
-    # monkeypatch would be a silent no-op.
-    from scripts.measure_suggest_tiers import (
-        _CPU_DRIFT_LIMIT,
-        _CPU_SETTLE_SECONDS,
-        _load_snapshot,
-    )
+    # The import is inside the function on purpose: `_run` reads these names at
+    # *call* time, so a test can `monkeypatch.setattr` the module and be seen.
+    # A module-level import would bind them once at import and the monkeypatch
+    # would be a silent no-op.
+    from scripts.measure_suggest_tiers import quiet_closing, quiet_opening
 
-    before = _load_snapshot()
-    opening = float(before["cpu_busy"])
-    foreign = int(before["processes"]["pytest"])
-    print(f"quiet: opening cpu busy {opening}, foreign pytest {foreign}")
+    opening = quiet_opening()
 
     if args.budget == 0:
         # **Before the exporter and before the database.** A dry run that spun
@@ -891,26 +890,19 @@ async def _run(
     client = budget.install(
         client_factory(base_url=secrets["emby_server"], timeout=httpx.Timeout(args.timeout))
     )
-    session = build_session(
-        client,
-        credentials=SourceCredentials(username="unused", password=SecretStr("unused")),
-        source_name=args.source_label,
-        device_id=secrets["emby_device_id"],
-        token=secrets["emby_token"],
-        user_id=secrets["emby_user_id"],
-    )
+    session = build_session(client, secrets, source_name=args.source_label)
     try:
-        total_items = await warmer(
+        total_items = await warm_up(
             session, user_id=secrets["emby_user_id"], item_ids=item_ids, into=warmups
         )
-        probes = plan(
+        probes = plan_probes(
             user_id=secrets["emby_user_id"],
             item_ids=item_ids,
             total_items=total_items,
             reps=args.reps,
             seed=args.seed,
         )
-        await runner(session, probes, timings)
+        await run_probes(session, probes, timings)
     except (BudgetExceeded, ProbeFailed, UsherPortError) as exc:
         # **Caught, not propagated, so the partial run still reports.** Every
         # observation already on `timings` was paid for against a real
@@ -936,7 +928,10 @@ async def _run(
         # class, so a 429 that persisted nine rows says INCOMPLETE and does not
         # read as a clean nine-rep run.
         failure = exc
-        print(f"\nINCOMPLETE -- ended on {type(exc).__name__}: {exc}")
+        # Redacted, like every other line this file prints a failure on:
+        # `Budget` names the request it refused out of `request.url.path`, so
+        # the one exception this harness raises itself carries the user id.
+        print(f"\nINCOMPLETE -- ended on {redact(f'{type(exc).__name__}: {exc}', secrets)}")
     finally:
         await client.aclose()
         provider.force_flush()
@@ -951,15 +946,7 @@ async def _run(
         Path(args.timings_out).write_text(
             json.dumps(
                 [
-                    {
-                        "probe": one.probe,
-                        "op": one.op,
-                        "seconds": one.seconds,
-                        "started_at": one.started_at,
-                        "ended_at": one.ended_at,
-                        "payload_bytes": one.payload_bytes,
-                        "warmup": index < len(warmups),
-                    }
+                    {**dataclasses.asdict(one), "warmup": index < len(warmups)}
                     for index, one in enumerate(every)
                 ],
                 indent=1,
@@ -1047,22 +1034,12 @@ async def _run(
                     f"against a wall-clock median of {by_op[op].median:.4f}"
                 )
 
-    time.sleep(_CPU_SETTLE_SECONDS)
-    after = _load_snapshot()
-    closing = float(after["cpu_busy"])
-    foreign = max(foreign, int(after["processes"]["pytest"]))
-    drift = round(closing - opening, 4)
-    print(f"\nquiet: closing cpu busy {closing}, drift {drift} (limit +-{_CPU_DRIFT_LIMIT})")
-    # ⚠️ **This is a local-CPU guard on a network-bound measurement**, imported
-    # wholesale from a harness whose work was local Postgres queries. For 2.5
-    # minutes this process is idle-blocked on a socket, so the thing that could
-    # actually invalidate the run -- contention on the path to the household
-    # server, or on the server itself -- is not sampled at all. A TCP-connect
-    # RTT sample to the same host before and after costs no Emby request and is
-    # the right addition; recorded rather than done, and it belongs with S7's
-    # concurrency arm.
-    if abs(drift) > _CPU_DRIFT_LIMIT or foreign:
-        print("QUIET CHECK FAILED -- discard this run and repeat it")
+    # ⚠️ **A local-CPU guard on a network-bound measurement.** This process is
+    # idle-blocked on a socket for most of a run, so contention on the path to
+    # the household server -- the thing that could actually invalidate it -- is
+    # not sampled at all. A TCP-connect RTT sample to the same host, before and
+    # after, costs no Emby request and is the right addition.
+    if not quiet_closing(opening):
         return 1
     return 1 if failure is not None else 0
 
@@ -1105,39 +1082,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-
-    # **loguru's default handler runs with `diagnose=True`, which renders the
-    # value of every name on the frame of a raised exception -- including the
-    # `payload` dict `EmbySession._send` goes to such lengths to keep off its
-    # own awaiting line (`session.py`, the long comment there). `create_app`
-    # installs `configure_logging`; a bare script does not, so for a live run
-    # against a real household the default handler is what is listening.
-    # Removed rather than reconfigured: this script prints its own output and
-    # has no use for a log line it did not write.
-    logger.remove()
-
-    bar = Path(args.bar)
-    if not bar.exists():
-        # **Fatal, not a `MISSING` line and carry on.** The only property a
-        # pre-registered bar has is that it provably predates the numbers, and
-        # a run that cannot show its bar has no way to acquire that property
-        # afterwards. Printing `sha256=MISSING` and measuring anyway produces
-        # numbers nobody can ever score.
-        raise SystemExit(f"the pre-registered bar {bar} does not exist; refusing to measure")
-    print(f"bar: {bar} sha256={_sha256(bar)}")
-    if not args.secrets:
-        raise SystemExit("--secrets (or USHER_EMBY_SECRETS) is required; there is no default")
-    secrets = read_secrets(Path(args.secrets))
-    try:
-        return asyncio.run(_run(args, secrets))
-    except Exception:
-        # **The traceback, redacted -- not `str(exc)` alone.** Dropping it
-        # loses where the failure happened, and keeping it raw would print a
-        # frame carrying the token. `redact` over the formatted traceback
-        # keeps both properties; the test drives this path with a known fake
-        # secret and asserts the value is gone and the placeholder is there.
-        print(f"FAILED:\n{redact(traceback.format_exc(), secrets)}")
-        return 1
+    return run_measurement(
+        lambda secrets: _run(args, secrets), bar=args.bar, secrets_path=args.secrets
+    )
 
 
 if __name__ == "__main__":

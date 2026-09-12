@@ -113,7 +113,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-from pydantic import SecretStr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -124,19 +123,17 @@ from scripts.measure_source_latency import (
     Timing,
     _iso,
     _item_ids,
-    _sha256,
     _table,
     build_session,
     get_item_probe,
     issue,
-    read_secrets,
     redact,
+    run_measurement,
     summarise,
     verify_probe,
 )
 
 from usher.adapters.http import SourceGate
-from usher.ports.credentials import SourceCredentials
 
 #: `/var/tmp`, not `/tmp` -- tmpfs here, and a bar's only property is that it
 #: provably predates the numbers.
@@ -179,8 +176,6 @@ class Overlap:
     peak: int
     mean_in_flight: float
     iou: float
-    union_seconds: float
-    busy_seconds: float
 
 
 def overlap_of(timings: Sequence[Timing]) -> Overlap:
@@ -195,7 +190,7 @@ def overlap_of(timings: Sequence[Timing]) -> Overlap:
     `max(ended_at)`, and this function is where that is honoured.
     """
     if not timings:
-        return Overlap(peak=0, mean_in_flight=0.0, iou=0.0, union_seconds=0.0, busy_seconds=0.0)
+        return Overlap(peak=0, mean_in_flight=0.0, iou=0.0)
     events: list[tuple[float, int]] = []
     for one in timings:
         events.append((one.started_at, 1))
@@ -226,8 +221,6 @@ def overlap_of(timings: Sequence[Timing]) -> Overlap:
         peak=peak,
         mean_in_flight=(busy / union) if union > 0 else 0.0,
         iou=(ge_two / union) if union > 0 else 0.0,
-        union_seconds=union,
-        busy_seconds=busy,
     )
 
 
@@ -369,20 +362,7 @@ class Journal:
     def record(self, timing: Timing, *, arm: str) -> None:
         if self._handle is None:
             return
-        self._handle.write(
-            json.dumps(
-                {
-                    "arm": arm,
-                    "probe": timing.probe,
-                    "op": timing.op,
-                    "seconds": timing.seconds,
-                    "started_at": timing.started_at,
-                    "ended_at": timing.ended_at,
-                    "payload_bytes": timing.payload_bytes,
-                }
-            )
-            + "\n"
-        )
+        self._handle.write(json.dumps({"arm": arm, **dataclasses.asdict(timing)}) + "\n")
         self._handle.flush()
 
     def close(self) -> None:
@@ -427,21 +407,6 @@ def _stats_table(timings: Sequence[Timing]) -> str:
     return _table("per concurrency setting (harness wall clock)", summarise(timings, "probe"))
 
 
-def _overlap_table(groups: Mapping[str, list[Timing]]) -> str:
-    lines = [
-        "",
-        "observed overlap (CLAUDE.md's fourth evidence rule)",
-        f"{'setting':>12} {'n':>4} {'peak':>5} {'mean in flight':>15} {'IoU':>7} {'union s':>9}",
-    ]
-    for name in sorted(groups):
-        seen = overlap_of(groups[name])
-        lines.append(
-            f"{name:>12} {len(groups[name]):>4} {seen.peak:>5} "
-            f"{seen.mean_in_flight:>15.2f} {seen.iou:>7.3f} {seen.union_seconds:>9.3f}"
-        )
-    return "\n".join(lines)
-
-
 def _spacing(timings: Sequence[Timing]) -> list[float]:
     """Gaps between consecutive request *starts*, in start order.
 
@@ -468,16 +433,9 @@ async def _run(
     live server is where its `TypeError` was found, after 98 requests. The
     rehearsal is now free and it runs before every live invocation.
     """
-    from scripts.measure_suggest_tiers import (
-        _CPU_DRIFT_LIMIT,
-        _CPU_SETTLE_SECONDS,
-        _load_snapshot,
-    )
+    from scripts.measure_suggest_tiers import quiet_closing, quiet_opening
 
-    before = _load_snapshot()
-    opening = float(before["cpu_busy"])
-    foreign = int(before["processes"]["pytest"])
-    print(f"quiet: opening cpu busy {opening}, foreign pytest {foreign}")
+    opening = quiet_opening()
 
     if args.budget == 0:
         print("DRY RUN (--budget 0): no request issued, no database")
@@ -511,14 +469,7 @@ async def _run(
     # The gate **off** for the ladder: this arm prices the server, and a gate
     # at the shipped 0.4 would pace every setting identically and measure the
     # limiter instead. Arm C measures the limiter, deliberately and separately.
-    session = build_session(
-        client,
-        credentials=SourceCredentials(username="unused", password=SecretStr("unused")),
-        source_name=args.source_label,
-        device_id=secrets["emby_device_id"],
-        token=secrets["emby_token"],
-        user_id=secrets["emby_user_id"],
-    )
+    session = build_session(client, secrets, source_name=args.source_label)
     user_id = secrets["emby_user_id"]
 
     try:
@@ -584,11 +535,8 @@ async def _run(
             )
             gated = build_session(
                 client,
-                credentials=SourceCredentials(username="unused", password=SecretStr("unused")),
+                secrets,
                 source_name=args.source_label,
-                device_id=secrets["emby_device_id"],
-                token=secrets["emby_token"],
-                user_id=secrets["emby_user_id"],
                 limiter=SourceGate(SHIPPED_RATE, source=args.source_label),
             )
             probes = [
@@ -624,20 +572,7 @@ async def _run(
 
     if args.timings_out:
         Path(args.timings_out).write_text(
-            json.dumps(
-                [
-                    {
-                        "probe": one.probe,
-                        "op": one.op,
-                        "seconds": one.seconds,
-                        "started_at": one.started_at,
-                        "ended_at": one.ended_at,
-                        "payload_bytes": one.payload_bytes,
-                    }
-                    for one in every
-                ],
-                indent=1,
-            ),
+            json.dumps([dataclasses.asdict(one) for one in every], indent=1),
             encoding="utf-8",
         )
         print(f"wrote {len(every)} raw timings to {args.timings_out} (no credential in it)")
@@ -692,14 +627,8 @@ async def _run(
             f"peak {overlap_of(arm_c).peak}, IoU {overlap_of(arm_c).iou:.3f}"
         )
 
-    after = _load_snapshot()
-    closing = float(after["cpu_busy"])
-    drift = round(closing - opening, 3)
-    print(f"\nquiet: closing cpu busy {closing}, drift {drift} (limit +-{_CPU_DRIFT_LIMIT})")
-    if abs(drift) > _CPU_DRIFT_LIMIT:
-        print("QUIET-CHECK FAILED: this run is discarded per the bar")
+    if not quiet_closing(opening):
         return 1
-    _ = _CPU_SETTLE_SECONDS
     return 1 if failure else 0
 
 
@@ -722,21 +651,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if not args.secrets:
-        raise SystemExit("--secrets or USHER_EMBY_SECRETS is required")
-    if args.bar.exists():
-        print(f"bar: {args.bar} sha256 {_sha256(args.bar)}")
-    else:
-        raise SystemExit(f"the pre-registered bar {args.bar} does not exist; write it first")
-    secrets = read_secrets(Path(args.secrets))
     started = time.time()
-    try:
-        code = asyncio.run(_run(args, secrets))
-    except SystemExit:
-        raise
-    except BaseException as exc:
-        print(redact(f"{type(exc).__name__}: {exc}", secrets))
-        return 1
+    code = run_measurement(
+        lambda secrets: _run(args, secrets), bar=args.bar, secrets_path=args.secrets
+    )
     print(f"elapsed {time.time() - started:.1f}s")
     return code
 

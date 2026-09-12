@@ -58,11 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.measure_suggest_tiers import (
-    _CPU_DRIFT_LIMIT,
-    _CPU_SETTLE_SECONDS,
-    _load_snapshot,
-)
+from scripts.measure_suggest_tiers import quiet_closing, quiet_opening
 
 from usher.composition import (
     SourceRegistry,
@@ -511,14 +507,9 @@ def _throwaway_postgres() -> tuple[str, Callable[[], None]]:
 async def run(args: argparse.Namespace, database_url: str) -> None:
     global _BARE
     print(f"bar: {BAR} sha256={_sha256(BAR) if BAR.exists() else 'MISSING'}")
-    # Settle first: the opening sample must be taken under the same condition
-    # as the closing one, and starting a container leaves the box in its own
+    # Settling first, because starting a container leaves the box in its own
     # wake for several seconds.
-    time.sleep(_CPU_SETTLE_SECONDS)
-    before = _load_snapshot()
-    opening = float(before["cpu_busy"])
-    foreign = int(before["processes"]["pytest"])
-    print(f"quiet: opening cpu busy {opening}, foreign pytest {foreign}, load {before['loadavg']}")
+    opening = quiet_opening(settle=True)
 
     _BARE = _settings(database_url=database_url, base_url="http://127.0.0.1:1", rps=1.0)
 
@@ -548,14 +539,7 @@ async def run(args: argparse.Namespace, database_url: str) -> None:
         _report(runs[-1:], label=f"limit {limit}")
 
     _report(runs, label=args.label)
-    time.sleep(_CPU_SETTLE_SECONDS)
-    after = _load_snapshot()
-    closing = float(after["cpu_busy"])
-    foreign = max(foreign, int(after["processes"]["pytest"]))
-    drift = round(closing - opening, 4)
-    print(f"quiet: closing cpu busy {closing}, drift {drift} (limit +-{_CPU_DRIFT_LIMIT})")
-    if abs(drift) > _CPU_DRIFT_LIMIT or foreign:
-        print("QUIET CHECK FAILED -- discard this run and repeat it")
+    quiet_closing(opening)
 
 
 def main() -> None:

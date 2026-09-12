@@ -70,9 +70,7 @@ import httpx
 import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from pydantic import SecretStr
 
-from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortRateLimited, PortUnavailable, UsherPortError
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "measure_source_latency.py"
@@ -125,6 +123,13 @@ _RUN_PROBES: Callable[..., Awaitable[None]] = _MODULE.run_probes
 
 _USER = "u-not-a-real-user"
 
+_SECRETS: Mapping[str, str] = {
+    "emby_server": "http://stub.invalid",
+    "emby_user_id": _USER,
+    "emby_device_id": "stub-device",
+    "emby_token": "stub-token",
+}
+
 
 def _stub(sent: list[httpx.Request], *, first_401: bool = False) -> httpx.MockTransport:
     """A transport that records every request that reaches it.
@@ -150,14 +155,7 @@ def _session(transport: httpx.MockTransport, budget: _Budget | None = None) -> o
     client = httpx.AsyncClient(transport=transport, base_url="http://stub.invalid")
     if budget is not None:
         budget.install(client)
-    return _BUILD_SESSION(
-        client,
-        credentials=SourceCredentials(username="stub", password=SecretStr("stub")),
-        source_name="stub",
-        device_id="stub-device",
-        token="stub-token",
-        user_id=_USER,
-    )
+    return _BUILD_SESSION(client, _SECRETS, source_name="stub")
 
 
 def _six_probes() -> list[_Probe]:
@@ -267,13 +265,6 @@ def test_the_budget_counts_requests_on_the_wire_and_not_probes() -> None:
 
 # -- the dry run, where the guard actually lives ------------------------------
 
-_SECRETS: Mapping[str, str] = {
-    "emby_server": "http://stub.invalid",
-    "emby_user_id": _USER,
-    "emby_device_id": "stub-device",
-    "emby_token": "stub-token",
-}
-
 
 def _run_stub(sent: list[httpx.Request]) -> httpx.MockTransport:
     """Answers every warm-up well enough that `_run` would proceed.
@@ -311,7 +302,9 @@ def _drive_run(
     answered 200 by `_run_stub`.
     """
     monkeypatch.setattr(
-        _QUIET, "_load_snapshot", lambda: {"cpu_busy": 0.0, "processes": {"pytest": 0}}
+        _QUIET,
+        "_load_snapshot",
+        lambda: {"loadavg": [0.0, 0.0, 0.0], "processes": {"pytest": 0}, "cpu_busy": 0.0},
     )
     monkeypatch.setattr(_QUIET, "_CPU_SETTLE_SECONDS", 0.0)
     stub = transport if transport is not None else _run_stub(sent)
@@ -494,6 +487,55 @@ def test_a_mid_run_port_error_keeps_the_partials_and_reports_the_failure(
         f"the report must name the failure class; it said {printed!r}"
     )
     assert code == 1, f"a run that ended on a port error must return non-zero; got {code}"
+
+
+def test_the_incomplete_line_is_redacted_like_every_other_line_that_prints_a_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """🔴 The last unredacted `str(exc)` in this family.
+
+    `BudgetExceeded` names the request it refused, and the `Budget` hook builds
+    that name out of `request.url.path` -- the **real** path, which is
+    `/Users/{emby_user_id}/Items/...`. So the one exception this harness raises
+    itself is the one carrying a credential, and the `INCOMPLETE` line printed
+    it raw where the sibling arms redact their identical line.
+
+    A 401 is what reaches the refusal without an over-subscribed budget:
+    `EmbySession.request` re-authenticates and resends, so one probe costs two
+    requests and a plan whose arithmetic fits still runs out.
+    """
+    sent: list[httpx.Request] = []
+    built: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        # The **second** request, not the first: the first warm-up is the
+        # anonymous `/System/Info/Public`, which does not re-authenticate.
+        if len(sent) == 2:
+            return httpx.Response(401, json={})
+        return httpx.Response(
+            200, json={"Items": [], "TotalRecordCount": 500_000, "Id": "stub-item"}
+        )
+
+    code = _drive_run(
+        budget=8,
+        reps=1,
+        sent=sent,
+        built=built,
+        monkeypatch=monkeypatch,
+        transport=httpx.MockTransport(handler),
+    )
+    printed = capsys.readouterr().out
+
+    # The premise: the 401 really did cost an extra request and the budget
+    # really did refuse one, or there is no `INCOMPLETE` line to redact.
+    assert "INCOMPLETE" in printed, f"the budget never refused a request: {printed!r}"
+    assert "BudgetExceeded" in printed, f"the report must name the class: {printed!r}"
+    assert _SECRETS["emby_user_id"] not in printed, (
+        f"the user id reached the terminal on the INCOMPLETE line: {printed!r}"
+    )
+    assert "<user-id>" in printed, f"redaction must leave a readable placeholder: {printed!r}"
+    assert code == 1, f"a run that ended early must return non-zero; got {code}"
 
 
 def test_the_four_probe_classes_are_read_only_and_spend_no_discovery_request() -> None:

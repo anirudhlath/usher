@@ -83,7 +83,7 @@ independently by three agents each, the third by two; they lead the list.
    trip per row (~14,259) and the SQL string plus its `TextClause` rebuilt
    inside each loop. Set-based `unnest` statements, hoisted constants, one
    helper for what remains.
-3. `scripts/measure_*.py` — the `main()` bar/secrets/redaction preamble is four
+3. ✅ `scripts/measure_*.py` — the `main()` bar/secrets/redaction preamble is four
    copies and has drifted: three redact `str(exc)` where the original redacts
    `format_exc()`, losing the traceback. One `run_measurement`.
 
@@ -92,11 +92,11 @@ independently by three agents each, the third by two; they lead the list.
 4. `services/backup.py:276` — third hand-rolled atomic scratch-write, missing
    the `fsync` the other two take, PID suffix where they use `uuid4`.
 5. `services/restore.py:358` — damaged-gzip exception set, second spelling.
-6. `scripts/measure_source_lane.py:471,694` — quiet-host check, fourth copy,
+6. ✅ `scripts/measure_source_lane.py:471,694` — quiet-host check, fourth copy,
    missing the settle sleep the other three take.
-7. `scripts/measure_source_lane.py:628` — `Timing` → dict hand-typed; three
+7. ✅ `scripts/measure_source_lane.py:628` — `Timing` → dict hand-typed; three
    sites want `dataclasses.asdict`.
-8. `scripts/*` — `build_session(...)` triplicated with placeholder credentials.
+8. ✅ `scripts/*` — `build_session(...)` triplicated with placeholder credentials.
 9. `tests/integration/` — `_column_set`/`_index_set` verbatim copies; 26 copies
    of the `sessions` fixture; `_scratch`/`_drop`; the Grafana panel walk ×3; the
    CLI dispatch test ×4 and its env helper ×5.
@@ -105,19 +105,19 @@ independently by three agents each, the third by two; they lead the list.
 
 10. `services/restore.py:152` — `RestoreReport` shreds `TableOutcome` into four
     parallel maps and rebuilds it; `_apply` is typed `Any` to dodge the import.
-11. `scripts/audit_bounded_columns.py:1942` — seven reading-independent scans
+11. ✅ `scripts/audit_bounded_columns.py:1942` — seven reading-independent scans
     re-run per pair; ~3× off a 23.5 s guard by hoisting them.
 12. `ports/repository/llm_call.py:173` — `list_since` has no caller in `src/`,
     and ships `SELECT *` unbounded.
 13. `db/backup_manifest.py:212` — `BackupEntry.restore` is derived state
     validated against the mapping it came from. A property.
-14. `scripts/measure_source_lane.py:430` — `_overlap_table` dead, two fields
+14. ✅ `scripts/measure_source_lane.py:430` — `_overlap_table` dead, two fields
     unread, a bare `_ = _CPU_SETTLE_SECONDS` discard.
 15. `services/scheduler.py:628,166` — test-only accessors; two parallel backoff
     dicts that must be cleared together.
 16. `ports/repository/search_query.py:95` — `surface` derivable from `tier`.
 17. `ports/repository/_references.py:12` — paragraph repeated verbatim at `:38`.
-18. `scripts/measure_source_latency.py:804` — three injected seams with no
+18. ✅ `scripts/measure_source_latency.py:804` — three injected seams with no
     caller; the reuse they were built for declined them.
 
 ### Efficiency

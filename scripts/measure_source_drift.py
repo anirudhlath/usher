@@ -67,7 +67,6 @@ the log.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import os
 import sys
 import time
@@ -76,21 +75,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-from pydantic import SecretStr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.measure_source_latency import (
     Budget,
     _iso,
-    _sha256,
     build_session,
-    read_secrets,
     redact,
+    run_measurement,
 )
 
 from usher.adapters.emby.adapter import ITEM_TYPES
-from usher.ports.credentials import SourceCredentials
 
 DEFAULT_BAR = Path("/var/tmp/m10-gate/BAR-S8.md")  # noqa: S108 -- durable, not tmpfs
 DEFAULT_SOURCE_LABEL = "s8-probe"
@@ -224,14 +220,7 @@ async def _run(args: argparse.Namespace, secrets: Mapping[str, str]) -> int:
     client = budget.install(
         httpx.AsyncClient(base_url=secrets["emby_server"], timeout=httpx.Timeout(args.timeout))
     )
-    session = build_session(
-        client,
-        credentials=SourceCredentials(username="unused", password=SecretStr("unused")),
-        source_name=args.source_label,
-        device_id=secrets["emby_device_id"],
-        token=secrets["emby_token"],
-        user_id=secrets["emby_user_id"],
-    )
+    session = build_session(client, secrets, source_name=args.source_label)
     opened = time.time()
     drifts: list[Drift] = []
     try:
@@ -275,20 +264,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if not args.secrets:
-        raise SystemExit("--secrets or USHER_EMBY_SECRETS is required")
-    if args.bar.exists():
-        print(f"bar: {args.bar} sha256 {_sha256(args.bar)}")
-    else:
-        raise SystemExit(f"the pre-registered bar {args.bar} does not exist; write it first")
-    secrets = read_secrets(Path(args.secrets))
-    try:
-        return asyncio.run(_run(args, secrets))
-    except SystemExit:
-        raise
-    except BaseException as exc:
-        print(redact(f"{type(exc).__name__}: {exc}", secrets))
-        return 1
+    return run_measurement(
+        lambda secrets: _run(args, secrets), bar=args.bar, secrets_path=args.secrets
+    )
 
 
 if __name__ == "__main__":
