@@ -1927,23 +1927,32 @@ class DegenerateScan(RuntimeError):
     """
 
 
-def build_ledger(reading: str = DEFAULT_READING, at: str | None = None) -> list[LedgerRow]:
-    """The ledger, optionally over the column set of a *past* migration head.
+@dataclasses.dataclass(frozen=True, slots=True)
+class Scans:
+    """Everything the ledger reads out of today's source.
 
-    `at` narrows the columns to what the replay says existed at that revision
-    and classifies them with **today's** source. That is the only past-head
-    statement this file can honestly make, and it is labelled as such wherever
-    it is printed: the writers, the `except` clauses and the source classes are
-    all today's, so `--at m08b` answers "how would this rule score M8's schema",
-    not "what did M8 measure".
+    Hoisted into a value because neither `reading` nor `--at` can change any
+    of it, and `_drift` builds six ledgers: without this each one re-walks the
+    package's AST to answer the same seven questions.
     """
-    if reading not in READINGS:
-        raise ValueError(f"unknown reading {reading!r}; expected one of {READINGS}")
+
+    sites: list[WriteSite]
+    bounds: dict[tuple[str, str], str]
+    staged: dict[tuple[str, str], tuple[str, bool, str]]
+    feeds: dict[tuple[str, str], StagingColumn]
+
+
+def scan_sources() -> Scans:
+    """The source scans, and every degeneracy check that reads only them.
+
+    A scan that globs nothing passes identically to a scan that passes, so
+    each one is checked for emptiness here rather than being allowed to empty
+    a bucket quietly.
+    """
     _check_call_lists_are_live()
     staging = staging_ddls()
     edges = staged_into()
     sites = write_sites()
-    columns = bounded_columns() if at is None else sorted(migration_bounded_columns(at))
     bounds = domain_bounds()
     staged = staged_bounds()
 
@@ -1951,19 +1960,14 @@ def build_ledger(reading: str = DEFAULT_READING, at: str | None = None) -> list[
         raise DegenerateScan("no CREATE TEMP TABLE found -- the staging scan is dead")
     if not sites:
         raise DegenerateScan("no write site found -- the write-site scan is dead")
-    if not columns:
-        raise DegenerateScan("no bounded column found -- the metadata scan is dead")
     if not bounds:
         raise DegenerateScan("no domain bound found -- the pydantic scan is dead")
     if not staged:
         raise DegenerateScan("no staged bound found -- the source-class scan is dead")
-    # **Symmetric, and the asymmetry it replaces was the reviewed Critical in
-    # its sibling direction.** Checking only `edges - staging` left
-    # `staged_into() -> {}` silent, and it moves 31 columns from `exposed-copy`
-    # to `exposed-sqlalchemy` -- the two buckets F9 splits on. Losing one
-    # table's destinations moved 8. Both now fail here, in `build_ledger`,
-    # which is what F9 imports; `--check` caught them already and nothing runs
-    # `--check`.
+    # **Symmetric**, because the asymmetry it replaces was a reviewed Critical
+    # in its sibling direction: checking only `edges - staging` left
+    # `staged_into() -> {}` silent, and that moves columns between the two
+    # buckets F9 splits on.
     unread = sorted(set(edges) - set(staging))
     if unread:
         raise DegenerateScan(f"staging tables read but never declared: {unread}")
@@ -1991,6 +1995,35 @@ def build_ledger(reading: str = DEFAULT_READING, at: str | None = None) -> list[
         for destination in destinations:
             for staging_column in staging.get(staging_table, {}).values():
                 feeds.setdefault((destination, staging_column.name), staging_column)
+    return Scans(sites=sites, bounds=bounds, staged=staged, feeds=feeds)
+
+
+def build_ledger(
+    reading: str = DEFAULT_READING, at: str | None = None, *, scans: Scans | None = None
+) -> list[LedgerRow]:
+    """The ledger, optionally over the column set of a *past* migration head.
+
+    `at` narrows the columns to what the replay says existed at that revision
+    and classifies them with **today's** source. That is the only past-head
+    statement this file can honestly make, and it is labelled as such wherever
+    it is printed: the writers, the `except` clauses and the source classes are
+    all today's, so `--at m08b` answers "how would this rule score M8's schema",
+    not "what did M8 measure".
+
+    ⚠️ `scans` is a hoist for a caller building several ledgers, **not** a
+    cache. It must stay optional and it must stay off by default: the
+    degradation cases monkeypatch a scan and then call this, and a memo would
+    hand them a ledger built before the patch -- a check that passes for the
+    wrong reason.
+    """
+    if reading not in READINGS:
+        raise ValueError(f"unknown reading {reading!r}; expected one of {READINGS}")
+    if scans is None:
+        scans = scan_sources()
+    sites, bounds, staged, feeds = scans.sites, scans.bounds, scans.staged, scans.feeds
+    columns = bounded_columns() if at is None else sorted(migration_bounded_columns(at))
+    if not columns:
+        raise DegenerateScan("no bounded column found -- the metadata scan is dead")
 
     rows: list[LedgerRow] = []
     for table, column, sql_type in columns:
@@ -2386,10 +2419,11 @@ def readings_table() -> str:
     accident.
     """
     head = head_revision()
+    scans = scan_sources()
     lines = [f"reading            safe  transl  copy  sqla  exposed  ({head} / m08b)"]
     for reading in READINGS:
         for label, at in ((head, None), ("m08b", "m08b")):
-            got = counts(build_ledger(reading, at=at))
+            got = counts(build_ledger(reading, at=at, scans=scans))
             exposed = got["exposed-copy"] + got["exposed-sqlalchemy"]
             marker = "*" if reading == DEFAULT_READING else " "
             lines.append(
@@ -2518,12 +2552,13 @@ def _drift(reading: str) -> list[str]:
             f"metadata/migration drift: only-metadata={sorted(metadata_set - replayed)} "
             f"only-migrations={sorted(replayed - metadata_set)}"
         )
+    scans = scan_sources()
     for label, published, at in (
         (head_revision(), PUBLISHED, None),
         ("m08b", PUBLISHED_AT_M08B, "m08b"),
     ):
         for name in READINGS:
-            got = counts(build_ledger(name, at=at))
+            got = counts(build_ledger(name, at=at, scans=scans))
             want = dict(published[name])
             if {k: got[k] for k in want} != want:
                 complaints.append(

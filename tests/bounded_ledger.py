@@ -32,23 +32,16 @@ def audit_module() -> ModuleType:
     """`scripts/audit_bounded_columns.py`, imported once per process.
 
     Cached because building a ledger walks the SQLAlchemy metadata, the
-    `usher` package's AST and 22 migration revisions; `_drift()` alone builds
-    six of them.
+    `usher` package's AST and every migration revision.
 
-    ⚠️ **The obvious next optimisation is a trap, and it is written here
-    because this docstring is where the next person to measure the cost will
-    look.** The guard costs ~23.5 s of a ~237 s suite, essentially all of it
-    six `build_ledger` calls per `_drift()`, twice. Memoising `build_ledger` on
-    `(reading, at)` removes almost all of that **and silently destroys the
-    degradation cases in `tests/unit/test_bounded_column_ledger.py`**: those
-    monkeypatch a scan (`write_sites`, `_constructed_rows`) and then call
-    `build_ledger`/`write_sites` expecting the mutation to be seen. Against a
-    memo they would read a ledger built before the patch, pass, and assert
-    nothing at all -- a check that passes for the wrong reason, which is this
-    project's named recurring failure. Only the *module import* is cached here,
-    which no case mutates. If the 23 s ever has to go, the cache has to be
-    per-test-scoped and the degradation cases have to be shown to still fail
-    with it in place, in that order.
+    ⚠️ **Do not memoise `build_ledger` on `(reading, at)` to make this
+    faster.** The degradation cases in
+    `tests/unit/test_bounded_column_ledger.py` monkeypatch a scan and then
+    call it expecting the mutation to be seen; against a memo they would read
+    a ledger built before the patch and assert nothing at all. What the script
+    does instead is hoist the source scans into a value its own multi-ledger
+    callers pass in -- optional, and off by default for this reason. Only the
+    *module import* is cached here, which no case mutates.
     """
     specification = importlib.util.spec_from_file_location(
         "usher_audit_bounded_columns", AUDIT_SCRIPT
