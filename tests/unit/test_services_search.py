@@ -21,13 +21,15 @@ scans this file.
 """
 
 import ast
+import asyncio
 import dataclasses
 import inspect
 import math
 import pathlib
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -66,6 +68,7 @@ from usher.services.query_expansion import QUERY_KEY, QueryExpansionService
 from usher.services.search import (
     SearchAnalytics,
     SearchAnswer,
+    SearchQueryBuffer,
     SearchService,
     SemanticSearchUnavailable,
     _blend,
@@ -2273,6 +2276,226 @@ async def test_type_ahead_with_no_household_records_nothing_on_either_tier(
 
     assert len(await service.suggest("vac", tier=tier, user_id=_HOUSEHOLD)) == 1
     assert len(recorder.rows) == 1, "the control: the same call with a household writes"
+
+
+def _keystroke_row(offset: int) -> SearchQueryRecord:
+    """One buffered suggest row, with a fixed id so an order assertion reads."""
+    return SearchQueryRecord(
+        id=uuid.UUID(int=0x900 + offset),
+        at=_NOW,
+        user_id=_HOUSEHOLD,
+        query="vac",
+        mode=SearchMode.FULL_TEXT,
+        result_count=1,
+        latency_ms=1,
+        tier=SuggestTier.PREFIX,
+    )
+
+
+class _Batches:
+    """`SearchQueryScope`'s shape over the fake, with the transactions counted.
+
+    The count is the subject: a buffer that opened a scope per row would write
+    the same rows and cost a WAL flush per keystroke, which is the whole thing
+    the buffer exists to stop.
+    """
+
+    def __init__(self, queries: FakeSearchQueryRepository) -> None:
+        self.queries = queries
+        self.batches: list[int] = []
+
+    def __call__(self) -> AbstractAsyncContextManager[FakeSearchQueryRepository]:
+        return self._open()
+
+    @asynccontextmanager
+    async def _open(self) -> AsyncIterator[FakeSearchQueryRepository]:
+        before = len(self.queries.rows)
+        yield self.queries
+        self.batches.append(len(self.queries.rows) - before)
+
+
+class _GatedBatches(_Batches):
+    """`_Batches`, held open until a case lets the write finish.
+
+    A batch the drain has already taken is the state `flush` has to wait for,
+    and it is not reachable without a scope that can be stopped inside.
+    """
+
+    def __init__(self, queries: FakeSearchQueryRepository) -> None:
+        super().__init__(queries)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @asynccontextmanager
+    async def _open(self) -> AsyncIterator[FakeSearchQueryRepository]:
+        self.entered.set()
+        await self.release.wait()
+        async with super()._open() as queries:
+            yield queries
+
+
+async def test_flush_waits_for_a_batch_the_drain_has_already_taken() -> None:
+    """`flush` is a barrier: on return nothing is pending **and** nothing is in
+    flight.
+
+    Two callers need that and neither can see the difference without it. The
+    lifespan flushes before it stops the drain, and a flush that returned early
+    would leave the shutdown cancelling an INSERT and rolling its batch back;
+    an integration case flushes before reading the table, and an early return
+    makes the row count a race.
+
+    Fails: `flush` popping outside the lock the writer holds.
+    """
+    recorder = _Recorder()
+    batches = _GatedBatches(recorder.queries)
+    buffer = SearchQueryBuffer(batches)
+    assert buffer.submit(_keystroke_row(0))
+    draining = asyncio.create_task(buffer.drain())
+    await batches.entered.wait()
+
+    flushing = asyncio.create_task(buffer.flush())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not flushing.done(), "flush returned while the drain held a batch"
+
+    batches.release.set()
+    await flushing
+    assert [one.id for one in recorder.rows] == [_keystroke_row(0).id]
+
+    await buffer.aclose()
+    await draining
+
+
+async def test_aclose_stops_the_drain_and_writes_what_is_still_buffered() -> None:
+    """Shutdown writes the last keystrokes rather than cancelling them.
+
+    The drain is stopped by being told to stop, not by `Task.cancel()`:
+    `CancelledError` is not an `Exception`, so a cancel landing inside the
+    write escapes the guard that absorbs everything else and takes the batch
+    with it.
+
+    Fails: `aclose` that only sets a flag; a drain cancelled mid-write.
+    """
+    recorder = _Recorder()
+    buffer = SearchQueryBuffer(_Batches(recorder.queries))
+    draining = asyncio.create_task(buffer.drain())
+    await asyncio.sleep(0)
+    assert buffer.submit(_keystroke_row(0))
+
+    await buffer.aclose()
+    await asyncio.wait_for(draining, timeout=1)
+    assert draining.done() and not draining.cancelled()
+    assert [one.id for one in recorder.rows] == [_keystroke_row(0).id]
+
+
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_an_answered_keystroke_hands_its_row_over_rather_than_waiting_for_it(
+    tier: SuggestTier,
+) -> None:
+    """An INSERT plus its WAL flush costs more than a tier-1 answer, so a
+    keystroke that waits for its own row is measuring something it caused.
+
+    `suggest` returns with the row submitted and nothing written; the drain
+    writes it. Both tiers, because a buffer reached on one is a defect a
+    single-tier case cannot see.
+    """
+    hits = (SearchHit(title_id=_QUIET, score=1.0),)
+    recorder = _Recorder()
+    batches = _Batches(recorder.queries)
+    buffer = SearchQueryBuffer(batches)
+    service = await _service(
+        _ScriptedIndex(SearchOutcome()),
+        suggestions=_ScriptedSuggest(hits),
+        tier=tier,
+        analytics=SearchAnalytics(queries=recorder.queries, commit=recorder._commit, buffer=buffer),
+    )
+
+    assert len(await service.suggest("vac", tier=tier, user_id=_HOUSEHOLD)) == 1
+    assert (recorder.rows, recorder.commits) == ([], 0), "the request wrote nothing"
+
+    await buffer.flush()
+    assert [(one.user_id, one.surface, one.tier) for one in recorder.rows] == [
+        (_HOUSEHOLD, SearchSurface.SUGGEST, tier)
+    ]
+
+
+async def test_a_run_of_keystrokes_is_one_transaction_rather_than_one_each() -> None:
+    """The drain's own claim: N buffered rows cost one WAL flush, not N.
+
+    Fails: a buffer that opened its scope per record, which writes the same
+    rows and would satisfy every assertion in the case above.
+    """
+    recorder = _Recorder()
+    batches = _Batches(recorder.queries)
+    buffer = SearchQueryBuffer(batches)
+    for offset in range(5):
+        assert buffer.submit(_keystroke_row(offset))
+    assert recorder.rows == [], "the premise: submitting writes nothing"
+
+    await buffer.flush()
+    assert batches.batches == [5]
+
+
+def _typed(offset: int, query: str) -> SearchQueryRecord:
+    """One buffered suggest row carrying a query of a case's own choosing."""
+    return dataclasses.replace(_keystroke_row(offset), query=query)
+
+
+async def test_the_bound_is_characters_as_well_as_rows() -> None:
+    """A row bound alone is not a memory bound: `q` declares no maximum length
+    on either search route and `search_queries.query` is `Text`, so the worst
+    case is the row cap times whatever one caller cares to type.
+
+    Fails: a capacity check on `len(self._pending)` alone.
+    """
+    recorder = _Recorder()
+    buffer = SearchQueryBuffer(_Batches(recorder.queries), capacity=100, budget=20)
+    assert buffer.submit(_typed(0, "a" * 15))
+    assert not buffer.submit(_typed(1, "b" * 15)), "the budget is what refuses it, not the rows"
+
+    # Released with the batch, so the buffer recovers rather than latching.
+    await buffer.flush()
+    assert buffer.submit(_typed(2, "c" * 15))
+    assert [one.query for one in recorder.rows] == ["a" * 15]
+
+
+async def test_a_run_of_drops_is_reported_once_rather_than_per_keystroke() -> None:
+    """A database that is down drops every keystroke, and this is the route a
+    browser drives per character -- so the line that says so is aggregated:
+    once when the run starts, and once with the count when the buffer empties.
+
+    Fails: the per-drop report left inside `submit`.
+    """
+    recorder = _Recorder()
+    buffer = SearchQueryBuffer(_Batches(recorder.queries), capacity=1)
+
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="TRACE", serialize=True)
+    try:
+        for offset in range(5):
+            buffer.submit(_keystroke_row(offset))
+        assert sum("keystrokes are unrecorded" in one for one in lines) == 1, lines
+        await buffer.flush()
+    finally:
+        logger.remove(sink)
+
+    assert [one for one in lines if "were dropped while the buffer was full" in one], lines
+
+
+async def test_a_full_buffer_refuses_a_row_rather_than_making_a_keystroke_wait() -> None:
+    """Back-pressure on a type-ahead box would let an analytics row slow down
+    the answer, which is the one property this class exists to remove. So the
+    bound is a drop, and it is reported.
+
+    Fails: an unbounded buffer, which grows with a database that is down.
+    """
+    recorder = _Recorder()
+    buffer = SearchQueryBuffer(_Batches(recorder.queries), capacity=2)
+    rows = [_keystroke_row(offset) for offset in range(3)]
+    assert [buffer.submit(one) for one in rows] == [True, True, False]
+
+    await buffer.flush()
+    assert [one.id for one in recorder.rows] == [rows[0].id, rows[1].id]
 
 
 @pytest.mark.parametrize("tier", list(SuggestTier))

@@ -73,7 +73,7 @@ from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortUnavailable
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.repository import SearchQueryRecord
-from usher.ports.search import SearchMode, SearchSurface
+from usher.ports.search import SearchMode
 from usher.ports.source import (
     INFUSE_SCHEME,
     SourceAdapter,
@@ -268,7 +268,6 @@ async def _seed_search(
         mode=SearchMode.FULL_TEXT,
         result_count=3,
         latency_ms=12,
-        surface=SearchSurface.SEARCH,
     )
     await queries.record(record)
     return record.id

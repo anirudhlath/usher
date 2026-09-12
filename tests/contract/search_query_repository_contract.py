@@ -106,7 +106,6 @@ def search_query_record(
     mode: SearchMode = SearchMode.SEMANTIC,
     result_count: int = RESULT_COUNT,
     latency_ms: int = LATENCY_MS,
-    surface: SearchSurface = SearchSurface.SEARCH,
     tier: SuggestTier | None = None,
 ) -> SearchQueryRecord:
     """One `SearchQueryRecord`, with the fields a case does not care about
@@ -117,13 +116,8 @@ def search_query_record(
     write that hardcoded the default would still pass a case that never
     varied it.
 
-    ⚠️ **`surface` is defaulted here and is required on the record itself**,
-    and the asymmetry is deliberate rather than an oversight. `m10c` refuses a
-    `server_default` and `SearchQueryRecord` refuses a field default for the
-    same reason -- a plausible wrong value supplied to a writer that forgot --
-    but a *test-double builder* has no writer to forget: every case here states
-    the surface it is about, and the one that varies it is the pair below. A
-    default in the fixture cannot reach production; one on the record can.
+    `surface` is not a parameter: the record derives it from `tier`, so a case
+    that wants a suggest row names the tier that answered.
     """
     return SearchQueryRecord(
         id=record_id if record_id is not None else new_id(),
@@ -133,7 +127,6 @@ def search_query_record(
         mode=mode,
         result_count=result_count,
         latency_ms=latency_ms,
-        surface=surface,
         tier=tier,
     )
 
@@ -291,7 +284,6 @@ class SearchQueryRepositoryContract:
                 user_id=user_id,
                 query=f"{QUERY[: 4 + len(tier.value)]}",
                 mode=SearchMode.FULL_TEXT,
-                surface=SearchSurface.SUGGEST,
                 tier=tier,
             )
             for tier in SuggestTier

@@ -303,12 +303,11 @@ _EXACT_SCAN_ON = ("SET LOCAL enable_indexscan = on", "SET LOCAL enable_bitmapsca
 
 _COUNT_WITHOUT_EMBEDDING = "SELECT count(*) FROM title_embeddings WHERE embedding IS NULL"
 
-# The model guard's read (M10 J6). Scoped to rows that **have a vector**,
-# which is `_LIST_EMBEDDED`'s own population: a refused title is stored with a
-# NULL embedding, is never a seed, and its recorded model names no vector a
-# rebuild can draw a pool from. `DISTINCT` over the whole table would refuse a
-# rebuild whose readable vectors are uniform because an unreadable row
-# disagreed.
+# The model guard's read. Scoped to rows that **have a vector**: a refused
+# title is stored with a NULL embedding, is never a seed, and names no vector a
+# rebuild can draw a pool from, so `DISTINCT` over the whole table would refuse
+# a rebuild whose readable vectors are uniform. `ix_title_embeddings_model_name`
+# carries the same predicate, and the `ORDER BY` is what reaches for it.
 _STORED_MODEL_NAMES = """
 SELECT DISTINCT model_name FROM title_embeddings
 WHERE embedding IS NOT NULL

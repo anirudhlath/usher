@@ -16,6 +16,7 @@ scans this file.
 """
 
 import ast
+import asyncio
 import pathlib
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -40,7 +41,9 @@ from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
 from usher.api.deps import get_default_user_id, get_search_service, get_visibility_service
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemCode
+from usher.composition import search_query_scope
 from usher.config import Settings
+from usher.db.base import build_session_factory
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.title import Title
@@ -55,7 +58,7 @@ from usher.ports.search import (
     SuggestIndex,
 )
 from usher.services.query_expansion import QUERY_KEY, QueryExpansionService
-from usher.services.search import SearchAnalytics, SearchService
+from usher.services.search import SearchAnalytics, SearchQueryBuffer, SearchService
 from usher.services.visibility import VisibilityService
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
@@ -480,6 +483,36 @@ async def test_a_deployment_with_no_embedding_model_exposes_none_rather_than_not
         assert app.state.embedder is None
 
 
+def _drains() -> list[asyncio.Task[None]]:
+    """The drain tasks alive right now, found by the coroutine they run.
+
+    By name rather than by holding the task, because the claim is about what
+    the lifespan leaves behind: a task nobody cancelled is one that keeps a
+    session factory alive past the engine it was built on.
+    """
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if getattr(task.get_coro(), "__qualname__", "") == "SearchQueryBuffer.drain"
+    ]
+
+
+async def test_the_process_holds_one_keystroke_buffer_and_its_drain_ends_with_it() -> None:
+    """The buffer is a process resource on `app.state`, the model's shape, and
+    the drain is the task that makes it a buffer rather than a leak.
+
+    Both halves, because either alone passes for the wrong reason: a lifespan
+    that parked a buffer and started nothing would record a keystroke nowhere,
+    and one that started a task and never cancelled it would leave it awaiting
+    on an engine the same `finally` has disposed.
+    """
+    app = create_app(_settings())
+    async with LifespanManager(app):
+        assert isinstance(app.state.search_queries, SearchQueryBuffer)
+        assert len(_drains()) == 1
+    assert _drains() == []
+
+
 async def test_get_search_service_hands_over_the_model_this_process_holds() -> None:
     """The other half of the wiring, and the one a mutation can delete
     silently: a dependency that went on passing `None` would answer a working
@@ -497,12 +530,20 @@ async def test_get_search_service_hands_over_the_model_this_process_holds() -> N
         app = create_app(_settings())
         model = FakeEmbedder()
         app.state.embedder = model
+        # The lifespan parks this too, and this request never ran one. Asserted
+        # below rather than only supplied: a dependency that stopped reading it
+        # would answer a working `SearchService` that writes every keystroke's
+        # row inside the request it is measuring.
+        buffer = SearchQueryBuffer(search_query_scope(build_session_factory(engine)))
+        app.state.search_queries = buffer
         request = Request({"type": "http", "app": app, "headers": []})
 
         def _built() -> SearchService:
             return get_search_service(request=request, session=session, settings=_settings())
 
         assert _built()._embedder is model
+        analytics = _built()._analytics
+        assert analytics is not None and analytics.buffer is buffer
 
         # The control, and it is the whole of the 500 the old docstring
         # feared: an API process holding no model builds the same service

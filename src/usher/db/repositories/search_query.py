@@ -26,44 +26,14 @@ from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
 from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
-# **Every column named explicitly**, never `INSERT INTO search_queries VALUES
-# (...)`, for the reason `llm_calls`' identical comment gives: positional
-# values shift silently the moment a column is added, and this table gains
-# readers in a later milestone -- a reader is what would find such a shift,
-# possibly years later, in a dashboard. It was nine columns until `m10c` and
-# is eleven now, which is that comment paying for itself: the statement below
-# had to be edited, loudly, rather than starting to write `tier` into
-# `surface`.
-#
-# `clicked_title_id` and `played` are written as **literals** (`NULL`,
-# `false`) rather than as bind parameters: neither is a fact `record()`'s
-# caller has, and a column with no default (`played` is `NOT NULL` with none
-# at all) has to get its first value from somewhere. `record_outcome` is the
-# only thing that ever moves them.
-#
-# 🔴 **`surface` was the literal `'search'` for exactly one commit and is a
-# bind parameter now.** `m10c` landed the column `NOT NULL` with no
-# `server_default` -- deliberately, because a default would outlive the
-# migration and supply a plausible wrong value to a writer that forgot -- so
-# this statement had to name it, and at `m10c` `'search'` was the *true* value
-# for every row this method wrote: the one caller was
-# `SearchService._record_search`. J2 gives it a second caller
-# (`SearchService.suggest`, both tiers), so the literal would now be the
-# plausible wrong value the migration refused to install, one layer up. It
-# comes off `SearchQueryRecord.surface`, which is required and undefaulted for
-# the same reason.
-#
-# `tier` is a bind parameter beside it rather than a `NULL` literal, and the
-# pairing is the point: `SearchQueryRecord` refuses the two combinations that
-# are not states -- a `search` row with a tier, a `suggest` row without one --
-# so these two binds can never disagree about which index answered.
-#
-# `result_count` and `latency_ms` are deliberately left with no explicit
-# `bindparam` type, following `curated_rows."position"`'s precedent
-# (`db/repositories/curation.py`): an untyped integer bind is exactly what
-# lets asyncpg's own binary encoder refuse an out-of-range value client-side,
-# which is the behaviour `record`'s docstring documents and
-# `test_a_latency_the_column_cannot_hold_is_a_port_error` (integration) pins.
+# Every column named explicitly, never `INSERT INTO search_queries VALUES
+# (...)`: positional values shift silently the moment a column is added, and
+# the reader that finds such a shift is a dashboard, years later.
+
+# `clicked_title_id` and `played` are literals rather than binds because
+# neither is a fact `record()`'s caller has. `result_count` and `latency_ms`
+# carry no `bindparam` type on purpose: an untyped integer bind is what lets
+# asyncpg refuse an out-of-range value client-side.
 _INSERT_QUERY = text(
     "INSERT INTO search_queries "
     "(id, at, user_id, query, mode, result_count, latency_ms, "
@@ -82,20 +52,11 @@ _INSERT_QUERY = text(
     # member-to-value conversion is one implementation rather than a `.value`
     # spelled by hand here and a `values_callable` spelled there.
     bindparam("mode", type_=enum_column(SearchMode, length=16)),
-    # Both widths are `SearchQueryRow`'s own -- 8 for `surface` and 6 for
-    # `tier` -- read off that model rather than counting the longest member
-    # here, because two spellings of one width is how they stop agreeing.
-    # 🔴 **Which is exactly what happened**: `surface` shipped as `length=7`
-    # for one commit, the width of `'suggest'` counted by hand, against the
-    # model's and `m10c`'s `varchar(8)`. Harmless on the wire -- a bind
-    # parameter's declared width is not enforced, only the column's is -- and
-    # the comment above it was false about the line below it, which is the
-    # failure it exists to name arriving in its own paragraph.
-    # Typed for `mode`'s reason and for one more:
-    # `tier` binds `None` on every `search` row, and an untyped `NULL` is the
-    # shape asyncpg refuses with "could not determine data type of parameter"
-    # (`.claude/rules/db-and-sql.md`, and `_RECORD_OUTCOME`'s
-    # `clicked_title_id` below is the same trap one statement over).
+    # Both widths are `SearchQueryRow`'s own, read off that model rather than
+    # counted by hand here, because two spellings of one width is how they stop
+    # agreeing. Typed for `mode`'s reason and for one more: `tier` binds `None`
+    # on every search row, and an untyped `NULL` is the shape asyncpg refuses
+    # with "could not determine data type of parameter".
     bindparam("surface", type_=enum_column(SearchSurface, length=8)),
     bindparam("tier", type_=enum_column(SuggestTier, length=6)),
 )
@@ -275,17 +236,14 @@ class PostgresSearchQueryRepository(SearchQueryRepository):
 
 
 def _parameters(record: SearchQueryRecord) -> dict[str, object]:
-    """The nine columns a caller supplies, spelled out.
+    """The nine columns the INSERT binds, spelled out.
 
-    Seven until `m10c`; `surface` and `tier` are the two the amendment added
-    and they arrive here rather than in the statement text, which is what
-    stops the INSERT from writing `'search'` onto a keystroke.
+    `surface` is derived by the record rather than bound from a field, which is
+    what stops the statement from writing `'search'` onto a keystroke.
 
-    A `dataclasses.asdict()` would be shorter and would couple the
-    statement's parameter names to the record's field names, so a field
-    renamed on `SearchQueryRecord` would reach Postgres as an unbound
-    parameter rather than as a type error here -- `llm_calls`' identical
-    argument.
+    A `dataclasses.asdict()` would couple the statement's parameter names to
+    the record's field names, so a renamed field would reach Postgres as an
+    unbound parameter rather than as a type error here.
     """
     return {
         "id": record.id,

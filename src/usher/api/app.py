@@ -1,7 +1,8 @@
 """Application factory."""
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -44,6 +45,7 @@ from usher.composition import (
     llm_client,
     metadata_provider,
     nothing,
+    search_query_buffer,
     source_gates,
     unit_of_work,
 )
@@ -171,6 +173,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         image_fetcher, image_store, close_images = image_proxy(settings)
         app.state.image_fetcher = image_fetcher
         app.state.image_store = image_store
+        # PRD 10's keystroke rows. One buffer and one drain per process, so a
+        # row a keystroke submits is written by a task the answered request is
+        # no longer waiting on. Unconditional on `app.state.embedder`'s terms:
+        # a buffer nobody submits to holds a deque and a parked task.
+        search_queries = search_query_buffer(session_factory)
+        app.state.search_queries = search_queries
+        draining = asyncio.create_task(search_queries.drain())
         lanes = LaneSupervisor(
             settings,
             unit_of_work(session_factory, settings, events=bus, provider=provider, gates=gates),
@@ -226,6 +235,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # disposed under a live lane makes that lane's next statement
             # raise into a task that is about to be cancelled anyway.
             await lanes.stop()
+            # Told to stop, never cancelled: `CancelledError` is not an
+            # `Exception`, so a cancel landing inside the write escapes the
+            # guard that absorbs everything else and rolls that batch back.
+            # `aclose` flushes, and `flush` waits for a batch already in flight.
+            await search_queries.aclose()
+            with suppress(asyncio.CancelledError):
+                await draining
             await close_provider()
             await close_model()
             await close_client()

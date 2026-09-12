@@ -56,11 +56,14 @@ ST-vs-fastembed difference is 6x the halfvec quantisation error, so the two are
 not interchangeable without a re-embed.
 """
 
+import asyncio
 import hashlib
 import math
 import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 
@@ -88,7 +91,6 @@ from usher.ports.search import (
     SearchIndex,
     SearchMode,
     SearchRequest,
-    SearchSurface,
     SuggestIndex,
     SuggestTier,
 )
@@ -288,6 +290,142 @@ def compose_document(title: Title, *, credits: Sequence[str] = ()) -> EmbeddingD
 # anyway.
 
 
+#: One `SearchQueryRepository` per batch, committed on a clean exit. A callable
+#: returning a context manager rather than a session factory, so this module
+#: still imports no SQLAlchemy.
+SearchQueryBatch = Callable[[], AbstractAsyncContextManager[SearchQueryRepository]]
+
+
+class SearchQueryBuffer:
+    """Keystroke rows, taken off the path that produced them.
+
+    `submit` appends and returns; `drain` -- one task per process, started by
+    the composition root -- writes what has accumulated, one transaction per
+    batch. What a request pays is an append, which is what lets
+    `USHER_SEARCH_SUGGEST_ANALYTICS` ship on.
+
+    **Bounded twice, by rows and by the characters they carry, and a full
+    buffer drops rather than blocks.** Back-pressure would let an analytics row
+    slow down the answer it is about, which is the property this class exists
+    to remove; `q` has no maximum length, so a row bound alone would let one
+    caller hold arbitrary memory per keystroke.
+
+    **`flush` is a barrier**: it returns with nothing pending and nothing in
+    flight, which is what `aclose` and a reader of the table both need.
+
+    Nothing here escapes: a refused row loses that row and an unwritable batch
+    loses that batch, both at `ERROR`, because a drain that raises stops
+    recording silently.
+    """
+
+    def __init__(
+        self,
+        batches: SearchQueryBatch,
+        *,
+        capacity: int = 1024,
+        batch: int = 64,
+        budget: int = 64 * 1024,
+    ) -> None:
+        self._batches = batches
+        self._capacity = capacity
+        self._batch = batch
+        self._budget = budget
+        self._pending: deque[SearchQueryRecord] = deque()
+        self._held = 0
+        self._dropped = 0
+        self._stopped = False
+        self._submitted = asyncio.Event()
+        # Held across the pop as well as the write, which is what makes `flush`
+        # a barrier rather than a drain of whatever happens to be left.
+        self._writing = asyncio.Lock()
+
+    def submit(self, record: SearchQueryRecord) -> bool:
+        """Take the row, or refuse it because the buffer is full.
+
+        Never awaits and never raises, so a caller can treat recording as free.
+        """
+        if len(self._pending) >= self._capacity or self._held + len(record.query) > self._budget:
+            # Reported once per run of drops rather than once per keystroke:
+            # the shape this defends against is a database that is down, and on
+            # this route that is a log line per character typed. `flush` reports
+            # the count when the buffer next empties.
+            self._dropped += 1
+            if self._dropped == 1:
+                logger.error(
+                    "the {surface} analytics buffer is full; keystrokes are unrecorded",
+                    surface=record.surface.value,
+                )
+            return False
+        self._pending.append(record)
+        self._held += len(record.query)
+        self._submitted.set()
+        return True
+
+    async def drain(self) -> None:
+        """Write submitted rows until `aclose` stops it -- the root's task."""
+        while not self._stopped:
+            await self._submitted.wait()
+            self._submitted.clear()
+            await self.flush()
+
+    async def flush(self) -> None:
+        """Write everything submitted, and wait for a batch already in flight.
+
+        A barrier on both counts. A caller that only drained the deque would
+        return while the drain task held a batch of its own -- which is a
+        shutdown that cancels an INSERT, and a reader that races one.
+        """
+        async with self._writing:
+            while self._pending:
+                batch = [
+                    self._pending.popleft() for _ in range(min(self._batch, len(self._pending)))
+                ]
+                self._held -= sum(len(record.query) for record in batch)
+                await self._write(batch)
+            if self._dropped:
+                logger.error(
+                    "{count} analytics rows were dropped while the buffer was full",
+                    count=self._dropped,
+                )
+                self._dropped = 0
+
+    async def aclose(self) -> None:
+        """Stop the drain and write what is left.
+
+        Told to stop rather than cancelled: `CancelledError` is not an
+        `Exception`, so a cancel landing inside the write escapes the guard
+        below it and rolls that batch back.
+        """
+        self._stopped = True
+        self._submitted.set()
+        await self.flush()
+
+    async def _write(self, records: Sequence[SearchQueryRecord]) -> None:
+        try:
+            async with self._batches() as queries:
+                for record in records:
+                    try:
+                        await queries.record(record)
+                    except UsherPortError as exc:
+                        # One refused row loses one row, `_write_row`'s rule:
+                        # the repository refuses inside a SAVEPOINT, so the
+                        # rest of the batch still commits.
+                        logger.error(
+                            "the {surface} analytics row was refused: {error}",
+                            surface=record.surface.value,
+                            error=str(exc) or type(exc).__name__,
+                        )
+        except Exception as exc:
+            # Wider than anywhere else in this module and deliberately so: this
+            # runs in a task nobody awaits, so an escaping exception stops the
+            # writer for the life of the process with nothing on the wire.
+            logger.error(
+                "{count} analytics rows were lost: {error}",
+                count=len(records),
+                error=str(exc) or type(exc).__name__,
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class SearchAnalytics:
     """`search_queries`' retrieval half: the repository, and the commit that
@@ -314,6 +452,10 @@ class SearchAnalytics:
 
     queries: SearchQueryRepository
     commit: Callable[[], Awaitable[None]]
+    #: Where a keystroke row goes on a root that has a drain for it. `None` on
+    #: one that does not -- `usher suggest` is a command typed once, and an
+    #: `INSERT` it waits for is a cost nobody is paying per character.
+    buffer: SearchQueryBuffer | None = None
 
 
 class SemanticSearchUnavailable(Exception):
@@ -594,7 +736,7 @@ class SearchService:
         embedder: Embedder | None = None,
         expander: QueryExpansionService | None = None,
         analytics: SearchAnalytics | None = None,
-        suggest_analytics: bool = False,
+        suggest_analytics: bool = True,
         now: Callable[[], AwareDatetime] = lambda: datetime.now(UTC),
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
@@ -678,34 +820,27 @@ class SearchService:
         # is exactly what it was before F2 and the search is unrecorded rather
         # than wrong.
         self._analytics = analytics
-        # **A second switch beside it, and it narrows one surface rather than
-        # the collaborator.** `analytics=None` is a *caller* state -- a caller
-        # inside a larger unit of work it does not own -- and turns off both
-        # writers; this is an *operator* state, `USHER_SEARCH_SUGGEST_ANALYTICS`,
-        # and turns off only the keystroke one. Two different questions:
-        # collapsing them would make "do not record keystrokes" also mean "do
-        # not record searches", which is a setting nobody asked for and PRD 10
-        # would refuse.
-        #
-        # 🔴 **Defaulting `False` is a measurement rather than an opinion, and
-        # the bar was registered predicting the opposite.** Tier 1 end to end
-        # through the shipped route against a clone of the real catalog: p50
-        # **2.53 ms** without the row, **6.29 ms** with it. The refutation
-        # condition was *under 5 ms with the writer on*, so the position that
-        # both tiers should write unconditionally is refuted and the default
-        # flips rather than the bar bending. `.claude/rules/
-        # search-and-embeddings.md` carries the arms and the caveats.
-        #
-        # **It defaults the same way here as in `Settings`, deliberately.** Two
-        # defaults for one decision is how they come to disagree, and the one
-        # that would have been wrong here is this one: every shipped
-        # construction goes through `composition.build_search_service`, so a
-        # `True` left in this signature would be invisible until somebody built
-        # a `SearchService` by hand -- which is what every unit case does.
-        #
-        # A `bool` and never a rate -- `_record_suggest` has the denominator
-        # argument.
+        # A second switch beside it, narrowing one surface rather than the
+        # collaborator: `analytics=None` is a caller inside a unit of work it
+        # does not own and turns off both writers, where this is an operator
+        # turning off the keystroke one. Collapsing them would make "do not
+        # record keystrokes" also mean "do not record searches".
+
+        # It defaults the same way here as in `Settings`, because every shipped
+        # construction goes through `composition.build_search_service` -- so a
+        # disagreement is invisible until somebody builds a `SearchService` by
+        # hand, which is what every unit case does.
         self._suggest_analytics = suggest_analytics
+
+    @property
+    def records_suggestions(self) -> bool:
+        """Whether an answered keystroke produces a `search_queries` row.
+
+        Published so a request boundary can decide whether to resolve a
+        household: the row is the only thing on the suggest path that needs
+        one, and resolving it is a `users` read per keystroke.
+        """
+        return self._analytics is not None and self._suggest_analytics
 
     async def search(
         self,
@@ -969,14 +1104,12 @@ class SearchService:
         lose one -- `api/analytics.py` is the same decision for the outcome
         half, one layer out.
 
-        **The commit is here rather than left to the caller**, and the reason
-        is `cli._session_for`: it yields a session and disposes the engine
-        **without ever committing**, so on the CLI path the row would be rolled
-        back and the search would be recorded nowhere with nothing to say so.
-        `api/deps.get_session` commits again when the handler returns and that
-        second commit is a no-op over an already-committed transaction; what it
-        costs on the route is that any read *after* this point begins a new
-        transaction, which is why this is the last thing `search` does.
+        **The commit is the caller's to supply**, because the roots differ:
+        `cli._session_for` yields a session and disposes the engine without
+        ever committing, so a row left to it is recorded nowhere with nothing
+        to say so, while `api/deps.get_session` commits when the handler
+        returns and hands the service `nothing` -- a request is one transaction
+        and one WAL flush rather than two.
 
         **The query text reaches no log line.** PRD 08's rule is written about
         credentials (`docs/prd/08-operations.md:165`) and this extends it by
@@ -1000,11 +1133,6 @@ class SearchService:
                 mode=mode,
                 result_count=results,
                 latency_ms=_ms(elapsed),
-                # Stated rather than defaulted. `SearchQueryRecord.surface`
-                # carries no default at all, so this line is what a writer
-                # that forgot cannot omit -- the same refusal `m10c` makes
-                # about `server_default`, one layer up.
-                surface=SearchSurface.SEARCH,
             ),
         )
 
@@ -1052,33 +1180,38 @@ class SearchService:
         `test_a_suggest_with_no_household_writes_no_row_and_the_eval_harness_is_that_caller`
         is what says it stays true.
 
-        **Whole or nothing, never sampled.** `self._suggest_analytics` is a
-        `bool`, and PRD 10's *"which absence means what"* table is the reason:
-        every absence in it is **exact**, so a sample rate would make every
+        **Whole or nothing, never sampled.** Every absence in PRD 10's *"which
+        absence means what"* table is exact, so a sample rate would make every
         count over this surface an estimate and add a further absence -- *the
-        row that was not written* -- indistinguishable in the data from the
-        ones that are real. The volume is bounded by retention instead. ⚠️
-        **Stated without a cardinality on purpose**: this sentence said *"all
-        five of its rows"* while the table held six, having gone stale on the
-        commit that added the row it is about. PRD 10 carries the correction.
+        row that was not written* -- indistinguishable from the ones that are
+        real. The volume is bounded by retention instead.
+
+        **The row is handed to `SearchAnalytics.buffer` where a root has one**,
+        so an answered keystroke never waits for it. A root with no drain --
+        `usher suggest`, the eval harness, every unit fixture -- writes it
+        here, because one command can afford one INSERT.
         """
         analytics = self._analytics
         if analytics is None or user_id is None or not self._suggest_analytics:
             return
-        await _write_row(
-            analytics,
-            SearchQueryRecord(
-                id=new_id(),
-                at=self._now(),
-                user_id=user_id,
-                query=prefix,
-                mode=SearchMode.FULL_TEXT,
-                result_count=results,
-                latency_ms=_ms(elapsed),
-                surface=SearchSurface.SUGGEST,
-                tier=tier,
-            ),
+        record = SearchQueryRecord(
+            id=new_id(),
+            at=self._now(),
+            user_id=user_id,
+            query=prefix,
+            mode=SearchMode.FULL_TEXT,
+            result_count=results,
+            latency_ms=_ms(elapsed),
+            tier=tier,
         )
+        # Handed over rather than written where a root has a drain: the
+        # keystroke is answered and there is no id to publish, so nothing here
+        # has any reason to wait for the row. `_record_search` does wait,
+        # because `SearchAnswer.search_id` is only honest once the row exists.
+        if analytics.buffer is not None:
+            analytics.buffer.submit(record)
+            return
+        await _write_row(analytics, record)
 
     async def suggest(
         self,
@@ -1144,17 +1277,10 @@ class SearchService:
         -- *whether real users type 2-4-character queries at all* -- which is a
         question about this box and which M9 could not answer.
 
-        🔴 **The volume argument did not go away with the vocabulary one, and
-        the measurement it was answered with came back against the writer, so
-        `USHER_SEARCH_SUGGEST_ANALYTICS` ships `false`.** Measured end to end
-        through the shipped route against a clone of the real catalog under a
-        bar written first: tier 1 is p50 **2.53 ms** without the row and
-        **6.29 ms** with it -- the analytics write is 148% of the request on
-        the path ADR-0031 exists to make cheap, against a refutation condition
-        of 5 ms. Tier 2 pays the same ~3.3 ms as 7.8%, inside the 11.9% PRD 10
-        already accepted for full text, and one switch governs both tiers for
-        the reason `_record_suggest` gives, so the tier that cannot afford it
-        decides. `.claude/rules/search-and-embeddings.md` carries the run.
+        **The volume argument is answered by where the write happens rather
+        than by switching it off.** The row goes to `SearchAnalytics.buffer`
+        and a drain writes it, so an answered keystroke pays an append on the
+        path ADR-0031 exists to make cheap.
 
         ✅ **It also emits `usher.suggest.duration` and
         `usher.suggest.results` since M10's D1, both labelled `tier`, and the
@@ -1163,10 +1289,9 @@ class SearchService:
         schema change `m10c` made: a histogram answers *"is the box fast"* and
         `search_queries` answers *"what did people type"*. So they sit outside
         `USHER_SEARCH_SUGGEST_ANALYTICS` -- an operator who turned the row off
-        to buy back the 148% would otherwise also have turned off the only
-        series that could show whether the box was meeting its budget -- and
-        they record on a deployment with no `analytics` collaborator at all,
-        which is every unit case and `usher suggest`.
+        would otherwise also have turned off the only series that could show
+        whether the box was meeting its budget -- and they record on a
+        deployment with no `analytics` collaborator at all.
 
         **The measured interval is the whole method rather than the tier
         call**, because hydration is what a client waits for and it is the same
@@ -1176,10 +1301,9 @@ class SearchService:
 
         **The write is outside the measured window and after the hydration**,
         for `search`'s reason: an INSERT inside it would be counted as suggest
-        latency by the very row recording it. It is also the last thing this
-        method does, because the commit ends the caller's transaction. The two
-        `record` calls are on the near side of it and share its one clock read,
-        so the row and the histogram are the same interval.
+        latency by the very row recording it. The two `record` calls are on the
+        near side of it and share its one clock read, so the row and the
+        histogram are the same interval.
 
         **A short `prefix` is refused before the measurement and therefore
         before the row and before either histogram point.** The route's own
@@ -1568,20 +1692,14 @@ async def _write_row(analytics: SearchAnalytics, record: SearchQueryRecord) -> u
     billed as an outage. The guard is defence in depth on both paths, so the
     only way to test it is to inject a repository that raises.
 
-    ⚠️ **So a database that is *unwell* rather than refusing fails the request,
-    and `analytics.commit` being inside the `try` is where.** It is
-    `AsyncSession.commit` itself (`composition.py`), and
-    `refusals_as_conflict` translates only a row refusal on purpose -- its own
-    docstring declines to report *"a dropped connection, a statement timeout or
-    a missing table"* as the row being wrong -- so both statements here can
-    raise a raw `SQLAlchemyError`, which is not a `UsherPortError` and leaves
-    this function as a 500 on a request whose results were already computed.
-    That is F2's shipped shape on `GET /search` and it is unchanged; what M10
-    changed is what it is reachable *from*, because a browser drives
-    `GET /search/suggest` per keystroke. Widening the catch is not the answer
-    -- the paragraph above is why -- and the bound is the switch:
-    `USHER_SEARCH_SUGGEST_ANALYTICS` ships `false`, so the keystroke path pays
-    this only where an operator has opted in.
+    ⚠️ **So a database that is *unwell* rather than refusing fails the
+    request.** `refusals_as_conflict` translates only a row refusal, so a
+    dropped connection or a statement timeout raises a raw `SQLAlchemyError`,
+    which is not a `UsherPortError` and leaves this a 500 on a request whose
+    results were already computed. That is `GET /search`'s shipped shape and it
+    is unchanged. The keystroke path does not reach it: those rows go to
+    `SearchQueryBuffer`, which absorbs its own failures because it runs in a
+    task nobody awaits.
 
     **Neither the query text nor the surface's own words reach the log line.**
     What somebody typed is household state whose home is
@@ -1619,6 +1737,8 @@ __all__ = [
     "EmbeddingDocument",
     "SearchAnalytics",
     "SearchAnswer",
+    "SearchQueryBatch",
+    "SearchQueryBuffer",
     "SearchService",
     "SemanticSearchUnavailable",
     "compose_document",

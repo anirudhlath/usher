@@ -137,8 +137,8 @@ exists too. The two spellings look alike, which is why this paragraph is here.
 reads reversible.** `downgrade()` drops `surface` and `tier` from a table it
 does not drop, so a `search_queries` row survives the cycle with both facts
 gone, and `upgrade()` re-applied answers `('search', NULL)` for every one of
-them. On a deployment where J2's writer has run -- `USHER_SEARCH_SUGGEST_ANALYTICS`,
-shipped `false` -- **a down-then-up cycle silently relabels every
+them. On a deployment where the keystroke writer has run
+(`USHER_SEARCH_SUGGEST_ANALYTICS`) **a down-then-up cycle silently relabels every
 `surface = 'suggest'` row as `'search'` and discards the tier that answered
 it**, which is exactly the two-vocabularies confusion this column was added to
 prevent, arriving from the migration rather than from a writer.

@@ -713,42 +713,15 @@ class Settings(BaseSettings):
     # or the re-rank can only reorder what the cap already chose.
     search_suggest_candidates: int = Field(default=200, ge=1, le=2000)
     # Whether `GET /search/suggest` and `usher suggest` write a
-    # `search_queries` row (`surface = 'suggest'`, `tier` naming the index
-    # that answered). PRD 10's amendment 2; `m10c` landed the columns.
-    #
-    # **A `bool` and deliberately not a sample rate.** Every absence in PRD
-    # 10's *"which absence means what"* table is **exact**, so a rate makes
-    # every count over this surface an estimate and adds a further absence --
-    # *the row that was not written* -- indistinguishable in the data from the
-    # ones that are real. Whole-or-nothing keeps that table's contract and the
-    # volume is bounded by retention instead. (This comment counted the table's
-    # rows at *five* until the row count was re-measured at six; the argument
-    # never needed the number and no longer carries one.)
-    #
-    # 🔴 **`False` because a bar said so, and the bar was written to say the
-    # opposite.** The registered position was *both tiers write,
-    # unconditionally, defaulting on*; the refutation condition was tier 1's
-    # **end-to-end** p50 staying under 5 ms with the writer on. Measured
-    # through the shipped route against a clone of the real 1,272,870-title
-    # catalog: **2.53 ms without the row and 6.29 ms with it**, so the
-    # analytics write is 148% of the request it is measuring on the path
-    # ADR-0031 exists to make cheap. Tier 2 pays the same ~3.3 ms as **7.8%**,
-    # which is inside the 11.9% PRD 10 already accepted for full text -- but
-    # one switch governs both tiers, for the reason below, and the tier that
-    # cannot afford it decides.
-    #
-    # **So this ships off and documented rather than on and regretted**, and
-    # an operator who wants the data turns it on knowingly. Nothing else about
-    # the writer is conditional: the columns, the row shape and both
-    # boundaries are the same either way.
-    # `.claude/rules/search-and-embeddings.md` carries the run, its arms, and
-    # what it did not establish.
-    #
-    # It narrows the suggest surface only. `GET /search` and `usher search`
-    # write regardless -- a household that turns off keystroke analytics has
-    # not asked to stop recording searches, and one switch for both would make
-    # it look as though they had.
-    search_suggest_analytics: bool = False
+    # `search_queries` row (`surface = 'suggest'`, `tier` naming the index that
+    # answered). The row is buffered off the request path, so what a keystroke
+    # pays for it is an append.
+
+    # A `bool` and never a sample rate: every absence in PRD 10's *"which
+    # absence means what"* table is exact, and a rate adds one nobody can name.
+    # It narrows the suggest surface only -- turning keystroke analytics off is
+    # not a request to stop recording searches.
+    search_suggest_analytics: bool = True
 
     # The push lane and the worker lane (PRD 03, PRD 01's concurrency
     # model). Same reasoning as every block above: PRD 08's TOML config

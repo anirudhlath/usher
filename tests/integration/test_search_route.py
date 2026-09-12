@@ -25,6 +25,7 @@ scans this file.
 
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
@@ -46,6 +47,7 @@ from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
+from usher.services.search import SearchQueryBuffer
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
@@ -89,10 +91,9 @@ def settings(postgres_url: str) -> Settings:
         # assert on.
         push_enabled=False,
         worker_enabled=False,
-        # Opposite the shipped default, deliberately: the suggest writer is
-        # off out of the box (the row is 148% of a tier-1 request, measured),
-        # and the keystroke case below is about the deployment that turned it
-        # on. `tests/integration/test_search_analytics.py` owns the semantics.
+        # Stated rather than defaulted, so the keystroke case below reads as a
+        # deployment that records rather than as an absence.
+        # `tests/integration/test_search_analytics.py` owns the semantics.
         search_suggest_analytics=True,
     )
 
@@ -226,13 +227,37 @@ async def catalog(sessions: async_sessionmaker[AsyncSession], clean: None) -> _C
     return _Catalog(named=named.id, described=described.id, typeable=typeable.id)
 
 
+@dataclass(frozen=True, slots=True)
+class _Deployment:
+    """The shipped app, and the buffer its keystroke rows are handed to.
+
+    Two fixtures over one of these rather than two apps: a case that reads the
+    table after a keystroke has to flush the *same* buffer the request
+    submitted to.
+    """
+
+    client: AsyncClient
+    keystrokes: SearchQueryBuffer
+
+
 @pytest_asyncio.fixture
-async def client(settings: Settings, catalog: _Catalog) -> AsyncIterator[AsyncClient]:
+async def deployment(settings: Settings, catalog: _Catalog) -> AsyncIterator[_Deployment]:
     app: FastAPI = create_app(settings)
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)
         async with AsyncClient(transport=transport, base_url="http://test") as connected:
-            yield connected
+            yield _Deployment(client=connected, keystrokes=app.state.search_queries)
+
+
+@pytest_asyncio.fixture
+async def client(deployment: _Deployment) -> AsyncClient:
+    return deployment.client
+
+
+@pytest_asyncio.fixture
+async def keystrokes(deployment: _Deployment) -> SearchQueryBuffer:
+    """The drain, for a case that reads back a row a keystroke only submitted."""
+    return deployment.keystrokes
 
 
 async def test_the_shipped_graph_answers_a_real_full_text_search(
@@ -496,7 +521,10 @@ async def test_one_answered_request_writes_exactly_one_search_queries_row(
 
 
 async def test_a_keystroke_writes_a_row_only_when_it_clears_its_tiers_minimum(
-    client: AsyncClient, sessions: async_sessionmaker[AsyncSession], catalog: _Catalog
+    client: AsyncClient,
+    keystrokes: SearchQueryBuffer,
+    sessions: async_sessionmaker[AsyncSession],
+    catalog: _Catalog,
 ) -> None:
     """`GET /search/suggest` records one row per **answered** request since
     M10's J2, and none for the two arms that never reach the service.
@@ -524,6 +552,9 @@ async def test_a_keystroke_writes_a_row_only_when_it_clears_its_tiers_minimum(
     for params in (*answered, *unanswered):
         assert (await client.get("/search/suggest", params=params)).status_code == 200, params
 
+    # The keystroke hands its row over and does not wait for it, so a reader
+    # that did not flush would be racing the drain rather than asserting on it.
+    await keystrokes.flush()
     async with sessions() as reader:
         assert await _analytics_rows(reader) == len(answered), (
             "one row per answered keystroke, and none for the two arms that return "

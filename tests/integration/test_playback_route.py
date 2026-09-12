@@ -65,7 +65,7 @@ from usher.domain.title import Title
 from usher.ports.credentials import SourceCredentials
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.repository import SearchQueryRecord
-from usher.ports.search import SearchMode, SearchSurface
+from usher.ports.search import SearchMode
 from usher.ports.source import (
     SourceAdapter,
     SourceAdapterFactory,
@@ -363,10 +363,9 @@ async def test_a_play_carrying_a_search_id_records_played_durably(
                 mode=SearchMode.FULL_TEXT,
                 result_count=3,
                 latency_ms=12,
-                # F3's funnel attributes a click and a play, and only a
-                # `search` row has either: `SuggestResponse` publishes no id
-                # for a client to report against.
-                surface=SearchSurface.SEARCH,
+                # No tier, so a `search` row: F3's funnel attributes a click
+                # and a play, and `SuggestResponse` publishes no id for a
+                # client to report either against.
             )
         )
         await session.commit()

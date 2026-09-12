@@ -219,11 +219,16 @@ class TitleEmbeddingRow(Base):
             postgresql_with={"m": 16, "ef_construction": 64},
             postgresql_where=text("embedding IS NOT NULL"),
         ),
-        # No index on `model_name`. The stale predicate filters on it, but a
-        # deployment holds one value at a time, so a btree over it is a
-        # structure with one entry -- pure write cost. The predicate's own
-        # driving scan is `ix_titles_enrichment_state` on the other side of
-        # the join; see db/repositories/search.py.
+        # **Partial on the same predicate `stored_model_names` carries.** That
+        # read is a `DISTINCT` over this column, and with no index it walks a
+        # heap holding 1024-lane vectors inline to name one string. The
+        # predicate keeps the index to the population the guard is about, so a
+        # written refusal -- never a seed -- costs nothing to keep in it.
+        Index(
+            "ix_title_embeddings_model_name",
+            "model_name",
+            postgresql_where=text("embedding IS NOT NULL"),
+        ),
     )
 
 

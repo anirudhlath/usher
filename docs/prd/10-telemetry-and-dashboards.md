@@ -821,7 +821,7 @@ all three and only one of them is a real zero.**
 | a row with `clicked_title_id` set and `played = false` | **also the signal.** A click that never became a play, which is the row `usher search`'s own gate cannot produce and a synthetic typo set cannot imitate |
 | a row with `played = true` and `clicked_title_id IS NULL` | legal and meaningful: the household played a result without ever asking for its detail page, so no click was ever reported. Not a hole |
 | a play with **no row at all** | simply **unattributed**. A client that carried no `search_id` — a home row, a deep link, a bookmark — is not a search that led nowhere, and counting it as one would make the denominator the whole library |
-| **no rows from `GET /search/suggest`** | ⚠️ **the ordinary state, and since M10 it means one specific thing rather than "by design".** Through M9 the type-ahead box could not write at all; since M10 it can, and `USHER_SEARCH_SUGGEST_ANALYTICS` **defaults off** because the write is 148% of a tier-1 request, so *no suggest rows* is what a deployment that has not turned it on looks like. A reader must not read it as *"nobody used the box"* — the two are indistinguishable here and only the setting tells them apart. A keystroke below its tier's `min_query_length` is the row below |
+| **no rows from `GET /search/suggest`** | ⚠️ **`USHER_SEARCH_SUGGEST_ANALYTICS` is off on this deployment, or nobody used the box — and the two are indistinguishable here.** The setting **defaults on**: the row is buffered and written off the request path, so it no longer costs the keystroke the 148% of a tier-1 request that kept it off. Only the setting tells the two readings apart. A keystroke below its tier's `min_query_length` is the row below |
 | **no row for a keystroke below its tier's `min_query_length`** | by design, and it is the length bound rather than the switch. `GET /search/suggest` returns before `SearchService.suggest` for a `q` shorter than four characters on `prefix` or one on `fuzzy`, so there is no answered query to record — the same exclusion as *"a blank or whitespace-only query"* below, with a number on it. ⚠️ **The bound is per tier**, so "answered" means different things on the two tiers and the two row counts are **not** directly comparable: a panel dividing one by the other is measuring the bound |
 | **`latency_ms = 0` on a suggest row** | 🔴 **not an absence of a row but an absence of a *number*, and on tier 1 it is the ordinary state rather than a stopped clock.** `latency_ms` is a truncated whole number of milliseconds (`max(0, int(seconds * 1000))`) over a service-side window tier 1 answers inside, so the column records ADR-0031's tier-1 win as a zero. Measured read-only on M10 J2's own disposable clone, 2026-08-27: **14,181 of 14,898** tier-1 suggest rows read exactly **0**, p50 **0 ms**, max **18 ms** — against 1 of 80 on `surface = 'search'`, whose p50 is 29 ms. **So dashboard 4's latency panels are `search`-surface panels**, and a p50 taken over `surface = 'suggest'` is not a latency measurement on tier 1 at all; a tier-1 p50 that has *left* 0 is the reading worth looking at, and the end-to-end figures in [05](05-search-and-similarity.md) are where a real tier-1 cost lives. ⚠️ **It is also the one number in this table that a correct measurement and a broken one render identically** — a window that had silently stopped covering the index probe would also read 0 — which is why `tests/unit/test_services_search.py::test_the_keystrokes_latency_covers_the_index_probe_and_the_hydration` pins what the window *covers* rather than what it reads |
 
@@ -868,19 +868,16 @@ because the absence is invisible in the data:
   absence in it is exact**, so a rate makes every count over this surface an
   estimate and adds a further absence — *the row that was not written* — which
   is indistinguishable in the data from the ones that are real. The volume is
-  bounded by retention instead. ⚠️ **This argument used to be stated as a
-  cardinality — *"all five rows above"* — and the cardinality is what went
-  stale**: the table held five rows when the sentence was written, six the
-  moment M10's suggest writer added the `min_query_length` row, and seven with
-  the `latency_ms` row above. The claim never needed the number, and the same
-  correction is applied to the three code sites that had copied it
-  (`config.py`, `services/search.py`, `eval/surfaces/suggest.py`) rather than
-  re-counted in each. ⚠️ **And it is a `bool` covering *both tiers*, not one
-  per tier**, for the same reason one step over: a switch that recorded
+  bounded by retention instead. ⚠️ **And it is a `bool` covering *both tiers*,
+  not one per tier**, for the same reason one step over: a switch that recorded
   `fuzzy` and not `prefix` would make *"no prefix rows"* mean either "nobody
   typed four characters" or "that tier is not recorded here", which is that
-  same invented absence arriving on a different axis. Tier 2 could afford the
-  row and tier 1 cannot, so the tier that cannot decides.
+  same invented absence arriving on a different axis. ⚠️ **A row the buffer
+  dropped is that same invented absence and is the one case where it is
+  reachable**: the buffer is bounded and a full one refuses the row rather than
+  making a keystroke wait for a database that is not keeping up. It logs at
+  `ERROR` when it does, so the absence is nameable from the logs even though it
+  is not from the table.
 
 ✅ **`m10c` landed the columns and M10's suggest writer emits them, so the
 schema and the behaviour are both current as of M10.** The columns exist,
@@ -958,11 +955,9 @@ worth knowing before anything prices a *keystroke* against it. No bar is minted
 and none is needed; the full table and its caveats are in
 `.claude/rules/search-and-embeddings.md`.
 
-🔴 **And what it costs a *keystroke* was measured under a bar written first,
-the bar came back against the writer, and `USHER_SEARCH_SUGGEST_ANALYTICS`
-therefore ships `false`.** M10 registered *"tier 1's end-to-end p50 must stay
-under 5 ms with the writer on"* before the run, with the position it was
-written to refute being *both tiers write, unconditionally, defaulting on*.
+🔴 **What it costs a *keystroke* was measured under a bar written first, and
+the bar came back against a *synchronous* writer.** M10 registered *"tier 1's
+end-to-end p50 must stay under 5 ms with the writer on"* before the run.
 Measured through the shipped route against a clone of the real catalog:
 
 | tier, end to end | writer off | writer on | the row |
@@ -975,11 +970,16 @@ So the row is roughly a constant ~3.5 ms — PRD 10's own 3.957 ms, of which
 tier 2 that is 7.8%, inside the 11.9% this document already accepted for full
 text. On tier 1, the path
 [ADR-0031](decisions/0031-the-two-tier-suggest.md) exists to make cheap, the
-analytics write costs half again as much as the thing it is measuring. **One
-switch governs both tiers**, for the reason the absence table above gives, so
-the tier that cannot afford it decides. The run, its arms and what it did not
-establish are in `.claude/rules/search-and-embeddings.md`. **It is
-whole-or-nothing and never a sample rate**, for the same reason.
+analytics write costs half again as much as the thing it is measuring.
+
+✅ **So the write was taken off the request instead, and the setting ships
+`true`.** A keystroke's row is submitted to a bounded in-process buffer and
+written by a drain task, one transaction per batch — so what the request pays
+is an append, and what the ~3.5 ms buys is amortised across a batch. **One
+switch still governs both tiers**, for the reason the absence table above
+gives, and it is **whole-or-nothing and never a sample rate**, for the same
+reason. The run, its arms and what it did not establish are in
+`.claude/rules/search-and-embeddings.md`.
 
 ✅ **Something owns this table's size since M10, and it is a scheduled job
 rather than an operator's cron line.** This paragraph read *"there is no

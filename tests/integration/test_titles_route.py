@@ -50,7 +50,7 @@ from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.ports.repository import SearchQueryRecord
-from usher.ports.search import SearchMode, SearchSurface
+from usher.ports.search import SearchMode
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
@@ -615,7 +615,6 @@ async def _given_search(
         mode=SearchMode.FULL_TEXT,
         result_count=3,
         latency_ms=12,
-        surface=SearchSurface.SEARCH,
     )
     async with sessions() as session:
         await PostgresSearchQueryRepository(session).record(record)

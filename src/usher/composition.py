@@ -181,7 +181,7 @@ from usher.services.scheduler import (
     SearchQueryRetention,
     SearchQueryScope,
 )
-from usher.services.search import SearchAnalytics, SearchService
+from usher.services.search import SearchAnalytics, SearchQueryBuffer, SearchService
 from usher.services.similar import (
     NeighborRebuildJob,
     SimilarityScope,
@@ -662,6 +662,8 @@ def build_search_service(
     *,
     embedder: Embedder | None = None,
     expander: QueryExpansionService | None = None,
+    commit: Callable[[], Awaitable[None]] | None = None,
+    buffer: SearchQueryBuffer | None = None,
 ) -> SearchService:
     """PRD 05's read path on one session, and nothing else.
 
@@ -730,10 +732,19 @@ def build_search_service(
     pass. That is what makes `search_queries` written on all three roots
     without any of them saying so: `api/deps.get_search_service` and
     `usher search` reach this function, and `build_pipeline` delegates to it
-    rather than assembling its own. **`session.commit` rather than the
-    caller's commit boundary** -- `api/deps.get_session` has one and
-    `cli._session_for` does not, so a row left for the caller to commit is a
-    row `usher search` silently loses (F2).
+    rather than assembling its own.
+
+    `commit` defaults to this session's own, because `cli._session_for` yields
+    a session and disposes the engine without ever committing -- a row left to
+    that caller is one `usher search` silently loses. A root that already has a
+    commit boundary passes `nothing` instead: committing inside the service
+    ends the caller's transaction, so everything the request does afterwards is
+    a second one, and a keystroke costs two WAL flushes where one will do.
+
+    `buffer` is where keystroke rows go on a root that runs a drain for them,
+    and is `None` on the roots that do not. It is a *process* resource on a
+    function that runs once per session, so it is passed for the reason
+    `embedder` is.
     """
     return SearchService(
         PostgresSearchIndex(
@@ -778,7 +789,9 @@ def build_search_service(
         # other, which is precisely the state `SearchAnalytics` exists to make
         # unconstructible.
         analytics=SearchAnalytics(
-            queries=PostgresSearchQueryRepository(session), commit=session.commit
+            queries=PostgresSearchQueryRepository(session),
+            commit=commit if commit is not None else session.commit,
+            buffer=buffer,
         ),
         # Ten: the one surface an operator can turn off. It is read here rather
         # than at either boundary because `usher suggest` and
@@ -1061,6 +1074,17 @@ def search_query_scope(sessions: async_sessionmaker[AsyncSession]) -> SearchQuer
     on a process that died mid-loop, delete none of them.
     """
     return scope(sessions, PostgresSearchQueryRepository, commit=True)
+
+
+def search_query_buffer(sessions: async_sessionmaker[AsyncSession]) -> SearchQueryBuffer:
+    """Keystroke rows, written in batches off the request path.
+
+    `search_query_scope`'s unit of work per batch, so N buffered rows cost one
+    transaction and one WAL flush rather than N. One per process: the buffer
+    outlives every request that submits to it, and the root that builds it owns
+    the drain task.
+    """
+    return SearchQueryBuffer(search_query_scope(sessions))
 
 
 def similarity_scope(
@@ -2686,6 +2710,7 @@ __all__ = [
     "nothing",
     "open_adapter",
     "run_bootstrap",
+    "search_query_buffer",
     "search_query_scope",
     "selected_sources",
     "source_gates",
