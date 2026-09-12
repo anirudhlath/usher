@@ -46,7 +46,7 @@ Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
   gives `in`) and move the displaced one into the revision-pinned block. A
   table-creating head needs one assertion **per table**, and a `-1` half that
   stays *green* after a new head is the alarm: it had no teeth.
-- **Fourteen landings, fourteen loud breaks.** The count is written out in words
+- **Sixteen landings, sixteen loud breaks.** The count is written out in words
   here and in `test_migrations.py`, and `test_db_migration_status.py` goes red if
   a landing re-points the chain without editing both. Keep the cardinal and the
   noun on one line — the guard matches `(\w+) landings`, so a wrap between them

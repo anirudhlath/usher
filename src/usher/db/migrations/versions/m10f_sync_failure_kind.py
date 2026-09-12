@@ -1,7 +1,7 @@
 """`sync_runs` records the failure kind in a column, not as a message prefix.
 
-Revision ID: m10d
-Revises: m10c
+Revision ID: m10f
+Revises: m10e
 Create Date: 2026-09-12
 
 Nullable and staying nullable: a run that completed has no failure kind, and a
@@ -14,8 +14,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "m10d"
-down_revision: str | Sequence[str] | None = "m10c"
+revision: str = "m10f"
+down_revision: str | Sequence[str] | None = "m10e"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -26,14 +26,11 @@ def upgrade() -> None:
     # supply a plausible wrong value to a writer that forgot.
     op.add_column("sync_runs", sa.Column("error_code", sa.String(length=32), nullable=True))
 
-    # Rows written before this revision carry their kind as the first token of
-    # `error`, which is what `usher sync` matched on. Backfilled rather than
-    # left NULL, or the command stops offering `--allow-full-retraction` for
-    # every refusal already on disk.
-    #
-    # `error` itself is left alone: rewriting it would make `downgrade()` lossy
-    # for rows this revision did not write, and the duplicated token is
-    # cosmetic on a column nothing classifies by any more.
+    # The kind of a row written before this revision is the first token of its
+    # `error`; backfilled, or `usher sync` stops offering
+    # `--allow-full-retraction` for the refusals already on disk. `error`
+    # itself is left alone, which is what keeps `downgrade()` non-lossy for
+    # exactly those rows.
     op.execute(
         "UPDATE sync_runs SET error_code = 'availability_ceiling' "
         "WHERE starts_with(error, 'availability_ceiling:')"
@@ -47,6 +44,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Reversible in schema and lossy in data, for rows written *above* this
     # revision only: `ReconcileService` stops prefixing `error` here, so a run
-    # recorded at `m10d` loses its kind entirely rather than falling back to
+    # recorded at `m10f` loses its kind entirely rather than falling back to
     # the token `upgrade()` reads.
     op.drop_column("sync_runs", "error_code")

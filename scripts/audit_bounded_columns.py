@@ -2344,7 +2344,7 @@ BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 #: above are both a bucket moving *because of a scan or a redirect*, which
 #: makes them look like the normal shape when they are the interesting one.
 #:
-#: **`m10d` is the same cheap case, one more time.** `sync_runs.error_code
+#: **`m10f` is the same cheap case, one more time.** `sync_runs.error_code
 #: VARCHAR(32)` is bounded by declared width and its only writer is
 #: `sync.py:add`/`save`, already translating on the SQLSTATE class -- so it
 #: lands **translated** on every reading with nothing to repair. The bounded

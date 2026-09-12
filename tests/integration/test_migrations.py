@@ -633,18 +633,18 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     landed on top -- the failure this case had on the first run after that,
     and a good illustration of why a step count is the wrong pin.
 
-    **Head is `m10d` and the `-1` half is re-pointed at its one artefact** --
+    **Head is `m10f` and the `-1` half is re-pointed at its one artefact** --
     `sync_runs.error_code`, asserted absent one step below head, because a
     creating head's `downgrade()` is what removes it. **One artefact, one
     assertion**: the column carries no constraint and no index, so there is
     nothing that could be dropped independently of it. That is the
-    **fourteenth** landing in a row to break and re-point this block (`ffa`,
+    **sixteenth** landing in a row to break and re-point this block (`ffa`,
     `ffb`, `ffc`, `m08a`, `m08b`, `m09a`, `m09c`, `m09d`, `m09e`, `m09f`,
-    `m10a`, `m10b`, `m10c`, `m10d`). ⚠️ Read that number against the *seven*
-    this docstring claimed until 2026-08-25: five landings re-pointed the block
-    and left the prose alone, so the jump is a gap in the record rather than a
-    burst of migrations. `.claude/rules/db-and-sql.md` carries the same count
-    and the same caveat.
+    `m10a`, `m10b`, `m10c`, `m10d`, `m10e`, `m10f`). ⚠️ Read that number
+    against the *seven* this docstring claimed until 2026-08-25: five landings
+    re-pointed the block and left the prose alone, so the jump is a gap in the
+    record rather than a burst of migrations. `.claude/rules/db-and-sql.md`
+    carries the same count and the same caveat.
 
     **The worked example below is `m09c` and is kept because it is the
     better one**, not because it is the head. Its predecessor asserted
@@ -687,8 +687,8 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     false. The direction of the assertion has nothing to do with it: `ffc`'s
     was positive (`in`) and broke; `ffb`'s was negative (`not in`) and broke
     too, because `-1`-from-`ffc` lands at the `ffb` state where
-    `blend_fingerprint` is present. Fourteen landings, fourteen loud breaks --
-    the same fourteen the paragraph above counts, which is the point of
+    `blend_fingerprint` is present. Sixteen landings, sixteen loud breaks --
+    the same sixteen the paragraph above counts, which is the point of
     stating the number in both places -- which only works if both are
     maintained.
     Both said *seven* until 2026-08-25, five landings after they stopped
@@ -731,13 +731,13 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # re-pointed it for `ffa`, `af64ba2` for `ffb`, M7 Task 36 for `ffc`,
         # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`, M9 Task M1 for `m09a`,
         # M9 Task C2 for `m09c`, T4R for `m09d`, then `m09e`, `m09f` and
-        # `m10a` in turn, issue #41's Task 1 for `m10b`, M10's J1 for `m10c`
-        # and the polish milestone's 1F for `m10d` — fourteen. (The three
-        # before `m10b` had been going unrecorded here: the list said `m09d`
-        # while the count below said twelve, so it read as a jump rather than
-        # as the omission it was.) It is cheaper than a step count, which
-        # keeps passing for the wrong reason instead of failing for the right
-        # one.
+        # `m10a` in turn, issue #41's Task 1 for `m10b`, M10's J1 for `m10c`,
+        # and the polish milestone's 1D, 1E and 1F for `m10d`, `m10e` and
+        # `m10f` — sixteen. (The three before `m10b` had been going unrecorded
+        # here: the list said `m09d` while the count below said twelve, so it
+        # read as a jump rather than as the omission it was.) It is cheaper
+        # than a step count, which keeps passing for the wrong reason instead
+        # of failing for the right one.
         #
         # **The direction of the assertion does not decide this.** `m09c`
         # creates a constraint and renames a column, so its artefacts are
@@ -758,10 +758,10 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `pass`, which no other case in this suite can see -- the shared
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
-        # **`m10d`'s one artefact, re-pointed here the moment it became head**
-        # — the fourteenth landing in a row to do this. `m10d` *creates*, so
+        # **`m10f`'s one artefact, re-pointed here the moment it became head**
+        # — the sixteenth landing in a row to do this. `m10f` *creates*, so
         # the assertion is negative: one step below head the column does not
-        # exist, and only `m10d.upgrade()` makes it.
+        # exist, and only `m10f.upgrade()` makes it.
         #
         # **One artefact, one assertion**, which is `m10b`'s shape rather than
         # `m10c`'s: `error_code` carries no CHECK and no index, so there is
@@ -769,16 +769,16 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # backfill is not an artefact either — a column-adding revision's
         # inverse is dropping the column, and the rows it read are gone with
         # it.
-        at_m10c_columns = await _column_set(url, "sync_runs")
-        assert "error_code" not in at_m10c_columns, "error_code should not exist below m10d"
+        at_m10e_columns = await _column_set(url, "sync_runs")
+        assert "error_code" not in at_m10e_columns, "error_code should not exist below m10f"
         # The premise, for the reason the `m09a` stop below records: an empty
         # column set satisfies the absence above, so without this the block
         # would pass at any depth at which `sync_runs` had ceased to exist.
-        assert at_m10c_columns, "the premise: `sync_runs` still exists at `m10c`"
+        assert at_m10e_columns, "the premise: `sync_runs` still exists at `m10e`"
 
         # **A named stop at `m10b`, holding `m10c`'s five.** Displaced from the
         # `-1` half the moment `m10d` became head, and displaced *because they
-        # had teeth*: `-1`-from-`m10d` lands on `m10c`'s applied state, where
+        # had teeth*: `-1`-from-`m10d` landed on `m10c`'s applied state, where
         # all five are present and every `not in` below is false.
         #
         # **Five artefacts, five assertions**, and here that rule is
