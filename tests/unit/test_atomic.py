@@ -1,4 +1,5 @@
 import os
+import stat
 from pathlib import Path
 from typing import IO
 
@@ -31,19 +32,25 @@ def test_two_writers_aimed_at_one_destination_get_different_scratch_files(
     assert scratch_beside(final) != scratch_beside(final)
 
 
-def test_the_finished_bytes_are_flushed_to_disk_before_the_rename(
+def test_both_the_bytes_and_the_new_name_are_flushed_around_the_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The rename is atomic against other processes and not against a power
-    cut: without the `fsync` it can leave a correctly-named file whose
-    contents were never written. Asserted as an *order* rather than as "fsync
-    was called", because a flush after the rename buys nothing.
+    cut, and closing that needs two flushes in the right places: the file's
+    before the rename, or the name survives pointing at contents that were
+    never written, and the directory's after it, or the contents survive under
+    the old name because the rename was the thing still in cache.
+
+    Asserted as an *order* over two distinguishable targets rather than as a
+    call count, because a flush of the wrong object, or of the right one after
+    the rename, buys exactly nothing and both would satisfy "fsync was called
+    twice".
     """
     calls: list[str] = []
     real_fsync, real_replace = os.fsync, os.replace
 
     def fsync(fd: int) -> None:
-        calls.append("fsync")
+        calls.append("fsync-dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync-file")
         real_fsync(fd)
 
     def replace(src: Path, dst: Path) -> None:
@@ -58,7 +65,7 @@ def test_the_finished_bytes_are_flushed_to_disk_before_the_rename(
 
     write_atomically(tmp_path / "x", body)
 
-    assert calls == ["fsync", "replace"]
+    assert calls == ["fsync-file", "replace", "fsync-dir"]
     assert (tmp_path / "x").read_bytes() == b"body"
 
 

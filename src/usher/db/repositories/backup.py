@@ -41,27 +41,9 @@ in both directions at once.
 
 ## One statement per table, over parallel `unnest` arrays
 
-**The report is what shapes the writes, and it survives being set-based.**
-`written` / `present` / `refused` is the artefact this whole command exists
-for -- *"restored 9 rows"* over an artifact holding 50 is the failure it is
-built to make visible -- and `RETURNING` over a batch answers exactly the
-rows that moved, so a row that conflicted and changed nothing is still
-counted apart from one that landed. What a statement cannot decide per row
-is decided in Python first, against one read of the target: which `sources`
-row collides on a name, which credential's source is absent, which
-`media_items` key has nothing to write onto.
-
-**The arrays are cast to the columns' own types**, which is what lets a
-`text()` statement be built once at import instead of per batch: the SQL no
-longer mentions how many rows there are. `_arrays` renders the casts off
-`Base.metadata`, so a column added to a precious table is bound correctly
-with no edit here.
-
-⚠️ **`ON CONFLICT ... DO UPDATE` refuses a batch that names one conflict
-target twice.** `watch_states` and `row_provider_settings` rely on the
-source's own unique constraints for that rather than deduplicating here; an
-artifact that breaks it fails loudly inside the transaction that is about to
-roll back, which is this command's whole stance on a damaged file.
+Every merge below binds its whole batch through `_arrays` and reads its
+verdict off `RETURNING`; what a statement cannot decide per row is decided in
+Python first, against one read of the target.
 
 ## The column list is derived, in both of the two ways a table can be carried
 
@@ -891,10 +873,16 @@ class PostgresRestoreRepository(RestoreRepository):
         by_title = [row for row in rows if row["title_id"] is not None]
         by_episode = [row for row in rows if row["title_id"] is None]
         written = 0
-        for statement, batch in (
-            (_UPSERT_WATCH_STATE_ON_TITLE, by_title),
-            (_UPSERT_WATCH_STATE_ON_EPISODE, by_episode),
+        for statement, arbiter, batch in (
+            (_UPSERT_WATCH_STATE_ON_TITLE, ("user_id", "title_id"), by_title),
+            (_UPSERT_WATCH_STATE_ON_EPISODE, ("user_id", "episode_id"), by_episode),
         ):
+            # Per arbiter, because the two statements conflict on different
+            # columns and a row is only a duplicate of one it shares a target
+            # with. Two artifact rows can collapse onto one target here even
+            # though the source held them apart, when two of its titles resolve
+            # to one of this catalog's.
+            batch = _one_per(arbiter, batch)
             if batch:
                 written += await self._write(statement, "watch_states", batch)
         return TableOutcome(written=written, present=len(rows) - written)
@@ -907,9 +895,10 @@ class PostgresRestoreRepository(RestoreRepository):
         carrying the same choice under a later stamp has not changed anything
         an operator would call a change.
         """
-        if not rows:
+        settings = _one_per(("slug_prefix",), rows)
+        if not settings:
             return TableOutcome(written=0, present=0)
-        written = await self._write(_UPSERT_ROW_PROVIDER_SETTING, "row_provider_settings", rows)
+        written = await self._write(_UPSERT_ROW_PROVIDER_SETTING, "row_provider_settings", settings)
         return TableOutcome(written=written, present=len(rows) - written)
 
     async def _append(self, table: str, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
@@ -960,13 +949,21 @@ class PostgresRestoreRepository(RestoreRepository):
         """
         if not rows:
             return TableOutcome(written=0, present=0)
-        held = await self._existing_media_items(rows)
-        absent = sum(1 for row in rows if (row["source_id"], row["external_id"]) not in held)
-        # Every row goes to the statement, the absent ones included: the join
-        # is on the same key `held` was read under, so a row with nothing to
-        # write onto matches nothing and a second pass to drop it first would
-        # be a filter the database already applies.
-        written = await self._write(_UPDATE_MEDIA_ITEM_LINKS, "media_items", rows)
+        # `external_id` is `TEXT`, so the target's side of the key is a `str`
+        # and the artifact's is read as one **once**, here: the membership
+        # test below and the bind that follows it have to agree about what the
+        # key is, and a row the first spelling calls absent and the second
+        # binds anyway is the two of them disagreeing.
+        keyed = [dict(row, external_id=str(row["external_id"])) for row in rows]
+        held = await self._existing_media_items(keyed)
+        absent = sum(1 for row in keyed if (row["source_id"], row["external_id"]) not in held)
+        # Every remaining row goes to the statement, the absent ones included:
+        # the join is on the same key `held` was read under, so a row with
+        # nothing to write onto matches nothing and a second pass to drop it
+        # first would be a filter the database already applies.
+        written = await self._write(
+            _UPDATE_MEDIA_ITEM_LINKS, "media_items", _one_per(_MEDIA_ITEM_KEY, keyed)
+        )
         return TableOutcome(written=written, present=len(rows) - written - absent, absent=absent)
 
     async def _existing_media_items(
@@ -1223,18 +1220,36 @@ def _coerce(column: sa.Column[Any], value: object) -> object:
 _DIALECT: Final = PGDialect()  # type: ignore[no-untyped-call]
 
 
+def _array_of(column: sa.Column[Any]) -> str:
+    """The array type one column's bind is cast to.
+
+    ⚠️ **A character column is cast to `TEXT[]` and never to its declared
+    width.** An *explicit* cast to `VARCHAR(n)` truncates an over-long value
+    silently, where the assignment cast an `INSERT` still makes raises
+    `22001`; keeping the width here would turn a hand-edited
+    `search_queries.surface` into a shorter string that is written, reported
+    as written, and then raises out of the Enum result processor on every
+    later read. Nothing is lost by widening: the column's own definition is
+    what the row lands against either way.
+
+    Everything else keeps the type it declares, because `unnest` of an uncast
+    parameter gives Postgres nothing to infer and a `text[]` standing in for a
+    `uuid[]` would be a cast per row on the join.
+    """
+    if isinstance(column.type, sa.String):
+        return "TEXT[]"
+    return f"{column.type.compile(_DIALECT)}[]"
+
+
 def _arrays(table: str, columns: Sequence[str]) -> str:
     """`unnest(<one array bind per column>) AS carried(<columns>)`.
 
     A batch travels as one array per column rather than one bind set per row,
     so a statement's text does not depend on how many rows it is about to
-    write and can be built once. Each bind carries the column's own type
-    because `unnest` of an uncast parameter gives Postgres nothing to infer,
-    and a `text[]` standing in for a `uuid[]` would be a cast per row on the
-    join.
+    write and can be built once.
     """
     binds = ", ".join(
-        f"CAST(:{column} AS {Base.metadata.tables[table].columns[column].type.compile(_DIALECT)}[])"
+        f"CAST(:{column} AS {_array_of(Base.metadata.tables[table].columns[column])})"
         for column in columns
     )
     return f"unnest({binds}) AS carried({', '.join(columns)})"
@@ -1243,6 +1258,24 @@ def _arrays(table: str, columns: Sequence[str]) -> str:
 def _as_arrays(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> dict[str, list[Any]]:
     """One batch of rows transposed into the arrays `_arrays` binds."""
     return {column: [row[column] for row in rows] for column in columns}
+
+
+def _one_per(key: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The batch with at most one row per `key`, the artifact's first winning.
+
+    A set-based write cannot carry two rows naming one conflict target: a
+    second `ON CONFLICT ... DO UPDATE` on it is SQLSTATE `21000`, which is
+    outside `ROW_REFUSED_SQLSTATE_CLASSES` and would cross the port as a raw
+    `DBAPIError`; an `UPDATE ... FROM` picks one of the two arbitrarily and
+    writes a value nobody chose. Both are states the source's own unique
+    constraints make unwritable, so a batch that has them is a hand-edited
+    file -- and the artifact's own order is the only thing that can decide
+    between its rows, which is the rule `_merge_sources` already follows.
+    """
+    chosen: dict[tuple[Any, ...], Mapping[str, Any]] = {}
+    for row in rows:
+        chosen.setdefault(tuple(row[column] for column in key), row)
+    return list(chosen.values())
 
 
 def _insert(table: str) -> str:

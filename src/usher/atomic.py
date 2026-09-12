@@ -35,9 +35,10 @@ def write_atomically(final: Path, body: Callable[[IO[bytes]], None]) -> None:
     night's copy.
 
     The rename is atomic against other processes and *not* against a power
-    cut, which can leave a correctly-named file whose contents were never
-    flushed; the `fsync` is what closes that, and it is cheap against a write
-    that only happens on an operator's command.
+    cut, so two `fsync`s close it and neither is optional: the file's, or the
+    name survives a crash pointing at contents that were never written, and
+    the directory's, or the contents survive under the old name because the
+    rename itself was the thing still in cache.
 
     Blocking, deliberately: a caller on an event loop hands the whole call to
     a thread so the `body` -- typically compression -- goes with it.
@@ -55,3 +56,19 @@ def write_atomically(final: Path, body: Callable[[IO[bytes]], None]) -> None:
         # leaves the scratch file behind.
         scratch.unlink(missing_ok=True)
         raise
+    # Outside the cleanup, because by here there is no scratch file left to
+    # clean up and a durability failure must not read as a failed write.
+    _fsync_directory(final.parent)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush the directory entry the rename just created.
+
+    A directory has to be opened read-only to be `fsync`ed, which POSIX leaves
+    to the implementation and Linux allows.
+    """
+    handle = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)

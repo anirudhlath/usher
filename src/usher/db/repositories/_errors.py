@@ -67,12 +67,16 @@ from usher.ports.errors import RepositoryConflict
 #: general.** It also carries statement-level faults -- `22012`
 #: division_by_zero, `2201B` invalid_regular_expression, `22P02` on a literal
 #: cast -- which are bugs in the *statement* rather than in the row a caller
-#: handed in. The claim holds for **a parameterised statement with no
-#: server-side expressions**, which is every caller today: both are a bare
-#: `INSERT` of bound values, so the only thing class 22 can be about is a bound
-#: value. A repository whose statement computes something would report its own
-#: bug to the caller as a refused row, and needs a narrower predicate than this
-#: one rather than a wider `except`.
+#: handed in. The invariant is therefore about what a statement can compute,
+#: not about how simple it looks: it holds while **every class-22 fault a
+#: statement can raise is decided by a bound value**. The restore repository
+#: is the caller that makes the distinction worth stating -- its writes carry
+#: `CAST(...)` and `unnest(...)` rather than bare `VALUES` -- and the claim
+#: still holds there, because both operate on the bound arrays and neither
+#: introduces a literal or an arithmetic expression of its own. A repository
+#: whose statement computes something from more than its parameters would
+#: report its own bug to the caller as a refused row, and needs a narrower
+#: predicate than this one rather than a wider `except`.
 ROW_REFUSED_SQLSTATE_CLASSES = frozenset({"22", "23"})
 
 

@@ -296,10 +296,9 @@ def _refuse_a_missing_directory(path: Path) -> None:
     """The one destination mistake worth catching *before* the read.
 
     **This is not the refusal; opening the scratch file is.** A path that is
-    not writable,
-    a full disk, a read-only mount and a name that is already a directory all
-    still surface where they always did, one statement after the whole
-    carried set has been read -- and they have to, because none of them is
+    not writable, a full disk, a read-only mount and a name that is already a
+    directory all still surface where they always did, one statement after the
+    whole carried set has been read -- and they have to, because none of them is
     decidable in advance without racing the thing being checked.
 
     What this catches is the one that is both common and cheap: a typo in a
